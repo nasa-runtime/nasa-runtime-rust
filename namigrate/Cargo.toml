@@ -1,0 +1,16 @@
+[package]
+name = "namigrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA DB migration 版本门禁(disabled/validate/apply;listener Ready 前完成;错误脱敏),不依赖 napp"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["time"] }

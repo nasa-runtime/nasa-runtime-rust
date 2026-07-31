@@ -1,0 +1,35 @@
+# ============================================================================
+# naweb-macro —— naweb 的服务端 MVC 风格属性宏：
+#   #[get_mapping("/path")] / #[post_mapping("/path")] / #[put_mapping("/path")] /
+#   #[delete_mapping("/path")] / #[patch_mapping("/path")] 注解。
+#
+# 它【不包裹/不改写】被注解的 handler，只额外生成一段"注册项"，借 linkme 在编译期
+# 把 (方法, 路径, 注册闭包) 收集进主 crate 的全局分布式数组 crate::mvc::ROUTES，
+# 供 main.rs 遍历"解析出来"并自动装配进 axum Router（无需手写 .route()）。
+# ============================================================================
+[package]
+name = "naweb-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "#[*_mapping] + mvc_router!(服务端 MVC 风格路由注解)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# [lib] proc-macro = true —— 声明这是过程宏 crate（编译成编译器插件，只在编译期运行）。
+# 和 hystrix-macro / cache-macro 同款结构。
+[lib]
+proc-macro = true
+
+name = "naweb_macro"
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+# syn 2：把传进来的 Rust 源码 TokenStream 解析成语法树（解析函数 ItemFn、字符串字面量 LitStr）
+syn = { version = "2", features = ["full"] }
+# quote：用 quote!{} 模板把语法树/变量拼回 TokenStream（生成代码）；format_ident! 拼唯一静态名
+quote = "1"
+# proc-macro2：syn/quote 操作的可在普通代码里用的 TokenStream 类型
+proc-macro2 = "1"

@@ -1,0 +1,36 @@
+# nafana —— 接口级隔离监控运行时:Command/run_fn/配置驱动隔离 + Prometheus /metrics 出口 + re-export #[grafana]
+# 独立的接口隔离、超时、降级和 Prometheus/Grafana 观测组件。
+# 业务项目优先依赖 nasa 门面并开启 grafana feature;内部迁移可直接依赖 nafana 包。
+[package]
+name = "nafana"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "接口级隔离监控门面(Command/run_fn/isolation + Prometheus /metrics + #[grafana])"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/nafana"
+readme = "README.md"
+exclude = ["t.md"]
+
+[lib]
+name = "nafana"
+
+[dependencies]
+nafana-macro = { version = "1.0.0", path = "../nafana-macro" }
+# axum: handler 与 middleware 类型(Request/Next/Response/IntoResponse);经 __private 桥暴露给宏展开
+axum = "0.8"
+# tokio: bulkhead 信号量、单请求超时、周期请求汇总任务
+tokio = { version = "1", features = ["full"] }
+# serde: IsolationRule 让业务 yml 直接反序列化
+serde = { version = "1", features = ["derive"] }
+# serde_json: 自定义降级 JSON 的解析与响应壳拼装
+serde_json = "1"
+# matchit: 配置驱动 isolation 的路由前缀 Trie(与 axum 内部同款)
+matchit = "0.8"
+# dashmap: isolation 懒建命令的分段锁缓存
+dashmap = "6"
+tracing = "0.1"

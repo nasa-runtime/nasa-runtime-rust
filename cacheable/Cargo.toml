@@ -1,0 +1,34 @@
+# cacheable —— 两级缓存运行时:L1(moka)+L2(redis 三防)+ #[cached]/#[cache_invalidate] 运行端
+# 业务项目优先依赖 nasa 门面并开启 cache feature；内部迁移可直接依赖 cacheable 包。
+[package]
+name = "cacheable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "两级缓存门面(L1 moka + L2 Redis 三防 + #[cached]/#[cache_invalidate])"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "cacheable"
+[dependencies]
+nacache-macro = { package = "nacache-macro", version = "1.0.0", path = "../nacache-macro" }
+redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
+moka = { version = "0.12", features = ["future"] }
+dashmap = "6"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# `CacheBackend` 抽象需要对象安全的 async trait(`Arc<dyn CacheBackend>`),原生 async-fn-in-trait
+# 尚不支持 dyn,故用 async-trait(§6.2:窄接口隔离,不让 redis 具体连接类型泄露到 CacheLayer)。
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+futures-util = "0.3"
+tracing = "0.1"
+# 编译期收集 #[cached] 生成的 CacheSceneUsage 静态 descriptor(§22.5,与 naweb-macro 同款)。
+linkme = "0.3"

@@ -1,0 +1,17 @@
+[package]
+name = "nainbox-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Inbox MySQL backend using the ambient natx transaction"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow = "1"
+nainbox-core = { version = "1.0.0", path = "../nainbox-core" }
+natx = { version = "1.0.0", path = "../natx" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

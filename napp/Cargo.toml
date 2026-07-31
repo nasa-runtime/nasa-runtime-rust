@@ -1,0 +1,95 @@
+[package]
+name = "napp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA application lifecycle runtime"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# 每个内置组件按需拉取其重实现依赖，避免 web-only 应用编译 log/db/redis/nacos 等重依赖
+# （§16 裁剪纪律）。由 nasa 门面经 `application_impl?/<组件>` 弱依赖桥打开。
+log = ["dep:nalog"]
+# nacos-config 配置中心：API 编入即可用 disabled 本地路径；真实连接由 nacos-config-sdk 打开 nanacos 后端。
+nacos-config = ["dep:config-boot", "dep:nanacos"]
+nacos-config-sdk = ["nacos-config", "nanacos/nacos"]
+# db：MySQL 数据源；建池/探测能力在 natx，napp 不直接依赖 SQLx（§16）；
+#     migration 门禁(§13)由 namigrate 提供,DB 组件 Ready 前子阶段执行,不新增组件字符串。
+db = ["dep:natx", "dep:namigrate"]
+# redis：统一客户端建连与显式停机由 nadis 提供，napp 只做编排。
+redis = ["dep:nadis"]
+# rate-limit：跨副本分布式业务配额(§7.2 / PR-7)——RateLimitProvider 抽象 + nadis Redis 固定窗口后端。
+rate-limit = ["redis", "dep:async-trait"]
+# telemetry：OpenTelemetry traces 组件(§9);natelemetry 是硬依赖,本 feature 只门控组件与声明字符串。
+# telemetry：OTLP traces 组件(§9);OTLP wire exporter(§0.2 PR-8)用 reqwest POST OTLP/HTTP JSON。
+telemetry = ["dep:reqwest"]
+# cache：两级缓存组件(§6);由 cacheable 提供 L2/失效广播,napp 托管其 CacheRuntimeGuard 生命周期。
+cache = ["dep:cacheable", "dep:async-trait"]
+# Kafka：受管 producer/consumer、broker Ready、动态健康和两段停机由 napp 编排。
+kafka = ["dep:futures", "dep:nafka"]
+# Web：自动端点收集、监听与排空；无 Web 的批处理不编译路由和网络依赖。
+web = ["dep:axum", "dep:naweb", "dep:matchit", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
+# Web 安全端点：把 naweb 的 auth/crypto 组合显式编入 Application 容器路径。
+web-security = ["web", "naweb/security"]
+# scheduling：启动/关闭 `#[scheduled]` 任务；cluster 模式另需 nasched 的 nadis 适配层与 redis 组件。
+# Mapper 缓存查询的启动断言；真实 L2 仍由业务在启动 Hook 中显式装配。
+mapper-cache = ["dep:namapper", "namapper/redis-cache"]
+# ws：长连接服务（TCP/WebSocket）；鉴权与 endpoint 事件表由业务经 configure_ws 注入。
+ws = ["dep:naws"]
+# nacos-discovery：分段生命周期（出站 runtime / 本实例注册 / 关闭后台任务）由 rest-discovery-nacos 提供。
+nacos-discovery = ["dep:rest-discovery-nacos"]
+# 真实注册中心后端；门面依赖会统一底层包的能力开关，这里供直连 napp 的测试显式启用。
+nacos-discovery-sdk = ["nacos-discovery", "rest-discovery-nacos/nacos-sdk"]
+scheduling = ["dep:nasched"]
+scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+axum = { version = "0.8", optional = true }
+config-boot = { version = "1.0.0", path = "../config-boot", optional = true }
+futures = { version = "0.3", optional = true }
+naweb = { version = "1.0.0", path = "../naweb", optional = true }
+matchit = { version = "0.8", optional = true }
+naml = { version = "1.0.0", path = "../naml" }
+nametrics-core = { version = "1.0.0", path = "../nametrics-core" }
+nabudget = { version = "1.0.0", path = "../nabudget" }
+nasecret = { version = "1.0.0", path = "../nasecret" }
+naidempotency = { version = "1.0.0", path = "../naidempotency" }
+naauthz = { version = "1.0.0", path = "../naauthz" }
+natelemetry = { version = "1.0.0", path = "../natelemetry" }
+# authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
+nauth-oauth = { version = "1.0.0", path = "../nauth-oauth", optional = true }
+naopenapi = { version = "1.0.0", path = "../naopenapi", optional = true }
+# 仅 web 特性:auth 组件的远程 `jwks_uri` 拉取(§16.2)。rustls-tls 对齐 rest-discovery 的 TLS 栈。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+namapper = { version = "1.0.0", path = "../namapper", optional = true, default-features = false }
+natx = { version = "1.0.0", path = "../natx", optional = true }
+namigrate = { version = "1.0.0", path = "../namigrate", optional = true }
+cacheable = { version = "1.0.0", path = "../cacheable", optional = true }
+# 仅 cache 组件用:实现 cacheable 的 async trait `CacheBackend`(受管 Redis adapter,§6.2)。
+async-trait = { version = "0.1", optional = true }
+nadis = { version = "1.0.0", path = "../nadis", optional = true }
+nalog = { version = "1.0.0", path = "../nalog", optional = true }
+nafka = { version = "1.0.0", path = "../nafka", optional = true, default-features = false }
+nanacos = { version = "1.0.0", path = "../nanacos", optional = true, default-features = false }
+nasched = { version = "1.0.0", path = "../nasched", optional = true }
+naws = { version = "1.0.0", path = "../naws", optional = true, default-features = false }
+rest-discovery-nacos = { version = "1.0.0", path = "../rest-discovery-nacos", optional = true, default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "=1.52.3", features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.6", features = ["trace", "catch-panic", "compression-gzip"], optional = true }
+ipnet = { version = "2", optional = true }
+tracing = "0.1"
+rand = "0.8"
+sha2 = "0.10"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = "1"

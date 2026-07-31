@@ -1,0 +1,25 @@
+# base —— 公共 API / 轻量工具库(合同 base.md):响应壳 BaseResponse、translator 抽象、
+# strings/env/size/id 纯工具。经门面 `use nasa::base::...` 引用(crate 真名 nabase,业务无感知)。
+# 默认依赖只有 serde(base.md §9.1);重能力(date/numeric/crypto/image)保持独立 crate,
+# 由 nasa 顶层 feature 暴露,不在 base 内做重复聚合。
+[package]
+name = "nabase"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 公共 API 与轻量工具库:BaseResponse/strings/env/ByteSize/Snowflake"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nabase"
+[features]
+# 默认必须为空:只用 BaseResponse/strings 的项目不应被迫编译 chrono/bigdecimal/crypto/图片库(base.md §2.2/§9.2)。
+default = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

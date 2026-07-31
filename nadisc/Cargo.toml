@@ -1,0 +1,24 @@
+# discovery —— 服务发现/注册的【provider-neutral 中性类型 + 接口】(后端 nacos/eureka/... 共用)。
+# 放与后端无关的数据类型(Instance)、流量过滤规则(is_traffic_instance)与抽象接口
+# (DiscoveryClient/ServiceRegistry 等):后端各自 crate 实现这些 trait,RestDiscovery 等上层只面向本 crate 抽象,
+# 不绑定具体后端(NacosDiscoveryClient)。各后端 crate 彼此不互相依赖。
+[package]
+name = "nadisc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "服务发现 provider-neutral 中性类型 + 接口(Instance/DiscoveryClient;nacos/eureka 等后端实现)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nadisc"
+[dependencies]
+# 抽象接口需要:async trait(对象安全,供 dyn DiscoveryClient)、错误类型、watch::Receiver(服务实例快照推送)。
+async-trait = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }

@@ -1,0 +1,39 @@
+# mapper —— MyBatis 风格声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
+[package]
+name = "namapper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MyBatis style declarative mapper runtime"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "namapper"
+
+[features]
+default = []
+grouped-cache = ["dep:cacheable"]
+redis-cache = ["dep:redis"]
+
+[dependencies]
+namapper-macro = { package = "namapper-macro", version = "1.0.0", path = "../namapper-macro" }
+natx = { package = "natx", version = "1.0.0", path = "../natx" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
+async-trait = "0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+linkme = "0.3"
+tokio = { version = "1", features = ["sync", "time"] }
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
+cacheable = { version = "1.0.0", path = "../cacheable", optional = true }
+redis = { version = "1", features = ["tokio-comp", "cluster-async"], optional = true }

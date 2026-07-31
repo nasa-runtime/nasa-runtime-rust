@@ -1,0 +1,36 @@
+# image —— 图片压缩/缩放 crate(对照 原实现 原工具包 ImageUtils)。
+# 组件设计与兼容边界见 README.md。
+#
+# crate 名 = image(用户 2026-06-17 拍板)。本 crate 依赖 crates.io 的 image crate,为避免包名/依赖名冲突,
+# 把那个依赖**内部重命名**为 `image_crate`(package = "image")。nimage 无派生宏,故不存在 nadis/redis-rs 那种
+# proc-macro crate_name 解析歧义,bare 名 image 安全。门面仍 nasa::image。
+[package]
+name = "naimg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 图片压缩/缩放工具(对照原工具包 ImageUtils):质量+尺寸压缩,基于 image crate"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "naimg"
+[dependencies]
+# 只编入组件承诺的常用格式，避免默认格式集把未对外承诺的 AVIF 编码链及其停止维护依赖
+# 带进所有图片用户。格式边界在 README 明示；需要其它格式应由业务在边界层转换。
+image_crate = { package = "image", version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
+    "tiff",
+    "webp",
+] }

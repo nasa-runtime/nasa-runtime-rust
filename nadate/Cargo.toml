@@ -1,0 +1,23 @@
+# date —— 日期时间工具 crate(对照 原实现 原工具包 DateUtils 静态工具类)。
+# 组件设计与兼容边界见 README.md。
+#
+# 设计:以 **i64 epoch 毫秒**为规范表示(对照 原实现 long),用 `chrono` 实现;默认时区 **GMT+8**(对照 原实现 GMT8)。
+#   支持 **原实现 SimpleDateFormat 风格 pattern**("yyyy-MM-dd HH:mm:ss"),内部转 chrono strftime,便于从 原实现 迁移。
+#   只移植实际有用的子集(format/parse/add/earliest/allTime/today),不复刻 原实现 292 个 Date/long/String×TimeZone 重载。
+[package]
+name = "nadate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 日期时间工具(对照原工具包 DateUtils):i64 epoch ms + GMT+8 默认 + 兼容 pattern,基于 chrono"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nadate"
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

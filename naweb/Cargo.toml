@@ -1,0 +1,50 @@
+# naweb —— NASA Web 路由、interceptor 与端点安全运行时。
+# 业务通常通过 nasa(feature = "web") 使用；本包同时保留可独立依赖的底层入口。
+[package]
+name = "naweb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Web routing, interceptor and endpoint security runtime"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "naweb"
+
+[features]
+default = []
+auth = ["dep:serde", "dep:serde_json", "dep:tokio"]
+crypto = [
+    "dep:base64",
+    "dep:ncrypto",
+    "dep:rand",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:subtle",
+    "dep:tokio",
+    "dep:zeroize",
+]
+# 编译期风险门；仍需 `LocalCryptoProvider` 的运行时显式允许，二者缺一不可。
+legacy-rsa-private = ["crypto", "ncrypto/legacy-rsa-private"]
+security = ["auth", "crypto"]
+
+[dependencies]
+naweb-macro = { version = "1.0.0", path = "../naweb-macro" }
+axum = "0.8"
+linkme = "0.3"
+tracing = "0.1"
+arc-swap = "1"
+sha2 = "0.10"
+base64 = { version = "0.22", optional = true }
+ncrypto = { version = "1.0.0", path = "../ncrypto", optional = true }
+rand = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+subtle = { version = "2", optional = true }
+tokio = { version = "=1.52.3", features = ["rt", "sync", "time"], optional = true }
+zeroize = { version = "1", optional = true }

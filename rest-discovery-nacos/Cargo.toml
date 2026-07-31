@@ -1,0 +1,40 @@
+# rest-discovery-nacos —— RestDiscovery + Nacos 一键装配【便利层】。
+#
+# 边界(对照 lb.md §D):
+#   · rest-discovery 本体保持 provider-neutral(只认 discovery::DiscoveryClient,绝不依赖 nacos);
+#   · 本 crate 收敛「读 DiscoveryConfig → 连 Nacos → 可选注册 → 装配 RestDiscovery」的装配逻辑;
+#   · nasa 把本 crate 的 init_from_config 重导出成统一门面路径 nasa::discovery::init_from_config(业务不直接 dep 本 crate)。
+#
+# RegistrationGuard 生命周期:由 init_from_config 返回的 DiscoveryHandle 交业务 main 持有,
+#   main 在优雅停机时显式 deregister()【先摘流】再 drain HTTP —— 不放进程级 static(否则丢掉「先摘流再排空」顺序)。
+[package]
+name = "rest-discovery-nacos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "RestDiscovery + Nacos 一键装配便利层(DiscoveryConfig / init_from_config / DiscoveryHandle);rest-discovery 仍 provider-neutral"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "rest_discovery_nacos"
+[features]
+default = []
+# 透传真实 nacos-sdk 后端(nasa 的 rest-discovery-nacos feature 打开它);不开时 nacos 为 stub、connect 运行期 bail。
+nacos-sdk = ["nanacos/nacos"]
+# 可选真实后端开关,供下游显式连真实注册中心时启用。
+live-nacos = ["nacos-sdk"]
+
+[dependencies]
+rest-discovery = { version = "1.0.0", path = "../rest-discovery" }
+# 只用 nacos 后端的 client/props/guard + 中性 Instance(re-export);default-features=false:真实后端由 nacos-sdk feature 透传。
+nanacos = { package = "nanacos", version = "1.0.0", path = "../nanacos", default-features = false }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+# init_with_discovery 失败时回滚 deregister 的超时(time);也用于 live 测试。
+tokio = { version = "1", features = ["time"] }

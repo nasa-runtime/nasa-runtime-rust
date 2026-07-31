@@ -1,0 +1,16 @@
+[package]
+name = "naaudit-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA transactional audit sink backed by the MySQL outbox"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+naaudit = { version = "1.0.0", path = "../naaudit" }
+naoutbox-mysql = { version = "1.0.0", path = "../naoutbox-mysql" }

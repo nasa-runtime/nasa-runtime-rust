@@ -1,0 +1,1386 @@
+{
+  "kind": "Dashboard",
+  "apiVersion": "dashboard.grafana.app/v2alpha1",
+  "metadata": {
+    "name": "nafana-interfaces"
+  },
+  "spec": {
+    "annotations": [],
+    "cursorSync": "Off",
+    "description": "Prometheus 集群接口监控面板。每张接口卡使用 Grafana 原生 Time series，按所选 job、instance、group、command 聚合 QPS、TPS、结果、并发、存活实例和延迟直方图；instance=All 时展示集群整体。",
+    "editable": true,
+    "elements": {
+      "total-qps": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "(sum(increase(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\"}[10s])) / 10) or vector(0)",
+                        "legendFormat": "Total QPS",
+                        "instant": true
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "stat",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "textMode": "value_and_name",
+                "wideLayout": true,
+                "text": {
+                  "titleSize": 18,
+                  "valueSize": 28
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "suffix: /s",
+                  "decimals": 0,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "green"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "tps": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "(sum(increase(nafana_tps_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\"}[10s])) / 10) or vector(0)",
+                        "legendFormat": "TPS",
+                        "instant": true
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "stat",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "textMode": "value_and_name",
+                "wideLayout": true,
+                "text": {
+                  "titleSize": 18,
+                  "valueSize": 28
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "suffix: /s",
+                  "decimals": 0,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "green"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "hosts": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3,
+          "title": "",
+          "description": "当前筛选范围内 Prometheus 抓取成功的应用实例数。",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum(up{job=~\"$job\",instance=~\"$instance\"}) or vector(0)",
+                        "legendFormat": "Hosts",
+                        "instant": true
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "stat",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "textMode": "value_and_name",
+                "wideLayout": true,
+                "text": {
+                  "titleSize": 18,
+                  "valueSize": 28
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "decimals": 0,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "green"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "error": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "(100 * sum(increase(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",outcome!=\"success\"}[10s])) / clamp_min(sum(increase(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\"}[10s])), 1)) or vector(-1)",
+                        "legendFormat": "Error",
+                        "instant": true
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "stat",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "textMode": "value_and_name",
+                "wideLayout": true,
+                "text": {
+                  "titleSize": 18,
+                  "valueSize": 28
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "decimals": 1,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      },
+                      {
+                        "color": "yellow",
+                        "value": 5
+                      },
+                      {
+                        "color": "orange",
+                        "value": 25
+                      },
+                      {
+                        "color": "red",
+                        "value": 50
+                      }
+                    ]
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "-1": {
+                          "text": "—",
+                          "color": "#80868F"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "global-p99": {
+        "kind": "Panel",
+        "spec": {
+          "id": 5,
+          "title": "",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "(1000 * histogram_quantile(0.99, sum by (le) (rate(nafana_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",group=~\"$group\"}[1m])))) or vector(-1)",
+                        "legendFormat": "Global P99",
+                        "instant": true
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "stat",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "orientation": "horizontal",
+                "textMode": "value_and_name",
+                "wideLayout": true,
+                "text": {
+                  "titleSize": 18,
+                  "valueSize": 28
+                },
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "ms",
+                  "decimals": 0,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "green"
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "-1": {
+                          "text": "—",
+                          "color": "#80868F"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "interface-card": {
+        "kind": "Panel",
+        "spec": {
+          "id": 7,
+          "title": "$command",
+          "description": "集群接口趋势。所有序列均按当前 job、instance、group、command 过滤器从 Prometheus 聚合；instance=All 时代表整个集群。十字悬停同时显示吞吐、错误、各结局、并发、实例数和集群延迟分位。",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Cluster QPS"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_tps_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "TPS"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "100 * sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome!=\"success\"}[10s])) / clamp_min(sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[10s])), 0.000001)",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Error %"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=\"success\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Success /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=\"failure\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Failure /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "E",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=\"timeout\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Timeout /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "F",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=\"rejected\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Rejected /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "G",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=\"canceled\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Canceled /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "H",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (rate(nafana_fallback_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[10s]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Fallback /s"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "I",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "sum by (command, group) (nafana_inflight{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"})",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Inflight"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "J",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "count by (command, group) (count by (job, instance, command, group) (nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}) and on (job, instance) (up{job=~\"$job\",instance=~\"$instance\"} == 1))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Hosts"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "K",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "1000 * sum by (command, group) (rate(nafana_latency_seconds_sum{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])) / clamp_min(sum by (command, group) (rate(nafana_latency_seconds_count{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])), 0.000001)",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "Mean ms"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "L",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "1000 * histogram_quantile(0.50, sum by (le, command, group) (rate(nafana_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "P50 ms"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "M",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "1000 * histogram_quantile(0.90, sum by (le, command, group) (rate(nafana_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "P90 ms"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "N",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "1000 * histogram_quantile(0.99, sum by (le, command, group) (rate(nafana_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "P99 ms"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "O",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "1000 * histogram_quantile(0.995, sum by (le, command, group) (rate(nafana_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\"}[1m])))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "P99.5 ms"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "P",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "prometheus",
+                      "spec": {
+                        "expr": "(max(up{job=~\"$job\",instance=~\"$instance\"}) or vector(0)) * (1 + ((sum(increase(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\",command=~\"$command\",outcome=~\"timeout|rejected|canceled\"}[10s])) > bool 0) or vector(0)))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "State (0/1/2)"
+                      }
+                    },
+                    "datasource": {
+                      "type": "prometheus",
+                      "uid": "${DS_PROMETHEUS}"
+                    },
+                    "refId": "Q",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "timeseries",
+            "spec": {
+              "pluginVersion": "12.1.0",
+              "options": {
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc",
+                  "hideZeros": false
+                },
+                "legend": {
+                  "showLegend": true,
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "calcs": []
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "suffix: /s",
+                  "decimals": 1,
+                  "noValue": "—",
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": null
+                      }
+                    ]
+                  },
+                  "mappings": [],
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineInterpolation": "linear",
+                    "barAlignment": 0,
+                    "lineWidth": 2,
+                    "fillOpacity": 8,
+                    "gradientMode": "none",
+                    "spanNulls": false,
+                    "insertNulls": false,
+                    "showPoints": "never",
+                    "pointSize": 5,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "axisPlacement": "auto",
+                    "axisLabel": "",
+                    "axisColorMode": "text",
+                    "axisBorderShow": false,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "axisCenteredZero": false,
+                    "hideFrom": {
+                      "tooltip": false,
+                      "viz": false,
+                      "legend": false
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Cluster QPS"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
+                      },
+                      {
+                        "id": "custom.lineWidth",
+                        "value": 2
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Error %"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "percent"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "red"
+                        }
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "hidden"
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "P99 ms"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "ms"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "yellow"
+                        }
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "hidden"
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": "^(TPS|Success /s|Failure /s|Timeout /s|Rejected /s|Canceled /s|Fallback /s)$"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "suffix: /s"
+                      },
+                      {
+                        "id": "custom.hideFrom",
+                        "value": {
+                          "tooltip": false,
+                          "viz": false,
+                          "legend": true
+                        }
+                      },
+                      {
+                        "id": "custom.lineWidth",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "hidden"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": "^(Mean ms|P50 ms|P90 ms|P99[.]5 ms)$"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "ms"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      },
+                      {
+                        "id": "custom.hideFrom",
+                        "value": {
+                          "tooltip": false,
+                          "viz": false,
+                          "legend": true
+                        }
+                      },
+                      {
+                        "id": "custom.lineWidth",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "hidden"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": "^(Inflight|Hosts|State \\(0/1/2\\))$"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "short"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.hideFrom",
+                        "value": {
+                          "tooltip": false,
+                          "viz": false,
+                          "legend": true
+                        }
+                      },
+                      {
+                        "id": "custom.lineWidth",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "hidden"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "color-legend": {
+        "kind": "Panel",
+        "spec": {
+          "id": 6,
+          "title": "",
+          "description": "集群接口趋势和悬停指标说明。",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "text",
+            "spec": {
+              "pluginVersion": "13.1.0",
+              "options": {
+                "mode": "markdown",
+                "content": "<small>🔵 Cluster QPS　🔴 Error %　🟡 P99　　鼠标十字悬停：TPS、成功、失败、超时、拒绝、取消、降级、Inflight、Hosts、Mean、P50、P90、P99、P99.5　　所有指标按所选 job / instance / group 聚合，instance=All 即集群整体</small>"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      }
+    },
+    "layout": {
+      "kind": "RowsLayout",
+      "spec": {
+        "rows": [
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "颜色图例",
+              "collapse": false,
+              "hideHeader": true,
+              "layout": {
+                "kind": "AutoGridLayout",
+                "spec": {
+                  "maxColumnCount": 1,
+                  "columnWidthMode": "custom",
+                  "columnWidth": 300,
+                  "rowHeightMode": "custom",
+                  "rowHeight": 42,
+                  "fillScreen": true,
+                  "items": [
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "color-legend"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "概览",
+              "collapse": false,
+              "hideHeader": true,
+              "layout": {
+                "kind": "AutoGridLayout",
+                "spec": {
+                  "maxColumnCount": 5,
+                  "columnWidthMode": "custom",
+                  "columnWidth": 200,
+                  "rowHeightMode": "custom",
+                  "rowHeight": 56,
+                  "fillScreen": false,
+                  "items": [
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "total-qps"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "tps"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "hosts"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "error"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "global-p99"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "接口墙",
+              "collapse": false,
+              "hideHeader": true,
+              "layout": {
+                "kind": "AutoGridLayout",
+                "spec": {
+                  "maxColumnCount": 100,
+                  "columnWidthMode": "custom",
+                  "columnWidth": 320,
+                  "rowHeightMode": "custom",
+                  "rowHeight": 280,
+                  "fillScreen": false,
+                  "items": [
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "interface-card"
+                        },
+                        "repeat": {
+                          "mode": "variable",
+                          "value": "command"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "links": [],
+    "preload": true,
+    "tags": [
+      "nafana",
+      "nasa",
+      "interface-monitoring"
+    ],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-2m",
+      "to": "now",
+      "autoRefresh": "5s",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m"
+      ],
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0
+    },
+    "title": "NASA 接口监控 (nafana)",
+    "variables": [
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "DS_PROMETHEUS",
+          "pluginId": "prometheus",
+          "refresh": "onDashboardLoad",
+          "regex": "",
+          "current": {
+            "text": "Prometheus",
+            "value": "prometheus"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Prometheus 数据源",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": false
+        }
+      },
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "job",
+          "label": "应用 (job)",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "query": {
+            "kind": "prometheus",
+            "spec": {
+              "query": "label_values(nafana_requests_total, job)",
+              "refId": "PrometheusVariableQueryEditor-job"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "allowCustomValue": false
+        }
+      },
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "instance",
+          "label": "实例",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "query": {
+            "kind": "prometheus",
+            "spec": {
+              "query": "label_values(nafana_requests_total{job=~\"$job\"}, instance)",
+              "refId": "PrometheusVariableQueryEditor-instance"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "allowCustomValue": false
+        }
+      },
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "group",
+          "label": "分组",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "query": {
+            "kind": "prometheus",
+            "spec": {
+              "query": "label_values(nafana_requests_total{job=~\"$job\",instance=~\"$instance\"}, group)",
+              "refId": "PrometheusVariableQueryEditor-group"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "allowCustomValue": false
+        }
+      },
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "command",
+          "label": "接口",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "query": {
+            "kind": "prometheus",
+            "spec": {
+              "query": "label_values(nafana_requests_total{job=~\"$job\",instance=~\"$instance\",group=~\"$group\"}, command)",
+              "refId": "PrometheusVariableQueryEditor-command"
+            }
+          },
+          "regex": "/^[^\"\\\\\\r\\n]+$/",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "allowCustomValue": false
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "naobject"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Experimental provider-neutral bounded object store contract with S3-compatible SigV4 adapter"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+hex = "0.4"
+hmac = "0.12"
+nasecret = { version = "1.0.0", path = "../nasecret" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sha2 = "0.10"
+zeroize = "1"

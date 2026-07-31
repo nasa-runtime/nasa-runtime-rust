@@ -1,0 +1,15 @@
+[package]
+name = "naidempotency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 业务幂等核心:Idempotency-Key 状态机(首次/重放/并发冲突/指纹冲突),不依赖 napp"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }

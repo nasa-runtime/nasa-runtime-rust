@@ -1,0 +1,30 @@
+# numeric —— 定点精确算术 crate(对照 原实现 原工具包 Numeric 静态工具类)。
+# 组件设计与兼容边界见 README.md。
+#
+# 方案 P(最终落地;方案 C 已被推翻):**所有算法与 原实现 端逐值对齐**——multiply/divide 的余数部分
+#   复刻 原实现 的 f64 中间运算路径,`to_fixed_f64` 用 `Math.round` ties-to-+∞。**scale 上限 = MAX_SCALE = 8**
+#   (对齐 原实现 `MAX_FIXED_SCALE`;f64 的 10^s 超 8 即超安全整数域)。底层 mantissa 仍是 i128。
+#   用户 2026-06-21:**全量迁移 原实现 `Numeric`**——i128 定点核(scale≤8,不传 scale 默认 8)+ `decimal`
+#   模块(BigDecimal,scale>8 不受 fixed 8 位限制;凡需展开 10^n 的操作受 MAX_DECIMAL_EXPANSION 边界保护,
+#   对照 原实现 BigDecimal API)+ `float` 模块(double 便捷算术)。
+[package]
+name = "nanum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 定点精确算术(对照原工具包 Numeric):i128 定点 ×10^scale + 全 RoundingMode + align + I/O,撮合/金额用"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nanum"
+[dependencies]
+rand = "0.8"
+# BigDecimal 高精度段(scale>8 退化路径,对照 原实现 Numeric BigDecimal API)。BigDecimal 段不受 fixed MAX_SCALE=8
+# 限制;凡需展开 10^n 的操作(divide/avg/align*/multiply_scale)受 decimal::MAX_DECIMAL_EXPANSION 边界保护,超界返 Err。
+# 普通依赖即可被集成测试引用(如 bigdecimal::num_bigint::BigInt 构造极端 exponent 验 panic guard),无需重复 dev-dependency。
+bigdecimal = "0.4"

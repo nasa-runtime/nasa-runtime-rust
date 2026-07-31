@@ -1,0 +1,26 @@
+# ============================================================================
+# tx-macro —— 自定义属性宏 #[transactional](ambient 事务编排)
+#   把被注解的 async fn 包进 crate::tx::run(...):进方法 begin、正常 commit、出错 rollback。
+#   配合 src/tx.rs 的 task_local ambient 事务:方法体里嵌套调用的 repo 自动加入同一事务,无需手传连接。
+# ============================================================================
+[package]
+name = "natx-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "#[transactional] 属性宏(事务编排)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+name = "natx_macro"
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

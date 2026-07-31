@@ -1,0 +1,33 @@
+# ============================================================================
+# rest-client-macro —— OpenFeign 风格声明式 HTTP 客户端宏(lb.md §11)。
+#
+#   #[rest_client] 读 trait → 生成 {Trait}Client + new(rest) + #[async_trait] impl;
+#   方法属性 #[GetMapping]/#[PostMapping]/#[PutMapping]/#[DeleteMapping] 提供 HTTP 元数据;
+#   参数 inert attr #[PathVariable]/#[RequestParam]/#[RequestHeader]/#[RequestHeaders]/#[RequestBody]/#[FormBody]
+#   只由 #[rest_client] 消费、不导出成独立 proc macro(Rust attr 宏不能作用于函数参数,§0 第8条)。
+#
+# service 模式生成 self.rest.service_request(service, method, path)(档1 直连,**不生成字符串 URL**);
+# url 模式生成 self.rest.request(method, url)(普通外部)。运行时复杂逻辑收敛到 rest-discovery 的 __private。
+# ============================================================================
+[package]
+name = "rest-client-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "OpenFeign 风格声明式 HTTP 客户端宏(#[rest_client] + #[GetMapping/PostMapping/PutMapping/DeleteMapping])"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+name = "rest_client_macro"
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+# 解析运行时根路径:直接依赖 rest-discovery → ::rest_discovery;否则门面 nasa → ::nasa::discovery::rest。
+proc-macro-crate = "3"

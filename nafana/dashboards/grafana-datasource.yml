@@ -1,0 +1,19 @@
+# Grafana provisioning sample for the Prometheus used by nafana.
+#
+# Keep name and uid unchanged so nafana-interfaces.json works without edits.
+# When Grafana cannot resolve the Docker service name "prometheus", change only
+# the url host:port to the Prometheus address reachable from the Grafana server.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 5s
+      httpMethod: POST

@@ -1,0 +1,16 @@
+[package]
+name = "natelemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 遥测核心:W3C trace context 传播、有界 span 导出队列与停机 flush(不依赖 napp)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hex = "0.4"
+rand = "0.8"
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }

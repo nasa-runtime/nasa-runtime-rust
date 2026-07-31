@@ -1,0 +1,31 @@
+# hystrix-macro —— 自定义【属性过程宏】#[hystrix(...)] 的独立 crate
+# 过程宏【必须】单独放一个 crate，且声明 [lib] proc-macro = true
+[package]
+name = "hystrix-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "#[hystrix] 属性宏(bulkhead + 超时 + Dashboard 上报)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+# ★ 这一行把本 crate 标记为"过程宏 crate"：它编译成编译器插件，
+#   只能导出 #[proc_macro] / #[proc_macro_derive] / #[proc_macro_attribute] 函数，
+#   且只在【编译期】被别的 crate 调用，不进最终二进制。
+proc-macro = true
+
+name = "hystrix_macro"
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+# syn: 把传进来的 Rust 源码 TokenStream 解析成语法树(AST)，features=full 才能解析函数体等完整语法
+syn = { version = "2", features = ["full"] }
+# quote: 反过来——用 quote!{} 模板把 AST/变量拼回 TokenStream(生成代码)
+quote = "1"
+# proc-macro2: syn/quote 用的"可在普通代码里操作"的 TokenStream 类型(标准库的 proc_macro 只能在宏 crate 用)
+proc-macro2 = "1"
+# serde_json: 仅用于【编译期】校验 reject_response/timeout_response 是合法 JSON(早报错);不进运行期二进制
+serde_json = "1"

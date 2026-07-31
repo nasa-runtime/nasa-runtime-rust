@@ -1,0 +1,36 @@
+# nlog —— NASA 日志 crate(对照 原实现 原工具包 的 logback-原框架.xml)。
+#
+# 命名:叫 nlog 而非 log,避免与 crates.io 的 `log` 门面 crate 撞名(同 nadis/ncrypto 惯例);
+#       业务经门面 `use nasa::log` 引用,无感知 crate 真名。
+#
+# 能力(tracing + tracing-subscriber,≈ SLF4J + Logback):
+#   - 原实现 logback PatternLayout 风格 formatter(yyyy-MM-dd HH:mm:ss.SSS [LEVEL] [thread] logger[line] - msg)
+#   - 运行期级别热切(reload),配合 nacos:先控制台,配置就绪后热接文件 + 改级别
+#   - 按天 + 按大小滚动(maxFileSize,带 .%i 索引),对照 logback SizeAndTimeBasedRollingPolicy
+#   - 保留清理:maxHistory(天) + totalSizeCap(总量) + cleanHistoryOnStart,对照 logback(原 Rust 版缺,会涨爆磁盘)
+#   - 独立 error.log(仅 ERROR),对照 logback 的 error appender + ThresholdFilter
+[package]
+name = "nalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 日志(对照原日志配置):tracing + 兼容 formatter + 按天/按大小滚动 + maxHistory/totalSizeCap 保留 + 独立 error.log + 级别热切"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nalog"
+[dependencies]
+nabase = { package = "nabase", version = "1.0.0", path = "../nabase" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+arc-swap = "1"
+# 应用侧 LogConfig 反序列化(业务直接把 YAML/Nacos 的 log: 段反序列化进 nlog::LogConfig)。
+# 默认启用,避免门面 nasa 再多配一个 log-config feature。
+serde = { version = "1", features = ["derive"] }

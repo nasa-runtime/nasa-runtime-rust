@@ -1,0 +1,39 @@
+# nafana Prometheus scrape configuration.
+#
+# Quick start:
+# 1. Copy this job into Prometheus, or use this file as a minimal standalone config.
+# 2. Change only the target host:port values to addresses reachable by Prometheus.
+# 3. Keep job_name and metrics_path unchanged when the application exposes the
+#    recommended root-level /metrics endpoint.
+#
+# This ready-to-run sample assumes Prometheus runs in Docker and two independent
+# application processes listen on host ports 8080 and 8081. A native
+# Prometheus process should use 127.0.0.1 with the same ports instead.
+# Linux Docker users may need this compose setting:
+# extra_hosts: ["host.docker.internal:host-gateway"]
+
+global:
+  # Dashboard 使用 10s increase/rate 窗口；抓取间隔必须不大于 5s，确保窗口内至少有两个样本。
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "example-service"
+    # 不要调大到 10s 以上，否则 Dashboard 的 10s 查询会间歇性显示空值。
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    metrics_path: "/metrics"
+    scheme: "http"
+
+    static_configs:
+      - targets:
+          # Standard deployment only changes these host:port values.
+          - "host.docker.internal:8080"
+          - "host.docker.internal:8081"
+        labels:
+          name: "nafana-app"
+          env: "local"
+
+      # Add every additional application process to the same target list.
+      # Prometheus supplies a unique instance label from each target, and the
+      # Dashboard aggregates all selected instances as one cluster.

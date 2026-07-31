@@ -1,0 +1,37 @@
+# nacos —— Nacos 配置中心 + 注册中心的【传输/机制】门面(抽自各业务 app,机制写一次复用)。
+# 业务项目经 nasa 门面使用:nasa::config::nacos(配置中心)/ nasa::discovery::nacos(注册中心)(--features nacos-sdk)。
+#
+# 边界(对照 nacos.md §3):本 crate 只给【机制】——连接/鉴权、配置拉取与 watch(只吐裸文本)、
+#   服务注册/心跳/优雅下线(drop best-effort deregister + 显式 deregister)/发现/订阅;**绝不认识业务 AppConfig**。
+#   配置的 parse+merge+apply 是 app 策略,留在各 app。
+[package]
+name = "nanacos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Nacos 配置中心 + 注册中心传输门面(NacosConfigClient / NacosDiscoveryClient)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nanacos"
+[dependencies]
+# 服务实例中性类型(provider-neutral);naming 的 register/discover/subscribe 用它,与 eureka 等后端共享。
+nadisc = { package = "nadisc", version = "1.0.0", path = "../nadisc" }
+anyhow = "1"
+tracing = "0.1"
+# 实现 discovery 的 provider-neutral 接口(DiscoveryClient/ServiceRegistry/...,对象安全)。
+async-trait = "0.1"
+# Drop best-effort spawn(rt);watch/subscribe channel 需 sync;subscribe_channel 轮询兜底需 time(interval)+ macros(select!)。
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# 真实传输实现;feature 关时不编进 binary(对照各 app 既有 `--features nacos` 门控)。
+nacos-sdk = { version = "0.8", optional = true }
+
+[features]
+# 关 feature:不编 nacos-sdk,connect/fetch/... 直接 bail 提示重编译(防"以为开了 Nacos 实际没生效")。
+# 开 feature:走真实 nacos-sdk(默认含 config/naming/auth-by-http)。
+nacos = ["dep:nacos-sdk"]

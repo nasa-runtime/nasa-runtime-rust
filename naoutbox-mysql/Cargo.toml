@@ -1,0 +1,16 @@
+[package]
+name = "naoutbox-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Outbox 的 MySQL 后端(经 natx 事务内写事件 + 轮询 dispatcher 标记已投递),不依赖 napp"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+naoutbox-core = { version = "1.0.0", path = "../naoutbox-core" }
+natx = { version = "1.0.0", path = "../natx" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

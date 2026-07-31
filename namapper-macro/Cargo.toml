@@ -1,0 +1,22 @@
+# mapper-macro —— MyBatis 风格 Mapper trait 生成宏
+[package]
+name = "namapper-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "#[Mapper]/#[Query]/#[Insert]/#[Update]/#[Delete]/#[Execute] proc macros"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+name = "namapper_macro"
+
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

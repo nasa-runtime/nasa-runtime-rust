@@ -1,0 +1,38 @@
+# nasched —— 异步/定时运行时:运行端(start/shutdown)+ re-export #[Async]/#[scheduled]/#[EnableScheduling]
+# 业务项目优先依赖 nasa 门面并开启 scheduling feature；内部迁移可直接依赖 nasched 包。
+[package]
+name = "nasched"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "异步/定时门面(cron: misfire=skip 走 tokio-cron-scheduler、fire_once 走自管 CronPlan driver;非 cron 用 tokio::time;#[Async]/#[scheduled]/#[EnableScheduling])"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "nasched"
+[features]
+default = []
+# 只启用 nadis adapter(NadisLeaderGate / start_scheduled_clustered*),不是启用 cluster 语义本身——
+# cluster="leader" + 自定义 LeaderGate 在默认 feature 下即可用(d.md §2/§4.2)。
+cluster = ["dep:nadis"]
+
+[dependencies]
+async-macro = { version = "1.0.0", path = "../async-macro" }
+# 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
+nadis = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true }
+linkme = "0.3"
+tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
+tokio-cron-scheduler = "0.13"
+# misfire 补偿(d.md §17.5)算"上一拍应触发时刻":tokio-cron-scheduler 内部用 croner,这里直依赖同款做反向搜索。
+croner = "2"
+tracing = "0.1"
+anyhow = "1"
+# cron 时区(zone):chrono 提供 UTC/固定 offset,chrono-tz 提供 IANA 名(如 Asia/Shanghai);
+# 二者都只需类型 + FromStr,配合 tokio-cron-scheduler 的 new_async_tz 解析触发时区。
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }

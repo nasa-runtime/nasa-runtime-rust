@@ -1,0 +1,15 @@
+[package]
+name = "nabudget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA provider-neutral absolute request budget and cancellation contract"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["time"] }
+tokio-util = { version = "0.7", features = ["rt"] }

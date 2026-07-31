@@ -1,0 +1,22 @@
+# macro-support —— 5 个业务过程宏共用的【运行时路径解析器】(维护约束 门面方案 §六)。
+# 只负责:找 `nasa` 的实际依赖名(支持 Cargo 重命名)→ 拼 `nasa::<module>`;
+# 回退旧直接依赖;两者皆无 → 统一、可理解的缺依赖编译错误。
+# 不向业务公开;宏 crate 发布后需要它,故也须先发布到 crates.io(发布顺序最先)。
+[package]
+name = "macro-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 过程宏的运行时路径发现(proc-macro-crate 封装,内部 crate)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+proc-macro-crate = "3"
+proc-macro2 = "1"
+quote = "1"
+# syn: wrap_handler 需要解析/重组被注解函数的签名与函数体
+syn = { version = "2", features = ["full"] }

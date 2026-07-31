@@ -1,0 +1,21 @@
+# nametrics-core —— 进程级 provider-neutral 指标核心( §22.3 / R0-G)。
+#
+# 唯一进程级 descriptor catalog + 进程内记录 + 结构化导出。**不依赖** OpenTelemetry、
+# Prometheus client、Axum,也**不依赖 napp**——否则 nafana/naweb/nafka 接入时会形成反向依赖。
+# Web scrape adapter 与 Telemetry OTLP exporter 各自读取同一 MetricHub,不重新拥有领域指标语义。
+[package]
+name = "nametrics-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 进程级 provider-neutral 指标核心:descriptor catalog + 冲突审计 + 进程内记录 + 结构化/Prometheus 导出(不依赖 OTel/Prometheus/Axum/napp)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "nametrics_core"
+
+[dependencies]

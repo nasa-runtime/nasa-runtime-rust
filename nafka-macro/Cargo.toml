@@ -1,0 +1,21 @@
+[package]
+name = "nafka-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "nafka 消费者静态收集属性宏"
+
+[lib]
+proc-macro = true
+name = "nafka_macro"
+
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

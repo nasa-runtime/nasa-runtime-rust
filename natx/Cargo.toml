@@ -1,0 +1,24 @@
+# natx —— 事务运行时 crate:task_local ambient 事务运行端 + re-export #[transactional]
+# 业务项目优先依赖 nasa 门面并开启 tx feature；内部迁移可直接依赖 natx 包。
+[package]
+name = "natx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "ambient 事务门面(task_local + #[transactional])"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "natx"
+[dependencies]
+natx-macro = { package = "natx-macro", version = "1.0.0", path = "../natx-macro" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

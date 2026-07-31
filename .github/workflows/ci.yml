@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  msrv:
+    name: Rust 1.94 compatibility
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
+      # 必须使用清单声明的最低 Rust 版本覆盖完整 feature 图。
+      - run: cargo check --workspace --all-features
+
+  nafka-policy:
+    name: facade feature isolation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p nafka --no-default-features
+      - run: cargo check -p nafka --features tls
+      - run: cargo check -p nafka --features schema-registry
+      - run: cargo check -p nasa --no-default-features
+      - run: cargo check -p nasa --features ws
+      - run: cargo check -p nasa --features ws-redis
+      - run: cargo check -p nasa --features kafka
+      - run: cargo check -p nasa --no-default-features --features application,kafka
+      - run: cargo check -p nasa --features ws-kafka
+      - run: cargo check -p nasa --features kafka-tls
+      - run: cargo check -p nasa --features kafka-zstd
+      - run: cargo check -p nasa --features kafka-schema-registry
+      - run: cargo check -p nasa --features secret-http
+      - run: cargo check -p nasa --features object-store-experimental
+      - run: cargo check -p nasa --features grpc-experimental
+      - run: cargo check -p nasa --features application,web,openapi
+      # 默认密码构建不得隐式打开 legacy RSA 私钥路径；迁移 feature 另做隔离编译。
+      - run: cargo check -p ncrypto --no-default-features
+      - run: cargo check -p ncrypto --no-default-features --features legacy-rsa-private
+      - run: cargo check -p nasa --no-default-features --features web-security
+      - run: cargo check -p nasa --no-default-features --features web-security,web-crypto-legacy-rsa
+
+  nafka-linux-builders:
+    name: nafka ${{ matrix.arch }} builder
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
+      - run: cargo clippy -p nafka -p naws --features naws/kafka --all-targets -- -D warnings
+      - run: cargo test -p nafka -p naws --features naws/kafka
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy-test:
+    name: clippy + build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
+      # 全 feature 下运行 clippy(-D warnings 由 RUSTFLAGS 生效),覆盖所有可选模块。
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo build --workspace --all-features
+      # 统一验证公开代码的测试入口;没有测试用例时也会完成编译校验。
+      - run: cargo test --workspace --all-features
+      # 公开 API 文档也是 1.0.0 合同的一部分,缺失项和失效链接均阻止发布。
+      - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
+      # 每个 .crate 归档都必须携带两份许可证正文和名称声明。
+      - run: test "$(cargo package --workspace --list | grep -Ec '^LICENSE-(MIT|APACHE)$')" -eq 120
+      - run: test "$(cargo package --workspace --list | grep -c '^NOTICE$')" -eq 60
+
+  deny:
+    name: cargo-deny (advisories / licenses / sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

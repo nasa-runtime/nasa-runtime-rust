@@ -1,0 +1,55 @@
+# ws —— 通用 Rust 长连接框架库(对照 原实现 原工具包/netty)。
+# transport(TCP/WebSocket/socket.io)+ wire codec + Server/Client/Session/Sender +
+# endpoint/handler 抽象 + 背压/心跳/优雅关闭 + 集群 fan-out。**不含业务逻辑**。
+# 业务服务见独立工程 socket-center(通过 git 或 crates.io 依赖门面 nasa)。
+#
+# nasa-runtime-rust workspace 成员(维护约束 合并方案):协议层见同级 ws-proto / ws-proto-derive,
+# 依赖别名保持 `use proto::...` 与 `ws::proto` 不变。
+[package]
+name = "naws"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "纯 Rust 长连接消息中心框架(对照原长连接模块);通用 lib,业务无关。"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# 打包边界(维护约束 合并方案 §二.4):JS demo 依赖由 npm ci 恢复,绝不打进 crate;
+# x.md 为维护约束工作文档,不随包发布。
+exclude = ["examples/node_modules/**", "x.md"]
+
+[lib]
+name = "naws"
+path = "src/lib.rs"
+
+[dependencies]
+# 协议层:发布包名 naws-proto,别名 `proto` 保持全部源码/公开 API 不变。
+naws-proto = { package = "naws-proto", version = "1.0.0", path = "../naws-proto" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+bytes = "1"
+futures = "0.3"
+dashmap = "6"
+tracing = "0.1"
+thiserror = "1"
+tokio-tungstenite = "0.24"   # WebSocket(R0.4):binary message 内载 NASA frame
+uuid = { version = "1", features = ["v4"] }  # 会话 ID 随机后缀(OS CSPRNG;维护约束 R21 P3)
+# Redis Stream 集群 transport(可选,默认不编译;核心不强依赖 redis)
+redis = { version = "1", optional = true, features = ["tokio-comp", "streams"] }
+# socket.io / engine.io 兼容层用的 JSON(可选)
+serde_json = { version = "1", optional = true }
+# 二进制 payload ↔ socket.io 文本的 base64 桥接(可选,随 socketio 启用)
+base64 = { version = "0.22", optional = true }
+# 消息队列数据面适配器；只在 socket 集群场景按需启用。
+nafka = { version = "1.0.0", path = "../nafka", optional = true, default-features = false }
+smallvec = { version = "1", optional = true }
+
+[features]
+# 开启 RedisNotifier(R0.6 集群的 Redis Stream transport)
+redis = ["dep:redis"]
+# 开启 socket.io / engine.io 兼容层(R0.7)
+socketio = ["dep:serde_json", "dep:base64"]
+# 开启严格 header 路由、借用式数据面消费者与 raw publisher。
+kafka = ["dep:nafka", "dep:smallvec"]

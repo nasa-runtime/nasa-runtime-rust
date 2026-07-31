@@ -1,0 +1,57 @@
+# ============================================================================
+# nafka —— NASA Kafka 组件(实现 crate)
+#
+# 业务唯一入口是 nasa 门面(feature = "kafka" → nasa::kafka);业务工程直接依赖本 crate
+# 会被 CI 拦截(绿地 crate,无旧式直依赖豁免)。设计基线与全部语义见 ./nafka.md(v10 冻结版);
+# 源码注释与用语规范见 nafka.md §18(违禁词机检从骨架第一行生效)。
+#
+# rdkafka 是 workspace 纯 Rust 惯例的文档化例外(nafka.md §2.2):
+#   - 默认内嵌编译 librdkafka 静态链接,构建只需 clang/gcc + make,运行环境零依赖;
+#   - 默认不开 ssl,内网明文场景无 OpenSSL 面积;需要加密走 feature `tls`(内嵌静态 OpenSSL);
+#   - rdkafka 类型不得出现在任何 pub API(nafka.md §3.3),全部收敛在内部 rd/ 模块。
+# ============================================================================
+[package]
+name = "nafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "NASA Kafka 组件:发布/消费组/广播/assign/DLT/少拷贝 passthrough,业务经 nasa::kafka 使用"
+
+[dependencies]
+# tracing 是 rdkafka 的 optional 依赖生成的隐式 feature(nafka.md 附录 D4):
+# 开启后 rust-rdkafka 自身事件走 tracing 而非 log;结构化字段仍由自定义 ClientContext 补充(§3.2)。
+rdkafka = { version = "0.39", default-features = false, features = ["tokio", "libz-static", "tracing"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "1"
+tracing = "0.1"
+futures = "0.3"
+# linkme 收集点宿主(nafka.md §8.4):#[kafka_consumer] 的静态注册项落在本 crate 的 distributed slice。
+linkme = "0.3"
+# ProtocolBytes 二进制载荷(nafka.md §4.3):与上游对标实现逐字节兼容的 wire codec。
+naws-proto = { version = "1.0.0", path = "../naws-proto" }
+natelemetry = { version = "1.0.0", path = "../natelemetry" }
+nafka-macro = { version = "1.0.0", path = "../nafka-macro", optional = true }
+async-trait = { version = "0.1", optional = true }
+base64 = { version = "0.22", optional = true }
+nasecret = { version = "1.0.0", path = "../nasecret", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+zeroize = { version = "1", optional = true }
+
+[features]
+default = ["macros"]
+# 过程宏 #[kafka_consumer];关闭后仍可用 trait + register 显式注册(nafka.md §8.2)。
+macros = ["dep:nafka-macro"]
+# SASL_SSL/SSL 场景:内嵌静态 OpenSSL,运行时镜像无需 libssl(nafka.md §2.2)。
+tls = ["rdkafka/ssl-vendored"]
+# 仅 Kerberos 使用 gssapi；SCRAM 仍依赖 OpenSSL，因此还需要 `tls`。
+gssapi = ["rdkafka/gssapi-vendored", "rdkafka/ssl-vendored"]
+zstd = ["rdkafka/zstd"]
+# 实验性 Confluent-compatible Schema Registry adapter；不进入默认/full，待真实业务合同收敛后再稳定。
+schema-registry = ["dep:async-trait", "dep:base64", "dep:nasecret", "dep:reqwest", "dep:zeroize"]

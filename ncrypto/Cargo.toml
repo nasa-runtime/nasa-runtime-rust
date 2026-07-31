@@ -1,0 +1,54 @@
+# ncrypto —— 密码学工具 crate(L1,对照 原实现 原工具包 Encryptor 静态工具类)。
+# 组件设计与兼容边界见 README.md。本 crate 只提供无 Web 依赖的 L1 密码原语；端点透明加解密
+# 由 mapping 路由属性和安全运行时编排，不在这里增加独立属性宏或 Axum 依赖。
+#
+# 字节保真(架构文档 §4):hex 大小写按函数区分、AES key=key 串 UTF-8 字节、AES-GCM 布局 IV‖ct‖tag、
+#   RSA=PKCS1v1.5、自动分段、RSA 私钥加密=PKCS1 type-1(§4.1,低层手工 padding)。
+# 安全改良:随机值(salt/AES key/GCM IV)一律用 OS 安全 RNG,不复刻 原实现 的 Math.random()。
+[package]
+name = "ncrypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA 密码学工具(对照原工具包 Encryptor):hash/hmac/pbkdf2/aes/rsa/ed25519/base64,跨语言字节保真"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+[lib]
+name = "ncrypto"
+
+[features]
+default = []
+# 只为受控迁移开放 PKCS#1 v1.5 私钥解密和历史私钥 type-1 运算。
+# 默认关闭；RS256 公钥验签、现代 AEAD、哈希与 KDF 不依赖本开关。
+legacy-rsa-private = []
+
+[dependencies]
+# 哈希 / MAC / KDF
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hkdf = "0.12"
+bcrypt = "0.15"
+# 对称 AES(ECB/CBC/GCM)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+ecb = { version = "0.1", features = ["alloc"] }
+aes-gcm = "0.10"
+# 块密码 trait + PKCS7 padding(cbc/ecb 的 new_from_slices / encrypt_padded_vec_mut 由它提供)
+cipher = { version = "0.4", features = ["block-padding", "alloc"] }
+# 非对称 RSA(含低层 BigUint 供 §4.1 私钥 type-1)+ Ed25519
+rsa = { version = "0.9", features = ["sha2"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+pkcs8 = "0.10"
+spki = "0.7"
+# 编码 / 随机
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
