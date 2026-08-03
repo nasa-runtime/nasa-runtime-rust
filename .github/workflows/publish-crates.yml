@@ -113,19 +113,19 @@ jobs:
             archive_list="$scan_root/${crate_name}.files"
             tar -tzf "$archive" > "$archive_list"
             for required_file in README.md LICENSE-MIT LICENSE-APACHE NOTICE; do
-              if ! rg -q "/${required_file}$" "$archive_list"; then
+              if ! grep -Eq "/${required_file}$" "$archive_list"; then
                 echo "$crate_name 归档缺少 $required_file" >&2
                 exit 1
               fi
             done
-            if rg -ni '(^|/)[^/]*(test|fixture)[^/]*($|/)' "$archive_list"; then
+            if grep -Eni '(^|/)[^/]*(test|fixture)[^/]*($|/)' "$archive_list"; then
               echo "$crate_name 归档包含验证资产路径" >&2
               exit 1
             fi
             crate_scan_dir="$scan_root/$crate_name"
             mkdir -p "$crate_scan_dir"
             tar -xzf "$archive" -C "$crate_scan_dir"
-            if rg -ni '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|\btrybuild\b|\bfixture\b|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
+            if grep -REni --binary-files=without-match '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|(^|[^[:alnum:]_])trybuild([^[:alnum:]_]|$)|(^|[^[:alnum:]_])fixture([^[:alnum:]_]|$)|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
               echo "$crate_name 归档包含验证性内容" >&2
               exit 1
             fi
