@@ -1,0 +1,230 @@
+name: Publish crates.io first batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "选择发布子批次；1B 只能在 nabase 1.0.0 已进入 crates.io 索引后执行"
+        required: true
+        type: choice
+        options:
+          - 1a
+          - 1b
+      confirm:
+        description: "输入 publish-1.0.0 确认执行不可逆发布"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-first-batch
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guard:
+    name: release ref guard
+    runs-on: ubuntu-24.04
+    steps:
+      - name: verify immutable release intent
+        env:
+          RELEASE_CONFIRM: ${{ inputs.confirm }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/release/1.0.0" ]]; then
+            echo "仅允许从 release/1.0.0 发布，当前 ref: $GITHUB_REF" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_CONFIRM" != "publish-1.0.0" ]]; then
+            echo "确认文本不匹配，拒绝发布" >&2
+            exit 1
+          fi
+
+  verify:
+    name: verify ${{ inputs.batch }}
+    needs: guard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: select release crates
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
+        shell: bash
+        run: |
+          case "$RELEASE_BATCH" in
+            1a)
+              echo "RELEASE_CRATES=nabase macro-support nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry" >> "$GITHUB_ENV"
+              ;;
+            1b)
+              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "未知发布批次: $RELEASE_BATCH" >&2
+              exit 1
+              ;;
+          esac
+      - name: verify nabase registry precondition
+        if: inputs.batch == '1b'
+        shell: bash
+        run: |
+          curl --fail --silent --show-error \
+            --user-agent "nasa-runtime-release/1.0" \
+            "https://crates.io/api/v1/crates/nabase/1.0.0" >/dev/null
+      - name: verify formatting
+        run: cargo fmt --all -- --check
+      - name: verify clippy
+        shell: bash
+        run: |
+          for crate_name in $RELEASE_CRATES; do
+            cargo clippy --locked -p "$crate_name" --all-targets -- -D warnings
+          done
+      - name: verify rustdoc
+        shell: bash
+        run: |
+          for crate_name in $RELEASE_CRATES; do
+            RUSTDOCFLAGS="-D missing_docs -D warnings" \
+              cargo doc --locked --no-deps -p "$crate_name"
+          done
+      - name: verify package archives
+        shell: bash
+        run: |
+          scan_root="$RUNNER_TEMP/crate-scan"
+          mkdir -p "$scan_root"
+          for crate_name in $RELEASE_CRATES; do
+            cargo publish --dry-run --locked -p "$crate_name"
+            version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
+            if [[ "$version" != "1.0.0" ]]; then
+              echo "$crate_name 版本不是 1.0.0: $version" >&2
+              exit 1
+            fi
+            archive="target/package/${crate_name}-${version}.crate"
+            if [[ ! -f "$archive" ]]; then
+              echo "未生成归档: $archive" >&2
+              exit 1
+            fi
+            archive_list="$scan_root/${crate_name}.files"
+            tar -tzf "$archive" > "$archive_list"
+            for required_file in README.md LICENSE-MIT LICENSE-APACHE NOTICE; do
+              if ! rg -q "/${required_file}$" "$archive_list"; then
+                echo "$crate_name 归档缺少 $required_file" >&2
+                exit 1
+              fi
+            done
+            if rg -ni '(^|/)[^/]*(test|fixture)[^/]*($|/)' "$archive_list"; then
+              echo "$crate_name 归档包含验证资产路径" >&2
+              exit 1
+            fi
+            crate_scan_dir="$scan_root/$crate_name"
+            mkdir -p "$crate_scan_dir"
+            tar -xzf "$archive" -C "$crate_scan_dir"
+            if rg -ni '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|\btrybuild\b|\bfixture\b|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
+              echo "$crate_name 归档包含验证性内容" >&2
+              exit 1
+            fi
+          done
+
+  publish:
+    name: publish ${{ inputs.batch }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
+      - name: select release crates
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
+        shell: bash
+        run: |
+          case "$RELEASE_BATCH" in
+            1a)
+              echo "RELEASE_CRATES=nabase macro-support nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry" >> "$GITHUB_ENV"
+              ;;
+            1b)
+              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "未知发布批次: $RELEASE_BATCH" >&2
+              exit 1
+              ;;
+          esac
+      - name: publish crates sequentially
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "crates.io token 未配置" >&2
+            exit 1
+          fi
+
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          for crate_name in $RELEASE_CRATES; do
+            version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
+            if [[ "$version" != "1.0.0" ]]; then
+              echo "$crate_name 版本不是 1.0.0: $version" >&2
+              exit 1
+            fi
+
+            cargo package --locked -p "$crate_name"
+            archive="target/package/${crate_name}-${version}.crate"
+            local_checksum="$(sha256sum "$archive" | awk '{print $1}')"
+            response_file="$RUNNER_TEMP/${crate_name}-${version}.json"
+            version_url="https://crates.io/api/v1/crates/${crate_name}/${version}"
+            http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+              --user-agent "nasa-runtime-release/1.0" "$version_url")"
+
+            case "$http_code" in
+              200)
+                remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
+                if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
+                  echo "$crate_name $version 已存在但 checksum 不匹配，拒绝跳过" >&2
+                  exit 1
+                fi
+                echo "$crate_name $version 已发布且 checksum 一致，安全跳过"
+                continue
+                ;;
+              404)
+                ;;
+              *)
+                echo "查询 $crate_name $version 返回 HTTP $http_code" >&2
+                cat "$response_file" >&2
+                exit 1
+                ;;
+            esac
+
+            cargo publish --locked -p "$crate_name"
+
+            published=false
+            for _ in {1..30}; do
+              http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                --user-agent "nasa-runtime-release/1.0" "$version_url")"
+              if [[ "$http_code" == "200" ]]; then
+                published=true
+                break
+              fi
+              if [[ "$http_code" != "404" ]]; then
+                echo "等待 $crate_name $version 入库时返回 HTTP $http_code" >&2
+                cat "$response_file" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+            if [[ "$published" != "true" ]]; then
+              echo "$crate_name $version 上传后五分钟仍未出现在 API" >&2
+              exit 1
+            fi
+            remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
+            if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
+              echo "$crate_name $version 发布后 checksum 不匹配" >&2
+              exit 1
+            fi
+          done
