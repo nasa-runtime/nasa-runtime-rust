@@ -1,6 +1,6 @@
 //! 分区连续安全水位状态机:at-least-once 保证的正确性核心。
 //!
-//! 本模块是纯逻辑,不依赖底层客户端,可完整表驱动单测。P3 poll_task 负责:
+//! 本模块是纯逻辑,不依赖底层客户端。P3 poll_task 负责:
 //! 把每条记录的处理结果映射成 [`RecordOutcome`] 喂给 [`PartitionOffsetState::observe`]、
 //! 读 [`PartitionOffsetState::committable_next`] 决定同步 commit 到哪、读
 //! [`PartitionOffsetState::retry_from`] 决定失败 seek 回哪、commit 成功后调

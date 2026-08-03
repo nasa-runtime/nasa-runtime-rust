@@ -50,30 +50,32 @@ cargo metadata --no-deps --format-version 1 \
 `https://crates.io/api/v1/crates/<crate>/owners`：只有 owner 明确属于本项目发布账号时才能沿用；
 否则先修改 crate 名、门面依赖、README、发布拓扑和下游示例，再重新执行全量检查。
 
-截至 2026-07-30 的五次实时检查中，当前 60 个名称均返回 `404`。该结果会随外部注册表变化，
+截至 2026-08-03 的实时检查中，当前 60 个名称均返回 `404`。该结果会随外部注册表变化，
 不能替代正式发布前的最后一次复查。
 
-## 发布顺序
+## 发布批次与顺序
 
 首次发布时，依赖包尚不存在于 crates.io，后续阶段的 `cargo publish --dry-run` 会在解析 sibling
 版本依赖时失败。因此必须按下面的拓扑阶段发布；每一阶段全部进入 crates.io 索引后，才能 dry-run
 下一阶段。
 
-1. 叶子合同、基础工具和宏支撑：`macro-support`、`naauthz`、`nabase`、`nabudget`、`nadate`、
-   `nadisc`、`nagrpc`、`naidempotency`、`naimg`、`nainbox-core`、`nametrics-core`、`namigrate`、
-   `nanum`、`naopenapi`、`naoutbox-core`、`napart`、`nasecret`、`natelemetry`、
+1. 第一批 1A，无内部 workspace 依赖的公开合同：`macro-support`、`nabase`、`nabudget`、`nadisc`、
+   `naauthz`、`naidempotency`、`nainbox-core`、`nametrics-core`、`naopenapi`、`naoutbox-core`、
+   `natelemetry`。
+2. 第一批 1B，配置合同：`naml`。它依赖 `nabase = 1.0.0`，必须等 1A 的 `nabase` 可被
+   crates.io 稀疏索引解析后再发布。
+3. 第二批，其余叶子：`nadate`、`nagrpc`、`naimg`、`namigrate`、`nanum`、`napart`、`nasecret`、
    `naws-proto-derive`、`ncrypto`、`rest-client-macro`。
-2. 依赖第一阶段的宏、adapter 和协议层：`async-macro`、`hystrix-macro`、`naaudit`、
-   `nacache-macro`、`nadis-derive`、`nafana-macro`、`nafka-macro`、`nalog`、`namapper-macro`、
-   `naml`、`nanacos`、`naobject`、`napp-macro`、`nasecret-http`、`nasecret-vault`、
-   `natx-macro`、`nauth-oauth`、`naweb-macro`、`naws-proto`。
-3. 核心运行时：`cacheable`、`config-boot`、`hystrix`、`nadis`、`nafana`、`nafka`、`natx`、
-   `naweb`、`rest-discovery`。
-4. 持久化 adapter 与组合运行时：`naidempotency-mysql`、`naidempotency-redis`、
-   `nainbox-mysql`、`namapper`、`naoutbox-mysql`、`nasched`、`naws`、
-   `rest-discovery-nacos`。
-5. 应用编排层：`naaudit-mysql`、`napp`。
-6. 唯一业务门面：`nasa`。
+4. 第三批，宏、adapter 和协议层：`async-macro`、`hystrix-macro`、`naaudit`、`nacache-macro`、
+   `nadis-derive`、`nafana-macro`、`nafka-macro`、`nalog`、`namapper-macro`、`nanacos`、
+   `naobject`、`napp-macro`、`nasecret-http`、`nasecret-vault`、`natx-macro`、`nauth-oauth`、
+   `naweb-macro`、`naws-proto`。
+5. 第四批，核心运行时：`cacheable`、`config-boot`、`hystrix`、`nadis`、`nafana`、`nafka`、
+   `natx`、`naweb`、`rest-discovery`。
+6. 第五批，持久化 adapter 与组合运行时：`naidempotency-mysql`、`naidempotency-redis`、
+   `nainbox-mysql`、`namapper`、`naoutbox-mysql`、`nasched`、`naws`、`rest-discovery-nacos`。
+7. 第六批，应用编排层：`naaudit-mysql`、`napp`。
+8. 第七批，唯一业务门面：`nasa`。
 
 如果某个 crate 依赖另一个本地 crate，必须先发布被依赖项。
 
@@ -98,6 +100,8 @@ cargo publish -p macro-support
 - `edition`；
 - `repository`、`homepage` 和统一 MSRV（Rust 1.94）；
 - `.crate` 归档中的两份许可证正文及 `NOTICE`；
+- `.crate` 归档不包含任何测试目录、文件、代码、fixture、证书、脚本或相关说明；组件 README、
+  rustdoc、源码注释和 manifest 注释同样不得携带测试性内容；
 - 不依赖只适用于私有本地环境的 path-only 依赖；
 - README 与该 crate 的公开 API 一致。
 

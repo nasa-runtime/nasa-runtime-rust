@@ -587,7 +587,7 @@ async fn init_from_config_impl(
 
     match cfg.provider {
         ProviderKind::Nacos => {
-            // 先解析 + 校验最终注册参数(fail-fast,在连 Nacos【之前】:不浪费连接,也让校验可纯单测)。
+            // 先解析 + 校验最终注册参数(fail-fast,在连 Nacos【之前】)，避免无效配置浪费连接。
             // 只在 registration.enabled=true 时读取/校验注册 IP:纯消费者不应因注册 IP 缺失失败。
             let reg_params = if cfg.registration.enabled {
                 Some(resolve_registration(

@@ -28,11 +28,11 @@ kind、label、unit、help 或 histogram bounds 不一致时会返回 `MetricCon
 
 ```yaml
 server:
-  metrics:
-    enabled: true
+  health: true
 ```
 
-上面的开关归 Web/应用层解释，不是本 crate 的固定配置结构。
+当前 `napp` Web 组件在 `server.health=true` 时统一挂载 `/healthz`、`/readyz` 和 `/metrics`；该开关
+归 Web/应用层解释，不是本 crate 的固定配置结构。`nametrics-core` 自身不会监听端口。
 
 ## 主要边界
 

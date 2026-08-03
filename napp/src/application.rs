@@ -2429,8 +2429,7 @@ const fn component_mask(component: ComponentId) -> u32 {
 
 /// 每个 `ComponentId` 到声明位集合中唯一 bit 偏移的显式映射。
 ///
-/// 新增组件时必须在此追加一个此前未用、且小于 32 的偏移;唯一性与上界由根 tests/ 的
-/// `readiness/registry.rs` 断言。
+/// 新增组件时必须在此追加一个此前未用、且小于 32 的偏移;唯一性与上界由发布门禁校验。
 const fn component_bit_offset(component: ComponentId) -> u32 {
     match component {
         ComponentId::Application => 0,

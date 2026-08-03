@@ -3,15 +3,15 @@
 `naoutbox-core` 定义 Outbox 事件、写入端、下游发布端和保序至少一次投递算法。事件字段包含
 全局 `event_id`、聚合类型/ID、事件类型、payload 和可选 W3C `traceparent`。
 
-本 crate 是 adapter 集成合同，当前没有独立门面 feature；实现 dispatcher 时直接依赖：
+业务应用通常通过门面的 `outbox` feature 使用；实现独立 adapter 时才直接依赖本 crate：
 
 ```toml
 [dependencies]
-naoutbox-core = { version = "1" }
+nasa = { version = "1", features = ["outbox"] }
 ```
 
 ```rust
-use naoutbox_core::OutboxEvent;
+use nasa::outbox::OutboxEvent;
 
 let event = OutboxEvent::new(
     "Order",

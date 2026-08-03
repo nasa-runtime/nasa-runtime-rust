@@ -36,17 +36,20 @@ RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
 
 ## 测试要求
 
-测试、fixture、探针和实机场景只允许位于 gitignored 的根 `tests/`，或仓库外
-`application-demo` / `application-demo2`；不得把测试属性、测试 target、测试专用接口或测试脚本
-提交到产品 Git。贡献者需要在变更说明中写清验证场景，由维护者在本地验收资产中复现并记录结果。
+所有测试、fixture、探针和实机场景只能位于 gitignored 的仓库根 `tests/`，或仓库外
+`application-demo` / `application-demo2`。任何组件 crate 内都禁止新增 `tests/`、`#[cfg(test)]`
+测试模块、测试 target、测试专用接口或测试脚本；测试文件不得进入产品 `.crate` 归档。
+fixture 不得包含凭据和私钥。
+任何进入 `.crate` 的 README、rustdoc、源码注释和 manifest 注释也不得描述测试资产、测试命令或
+测试实现。协议本身使用的同名字段不属于测试内容，例如 `namapper` 动态 SQL 的 `test` 属性。
 
 | 变更类型 | 最小检查 |
 | --- | --- |
 | 只改 README 或注释 | 格式检查、禁用词扫描、README 覆盖扫描 |
-| 单个基础工具 crate | 本地根 `tests/` 对应用例 + 工作区 clippy |
-| 宏展开行为 | 本地根 `tests/` 的 UI/下游编译覆盖 |
-| Redis 或缓存行为 | 本地根 `tests/` 覆盖 + 涉及协议、TTL 或真实缓存语义时跑真实后端验收 |
-| MySQL、mapper 或事务行为 | 本地根 `tests/` 覆盖 + 涉及 SQL 或事务语义时跑真实后端验收 |
+| 单个基础工具 crate | 根 `tests/` 对应合同用例 + 工作区 clippy |
+| 宏展开行为 | 根 `tests/` 的 `trybuild`/fixture 与下游编译矩阵 |
+| Redis 或缓存行为 | 根 `tests/` 合同测试 + 涉及协议、TTL 或真实缓存语义时跑 live 验收 |
+| MySQL、mapper 或事务行为 | 根 `tests/` 状态机/SQL 合同测试 + 涉及真实事务语义时跑 live 验收 |
 | 门面 feature 编排 | `cargo check -p nasa --features full --all-targets` |
 
 ## 维护重点

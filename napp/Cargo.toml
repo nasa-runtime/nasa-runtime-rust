@@ -43,7 +43,7 @@ mapper-cache = ["dep:namapper", "namapper/redis-cache"]
 ws = ["dep:naws"]
 # nacos-discovery：分段生命周期（出站 runtime / 本实例注册 / 关闭后台任务）由 rest-discovery-nacos 提供。
 nacos-discovery = ["dep:rest-discovery-nacos"]
-# 真实注册中心后端；门面依赖会统一底层包的能力开关，这里供直连 napp 的测试显式启用。
+# 真实注册中心后端；门面依赖会统一底层包的能力开关，直连 napp 时也可显式启用。
 nacos-discovery-sdk = ["nacos-discovery", "rest-discovery-nacos/nacos-sdk"]
 scheduling = ["dep:nasched"]
 scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]

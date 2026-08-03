@@ -262,7 +262,7 @@ impl YmlLoader {
             .unwrap_or_else(|| std::path::Path::new("."))
     }
 
-    /// 加载核心(可注入 env,便于单测避免进程级环境变量竞争):合并各 source → 转 Value 树 → 解析占位符。
+    /// 加载核心(显式接收 env 快照以隔离进程级环境变量读取):合并各 source → 转 Value 树 → 解析占位符。
     ///
     /// 【source 叠加顺序 = 优先级低→高】:
     ///

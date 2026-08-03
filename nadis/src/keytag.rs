@@ -102,7 +102,7 @@ fn synthetic_table() -> &'static Vec<String> {
 ///**当前 partition cluster 同槽走 ④B 的 group 级 `{group}` relayout(整组同 slot),
 /// 不经此函数**。`synthetic_tag`/`derive_same_slot_key` 是 **per-key 细粒度同槽派生**的预留能力,
 /// 留给后续 **PollDomain / pipeline 按 slot 分桶**(把不同分区散到不同 slot 同时保证每组 Lua 的 key 同槽)。
-/// 保留为 pub API(非死代码:keytag 单测覆盖 + 后续按 slot 分布会用);现阶段 group 级 relayout 不调用。
+/// 保留为 pub API(非死代码，后续按 slot 分布会用);现阶段 group 级 relayout 不调用。
 ///
 /// # 参数
 /// - `slot`: 目标 Redis Cluster slot,超出范围时按 16384 取模。

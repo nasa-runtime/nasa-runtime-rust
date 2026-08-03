@@ -50,7 +50,7 @@ pub enum ClusterMode {
 }
 
 /// leader 判定的注入点:调度层只依赖它读 `is_leader()`,不直接持有 `nadis::Leader`——
-/// 便于单测注入 fake、也便于接别的选主实现。详见 d.md。
+/// 该边界允许接入不同选主实现，调度层不依赖具体租约客户端。详见 d.md。
 pub trait LeaderGate: Send + Sync + 'static {
     /// 返回当前节点此刻是否拥有任务触发权。
     fn is_leader(&self) -> bool;

@@ -1,7 +1,7 @@
 // ============================================================================
 // src/socketio.rs —— socket.io v5 / engine.io v4 兼容层(R0.7,feature = "socketio")。
 //
-// 步骤 1(本文件):engine.io + socket.io 文本包编解码 + NASA 映射 helper(自包含、可单测)。
+// 步骤 1(本文件):engine.io + socket.io 文本包编解码 + NASA 映射 helper(自包含)。
 // 步骤 2(后续):ProtocolSelector(HTTP upgrade 看 ?EIO= 分流)+ 握手状态机 + 接入 WS pipeline。
 //
 // 协议参考(架构说明 / agent 调研):

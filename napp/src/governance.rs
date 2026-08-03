@@ -54,7 +54,7 @@ fn generate_request_id() -> String {
     natelemetry::TraceContext::new_root(true).trace_id_hex()
 }
 
-/// 解析或生成本次请求的关联 ID(纯逻辑,便于单测)。
+/// 解析或生成本次请求的关联 ID；纯逻辑保证入口与下游使用同一信任边界。
 pub fn resolve_request_id(inbound: Option<&str>) -> String {
     match inbound {
         Some(value) if is_trusted_request_id(value) => value.to_owned(),

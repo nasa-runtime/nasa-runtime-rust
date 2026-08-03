@@ -11,12 +11,13 @@
 - `naweb-macro` 保留旧布局兼容：直接依赖宏 crate 时仍可走裸 `::axum` / `::linkme` / `::tracing`。
 - 两类依赖都缺时返回错误文案，宏侧转成 `compile_error!`，提示"依赖 `nasa`(features 含对应模块)或直接依赖运行时 crate"——不会 panic，也不会产生难定位的路径错误。
 
-四条支路(直接依赖 / 门面回退 / Cargo rename / 缺依赖报错)均有实测覆盖：rename 场景下 `#[company_nasa::tx::transactional]`、`#[company_nasa::scheduling::Async]` 展开编译通过；只依赖宏 crate 而无任何运行时的场景得到上述清晰编译错误。
+路径解析同时覆盖 handler 包装、直接依赖、门面回退、Cargo rename 和缺依赖报错，并兼容 library
+与 Cargo 独立编译目标。发布归档仅包含路径解析实现、使用说明和许可文件。
 
 宏 crate 使用示例：
 
 ```rust
-let root = nasa_macro_support::runtime_root("tx", "natx")?;
+let root = macro_support::runtime_root("tx", "natx")?;
 ```
 
 业务项目不应直接调用本 crate。

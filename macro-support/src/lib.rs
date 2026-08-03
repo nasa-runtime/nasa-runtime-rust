@@ -124,16 +124,16 @@ pub fn runtime_root(module: &str, legacy: &str) -> Result<TokenStream, String> {
     use proc_macro_crate::{crate_name, FoundCrate};
     // ① 旧直接依赖优先(混合迁移安全:无关的 nasa 依赖不破坏未迁移的旧宏)。
     match crate_name_compat(legacy) {
-        // proc_macro_crate 对同一 package 的 lib / examples / tests / bin / benches **都**返回 Itself,
-        // 但只有「在 lib 自身(含库目标内部校验场景)展开」时 `crate` 才指向运行时 lib;
-        // examples / tests / bin / benches 是【独立编译单元】,它们的 `crate` 是自己 → 必须用外部路径
+        // proc_macro_crate 对同一 package 的各类 target **都**返回 Itself,
+        // 但只有在 lib 自身展开时 `crate` 才指向运行时 lib;
+        // 非 lib target 是【独立编译单元】,它们的 `crate` 是自己 → 必须用外部路径
         // `::<lib>`(Cargo 已自动把本 package 的 lib 以 lib 名提供给这些 target)。否则 `crate::__private`
         // 找不到(见 调度设计约束)。用 `CARGO_CRATE_NAME` 区分,且**只在它确定 ≠ lib 名时**才改走外部路径;
-        // 缺失或相等都保持原 `crate`——即只修正已坏的 example/test/bin 场景,绝不动 lib 主路径(零回归)。
+        // 缺失或相等都保持原 `crate`——即只修正已坏的非 lib 场景,绝不动 lib 主路径(零回归)。
         Some(FoundCrate::Itself) => {
             let lib = legacy.replace('-', "_");
             // `crate` 只在编译 **lib 目标**(含库目标内部校验场景)时正确:CARGO_CRATE_NAME==lib 且【非 bin】。
-            // examples/tests/bin/benches 是独立编译单元(其 `crate` 指自己),含「bin 名 == lib 名」的边界
+            // 非 lib target 是独立编译单元(其 `crate` 指自己),含「bin 名 == lib 名」的边界
             // ——此时 CARGO_CRATE_NAME==lib 但 CARGO_BIN_NAME 置位→ 仍须走外部路径 `::<lib>`。
             // 只在【确定不是 lib 目标】时改路径;env 缺失时保守回退 `crate`,对 lib 主路径零回归。
             let compiling = std::env::var("CARGO_CRATE_NAME").unwrap_or_default();

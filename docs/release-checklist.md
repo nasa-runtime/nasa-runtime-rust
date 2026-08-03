@@ -25,13 +25,17 @@
 - [ ] `RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps`
 - [ ] `cargo check -p nasa --features full --all-targets`
 - [ ] `cargo deny check`
+- [ ] 本批合同测试全部位于仓库根 `tests/`；组件 crate 内无测试目录/测试 target，`.crate` 归档无测试文件、
+      测试代码或测试性文档/注释。
+- [ ] 第一批 1A 的逐包 `cargo package --offline` 通过；1B 的 `naml` 在 `nabase = 1.0.0` 可从索引解析后再验证。
 
 ## 文档检查
 
 - [ ] 禁用词扫描在 `target/` 之外无命中。
 - [ ] 已删除组件残留扫描在 `target/` 之外无命中。
 - [ ] README 覆盖扫描显示根 README 和所有组件 README 都是 `cfg=ok code=ok usage=ok`。
-- [ ] `namapper/README.md` 保持业务使用说明，不出现测试目录或测试属性说明。
+- [ ] 所有组件 README、rustdoc、源码注释和 manifest 注释不含测试性内容；`namapper` 的动态 SQL
+      `test` 仅作为公开协议属性出现。
 - [ ] yml 示例不包含真实私有地址、密码或 token。
 
 ## 后端检查

@@ -94,13 +94,25 @@ jobs:
       # 全 feature 下运行 clippy(-D warnings 由 RUSTFLAGS 生效),覆盖所有可选模块。
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo build --workspace --all-features
-      # 统一验证公开代码的测试入口;没有测试用例时也会完成编译校验。
+      # 产品工作区只做编译与 doctest 校验；完整测试资产按规范统一位于仓库根 tests/。
       - run: cargo test --workspace --all-features
       # 公开 API 文档也是 1.0.0 合同的一部分,缺失项和失效链接均阻止发布。
       - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
       # 每个 .crate 归档都必须携带两份许可证正文和名称声明。
       - run: test "$(cargo package --workspace --list | grep -Ec '^LICENSE-(MIT|APACHE)$')" -eq 120
       - run: test "$(cargo package --workspace --list | grep -c '^NOTICE$')" -eq 60
+      # 发布路径不得携带验证资产，组件源码、manifest 和随包文档也不得描述本地验证实现。
+      - name: audit crate release boundary
+        shell: bash
+        run: |
+          if cargo package --workspace --list | rg -ni '(^|/)[^/]*(test|fixture)[^/]*($|/)'; then
+            exit 1
+          fi
+          if rg -ni '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|\btrybuild\b|\bfixture\b|测试|单测|测例|test target|compile test)' \
+            --glob '!tests/**' --glob '!target/**' --glob '*/Cargo.toml' --glob '*/src/**' \
+            --glob '*/README.md' --glob '*/*/README.md' .; then
+            exit 1
+          fi
 
   deny:
     name: cargo-deny (advisories / licenses / sources)

@@ -323,8 +323,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 校验成功后替换依赖内部状态；运行时不会猜测外部库的重应用协议。若某依赖必须早于内置组件 Start，
 则应实现正式 `ApplicationComponent` 并进入声明顺序，而不是放在启动 Hook 中抢时序。
 
-## 验证边界
+## 发布边界
 
-产品 crate 只包含运行时代码。仓库级验证资产统一位于被 Git 忽略的根 `tests/`，跨组件实机场景位于
-仓库外的 `application-demo` / `application-demo2`；这些资产不进入产品提交和发布包。
-MySQL、Redis、Nacos、Kafka、OTLP 等连接信息只从本地环境注入。
+产品 crate 只包含运行时代码、业务使用说明与许可文件。MySQL、Redis、Nacos、Kafka、OTLP 等连接信息
+只从部署环境注入，不写入源码、示例或发布归档。

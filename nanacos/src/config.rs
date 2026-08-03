@@ -530,7 +530,7 @@ pub struct ConfigBundle {
 }
 
 /// 分组回退:`Some(非空)` 用它,否则(`None`/空白)回退默认分组。
-/// 仅真实后端(`fetch_many`/watch)或本 crate 单测用到;作为无 feature 依赖被编译时不参与,避免 dead_code。
+/// 仅真实后端(`fetch_many`/watch)使用;作为无 feature 依赖被编译时不参与,避免 dead_code。
 ///
 /// # 参数
 /// - `group`: 消费组、服务分组或任务分组名称。
@@ -549,9 +549,9 @@ fn resolved_group(group: &Option<String>, default_group: &str) -> String {
 ///   后续应细分,避免环境故障被静默吞掉)。
 /// - `optional=false` 拉取失败:返回 `Err`,启动/重拉 fail-fast。
 ///
-/// 抽成【与 nacos-sdk 无关】的泛型函数:既供真实 `fetch_many`/watch 复用,也便于单测注入假拉取器
-/// (无需连真 Nacos 即可验证 顺序 / optional 跳过 / required 报错 / 分组回退)。
-/// 仅真实后端或本 crate 单测用到;作为无 feature 依赖被编译时不参与,避免 dead_code。
+/// 抽成【与 nacos-sdk 无关】的泛型函数,供真实 `fetch_many`/watch 复用，并保持拉取顺序、
+/// optional 跳过、required 报错与分组回退的编排边界集中一致。
+/// 仅真实后端使用;作为无 feature 依赖被编译时不参与,避免 dead_code。
 ///
 /// # 参数
 /// - `default_group`: 未显式指定 group 时使用的默认分组。
@@ -617,9 +617,9 @@ async fn get_one(
     Ok(resp.content().to_string())
 }
 
-// ── watch_many 编排(抽成【与 nacos-sdk 无关】的泛型件,便于用 fake guard/fetcher 单测-Q6 顺序)──
+// ── watch_many 编排(抽成【与 nacos-sdk 无关】的泛型件，统一 guard/fetcher 的关闭顺序)──
 
-/// best-effort 关闭句柄的抽象:真实是 [`WatchGuard`],单测用 fake 记录关闭次数。
+/// best-effort 关闭句柄的抽象；真实后端使用 [`WatchGuard`]，调用方无需感知底层句柄类型。
 #[cfg(feature = "nacos")]
 trait GuardClose: Send + 'static {
     /// 关闭 close best effort 流程；用于释放资源并停止后台任务。

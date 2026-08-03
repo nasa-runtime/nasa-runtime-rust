@@ -71,7 +71,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按上述规范顺序
 启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
-详见 [napp](napp/README.md) 与架构文档 `app.md`。
+详见 [napp](napp/README.md) 与当前架构设计 []()。
 
 ### Mapping interceptor：手动与自动装配
 
@@ -174,11 +174,10 @@ use nasa::ws::Server;                // WebSocket 服务端
 nasa = { version = "1", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
-为降低包名心智成本，内部实现包的**发布包名**按 crates.io 实际占用决定：短名未占用则使用短名，
-短名已被占用则使用 `na*` 缩写名,文件夹名与发布包名保持一致。例如 `hystrix`、`ncrypto`
-使用短包名，而 `base`、`date`、`image`、`ws` 已被占用，发布为 `nabase`、`nadate`、`naimg`、`naws`。
-这些改名只影响 Cargo 包坐标和仓库目录名，不改变业务接口：门面模块仍是 `nasa::base`、
-`nasa::date`、`nasa::image` 等；各内部包也保留原 Rust 库包名用于兼容源码路径。
+内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`nadate`、`naimg`、`naws`。
+包名可用性是发布时事实，正式发布前仍须按 [发布指南](docs/publishing.md) 实时复查 crates.io，不能依赖
+历史占用结论。Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
+`nasa::image` 等。
 
 ## YML 配置总览
 
@@ -236,7 +235,7 @@ scheduling:             # scheduling 组件
 
 手工装配（不使用应用运行时）的项目可自定根节点，启动顺序建议：
 
-1. `naml` / `config-boot` 加载本地 yml 和远端 overlay。
+1. `naml` 加载本地 yml、profile、环境变量并解析 import 描述；`config-boot` 负责拉取远端配置并组装 overlay。
 2. `nalog` 初始化日志。
 3. `nadis`、`natx` 初始化 Redis 和 MySQL pool。
 4. `namapper`、`cacheable` 注入缓存和数据源。
@@ -253,7 +252,7 @@ scheduling:             # scheduling 组件
 | [nasa](nasa/README.md) | 门面包 | 统一导出所有业务能力 | 不直接读取 yml，按组件配置 |
 | [napp](napp/README.md) | `application` | `#[nasa::application]` 应用生命周期运行时:组件编排、信号、优雅停机、配置热刷新 | `application.*` 及各组件配置根 |
 | [napp-macro](napp-macro/README.md) | `application` | `#[nasa::application(...)]` 属性宏与编译期校验 | 由 `napp` 运行时读取 |
-| [naml](naml/README.md) | `yml` | 分层 yml、profile、环境变量覆盖、导入远端配置 | `yml.*`、业务自定义根节点 |
+| [naml](naml/README.md) | `yml` | 分层 yml、profile、环境变量覆盖、解析本地/远端 import 描述 | `yml.*`、业务自定义根节点 |
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
 | [nanacos](nanacos/README.md) | `nacos` / `nacos-sdk` | Nacos 配置、注册、发现、监听 | `nacos.*` |
 | [nadisc](nadisc/README.md) | `discovery` | 服务发现抽象、实例过滤、watch 契约 | `discovery.*` |
@@ -341,8 +340,9 @@ cargo deny check          # 需要 cargo-deny，用于供应链门禁
 cargo publish --dry-run -p nabase
 ```
 
-持续集成（`.github/workflows/ci.yml`）只依赖随产品发布的源码入口执行格式、静态检查、构建和依赖审计。
-本地验证资产统一位于被 Git 忽略的仓库根 `tests/` 或仓库外的业务样板，不进入发布包和提交历史。
+持续集成（`.github/workflows/ci.yml`）只依赖产品源码入口执行格式、静态检查、构建和依赖审计。
+所有测试、fixture、探针和下游编译样板统一放在仓库根 `tests/`，组件 crate 内禁止创建测试目录、
+测试 target 或测试专用发布资产；任何 `.crate` 归档都不得包含测试文件、代码或测试性文档/注释。
 真实后端连接信息只能由本地环境注入，不要把内网地址、账号或密码写进说明文档或持续集成配置。
 
 ## 开源文档

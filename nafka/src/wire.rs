@@ -133,7 +133,7 @@ pub trait DecodePayload: Sized + Send + 'static {
 
 // JSON blanket:一切 serde 类型默认走 JSON UTF-8,与参照实现互通。
 // 与下方 Proto<T> 的具体 impl 不重叠:Proto<T> 不实现 Serialize/DeserializeOwned,
-// 且孤儿规则封死了下游补实现的可能(该边界由 compile test 锁住)。
+// 且孤儿规则封死了下游补实现的可能，该编译期边界不能由下游绕开。
 impl<T: Serialize + Sync + 'static> EncodePayload for T {
     const CODEC: PayloadCodec = PayloadCodec::Json;
 
@@ -186,7 +186,7 @@ pub trait ProtoMode {
 ///
 /// 只是 codec marker + 透明包装,无运行时开销(repr(transparent))。
 /// 禁止为它实现 serde Serialize/Deserialize——那会与 JSON blanket impl 产生编码歧义,
-/// compile test 锁住该边界。
+/// 该类型约束在编译期锁住编码路径边界。
 #[repr(transparent)]
 pub struct Proto<T>(pub T);
 

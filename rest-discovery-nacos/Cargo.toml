@@ -36,5 +36,5 @@ nanacos = { package = "nanacos", version = "1.0.0", path = "../nanacos", default
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tracing = "0.1"
-# init_with_discovery 失败时回滚 deregister 的超时(time);也用于 live 测试。
+# init_with_discovery 失败时回滚 deregister 的超时能力(time)。
 tokio = { version = "1", features = ["time"] }

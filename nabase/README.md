@@ -32,8 +32,8 @@ assert_eq!(size.bytes(), 128 * 1024 * 1024);
 ```rust
 use nasa::base::{SnowflakeConfig, IdGenerate};
 
-let gen = SnowflakeConfig::default().build_local()?;
-let id = gen.next_id();
+let generator = SnowflakeConfig::default().build_local()?;
+let id = generator.next_id();
 ```
 
 默认 `Snowflake` 是本地算法，不做 Redis workerId 分配；分布式 workerId 分配由 Redis 组件负责。

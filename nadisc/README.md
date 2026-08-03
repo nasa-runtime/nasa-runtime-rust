@@ -1,6 +1,7 @@
 # nadisc
 
-`nadisc` 是服务发现的 provider-neutral 抽象层，不连接任何具体注册中心。
+`nadisc` 是服务发现的 provider-neutral 合同层，并提供不依赖第三方注册中心的 `StaticDiscovery` 与
+`DnsDiscovery`。Nacos 等外部注册中心仍由独立 adapter 实现。
 
 它定义：
 
@@ -9,6 +10,8 @@
 - `DiscoveryClient`：服务发现读侧接口。
 - `ServiceRegistry`：服务注册写侧接口。
 - `ServiceWatch`：实例变化订阅结果。
+- `StaticDiscovery`：可原子替换、失败保留 last-good 的进程内静态 provider。
+- `DnsDiscovery`：基于系统 DNS 的 A/AAAA 查询与有界周期 watch。
 
 后端 crate 例如 Nacos 负责实现这些 trait；上层 REST 负载均衡只依赖本 crate 的抽象，不绑定具体 SDK。
 
@@ -90,7 +93,8 @@ let opts = nasa::discovery::WatchOptions::new()
 
 ## 主要边界
 
-- 本 crate 只定义 provider-neutral 合同，不建立网络连接或拥有后台任务。
+- 本 crate 不连接 Nacos 等第三方注册中心；`DnsDiscovery::discover*` 会执行 DNS 查询，启动 watch
+  后会拥有一个周期轮询任务，显式 `unsubscribe` 或 guard Drop 会终止该任务。
 - 负载均衡只能消费 `is_traffic_instance` 过滤后的实例。
 - watch 更新必须以完整快照替换，后端异常时由上层决定 last-good 和 stale 窗。
 - 需要确定性取消时显式 `unsubscribe().await`，不能只依赖 Drop 的 best-effort 清理。

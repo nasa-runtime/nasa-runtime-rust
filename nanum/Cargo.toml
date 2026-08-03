@@ -26,5 +26,5 @@ name = "nanum"
 rand = "0.8"
 # BigDecimal 高精度段(scale>8 退化路径,对照 原实现 Numeric BigDecimal API)。BigDecimal 段不受 fixed MAX_SCALE=8
 # 限制;凡需展开 10^n 的操作(divide/avg/align*/multiply_scale)受 decimal::MAX_DECIMAL_EXPANSION 边界保护,超界返 Err。
-# 普通依赖即可被集成测试引用(如 bigdecimal::num_bigint::BigInt 构造极端 exponent 验 panic guard),无需重复 dev-dependency。
+# BigDecimal 是公开数值输入的一部分，因此保持为普通依赖并复用其 BigInt 类型处理极端 exponent。
 bigdecimal = "0.4"

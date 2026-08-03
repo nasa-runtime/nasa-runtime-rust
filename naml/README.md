@@ -33,13 +33,15 @@ fn load() -> anyhow::Result<AppConfig> {
 
 ## profile 配置
 
-适合 `application.yml` + `application-dev.yml` 这种场景，后者覆盖前者。
+适合 `application.yml` + `application-dev.yml` 这种场景，后者覆盖前者。`base_file` 只修改主文件；
+主文件不在默认 `zcf/` 目录时，还必须同步设置 profile pattern。
 
 ```rust
-std::env::set_var("APP_PROFILE", "dev");
+# 启动进程前设置：APP_PROFILE=dev
 
 let cfg: AppConfig = nasa::yml::YmlLoader::standard()
     .base_file("config/application.yml")
+    .profile_file_pattern("config/application-{profile}")
     .load()?;
 ```
 
@@ -105,11 +107,10 @@ yml:
   imports:
     - file: common.yml
       optional: false
-    - nacos:
-        data_id: order.yml
-        group: DEFAULT_GROUP
-        optional: true
-        file_extension: yaml
+    - nacos: order.yml
+      group: DEFAULT_GROUP
+      optional: true
+      file_extension: yaml
 ```
 
 字段说明：
@@ -119,7 +120,7 @@ yml:
 | `APP_PROFILE` | 环境变量；非空时额外加载 `application-{profile}.yml`。 |
 | `APP__X__Y` | 环境变量覆盖 `x.y`，优先级最高。 |
 | `yml.imports[].file` | 本地 overlay 文件路径；相对路径按主配置文件目录解析。 |
-| `yml.imports[].nacos.data_id` | 远端配置 data id；只被解析为中性 import，不在本 crate 内拉取。 |
+| `yml.imports[].nacos` | 远端配置 data id 字符串；只被解析为中性 import，不在本 crate 内拉取。 |
 | `optional` | `false` 表示源缺失或内容为空即启动失败；`true` 表示缺失可跳过。 |
 | `file_extension` | 覆盖内容格式，可选 `yaml`/`yml`/`json`/`toml`。 |
 

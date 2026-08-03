@@ -6,6 +6,14 @@
 
 ## 未发布
 
+- 发布工程：记录 60 个 crate 的 1A/1B 至第七批依赖顺序；首批将 `naml` 明确放入 1B，
+  仅因其必须等待 1A 的 `nabase = 1.0.0` 进入 crates.io 索引。
+- 根测试：补充首批 `nabase`、`naml` 与 `nainbox-core` 合同用例，并复用根目录现有的预算、发现、
+  授权、幂等、指标、OpenAPI、Outbox、遥测与宏编译矩阵；组件发布归档不携带测试文件。
+- 文档：修正 `naml` 的职责、profile 路径和 Nacos import 结构，明确它只解析 import 描述、不拉取
+  远端配置；根 README 与贡献指南重申所有测试只能位于仓库根 `tests/`。
+- 发布边界：清理组件 README、rustdoc、源码注释和 manifest 注释中的测试性描述，并增加归档路径与
+  发布文本双重扫描，确保 `.crate` 不携带测试内容。
 - `nasa`：新增稳定 `outbox`、`idempotency`、`idempotency-mysql` 与
   `idempotency-redis` 门面 feature；业务无需再直接依赖实现 crate。
 - `nadis`：`stream.async_del_record_period_ms` 现在真实驱动 ACK 后有界异步 XDEL；0 表示禁用，
