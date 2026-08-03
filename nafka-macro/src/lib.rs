@@ -49,7 +49,7 @@ enum HandlerShape {
 }
 
 impl HandlerShape {
-    /// 返回关联业务消息类型。
+    /// 业务作用：返回关联业务消息类型。
     fn message_type(&self) -> &Type {
         match self {
             Self::SinglePayload(ty)
@@ -59,18 +59,18 @@ impl HandlerShape {
         }
     }
 
-    /// 判断是否使用批消费者契约。
+    /// 业务作用：判断是否使用批消费者契约。
     fn is_batch(&self) -> bool {
         matches!(self, Self::BatchPayload(_) | Self::BatchRecord(_))
     }
 
-    /// 判断业务参数是否拿得到可信记录确认能力。
+    /// 业务作用：判断业务参数是否拿得到可信记录确认能力。
     fn receives_record(&self) -> bool {
         matches!(self, Self::SingleRecord(_) | Self::BatchRecord(_))
     }
 }
 
-/// 收集无状态异步消费函数。
+/// 业务作用：收集无状态异步消费函数。
 ///
 /// 支持 `T`、`KafkaRecord<T>`、`Vec<T>`、`Vec<KafkaRecord<T>>` 四种参数形态。
 #[proc_macro_attribute]
@@ -83,7 +83,7 @@ pub fn kafka_consumer(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// 校验属性和函数签名并生成 trait 实现与静态收集项。
+/// 业务作用：校验属性和函数签名并生成 trait 实现与静态收集项。
 ///
 /// # 参数
 ///
@@ -136,32 +136,32 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
             impl #root::BatchConsumer for __NafkaConsumer {
                 type Message = #message;
 
-                /// 返回属性中声明的 topic 列表。
+                /// 业务作用：返回属性中声明的 topic 列表。
                 fn topics(&self) -> ::std::vec::Vec<::std::string::String> {
                     ::std::vec![#(::std::string::ToString::to_string(#topics)),*]
                 }
 
-                /// 返回属性中声明的事件名。
+                /// 业务作用：返回属性中声明的事件名。
                 fn event(&self) -> ::std::string::String {
                     ::std::string::ToString::to_string(#event)
                 }
 
-                /// 返回属性中声明的 group 解析规则。
+                /// 业务作用：返回属性中声明的 group 解析规则。
                 fn group(&self) -> #root::GroupSpec {
                     #group
                 }
 
-                /// 返回模块路径与函数名组成的稳定 id。
+                /// 业务作用：返回模块路径与函数名组成的稳定 id。
                 fn id(&self) -> &'static str {
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#function_name))
                 }
 
-                /// 返回属性中声明的确认模式。
+                /// 业务作用：返回属性中声明的确认模式。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
                 }
 
-                /// 将框架批记录转换为业务函数声明的参数形态并调用。
+                /// 业务作用：将框架批记录转换为业务函数声明的参数形态并调用。
                 async fn consume_batch(
                     &self,
                     records: ::std::vec::Vec<#root::KafkaRecord<Self::Message>>,
@@ -175,32 +175,32 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
             impl #root::SingleConsumer for __NafkaConsumer {
                 type Message = #message;
 
-                /// 返回属性中声明的 topic 列表。
+                /// 业务作用：返回属性中声明的 topic 列表。
                 fn topics(&self) -> ::std::vec::Vec<::std::string::String> {
                     ::std::vec![#(::std::string::ToString::to_string(#topics)),*]
                 }
 
-                /// 返回属性中声明的事件名。
+                /// 业务作用：返回属性中声明的事件名。
                 fn event(&self) -> ::std::string::String {
                     ::std::string::ToString::to_string(#event)
                 }
 
-                /// 返回属性中声明的 group 解析规则。
+                /// 业务作用：返回属性中声明的 group 解析规则。
                 fn group(&self) -> #root::GroupSpec {
                     #group
                 }
 
-                /// 返回模块路径与函数名组成的稳定 id。
+                /// 业务作用：返回模块路径与函数名组成的稳定 id。
                 fn id(&self) -> &'static str {
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#function_name))
                 }
 
-                /// 返回属性中声明的确认模式。
+                /// 业务作用：返回属性中声明的确认模式。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
                 }
 
-                /// 将框架单记录转换为业务函数声明的参数形态并调用。
+                /// 业务作用：将框架单记录转换为业务函数声明的参数形态并调用。
                 async fn consume(
                     &self,
                     record: #root::KafkaRecord<Self::Message>,
@@ -225,7 +225,7 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
 
             #trait_impl
 
-            /// 构造由运行时统一实现的类型擦除 adapter。
+            /// 业务作用：构造由运行时统一实现的类型擦除 adapter。
             fn __build() -> #root::Result<
                 ::std::sync::Arc<dyn #root::__private::ErasedConsumer>
             > {
@@ -256,7 +256,7 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
     })
 }
 
-/// 解析宏属性参数。
+/// 业务作用：解析宏属性参数。
 ///
 /// # 参数
 ///
@@ -369,7 +369,7 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
     })
 }
 
-/// 拒绝同名属性重复出现。
+/// 业务作用：拒绝同名属性重复出现。
 ///
 /// # 参数
 ///
@@ -388,7 +388,7 @@ fn ensure_missing<T>(current: &Option<T>, meta: &Meta, name: &str) -> syn::Resul
     }
 }
 
-/// 校验一个字面量值不含首尾空白。
+/// 业务作用：校验一个字面量值不含首尾空白。
 ///
 /// 这些值会原样进入 route 元数据：`client` 与 registry 精确比较、`event` 与 header 精确比较、
 /// `topics` 直接作为 Kafka topic 名。带一个空格就会变成「静默永不注册 / 永不匹配」，
@@ -413,7 +413,7 @@ fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
     Ok(())
 }
 
-/// 解析 `topics = ["a", "b"]`。
+/// 业务作用：解析 `topics = ["a", "b"]`。
 ///
 /// # 参数
 ///
@@ -465,7 +465,7 @@ fn parse_topics(meta: &Meta) -> syn::Result<Vec<LitStr>> {
     Ok(output)
 }
 
-/// 解析字符串赋值属性。
+/// 业务作用：解析字符串赋值属性。
 ///
 /// # 参数
 ///
@@ -497,7 +497,7 @@ fn parse_string_value(meta: &Meta, name: &str) -> syn::Result<LitStr> {
     Ok(value.clone())
 }
 
-/// 校验被标注函数的限定符和输入输出数量。
+/// 业务作用：校验被标注函数的限定符和输入输出数量。
 ///
 /// # 参数
 ///
@@ -542,7 +542,7 @@ fn validate_function(function: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-/// 识别四种规范参数形态并提取业务消息类型。
+/// 业务作用：识别四种规范参数形态并提取业务消息类型。
 ///
 /// # 参数
 ///
@@ -571,7 +571,7 @@ fn parse_shape(ty: &Type) -> syn::Result<HandlerShape> {
     }
 }
 
-/// 若类型末段是指定容器，返回其唯一类型参数。
+/// 业务作用：若类型末段是指定容器，返回其唯一类型参数。
 ///
 /// # 参数
 ///
@@ -612,7 +612,7 @@ fn one_type_argument<'a>(ty: &'a Type, container: &str) -> syn::Result<Option<&'
     }
 }
 
-/// 生成 group 元数据表达式。
+/// 业务作用：生成 group 元数据表达式。
 ///
 /// # 参数
 ///
@@ -644,7 +644,7 @@ fn group_tokens(
     }
 }
 
-/// 生成四种函数参数形态对应的调用表达式。
+/// 业务作用：生成四种函数参数形态对应的调用表达式。
 ///
 /// # 参数
 ///

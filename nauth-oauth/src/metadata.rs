@@ -34,7 +34,7 @@ pub struct MetadataOptions {
 }
 
 impl Default for MetadataOptions {
-    /// 使用 3 秒、256 KiB 且不扩展跨 host 信任的保守缺省。
+    /// 业务作用：使用 3 秒、256 KiB 且不扩展跨 host 信任的保守缺省。
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(3),
@@ -60,7 +60,7 @@ pub enum MetadataError {
 }
 
 impl std::fmt::Display for MetadataError {
-    /// 输出稳定错误分类，不附带 issuer、URL 或远端响应正文。
+    /// 业务作用：输出稳定错误分类，不附带 issuer、URL 或远端响应正文。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "authorization server metadata error: {self:?}")
     }
@@ -77,7 +77,7 @@ pub struct MetadataClient {
 }
 
 impl MetadataClient {
-    /// 创建客户端；非 loopback 的 HTTP、userinfo、fragment 和未允许 host 均被拒。
+    /// 业务作用：创建客户端；非 loopback 的 HTTP、userinfo、fragment 和未允许 host 均被拒。
     pub fn new(
         expected_issuer: impl Into<String>,
         metadata_uri: &str,
@@ -109,7 +109,7 @@ impl MetadataClient {
         })
     }
 
-    /// 拉取、限长、解析并校验 issuer/jwks_uri。
+    /// 业务作用：拉取、限长、解析并校验 issuer/jwks_uri。
     pub async fn fetch(&self) -> Result<AuthorizationServerMetadata, MetadataError> {
         let mut response = self
             .client
@@ -153,7 +153,7 @@ impl MetadataClient {
     }
 }
 
-/// 校验 metadata/JWKS URL 的 scheme、host、userinfo、fragment 与 SSRF 白名单。
+/// 业务作用：校验 metadata/JWKS URL 的 scheme、host、userinfo、fragment 与 SSRF 白名单。
 fn validate_url(url: &reqwest::Url, allowed_hosts: &BTreeSet<String>) -> Result<(), ()> {
     if !url.username().is_empty()
         || url.password().is_some()

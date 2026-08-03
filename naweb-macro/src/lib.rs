@@ -25,7 +25,7 @@ use syn::{
     PathArguments, Type,
 };
 
-/// 声明一个可被 mapping 编排器类型化引用的 Axum 风格拦截器。
+/// 业务作用：声明一个可被 mapping 编排器类型化引用的 Axum 风格拦截器。
 ///
 /// # 属性参数
 ///
@@ -171,7 +171,7 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let binding_helper = if let Some(state_ty) = state_ty {
         quote! {
             impl #ident {
-                /// 建立“拦截器 State 与 Router 根 State 相同”的常用 binding。
+                /// 业务作用：建立“拦截器 State 与 Router 根 State 相同”的常用 binding。
                 ///
                 /// napp 应用通常使用 `State<Application>`，非 napp 应用则使用自己的 AppState；
                 /// mapping 只 clone 启动时传入的同一根状态，不建立全局容器。
@@ -187,7 +187,7 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
                     )
                 }
 
-                /// 把启动期已经构造好的窄 State 绑定到另一种 Router 根 State。
+                /// 业务作用：把启动期已经构造好的窄 State 绑定到另一种 Router 根 State。
                 ///
                 /// 例如 Router 使用 napp `Application`，高频 Token interceptor 只持有 Redis
                 /// handle 与配置快照。窄 State 只在装配期 clone，受管资源的关闭权仍归根容器。
@@ -213,7 +213,7 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {
             impl #ident {
-                /// 建立不依赖 `State<_>` extractor 的可复用 binding。
+                /// 业务作用：建立不依赖 `State<_>` extractor 的可复用 binding。
                 ///
                 /// Router 根 State 由调用位置推断；Header、Extension、InterceptorContext 等
                 /// `FromRequestParts` extractor 仍可照常使用。
@@ -284,7 +284,7 @@ pub fn interceptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// 解析逗号分隔的 before/after ID，并对每项执行安全标识校验。
+/// 业务作用：解析逗号分隔的 before/after ID，并对每项执行安全标识校验。
 fn parse_dependency_ids(value: &LitStr) -> syn::Result<Vec<LitStr>> {
     let mut result = Vec::new();
     for item in value.value().split(',') {
@@ -300,7 +300,7 @@ fn parse_dependency_ids(value: &LitStr) -> syn::Result<Vec<LitStr>> {
     Ok(result)
 }
 
-/// 校验 interceptor 必须是非泛型 async 自由函数，且 Request/Next 位于末尾。
+/// 业务作用：校验 interceptor 必须是非泛型 async 自由函数，且 Request/Next 位于末尾。
 fn validate_interceptor_function(function: &ItemFn) -> syn::Result<()> {
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
@@ -347,7 +347,7 @@ fn validate_interceptor_function(function: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-/// 返回一个 typed 参数路径的最后类型名，供 extractor 形状静态审计。
+/// 业务作用：返回一个 typed 参数路径的最后类型名，供 extractor 形状静态审计。
 fn fn_arg_last_type(input: &FnArg) -> Option<String> {
     let FnArg::Typed(input) = input else {
         return None;
@@ -361,7 +361,7 @@ fn fn_arg_last_type(input: &FnArg) -> Option<String> {
         .map(|segment| segment.ident.to_string())
 }
 
-/// 从 interceptor 参数中提取 `State<T>` 的 T，供生成单态化 binding helper。
+/// 业务作用：从 interceptor 参数中提取 `State<T>` 的 T，供生成单态化 binding helper。
 fn interceptor_state_type(function: &ItemFn) -> Option<Type> {
     for input in &function.sig.inputs {
         let FnArg::Typed(input) = input else {
@@ -389,7 +389,7 @@ fn interceptor_state_type(function: &ItemFn) -> Option<Type> {
 // 一、收集器生成宏：mvc_router!(StateType)
 //   在 crate 根调用一次，生成 `pub mod __mvc` 的收集表、审计入口与装配入口。
 // ════════════════════════════════════════════════════════════════════════════
-/// # `mvc_router!(StateType)` —— 生成路由收集模块 `crate::__mvc`
+/// 业务作用：# `mvc_router!(StateType)` —— 生成路由收集模块 `crate::__mvc`
 ///
 /// 在 crate 根（`main.rs` / `lib.rs`）调用一次，按 Axum 根 State 类型生成 `RouteEntry`、
 /// `ROUTES`、`GLOBAL_INTERCEPTORS`、`try_register_all` 与兼容 `register_all`。
@@ -461,7 +461,7 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
                 #[linkme(crate = #linkme_p)]
                 pub static ROUTES: [RouteEntry];
 
-                /// 装配不使用 mapping 运行时的兼容路由。
+                /// 业务作用：装配不使用 mapping 运行时的兼容路由。
                 ///
                 /// # 参数
                 ///
@@ -557,7 +557,7 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
             #[linkme(crate = #linkme_p)]
             pub static GLOBAL_INTERCEPTORS: [GlobalInterceptorEntry];
 
-            /// 审计完整路由集合后逐条装配，任何安全依赖缺失都在监听端口前返回错误。
+            /// 业务作用：审计完整路由集合后逐条装配，任何安全依赖缺失都在监听端口前返回错误。
             ///
             /// # 参数
             ///
@@ -637,7 +637,7 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
                 Ok(router)
             }
 
-            /// 仅供没有任何身份和密码策略的旧应用装配普通路由。
+            /// 业务作用：仅供没有任何身份和密码策略的旧应用装配普通路由。
             ///
             /// # 参数
             ///
@@ -671,7 +671,7 @@ pub fn mvc_router(input: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 // 二、路由注解：#[get_mapping(...)] / #[post_mapping(...)] / #[put_mapping(...)] / #[delete_mapping(...)] / #[patch_mapping(...)]
 // ════════════════════════════════════════════════════════════════════════════
-/// # `#[get_mapping]` —— 注册一条 GET 服务端路由
+/// 业务作用：# `#[get_mapping]` —— 注册一条 GET 服务端路由
 ///
 /// 贴在 axum handler 上（不改写函数体），把路由、身份、密码与 interceptor 元数据收进
 /// `crate::__mvc::ROUTES`。应用必须先在 crate 根调用 `mvc_router!(State)`，再用
@@ -755,7 +755,7 @@ pub fn get_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "GET", "get")
 }
 
-/// # `#[post_mapping]` —— 注册一条 POST 服务端路由
+/// 业务作用：# `#[post_mapping]` —— 注册一条 POST 服务端路由
 ///
 /// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
 /// ★ **唯一区别**:不写 `consumes` 时【默认 `"application/json"`】(POST 通常吃 JSON body);
@@ -790,7 +790,7 @@ pub fn post_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "POST", "post")
 }
 
-/// # `#[put_mapping]` —— 注册一条 PUT 服务端路由
+/// 业务作用：# `#[put_mapping]` —— 注册一条 PUT 服务端路由
 ///
 /// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
 /// ★ 与 `#[post_mapping]` 不同:**不写 `consumes` 时不默认任何值**(只有 POST 保留历史默认
@@ -805,7 +805,7 @@ pub fn put_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "PUT", "put")
 }
 
-/// # `#[delete_mapping]` —— 注册一条 DELETE 服务端路由
+/// 业务作用：# `#[delete_mapping]` —— 注册一条 DELETE 服务端路由
 ///
 /// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
 /// 不默认 `consumes`(DELETE 通常无 body)。
@@ -819,7 +819,7 @@ pub fn delete_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "DELETE", "delete")
 }
 
-/// # `#[patch_mapping]` —— 注册一条 PATCH 服务端路由
+/// 业务作用：# `#[patch_mapping]` —— 注册一条 PATCH 服务端路由
 ///
 /// 支持 [`get_mapping`] 文档列出的全部路由、安全与 `interceptors(...)` 属性。
 /// 不默认 `consumes`;要强制请求体类型就显式写 `consumes = "application/json"`。
@@ -833,7 +833,7 @@ pub fn patch_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, "PATCH", "patch")
 }
 
-/// get_mapping / post_mapping / put_mapping / delete_mapping / patch_mapping 的公共实现。
+/// 业务作用：get_mapping / post_mapping / put_mapping / delete_mapping / patch_mapping 的公共实现。
 ///   attr   = 注解括号内容：单串(= path) 或 key=value 列表
 ///   method = "GET"/"POST"/"PUT"/"DELETE"/"PATCH"（存注册项 + 日志）；
 ///   verb   = "get"/"post"/"put"/"delete"/"patch"（生成 ::axum::routing::<verb>）
@@ -1233,6 +1233,7 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
     // 只有确实声明了 produces 或 consumes 时才生成，普通路由不额外包一层。
     let mw_fn_def = if need_mw {
         quote! {
+            /// 业务作用：在单一路由边界校验请求媒体类型，并按声明覆盖响应媒体类型。
             ///
             /// # 参数
             /// - `req`: HTTP 请求对象。
@@ -1467,7 +1468,7 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
     expanded.into()
 }
 
-/// produces/consumes 的最小媒体类型校验:非空 + 不含控制字符。
+/// 业务作用：produces/consumes 的最小媒体类型校验:非空 + 不含控制字符。
 ///   不做完整 media-type 解析(不引依赖),只挡住空串与控制字符这类明显写错;
 ///   出错返回指向注解处的 `compile_error!`,由调用方 `return ...into()`。
 ///
@@ -1497,7 +1498,7 @@ fn validate_media_type(
     Ok(())
 }
 
-/// Option<String> → `Some("x")` / `None` 的 token。
+/// 业务作用：Option<String> → `Some("x")` / `None` 的 token。
 ///
 /// # 参数
 /// - `o`: 映射宏正在处理的输出字段描述。
@@ -1508,7 +1509,7 @@ fn opt_str_tokens(o: &Option<String>) -> proc_macro2::TokenStream {
     }
 }
 
-/// 判断媒体类型是否属于第一版明确不支持的流式或文件场景。
+/// 业务作用：判断媒体类型是否属于第一版明确不支持的流式或文件场景。
 ///
 /// # 参数
 ///
@@ -1525,7 +1526,7 @@ fn forbidden_crypto_media_type(value: &str) -> bool {
         || lower.contains("websocket")
 }
 
-/// 校验路由策略中用作注册表索引的静态 ID。
+/// 业务作用：校验路由策略中用作注册表索引的静态 ID。
 ///
 /// # 参数
 ///
@@ -1542,7 +1543,7 @@ fn valid_policy_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// 建立指向当前路由属性的编译期错误。
+/// 业务作用：建立指向当前路由属性的编译期错误。
 ///
 /// # 参数
 ///
@@ -1558,7 +1559,7 @@ fn attribute_error(verb: &str, message: &str) -> TokenStream {
         .into()
 }
 
-/// 解析业务 crate 实际依赖的 naweb 运行时门面路径。
+/// 业务作用：解析业务 crate 实际依赖的 naweb 运行时门面路径。
 ///
 /// # 返回
 ///
@@ -1572,7 +1573,7 @@ fn web_runtime_path() -> Option<proc_macro2::TokenStream> {
     }
 }
 
-/// 三方依赖路径解析
+/// 业务作用：三方依赖路径解析
 /// - 业务依赖 `nasa`(含重命名)→ `::nasa::web::__private::<crate>`;
 /// - 业务直接依赖 `naweb` 运行时 → `::naweb::__private::<crate>`;
 /// - 旧布局(直接依赖 naweb-macro + axum/linkme/tracing)→ 裸 `::axum` 等。

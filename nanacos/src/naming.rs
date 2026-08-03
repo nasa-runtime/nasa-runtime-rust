@@ -23,7 +23,7 @@ pub struct NacosDiscoveryClient {
 }
 
 impl std::fmt::Debug for NacosDiscoveryClient {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -36,7 +36,7 @@ impl std::fmt::Debug for NacosDiscoveryClient {
     }
 }
 
-/// 校验 validate service 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 validate service 约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -47,7 +47,7 @@ fn validate_service(service: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 分页参数校验(共享层 fail-fast,胜过把非法分页交给 SDK)。
+/// 业务作用：分页参数校验(共享层 fail-fast,胜过把非法分页交给 SDK)。
 ///
 /// # 参数
 /// - `page_no`: Nacos 分页查询的页码。
@@ -66,7 +66,7 @@ fn validate_page(page_no: i32, page_size: i32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 校验 validate cluster name 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 validate cluster name 约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
@@ -83,7 +83,7 @@ fn validate_cluster_name(field: &str, cluster: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 校验 validate clusters 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 validate clusters 约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `clusters`: 服务实例所属集群列表。
@@ -94,7 +94,7 @@ fn validate_clusters(clusters: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 校验 validate instance 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 validate instance 约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `inst`: 服务发现返回的实例信息。
@@ -117,7 +117,7 @@ fn validate_instance(inst: &Instance) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 转换为 sdk 表示；用于对接下游接口。
+/// 业务作用：转换为 sdk 表示；用于对接下游接口。
 ///
 /// # 参数
 /// - `inst`: 服务发现返回的实例信息。
@@ -137,7 +137,7 @@ fn to_sdk(inst: &Instance) -> nacos_sdk::api::naming::ServiceInstance {
     }
 }
 
-/// SDK 实例 → 中性 Instance。端口越界(<0 或 >65535)→ 返回 None 并 warn(不静默截断后交给业务负载均衡)。
+/// 业务作用：SDK 实例 → 中性 Instance。端口越界(<0 或 >65535)→ 返回 None 并 warn(不静默截断后交给业务负载均衡)。
 ///
 /// # 参数
 /// - `si`: 服务实例结构,用于完成注册、续约或列表解析。
@@ -158,7 +158,7 @@ fn try_from_sdk(si: &nacos_sdk::api::naming::ServiceInstance) -> Option<Instance
     )
 }
 
-/// 把实例列表按稳定 key `(cluster_name, ip, port)` 排序——用于 `subscribe_channel` 比较前归一化,
+/// 业务作用：把实例列表按稳定 key `(cluster_name, ip, port)` 排序——用于 `subscribe_channel` 比较前归一化,
 /// 避免 Nacos 返回同一批实例但顺序抖动时(`Vec` 的 `PartialEq` 顺序敏感)产生伪变更、触发订阅方无谓重建。
 ///
 /// # 参数
@@ -173,7 +173,7 @@ fn sort_instances(v: &mut [Instance]) {
     });
 }
 
-/// 规范化 `discovery_ip`:trim 后空串视为未配置(`None`)。connect 时把 `NacosProps.discovery_ip` 收进 client。
+/// 业务作用：规范化 `discovery_ip`:trim 后空串视为未配置(`None`)。connect 时把 `NacosProps.discovery_ip` 收进 client。
 ///
 /// # 参数
 /// - `raw`: 待解析的原始字符串、字节或配置值。
@@ -184,7 +184,7 @@ fn normalize_discovery_ip(raw: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// 把 client 的 `discovery_ip`(已规范化)应用到待注册实例:`Some` 覆盖 `Instance.ip`,`None` 保持原值。
+/// 业务作用：把 client 的 `discovery_ip`(已规范化)应用到待注册实例:`Some` 覆盖 `Instance.ip`,`None` 保持原值。
 /// 用于服务监听 `0.0.0.0`、本机多网卡、VPN/容器网卡等场景,避免注册不可拨号地址。
 ///
 /// # 参数
@@ -198,7 +198,7 @@ fn apply_discovery_ip(discovery_ip: Option<&str>, mut inst: Instance) -> Instanc
     inst
 }
 
-/// 最终注册 IP 是否为「未指定地址」(`0.0.0.0` / `::`,或空)——这类地址注册上去消费者无法拨号。
+/// 业务作用：最终注册 IP 是否为「未指定地址」(`0.0.0.0` / `::`,或空)——这类地址注册上去消费者无法拨号。
 /// 非 IP 字面量(如主机名)按已指定处理(不拦,留给确实想注册 hostname 的场景)。
 ///
 /// # 参数
@@ -213,7 +213,7 @@ fn is_unspecified_ip(ip: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// 去重保序:保留首次出现的顺序、丢弃重复(分页拉服务名跨页可能重复)。`list_services` 用。
+/// 业务作用：去重保序:保留首次出现的顺序、丢弃重复(分页拉服务名跨页可能重复)。`list_services` 用。
 ///
 /// # 参数
 /// - `names`: 需要合并或解析的名称列表。
@@ -226,7 +226,7 @@ fn dedup_preserve_order(names: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// 按总量和页大小计算最大页数；用于分页拉取实例列表。
+/// 业务作用：按总量和页大小计算最大页数；用于分页拉取实例列表。
 ///
 /// # 参数
 /// - `total`: 服务端返回的总记录数。
@@ -255,7 +255,7 @@ pub struct SubscribeOptions {
 }
 
 impl Default for SubscribeOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             clusters: Vec::new(),
@@ -265,12 +265,12 @@ impl Default for SubscribeOptions {
 }
 
 impl SubscribeOptions {
-    /// 起手式:默认订阅选项。
+    /// 业务作用：起手式:默认订阅选项。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 只订阅这些 cluster(空 = 全部)。注意 cluster 不是 group;默认 cluster 通常是 `DEFAULT`。
+    /// 业务作用：只订阅这些 cluster(空 = 全部)。注意 cluster 不是 group;默认 cluster 通常是 `DEFAULT`。
     ///
     /// # 参数
     /// - `clusters`: 要订阅的 Nacos cluster 名称集合;空集合表示全部 cluster。
@@ -279,7 +279,7 @@ impl SubscribeOptions {
         self
     }
 
-    /// discover 轮询兜底间隔。
+    /// 业务作用：discover 轮询兜底间隔。
     ///
     /// # 参数
     /// - `poll_interval`: 后台 discover 校正快照的时间间隔,必须大于 0。
@@ -288,7 +288,7 @@ impl SubscribeOptions {
         self
     }
 
-    /// 校验 cluster 名称和轮询间隔;builder 保持轻量,使用点 fail-fast。
+    /// 业务作用：校验 cluster 名称和轮询间隔;builder 保持轻量,使用点 fail-fast。
     ///
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_clusters(&self.clusters)?;
@@ -301,7 +301,7 @@ impl SubscribeOptions {
 }
 
 impl NacosDiscoveryClient {
-    /// 连接注册中心(只建 NamingService,含 HTTP 鉴权)。feature 关 → `Err`;开 → 校验参数后连接。
+    /// 业务作用：连接注册中心(只建 NamingService,含 HTTP 鉴权)。feature 关 → `Err`;开 → 校验参数后连接。
     ///
     /// # 参数
     /// - `props`: Nacos 连接参数,提供服务端地址、命名空间、默认分组、鉴权和可选对外 IP。
@@ -329,7 +329,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 注册本实例(临时实例由 SDK 自动维持心跳);返回的 [`RegistrationGuard`]。
+    /// 业务作用：注册本实例(临时实例由 SDK 自动维持心跳);返回的 [`RegistrationGuard`]。
     /// [`RegistrationGuard`] drop 时只做 best-effort deregister;优雅停机必须显式 `deregister().await`。feature 关 → `Err`。
     ///
     /// # 参数
@@ -382,7 +382,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 返回本 client 配置的注册中心对外 IP。为空表示由调用方传入的 `Instance.ip` 决定。
+    /// 业务作用：返回本 client 配置的注册中心对外 IP。为空表示由调用方传入的 `Instance.ip` 决定。
     pub fn discovery_ip(&self) -> Option<&str> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -394,7 +394,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 查询某服务**当前可承载流量的实例**:共享层用 [`nadisc::is_traffic_instance`] 统一过滤
+    /// 业务作用：查询某服务**当前可承载流量的实例**:共享层用 [`nadisc::is_traffic_instance`] 统一过滤
     /// (启用 + 健康 + 权重正且有限 + ip 非空 + port≠0),不依赖 SDK 行为。即客户端负载均衡的"可用实例集"。
     /// 要含不健康/禁用/零权重实例做管理/诊断,用 [`discover_all`](Self::discover_all)。不自动订阅、全 cluster。feature 关 → `Err`。
     ///
@@ -412,7 +412,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 同 [`discover`](Self::discover),但只查指定 cluster(空 = 全部)。注意 cluster 不是 group:
+    /// 业务作用：同 [`discover`](Self::discover),但只查指定 cluster(空 = 全部)。注意 cluster 不是 group:
     /// 默认 group 常见为 `DEFAULT_GROUP`,默认 cluster 是 `DEFAULT`,且 cluster 不允许 `_`。feature 关 → `Err`。
     ///
     /// # 参数
@@ -436,7 +436,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 查询 discover core 信息；用于获取服务和实例快照。
+    /// 业务作用：查询 discover core 信息；用于获取服务和实例快照。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -463,7 +463,7 @@ impl NacosDiscoveryClient {
             .collect())
     }
 
-    /// 查询某服务**全部实例**(含 `healthy=false` / `enabled=false` / `weight=0`;全 cluster,不自动订阅)。供管理面/调试/灰度排查;
+    /// 业务作用：查询某服务**全部实例**(含 `healthy=false` / `enabled=false` / `weight=0`;全 cluster,不自动订阅)。供管理面/调试/灰度排查;
     /// 客户端负载均衡请用 [`discover`](Self::discover)。每个实例的 `healthy`/`enabled`/`weight` 如实反映注册中心状态。feature 关 → `Err`。
     ///
     /// # 参数
@@ -480,7 +480,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 同 [`discover_all`](Self::discover_all),但只查指定 cluster(空 = 全部)。注意 cluster 不是 group:
+    /// 业务作用：同 [`discover_all`](Self::discover_all),但只查指定 cluster(空 = 全部)。注意 cluster 不是 group:
     /// 默认 group 常见为 `DEFAULT_GROUP`,默认 cluster 是 `DEFAULT`,且 cluster 不允许 `_`。feature 关 → `Err`。
     ///
     /// # 参数
@@ -504,7 +504,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 查询 discover all core 信息；用于获取服务和实例快照。
+    /// 业务作用：查询 discover all core 信息；用于获取服务和实例快照。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -527,7 +527,7 @@ impl NacosDiscoveryClient {
         Ok(list.iter().filter_map(try_from_sdk).collect())
     }
 
-    /// 列出当前 group 下【一页】服务名 + 总数(`page_no` 从 1 起;供自定义分页)。feature 关 → `Err`。
+    /// 业务作用：列出当前 group 下【一页】服务名 + 总数(`page_no` 从 1 起;供自定义分页)。feature 关 → `Err`。
     ///
     /// # 参数
     /// - `page_no`: 页码,从 1 开始。
@@ -552,7 +552,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 列出当前 group 下【全部】服务名(循环分页直到取满 total;去重保序,保留 Nacos 原始服务名)。
+    /// 业务作用：列出当前 group 下【全部】服务名(循环分页直到取满 total;去重保序,保留 Nacos 原始服务名)。
     /// 供 RestDiscovery 等上层构建服务索引(大小写归一化在上层做)。feature 关 → `Err`。
     pub async fn list_services(&self) -> anyhow::Result<Vec<String>> {
         #[cfg(not(feature = "nacos"))]
@@ -582,7 +582,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// **【低层原始 SDK 事件入口,不适合客户端负载均衡】** 订阅某服务实例变化(全 cluster):每次推送把回调 callback 一遍(原始事件实例列表)。
+    /// 业务作用：**【低层原始 SDK 事件入口,不适合客户端负载均衡】** 订阅某服务实例变化(全 cluster):每次推送把回调 callback 一遍(原始事件实例列表)。
     /// 返回 [`SubscribeGuard`];drop 只做 best-effort 取消订阅,也可显式 `guard.unsubscribe().await`。feature 关 → `Err`。
     ///
     /// ⚠️ **SDK 限制**(已核实 nacos-sdk 0.8 源码):① 订阅【最后一个实例被删 → 变空】的事件会被 SDK 的 empty-push 过滤掉
@@ -609,7 +609,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 同 [`subscribe`](Self::subscribe),但只订阅指定 cluster(空 = 全部)。注意 cluster 不是 group:
+    /// 业务作用：同 [`subscribe`](Self::subscribe),但只订阅指定 cluster(空 = 全部)。注意 cluster 不是 group:
     /// 默认 group 常见为 `DEFAULT_GROUP`,默认 cluster 是 `DEFAULT`,且 cluster 不允许 `_`。feature 关 → `Err`。
     ///
     /// # 参数
@@ -638,7 +638,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 建立 subscribe core 监听；用于接收后续变更并保持状态同步。
+    /// 业务作用：建立 subscribe core 监听；用于接收后续变更并保持状态同步。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -683,7 +683,7 @@ impl NacosDiscoveryClient {
         })
     }
 
-    /// channel 变体:返回 [`SubscribeGuard`] + `watch::Receiver<Vec<Instance>>`,便于 app 用 `select!` 统一处理。
+    /// 业务作用：channel 变体:返回 [`SubscribeGuard`] + `watch::Receiver<Vec<Instance>>`,便于 app 用 `select!` 统一处理。
     /// **顺序:先 subscribe 建监听,再 discover 播种当前(健康)快照**——避免"订阅前已有实例、订阅后无变更"时 Receiver 长期空列表
     /// (把"无实例"和"还没收到事件"混成一种状态)。返回前已把初值设为当前快照。guard 与 rx 都要持有。feature 关 → `Err`。
     ///
@@ -705,7 +705,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 同 [`subscribe_channel`](Self::subscribe_channel),但只订阅指定 cluster(空 = 全部)。注意 cluster 不是 group:
+    /// 业务作用：同 [`subscribe_channel`](Self::subscribe_channel),但只订阅指定 cluster(空 = 全部)。注意 cluster 不是 group:
     /// 默认 group 常见为 `DEFAULT_GROUP`,默认 cluster 是 `DEFAULT`,且 cluster 不允许 `_`。feature 关 → `Err`。
     ///
     /// # 参数
@@ -730,7 +730,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 同 [`subscribe_channel`](Self::subscribe_channel),但可配置 cluster 过滤 + **轮询兜底间隔**([`SubscribeOptions`])。
+    /// 业务作用：同 [`subscribe_channel`](Self::subscribe_channel),但可配置 cluster 过滤 + **轮询兜底间隔**([`SubscribeOptions`])。
     /// 注意 cluster 不是 group:默认 group 常见为 `DEFAULT_GROUP`,默认 cluster 是 `DEFAULT`,且 cluster 不允许 `_`。
     /// 低延迟场景调小 `poll_interval`(删实例/漏推的最终一致延迟随之降低),压低 Nacos 压力调大。feature 关 → `Err`。
     ///
@@ -753,7 +753,7 @@ impl NacosDiscoveryClient {
         }
     }
 
-    /// 建立 subscribe channel core 监听；用于接收后续变更并保持状态同步。
+    /// 业务作用：建立 subscribe channel core 监听；用于接收后续变更并保持状态同步。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -862,7 +862,7 @@ pub struct RegistrationGuard {
 }
 
 impl RegistrationGuard {
-    /// 原位刷新同一个已注册实例的权重、健康状态或 metadata，不先注销，避免配置换版造成注册表闪断。
+    /// 业务作用：原位刷新同一个已注册实例的权重、健康状态或 metadata，不先注销，避免配置换版造成注册表闪断。
     ///
     /// `service/group/ip/port/cluster/ephemeral` 是注册身份，必须保持不变；身份变化仍应显式注销旧
     /// guard 后重新 [`NacosDiscoveryClient::register`]。刷新成功后同步替换 guard 内保存的实例，
@@ -898,7 +898,7 @@ impl RegistrationGuard {
         }
     }
 
-    /// 显式注销(优雅路径:可 await 等结果)。**先注销成功**再标记不再 Drop 兜底;失败时 `active` 仍为 true,
+    /// 业务作用：显式注销(优雅路径:可 await 等结果)。**先注销成功**再标记不再 Drop 兜底;失败时 `active` 仍为 true,
     /// self drop 时还会走一次 best-effort 注销(不至于因一次失败彻底关掉兜底)。
     /// ⚠️ 优雅停机若担心 Nacos 半开/卡住,用 `tokio::time::timeout(d, guard.deregister())` 包裹:超时丢弃本 future →
     ///    self 随之 drop → Drop 的 best-effort 投递接力(非阻塞),不会拖死停机流程。
@@ -920,7 +920,7 @@ impl RegistrationGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for RegistrationGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         if !self.active {
             return;
@@ -941,7 +941,7 @@ impl Drop for RegistrationGuard {
 
 #[cfg(feature = "nacos")]
 impl std::fmt::Debug for RegistrationGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -956,7 +956,7 @@ impl std::fmt::Debug for RegistrationGuard {
 
 #[cfg(not(feature = "nacos"))]
 impl std::fmt::Debug for RegistrationGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -989,7 +989,7 @@ pub struct SubscribeGuard {
 }
 
 impl SubscribeGuard {
-    /// 显式取消订阅(优雅路径:可 await)。成功后关闭 Drop 兜底;失败保留 Drop 兜底。
+    /// 业务作用：显式取消订阅(优雅路径:可 await)。成功后关闭 Drop 兜底;失败保留 Drop 兜底。
     /// ⚠️ 担心卡住同 [`RegistrationGuard::deregister`]:用 `tokio::time::timeout` 包裹,超时由 Drop best-effort 接力。
     ///
     #[allow(unused_mut)]
@@ -1018,7 +1018,7 @@ impl SubscribeGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for SubscribeGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         // 停轮询兜底任务(无论 armed 与否)
         if let Some(h) = &self.poll {
@@ -1044,7 +1044,7 @@ impl Drop for SubscribeGuard {
 
 #[cfg(feature = "nacos")]
 impl std::fmt::Debug for SubscribeGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -1060,7 +1060,7 @@ impl std::fmt::Debug for SubscribeGuard {
 
 #[cfg(not(feature = "nacos"))]
 impl std::fmt::Debug for SubscribeGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -1077,7 +1077,7 @@ struct EvtListener<F: Fn(Vec<Instance>) + Send + Sync + 'static>(F);
 impl<F: Fn(Vec<Instance>) + Send + Sync + 'static> nacos_sdk::api::naming::NamingEventListener
     for EvtListener<F>
 {
-    /// 接收实例变更事件并发布最新快照；用于驱动服务订阅刷新。
+    /// 业务作用：接收实例变更事件并发布最新快照；用于驱动服务订阅刷新。
     ///
     /// # 参数
     /// - `event`: 注册中心推送的服务实例变更事件。
@@ -1100,12 +1100,12 @@ impl<F: Fn(Vec<Instance>) + Send + Sync + 'static> nacos_sdk::api::naming::Namin
 
 #[async_trait::async_trait]
 impl nadisc::DiscoveryClient for NacosDiscoveryClient {
-    /// 查询 list services 信息；用于获取服务和实例快照。
+    /// 业务作用：查询 list services 信息；用于获取服务和实例快照。
     async fn list_services(&self) -> anyhow::Result<Vec<String>> {
         NacosDiscoveryClient::list_services(self).await
     }
 
-    /// 查询 discover 信息；用于获取服务和实例快照。
+    /// 业务作用：查询 discover 信息；用于获取服务和实例快照。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -1113,7 +1113,7 @@ impl nadisc::DiscoveryClient for NacosDiscoveryClient {
         NacosDiscoveryClient::discover(self, service).await
     }
 
-    /// 查询 discover all 信息；用于获取服务和实例快照。
+    /// 业务作用：查询 discover all 信息；用于获取服务和实例快照。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -1121,7 +1121,7 @@ impl nadisc::DiscoveryClient for NacosDiscoveryClient {
         NacosDiscoveryClient::discover_all(self, service).await
     }
 
-    /// 建立 watch with options 监听；用于接收后续变更并保持状态同步。
+    /// 业务作用：建立 watch with options 监听；用于接收后续变更并保持状态同步。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -1147,7 +1147,7 @@ impl nadisc::DiscoveryClient for NacosDiscoveryClient {
 
 #[async_trait::async_trait]
 impl nadisc::ServiceWatchGuard for SubscribeGuard {
-    /// 建立 unsubscribe 监听；用于接收后续变更并保持状态同步。
+    /// 业务作用：建立 unsubscribe 监听；用于接收后续变更并保持状态同步。
     async fn unsubscribe(self: Box<Self>) -> anyhow::Result<()> {
         SubscribeGuard::unsubscribe(*self).await
     }
@@ -1155,7 +1155,7 @@ impl nadisc::ServiceWatchGuard for SubscribeGuard {
 
 #[async_trait::async_trait]
 impl nadisc::ServiceRegistry for NacosDiscoveryClient {
-    /// 执行 register 操作；用于维护服务实例生命周期。
+    /// 业务作用：执行 register 操作；用于维护服务实例生命周期。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -1172,7 +1172,7 @@ impl nadisc::ServiceRegistry for NacosDiscoveryClient {
 
 #[async_trait::async_trait]
 impl nadisc::Registration for RegistrationGuard {
-    /// 执行 deregister 操作；用于维护服务实例生命周期。
+    /// 业务作用：执行 deregister 操作；用于维护服务实例生命周期。
     async fn deregister(self: Box<Self>) -> anyhow::Result<()> {
         RegistrationGuard::deregister(*self).await
     }

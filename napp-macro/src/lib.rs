@@ -12,7 +12,7 @@ use syn::{
     PathArguments, ReturnType, Token, Type,
 };
 
-/// 把业务异步 `main` 转换为统一生命周期进程入口。
+/// 业务作用：把业务异步 `main` 转换为统一生命周期进程入口。
 ///
 /// # 支持的组件字符串
 ///
@@ -90,7 +90,7 @@ pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// 校验入口契约并生成静态描述、业务 Hook 包装和同步主函数。
+/// 业务作用：校验入口契约并生成静态描述、业务 Hook 包装和同步主函数。
 ///
 /// # 参数
 ///
@@ -126,7 +126,7 @@ fn expand_application(
         quote! {
             #runtime::__private::naweb::mvc_router!(#runtime::Application);
 
-            /// 把业务 crate 内收集的 nominal 路由项投影成稳定诊断元数据。
+            /// 业务作用：把业务 crate 内收集的 nominal 路由项投影成稳定诊断元数据。
             ///
             /// # 参数
             ///
@@ -155,7 +155,7 @@ fn expand_application(
                     .collect()
             }
 
-            /// 构造只含自动收集端点、尚未补齐状态的业务路由。
+            /// 业务作用：构造只含自动收集端点、尚未补齐状态的业务路由。
             ///
             /// 状态刻意不在这里补：`configure_router` 的定制与框架探针都必须先作用在
             /// `Router<Application>` 上，`with_state` 由运行时在装配顺序末尾统一执行。
@@ -201,7 +201,7 @@ fn expand_application(
         #web_items
         #function
 
-        /// 在生成入口附近约束业务 Hook 的可移动性、生命周期和错误类型。
+        /// 业务作用：在生成入口附近约束业务 Hook 的可移动性、生命周期和错误类型。
         ///
         /// 该薄包装不执行 Hook；它把类型错误定位到业务入口，而不是延后到任务监督器内部。
         ///
@@ -219,7 +219,7 @@ fn expand_application(
             hook
         }
 
-        /// 创建运行时静态描述并把业务 Hook 交给统一同步入口。
+        /// 业务作用：创建运行时静态描述并把业务 Hook 交给统一同步入口。
         ///
         /// # 参数
         ///
@@ -237,7 +237,7 @@ fn expand_application(
     })
 }
 
-/// 校验业务主函数的名称、异步形态、参数和返回结果形状。
+/// 业务作用：校验业务主函数的名称、异步形态、参数和返回结果形状。
 ///
 /// # 参数
 ///
@@ -299,7 +299,7 @@ fn validate_function(function: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-/// 校验唯一可选参数的类型为统一 Application。
+/// 业务作用：校验唯一可选参数的类型为统一 Application。
 ///
 /// # 参数
 ///
@@ -331,7 +331,7 @@ fn validate_application_parameter(argument: &FnArg) -> syn::Result<()> {
     Ok(())
 }
 
-/// 校验业务主函数返回单元成功值的 `Result`。
+/// 业务作用：校验业务主函数返回单元成功值的 `Result`。
 ///
 /// # 参数
 ///
@@ -394,7 +394,7 @@ const CANONICAL_COMPONENT_ORDER: [&str; 12] = [
     "scheduling",
 ];
 
-/// 校验组件名称与重复项,并按规范启动顺序排序返回(业务书写顺序不影响启动顺序)。
+/// 业务作用：校验组件名称与重复项,并按规范启动顺序排序返回(业务书写顺序不影响启动顺序)。
 ///
 /// 业务侧无需按启动顺序书写 `#[application(...)]`:本函数接受任意顺序,拒绝未知名称和重复项,
 /// 然后按 [`CANONICAL_COMPONENT_ORDER`] 排序。运行时因此始终收到规范顺序的组件列表。
@@ -431,7 +431,7 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
     Ok(names)
 }
 
-/// 把规范化组件名称转换为运行时枚举变体。
+/// 业务作用：把规范化组件名称转换为运行时枚举变体。
 ///
 /// # 参数
 ///
@@ -460,7 +460,7 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
     Ok(format_ident!("{variant}"))
 }
 
-/// 把已校验组件名称转换为编译期能力探测模块。
+/// 业务作用：把已校验组件名称转换为编译期能力探测模块。
 ///
 /// # 参数
 ///

@@ -14,7 +14,7 @@ pub struct NacosConfigClient {
 }
 
 impl std::fmt::Debug for NacosConfigClient {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -26,7 +26,7 @@ impl std::fmt::Debug for NacosConfigClient {
     }
 }
 
-/// 配置侧参数校验(data_id/group 非空)。
+/// 业务作用：配置侧参数校验(data_id/group 非空)。
 ///
 /// # 参数
 /// - `data_id`: 业务标识,用于定位具体对象或记录。
@@ -41,7 +41,7 @@ fn validate_cfg(data_id: &str, group: &str) -> anyhow::Result<()> {
 }
 
 impl NacosConfigClient {
-    /// 连接配置中心(只建 ConfigService,含 HTTP 鉴权)。feature 关 → `Err`;开 → 校验参数后连接。
+    /// 业务作用：连接配置中心(只建 ConfigService,含 HTTP 鉴权)。feature 关 → `Err`;开 → 校验参数后连接。
     ///
     /// # 参数
     /// - `props`: Nacos 连接参数,提供服务端地址、命名空间、默认分组和鉴权信息。
@@ -68,7 +68,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// 拉一次配置原文(yaml/properties/json 由内容本身决定,本 crate 不解析)。app 拿到后自己 parse+merge+apply。feature 关 → `Err`。
+    /// 业务作用：拉一次配置原文(yaml/properties/json 由内容本身决定,本 crate 不解析)。app 拿到后自己 parse+merge+apply。feature 关 → `Err`。
     ///
     /// # 参数
     /// - `data_id`: Nacos 配置 dataId。
@@ -86,7 +86,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// 同 [`fetch`](Self::fetch),但用 client 默认 group(连接时 `NacosProps::group`),省得每次传。
+    /// 业务作用：同 [`fetch`](Self::fetch),但用 client 默认 group(连接时 `NacosProps::group`),省得每次传。
     ///
     /// # 参数
     /// - `data_id`: Nacos 配置 dataId。
@@ -103,7 +103,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// 拉一次配置,同时返回【原文 + 服务端 md5】。
+    /// 业务作用：拉一次配置,同时返回【原文 + 服务端 md5】。
     ///
     /// 相比 [`fetch`](Self::fetch) 多返回 Nacos 服务端计算的 md5:CAS 写入([`publish_cas`](Self::publish_cas))
     /// 需要拿【当前远端内容的 md5】作为 compare-and-set 基线,直接复用服务端 md5 可避免调用方本地重算 md5 与
@@ -137,7 +137,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// CAS(compare-and-set)发布配置:仅当 Nacos 端【当前内容 md5】等于 `cas_md5` 时才写入。
+    /// 业务作用：CAS(compare-and-set)发布配置:仅当 Nacos 端【当前内容 md5】等于 `cas_md5` 时才写入。
     ///
     /// 用于「并发编辑安全」场景:调用方先 [`fetch_with_md5`](Self::fetch_with_md5) 拿到基线 md5,写入时带上它;
     /// 若在读-改-写窗口内有人抢先改了该 dataId,服务端 md5 已变,本次写被服务端拒绝(返回 `Ok(false)`),
@@ -186,7 +186,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// 注册配置变更监听:每次推送把【新原文】交给 `on_change`(回调内 parse+merge+apply 由 app 决定)。
+    /// 业务作用：注册配置变更监听:每次推送把【新原文】交给 `on_change`(回调内 parse+merge+apply 由 app 决定)。
     /// 返回 [`WatchGuard`];drop 只做 best-effort 注销监听,也可显式 `guard.close().await`。回调是 trait 要求的【同步】方法,
     /// 内部别做阻塞 IO(纯 CPU 的 parse/merge 直接做;要异步就 `tokio::spawn` 或改用 [`watch_channel`](Self::watch_channel))。feature 关 → `Err`。
     ///
@@ -236,7 +236,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// 同 [`watch`](Self::watch),但用 client 默认 group。
+    /// 业务作用：同 [`watch`](Self::watch),但用 client 默认 group。
     ///
     /// # 参数
     /// - `data_id`: 要监听的 Nacos 配置 dataId。
@@ -261,7 +261,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// channel 变体:返回 [`WatchGuard`] + `watch::Receiver<String>`,便于 app 用 `select!` 统一处理。
+    /// 业务作用：channel 变体:返回 [`WatchGuard`] + `watch::Receiver<String>`,便于 app 用 `select!` 统一处理。
     /// **顺序:先注册 listener,再 fetch 播种初值**——避免"fetch 后、注册前"窗口里的变更丢失。
     /// 用 `pushed` 原子标记防竞态:listener 注册后、fetch 返回前若已推过更新,则不再用(可能更旧的)fetch 初值覆盖回去。
     /// fetch 失败时显式 `close` 监听,不留残余。guard 与 rx 都要持有。feature 关 → `Err`。
@@ -312,7 +312,7 @@ impl NacosConfigClient {
     }
 }
 
-/// `watch_channel` 初值播种:**仅当 listener 还没推过更新时**才用 fetch 初值播种。
+/// 业务作用：`watch_channel` 初值播种:**仅当 listener 还没推过更新时**才用 fetch 初值播种。
 /// 否则 listener 注册后、fetch 返回前到达的 push(较新值)会被较旧的 fetch 初值覆盖回去。
 /// 用 `swap` 原子地"检查并占位":返回 `false`(此前没 push)才发 initial。
 ///
@@ -350,7 +350,7 @@ pub struct WatchGuard {
 }
 
 impl WatchGuard {
-    /// 显式注销监听(优雅路径:可 await 等结果)。**成功后**才标记不再 Drop 注销;失败则保留 Drop 兜底。
+    /// 业务作用：显式注销监听(优雅路径:可 await 等结果)。**成功后**才标记不再 Drop 注销;失败则保留 Drop 兜底。
     /// ⚠️ 担心卡住:用 `tokio::time::timeout(d, guard.close())` 包裹,超时由 Drop best-effort 接力(非阻塞)。
     ///
     #[allow(unused_mut)]
@@ -379,7 +379,7 @@ impl WatchGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for WatchGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -400,7 +400,7 @@ impl Drop for WatchGuard {
 
 #[cfg(feature = "nacos")]
 impl std::fmt::Debug for WatchGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -415,7 +415,7 @@ impl std::fmt::Debug for WatchGuard {
 
 #[cfg(not(feature = "nacos"))]
 impl std::fmt::Debug for WatchGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -432,7 +432,7 @@ struct CbListener<F: Fn(String) + Send + Sync + 'static>(F);
 impl<F: Fn(String) + Send + Sync + 'static> nacos_sdk::api::config::ConfigChangeListener
     for CbListener<F>
 {
-    /// 接收配置变更通知并推进 watch 通道；用于触发订阅方刷新配置。
+    /// 业务作用：接收配置变更通知并推进 watch 通道；用于触发订阅方刷新配置。
     ///
     /// # 参数
     /// - `resp`: Nacos SDK 返回的原始响应。
@@ -467,7 +467,7 @@ pub struct ConfigRef {
 }
 
 impl ConfigRef {
-    /// 必需引用(缺失即 fail-fast),默认分组。
+    /// 业务作用：必需引用(缺失即 fail-fast),默认分组。
     ///
     /// # 参数
     /// - `data_id`: Nacos 配置 dataId。
@@ -480,7 +480,7 @@ impl ConfigRef {
         }
     }
 
-    /// 可选引用(缺失 warn+skip),默认分组。
+    /// 业务作用：可选引用(缺失 warn+skip),默认分组。
     ///
     /// # 参数
     /// - `data_id`: Nacos 配置 dataId。
@@ -493,7 +493,7 @@ impl ConfigRef {
         }
     }
 
-    /// 指定分组(覆盖默认分组)。
+    /// 业务作用：指定分组(覆盖默认分组)。
     ///
     /// # 参数
     /// - `group`: Nacos 配置 group。
@@ -502,7 +502,7 @@ impl ConfigRef {
         self
     }
 
-    /// 指定内容格式 `file_extension`(门面层按解析优先级填入)。
+    /// 业务作用：指定内容格式 `file_extension`(门面层按解析优先级填入)。
     ///
     /// # 参数
     /// - `ext`: 内容格式扩展名,如 `yaml` 或 `json`。
@@ -529,7 +529,7 @@ pub struct ConfigBundle {
     pub documents: Vec<ConfigDocument>,
 }
 
-/// 分组回退:`Some(非空)` 用它,否则(`None`/空白)回退默认分组。
+/// 业务作用：分组回退:`Some(非空)` 用它,否则(`None`/空白)回退默认分组。
 /// 仅真实后端(`fetch_many`/watch)使用;作为无 feature 依赖被编译时不参与,避免 dead_code。
 ///
 /// # 参数
@@ -543,7 +543,7 @@ fn resolved_group(group: &Option<String>, default_group: &str) -> String {
     }
 }
 
-/// 纯编排:按 `refs` 顺序调用 `fetch_one` 拉取,组装成保序的 [`ConfigBundle`]。
+/// 业务作用：纯编排:按 `refs` 顺序调用 `fetch_one` 拉取,组装成保序的 [`ConfigBundle`]。
 ///
 /// - `optional=true` 拉取失败:warn + 跳过(第一版兼容策略——暂不细分「配置不存在」与鉴权/网络错误,
 ///   后续应细分,避免环境故障被静默吞掉)。
@@ -593,7 +593,7 @@ where
     Ok(ConfigBundle { documents })
 }
 
-/// 拉单份配置原文(fetch / fetch_many 共用的最小单元:校验 + get_config + 结构化日志)。
+/// 业务作用：拉单份配置原文(fetch / fetch_many 共用的最小单元:校验 + get_config + 结构化日志)。
 ///
 /// # 参数
 /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -622,13 +622,13 @@ async fn get_one(
 /// best-effort 关闭句柄的抽象；真实后端使用 [`WatchGuard`]，调用方无需感知底层句柄类型。
 #[cfg(feature = "nacos")]
 trait GuardClose: Send + 'static {
-    /// 关闭 close best effort 流程；用于释放资源并停止后台任务。
+    /// 业务作用：关闭 close best effort 流程；用于释放资源并停止后台任务。
     fn close_best_effort(self) -> impl std::future::Future<Output = ()> + Send;
 }
 
 #[cfg(feature = "nacos")]
 impl GuardClose for WatchGuard {
-    /// 关闭 close best effort 流程；用于释放资源并停止后台任务。
+    /// 业务作用：关闭 close best effort 流程；用于释放资源并停止后台任务。
     async fn close_best_effort(self) {
         if let Err(e) = self.close().await {
             tracing::warn!(error = %e, "nacos: watch_many close guard best-effort 失败");
@@ -636,7 +636,7 @@ impl GuardClose for WatchGuard {
     }
 }
 
-/// 逐个 close 全部 guard(注册/初始 reload 失败时清理)。
+/// 业务作用：逐个 close 全部 guard(注册/初始 reload 失败时清理)。
 ///
 /// # 参数
 /// - `guards`: 已注册监听器的生命周期守卫集合。
@@ -647,7 +647,7 @@ async fn close_all<G: GuardClose>(guards: Vec<G>) {
     }
 }
 
-/// 启动**单后台 reload worker**,并等【初始 reload】发布成功(oneshot ack)后才返回。
+/// 业务作用：启动**单后台 reload worker**,并等【初始 reload】发布成功(oneshot ack)后才返回。
 ///
 /// - 所有 reload(初始 + 后续 notify)都由这【一个】 worker 串行执行 `fetch`——天然防并发 fetch 乱序覆盖。
 /// - 初始 reload 走的是与后续变更【相同】的 worker 路径(不再函数体内同步播种)。
@@ -717,7 +717,7 @@ where
 }
 
 impl NacosConfigClient {
-    /// 按 `refs` 顺序拉一组配置,返回保序的 [`ConfigBundle`](对照)。
+    /// 业务作用：按 `refs` 顺序拉一组配置，返回保序的 [`ConfigBundle`]，用于对照声明顺序执行覆盖。
     ///
     /// **import 顺序 = 覆盖顺序**:靠前的先加载、被靠后的同名 key 覆盖
     /// (如 `tidb.yml`、`afj-redis.yml` 先于 `${app}.yml`,应用专属配置能覆盖共享配置)。
@@ -740,7 +740,7 @@ impl NacosConfigClient {
         }
     }
 
-    /// channel 变体:监听一组配置,任一变更就**全量重拉**后整体发新 [`ConfigBundle`](对照)。
+    /// 业务作用：channel 变体：监听一组配置，任一变更就**全量重拉**后整体发送新的 [`ConfigBundle`]。
     ///
     /// 为什么全量重拉而非只换单个文档:多份配置互相覆盖,只替换变更的那份会让 receiver 看到
     /// 混合的新旧快照;全量重拉保证每次下游拿到的都是【同一时刻、按声明顺序】组装的 bundle。
@@ -837,7 +837,7 @@ pub struct MultiWatchGuard {
 }
 
 impl MultiWatchGuard {
-    /// 显式注销全部子 listener + 中止后台重拉任务(优雅路径:可 await 等各子 guard 注销结果)。
+    /// 业务作用：显式注销全部子 listener + 中止后台重拉任务(优雅路径:可 await 等各子 guard 注销结果)。
     ///
     #[allow(unused_mut)]
     pub async fn close(mut self) -> anyhow::Result<()> {
@@ -856,7 +856,7 @@ impl MultiWatchGuard {
 
 #[cfg(feature = "nacos")]
 impl Drop for MultiWatchGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         // 中止后台任务;子 WatchGuard 由各自的 Drop best-effort 注销 listener。
         self.task.abort();
@@ -864,7 +864,7 @@ impl Drop for MultiWatchGuard {
 }
 
 impl std::fmt::Debug for MultiWatchGuard {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。

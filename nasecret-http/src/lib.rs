@@ -33,7 +33,7 @@ pub struct TlsHttpClientConfig {
 }
 
 impl TlsHttpClientConfig {
-    /// 创建使用默认 10 秒请求超时的配置。
+    /// 业务作用：创建使用默认 10 秒请求超时的配置。
     pub fn new(participant_id: impl Into<Arc<str>>) -> Self {
         Self {
             participant_id: participant_id.into(),
@@ -64,7 +64,7 @@ pub enum TlsHttpClientError {
 }
 
 impl fmt::Display for TlsHttpClientError {
-    /// 输出稳定配置错误分类，不包含 PEM、URL 或底层 TLS 错误正文。
+    /// 业务作用：输出稳定配置错误分类，不包含 PEM、URL 或底层 TLS 错误正文。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "TLS HTTP client configuration error: {self:?}")
     }
@@ -80,19 +80,19 @@ pub struct TlsHttpClientSnapshot {
 }
 
 impl TlsHttpClientSnapshot {
-    /// 构造该客户端所用的 secret generation。
+    /// 业务作用：构造该客户端所用的 secret generation。
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// 借用已经完成 TLS 配置的 reqwest client。
+    /// 业务作用：借用已经完成 TLS 配置的 reqwest client。
     pub fn client(&self) -> &reqwest::Client {
         &self.client
     }
 }
 
 impl fmt::Debug for TlsHttpClientSnapshot {
-    /// 只展示 secret generation，隐藏 reqwest client 内部 TLS 状态。
+    /// 业务作用：只展示 secret generation，隐藏 reqwest client 内部 TLS 状态。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TlsHttpClientSnapshot")
@@ -115,7 +115,7 @@ pub struct RotatingTlsHttpClient {
 }
 
 impl RotatingTlsHttpClient {
-    /// 从已验证初始 secret 快照构造 last-good client。
+    /// 业务作用：从已验证初始 secret 快照构造 last-good client。
     pub fn new(
         initial: &SecretSnapshot,
         config: TlsHttpClientConfig,
@@ -153,12 +153,12 @@ impl RotatingTlsHttpClient {
         })
     }
 
-    /// 固定当前 generation/client；调用方应在一个请求内复用返回的同一 `Arc`。
+    /// 业务作用：固定当前 generation/client；调用方应在一个请求内复用返回的同一 `Arc`。
     pub fn current(&self) -> Arc<TlsHttpClientSnapshot> {
         self.inner.current.load_full()
     }
 
-    /// 返回本 client 观察的 secret ID 集合。
+    /// 业务作用：返回本 client 观察的 secret ID 集合。
     pub fn watched_ids(&self) -> &BTreeSet<Arc<str>> {
         &self.watched_ids
     }
@@ -166,17 +166,17 @@ impl RotatingTlsHttpClient {
 
 #[async_trait::async_trait]
 impl SecretRotationParticipant for RotatingTlsHttpClient {
-    /// 返回两阶段协调器使用的稳定 participant ID。
+    /// 业务作用：返回两阶段协调器使用的稳定 participant ID。
     fn id(&self) -> &str {
         self.config.participant_id.as_ref()
     }
 
-    /// 判断本 client 引用的 identity 或 trust secret 是否发生变化。
+    /// 业务作用：判断本 client 引用的 identity 或 trust secret 是否发生变化。
     fn affected(&self, changed_ids: &BTreeSet<Arc<str>>) -> bool {
         changed_ids.iter().any(|id| self.watched_ids.contains(id))
     }
 
-    /// 完整构造候选 reqwest client；任何 PEM/TLS 错误都发生在统一 commit 之前。
+    /// 业务作用：完整构造候选 reqwest client；任何 PEM/TLS 错误都发生在统一 commit 之前。
     async fn prepare(
         &self,
         candidate: Arc<SecretSnapshot>,
@@ -197,16 +197,16 @@ struct PreparedHttpClient {
 }
 
 impl PreparedSecretRotation for PreparedHttpClient {
-    /// 将候选 client 原子替换为后续请求使用的 last-good。
+    /// 业务作用：将候选 client 原子替换为后续请求使用的 last-good。
     fn commit(self: Box<Self>) {
         self.inner.current.store(self.next);
     }
 
-    /// 候选未发布时直接释放；其中不持有外部副作用。
+    /// 业务作用：候选未发布时直接释放；其中不持有外部副作用。
     fn abort(self: Box<Self>) {}
 }
 
-/// 从同代 secret 快照解析 identity/trust，并构造禁重定向、仅 HTTPS 的 reqwest client。
+/// 业务作用：从同代 secret 快照解析 identity/trust，并构造禁重定向、仅 HTTPS 的 reqwest client。
 fn build_client(
     snapshot: &SecretSnapshot,
     config: &TlsHttpClientConfig,
@@ -256,7 +256,7 @@ fn build_client(
     })
 }
 
-/// 校验 participant 与 secret 引用使用的短 ASCII ID。
+/// 业务作用：校验 participant 与 secret 引用使用的短 ASCII ID。
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -265,7 +265,7 @@ fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// 将 TLS 细节错误压缩为协调器可安全记录的静态错误码。
+/// 业务作用：将 TLS 细节错误压缩为协调器可安全记录的静态错误码。
 fn prepare_error(error: TlsHttpClientError) -> SecretPrepareError {
     let code = match error {
         TlsHttpClientError::InvalidParticipantId => "invalid-participant-id",

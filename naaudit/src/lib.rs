@@ -22,7 +22,7 @@ pub struct AuditWriteError {
 }
 
 impl AuditWriteError {
-    /// 创建脱敏错误。
+    /// 业务作用：创建脱敏错误。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -31,7 +31,7 @@ impl AuditWriteError {
 }
 
 impl std::fmt::Display for AuditWriteError {
-    /// 输出不包含 SQL、凭据或审计载荷的稳定错误摘要。
+    /// 业务作用：输出不包含 SQL、凭据或审计载荷的稳定错误摘要。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "audit write failed: {}", self.reason)
     }
@@ -67,7 +67,7 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
-    /// 用必填字段创建审计事件(无附加 context)。
+    /// 业务作用：用必填字段创建审计事件(无附加 context)。
     pub fn new(
         actor: impl Into<String>,
         action: impl Into<String>,
@@ -85,13 +85,13 @@ impl AuditEvent {
         }
     }
 
-    /// 追加一条脱敏上下文键值。
+    /// 业务作用：追加一条脱敏上下文键值。
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
     }
 
-    /// 按统一映射约定转成 outbox 事件:aggregate_type=`Audit`、aggregate_id=actor、event_type=action、
+    /// 业务作用：按统一映射约定转成 outbox 事件:aggregate_type=`Audit`、aggregate_id=actor、event_type=action、
     /// payload=事件 JSON。
     ///
     /// [`OutboxAuditSink`](同步 `OutboxWriter` 路径)与**异步持久 outbox**(如 `MySqlOutbox::append`,在
@@ -106,7 +106,7 @@ impl AuditEvent {
 
 /// 审计投递端。
 pub trait AuditSink {
-    /// 记录一条审计事件(实现负责可靠投递)。
+    /// 业务作用：记录一条审计事件(实现负责可靠投递)。
     fn record(&self, event: AuditEvent);
 }
 
@@ -116,7 +116,7 @@ pub trait AuditSink {
 /// 或“业务提交但审计失败”的双写窗口。
 #[async_trait::async_trait]
 pub trait TransactionalAuditSink: Send + Sync {
-    /// 在当前业务事务内记录事件。
+    /// 业务作用：在当前业务事务内记录事件。
     async fn record_transactional(&self, event: AuditEvent) -> Result<(), AuditWriteError>;
 }
 
@@ -128,14 +128,14 @@ pub struct OutboxAuditSink<W: OutboxWriter> {
 }
 
 impl<W: OutboxWriter> OutboxAuditSink<W> {
-    /// 用一个 outbox writer 构造。
+    /// 业务作用：用一个 outbox writer 构造。
     pub fn new(writer: W) -> Self {
         Self { writer }
     }
 }
 
 impl<W: OutboxWriter> AuditSink for OutboxAuditSink<W> {
-    /// 把审计事实映射为 outbox 事件，交由同步 writer 加入当前可靠投递路径。
+    /// 业务作用：把审计事实映射为 outbox 事件，交由同步 writer 加入当前可靠投递路径。
     fn record(&self, event: AuditEvent) {
         // 与异步持久路径共用同一映射约定(单一来源,见 `AuditEvent::into_outbox_event`)。
         self.writer.append(event.into_outbox_event());

@@ -231,11 +231,11 @@ idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.0", p
 openapi_impl = { package = "naopenapi", version = "1.0.0", optional = true }
 audit_impl = { package = "naaudit", version = "1.0.0", path = "../naaudit", optional = true }
 audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.0", path = "../naaudit-mysql", optional = true }
-secret_impl = { package = "nasecret", version = "1.0.0", path = "../nasecret", optional = true }
+secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", path = "../nasecret-http", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", path = "../nasecret-vault", optional = true }
 object_impl = { package = "naobject", version = "1.0.0", path = "../naobject", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.0.0", path = "../nagrpc", optional = true }
+grpc_impl = { package = "nagrpc", version = "1.0.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", path = "../nauth-oauth", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.0", path = "../nasched", optional = true }
 async_macro = { package = "async-macro", version = "1.0.0", path = "../async-macro", optional = true }
@@ -243,20 +243,20 @@ web_impl = { package = "naweb", version = "1.0.0", path = "../naweb", optional =
 web_macro = { package = "naweb-macro", version = "1.0.0", path = "../naweb-macro", optional = true }
 mapper_impl = { package = "namapper", version = "1.0.0", path = "../namapper", optional = true }
 namapper_macro = { package = "namapper-macro", version = "1.0.0", path = "../namapper-macro", optional = true }
-partition_impl = { package = "napart", version = "1.0.0", path = "../napart", optional = true }
+partition_impl = { package = "napart", version = "1.0.0", optional = true }
 ws_impl = { package = "naws", version = "1.0.0", path = "../naws", optional = true, default-features = false }
 kafka_impl = { package = "nafka", version = "1.0.0", path = "../nafka", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true, default-features = false }
-crypto_impl = { package = "ncrypto", version = "1.0.0", path = "../ncrypto", optional = true }
-numeric_impl = { package = "nanum", version = "1.0.0", path = "../nanum", optional = true }
-date_impl = { package = "nadate", version = "1.0.0", path = "../nadate", optional = true }
+crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
+numeric_impl = { package = "nanum", version = "1.0.0", optional = true }
+date_impl = { package = "nadate", version = "1.0.0", optional = true }
 log_impl = { package = "nalog", version = "1.0.0", path = "../nalog", optional = true }
 base_impl = { package = "nabase", version = "1.0.0", optional = true }
 yml_impl = { package = "naml", version = "1.0.0", optional = true }
 config_boot_impl = { package = "config-boot", version = "1.0.0", path = "../config-boot", optional = true }
-image_impl = { package = "naimg", version = "1.0.0", path = "../naimg", optional = true }
+image_impl = { package = "naimg", version = "1.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "1.0.0", optional = true }
 nacos_impl = { package = "nanacos", version = "1.0.0", path = "../nanacos", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "1.0.0", path = "../rest-discovery", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "1.0.0", path = "../rest-client-macro", optional = true }
+rest_client_macro = { package = "rest-client-macro", version = "1.0.0", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.0", path = "../rest-discovery-nacos", optional = true, default-features = false }

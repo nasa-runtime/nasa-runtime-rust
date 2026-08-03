@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
 
-/// # `#[grafana]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + Prometheus 指标
+/// 业务作用：# `#[grafana]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + Prometheus 指标
 ///
 /// **所有参数全可省**;空参 = 只采集监控指标(不拦截、不限时)。
 ///
@@ -248,7 +248,7 @@ pub fn grafana(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// 把 `Option<T>` 的解析结果拼成源码级 `Some(...)` / `None` token。
+/// 业务作用：把 `Option<T>` 的解析结果拼成源码级 `Some(...)` / `None` token。
 ///
 /// # 参数
 /// - `value`: Some(值 token) 或 None。
@@ -259,7 +259,7 @@ fn option_tokens(value: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenS
     }
 }
 
-/// 递归扫描 token 流，检测是否已有宏生成的命令槽。
+/// 业务作用：递归扫描 token 流，检测是否已有宏生成的命令槽。
 ///
 /// # 参数
 /// - `stream`: 待扫描的 token 流(函数体)。
@@ -278,9 +278,9 @@ fn scan_idents(stream: proc_macro2::TokenStream, saw_nafana_cmd: &mut bool) {
     }
 }
 
-/// 返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
+/// 业务作用：返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
 fn type_contains_impl_trait(ty: &syn::Type) -> bool {
-    /// 递归检查返回类型 token 树中是否出现 `impl` 关键字。
+    /// 业务作用：递归检查返回类型 token 树中是否出现 `impl` 关键字。
     fn contains(stream: proc_macro2::TokenStream) -> bool {
         stream.into_iter().any(|tree| match tree {
             proc_macro2::TokenTree::Ident(ident) => ident == "impl",
@@ -292,7 +292,7 @@ fn type_contains_impl_trait(ty: &syn::Type) -> bool {
     contains(ty.to_token_stream())
 }
 
-/// 属性名按最后一个 path segment 匹配，支持短路径、门面完整路径和 Cargo 重命名后的多段路径。
+/// 业务作用：属性名按最后一个 path segment 匹配，支持短路径、门面完整路径和 Cargo 重命名后的多段路径。
 ///
 /// # 参数
 /// - `attr`: 待判定的属性。
@@ -305,7 +305,7 @@ fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 从一条 #[*_mapping(...)] 属性里抽出 path 字符串;单串简写与 key=value 具名写法都支持,
+/// 业务作用：从一条 #[*_mapping(...)] 属性里抽出 path 字符串;单串简写与 key=value 具名写法都支持,
 /// 取不到返回 None。
 ///
 /// # 参数

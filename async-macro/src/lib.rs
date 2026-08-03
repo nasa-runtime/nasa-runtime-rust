@@ -32,7 +32,7 @@ use syn::{parse_macro_input, parse_quote, ItemFn, LitBool, LitInt, LitStr, Retur
 // 仅处理【编译期字面量】:占位符/表达式(${...}/#{...})需配置/容器,显式拒绝。
 // ════════════════════════════════════════════════════════════════════════════
 
-/// `time_unit` 名 → 规范化单位记号(`ms/s/m/h/d/us/ns`)。供数字版与 string 无单位 fallback 共用。
+/// 业务作用：`time_unit` 名 → 规范化单位记号(`ms/s/m/h/d/us/ns`)。供数字版与 string 无单位 fallback 共用。
 ///
 /// # 参数
 /// - `u`: 注解里填写的 `time_unit` 原始字符串,允许大小写和常见别名。
@@ -51,7 +51,7 @@ fn canonical_time_unit(u: &str) -> Result<&'static str, String> {
     }
 }
 
-/// `value × 单位` → 毫秒。`us`/`ns` 仅当能**无损**折算(整除 1000 / 1_000_000)才接受,否则报错(调度精度毫秒,不静默截断)。
+/// 业务作用：`value × 单位` → 毫秒。`us`/`ns` 仅当能**无损**折算(整除 1000 / 1_000_000)才接受,否则报错(调度精度毫秒,不静默截断)。
 ///
 /// # 参数
 /// - `value`: 注解中的数值部分,例如 `fixed_rate = 5` 或 duration string 中的 `5s` 的 `5`。
@@ -78,7 +78,7 @@ fn unit_part_to_ms(value: u64, unit: &str, ctx: &str) -> Result<u64, String> {
     }
 }
 
-/// 单位粒度排序:d>h>m>s>ms>us>ns。COMPOSITE 段必须严格从大到小(避免歧义与重复)。
+/// 业务作用：单位粒度排序:d>h>m>s>ms>us>ns。COMPOSITE 段必须严格从大到小(避免歧义与重复)。
 ///
 /// # 参数
 /// - `unit`: duration string 中已经转小写的单位段。
@@ -95,7 +95,7 @@ fn unit_rank(unit: &str) -> Option<u8> {
     }
 }
 
-/// 字面量 duration string → 毫秒(对照原 `*String` 语义)。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
+/// 业务作用：字面量 duration string → 毫秒(对照原 `*String` 语义)。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
 /// 支持**编译期字面量**:可选 `+` 正号;纯整数(走 fallback);SIMPLE/COMPOSITE 段式 `1s500ms`/`1h12m27s`/`1d 2h 3m`(单位
 /// `d/h/m/s/ms/us/ns`,从大到小);ISO-8601 `P1DT2H`/`PT1M30S`/`PT0.5S`。负号与占位符/表达式拒绝。
 ///
@@ -199,7 +199,7 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
     Ok(total)
 }
 
-/// 解析 ISO-8601 时间段 `P[nD][T[nH][nM][n[.fffffffff]S]]`:日期段只取天 `D`,时间段(`T` 之后)取 `H`/`M`/`S`,
+/// 业务作用：解析 ISO-8601 时间段 `P[nD][T[nH][nM][n[.fffffffff]S]]`:日期段只取天 `D`,时间段(`T` 之后)取 `H`/`M`/`S`,
 /// **仅秒可带小数(1~9 位,按纳秒解析)**,且须能**无损折算到毫秒**否则拒绝(同 us/ns 策略)。大小写不限。
 /// 不支持年/月/周(`Y`/`W`/月,需历法不定长)。
 ///
@@ -312,7 +312,7 @@ fn parse_iso8601_duration(t: &str) -> Result<u64, String> {
     Ok(total)
 }
 
-/// 从多个来源里收敛出**最多一个**(>1 个即互斥冲突),返回 (选中来源名, 毫秒值)。
+/// 业务作用：从多个来源里收敛出**最多一个**(>1 个即互斥冲突),返回 (选中来源名, 毫秒值)。
 ///
 /// # 参数
 /// - `family`: 参数族名称,用于错误文案,例如 `fixed_rate` 或 `fixed_delay`。
@@ -331,7 +331,7 @@ fn pick_one<'a>(
     Ok(cands.into_iter().next())
 }
 
-/// 返回类型是否是【可解构 / 可 `?` 的标准 Result】:**仅带明确路径前缀**的 `std::result::Result` / `core::result::Result` /
+/// 业务作用：返回类型是否是【可解构 / 可 `?` 的标准 Result】:**仅带明确路径前缀**的 `std::result::Result` / `core::result::Result` /
 /// `anyhow::Result`(且末段带角括号泛型参数)。
 /// **刻意不收裸名 `Result`**:过程宏无法解析裸名真实来源,业务可能有自定义 `struct Result<T,E>` 或别名,把它当标准 Result
 /// 解构(`.is_err()` / `?`)会破坏合法代码编译;且"返回值被忽略"本就是默认契约,Err 自动记日志只是增强。
@@ -371,7 +371,7 @@ fn is_result_return(output: &ReturnType) -> bool {
     )
 }
 
-/// 返回类型是否是 `anyhow::Result<_>`。**专供 `#[EnableScheduling]` 判断能否注入 `?`**:
+/// 业务作用：返回类型是否是 `anyhow::Result<_>`。**专供 `#[EnableScheduling]` 判断能否注入 `?`**:
 /// `start_scheduled()` 返回 `anyhow::Result<()>`,`?` 需把其 `anyhow::Error` 转成 main 的错误类型;只有 main 也返回
 /// `anyhow::Result<_>` 时这一转换**必然成立**(同类型)。其它显式路径 Result(如 `std::result::Result<_, String>`,
 /// `String` 不实现 `From<anyhow::Error>`)若注入 `?` 会编译失败——过程宏无法静态求解 `From`,故只认 anyhow,其余走 expect。
@@ -411,7 +411,7 @@ fn is_anyhow_result_return(output: &ReturnType) -> bool {
 // ════════════════════════════════════════════════════════════════════════════
 // #[Async] —— 简单异步执行(调用即后台跑,返回 JoinHandle)
 // ════════════════════════════════════════════════════════════════════════════
-/// # `#[Async]` —— 简单异步执行
+/// 业务作用：# `#[Async]` —— 简单异步执行
 ///
 /// 贴在【带参/零参均可】的 `async fn foo(args) -> T` 上。编译期改写成【同步函数】
 /// `fn foo(args) -> JoinHandle<T>`:调用即 `tokio::spawn` 原体到后台、立即返回 `JoinHandle<T>`
@@ -577,7 +577,7 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 // #[scheduled] —— 定时任务(零参,自动注册 + 调度)
 // ════════════════════════════════════════════════════════════════════════════
-/// # `#[scheduled]` —— 定时任务
+/// 业务作用：# `#[scheduled]` —— 定时任务
 ///
 /// 贴在【零参 async fn】上,被自动注册并由调度器跑(没人调它)。**返回类型不限**——值被忽略(对照"返回值被调度器忽略")。
 /// 若返回**带显式路径的标准 Result**(`std::result::Result<_,_>` / `core::result::Result<_,_>` / `anyhow::Result<_>`),
@@ -1042,7 +1042,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
 // `std::result::Result<_, String>` 注入 `?` 会因 `String: !From<anyhow::Error>` 编译失败,过程宏无法静态求解)。
 // 其余一切(`()`、无返回、`ExitCode`、裸名/其它 Result)→ `expect` **fail-fast panic**(不进 body),不吞失败。
 // `#[Enable*(...)]` 非空参数 → compile_error(本注解无参)。
-///
+/// 业务作用：`#[Enable*(...)]` 非空参数 → compile_error(本注解无参)。
 /// # 参数
 /// - `attr`: `#[EnableScheduling]`/`#[EnableAsync]` 括号内的 token stream,当前必须为空。
 /// - `item`: 被注解的 async main 函数 token stream。
@@ -1092,7 +1092,7 @@ fn gen_enable(attr: TokenStream, item: TokenStream, what: &str) -> TokenStream {
     .into()
 }
 
-/// 贴在 main 上(★ 必须在 `#[tokio::main]` 之【上】),启动时拉起所有 #[scheduled] 定时任务。
+/// 业务作用：贴在 main 上(★ 必须在 `#[tokio::main]` 之【上】),启动时拉起所有 #[scheduled] 定时任务。
 /// (#[Async] 是编译期改写、调用即生效,不需要本注解;本注解只负责启动【定时】调度。)
 ///
 /// **错误传播**:仅 main 返回 **`anyhow::Result<_>`** 时,调度启动失败 `?` 传播(start 返回 anyhow::Result,转换必成立);
@@ -1118,7 +1118,7 @@ pub fn EnableScheduling(attr: TokenStream, item: TokenStream) -> TokenStream {
     gen_enable(attr, item, "EnableScheduling")
 }
 
-/// `#[EnableScheduling]` 的**兼容别名**(旧名;实际启动的是 #[scheduled] 定时调度,与 #[Async] 无关)。新代码建议用
+/// 业务作用：`#[EnableScheduling]` 的**兼容别名**(旧名;实际启动的是 #[scheduled] 定时调度,与 #[Async] 无关)。新代码建议用
 /// `#[EnableScheduling]`。
 ///
 /// # 参数

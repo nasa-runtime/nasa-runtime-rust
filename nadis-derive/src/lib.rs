@@ -77,7 +77,7 @@ struct FieldInfo {
     decl_idx: usize, // 声明顺序(array_key 同 order 时报错的诊断 & 稳定排序)
 }
 
-/// 字段类型是否 f64/f32(M1:to_fields 浮点用 原实现_double_to_string 对齐 原实现)。
+/// 业务作用：字段类型是否 f64/f32(M1:to_fields 浮点用 原实现_double_to_string 对齐 原实现)。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -90,7 +90,7 @@ fn is_float_type(ty: &Type) -> bool {
     false
 }
 
-/// 展开 Redis 文档派生宏；用于生成键、元数据和序列化辅助实现。
+/// 业务作用：展开 Redis 文档派生宏；用于生成键、元数据和序列化辅助实现。
 ///
 /// # 参数
 ///
@@ -104,7 +104,7 @@ pub fn derive_redis_document(input: TokenStream) -> TokenStream {
     }
 }
 
-/// 解析派生输入并生成实现代码；用于把结构体声明转换为文档契约。
+/// 业务作用：解析派生输入并生成实现代码；用于把结构体声明转换为文档契约。
 ///
 /// # 参数
 /// - `input`: 宏或解析器收到的原始输入。
@@ -404,7 +404,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #root::RedisDocument for #struct_name {
-            /// 返回派生生成的文档元数据；用于运行时读取索引和字段定义。
+            /// 业务作用：返回派生生成的文档元数据；用于运行时读取索引和字段定义。
             fn meta() -> &'static #root::DocMeta {
                 static META: ::std::sync::OnceLock<#root::DocMeta> =
                     ::std::sync::OnceLock::new();
@@ -420,17 +420,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
             }
 
-            /// 生成文档实例的主键字符串；用于定位 Redis 中的具体对象。
+            /// 业务作用：生成文档实例的主键字符串；用于定位 Redis 中的具体对象。
             fn id(&self) -> ::std::string::String {
                 self.#id_ident.to_string()
             }
 
-            /// 转换为 fields 表示；用于对接下游接口。
+            /// 业务作用：转换为 fields 表示；用于对接下游接口。
             fn to_fields(&self) -> ::std::vec::Vec<(::std::string::String, ::std::string::String)> {
                 vec![#(#to_pairs),*]
             }
 
-            /// 从 fields 构造结果；用于统一输入适配。
+            /// 业务作用：从 fields 构造结果；用于统一输入适配。
             ///
             /// # 参数
             /// - `fields`: Hash 字段名列表,用于批量读取或删除。
@@ -442,12 +442,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
             }
 
-            /// 收集占位符字段值；用于按模板拼接文档键。
+            /// 业务作用：收集占位符字段值；用于按模板拼接文档键。
             fn placeholder_parts(&self) -> ::std::vec::Vec<::std::string::String> {
                 vec![#(self.#placeholder_idents.to_string()),*]
             }
 
-            /// 收集数组键字段值；用于生成数组成员的定位键。
+            /// 业务作用：收集数组键字段值；用于生成数组成员的定位键。
             fn array_key_parts(&self) -> ::std::vec::Vec<::std::string::String> {
                 vec![#(self.#array_key_idents.to_string()),*]
             }
@@ -455,7 +455,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// id_numeric 判定:字段类型路径末段是数值类型 → JSON 里渲染为数字
+/// 业务作用：id_numeric 判定:字段类型路径末段是数值类型 → JSON 里渲染为数字
 /// (决定 idFilter 字面量形态,见 DocMeta.id_numeric 注释)。
 ///
 /// # 参数
@@ -483,7 +483,7 @@ fn is_numeric_type(ty: &Type) -> bool {
     )
 }
 
-/// 展开期解析 prefix 占位符(与 nadis::DocMeta::segments 同语法:
+/// 业务作用：展开期解析 prefix 占位符(与 nadis::DocMeta::segments 同语法:
 /// `{name}` 不嵌套、括号配对、name 非空)。返回占位符名按出现顺序。
 ///
 /// # 参数

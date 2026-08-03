@@ -28,7 +28,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct ObjectKey(Arc<str>);
 
 impl ObjectKey {
-    /// 校验并构造 key。拒绝空 key、绝对路径、控制字符、`.`/`..` 段、空段与超过 1024 字节。
+    /// 业务作用：校验并构造 key。拒绝空 key、绝对路径、控制字符、`.`/`..` 段、空段与超过 1024 字节。
     pub fn new(value: impl Into<Arc<str>>) -> Result<Self, ObjectStoreError> {
         let value = value.into();
         if value.is_empty()
@@ -44,7 +44,7 @@ impl ObjectKey {
         Ok(Self(value))
     }
 
-    /// 返回原始相对 key。
+    /// 业务作用：返回原始相对 key。
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -97,13 +97,13 @@ pub struct GetObject {
 /// provider-neutral 对象存储合同。
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
-    /// 上传一个有界对象。
+    /// 业务作用：上传一个有界对象。
     async fn put(&self, request: PutObject) -> Result<ObjectMetadata, ObjectStoreError>;
-    /// 下载一个有界对象。
+    /// 业务作用：下载一个有界对象。
     async fn get(&self, key: &ObjectKey) -> Result<GetObject, ObjectStoreError>;
-    /// 只读取元数据。
+    /// 业务作用：只读取元数据。
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStoreError>;
-    /// 幂等删除；不存在也算成功。
+    /// 业务作用：幂等删除；不存在也算成功。
     async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStoreError>;
 }
 
@@ -118,7 +118,7 @@ pub struct S3Credentials {
 }
 
 impl fmt::Debug for S3Credentials {
-    /// 只展示 credential 字段是否存在，永不输出实际认证字节。
+    /// 业务作用：只展示 credential 字段是否存在，永不输出实际认证字节。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("S3Credentials")
@@ -152,7 +152,7 @@ pub struct S3Options {
 }
 
 impl S3Options {
-    /// 创建生产保守缺省：10 秒、16 MiB、强制 SHA-256 metadata。
+    /// 业务作用：创建生产保守缺省：10 秒、16 MiB、强制 SHA-256 metadata。
     pub fn new(
         endpoint: impl Into<String>,
         bucket: impl Into<String>,
@@ -202,7 +202,7 @@ pub enum ObjectStoreError {
 }
 
 impl fmt::Display for ObjectStoreError {
-    /// 输出稳定错误分类，不附带 endpoint、credential、key 或远端正文。
+    /// 业务作用：输出稳定错误分类，不附带 endpoint、credential、key 或远端正文。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "object store error: {self:?}")
     }
@@ -218,7 +218,7 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
-    /// 校验配置并构造 adapter。
+    /// 业务作用：校验配置并构造 adapter。
     pub fn new(options: S3Options) -> Result<Self, ObjectStoreError> {
         if !valid_bucket(&options.bucket)
             || options.region.is_empty()
@@ -285,7 +285,7 @@ impl S3ObjectStore {
         })
     }
 
-    /// 在保留 endpoint 前缀的前提下，以独立 path segment 追加 bucket 与已校验对象 key。
+    /// 业务作用：在保留 endpoint 前缀的前提下，以独立 path segment 追加 bucket 与已校验对象 key。
     fn object_url(&self, key: &ObjectKey) -> Result<reqwest::Url, ObjectStoreError> {
         let mut url = self.endpoint.clone();
         let mut segments = url
@@ -300,7 +300,7 @@ impl S3ObjectStore {
         Ok(url)
     }
 
-    /// 构造 SigV4 canonical request、派生签名密钥并附加全部认证 header。
+    /// 业务作用：构造 SigV4 canonical request、派生签名密钥并附加全部认证 header。
     fn signed(
         &self,
         method: reqwest::Method,
@@ -395,7 +395,7 @@ impl S3ObjectStore {
         Ok(request)
     }
 
-    /// 从响应头提取并校验有界 ETag、SHA-256 与已知对象大小。
+    /// 业务作用：从响应头提取并校验有界 ETag、SHA-256 与已知对象大小。
     fn metadata(
         &self,
         key: &ObjectKey,
@@ -429,7 +429,7 @@ impl S3ObjectStore {
 
 #[async_trait::async_trait]
 impl ObjectStore for S3ObjectStore {
-    /// 校验对象与 Content-Type 上限，写入内容摘要并执行覆盖或 CreateOnly 上传。
+    /// 业务作用：校验对象与 Content-Type 上限，写入内容摘要并执行覆盖或 CreateOnly 上传。
     async fn put(&self, request: PutObject) -> Result<ObjectMetadata, ObjectStoreError> {
         let object_size = request.body.len();
         if object_size > self.options.max_object_bytes {
@@ -472,7 +472,7 @@ impl ObjectStore for S3ObjectStore {
         }
     }
 
-    /// 在 Content-Length 与流式累计两层限制下下载对象，并按配置复核 SHA-256。
+    /// 业务作用：在 Content-Length 与流式累计两层限制下下载对象，并按配置复核 SHA-256。
     async fn get(&self, key: &ObjectKey) -> Result<GetObject, ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -527,7 +527,7 @@ impl ObjectStore for S3ObjectStore {
         Ok(GetObject { metadata, body })
     }
 
-    /// 发送签名 HEAD 请求并把远端元数据投影为经过边界校验的对象摘要。
+    /// 业务作用：发送签名 HEAD 请求并把远端元数据投影为经过边界校验的对象摘要。
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -556,7 +556,7 @@ impl ObjectStore for S3ObjectStore {
         self.metadata(key, response.headers(), size)
     }
 
-    /// 发送签名 DELETE；成功与不存在都映射为幂等成功。
+    /// 业务作用：发送签名 DELETE；成功与不存在都映射为幂等成功。
     async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStoreError> {
         let url = self.object_url(key)?;
         let response = self
@@ -572,7 +572,7 @@ impl ObjectStore for S3ObjectStore {
     }
 }
 
-/// 按 S3 DNS-compatible 规则校验 bucket 名，额外拒绝 IPv4 字面量。
+/// 业务作用：按 S3 DNS-compatible 规则校验 bucket 名，额外拒绝 IPv4 字面量。
 fn valid_bucket(bucket: &str) -> bool {
     (3..=63).contains(&bucket.len())
         && bucket.bytes().all(|byte| {
@@ -590,7 +590,7 @@ fn valid_bucket(bucket: &str) -> bool {
         && bucket.parse::<std::net::Ipv4Addr>().is_err()
 }
 
-/// 计算一轮 HMAC-SHA256，并用可清零缓冲承载 SigV4 派生密钥。
+/// 业务作用：计算一轮 HMAC-SHA256，并用可清零缓冲承载 SigV4 派生密钥。
 fn hmac(key: &[u8], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, ObjectStoreError> {
     let mut mac =
         HmacSha256::new_from_slice(key).map_err(|_| ObjectStoreError::InvalidConfiguration)?;
@@ -598,12 +598,12 @@ fn hmac(key: &[u8], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, ObjectStoreError>
     Ok(Zeroizing::new(mac.finalize().into_bytes().to_vec()))
 }
 
-/// 返回空请求体的 SHA-256 hex，用于 GET/HEAD/DELETE 的 SigV4 payload hash。
+/// 业务作用：返回空请求体的 SHA-256 hex，用于 GET/HEAD/DELETE 的 SigV4 payload hash。
 fn empty_sha256() -> String {
     hex::encode(Sha256::digest([]))
 }
 
-/// 读取可选标准 header，并拒绝非文本值。
+/// 业务作用：读取可选标准 header，并拒绝非文本值。
 fn optional_header(
     headers: &reqwest::header::HeaderMap,
     name: reqwest::header::HeaderName,
@@ -619,7 +619,7 @@ fn optional_header(
         .transpose()
 }
 
-/// 读取可选扩展 header，并拒绝非文本值。
+/// 业务作用：读取可选扩展 header，并拒绝非文本值。
 fn optional_header_name(
     headers: &reqwest::header::HeaderMap,
     name: &'static str,

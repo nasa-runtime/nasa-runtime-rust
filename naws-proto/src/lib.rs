@@ -41,7 +41,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// 从 ordinal 构造序列化模式。
+    /// 业务作用：从 ordinal 构造序列化模式。
     ///
     /// # 参数
     /// - `v`: Frame 头或 ClusterEvent 中携带的模式序号。
@@ -55,7 +55,7 @@ impl Mode {
         }
     }
 
-    /// 返回协议类型序号；用于在线路格式中写入枚举标识。
+    /// 业务作用：返回协议类型序号；用于在线路格式中写入枚举标识。
     pub fn ordinal(self) -> u8 {
         self as u8
     }
@@ -63,13 +63,13 @@ impl Mode {
 
 /// 统一 codec 入口。每个 schema 类型实现它,按 mode 分派到对应编解码。
 pub trait WireCodec: Sized {
-    /// 按指定模式编码当前 schema 对象。
+    /// 业务作用：按指定模式编码当前 schema 对象。
     ///
     /// # 参数
     /// - `mode`: 要使用的线协议模式,决定走 JSON_BYTES、VARINT_TLV、BITPACK_TLV 或 FAST_FIXED。
     fn encode(&self, mode: Mode) -> Result<Vec<u8>>;
 
-    /// 按指定模式把字节还原为 schema 对象。
+    /// 业务作用：按指定模式把字节还原为 schema 对象。
     ///
     /// # 参数
     /// - `mode`: 输入字节所使用的线协议模式。

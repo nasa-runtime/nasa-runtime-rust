@@ -21,7 +21,7 @@ const C_RESET: &str = "\x1b[0m";
 const C_MAGENTA: &str = "\x1b[35m";
 const C_CYAN: &str = "\x1b[36m";
 
-/// 返回日志级别颜色码；用于控制台输出时区分严重程度。
+/// 业务作用：返回日志级别颜色码；用于控制台输出时区分严重程度。
 ///
 /// # 参数
 /// - `level`: 日志级别。
@@ -53,7 +53,7 @@ pub enum LogPatternError {
 }
 
 impl std::fmt::Display for LogPatternError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -115,7 +115,7 @@ enum PatternItem {
 }
 
 impl CompiledLogPattern {
-    /// 解析 pattern 字符串;未知/非法 token 返 `Err`。
+    /// 业务作用：解析 pattern 字符串;未知/非法 token 返 `Err`。
     ///
     /// # 参数
     /// - `s`: 用户配置的日志输出 pattern,例如时间、级别、线程、logger 和 message 组合。
@@ -128,7 +128,7 @@ impl CompiledLogPattern {
         Ok(Self { items })
     }
 
-    /// 渲染一条事件(被 `LogFormatter` 调用)。`ansi` 决定 `%highlight/%magenta/%cyan` 是否输出 ANSI 转义。
+    /// 业务作用：渲染一条事件(被 `LogFormatter` 调用)。`ansi` 决定 `%highlight/%magenta/%cyan` 是否输出 ANSI 转义。
     pub(crate) fn render<S, N>(
         &self,
         ctx: &FmtContext<'_, S, N>,
@@ -145,7 +145,7 @@ impl CompiledLogPattern {
     }
 }
 
-/// 渲染 render items 内容；用于生成最终输出文本。
+/// 业务作用：渲染 render items 内容；用于生成最终输出文本。
 ///
 /// # 参数
 /// - `items`: 已编译的日志 pattern 片段列表。
@@ -202,7 +202,7 @@ where
     Ok(())
 }
 
-/// 渲染 render wrapped 内容；用于生成最终输出文本。
+/// 业务作用：渲染 render wrapped 内容；用于生成最终输出文本。
 ///
 /// # 参数
 /// - `children`: 包装型日志 pattern 的子片段。
@@ -235,7 +235,7 @@ where
     }
 }
 
-/// 原实现 风格包名缩写(对照 `%logger{N}`):除末段外只留首字符、`::`→`.`;若仍超 `max_len` 则**硬截断**到 `max_len`
+/// 业务作用：原实现 风格包名缩写(对照 `%logger{N}`):除末段外只留首字符、`::`→`.`;若仍超 `max_len` 则**硬截断**到 `max_len`
 /// (保证 `%logger{N}` 的 `N` 生效;不强求 100% 复刻 logback,但保持原默认输出 + 长度上限)。
 ///
 /// # 参数
@@ -276,12 +276,12 @@ struct Parser {
 }
 
 impl Parser {
-    /// 查看模式解析器的下一个字符；用于分支判断但不消耗输入。
+    /// 业务作用：查看模式解析器的下一个字符；用于分支判断但不消耗输入。
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
 
-    /// 解析 read number 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 read number 输入；用于把文本或语法节点转换为内部结构。
     fn read_number(&mut self) -> Option<usize> {
         let start = self.pos;
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
@@ -298,7 +298,7 @@ impl Parser {
         }
     }
 
-    /// 解析 read ident 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 read ident 输入；用于把文本或语法节点转换为内部结构。
     fn read_ident(&mut self) -> String {
         let start = self.pos;
         while matches!(self.peek(), Some(c) if c.is_ascii_alphabetic()) {
@@ -307,7 +307,7 @@ impl Parser {
         self.chars[start..self.pos].iter().collect()
     }
 
-    /// 读取 `{...}` 中的参数内容。
+    /// 业务作用：读取 `{...}` 中的参数内容。
     ///
     /// 返回值不包含右花括号；如果模板里花括号未闭合则返回 `None`,让上层把格式串视为无效片段。
     fn read_braced(&mut self) -> Option<String> {
@@ -327,7 +327,7 @@ impl Parser {
         None // 未闭合
     }
 
-    /// 解析 parse seq 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 parse seq 输入；用于把文本或语法节点转换为内部结构。
     ///
     /// # 参数
     /// - `stop_at_paren`: 解析 pattern 时是否在右括号处停止。
@@ -355,7 +355,7 @@ impl Parser {
         Ok(items)
     }
 
-    /// 解析 parse conversion 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 parse conversion 输入；用于把文本或语法节点转换为内部结构。
     fn parse_conversion(&mut self) -> Result<PatternItem, LogPatternError> {
         let Some(c) = self.peek() else {
             return Err(LogPatternError::UnknownConversion(String::new()));
@@ -423,7 +423,7 @@ impl Parser {
         }
     }
 
-    /// 解析 parse wrapper 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 parse wrapper 输入；用于把文本或语法节点转换为内部结构。
     ///
     /// # 参数
     /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -444,7 +444,7 @@ impl Parser {
     }
 }
 
-/// 原实现 日期 pattern → chrono 格式串(仅 yyyy/MM/dd/HH/mm/ss/SSS 子集;其余字母 token 报错)。
+/// 业务作用：原实现 日期 pattern → chrono 格式串(仅 yyyy/MM/dd/HH/mm/ss/SSS 子集;其余字母 token 报错)。
 /// `SSS → %3f`(3 位毫秒不带前导点),使 `ss.SSS` → `%S.%3f` 渲染为 `07.298`,与旧硬编码 `%S%.3f` 一致。
 ///
 /// # 参数
@@ -473,7 +473,7 @@ fn map_legacy_date(s: &str) -> Result<String, LogPatternError> {
     Ok(out)
 }
 
-/// 映射 date token 配置；用于转换为运行时需要的类型。
+/// 业务作用：映射 date token 配置；用于转换为运行时需要的类型。
 ///
 /// # 参数
 /// - `c`: 日期 pattern 中当前解析到的格式字符。

@@ -20,7 +20,7 @@ use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
 // ════════════════════════════════════════════════════════════════════════════
 // #[cached] —— 读路径:两级缓存
 // ════════════════════════════════════════════════════════════════════════════
-/// # `#[cached]` —— 两级缓存读路径(对标 原框架 `@Cacheable` / JetCache)
+/// 业务作用：# `#[cached]` —— 两级缓存读路径(对标 原框架 `@Cacheable` / JetCache)
 ///
 /// 贴在【async 方法/函数】上,改写成"先查 L1(moka)→ L2(Redis 三防)→ 未命中才跑原体(DB)"。
 /// 原体返回 `anyhow::Result<T>`,本注解透传同一个 `T`(签名/返回类型不变)。
@@ -160,7 +160,7 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 // #[cache_invalidate] —— 写路径:执行原体后失效 L1+L2
 // ════════════════════════════════════════════════════════════════════════════
-/// # `#[cache_invalidate]` —— 写后失效(对标 原框架 `@CacheEvict`)
+/// 业务作用：# `#[cache_invalidate]` —— 写后失效(对标 原框架 `@CacheEvict`)
 ///
 /// 贴在【写操作 async 方法/函数】上:先跑原体(写 DB),再失效对应 key 的 L1 + L2。
 /// 失效是尽力而为(失败仅告警,不影响写结果);返回类型不变。
@@ -266,14 +266,14 @@ pub fn cache_invalidate(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 // 工具:把一句话变成"编译错误" token(用于参数缺失等),返回给编译器即在注解处报错。
-///
+/// 业务作用：工具:把一句话变成"编译错误" token(用于参数缺失等),返回给编译器即在注解处报错。
 /// # 参数
 /// - `msg`: 业务消息体或事件载荷。
 fn compile_err(msg: &str) -> TokenStream {
     quote! { ::core::compile_error!(#msg); }.into()
 }
 
-/// 从 `#[cached]` 的返回类型 `-> ...Result<T>` 提取缓存值类型 `T`(供 CacheSceneUsage)。
+/// 业务作用：从 `#[cached]` 的返回类型 `-> ...Result<T>` 提取缓存值类型 `T`(供 CacheSceneUsage)。
 ///
 /// 取返回类型最外层路径(如 `anyhow::Result` / `Result`)的第一个泛型实参作为 `T`;非该形态时回退用
 /// 整个返回类型(仍能编译并收集,只是类型不够精确);`-> ()` 回退为 unit。

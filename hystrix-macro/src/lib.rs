@@ -22,7 +22,7 @@ use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
 
-/// # `#[hystrix]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + 监控(对标 Hystrix Command)
+/// 业务作用：# `#[hystrix]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + 监控(对标 Hystrix Command)
 ///
 /// 贴在 async handler 上,编译期改写成"先抢信号量(满→429)、再限时执行(超时→504)"的版本,
 /// 并把 QPS/延迟/并发/成功率上报 Dashboard(`/hystrix.stream`)。**所有参数全可省**。
@@ -381,9 +381,9 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// 返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
+/// 业务作用：返回类型中包含返回位置 `impl Trait` 时，不能把它直接写进局部变量类型标注。
 fn type_contains_impl_trait(ty: &syn::Type) -> bool {
-    /// 递归检查返回类型 token 树中是否出现 `impl` 关键字。
+    /// 业务作用：递归检查返回类型 token 树中是否出现 `impl` 关键字。
     fn contains(stream: proc_macro2::TokenStream) -> bool {
         stream.into_iter().any(|tree| match tree {
             proc_macro2::TokenTree::Ident(ident) => ident == "impl",
@@ -395,7 +395,7 @@ fn type_contains_impl_trait(ty: &syn::Type) -> bool {
     contains(ty.to_token_stream())
 }
 
-/// 属性名按【最后一个 path segment】匹配
+/// 业务作用：属性名按【最后一个 path segment】匹配
 /// `#[get_mapping]` / `#[naweb::get_mapping]` / `#[nasa::web::get_mapping]` /
 /// `#[company_nasa::web::get_mapping]` 都能识别。
 ///
@@ -410,7 +410,7 @@ fn attr_name_is(attr: &syn::Attribute, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 从一条 #[*_mapping(...)] 属性里抽出 path 字符串。
+/// 业务作用：从一条 #[*_mapping(...)] 属性里抽出 path 字符串。
 /// 两种写法都支持：
 ///   - 单串简写：#[get_mapping("/x")]                     → parse_args::<LitStr>
 ///   - 具名写法：#[get_mapping(path = "/x", produces=..)] → parse_nested_meta 找 path/value

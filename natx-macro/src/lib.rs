@@ -21,7 +21,7 @@ use quote::quote;
 use syn::parse::Parser;
 use syn::{parse_macro_input, ItemFn, LitStr};
 
-/// `#[transactional]` —— 给 async fn 套上 ambient 事务编排。
+/// 业务作用：`#[transactional]` —— 给 async fn 套上 ambient 事务编排。
 ///
 /// 进入时 begin、正常返回 Ok → commit、返回 Err(或 `?` 上抛)→ rollback。
 /// 函数体里嵌套调用的 repo【自动用同一个事务连接】(靠 `src/tx.rs` 的 task_local ambient 事务,
@@ -125,7 +125,7 @@ pub fn transactional(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// 解析 `#[transactional]` 属性参数。
+/// 业务作用：解析 `#[transactional]` 属性参数。
 ///
 /// 支持三种写法：空参数表示默认 datasource，字符串字面量表示兼容短写，
 /// `datasource = "..."` 表示显式命名 datasource。其它参数一律编译期报错。
@@ -166,7 +166,7 @@ fn parse_transactional_attr(attr: TokenStream) -> Result<Option<LitStr>, proc_ma
     validate_datasource_lit(datasource).map(Some)
 }
 
-/// 校验 datasource 字面量是否能安全传给运行时。
+/// 业务作用：校验 datasource 字面量是否能安全传给运行时。
 ///
 /// # 参数
 /// - `lit`: 属性中解析出的 datasource 字符串字面量。

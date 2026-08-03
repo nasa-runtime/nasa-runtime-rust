@@ -32,7 +32,7 @@ pub enum Audience {
 }
 
 impl Audience {
-    /// 判断单值或数组 audience 是否包含策略要求的精确值。
+    /// 业务作用：判断单值或数组 audience 是否包含策略要求的精确值。
     fn contains(&self, expected: &str) -> bool {
         match self {
             Audience::One(value) => value == expected,
@@ -108,7 +108,7 @@ pub enum TokenError {
 }
 
 impl std::fmt::Display for TokenError {
-    /// 输出稳定校验原因，不包含 token、claims 正文或签名字节。
+    /// 业务作用：输出稳定校验原因，不包含 token、claims 正文或签名字节。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenError::Malformed => write!(formatter, "token is not a well-formed JWT"),
@@ -138,7 +138,7 @@ impl std::fmt::Display for TokenError {
 
 impl std::error::Error for TokenError {}
 
-/// 拆分 JWT 并 base64url 解码 header/claims(**不验签**);结构或解码错返回 [`TokenError`]。
+/// 业务作用：拆分 JWT 并 base64url 解码 header/claims(**不验签**);结构或解码错返回 [`TokenError`]。
 pub fn parse_unverified(token: &str) -> Result<(JwtHeader, AccessTokenClaims), TokenError> {
     let mut parts = token.split('.');
     let header_b64 = parts.next().ok_or(TokenError::Malformed)?;
@@ -157,7 +157,7 @@ pub fn parse_unverified(token: &str) -> Result<(JwtHeader, AccessTokenClaims), T
     Ok((header, claims))
 }
 
-/// 校验 access token 的 header + claims(不含签名验签)。
+/// 业务作用：校验 access token 的 header + claims(不含签名验签)。
 ///
 /// # 参数
 ///
@@ -216,7 +216,7 @@ pub fn validate_access_token(
     Ok(())
 }
 
-/// 从 JWK 取某个 base64url 参数并解码为字节(如 RSA 的 `n`/`e`)。
+/// 业务作用：从 JWK 取某个 base64url 参数并解码为字节(如 RSA 的 `n`/`e`)。
 fn jwk_component(jwk: &crate::jwks::Jwk, name: &str) -> Result<Vec<u8>, TokenError> {
     let value = jwk
         .params
@@ -228,7 +228,7 @@ fn jwk_component(jwk: &crate::jwks::Jwk, name: &str) -> Result<Vec<u8>, TokenErr
         .map_err(|_| TokenError::Decode)
 }
 
-/// 用 JWK 校验 JWT 的 **RS256 签名**(经 `ncrypto` 的 RSASSA-PKCS1-v1_5 + SHA-256)。
+/// 业务作用：用 JWK 校验 JWT 的 **RS256 签名**(经 `ncrypto` 的 RSASSA-PKCS1-v1_5 + SHA-256)。
 ///
 /// 仅支持 `kty=RSA` 且(若 JWK 声明 `alg`)`alg=RS256`,否则 [`TokenError::UnsupportedKey`]。签名输入为
 /// `header_b64 "." payload_b64`(原样字节);签名与 `n`/`e` 均按 base64url 解码。验签不通过返回
@@ -266,7 +266,7 @@ pub fn verify_rs256_signature(token: &str, jwk: &crate::jwks::Jwk) -> Result<(),
     }
 }
 
-/// **完整校验** access token:解析 → 按 header `kid` 选 JWK → RS256 验签 → header/claims 校验。
+/// 业务作用：**完整校验** access token:解析 → 按 header `kid` 选 JWK → RS256 验签 → header/claims 校验。
 ///
 /// 返回已验证 claims。这是 OAuth Resource Server / authentication 中间件应调用的入口:先证明**签名
 /// 真实**,再判断 claims 是否满足策略;二者缺一不可(仅 [`validate_access_token`] 不验签,不足以信任 claims)。

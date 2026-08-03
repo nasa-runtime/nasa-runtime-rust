@@ -16,5 +16,5 @@ serde_json = "1"
 arc-swap = "1"
 base64 = "0.22"
 # RS256 验签原语(L1 纯函数);Resource Server 校验 access token 签名。
-ncrypto = { version = "1.0.0", path = "../ncrypto" }
+ncrypto = { version = "1.0.0" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       batch:
-        description: "选择发布批次；1B 只能在 nabase 1.0.0 已进入 crates.io 索引后执行"
+        description: "选择发布批次；后续批次只能在前置依赖已进入 crates.io 索引后执行"
         required: true
         type: choice
         options:
           - 1a
           - 1b
           - 2
+          - 3
       confirm:
         description: "输入 publish-1.0.0 确认执行不可逆发布"
         required: true
@@ -70,6 +71,9 @@ jobs:
             2)
               echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
               ;;
+            3)
+              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -85,7 +89,7 @@ jobs:
       - name: verify registry dependency policy
         shell: bash
         run: |
-          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml"
+          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro"
           failed=false
           while IFS=$'\t' read -r owner dependency dependency_path; do
             case " $published_crates " in
@@ -119,14 +123,14 @@ jobs:
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
-            cargo clippy --locked -p "$crate_name" --all-targets -- -D warnings
+            cargo clippy --locked -p "$crate_name" --all-targets --all-features -- -D warnings
           done
       - name: verify rustdoc
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
             RUSTDOCFLAGS="-D missing_docs -D warnings" \
-              cargo doc --locked --no-deps -p "$crate_name"
+              cargo doc --locked --no-deps --all-features -p "$crate_name"
           done
       - name: verify package archives
         shell: bash
@@ -188,6 +192,9 @@ jobs:
               ;;
             2)
               echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              ;;
+            3)
+              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2

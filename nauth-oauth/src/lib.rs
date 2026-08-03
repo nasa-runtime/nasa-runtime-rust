@@ -1,7 +1,7 @@
 //! NASA OAuth Resource Server:JWT access token 校验与 JWKS 生命周期。
 //!
 //! - [`jwks`]:JWKS 解析与 [`JwksRegistry`](warmup / 校验后原子 rotate / 失败保留 last-good),对应
-//!「Start 建未激活 registry;Ready warmup;启动刷新失败保留 last-good」。
+//!   「Start 建未激活 registry;Ready warmup;启动刷新失败保留 last-good」。
 //! - [`token`]:JWT access token claims 校验(RFC 9068 `at+jwt`、algorithm 白名单、iss/aud、exp/nbf),
 //!   防 ID Token/Access Token 混淆(RFC 8725)。签名验签由后续增量接 `ncrypto`。
 //!

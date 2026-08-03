@@ -59,7 +59,7 @@ matchit = { version = "0.8", optional = true }
 naml = { version = "1.0.0" }
 nametrics-core = { version = "1.0.0" }
 nabudget = { version = "1.0.0" }
-nasecret = { version = "1.0.0", path = "../nasecret" }
+nasecret = { version = "1.0.0" }
 naidempotency = { version = "1.0.0" }
 naauthz = { version = "1.0.0" }
 natelemetry = { version = "1.0.0" }
@@ -70,7 +70,7 @@ naopenapi = { version = "1.0.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 namapper = { version = "1.0.0", path = "../namapper", optional = true, default-features = false }
 natx = { version = "1.0.0", path = "../natx", optional = true }
-namigrate = { version = "1.0.0", path = "../namigrate", optional = true }
+namigrate = { version = "1.0.0", optional = true }
 cacheable = { version = "1.0.0", path = "../cacheable", optional = true }
 # 仅 cache 组件用:实现 cacheable 的 async trait `CacheBackend`(受管 Redis adapter,§6.2)。
 async-trait = { version = "0.1", optional = true }

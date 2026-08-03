@@ -141,7 +141,7 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
                 // 失锁:立即撤销 owner 凭据(R4.2f-A)——此后任何 direct/control 管理操作都因
                 // owner_ctx 无该分区被拒(fenced Lua 的 holder/counter 校验是二次兜底)
                 rt.owner_ctx.lock().expect("owner_ctx").remove(&p);
-                ///N8:锁已丢(无法等优雅退出)→ abort recovery + worker,杜绝其继续动 Redis
+                // N8：锁已丢且无法等待优雅退出，必须立即中止 recovery 和 worker，避免失权任务继续写 Redis。
                 if let Some(mut h) = slot.recovery_handle.take() {
                     h.abort();
                 }
