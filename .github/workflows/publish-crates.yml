@@ -201,7 +201,60 @@ jobs:
                 ;;
             esac
 
-            cargo publish --locked -p "$crate_name"
+            publish_log="$RUNNER_TEMP/${crate_name}-${version}.publish.log"
+            publish_attempt=1
+            while true; do
+              if (( publish_attempt > 1 )); then
+                http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                  --user-agent "nasa-runtime-release/1.0" "$version_url")"
+                if [[ "$http_code" == "200" ]]; then
+                  remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
+                  if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
+                    echo "$crate_name $version 限流恢复前已出现但 checksum 不匹配" >&2
+                    exit 1
+                  fi
+                  break
+                fi
+                if [[ "$http_code" != "404" ]]; then
+                  echo "重试发布前查询 $crate_name $version 返回 HTTP $http_code" >&2
+                  cat "$response_file" >&2
+                  exit 1
+                fi
+              fi
+
+              set +e
+              cargo publish --locked -p "$crate_name" 2>&1 | tee "$publish_log"
+              publish_status="${PIPESTATUS[0]}"
+              set -e
+              if [[ "$publish_status" == "0" ]]; then
+                break
+              fi
+              if ! grep -q 'status 429 Too Many Requests' "$publish_log"; then
+                exit "$publish_status"
+              fi
+              if (( publish_attempt >= 3 )); then
+                echo "$crate_name 连续触发 crates.io 发布限流，停止自动重试" >&2
+                exit "$publish_status"
+              fi
+
+              retry_delay=660
+              retry_at="$(sed -nE 's/.*Please try again after (.+ GMT) and see.*/\1/p' "$publish_log" | tail -n 1)"
+              if [[ -n "$retry_at" ]]; then
+                retry_epoch="$(date -u -d "$retry_at" +%s 2>/dev/null || true)"
+                if [[ "$retry_epoch" =~ ^[0-9]+$ ]]; then
+                  now_epoch="$(date -u +%s)"
+                  retry_delay=$((retry_epoch - now_epoch + 15))
+                  if (( retry_delay < 15 )); then
+                    retry_delay=15
+                  fi
+                fi
+              fi
+
+              # crates.io 对短时间创建多个新 crate 实施冷却；等待服务端窗口恢复，避免无效重试扩大限流。
+              echo "$crate_name 触发 crates.io 限流，${retry_delay} 秒后重试"
+              sleep "$retry_delay"
+              publish_attempt=$((publish_attempt + 1))
+            done
 
             published=false
             for _ in {1..30}; do
