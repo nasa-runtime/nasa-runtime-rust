@@ -6,14 +6,14 @@ service 仍归业务项目。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["grpc-experimental"] }
+nagrpc = "1"
 ```
 
 ## 初始化与使用
 
 ```rust
 use std::net::SocketAddr;
-use nasa::grpc::{health, reflection, GrpcServerConfig, GrpcServerHandle};
+use nagrpc::{health, reflection, GrpcServerConfig, GrpcServerHandle};
 
 let config = GrpcServerConfig::default();
 let (_reporter, health_service) = health::server::health_reporter();
@@ -22,15 +22,15 @@ let reflection_service = reflection::server::Builder::configure()
 
 let router = config
     .server_builder()?
-    .add_service(nasa::grpc::apply_message_limits!(
+    .add_service(nagrpc::apply_message_limits!(
         config.message_limits,
         health_service
     ))
-    .add_service(nasa::grpc::apply_message_limits!(
+    .add_service(nagrpc::apply_message_limits!(
         config.message_limits,
         reflection_service
     ))
-    .add_service(nasa::grpc::apply_message_limits!(
+    .add_service(nagrpc::apply_message_limits!(
         config.message_limits,
         my_service
     ));
@@ -58,7 +58,11 @@ generated service 必须通过 `apply_message_limits!` 同时应用 `config.mess
 ```yaml
 grpc:
   bind: 0.0.0.0:50051
+  concurrency_limit_per_connection: 256
   request_timeout_ms: 30000
+  keepalive_interval_ms: 30000
+  keepalive_timeout_ms: 10000
+  max_concurrent_streams: 256
   drain_timeout_ms: 20000
   max_decoding_bytes: 4194304
   max_encoding_bytes: 4194304
@@ -66,10 +70,22 @@ grpc:
 
 该形状是业务投影，不是稳定框架 schema。
 
+| 键 | `GrpcServerConfig` 默认值 | 约束 |
+| --- | --- | --- |
+| `concurrency_limit_per_connection` | `256` | `1..=65535` |
+| `request_timeout_ms` | `30000` | 大于 0，最长一年 |
+| `keepalive_interval_ms` | `30000` | 大于 0，最长一年 |
+| `keepalive_timeout_ms` | `10000` | 大于 0，最长一年 |
+| `max_concurrent_streams` | `256` | 大于 0 |
+| `drain_timeout_ms` | `20000` | 大于 0，最长一年 |
+| `max_decoding_bytes` | `4194304` | `1..=67108864` |
+| `max_encoding_bytes` | `4194304` | `1..=67108864` |
+
 ## 成熟度与边界
 
 - 本能力是实验 API，不进入 `full`；稳定组件合同等待两个真实业务项目收敛。
 - `GrpcServerHandle` 是唯一 shutdown owner；正常路径必须显式 `shutdown()`。
 - drain 超时会 abort serve task，不遗留 detached listener。
+- `Drop` 只能执行取消和 abort 兜底，不能替代显式的异步排空。
 - reflection 是否开放、业务 service 健康状态、TLS 和 proto 兼容门禁由业务负责。
 - 单消息、并发、stream 数和所有 duration 都有硬上限，零值或越界配置会被拒绝。

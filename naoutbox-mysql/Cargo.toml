@@ -11,6 +11,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-naoutbox-core = { version = "1.0.0", path = "../naoutbox-core" }
+naoutbox-core = { version = "1.0.0" }
 natx = { version = "1.0.0", path = "../natx" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

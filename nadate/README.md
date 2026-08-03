@@ -1,17 +1,17 @@
 # nadate
 
-`nadate` 是日期时间工具 crate，对齐历史 `DateUtils` 的常用能力。统一使用 `i64 epoch ms`，默认时区为 GMT+8。
+`nadate` 是日期时间工具 crate，对齐历史 `DateUtils` 的常用能力。统一使用 `i64 epoch ms`，默认时区为 GMT+8；同时提供可注入的单调时钟与墙钟抽象。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["date"] }
+nadate = "1"
 ```
 
 ## 格式化
 
 ```rust
-let s = nasa::date::format(1_704_067_200_000, nasa::date::F_Y_M_D_H_M_S)?;
-let day = nasa::date::format_y_m_d(1_704_067_200_000)?;
+let s = nadate::format(1_704_067_200_000, nadate::F_Y_M_D_H_M_S)?;
+let day = nadate::format_y_m_d(1_704_067_200_000)?;
 ```
 
 格式使用历史日期格式风格，例如 `yyyy-MM-dd HH:mm:ss`。
@@ -19,8 +19,8 @@ let day = nasa::date::format_y_m_d(1_704_067_200_000)?;
 ## 解析
 
 ```rust
-let ms = nasa::date::parse("2024-01-01 08:00:00", nasa::date::F_Y_M_D_H_M_S)?;
-let ms2 = nasa::date::parse_auto("20240101")?;
+let ms = nadate::parse("2024-01-01 08:00:00", nadate::F_Y_M_D_H_M_S)?;
+let ms2 = nadate::parse_auto("20240101")?;
 ```
 
 缺失字段会按默认值补齐，例如只给年月日时，时间部分补 `00:00:00`。
@@ -28,13 +28,13 @@ let ms2 = nasa::date::parse_auto("20240101")?;
 ## 加减和区间
 
 ```rust
-let tomorrow = nasa::date::add_days(ms, 1)?;
-let next_month = nasa::date::add_months(ms, 1)?;
+let tomorrow = nadate::add_days(ms, 1)?;
+let next_month = nadate::add_months(ms, 1)?;
 
-let days = nasa::date::all_days(
+let days = nadate::all_days(
     ms,
-    nasa::date::add_days(ms, 7)?,
-    nasa::date::F_Y_M_D,
+    nadate::add_days(ms, 7)?,
+    nadate::F_Y_M_D,
 )?;
 ```
 
@@ -43,10 +43,25 @@ let days = nasa::date::all_days(
 ## 当下
 
 ```rust
-let now = nasa::date::now()?;
-let today = nasa::date::today()?;
-let yesterday = nasa::date::yesterday()?;
+let now = nadate::now()?;
+let today = nadate::today()?;
+let yesterday = nadate::yesterday()?;
 ```
+
+## 时钟抽象
+
+需要 deadline、退避或耗时计算时使用 `MonotonicClock`，不要用可能被系统校时拨动的 UTC 墙钟；协议时间戳和审计时间使用 `UtcClock`。
+
+```rust
+use nadate::{MonotonicClock, SystemClock, UtcClock};
+
+let clock = SystemClock::new();
+let started = MonotonicClock::now(&clock);
+let wall_time = UtcClock::now(&clock);
+let elapsed = MonotonicClock::now(&clock).saturating_duration_since(started);
+```
+
+`MonotonicInstant` 只表示当前进程统一基准下的相对时刻，不能持久化或跨进程比较。
 
 ## 行为边界(实测)
 

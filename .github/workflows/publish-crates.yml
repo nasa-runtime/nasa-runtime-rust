@@ -1,15 +1,16 @@
-name: Publish crates.io first batch
+name: Publish crates.io batches
 
 on:
   workflow_dispatch:
     inputs:
       batch:
-        description: "选择发布子批次；1B 只能在 nabase 1.0.0 已进入 crates.io 索引后执行"
+        description: "选择发布批次；1B 只能在 nabase 1.0.0 已进入 crates.io 索引后执行"
         required: true
         type: choice
         options:
           - 1a
           - 1b
+          - 2
       confirm:
         description: "输入 publish-1.0.0 确认执行不可逆发布"
         required: true
@@ -19,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-first-batch
+  group: crates-io-release
   cancel-in-progress: false
 
 env:
@@ -49,7 +50,7 @@ jobs:
     needs: guard
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
         with:
           components: clippy,rustfmt
@@ -66,6 +67,9 @@ jobs:
             1b)
               echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
               ;;
+            2)
+              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -78,6 +82,37 @@ jobs:
           curl --fail --silent --show-error \
             --user-agent "nasa-runtime-release/1.0" \
             "https://crates.io/api/v1/crates/nabase/1.0.0" >/dev/null
+      - name: verify registry dependency policy
+        shell: bash
+        run: |
+          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml"
+          failed=false
+          while IFS=$'\t' read -r owner dependency dependency_path; do
+            case " $published_crates " in
+              *" $dependency "*)
+                echo "$owner 仍通过 path 引用已发布 crate $dependency: $dependency_path" >&2
+                failed=true
+                ;;
+            esac
+          done < <(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
+          )
+          if [[ "$failed" == "true" ]]; then
+            exit 1
+          fi
+
+          for crate_name in $RELEASE_CRATES; do
+            local_dependencies="$(
+              cargo metadata --locked --no-deps --format-version 1 |
+                jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .dependencies[] | select(.path != null) | "\(.name)=\(.path)"'
+            )"
+            if [[ -n "$local_dependencies" ]]; then
+              echo "$crate_name 发布 manifest 仍含本地依赖:" >&2
+              echo "$local_dependencies" >&2
+              exit 1
+            fi
+          done
       - name: verify formatting
         run: cargo fmt --all -- --check
       - name: verify clippy
@@ -137,7 +172,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: crates-io
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
       - name: select release crates
         env:
@@ -150,6 +185,9 @@ jobs:
               ;;
             1b)
               echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
+            2)
+              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2

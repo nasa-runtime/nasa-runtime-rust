@@ -1,8 +1,7 @@
-# partition —— 同 key 串行消费执行器(从 原实现 TimingWheel.partition 移植,生产硬化版)。
+# napart —— 同 key 串行消费执行器(从 原实现 TimingWheel.partition 移植,生产硬化版)。
 # 语义:同 key 严格按提交顺序串行、不同 key 最大并发;不丢任务的优雅停机;
 #       任务 panic 隔离 + worker 死亡检测/黑洞拒收/健康面板。
-# 业务经 nasa 门面引用:nasa = { features = ["partition"] };  use nasa::partition::PartitionExecutor;
-# (注:crate 名 partition 与 nasa-redis 内部的 partition 模块不冲突——后者是 nasa::redis::partition 模块,本 crate 是独立 crate→nasa::partition。)
+# 独立发布入口:napart = "1";use napart::PartitionExecutor。
 [package]
 name = "napart"
 version.workspace = true

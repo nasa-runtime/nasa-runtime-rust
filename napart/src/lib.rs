@@ -4,9 +4,9 @@
 // ============================================================================
 // nasa-partition —— 同 key 串行消费执行器(从 原实现 TimingWheel.partition 移植)
 //
-// 业务入口(经 nasa 门面):
-//   nasa = { ..., features = ["partition"] }
-//   use nasa::partition::PartitionExecutor;
+// 独立发布入口:
+//   napart = "1"
+//   use napart::PartitionExecutor;
 //
 // 解决的核心问题(资金安全):撮合主线程把「按 makerId 顺序更新 Redis JSON $.v」之类的
 // 操作扔进来,要求【同一个 key 的多次操作严格按提交顺序落地】,否则大 maker 被多个 taker
@@ -69,6 +69,7 @@ pub enum SubmitError {
 }
 
 impl std::fmt::Display for SubmitError {
+    /// 业务作用: 把提交拒绝原因格式化为稳定文本，供调用方记录和分类处理。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -118,12 +119,12 @@ const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_QUEUE_CAPACITY: usize = 65_536;
 
 impl PartitionExecutor {
-    /// 默认 partition 数(2 × CPU,向上取 2 的幂)+ 默认队列容量构造并启动。
+    /// 业务作用: 默认 partition 数(2 × CPU,向上取 2 的幂)+ 默认队列容量构造并启动。
     pub fn new() -> Self {
         Self::with_partitions(default_partitions())
     }
 
-    /// 指定 partition 数(向上取整为 2 的幂)+ 默认队列容量构造并启动。
+    /// 业务作用: 指定 partition 数(向上取整为 2 的幂)+ 默认队列容量构造并启动。
     ///
     /// # 参数
     /// - `n`: 调用方期望的分区数量,会至少取 1 并向上取整为 2 的幂以便位运算路由。
@@ -131,7 +132,7 @@ impl PartitionExecutor {
         Self::with_partitions_and_capacity(n, DEFAULT_QUEUE_CAPACITY)
     }
 
-    /// 指定 partition 数 + 每分区有界队列容量构造并启动。
+    /// 业务作用: 指定 partition 数 + 每分区有界队列容量构造并启动。
     ///
     /// # 参数
     /// - `n`: 分区数量(至少 1,向上取整为 2 的幂)。
@@ -178,7 +179,7 @@ impl PartitionExecutor {
         }
     }
 
-    /// 设停机 worker-join 上界(对标 原实现 `stop-timeout-ms`;默认 2s)。链式:
+    /// 业务作用: 设停机 worker-join 上界(对标 原实现 `stop-timeout-ms`;默认 2s)。链式:
     /// `PartitionExecutor::new().with_stop_timeout(Duration::from_secs(5))`。
     /// 调大=更耐心等 drain;调小=更快放弃挂住的在途任务。`Duration::MAX` ≈ 旧的无上界行为。
     ///
@@ -189,18 +190,18 @@ impl PartitionExecutor {
         self
     }
 
-    /// 是否健康:仍在运行 且 无死亡 partition(对标 原实现 isHealthy)。
+    /// 业务作用: 是否健康:仍在运行 且 无死亡 partition(对标 原实现 isHealthy)。
     /// 任一 partition worker 异常死亡后返回 false,监控/oncall 据此决策。
     pub fn is_healthy(&self) -> bool {
         self.started.load(SeqCst) && self.dead_partitions.load(SeqCst) == 0
     }
 
-    /// 已死亡 partition 数(0 = 全部健康),对标 原实现 deadPartitionCount。
+    /// 业务作用: 已死亡 partition 数(0 = 全部健康),对标 原实现 deadPartitionCount。
     pub fn dead_partitions(&self) -> i64 {
         self.dead_partitions.load(SeqCst)
     }
 
-    /// 把某 slot 标记为死亡(true→false 仅记一次,避免重复计数), 并告警。
+    /// 业务作用: 把某 slot 标记为死亡(true→false 仅记一次,避免重复计数), 并告警。
     ///
     /// # 参数
     /// - `slot`: 分区执行器或 Redis partition 的槽位编号。
@@ -214,7 +215,7 @@ impl PartitionExecutor {
         }
     }
 
-    /// 非阻塞入队:映射 tokio 有界通道 try_send 结果为 SubmitError。
+    /// 业务作用: 非阻塞入队:映射 tokio 有界通道 try_send 结果为 SubmitError。
     /// 满 → QueueFull(非任务丢失,可背压重试);接收端关闭 → 标记死亡 + PartitionDead。
     ///
     /// # 参数
@@ -235,17 +236,17 @@ impl PartitionExecutor {
         }
     }
 
-    /// 读取 partitions 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用: 读取 partitions 状态；用于向调用方暴露当前运行信息。
     pub fn partitions(&self) -> usize {
         self.mask + 1
     }
 
-    /// 返回当前对象的 started 状态。
+    /// 业务作用: 返回执行器是否仍接受任务，用于准入检查和运行状态探测。
     pub fn is_started(&self) -> bool {
         self.started.load(SeqCst)
     }
 
-    /// 提交一个【异步】任务(非阻塞):同 key 严格按提交顺序串行执行,不同 key 最大并发。
+    /// 业务作用: 提交一个【异步】任务(非阻塞):同 key 严格按提交顺序串行执行,不同 key 最大并发。
     ///
     /// 返回 `Result`:被拒对调用方【可见可监控】(资金任务不静默丢)——
     ///   `Err(ShuttingDown)` 已停机;`Err(PartitionDead)` 目标分区 worker 死;`Err(QueueFull)` 队列满(可退避重试)。
@@ -295,7 +296,7 @@ impl PartitionExecutor {
         res
     }
 
-    /// 提交一个【异步】任务并【等待队列容量】(真背压):队列满时 `await` 直到有空位,**永不** QueueFull。
+    /// 业务作用: 提交一个【异步】任务并【等待队列容量】(真背压):队列满时 `await` 直到有空位,**永不** QueueFull。
     /// 适合愿意等待的异步生产端;撮合主线程等场景请用非阻塞 [`submit`](Self::submit)。
     /// 仅在停机(ShuttingDown)或目标分区 worker 死(PartitionDead)时返回 `Err`。
     ///
@@ -347,7 +348,7 @@ impl PartitionExecutor {
         res
     }
 
-    /// 提交一个【同步】短任务的便捷版(非阻塞,返回语义同 [`submit`](Self::submit))。
+    /// 业务作用: 提交一个【同步】短任务的便捷版(非阻塞,返回语义同 [`submit`](Self::submit))。
     ///
     ///
     /// # 参数
@@ -381,7 +382,7 @@ impl PartitionExecutor {
         res
     }
 
-    /// 优雅停机(不丢任务)。返回时:所有已准入任务跑完、所有 worker 已退出。幂等。
+    /// 业务作用: 优雅停机(不丢任务)。返回时:所有已准入任务跑完、所有 worker 已退出。幂等。
     ///
     /// 步骤 & soundness:
     ///   1. `started = false`(关闸,拒新)。
@@ -436,7 +437,7 @@ impl PartitionExecutor {
         tracing::info!("PartitionExecutor shutdown complete");
     }
 
-    /// 等 inflight 归零;bounded 2s 防卡死。对 `submit`/`submit_sync`(try_send 非阻塞)在途窗口
+    /// 业务作用: 等 inflight 归零;bounded 2s 防卡死。对 `submit`/`submit_sync`(try_send 非阻塞)在途窗口
     /// 仅「+1→try_send→-1」纳秒级,正常瞬间清零;**`submit_async` 例外**——它跨 `send().await`
     /// 持有 inflight,背压满队时可等任意久,可能触发本处 2s 超时告警(该 submit_async 随后会
     /// 因通道关闭得到 `PartitionDead`,任务不落队)。
@@ -455,7 +456,7 @@ impl PartitionExecutor {
         }
     }
 
-    /// 根据键计算分片槽位；用于把同一键稳定路由到同一分区。
+    /// 业务作用: 根据键计算分片槽位；用于把同一键稳定路由到同一分区。
     ///
     /// # 参数
     /// - `key`: 用于哈希路由的业务 key。
@@ -467,7 +468,7 @@ impl PartitionExecutor {
 }
 
 impl Default for PartitionExecutor {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用: 返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self::new()
     }
@@ -489,7 +490,7 @@ struct DeathGuard {
 }
 
 impl Drop for DeathGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用: 释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         if self.clean {
             return; // 正常停机, 不算死亡
@@ -504,7 +505,7 @@ impl Drop for DeathGuard {
     }
 }
 
-/// Partition worker:顺序消费保证同 key 串行;收到关停信号后【drain 残余】再退出。
+/// 业务作用: Partition worker:顺序消费保证同 key 串行;收到关停信号后【drain 残余】再退出。
 ///
 /// # 参数
 /// - `slot`: 分区执行器或 Redis partition 的槽位编号。
@@ -551,7 +552,7 @@ async fn worker(
     tracing::debug!("PartitionExecutor worker {} stopped", slot);
 }
 
-/// 执行单个任务,带 panic 隔离(spawn+await:崩溃不杀 worker,await 保串行序)。
+/// 业务作用: 执行单个任务,带 panic 隔离(spawn+await:崩溃不杀 worker,await 保串行序)。
 ///
 /// job 经 `tokio::spawn` 成为独立 task(panic 隔离所需),但独立即 detached——若 worker 在
 /// `await` 中被 `shutdown` 超时 abort,job 本身不会被取消。这里用 abort-on-drop guard 补上:
@@ -565,7 +566,7 @@ async fn run_job(slot: usize, job: Job) {
     /// worker 被 abort 时连带取消在途 job;正常完成路径 disarm。
     struct AbortOnDrop(Option<tokio::task::AbortHandle>);
     impl Drop for AbortOnDrop {
-        /// guard 离开作用域时取消仍在运行的分区任务,避免停机后后台继续执行业务逻辑。
+        /// 业务作用: guard 离开作用域时取消仍在运行的分区任务,避免停机后后台继续执行业务逻辑。
         fn drop(&mut self) {
             if let Some(h) = self.0.take() {
                 h.abort();
@@ -586,7 +587,7 @@ async fn run_job(slot: usize, job: Job) {
 // 工具
 // ════════════════════════════════════════════════════════════════════════════
 
-/// 返回默认分片数；用于未配置时提供稳定的分区基线。
+/// 业务作用: 返回默认分片数；用于未配置时提供稳定的分区基线。
 fn default_partitions() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -594,7 +595,7 @@ fn default_partitions() -> usize {
         * 2
 }
 
-/// 扩散哈希值的高低位；用于降低槽位分布偏斜。
+/// 业务作用: 扩散哈希值的高低位；用于降低槽位分布偏斜。
 ///
 /// # 参数
 /// - `hash`: 原始哈希值,通常来自业务 key。

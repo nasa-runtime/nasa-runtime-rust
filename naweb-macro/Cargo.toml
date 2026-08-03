@@ -26,7 +26,7 @@ proc-macro = true
 
 name = "naweb_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
 # syn 2：把传进来的 Rust 源码 TokenStream 解析成语法树（解析函数 ItemFn、字符串字面量 LitStr）
 syn = { version = "2", features = ["full"] }
 # quote：用 quote!{} 模板把语法树/变量拼回 TokenStream（生成代码）；format_ident! 拼唯一静态名

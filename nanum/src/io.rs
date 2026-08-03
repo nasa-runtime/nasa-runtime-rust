@@ -2,14 +2,14 @@
 
 use crate::{check_scale, pow10, NumericError, Result};
 
-/// 原实现 `Math.round(double)` = `floor(x + 0.5)`,**ties 朝 +∞**(非远离零)。
+/// 业务作用: 原实现 `Math.round(double)` = `floor(x + 0.5)`,**ties 朝 +∞**(非远离零)。
 /// 用于 `to_fixed_str`/`to_fixed_f64`,对齐 原实现 `Numeric.toFixed`(L466/L478)。
 /// **注意**:这与 `multiply/divide` 的 `roundHalfUp`(ties away-from-zero)是**两套**——原实现 本就不一致。
 pub(crate) fn compat_math_round(x: f64) -> f64 {
     (x + 0.5).floor()
 }
 
-/// **十进制 / 科学计数法字符串** → 定点 i128。在该解析子集内对齐 原实现 `Numeric.toFixed(String,scale)`(L464)的
+/// 业务作用: **十进制 / 科学计数法字符串** → 定点 i128。在该解析子集内对齐 原实现 `Numeric.toFixed(String,scale)`(L464)的
 /// `Math.round(Double.parseDouble(val) × 10^scale)` 语义,**经 f64**(故受 f64 53 位尾数限制,与 原实现 一致)。
 /// **非** 原实现 `Double.parseDouble` 全语言全集(见下「解析语言偏离」)。
 ///
@@ -39,7 +39,7 @@ pub fn to_fixed_str(val: &str, scale: u32) -> Result<i128> {
     to_fixed_f64(parsed, scale)
 }
 
-/// f64 → 定点 i128。**有限 f64 逐值复刻 原实现 `Numeric.toFixed(double,scale)`**(L476):`Math.round(val × 10^scale)`,
+/// 业务作用: f64 → 定点 i128。**有限 f64 逐值复刻 原实现 `Numeric.toFixed(double,scale)`**(L476):`Math.round(val × 10^scale)`,
 /// **ties 朝 +∞**(`floor(x+0.5)`,非远离零)。
 ///
 /// **NaN/Infinity 返 `Err`(有意安全偏离,非逐值复刻 bug)**——原实现 `Math.round(NaN)=0`、
@@ -65,7 +65,7 @@ pub fn to_fixed_f64(val: f64, scale: u32) -> Result<i128> {
     Ok(scaled as i128)
 }
 
-/// 定点 i128 → 易读字符串,**自动去尾零**,整数不带小数点。对照 原实现 `Numeric.toPlainString`。
+/// 业务作用: 定点 i128 → 易读字符串,**自动去尾零**,整数不带小数点。对照 原实现 `Numeric.toPlainString`。
 ///
 /// 纯整数算术,无 BigDecimal/f64。例:
 /// `to_plain_string(123456789, 8) = "1.23456789"`、`(120000000,8)="1.2"`、`(100000000,8)="1"`、
@@ -104,7 +104,7 @@ pub fn to_plain_string(fixed: i128, scale: u32) -> Result<String> {
 // ==================== 默认精度重载(不传 scale → DEFAULT_SCALE=8)====================
 // 不传 scale 默认 8。Rust 无重载,故以 `_default` 后缀区分。
 
-/// `to_fixed_str` 默认精度(scale=8)。对照 原实现 `Numeric.toFixed(String)`。
+/// 业务作用: `to_fixed_str` 默认精度(scale=8)。对照 原实现 `Numeric.toFixed(String)`。
 ///
 /// # 参数
 ///
@@ -113,7 +113,7 @@ pub fn to_fixed_str_default(val: &str) -> Result<i128> {
     to_fixed_str(val, crate::DEFAULT_SCALE)
 }
 
-/// `to_fixed_f64` 默认精度(scale=8)。对照 原实现 `Numeric.toFixed(double)`。
+/// 业务作用: `to_fixed_f64` 默认精度(scale=8)。对照 原实现 `Numeric.toFixed(double)`。
 ///
 /// # 参数
 ///
@@ -122,7 +122,7 @@ pub fn to_fixed_f64_default(val: f64) -> Result<i128> {
     to_fixed_f64(val, crate::DEFAULT_SCALE)
 }
 
-/// `to_plain_string` 默认精度(scale=8)。对照 原实现 `Numeric.toPlainString(long)`。
+/// 业务作用: `to_plain_string` 默认精度(scale=8)。对照 原实现 `Numeric.toPlainString(long)`。
 ///
 /// # 参数
 ///
@@ -133,7 +133,7 @@ pub fn to_plain_string_default(fixed: i128) -> Result<String> {
 
 // ==================== double → 字符串(中转定点防漂移)====================
 
-/// f64 → 字符串,自动去尾零(先 round 到定点再转,避开 f64 表示噪音)。对照 原实现 `Numeric.toPlainString(double,int)`。
+/// 业务作用: f64 → 字符串,自动去尾零(先 round 到定点再转,避开 f64 表示噪音)。对照 原实现 `Numeric.toPlainString(double,int)`。
 /// 例:`to_plain_string_f64(0.30000000000000004, 8) = "0.3"`。
 ///
 /// # 参数
@@ -144,7 +144,7 @@ pub fn to_plain_string_f64(val: f64, scale: u32) -> Result<String> {
     to_plain_string(to_fixed_f64(val, scale)?, scale)
 }
 
-/// f64 → 字符串,默认精度(scale=8),去尾零。对照 原实现 `Numeric.toPlainString(double)`。
+/// 业务作用: f64 → 字符串,默认精度(scale=8),去尾零。对照 原实现 `Numeric.toPlainString(double)`。
 ///
 /// # 参数
 ///
@@ -155,7 +155,7 @@ pub fn to_plain_string_f64_default(val: f64) -> Result<String> {
 
 // ==================== 保尾零 / 定点-显示精度分离 ====================
 
-/// 定点 i128 → 字符串,**保留所有尾零**(固定 scale 位小数)。对照 原实现 `Numeric.toPlainStringRaw(long,int)`。
+/// 业务作用: 定点 i128 → 字符串,**保留所有尾零**(固定 scale 位小数)。对照 原实现 `Numeric.toPlainStringRaw(long,int)`。
 /// 例:`to_plain_string_raw(120000000, 8) = "1.20000000"`、`(100, 8) = "0.00000100"`。
 ///
 /// # 参数
@@ -181,7 +181,7 @@ pub fn to_plain_string_raw(fixed: i128, scale: u32) -> Result<String> {
     Ok(s)
 }
 
-/// 定点 i128 → 字符串,**定点精度与显示精度分离,保尾零**(显示位四舍五入)。
+/// 业务作用: 定点 i128 → 字符串,**定点精度与显示精度分离,保尾零**(显示位四舍五入)。
 /// 对照 原实现 `Numeric.toPlainStringRaw(long,int,int)`。例:`to_plain_string_raw_display(123456789, 8, 4) = "1.2346"`。
 ///
 /// `display_scale` 为有符号 `i32`(对照 原实现 `int`):**`<= 0` 一律只显示四舍五入后的整数**
@@ -239,7 +239,7 @@ pub fn to_plain_string_raw_display(
     Ok(format!("{sign}{int_part}.{frac_str}"))
 }
 
-/// 定点 i128 → 字符串,**定点精度与显示精度分离,去尾零**(显示位四舍五入)。
+/// 业务作用: 定点 i128 → 字符串,**定点精度与显示精度分离,去尾零**(显示位四舍五入)。
 /// 对照 原实现 `Numeric.toPlainString(long,int,int)`。例:`to_plain_string_display(8075697000000, 8, 2) = "80756.97"`。
 ///
 /// `display_scale` 为有符号 `i32`:**`<= 0` 一律只显示四舍五入后的整数**(同 原实现 `displayScale <= 0` 普通分支)。
@@ -304,7 +304,7 @@ pub fn to_plain_string_display(
     Ok(format!("{sign}{int_part}.{frac_str}"))
 }
 
-/// f64 → 字符串,保尾零(中转定点)。对照 原实现 `Numeric.toPlainStringRaw(double,int)`。
+/// 业务作用: f64 → 字符串,保尾零(中转定点)。对照 原实现 `Numeric.toPlainStringRaw(double,int)`。
 ///
 /// # 参数
 ///
@@ -314,7 +314,7 @@ pub fn to_plain_string_raw_f64(val: f64, scale: u32) -> Result<String> {
     to_plain_string_raw(to_fixed_f64(val, scale)?, scale)
 }
 
-/// f64 → 字符串,定点/显示精度分离,保尾零(中转定点)。对照 原实现 `Numeric.toPlainStringRaw(double,int,int)`。
+/// 业务作用: f64 → 字符串,定点/显示精度分离,保尾零(中转定点)。对照 原实现 `Numeric.toPlainStringRaw(double,int,int)`。
 ///
 /// # 参数
 ///
@@ -329,7 +329,7 @@ pub fn to_plain_string_raw_f64_display(
     to_plain_string_raw_display(to_fixed_f64(val, fixed_scale)?, fixed_scale, display_scale)
 }
 
-/// f64 → 字符串,定点/显示精度分离,去尾零(中转定点)。对照 原实现 `Numeric.toPlainString(double,int,int)`。
+/// 业务作用: f64 → 字符串,定点/显示精度分离,去尾零(中转定点)。对照 原实现 `Numeric.toPlainString(double,int,int)`。
 ///
 /// # 参数
 ///
@@ -346,7 +346,7 @@ pub fn to_plain_string_f64_display(
 
 // ==================== 定点 i128 → BigDecimal ====================
 
-/// 定点 i128 → [`BigDecimal`](bigdecimal::BigDecimal)(真需 BigDecimal 入参的外部 API 时用)。
+/// 业务作用: 定点 i128 → [`BigDecimal`](bigdecimal::BigDecimal)(真需 BigDecimal 入参的外部 API 时用)。
 /// 对照 原实现 `Numeric.toBigDecimal(long,int)`:值 = `fixed × 10^-scale`,scale 位精度。
 ///
 /// # 参数
@@ -360,7 +360,7 @@ pub fn to_big_decimal(fixed: i128, scale: u32) -> Result<bigdecimal::BigDecimal>
     Ok(bigdecimal::BigDecimal::new(fixed.into(), scale as i64))
 }
 
-/// 定点 i128 → `BigDecimal`,默认精度(scale=8)。对照 原实现 `Numeric.toBigDecimal(long)`。
+/// 业务作用: 定点 i128 → `BigDecimal`,默认精度(scale=8)。对照 原实现 `Numeric.toBigDecimal(long)`。
 ///
 /// # 参数
 ///

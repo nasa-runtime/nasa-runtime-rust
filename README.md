@@ -71,7 +71,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按上述规范顺序
 启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
-详见 [napp](napp/README.md) 与当前架构设计 []()。
+详见 [napp](napp/README.md)。
 
 ### Mapping interceptor：手动与自动装配
 
@@ -163,7 +163,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 #[nasa::web::get_mapping("/x")]   // Axum MVC 风格路由
 ```
 
-内部成员用 `path + version` 相互依赖，通过仓库引用时按仓内路径解析，不需要 `[patch]` 段，也不需要私有注册表配置。
+已经发布到 crates.io 的内部依赖只保留精确 `version`，确保工作区持续验证真实 registry 解析；尚未发布的后续批次才允许临时使用 `path + version`，并在依赖项上架后立即移除 `path`。根目录本地验证工程不进入产品归档，可按验证目标引用工作区路径。通过仓库引用不需要 `[patch]` 段或私有注册表。
 
 ### crates.io 依赖
 
@@ -315,8 +315,9 @@ scheduling:             # scheduling 组件
 - **`ncrypto` 的弱加密是【刻意兼容历史实现】,不是缺陷、也不适合作新系统的机密性边界。**
   为逐字节对齐既有服务,ncrypto 保留了 AES-ECB、CBC(IV=Key)、RSA PKCS#1 v1.5、
   以及"用 RSA 私钥做保密"等**已知弱**的构造。**只用于与既有系统互操作**;新系统请用
-  `nasa::crypto::encrypt_modern` / `decrypt_modern` 这类现代入口,不要复用这些兼容函数。现代入口使用
-  随机盐 + PBKDF2-HMAC-SHA256 + AES-256-GCM，返回自描述 `NC1.*` 令牌，错误口令或密文篡改都会失败。
+  `nasa::crypto::encrypt_modern` / `decrypt_modern` 这类现代入口,不要复用这些兼容函数。现代入口默认使用
+  随机盐 + Argon2id + AES-256-GCM，返回自描述 `NC2.*` 令牌；业务可用 AAD 绑定租户或记录上下文。
+  既有 PBKDF2-HMAC-SHA256 的 `NC1.*` 仅保持兼容读取，错误口令、AAD 错配或密文篡改都会失败。
 
 - **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前无修复版本。**
   由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；历史

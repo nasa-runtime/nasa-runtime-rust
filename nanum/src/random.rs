@@ -3,7 +3,7 @@
 use crate::{NumericError, Result};
 use rand::Rng;
 
-/// `[min, max]` 闭区间随机整数(两端含)。对照 原实现 `Numeric.nextInt(min,max)`。
+/// 业务作用: `[min, max]` 闭区间随机整数(两端含)。对照 原实现 `Numeric.nextInt(min,max)`。
 ///
 /// `min == max` 返 `min`;`min > max` → `Err(Range)`(对照 原实现 抛 `IllegalArgumentException`)。
 ///
@@ -27,7 +27,7 @@ pub fn next_int(min: i32, max: i32) -> Result<i32> {
     Ok(rand::thread_rng().gen_range(min..=max))
 }
 
-/// `[0, max]` 闭区间随机整数。对照 原实现 `Numeric.nextInt(max)`。
+/// 业务作用: `[0, max]` 闭区间随机整数。对照 原实现 `Numeric.nextInt(max)`。
 ///
 /// `max < 0` → `Err(Range)`(经 `next_int(0, max)` 的 `min>max` 判定);`max == i32::MAX` 正常(见 [`next_int`])。
 ///

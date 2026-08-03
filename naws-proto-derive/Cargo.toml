@@ -1,5 +1,4 @@
-# naws-proto-derive —— #[derive(ProtocolBytes)] 派生宏(原 proto-derive)。
-# 消费方(naws-proto)用依赖别名保持 `use proto_derive::...` 不变。
+# naws-proto-derive —— `#[derive(ProtocolBytes)]` 派生宏，为 naws-proto 的 wire schema 生成 codec 调用。
 [package]
 name = "naws-proto-derive"
 version.workspace = true
@@ -13,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [lib]
-# 保持 crate 名 `proto_derive`(包内/历史源码同名引用)。
+# Rust 库名与 package 统一映射为 `naws_proto_derive`。
 name = "naws_proto_derive"
 proc-macro = true
 

@@ -17,7 +17,7 @@ categories.workspace = true
 [lib]
 name = "config_boot"
 [dependencies]
-naml = { package = "naml", version = "1.0.0", path = "../naml" }
+naml = { package = "naml", version = "1.0.0" }
 # 只用 nacos 的类型(ConfigRef/ConfigBundle)与 client 方法(fetch_many);default-features=false 不自带 SDK,
 # 真实后端由上层 app 经 nasa/nacos-sdk 打开(cargo 特性统一后本 crate 也拿到真后端)。
 nanacos = { package = "nanacos", version = "1.0.0", path = "../nanacos", default-features = false }

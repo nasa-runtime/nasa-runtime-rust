@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-naidempotency = { version = "1.0.0", path = "../naidempotency" }
+naidempotency = { version = "1.0.0" }
 natx = { version = "1.0.0", path = "../natx" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 async-trait = "0.1"

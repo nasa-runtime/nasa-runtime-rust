@@ -10,7 +10,7 @@ name = "ncrypto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 密码学工具(对照原工具包 Encryptor):hash/hmac/pbkdf2/aes/rsa/ed25519/base64,跨语言字节保真"
+description = "NASA 密码学工具：Argon2id/AES-GCM、hash/HMAC/KDF、RSA/Ed25519 与旧系统兼容算法"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -34,6 +34,7 @@ sha2 = "0.10"
 md-5 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
 hkdf = "0.12"
 bcrypt = "0.15"
 # 对称 AES(ECB/CBC/GCM)
@@ -52,3 +53,4 @@ spki = "0.7"
 base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
+zeroize = "1"

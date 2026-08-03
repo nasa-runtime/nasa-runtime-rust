@@ -1,9 +1,8 @@
-# image —— 图片压缩/缩放 crate(对照 原实现 原工具包 ImageUtils)。
+# naimg —— 图片压缩/缩放 crate(对照 原实现 原工具包 ImageUtils)。
 # 组件设计与兼容边界见 README.md。
 #
-# crate 名 = image(用户 2026-06-17 拍板)。本 crate 依赖 crates.io 的 image crate,为避免包名/依赖名冲突,
-# 把那个依赖**内部重命名**为 `image_crate`(package = "image")。nimage 无派生宏,故不存在 nadis/redis-rs 那种
-# proc-macro crate_name 解析歧义,bare 名 image 安全。门面仍 nasa::image。
+# 本 crate 依赖 crates.io 的 image crate；为区分公开包 `naimg` 与底层 codec，依赖名固定为
+# `image_crate`(package = "image")。公开 API 只暴露本组件声明支持的格式与压缩边界。
 [package]
 name = "naimg"
 version.workspace = true

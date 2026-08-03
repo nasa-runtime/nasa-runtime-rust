@@ -6,8 +6,14 @@
 
 ## 未发布
 
-- 发布工程：记录 60 个 crate 的 1A/1B 至第七批依赖顺序；首批将 `naml` 明确放入 1B，
-  仅因其必须等待 1A 的 `nabase = 1.0.0` 进入 crates.io 索引。
+- 发布工程：第一批 12 个 crate 的 1.0.0 已发布并以 `crates-batch-1-v1.0.0` 固化；发布工作流新增
+  第二批 10 个叶子 crate，并升级 checkout 运行时、registry 依赖门禁和归档内容扫描。
+- 依赖策略：所有组件对已发布内部 crate 的依赖改为纯 registry `version = "1.0.0"`，不再用本地
+  `path` 掩盖 crates.io 解析；根目录本地验证工程按目标区分 registry 与工作区依赖。
+- `ncrypto`：现代默认口令密文升级为 NC2（Argon2id + AES-256-GCM），新增业务 AAD、输入/KDF
+  资源上限、可失败 OS 熵源和派生 key 清理；既有 NC1 保持只读兼容，旧 Java 兼容算法行为不变。
+- 第二批文档：逐项校正 `nadate`、`nagrpc`、`naimg`、`namigrate`、`nanum`、`napart`、
+  `nasecret`、`naws-proto-derive`、`ncrypto`、`rest-client-macro` 的直接依赖、默认值、初始化和边界。
 - 根测试：补充首批 `nabase`、`naml` 与 `nainbox-core` 合同用例，并复用根目录现有的预算、发现、
   授权、幂等、指标、OpenAPI、Outbox、遥测与宏编译矩阵；组件发布归档不携带测试文件。
 - 文档：修正 `naml` 的职责、profile 路径和 Nacos import 结构，明确它只解析 import 描述、不拉取

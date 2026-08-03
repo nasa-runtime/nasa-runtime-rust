@@ -21,7 +21,7 @@ categories.workspace = true
 name = "nanacos"
 [dependencies]
 # 服务实例中性类型(provider-neutral);naming 的 register/discover/subscribe 用它,与 eureka 等后端共享。
-nadisc = { package = "nadisc", version = "1.0.0", path = "../nadisc" }
+nadisc = { package = "nadisc", version = "1.0.0" }
 anyhow = "1"
 tracing = "0.1"
 # 实现 discovery 的 provider-neutral 接口(DiscoveryClient/ServiceRegistry/...,对象安全)。

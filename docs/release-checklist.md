@@ -27,7 +27,7 @@
 - [ ] `cargo deny check`
 - [ ] 本批合同测试全部位于仓库根 `tests/`；组件 crate 内无测试目录/测试 target，`.crate` 归档无测试文件、
       测试代码或测试性文档/注释。
-- [ ] 第一批 1A 的逐包 `cargo package --offline` 通过；1B 的 `naml` 在 `nabase = 1.0.0` 可从索引解析后再验证。
+- [ ] 当前批次每个 crate 的 `cargo package --locked --offline` 通过，并解包扫描 README、许可证、NOTICE、依赖与内容边界。
 
 ## 文档检查
 
@@ -54,9 +54,9 @@
 - [ ] 所有 crate 均解析为 `1.0.0`，并继承统一的 repository、homepage、Rust 1.94 MSRV、keywords 和 categories。
 - [ ] 初次发布前实时查询 crates.io；不存在非本项目 owner 占用的同名 crate。
 - [ ] `nasa` 门面 feature 包含所有计划公开的可选组件。
-- [ ] 公开发布包不依赖未发布的本地 sibling path。
+- [ ] 所有组件对已发布内部 crate 只使用 registry `version`；当前待发布 crate 不含本地依赖。
 - [ ] 当前拓扑阶段每个待发布 crate 的 `cargo publish --dry-run -p <crate>` 通过。
-- [ ] 发布顺序符合 `docs/publishing.md` 的六阶段依赖顺序，且上一阶段已能从 crates.io 解析。
+- [ ] 发布顺序符合 `docs/publishing.md` 的七批依赖顺序（第一批分 1A/1B），且上一批已能从 crates.io 解析。
 
 ## 发布后检查
 

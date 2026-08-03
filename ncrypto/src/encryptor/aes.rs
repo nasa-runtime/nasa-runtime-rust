@@ -21,7 +21,7 @@ const GCM_IV_LEN: usize = 12;
 
 // ---------- ECB ----------
 
-/// 执行 AES ECB 加密；用于兼容只传密钥的分组加密场景。
+/// 业务作用: 执行 AES ECB 加密；用于兼容只传密钥的分组加密场景。
 ///
 /// # 参数
 /// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
@@ -46,7 +46,7 @@ fn ecb_encrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 执行 AES ECB 解密；用于还原只传密钥的密文数据。
+/// 业务作用: 执行 AES ECB 解密；用于还原只传密钥的密文数据。
 ///
 /// # 参数
 /// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
@@ -74,7 +74,7 @@ fn ecb_decrypt(key: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
 
 // ---------- CBC ----------
 
-/// 执行 AES CBC 加密；用于带初始化向量的分组加密场景。
+/// 业务作用: 执行 AES CBC 加密；用于带初始化向量的分组加密场景。
 ///
 /// # 参数
 /// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
@@ -100,7 +100,7 @@ fn cbc_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 执行 AES CBC 解密；用于还原带初始化向量的密文数据。
+/// 业务作用: 执行 AES CBC 解密；用于还原带初始化向量的密文数据。
 ///
 /// # 参数
 /// - `key`: AES 密钥字节,长度必须为 16、24 或 32。
@@ -127,7 +127,7 @@ fn cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// 编码 encode out 数据；用于生成可传输或可存储的字节。
+/// 业务作用: 按调用方选择把 AES 密文字节编码成 Base64 或大写 hex 文本。
 ///
 /// # 参数
 /// - `bytes`: 原始字节切片。
@@ -139,7 +139,7 @@ fn encode_out(bytes: &[u8], enc: EncOutput) -> String {
     }
 }
 
-/// 解码 decode in 数据；用于把输入还原为内部字节或结构。
+/// 业务作用: 按调用方选择把 Base64 或 hex 密文文本还原为 AES 密文字节。
 ///
 /// # 参数
 /// - `s`: 要解析的输入字符串。
@@ -153,7 +153,7 @@ fn decode_in(s: &str, enc: EncOutput) -> Result<Vec<u8>> {
 
 // ==================== AES-ECB(默认 encryptAES) ====================
 
-/// AES-ECB 加密(PKCS5,Base64 输出)。对照 原实现 `encryptAES(content,key)`。
+/// 业务作用: AES-ECB 加密(PKCS5,Base64 输出)。对照 原实现 `encryptAES(content,key)`。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文。
@@ -165,7 +165,7 @@ pub fn encrypt_aes(content: &str, key: &str) -> Result<String> {
     ))
 }
 
-/// AES-ECB 解密(PKCS5,Base64 输入)。
+/// 业务作用: AES-ECB 解密(PKCS5,Base64 输入)。
 ///
 /// # 参数
 /// - `cipher`: Base64 编码的 AES-ECB 密文。
@@ -175,7 +175,7 @@ pub fn decrypt_aes(cipher: &str, key: &str) -> Result<String> {
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// AES-ECB 加密(PKCS5,**大写 HEX** 输出)。对照 原实现 `encryptAESHex`。
+/// 业务作用: AES-ECB 加密(PKCS5,**大写 HEX** 输出)。对照 原实现 `encryptAESHex`。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文。
@@ -187,7 +187,7 @@ pub fn encrypt_aes_hex(content: &str, key: &str) -> Result<String> {
     ))
 }
 
-/// AES-ECB 解密(PKCS5,HEX 输入,大小写均可)。
+/// 业务作用: AES-ECB 解密(PKCS5,HEX 输入,大小写均可)。
 ///
 /// # 参数
 /// - `cipher`: HEX 编码的 AES-ECB 密文,大小写均可。
@@ -199,7 +199,7 @@ pub fn decrypt_aes_hex(cipher: &str, key: &str) -> Result<String> {
 
 // ==================== AES-CBC ====================
 
-/// AES-CBC 加密(PKCS5,**IV = key 字节**,Base64 输出)。对照 原实现 `encryptAESCBC(content,key)`。
+/// 业务作用: AES-CBC 加密(PKCS5,**IV = key 字节**,Base64 输出)。对照 原实现 `encryptAESCBC(content,key)`。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文。
@@ -212,7 +212,7 @@ pub fn encrypt_aes_cbc(content: &str, key: &str) -> Result<String> {
     )?))
 }
 
-/// AES-CBC 加密(PKCS5,独立 IV = iv 串 UTF-8 字节,Base64 输出)。
+/// 业务作用: AES-CBC 加密(PKCS5,独立 IV = iv 串 UTF-8 字节,Base64 输出)。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文。
@@ -226,7 +226,7 @@ pub fn encrypt_aes_cbc_iv(content: &str, key: &str, iv: &str) -> Result<String> 
     )?))
 }
 
-/// AES-CBC 解密(PKCS5,IV = key 字节,Base64 输入)。
+/// 业务作用: AES-CBC 解密(PKCS5,IV = key 字节,Base64 输入)。
 ///
 /// # 参数
 /// - `cipher`: Base64 编码的 AES-CBC 密文。
@@ -236,7 +236,7 @@ pub fn decrypt_aes_cbc(cipher: &str, key: &str) -> Result<String> {
     String::from_utf8(pt).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// AES-CBC 解密(PKCS5,独立 IV,Base64 输入)。
+/// 业务作用: AES-CBC 解密(PKCS5,独立 IV,Base64 输入)。
 ///
 /// # 参数
 /// - `cipher`: Base64 编码的 AES-CBC 密文。
@@ -249,7 +249,7 @@ pub fn decrypt_aes_cbc_iv(cipher: &str, key: &str, iv: &str) -> Result<String> {
 
 // ==================== AES-GCM(认证加密,推荐新用途) ====================
 
-/// AES-GCM 加密。输出 `Base64(IV[12] ‖ ciphertext ‖ tag[16])`,IV 随机(OsRng)。对照 原实现 `encryptAESGCM`。
+/// 业务作用: AES-GCM 加密。输出 `Base64(IV[12] ‖ ciphertext ‖ tag[16])`,IV 随机(OsRng)。对照 原实现 `encryptAESGCM`。
 ///
 /// # 参数
 /// - `content`: 要认证加密的 UTF-8 明文。
@@ -286,7 +286,7 @@ pub fn encrypt_aes_gcm(content: &str, key: &str) -> Result<String> {
     Ok(b64_encode(&nonce_bytes))
 }
 
-/// AES-GCM 解密(从密文头部取 IV)。对照 原实现 `decryptAESGCM`。
+/// 业务作用: AES-GCM 解密(从密文头部取 IV)。对照 原实现 `decryptAESGCM`。
 ///
 /// # 参数
 /// - `cipher`: Base64 编码的 `IV + 密文 + tag` 数据。
@@ -325,7 +325,7 @@ pub fn decrypt_aes_gcm(cipher: &str, key: &str) -> Result<String> {
 
 // ==================== 通用(自定义 mode + 编码) ====================
 
-/// AES 加密(自定义 ECB/CBC + Base64/HEX 输出)。对照 原实现 通用 `encryptAES(c,key,transformation,mode)`。
+/// 业务作用: AES 加密(自定义 ECB/CBC + Base64/HEX 输出)。对照 原实现 通用 `encryptAES(c,key,transformation,mode)`。
 /// CBC 模式 IV = key 字节(默认变体)。
 ///
 /// # 参数
@@ -341,7 +341,7 @@ pub fn encrypt_aes_with(content: &str, key: &str, mode: AesMode, enc: EncOutput)
     Ok(encode_out(&ct, enc))
 }
 
-/// AES 解密(自定义 ECB/CBC + Base64/HEX 输入)。
+/// 业务作用: AES 解密(自定义 ECB/CBC + Base64/HEX 输入)。
 ///
 /// # 参数
 /// - `cipher`: 按 `enc` 编码的 AES 密文。

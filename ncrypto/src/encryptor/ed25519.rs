@@ -8,7 +8,7 @@ use base64::Engine;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
-/// 生成 Ed25519 密钥对,返回 `(私钥 Base64(PKCS8), 公钥 Base64(SPKI))`。
+/// 业务作用: 生成 Ed25519 密钥对,返回 `(私钥 Base64(PKCS8), 公钥 Base64(SPKI))`。
 ///
 pub fn generate_ed25519_key_pair() -> Result<(String, String)> {
     let mut rng = rand::rngs::OsRng;
@@ -26,7 +26,7 @@ pub fn generate_ed25519_key_pair() -> Result<(String, String)> {
     ))
 }
 
-/// Ed25519 私钥签名(Base64 输出,64 字节)。对照 原实现 `signEd25519`。
+/// 业务作用: Ed25519 私钥签名(Base64 输出,64 字节)。对照 原实现 `signEd25519`。
 ///
 /// # 参数
 /// - `content`: 要签名的 UTF-8 内容。
@@ -41,7 +41,7 @@ pub fn sign_ed25519(content: &str, private_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&sig.to_bytes()))
 }
 
-/// Ed25519 公钥验签。出错即 false。对照 原实现 `verifyEd25519`。
+/// 业务作用: Ed25519 公钥验签。出错即 false。对照 原实现 `verifyEd25519`。
 ///
 /// # 参数
 /// - `content`: 原始 UTF-8 内容,必须与签名时输入一致。

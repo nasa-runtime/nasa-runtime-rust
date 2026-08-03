@@ -29,9 +29,9 @@ live-nacos = ["dep:nanacos", "nanacos/nacos"]
 
 [dependencies]
 # 只依赖 provider-neutral 抽象(Instance / DiscoveryClient / is_traffic_instance / WatchOptions / ServiceWatch)。
-nadisc = { package = "nadisc", version = "1.0.0", path = "../nadisc" }
-nabudget = { version = "1.0.0", path = "../nabudget" }
-natelemetry = { version = "1.0.0", path = "../natelemetry" }
+nadisc = { package = "nadisc", version = "1.0.0" }
+nabudget = { version = "1.0.0" }
+natelemetry = { version = "1.0.0" }
 # 已核实:workspace 树里 reqwest 0.12 走 rustls(从不 native-tls/openssl)。关 default-tls,只挂 rustls。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }

@@ -21,29 +21,29 @@ pub struct MonotonicInstant {
 }
 
 impl MonotonicInstant {
-    /// 用相对时钟基准的偏移构造。时钟实现用它产生合成时刻。
+    /// 业务作用: 用相对时钟基准的偏移构造。时钟实现用它产生合成时刻。
     pub const fn from_since_base(since_base: Duration) -> Self {
         Self { since_base }
     }
 
-    /// 返回相对时钟基准的偏移。
+    /// 业务作用: 返回相对时钟基准的偏移。
     pub const fn since_base(self) -> Duration {
         self.since_base
     }
 
-    /// `self` 晚于 `earlier` 的时长;`self` 早于 `earlier` 时饱和为 0(单调时钟正常不会出现)。
+    /// 业务作用: `self` 晚于 `earlier` 的时长;`self` 早于 `earlier` 时饱和为 0(单调时钟正常不会出现)。
     pub fn saturating_duration_since(self, earlier: MonotonicInstant) -> Duration {
         self.since_base.saturating_sub(earlier.since_base)
     }
 
-    /// 在本时刻上加一段时长构造 deadline;溢出返回 `None`。
+    /// 业务作用: 在本时刻上加一段时长构造 deadline;溢出返回 `None`。
     pub fn checked_add(self, delta: Duration) -> Option<MonotonicInstant> {
         self.since_base
             .checked_add(delta)
             .map(|since_base| Self { since_base })
     }
 
-    /// 在本时刻上加一段时长构造 deadline;溢出饱和到最大值。
+    /// 业务作用: 在本时刻上加一段时长构造 deadline;溢出饱和到最大值。
     pub fn saturating_add(self, delta: Duration) -> MonotonicInstant {
         Self {
             since_base: self.since_base.saturating_add(delta),
@@ -53,17 +53,17 @@ impl MonotonicInstant {
 
 /// 单调时钟:deadline、TTL、stale、退避、耗时。永不回拨。
 pub trait MonotonicClock: Send + Sync {
-    /// 返回当前单调时刻。连续两次调用满足非递减。
+    /// 业务作用: 返回当前单调时刻。连续两次调用满足非递减。
     fn now(&self) -> MonotonicInstant;
 }
 
 /// 墙钟(UTC):协议时间窗、JWT 时间声明、审计时间。可回拨,不得用于分布式 fencing。
 pub trait UtcClock: Send + Sync {
-    /// 返回当前墙上时间。可能因系统校时而非单调。
+    /// 业务作用: 返回当前墙上时间。可能因系统校时而非单调。
     fn now(&self) -> SystemTime;
 }
 
-/// 进程级单调基准:首次取时钟固定,使所有 [`SystemClock`] 实例产生同一族可比较的时刻。
+/// 业务作用: 进程级单调基准:首次取时钟固定,使所有 [`SystemClock`] 实例产生同一族可比较的时刻。
 fn system_monotonic_base() -> Instant {
     static BASE: OnceLock<Instant> = OnceLock::new();
     *BASE.get_or_init(Instant::now)
@@ -74,14 +74,14 @@ fn system_monotonic_base() -> Instant {
 pub struct SystemClock;
 
 impl SystemClock {
-    /// 创建系统时钟句柄。
+    /// 业务作用: 创建系统时钟句柄。
     pub const fn new() -> Self {
         Self
     }
 }
 
 impl MonotonicClock for SystemClock {
-    /// 返回相对于进程级单调基准的当前偏移，供 deadline 与耗时计算使用。
+    /// 业务作用: 返回相对于进程级单调基准的当前偏移，供 deadline 与耗时计算使用。
     fn now(&self) -> MonotonicInstant {
         MonotonicInstant {
             since_base: system_monotonic_base().elapsed(),
@@ -90,7 +90,7 @@ impl MonotonicClock for SystemClock {
 }
 
 impl UtcClock for SystemClock {
-    /// 读取操作系统当前墙钟，供协议时间声明与审计时间戳使用。
+    /// 业务作用: 读取操作系统当前墙钟，供协议时间声明与审计时间戳使用。
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }

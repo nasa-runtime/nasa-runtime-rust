@@ -56,16 +56,16 @@ config-boot = { version = "1.0.0", path = "../config-boot", optional = true }
 futures = { version = "0.3", optional = true }
 naweb = { version = "1.0.0", path = "../naweb", optional = true }
 matchit = { version = "0.8", optional = true }
-naml = { version = "1.0.0", path = "../naml" }
-nametrics-core = { version = "1.0.0", path = "../nametrics-core" }
-nabudget = { version = "1.0.0", path = "../nabudget" }
+naml = { version = "1.0.0" }
+nametrics-core = { version = "1.0.0" }
+nabudget = { version = "1.0.0" }
 nasecret = { version = "1.0.0", path = "../nasecret" }
-naidempotency = { version = "1.0.0", path = "../naidempotency" }
-naauthz = { version = "1.0.0", path = "../naauthz" }
-natelemetry = { version = "1.0.0", path = "../natelemetry" }
+naidempotency = { version = "1.0.0" }
+naauthz = { version = "1.0.0" }
+natelemetry = { version = "1.0.0" }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
 nauth-oauth = { version = "1.0.0", path = "../nauth-oauth", optional = true }
-naopenapi = { version = "1.0.0", path = "../naopenapi", optional = true }
+naopenapi = { version = "1.0.0", optional = true }
 # 仅 web 特性:auth 组件的远程 `jwks_uri` 拉取(§16.2)。rustls-tls 对齐 rest-discovery 的 TLS 栈。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 namapper = { version = "1.0.0", path = "../namapper", optional = true, default-features = false }

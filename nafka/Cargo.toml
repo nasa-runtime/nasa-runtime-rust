@@ -36,7 +36,7 @@ futures = "0.3"
 linkme = "0.3"
 # ProtocolBytes 二进制载荷(nafka.md §4.3):与上游对标实现逐字节兼容的 wire codec。
 naws-proto = { version = "1.0.0", path = "../naws-proto" }
-natelemetry = { version = "1.0.0", path = "../natelemetry" }
+natelemetry = { version = "1.0.0" }
 nafka-macro = { version = "1.0.0", path = "../nafka-macro", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }

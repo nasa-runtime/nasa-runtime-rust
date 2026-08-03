@@ -21,7 +21,7 @@ categories.workspace = true
 [lib]
 name = "naml"
 [dependencies]
-nabase = { package = "nabase", version = "1.0.0", path = "../nabase" }
+nabase = { package = "nabase", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 分层配置合并器:本地文件 / profile / 内存 overlay / 环境变量,**叶子级深合并**(yml.md Q5 硬约束)。

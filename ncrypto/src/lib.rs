@@ -18,12 +18,14 @@
 //! ## 安全改良
 //! 所有随机值(salt / AES key / GCM IV / RSA_AES 临时 key)一律用 **OS 安全 RNG**(`OsRng`),**不复刻** 原实现
 //! `StringUtils.random` 的 `Math.random()`(非密码学 RNG)——这些值每次随机、永不上线固定,不需要与 原实现 逐字节一致。
-//! 新业务默认加密请使用 [`encrypt_modern`] / [`decrypt_modern`]:该 token 用随机 salt + PBKDF2-HMAC-SHA256
-//! 派生 AES-256-GCM key,再做认证加密,不要求调用方自行准备 16/24/32 字节 AES 原始 key。
+//! 新业务默认加密请使用 [`encrypt_modern`] / [`decrypt_modern`]：默认写入的 NC2 token 用随机 salt +
+//! Argon2id 派生 AES-256-GCM key，再做认证加密，不要求调用方自行准备 16/24/32 字节 AES 原始 key。
+//! 既有 PBKDF2-HMAC-SHA256 的 NC1 token 保持只读兼容；需要绑定租户、记录或协议上下文时使用
+//! [`encrypt_modern_with_aad`] / [`decrypt_modern_with_aad`]。
 //!
 //! ## ⚠ 安全诚实标注
 //! - **AES-ECB**(Web 默认策略用)、**AES-CBC 用 key 当 IV**、**RSA 私钥加密当机密性**(实为签名语义,公钥人人可解)、
-//!   **MD5/SHA-1/HMAC-MD5**——均为遗留/弱实践,**新(非互通)用途请改用** GCM/OAEP/Ed25519/SHA-256/PBKDF2/BCrypt。
+//!   **MD5/SHA-1/HMAC-MD5**——均为遗留/弱实践,**新(非互通)用途请改用** GCM/OAEP/Ed25519/SHA-256/Argon2id/BCrypt。
 //! - `rsa` crate 的 PKCS1 v1.5 **私钥解密**背负 RUSTSEC-2023-0071(Marvin Attack,时序
 //!   侧信道),至今无修复版本。默认构建只保留 RS256 公钥验签等不执行该私钥解密的能力；
 //!   `decrypt_rsa_private` 与历史私钥 type-1 运算必须显式启用 `legacy-rsa-private`，Web 层还需
@@ -45,24 +47,24 @@ pub enum CryptoError {
 }
 
 impl CryptoError {
-    /// 加密 encrypt 数据；用于生成受保护的输出。
+    /// 业务作用: 加密 encrypt 数据；用于生成受保护的输出。
     pub(crate) fn encrypt(m: impl Into<String>) -> Self {
         CryptoError::Encrypt(m.into())
     }
 
-    /// 解密 decrypt 数据；用于还原受保护的输入。
+    /// 业务作用: 解密 decrypt 数据；用于还原受保护的输入。
     pub(crate) fn decrypt(m: impl Into<String>) -> Self {
         CryptoError::Decrypt(m.into())
     }
 
-    /// 创建加密配置构造器；用于选择算法模式并生成运行参数。
+    /// 业务作用: 创建加密配置构造器；用于选择算法模式并生成运行参数。
     pub(crate) fn config(m: impl Into<String>) -> Self {
         CryptoError::Config(m.into())
     }
 }
 
 impl std::fmt::Display for CryptoError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用: 实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。

@@ -33,7 +33,7 @@ pub struct GrpcMessageLimits {
 }
 
 impl Default for GrpcMessageLimits {
-    /// 使用 tonic 常见的 4 MiB 编解码上限作为保守默认值。
+    /// 业务作用: 使用 tonic 常见的 4 MiB 编解码上限作为保守默认值。
     fn default() -> Self {
         Self {
             max_decoding_bytes: 4 * 1024 * 1024,
@@ -77,7 +77,7 @@ pub struct GrpcServerConfig {
 }
 
 impl Default for GrpcServerConfig {
-    /// 提供有界并发、超时、keepalive、stream 与 drain 的生产保守默认值。
+    /// 业务作用: 提供有界并发、超时、keepalive、stream 与 drain 的生产保守默认值。
     fn default() -> Self {
         Self {
             concurrency_limit_per_connection: 256,
@@ -92,7 +92,7 @@ impl Default for GrpcServerConfig {
 }
 
 impl GrpcServerConfig {
-    /// 校验 transport 与消息配置并生成只接受 HTTP/2 的 tonic Server builder。
+    /// 业务作用: 校验 transport 与消息配置并生成只接受 HTTP/2 的 tonic Server builder。
     ///
     /// 每个 generated service 在 `add_service` 前还必须经过 [`apply_message_limits!`]；tonic 的消息
     /// codec 位于 generated service，transport builder 本身没有可设置该限制的 API。
@@ -140,7 +140,7 @@ pub enum GrpcServerState {
 }
 
 impl GrpcServerState {
-    /// 将公开状态编码为原子存储使用的紧凑整数。
+    /// 业务作用: 将公开状态编码为原子存储使用的紧凑整数。
     fn encode(self) -> u8 {
         match self {
             Self::Running => 1,
@@ -150,7 +150,7 @@ impl GrpcServerState {
         }
     }
 
-    /// 从原子值恢复状态；未知值按失败处理，避免误报可用。
+    /// 业务作用: 从原子值恢复状态；未知值按失败处理，避免误报可用。
     fn decode(value: u8) -> Self {
         match value {
             1 => Self::Running,
@@ -177,7 +177,7 @@ pub enum GrpcServerError {
 }
 
 impl fmt::Display for GrpcServerError {
-    /// 输出不包含监听地址或业务消息的稳定错误分类。
+    /// 业务作用: 输出不包含监听地址或业务消息的稳定错误分类。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "gRPC server error: {self:?}")
     }
@@ -200,7 +200,7 @@ pub struct GrpcServerHandle {
 }
 
 impl GrpcServerHandle {
-    /// 先绑定独立 TCP listener，再启动 tonic Router。
+    /// 业务作用: 先绑定独立 TCP listener，再启动 tonic Router。
     ///
     /// `router` 应由 [`GrpcServerConfig::server_builder`] 创建，并由业务追加 health、reflection 与业务
     /// service。预绑定保证本方法成功返回时端口 ownership 已确定。
@@ -249,17 +249,17 @@ impl GrpcServerHandle {
         })
     }
 
-    /// 实际绑定地址。
+    /// 业务作用: 实际绑定地址。
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr
     }
 
-    /// 当前生命周期状态。
+    /// 业务作用: 当前生命周期状态。
     pub fn state(&self) -> GrpcServerState {
         GrpcServerState::decode(self.inner.state.load(Ordering::Acquire))
     }
 
-    /// 停止准入并在预算内等待在途 RPC 排空。
+    /// 业务作用: 停止准入并在预算内等待在途 RPC 排空。
     pub async fn shutdown(&self) -> Result<(), GrpcServerError> {
         let mut guard = self.inner.join.lock().await;
         let Some(join) = guard.as_mut() else {
@@ -310,7 +310,7 @@ impl GrpcServerHandle {
 }
 
 impl Drop for GrpcServerHandle {
-    /// 未显式 shutdown 时至少停止准入并 abort serve task，禁止遗留 detached listener。
+    /// 业务作用: 未显式 shutdown 时至少停止准入并 abort serve task，禁止遗留 detached listener。
     fn drop(&mut self) {
         // Drop 不能异步排空，但也不能把 detached listener 留在进程里。正常路径必须显式 shutdown；
         // 异常 owner drop 至少立即停止准入并 abort serve task。

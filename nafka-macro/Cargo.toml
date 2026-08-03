@@ -15,7 +15,7 @@ proc-macro = true
 name = "nafka_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

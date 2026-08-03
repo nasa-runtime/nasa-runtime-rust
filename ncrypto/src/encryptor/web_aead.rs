@@ -18,7 +18,7 @@ pub const WEB_AEAD_NONCE_LEN: usize = 12;
 const WEB_AEAD_SALT: &[u8] = b"nasa-web-crypto/v2";
 const WEB_AEAD_ALGORITHM: &str = "A256GCM";
 
-/// 把字符串按固定大端长度前缀追加到派生上下文。
+/// 业务作用: 把字符串按固定大端长度前缀追加到派生上下文。
 ///
 /// 这种编码防止相邻字段产生拼接歧义，例如 `ab + c` 与 `a + bc` 得到同一输入。
 ///
@@ -38,7 +38,7 @@ fn push_length_prefixed(output: &mut Vec<u8>, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// 从高熵主密钥派生 Web 端点单方向 AES-256-GCM 密钥。
+/// 业务作用: 从高熵主密钥派生 Web 端点单方向 AES-256-GCM 密钥。
 ///
 /// 请求和响应必须传入不同的 `direction`，从而让同一主密钥产生相互隔离的子密钥。租户、密钥域、
 /// 密钥标识和算法也进入派生上下文，防止同一材料跨安全域复用。
@@ -102,7 +102,7 @@ pub fn derive_web_aead_key(
     Ok(key)
 }
 
-/// 使用调用方给定的随机数和附加认证数据执行 AES-256-GCM 加密。
+/// 业务作用: 使用调用方给定的随机数和附加认证数据执行 AES-256-GCM 加密。
 ///
 /// 本函数不生成随机数，因为协议层必须把同一随机数同时写入信封和认证上下文。调用方负责保证
 /// 同一密钥下随机数不重复；函数只执行长度校验和认证加密。
@@ -144,7 +144,7 @@ pub fn encrypt_web_aead(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) 
         .map_err(|_| CryptoError::encrypt("Web AEAD 加密失败"))
 }
 
-/// 使用调用方给定的随机数和附加认证数据执行 AES-256-GCM 认证解密。
+/// 业务作用: 使用调用方给定的随机数和附加认证数据执行 AES-256-GCM 认证解密。
 ///
 /// 认证标签、随机数或 AAD 任一不匹配都只返回统一错误，不向上层泄露具体失败位置。
 ///

@@ -8,7 +8,7 @@ use crate::{CryptoError, Result};
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 
-/// 生成随机盐(小写 hex)。`byte_len` 推荐 16 或 32。
+/// 业务作用: 生成随机盐(小写 hex)。`byte_len` 推荐 16 或 32。
 ///
 /// # 参数
 /// - `byte_len`: 随机盐的原始字节长度;返回值会变成两倍长度的小写 HEX。
@@ -18,7 +18,7 @@ pub fn generate_salt(byte_len: usize) -> String {
     hex_lower(&salt)
 }
 
-/// 生成随机 AES 密钥(Base64 编码)。`bits` ∈ {128,192,256}。
+/// 业务作用: 生成随机 AES 密钥(Base64 编码)。`bits` ∈ {128,192,256}。
 ///
 /// **安全说明:非法 `bits` fail-fast**(对照 原实现 `KeyGenerator.init(bits)` 抛
 /// `InvalidParameterException`)——此前 `bits=0` 返回空串、`bits=129` 静默 `/8` 截断成 16 字节
@@ -38,14 +38,14 @@ pub fn generate_aes_key(bits: usize) -> Result<String> {
     Ok(b64_encode(&key))
 }
 
-/// 生成 16 字节随机 AES-128 密钥(小写 hex,32 字符,可直接作 `encrypt_aes` 的 key 参数)。
+/// 业务作用: 生成 16 字节随机 AES-128 密钥(小写 hex,32 字符,可直接作 `encrypt_aes` 的 key 参数)。
 pub fn generate_aes_key_hex() -> String {
     let mut key = [0u8; 16];
     OsRng.fill_bytes(&mut key);
     hex_lower(&key)
 }
 
-/// 生成 `len` 个 `[0-9a-zA-Z]` 随机字符(对照 原实现 `StringUtils.random(len)`,**但用安全 RNG**)。
+/// 业务作用: 生成 `len` 个 `[0-9a-zA-Z]` 随机字符(对照 原实现 `StringUtils.random(len)`,**但用安全 RNG**)。
 /// Web RSA_AES 策略的临时 AES key 用它(`random_ascii(16)` = 16 字节 ASCII = 合法 AES-128 key)。
 ///
 /// # 参数

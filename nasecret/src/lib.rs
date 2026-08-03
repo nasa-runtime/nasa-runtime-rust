@@ -42,34 +42,34 @@ pub struct SecretBytes {
 }
 
 impl SecretBytes {
-    /// 接管已解析的拥有字节。
+    /// 业务作用: 接管已解析的拥有字节。
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
         }
     }
 
-    /// 从已 zeroize 的缓冲直接构造,避免多一份同时驻留的敏感明文。
+    /// 业务作用: 从已 zeroize 的缓冲直接构造,避免多一份同时驻留的敏感明文。
     pub fn from_zeroizing(bytes: Zeroizing<Vec<u8>>) -> Self {
         Self { bytes }
     }
 
-    /// 在一次受控调用期间借用字节;生命周期不超过容器。
+    /// 业务作用: 在一次受控调用期间借用字节;生命周期不超过容器。
     pub fn expose(&self) -> &[u8] {
         self.bytes.as_slice()
     }
 
-    /// 字节长度(非敏感)。
+    /// 业务作用: 字节长度(非敏感)。
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
 
-    /// 是否为空。
+    /// 业务作用: 是否为空。
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
-    /// 把字节移动给下一阶段;移动后容器不再保留副本。
+    /// 业务作用: 把字节移动给下一阶段;移动后容器不再保留副本。
     pub fn into_vec(self) -> Vec<u8> {
         let mut bytes = self.bytes;
         std::mem::take(&mut *bytes)
@@ -77,7 +77,7 @@ impl SecretBytes {
 }
 
 impl fmt::Debug for SecretBytes {
-    /// 只输出长度,防止调试链/panic 泄露内容。
+    /// 业务作用: 只输出长度,防止调试链/panic 泄露内容。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SecretBytes")
@@ -193,7 +193,7 @@ pub struct SecretError {
 }
 
 impl fmt::Display for SecretError {
-    /// 输出稳定 ID 与分类元数据，绝不包含任何 fragment 或解析后 material。
+    /// 业务作用: 输出稳定 ID 与分类元数据，绝不包含任何 fragment 或解析后 material。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.reason == SecretErrorReason::InvalidId {
             return write!(formatter, "secret has an invalid id");
@@ -256,12 +256,12 @@ impl fmt::Display for SecretError {
 impl std::error::Error for SecretError {}
 
 impl SecretSpec {
-    /// 以当前 spec 的安全 ID 构造统一解析错误。
+    /// 业务作用: 以当前 spec 的安全 ID 构造统一解析错误。
     fn error(&self, reason: SecretErrorReason) -> SecretError {
         secret_error(&self.id, reason)
     }
 
-    /// 从最终 material 上限反推可接受的拼接输入上限，避免先聚合/解码任意大数据再做结果校验。
+    /// 业务作用: 从最终 material 上限反推可接受的拼接输入上限，避免先聚合/解码任意大数据再做结果校验。
     fn input_limit(&self) -> Result<usize, SecretError> {
         if !valid_id(&self.id) {
             return Err(self.error(SecretErrorReason::InvalidId));
@@ -305,7 +305,7 @@ impl SecretSpec {
         })
     }
 
-    /// 在复制前检查剩余输入预算，再把 fragment 追加到可清零拼接缓冲。
+    /// 业务作用: 在复制前检查剩余输入预算，再把 fragment 追加到可清零拼接缓冲。
     fn append(
         &self,
         concat: &mut Zeroizing<Vec<u8>>,
@@ -323,7 +323,7 @@ impl SecretSpec {
         Ok(())
     }
 
-    /// 最多读取剩余预算加一个探测字节，避免先把无界文件载入内存再报超限。
+    /// 业务作用: 最多读取剩余预算加一个探测字节，避免先把无界文件载入内存再报超限。
     fn read_file(
         &self,
         path: &std::path::Path,
@@ -348,7 +348,7 @@ impl SecretSpec {
         Ok(value)
     }
 
-    /// 按声明顺序合并分片、一次性解码、校验长度,返回 zeroize 容器。
+    /// 业务作用: 按声明顺序合并分片、一次性解码、校验长度,返回 zeroize 容器。
     ///
     /// # 参数
     ///
@@ -402,7 +402,7 @@ impl SecretSpec {
         self.finish(concat)
     }
 
-    /// 同 [`Self::resolve`]，并允许通过注册表异步读取外部 provider 分片。
+    /// 业务作用: 同 [`Self::resolve`]，并允许通过注册表异步读取外部 provider 分片。
     pub async fn resolve_async<F>(
         &self,
         providers: &SecretProviderRegistry,
@@ -458,7 +458,7 @@ impl SecretSpec {
         self.finish(concat)
     }
 
-    /// 对完整拼接输入执行一次编码解码，并校验最终 material 的非空与大小边界。
+    /// 业务作用: 对完整拼接输入执行一次编码解码，并校验最终 material 的非空与大小边界。
     fn finish(&self, concat: Zeroizing<Vec<u8>>) -> Result<SecretBytes, SecretError> {
         // 拼接后一次性解码,decode 缓冲同样 zeroize。
         let decoded: Zeroizing<Vec<u8>> = match self.encoding {
@@ -498,7 +498,7 @@ pub struct SecretProviderError;
 /// Vault/OpenBao/KMS 等外部来源的最小公共合同。
 #[async_trait::async_trait]
 pub trait SecretProvider: Send + Sync {
-    /// 按稳定 key 读取 material；错误正文不得包含响应 body、token 或 material。
+    /// 业务作用: 按稳定 key 读取 material；错误正文不得包含响应 body、token 或 material。
     async fn read(&self, key: &str) -> Result<SecretBytes, SecretProviderError>;
 }
 
@@ -509,12 +509,12 @@ pub struct SecretProviderRegistry {
 }
 
 impl SecretProviderRegistry {
-    /// 创建空注册表。
+    /// 业务作用: 创建空注册表。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 注册唯一 provider ID。
+    /// 业务作用: 注册唯一 provider ID。
     pub fn register(
         &mut self,
         id: impl Into<Arc<str>>,
@@ -531,13 +531,13 @@ impl SecretProviderRegistry {
         Ok(())
     }
 
-    /// 按稳定 provider ID 借用已冻结 adapter。
+    /// 业务作用: 按稳定 provider ID 借用已冻结 adapter。
     fn get(&self, id: &str) -> Option<&Arc<dyn SecretProvider>> {
         self.providers.get(id)
     }
 }
 
-/// 将 provider、secret 与 participant ID 限制为短 ASCII 标识。
+/// 业务作用: 将 provider、secret 与 participant ID 限制为短 ASCII 标识。
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -546,13 +546,13 @@ fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// 校验引用元数据的非空、长度与控制字符边界。
+/// 业务作用: 校验引用元数据的非空、长度与控制字符边界。
 fn valid_metadata(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
 }
 
 impl fmt::Debug for SecretProviderRegistry {
-    /// 只输出已注册 provider ID，不展示 adapter 内部状态或凭据。
+    /// 业务作用: 只输出已注册 provider ID，不展示 adapter 内部状态或凭据。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SecretProviderRegistry")
@@ -570,7 +570,7 @@ pub enum SecretProviderRegistrationError {
     Duplicate(Arc<str>),
 }
 
-/// 对 material 求私有 fingerprint,仅供**同代变更检测**(不对外暴露)。
+/// 业务作用: 对 material 求私有 fingerprint,仅供**同代变更检测**(不对外暴露)。
 fn fingerprint(material: &SecretBytes) -> [u8; 32] {
     Sha256::digest(material.expose()).into()
 }
@@ -588,7 +588,7 @@ pub struct SecretSnapshot {
 }
 
 impl SecretSnapshot {
-    /// 开始构造 `generation` 代快照。
+    /// 业务作用: 开始构造 `generation` 代快照。
     pub fn builder(generation: u64) -> SecretSnapshotBuilder {
         SecretSnapshotBuilder {
             generation,
@@ -596,7 +596,7 @@ impl SecretSnapshot {
         }
     }
 
-    /// 逐个解析 `specs` 构造快照;任一失败返回不含值的错误并整体放弃(保留 last-good 由调用方负责)。
+    /// 业务作用: 逐个解析 `specs` 构造快照;任一失败返回不含值的错误并整体放弃(保留 last-good 由调用方负责)。
     ///
     /// # 参数
     ///
@@ -627,7 +627,7 @@ impl SecretSnapshot {
         Ok(builder.build())
     }
 
-    /// 异步解析含 provider fragment 的同代快照；任一失败时不返回部分结果。
+    /// 业务作用: 异步解析含 provider fragment 的同代快照；任一失败时不返回部分结果。
     pub async fn resolve_async<'a, I, F>(
         generation: u64,
         specs: I,
@@ -653,27 +653,27 @@ impl SecretSnapshot {
         Ok(builder.build())
     }
 
-    /// 本快照代号。
+    /// 业务作用: 本快照代号。
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// 借用某 secret 的字节;未知 ID 返回 `None`。
+    /// 业务作用: 借用某 secret 的字节;未知 ID 返回 `None`。
     pub fn get(&self, id: &str) -> Option<&SecretBytes> {
         self.entries.get(id).map(|entry| &entry.material)
     }
 
-    /// 是否含某 secret ID。
+    /// 业务作用: 是否含某 secret ID。
     pub fn contains(&self, id: &str) -> bool {
         self.entries.contains_key(id)
     }
 
-    /// 按有序遍历全部 secret ID(非敏感)。
+    /// 业务作用: 按有序遍历全部 secret ID(非敏感)。
     pub fn ids(&self) -> impl Iterator<Item = &Arc<str>> {
         self.entries.keys()
     }
 
-    /// 相对 `previous`,material 发生变化(新增、被移除或 fingerprint 不同)的 secret ID 集合。
+    /// 业务作用: 相对 `previous`,material 发生变化(新增、被移除或 fingerprint 不同)的 secret ID 集合。
     ///
     /// consumer 据此判断自己的 material 是否需要重取,而**不必**也**不能**解析对外的 `<redacted>` 树。
     pub fn changed_ids(&self, previous: &SecretSnapshot) -> BTreeSet<Arc<str>> {
@@ -700,9 +700,9 @@ impl SecretSnapshot {
 /// `commit` 必须只做内存中的无失败指针发布，不能执行解析、网络或磁盘 I/O；`abort` 释放尚未发布的
 /// 候选资源。协调器只有在所有 participant 都 prepare 成功后才调用 commit。
 pub trait PreparedSecretRotation: Send {
-    /// 无失败发布已经准备好的 consumer 状态。
+    /// 业务作用: 无失败发布已经准备好的 consumer 状态。
     fn commit(self: Box<Self>);
-    /// 放弃尚未发布的 consumer 状态。
+    /// 业务作用: 放弃尚未发布的 consumer 状态。
     fn abort(self: Box<Self>);
 }
 
@@ -712,19 +712,19 @@ struct PreparedRotationBatch {
 }
 
 impl PreparedRotationBatch {
-    /// 创建空准备批次。
+    /// 业务作用: 创建空准备批次。
     fn new() -> Self {
         Self {
             changes: Vec::new(),
         }
     }
 
-    /// 按 participant 顺序登记一项已完成的候选变更。
+    /// 业务作用: 按 participant 顺序登记一项已完成的候选变更。
     fn push(&mut self, change: Box<dyn PreparedSecretRotation>) {
         self.changes.push(change);
     }
 
-    /// 取走全部候选并执行无失败内存发布；Drop 不再 abort 已提交项。
+    /// 业务作用: 取走全部候选并执行无失败内存发布；Drop 不再 abort 已提交项。
     fn commit(mut self) {
         let changes = std::mem::take(&mut self.changes);
         for change in changes {
@@ -734,7 +734,7 @@ impl PreparedRotationBatch {
 }
 
 impl Drop for PreparedRotationBatch {
-    /// 任一 prepare 失败或协调 future 被取消时，逆序放弃所有尚未提交的候选资源。
+    /// 业务作用: 任一 prepare 失败或协调 future 被取消时，逆序放弃所有尚未提交的候选资源。
     fn drop(&mut self) {
         while let Some(change) = self.changes.pop() {
             change.abort();
@@ -749,12 +749,12 @@ pub struct SecretPrepareError {
 }
 
 impl SecretPrepareError {
-    /// 用不含 secret、URL 或响应正文的静态错误码构造。
+    /// 业务作用: 用不含 secret、URL 或响应正文的静态错误码构造。
     pub const fn new(code: &'static str) -> Self {
         Self { code }
     }
 
-    /// 返回可进入日志和指标的静态错误码。
+    /// 业务作用: 返回可进入日志和指标的静态错误码。
     pub const fn code(self) -> &'static str {
         self.code
     }
@@ -763,13 +763,13 @@ impl SecretPrepareError {
 /// 需要随 secret generation 一起轮换的 consumer。
 #[async_trait::async_trait]
 pub trait SecretRotationParticipant: Send + Sync {
-    /// 稳定 participant ID，只能用于日志和错误归因。
+    /// 业务作用: 稳定 participant ID，只能用于日志和错误归因。
     fn id(&self) -> &str;
 
-    /// 当前 material 变更是否影响本 participant。
+    /// 业务作用: 当前 material 变更是否影响本 participant。
     fn affected(&self, changed_ids: &BTreeSet<Arc<str>>) -> bool;
 
-    /// 对完整候选快照完成全部可失败准备工作，但不得发布给新请求。
+    /// 业务作用: 对完整候选快照完成全部可失败准备工作，但不得发布给新请求。
     async fn prepare(
         &self,
         candidate: Arc<SecretSnapshot>,
@@ -786,7 +786,7 @@ pub trait SecretResourceFactory<R>: Send + Sync
 where
     R: Send + Sync + 'static,
 {
-    /// 构造完整候选资源；错误只能返回不含凭据的静态码。
+    /// 业务作用: 构造完整候选资源；错误只能返回不含凭据的静态码。
     async fn build(&self, candidate: Arc<SecretSnapshot>) -> Result<R, SecretPrepareError>;
 }
 
@@ -797,12 +797,12 @@ pub struct SecretResourceSnapshot<R> {
 }
 
 impl<R> SecretResourceSnapshot<R> {
-    /// 该资源由哪一代 secret 构造。
+    /// 业务作用: 该资源由哪一代 secret 构造。
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// 借用本代资源；一次业务操作应固定同一个 snapshot。
+    /// 业务作用: 借用本代资源；一次业务操作应固定同一个 snapshot。
     pub fn resource(&self) -> &Arc<R> {
         &self.resource
     }
@@ -827,7 +827,7 @@ impl<R> Clone for RotatingSecretResource<R>
 where
     R: Send + Sync + 'static,
 {
-    /// 克隆同一个 participant 的共享发布槽；不会复制资源或形成第二个轮换 owner。
+    /// 业务作用: 克隆同一个 participant 的共享发布槽；不会复制资源或形成第二个轮换 owner。
     fn clone(&self) -> Self {
         Self {
             participant_id: Arc::clone(&self.participant_id),
@@ -842,7 +842,7 @@ impl<R> RotatingSecretResource<R>
 where
     R: Send + Sync + 'static,
 {
-    /// 从已验证初始快照构造第一代资源。
+    /// 业务作用: 从已验证初始快照构造第一代资源。
     pub async fn new(
         participant_id: impl Into<Arc<str>>,
         watched_ids: BTreeSet<Arc<str>>,
@@ -876,12 +876,12 @@ where
         })
     }
 
-    /// 固定当前 generation/resource 快照。
+    /// 业务作用: 固定当前 generation/resource 快照。
     pub fn current(&self) -> Arc<SecretResourceSnapshot<R>> {
         self.current.load_full()
     }
 
-    /// 返回本 participant 观察的 secret ID。
+    /// 业务作用: 返回本 participant 观察的 secret ID。
     pub fn watched_ids(&self) -> &BTreeSet<Arc<str>> {
         &self.watched_ids
     }
@@ -892,17 +892,17 @@ impl<R> SecretRotationParticipant for RotatingSecretResource<R>
 where
     R: Send + Sync + 'static,
 {
-    /// 返回只用于协调器去重和错误归因的脱敏标识。
+    /// 业务作用: 返回只用于协调器去重和错误归因的脱敏标识。
     fn id(&self) -> &str {
         &self.participant_id
     }
 
-    /// 仅当候选变化与声明依赖相交时参与本轮 prepare，避免无关资源重连。
+    /// 业务作用: 仅当候选变化与声明依赖相交时参与本轮 prepare，避免无关资源重连。
     fn affected(&self, changed_ids: &BTreeSet<Arc<str>>) -> bool {
         changed_ids.iter().any(|id| self.watched_ids.contains(id))
     }
 
-    /// 完整构造候选资源但暂不发布；watched secret 被删除时在调用 adapter 前拒绝。
+    /// 业务作用: 完整构造候选资源但暂不发布；watched secret 被删除时在调用 adapter 前拒绝。
     async fn prepare(
         &self,
         candidate: Arc<SecretSnapshot>,
@@ -938,12 +938,12 @@ impl<R> PreparedSecretRotation for PreparedSecretResource<R>
 where
     R: Send + Sync + 'static,
 {
-    /// 执行无 I/O、无失败的 ArcSwap 发布，满足协调器 commit 阶段约束。
+    /// 业务作用: 执行无 I/O、无失败的 ArcSwap 发布，满足协调器 commit 阶段约束。
     fn commit(self: Box<Self>) {
         self.current.store(self.next);
     }
 
-    /// 放弃候选时依靠所有权析构资源，不触碰当前 last-good 指针。
+    /// 业务作用: 放弃候选时依靠所有权析构资源，不触碰当前 last-good 指针。
     fn abort(self: Box<Self>) {}
 }
 
@@ -959,7 +959,7 @@ pub enum SecretResourceError {
 }
 
 impl fmt::Display for SecretResourceError {
-    /// 输出稳定错误分类，不展示 participant 内部资源或 secret material。
+    /// 业务作用: 输出稳定错误分类，不展示 participant 内部资源或 secret material。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "secret resource error: {self:?}")
     }
@@ -979,7 +979,7 @@ pub struct RotatingSecretStore {
 }
 
 impl RotatingSecretStore {
-    /// 用已验证初始快照创建。
+    /// 业务作用: 用已验证初始快照创建。
     pub fn new(initial: SecretSnapshot) -> Self {
         Self {
             current: arc_swap::ArcSwap::from_pointee(initial),
@@ -987,12 +987,12 @@ impl RotatingSecretStore {
         }
     }
 
-    /// 返回当前 last-good。
+    /// 业务作用: 返回当前 last-good。
     pub fn current(&self) -> Arc<SecretSnapshot> {
         self.current.load_full()
     }
 
-    /// 原子发布完整候选，并返回发生 material 变化的 ID。
+    /// 业务作用: 原子发布完整候选，并返回发生 material 变化的 ID。
     pub fn rotate(
         &self,
         candidate: SecretSnapshot,
@@ -1008,7 +1008,7 @@ impl RotatingSecretStore {
         Ok(changed)
     }
 
-    /// 两阶段轮换完整候选及其 consumer。
+    /// 业务作用: 两阶段轮换完整候选及其 consumer。
     ///
     /// participant 按调用方登记顺序 prepare/commit；prepare 失败时，已经准备的项按相反顺序 abort。
     /// participant ID 必须非空且唯一。未受 `changed_ids` 影响的 participant 不会被调用。
@@ -1058,7 +1058,7 @@ impl RotatingSecretStore {
     }
 }
 
-/// 强制候选 generation 严格递增，阻止旧快照或同代快照覆盖当前值。
+/// 业务作用: 强制候选 generation 严格递增，阻止旧快照或同代快照覆盖当前值。
 fn validate_generation(
     previous: &SecretSnapshot,
     candidate: &SecretSnapshot,
@@ -1098,7 +1098,7 @@ pub enum SecretRotationError {
 }
 
 impl fmt::Display for SecretRotationError {
-    /// 输出 generation、participant ID 与静态错误码，不包含 secret material。
+    /// 业务作用: 输出 generation、participant ID 与静态错误码，不包含 secret material。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "secret rotation error: {self:?}")
     }
@@ -1146,7 +1146,7 @@ pub enum TlsMaterialError {
 }
 
 impl TlsIdentityRef {
-    /// 从同一 snapshot 解析证书链与私钥，拒绝缺失或类型错误。
+    /// 业务作用: 从同一 snapshot 解析证书链与私钥，拒绝缺失或类型错误。
     pub fn resolve<'a>(
         &self,
         snapshot: &'a SecretSnapshot,
@@ -1181,7 +1181,7 @@ impl TlsIdentityRef {
 }
 
 impl TrustBundleRef {
-    /// 从同一 snapshot 解析 CA bundle。
+    /// 业务作用: 从同一 snapshot 解析 CA bundle。
     pub fn resolve<'a>(
         &self,
         snapshot: &'a SecretSnapshot,
@@ -1198,7 +1198,7 @@ impl TrustBundleRef {
     }
 }
 
-/// 通过预期 PEM block marker 验证引用类型，错误只携带安全 secret ID。
+/// 业务作用: 通过预期 PEM block marker 验证引用类型，错误只携带安全 secret ID。
 fn validate_pem(
     material: &SecretBytes,
     marker: &[u8],
@@ -1216,7 +1216,7 @@ fn validate_pem(
 }
 
 impl fmt::Debug for SecretSnapshot {
-    /// 只输出 generation 与 ID 列表,绝不输出 material。
+    /// 业务作用: 只输出 generation 与 ID 列表,绝不输出 material。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SecretSnapshot")
@@ -1233,7 +1233,7 @@ pub struct SecretSnapshotBuilder {
 }
 
 impl SecretSnapshotBuilder {
-    /// 放入一个已解析的 secret；非法 ID 或同代重复 ID 均拒绝，不能绕过 [`SecretSnapshot::resolve`]
+    /// 业务作用: 放入一个已解析的 secret；非法 ID 或同代重复 ID 均拒绝，不能绕过 [`SecretSnapshot::resolve`]
     /// 的快照不变量。
     ///
     /// # 错误
@@ -1270,7 +1270,7 @@ impl SecretSnapshotBuilder {
         Ok(self)
     }
 
-    /// 完成构造。
+    /// 业务作用: 完成构造。
     pub fn build(self) -> SecretSnapshot {
         SecretSnapshot {
             generation: self.generation,
@@ -1279,7 +1279,7 @@ impl SecretSnapshotBuilder {
     }
 }
 
-/// 构造只含安全 ID 的错误；非法原值统一替换，避免 builder 等低层入口把控制字符带进日志。
+/// 业务作用: 构造只含安全 ID 的错误；非法原值统一替换，避免 builder 等低层入口把控制字符带进日志。
 fn secret_error(id: &Arc<str>, reason: SecretErrorReason) -> SecretError {
     let id = if reason == SecretErrorReason::InvalidId {
         Arc::from("<invalid>")
