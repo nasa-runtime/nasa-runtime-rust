@@ -99,7 +99,7 @@ jobs:
           scan_root="$RUNNER_TEMP/crate-scan"
           mkdir -p "$scan_root"
           for crate_name in $RELEASE_CRATES; do
-            cargo publish --dry-run --locked -p "$crate_name"
+            cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             if [[ "$version" != "1.0.0" ]]; then
               echo "$crate_name 版本不是 1.0.0: $version" >&2
