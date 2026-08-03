@@ -166,6 +166,61 @@ jobs:
             exit 1
           fi
 
+          # 业务作用: 在归档 checksum 因发布工作流提交变化而不同时，验证 crates.io 已有版本与当前候选的实际发布内容等价。
+          # 参数说明: 依次接收 crate 名、版本、本地归档路径和 crates.io API 返回的远端 checksum。
+          # 返回: 远端归档完整且除 VCS 提交号外逐文件一致时成功；任何业务内容或元数据差异均失败。
+          verify_existing_archive() {
+            local crate_name="$1"
+            local version="$2"
+            local local_archive="$3"
+            local expected_remote_checksum="$4"
+            local compare_root
+            compare_root="$(mktemp -d "$RUNNER_TEMP/archive-compare-${crate_name}-${version}.XXXXXX")"
+            local remote_archive="$compare_root/remote.crate"
+            local local_dir="$compare_root/local"
+            local remote_dir="$compare_root/remote"
+            local crate_root="${crate_name}-${version}"
+            local actual_remote_checksum
+            local local_vcs
+            local remote_vcs
+
+            if [[ -z "$expected_remote_checksum" ]]; then
+              echo "$crate_name $version 远端 checksum 为空" >&2
+              return 1
+            fi
+            mkdir -p "$local_dir" "$remote_dir"
+            curl --fail --silent --show-error --location \
+              --user-agent "nasa-runtime-release/1.0" \
+              --output "$remote_archive" \
+              "https://crates.io/api/v1/crates/${crate_name}/${version}/download"
+            actual_remote_checksum="$(sha256sum "$remote_archive" | awk '{print $1}')"
+            if [[ "$actual_remote_checksum" != "$expected_remote_checksum" ]]; then
+              echo "$crate_name $version 下载归档与 crates.io checksum 不一致" >&2
+              return 1
+            fi
+
+            tar -xzf "$local_archive" -C "$local_dir"
+            tar -xzf "$remote_archive" -C "$remote_dir"
+            local_vcs="$local_dir/$crate_root/.cargo_vcs_info.json"
+            remote_vcs="$remote_dir/$crate_root/.cargo_vcs_info.json"
+            if [[ ! -f "$local_vcs" || ! -f "$remote_vcs" ]]; then
+              echo "$crate_name $version 缺少 VCS 来源元数据" >&2
+              return 1
+            fi
+
+            # 工作流修复会改变 git.sha1，但不得改变 path_in_vcs 或任何真正进入 crate 的发布内容。
+            jq -S '.git.sha1 = "<release-commit>"' "$local_vcs" > "$compare_root/local-vcs.json"
+            jq -S '.git.sha1 = "<release-commit>"' "$remote_vcs" > "$compare_root/remote-vcs.json"
+            if ! diff -u "$compare_root/local-vcs.json" "$compare_root/remote-vcs.json"; then
+              echo "$crate_name $version VCS 来源元数据不等价" >&2
+              return 1
+            fi
+            if ! diff -ru --exclude='.cargo_vcs_info.json' "$local_dir" "$remote_dir"; then
+              echo "$crate_name $version 已存在但发布内容不等价" >&2
+              return 1
+            fi
+          }
+
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
@@ -185,11 +240,12 @@ jobs:
             case "$http_code" in
               200)
                 remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
-                if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
-                  echo "$crate_name $version 已存在但 checksum 不匹配，拒绝跳过" >&2
-                  exit 1
+                if [[ "$remote_checksum" == "$local_checksum" ]]; then
+                  echo "$crate_name $version 已发布且 checksum 一致，安全跳过"
+                else
+                  verify_existing_archive "$crate_name" "$version" "$archive" "$remote_checksum"
+                  echo "$crate_name $version 已发布且内容等价，安全跳过"
                 fi
-                echo "$crate_name $version 已发布且 checksum 一致，安全跳过"
                 continue
                 ;;
               404)
@@ -209,9 +265,8 @@ jobs:
                   --user-agent "nasa-runtime-release/1.0" "$version_url")"
                 if [[ "$http_code" == "200" ]]; then
                   remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
-                  if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
-                    echo "$crate_name $version 限流恢复前已出现但 checksum 不匹配" >&2
-                    exit 1
+                  if [[ "$remote_checksum" != "$local_checksum" ]]; then
+                    verify_existing_archive "$crate_name" "$version" "$archive" "$remote_checksum"
                   fi
                   break
                 fi
