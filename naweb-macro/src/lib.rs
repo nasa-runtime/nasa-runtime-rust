@@ -1142,7 +1142,7 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
         return attribute_error(verb, "加密路由不能声明 streaming = true");
     }
 
-    // ── ①.6 produces/consumes 最小校验:非空 + 不含控制字符 ──
+    // produces/consumes 必须非空且不含控制字符，避免生成不可用的 OpenAPI 合同。
     //   produces 走 `HeaderValue::from_static`,非法值会在装配期 panic;consumes 非法则匹配恒不中。
     //   值来自宏字面量(非运行期输入),故在【编译期】就把空串/控制字符挡掉,报错指向注解处,优于启动期 panic。
     for (field, val) in [("produces", &produces), ("consumes", &consumes)] {
@@ -1509,7 +1509,7 @@ fn opt_str_tokens(o: &Option<String>) -> proc_macro2::TokenStream {
     }
 }
 
-/// 业务作用：判断媒体类型是否属于第一版明确不支持的流式或文件场景。
+/// 业务作用：判断媒体类型是否属于当前明确不支持的流式或文件场景。
 ///
 /// # 参数
 ///

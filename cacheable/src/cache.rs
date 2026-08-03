@@ -143,7 +143,7 @@ pub trait CacheBackend: Send + Sync {
 
 /// 直接建在 `redis::cluster_async::ClusterConnection` 上的 [`CacheBackend`] 实现(自建集群连接路径)。
 ///
-/// 保留升级到 redis 1.2.2 后 `cluster_async` 的多路复用语义:句柄 clone 廉价,每次操作 clone 一份可变句柄。
+/// 保留 `cluster_async` 的多路复用语义：句柄 clone 廉价，每次操作 clone 一份可变句柄。
 pub struct ClusterConnectionBackend {
     /// Redis 集群连接(cluster_async);clone 廉价,内部多路复用同一条连接。
     redis: ClusterConnection,

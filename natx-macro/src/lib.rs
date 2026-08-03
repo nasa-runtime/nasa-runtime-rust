@@ -65,7 +65,7 @@ use syn::{parse_macro_input, ItemFn, LitStr};
 /// ```
 /// 上面那个"流式边读边写"的死锁,显式版会变成【编译错误】(不能同时两次 `&mut *tx`)——
 /// 同一个"单连接不能同时干两件事"的限制,借用检查器在编译期就拦住了。详见
-/// `zdocs/mid/接入事务transactional基于task_local.md` 与 `zdocs/qa/44-...md`。
+/// 展开代码遵守 ambient transaction 传播边界，避免生成调用绕过当前事务上下文。
 ///
 /// # 参数
 ///

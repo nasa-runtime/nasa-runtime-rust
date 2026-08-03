@@ -1,4 +1,4 @@
-//! `double`(f64)便捷算术段。**对照 原实现 `Numeric` 的 `double` 重载**(L934-L1018)。
+//! `double`（f64）便捷算术，兼容原实现 `Numeric` 的 `double` 重载。
 //!
 //! 原实现 用方法重载区分 `long` / `double` / `BigDecimal` 三套同名 API;Rust 无重载,故 f64 段
 //! 收到 `numeric::float` 模块下(i128 定点在 crate 根、BigDecimal 在 `numeric::decimal`)。
@@ -10,7 +10,7 @@
 //! **大有限值偏离(既定设计,非缺口)**:原实现 经 `long` 中转,`Math.round` 超 i64 域会**饱和**到
 //! `Long.MAX/MIN`,后续 long 运算还会**回绕**(如 `add(1e19,1.0,0)` 在 原实现 回绕为负)。本 crate 用 i128,不复刻
 //! 这条 原实现 溢出 bug——见 crate 根文档「类型用 i128」一节。原实现 自身 原实现doc 也把支持域限定在
-//! `|val×10^scale| < 10^16`(`Numeric.toFixed` L459-460),大有限值本就在 原实现 支持域外。
+//! `|val×10^scale| < 10^16`；更大的有限值原本就在 `Numeric.toFixed` 支持域外。
 
 use crate::{
     align_rounding, check_scale, divide as fixed_divide, multiply as fixed_multiply, pow10,

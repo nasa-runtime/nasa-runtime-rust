@@ -1,6 +1,6 @@
 //! 实验性对象存储合同与 S3-compatible SigV4 adapter。
 //!
-//! 第一版只接受有硬上限的单对象缓冲，不伪装成 multipart/无限流式上传。adapter 不拥有应用生命周期；
+//! 当前只接受有硬上限的单对象缓冲，不伪装成 multipart 或无限流式上传。adapter 不拥有应用生命周期；
 //! 业务可把实例注册为 managed resource。稳定公共合同仍需两个真实上传/导出/归档项目收敛。
 
 #![forbid(unsafe_code)]

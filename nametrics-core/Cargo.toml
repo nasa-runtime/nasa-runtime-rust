@@ -1,4 +1,4 @@
-# nametrics-core —— 进程级 provider-neutral 指标核心( §22.3 / R0-G)。
+# nametrics-core：进程级 provider-neutral 指标核心。
 #
 # 唯一进程级 descriptor catalog + 进程内记录 + 结构化导出。**不依赖** OpenTelemetry、
 # Prometheus client、Axum,也**不依赖 napp**——否则 nafana/naweb/nafka 接入时会形成反向依赖。

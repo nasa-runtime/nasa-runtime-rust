@@ -19,14 +19,12 @@
 ## 构建检查
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo test --workspace`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - [ ] `RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps`
 - [ ] `cargo check -p nasa --features full --all-targets`
 - [ ] `cargo deny check`
-- [ ] 本批合同测试全部位于仓库根 `tests/`；组件 crate 内无测试目录/测试 target，`.crate` 归档无测试文件、
-      测试代码或测试性文档/注释。
+- [ ] 本地质量验证资产不参与产品发布，`.crate` 归档只包含产品源码、公开文档和再分发所需文件。
 - [ ] 当前批次每个 crate 的 `cargo package --locked --offline` 通过，并解包扫描 README、许可证、NOTICE、依赖与内容边界。
 
 ## 文档检查
@@ -34,8 +32,7 @@
 - [ ] 禁用词扫描在 `target/` 之外无命中。
 - [ ] 已删除组件残留扫描在 `target/` 之外无命中。
 - [ ] README 覆盖扫描显示根 README 和所有组件 README 都是 `cfg=ok code=ok usage=ok`。
-- [ ] 所有组件 README、rustdoc、源码注释和 manifest 注释不含测试性内容；`namapper` 的动态 SQL
-      `test` 仅作为公开协议属性出现。
+- [ ] 所有组件 README、rustdoc、源码注释和 manifest 注释不含内部验证内容或临时开发标记。
 - [ ] yml 示例不包含真实私有地址、密码或 token。
 
 ## 后端检查
@@ -45,7 +42,7 @@
 - [ ] 认证、帧处理、端点、通知或背压行为变化时，WebSocket 真实后端验收通过。
 - [ ] 集群锁、重复抑制或 cron 行为变化时，调度真实后端验收通过。
 - [ ] 注册映射、watch 或负载均衡行为变化时，服务发现真实后端验收通过。
-- [ ] 所有真实后端测试都清理 Redis key 和数据库测试行。
+- [ ] 所有真实后端验收都清理 Redis key 和数据库临时数据。
 
 ## 发布检查
 

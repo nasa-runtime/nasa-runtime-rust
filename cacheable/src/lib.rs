@@ -13,9 +13,7 @@ pub mod local_cache;
 // 真正的两级缓存逻辑在这里。三件事:
 //   ① init(layer)            —— main 启动时把 L2(CacheLayer)注入静态变量
 //   ② get_or_load_2level(..) —— 读:L1(local_cache moka)→ L2(CacheLayer Redis 三防)→ loader(DB)
-//   ③ invalidate(..)         —— 写后失效:删 L1 + 删 L2(B 步会在这再加 redis pub/sub 跨节点广播)
-//
-// 设计:rust-cache/00-Cacheable-lite设计.md
+//   ③ invalidate(..)         —— 写后删除 L1/L2，并通过 Redis Pub/Sub 广播跨节点失效。
 // ============================================================================
 
 use std::future::Future;
@@ -33,7 +31,7 @@ use crate::cache::CacheLayer; // L2:Redis 三防 cache-aside
 // 由一个全局 `OnceLock` 持有。`#[cached]`/`#[cache_invalidate]` 展开仍调 `get_or_load_2level`/
 // `invalidate` 两个自由入口(宏契约不变),它们改从 runtime 读后端与发布器。
 // 后端与发布器仍各用内部 `OnceLock` 两段设置,保持"init 后端 / 稍后起广播"的既有时序独立性;
-// 后续第③步由 napp `CacheComponent` 构造并**拥有**该 runtime(不再是进程全局),接 readiness 与停机。
+// napp `CacheComponent` 负责构造并**拥有** runtime，同时接入 readiness 与停机。
 
 /// 进程级两级缓存运行时:统一持有 L2 后端、失效广播发布器与可选 durable 失效 sink。
 ///
@@ -431,7 +429,7 @@ where
 ///   scene  L1 池名(要和对应 #[cached] 一致)
 ///   key    完整缓存 key(宏已拼好)
 /// 泛型 V:该 scene 缓存的值类型——L1 是按 <K,V> 强类型分池的,删除要用相同 V 才能 downcast 到那个池
-///        (所以 #[cache_invalidate] 必须传 value=)。B 步会用 pub/sub + 非泛型失效绕开它。
+///        （所以 #[cache_invalidate] 必须传 value=）。Pub/Sub 使用非泛型失效入口绕开该限制。
 ///
 /// # 参数
 /// - `scene`: L1 本地缓存池名,必须与对应读取入口使用的 scene 一致。
@@ -453,14 +451,14 @@ where
     if let Some(sink) = CacheRuntime::durable_sink() {
         sink.record(scene, &key).await?;
     }
-    // ④【B 步】广播失效:redis PUBLISH,让【其它节点】清理它们各自的 L1(本节点 L1 已在 ② 清理)。
+    // ④ 广播失效：通过 Redis PUBLISH 让其它节点清理各自 L1（本节点 L1 已在 ② 清理）。
     //    解决多节点 L1 不一致:不再只靠短 TTL 兜底。订阅端见 spawn_invalidate_subscriber。
     publish_invalidate(scene, &key);
     Ok(())
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// B 步:跨节点 L1 失效广播(redis pub/sub)
+// 跨节点 L1 失效广播（Redis Pub/Sub）
 // ════════════════════════════════════════════════════════════════════════════
 // 思路(对标 Cacheable cacheType=BOTH 的本地缓存失效广播):
 //   写节点 invalidate 时,除了删本地 L1 + 删 L2,还 PUBLISH 一条 {scene|key} 到固定频道;
@@ -615,7 +613,7 @@ impl Drop for InvalidateBroadcast {
 /// 缓存运行时的**拥有式生命周期句柄**:一处装配 L2 后端 + 失效广播,统一停机。
 ///
 /// 取代业务分散调 `init` + `start_invalidate_broadcast` + 自建 shutdown 资源;把"装配 + 拥有 + 停机"
-/// 收进单一对象,是迈向 napp `CacheComponent` 托管的中间形态(组件届时构造并持有本 guard)。
+/// 收进单一对象，便于由 napp `CacheComponent` 统一构造并持有该 guard。
 pub struct CacheRuntimeGuard {
     broadcast: Option<InvalidateBroadcast>,
     owner: u64,

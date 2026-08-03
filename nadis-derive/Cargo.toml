@@ -1,4 +1,4 @@
-# nadis-derive —— #[derive(RedisDocument)] 派生宏(R5.2;架构文档 §2.7)。
+# nadis-derive：提供 #[derive(RedisDocument)] 派生宏。
 # 纯语法糖:生成的代码只调用 nadis 的公开 API(DocMeta/FieldMeta/RedisDocument),
 # 手写 impl 与宏生成 impl 语义零差异(对照 原实现 注解 @RsDocument/@RsId/@TagField/
 # @TextField/@NumericField/@JsonArrayKey → MetaResolver 启动期解析)。

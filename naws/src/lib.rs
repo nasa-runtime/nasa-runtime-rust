@@ -3,8 +3,7 @@
 //! 提供鉴权、会话注册、事件分发、心跳、fan-out、端点管理和可选 Redis 集群广播。
 // ============================================================================
 // rust-ws —— 纯 Rust 长连接消息中心(对照 原实现 nasa-netty)。
-// R0.2/R0.3:单机 TCP server + 鉴权 + 路由授权 + fan-out + 心跳。
-// WS(R0.4)/ 客户端(R0.5)/ 集群(R0.6)按路线图后续加入。架构说明。
+// 单机 TCP/WS server + 鉴权 + 路由授权 + fan-out + 心跳 + 集群协作。
 // ============================================================================
 
 /// 鉴权回调、路由授权策略和只读连接上下文。
@@ -30,7 +29,7 @@ pub mod wire;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 
-/// socket.io / engine.io 兼容层(R0.7,feature = "socketio")。步骤1:包编解码 + NASA 映射。
+/// socket.io / engine.io 兼容层(feature = "socketio")，负责包编解码与 NASA 映射。
 #[cfg(feature = "socketio")]
 pub mod socketio;
 

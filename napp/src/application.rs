@@ -2421,8 +2421,8 @@ impl Application {
 /// - `component`：需要编码到 Runner 声明集合中的组件身份。
 const fn component_mask(component: ComponentId) -> u32 {
     // 位集合升到 u32:14 个现有 offset(0..=13)之外仍余 18 位,容纳后续 Cache、Telemetry、
-    // Auth 等组件。显式 match 而非 `component as u32` 位移:枚举未来插入
-    // 内部身份时不会悄悄改变已分配 bit 或超出位宽,唯一性由发布门禁断言。
+    // Auth 等组件。显式 match 而非 `component as u32` 位移：新增内部身份时不会悄悄改变
+    // 已分配 bit 或超出位宽，唯一性由编译期断言保证。
     let offset = component_bit_offset(component);
     1_u32 << offset
 }

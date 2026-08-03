@@ -1,8 +1,8 @@
 // ============================================================================
 // src/partition/runtime.rs —— 分区运行时:PollCoordinator / Claim / Worker / 再平衡。
-// (架构设计文档 的 R4.1 子集;对照 原实现 ManagedRunner + PollLifecycle)
+// 对照参照实现的 ManagedRunner 与 PollLifecycle，但以 Rust 的所有权和异步取消模型实现。
 //
-// 核心不变量(每条都对应文档审定结论):
+// 核心安全与顺序不变量：
 //   1. 【串行】同一分区同时最多一个在途批次:ClaimState 含 generation,worker mailbox
 //      容量=1,前一批 WorkFinished 前该分区不再进 poll(原实现 complete=false 同义);
 //   2. 【背压】拉取前 batch permit(Semaphore=max_inflight_batches):拿不到 permit 的
@@ -12,106 +12,11 @@
 //   4. 【fencing】业务调用前 + ACK 前 holds 双检查(V1 协议;Unknown/Lost 一律不 ACK);
 //   5. 【失败重投走 PEL】HandlerFailed → RetryBackoff{ids}(不持 permit),到期先
 //      try_acquire permit 再逐 ID `XPENDING 精确查 owner + XCLAIM 0`(ExactTargetRetry
-//      的无 marker 简化版;Unknown 对账的 retry-op marker = R4.2),重投期间禁 `>`;
+//      的无 marker 简化版；Unknown 对账使用 retry-op marker），重投期间禁 `>`;
 //   6. 【再平衡】心跳 ZADD(墙钟 now+3*period,V1)→ 清过期 → fair=ceil(count/alive);
 //      欠额 tryLock 抢占,超额释放(释放后才 pub wake);wake 订阅只是加速,周期兜底;
 //   7. 【停机】关 admission → 等 in-flight 归零 → 逐分区 unlock → ZREM 心跳 → pub wake。
 //
-// ┌─ 实现状态清单(读源码前先看这里;每条标注文档 出处)──────────────┐
-// │ ✅ 已实现(R4.1)                                                            │
-// │   串行不变量/ batch permit 拉取前准入          │
-// │   NOBLOCK 合批 poll + demux                      │
-// │   holds 双检查 fencing,Unknown 不 ACK                  │
-// │   RetryBackoff 不持 permit + XCLAIM 0 逐 ID PEL 重投 │
-// │   再平衡:墙钟心跳/fair/抢占/让出/wake                      │
-// │   停机:admission→drain→unlock→摘心跳→wake               │
-// │   generation 过滤迟到 WorkFinished                  │
-// │ ✅ 已实现(R4.2a,本轮)                                                     │
-// │   PoisonPolicy { Drop, Park, Dlq }(config 可配,**默认 Park** fail-closed)  │
-// │   disposition marker(HASH,Parking/Parked/Resumed/Dropped 子集)│
-// │   quarantine 确定性 HASH {tag}:quarantine:{park_id}            │
-// │   fenced park Lua(校验 holder→转存→XACK 源→写 marker,恢复协议雏形)      │
-// │   管理 API:list_parked / resume / drop_parked(单 owner 进程内直调)        │
-// │ ✅ 已实现(R4.2b,本轮)                                                     │
-// │   retry-op marker CAS 五规则(retryop.rs:意图先落盘,重放幂等不调低 count) │
-// │   resume planned-ID reservations(disposition.rs:显式 ID + 重入判定表)     │
-// │   ResumeIndeterminate 持久态 + force_republish 审计链               │
-// │   AckTicket 语义【隐式满足】:worker 在 process_batch 内重试 ACK 期间,      │
-// │     WorkBatch(含 permit)未释放、ClaimState 维持 InFlight → ACK 收敛天然    │
-// │     占预算且被停机 drain 等待——独立 AckTicket 结构留待 ACK 与 worker 解耦   │
-// │     的场景(当前串行语义下无收益)                                           │
-// │ ✅ 已实现(R4.2c,本轮)                                                     │
-// │   management command outbox/result key(command.rs:定向 stream + admin      │
-// │     group;control loop 独立于 Parked——修 Resume 自锁;at-least-once +      │
-// │     result 去重;Redis TIME deadline;先 result 后 ACK+XDEL)                │
-// │   attempt 权威值 = max(本地 attempt, PEL delivery count)             │
-// │ ✅ 已实现(R4.2d,本轮)                                                     │
-// │   PoisonPolicy::Dlq + CmdAction::Dlq(= fenced Park 转存 + planned-ID 发布   │
-// │     到 {prefix}:dlq;中途崩溃回退 Parked 可管理态)                           │
-// │   V2 FencingStamp/bootstrap(fencing.rs:全局三态 Initializing→Activating→  │
-// │     Ready + per-tag fence HASH 五规则 + per-partition counter stamp +        │
-// │     **原子 fenced ACK Lua**——堵住 V1 双检查与 XACK 之间的失锁窗口;          │
-// │     profile 驱动:RustV2 走 fenced Lua,原实现V1 仍 holds 双检查+裸 XACK)     │
-// │   bootstrap owner TTL lease + owner_term 接管(fencing.rs:已实现单 owner    │
-// │     推进 + 接管递增 owner_term;多进程并发抢 lease 的完整对账仍待 R4.2e+)     │
-// │ ✅ 已修复                                 │
-// │ 新 owner 接管 Recovering + XAUTOCLAIM(0)收编残留 PEL,完成前禁 `>`    │
-// │ 管理命令基础设施错误保留 PEL 重试(CmdAck::Retry),不再误 ACK+XDEL    │
-// │ quarantine 缺 payload fail-closed(协议损坏错误,禁空字节替代)        │
-// │ Park Lua 写前 TYPE 预检(消除 WRONGTYPE 半提交)                       │
-// │ drain_timeout_ms 绝对 deadline 生效(超时强制取消 worker+释锁)        │
-// │ ConnectionManager 自动重连(client.rs)                               │
-// │ stream.batch_size/poll_timeout_ms/inflight_max 接线;count 上限 16384 │
-// │ release 候选只 Ready/Backoff; wake 在 unlock 之后; rebalance │
-// │     single-flight                                                           │
-// │ ✅ 已修复                                       │
-// │ 丢锁后停 poll(看门狗 lost watch 检测移除 Claim)+ 周期 orphan sweep   │
-// │ retry-op Pending 绑定 ID 集身份(集合不一致即弃用重算,防吞 ID)       │
-// │ parked index 读失败 fail-closed; worker process_batch 期间监听    │
-// │     cancel + 停机 await worker 退出再回 ack                                  │
-// │   P1 错误分类(WRONGTYPE 等不重试)/ parser fail-closed / 假配置标注 / 注释   │
-// │ ✅ 已修复                                 │
-// │   P0 异构 PEL **逐 ID 毒消息判定**(effective(id)=max(attempt, pel_count(id)),│
-// │     poison/retryable 分组处置,不再用批次最大值连坐 Drop/Park/DLQ 正常消息)  │
-// │   P0 接管读 **disposition marker(权威)+ index** 归约(marker=Parked 而 index │
-// │     缺失不再当未 Park 消费;不一致 fail-closed 放弃接管)                      │
-// │   P1 shutdown 单一绝对 deadline(一次 cancel + 并发 join + 剩余预算 unlock)   │
-// │   P1 orphan sweep 移出 coordinator 主循环 → 后台 sweep_loop actor(多页+错误  │
-// │     可见,经 Event::OrphansClaimed 回灌);retry-op 覆盖语义订正(非 fail-closed)│
-// │ ✅ 已修复        │
-// │   P0 正常 poll 批次**子集结果**(process_batch 逐 ID 分桶;坏信封/失败桶只影响 │
-// │     本桶 IDs,ACK 成功子集——不再整批连坐 Drop 正常消息)                       │
-// │   P0 retry-op ID 集不一致改**合并保留旧 desired**(非覆盖重算,杜绝提前 Drop)  │
-// │   P0 ParkResolved → Recovering(先 XAUTOCLAIM 收编 retryable,不直接 Ready 越过)│
-// │   P0 marker 缺失+index 存在 / 非终态缺 park_id → Inconsistent fail-closed;     │
-// │     parked() API 改以 marker 为权威                                          │
-// │   P1 shutdown 端到端绝对 deadline(删隐式宽限,全程 timeout_at);后台任务入     │
-// │     TaskTracker 停机 deadline 内 wait                                        │
-// │ ✅ 已修复        │
-// │   P0 业务类型 T 解码逐 ID(ErasedHandler 收 Vec<(id,Value)> 返失败子集;坏 T/ │
-// │     handler 失败/桶内 panic 只影响相关 ID,不连坐整桶/整批)                   │
-// │   P0 poison 以**实际 PEL count** 判定(不信 marker desired);count<desired-1  │
-// │     = 损坏 → 冻结整分区不 Drop/Park/DLQ                                       │
-// │   P0 停机拆 cancel/bg_cancel:先停后台任务(持锁期内)再 coordinator drain+unlock│
-// │   诊断 parked() 损坏态返回 Err(复用 takeover_disposition,不误报 None)        │
-// │ ✅ 顺序模型对齐 原实现(文档)                                            │
-// │   worker 批内分桶改**首见插入序**(Vec 替 HashMap,对齐 原实现 RecycleLinkedMap)│
-// │   → per-(topic,event) FIFO + 同 key 跨事件首见序;单消费 task(mailbox=1)串行 │
-// │ ✅ 补完未实现项(文档)                                                 │
-// │   handler 强制 timeout(handler_timeout_ms;超时整桶留 PEL)                   │
-// │   EntryDeleted 墓碑 fenced ACK(retry RESOLVED 清 PEL 残留)                   │
-// │   shutdown 单一传入 deadline + 后台任务 abort_all(超 deadline)              │
-// │   sweep SweepTicket generation(只扫 Ready/Backoff,应用前校验 generation)    │
-// │ ✅ retry-op operation_id 键控(文档 Phase 1):marker 按 op_id 键控,      │
-// │   消除"陈旧/损坏 marker 串扰别宗";finish 删 marker + TTL 兜底  │
-// │ ✅ 已补齐(文档)                                                      │
-// │   disposition marker version + transition_operation_id;bootstrap owner TTL │
-// │   lease/owner_term 接管;Cluster 同槽布局;EntryDeleted fenced ACK;leader     │
-// │   autoTrim + ACK 后有界异步 XDEL(停机末次 flush)                            │
-// │ ⬜ 后续扩展(不影响当前正确性)                                              │
-// │   单组跨多个 Cluster slot 的 PollDomain 分片(当前整个组固定在一个 slot);    │
-// │   独立 GroupConsumer lease 抽象;按 control/poll/fencing 等角色拆更多连接 lane│
-// └──────────────────────────────────────────────────────────────────────┘
 // ============================================================================
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -122,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{Envelope, HandlerMap, KeyLayout, DATA_FIELD};
-// 同级模块 re-export(R2 拆分修正):runtime 子文件(coordinator/worker/retry/...)
+// 同级模块 re-export：runtime 子文件(coordinator/worker/retry/...)
 // 中的 `super::fencing::X` / `super::disposition::X` 等路径,在拆进 runtime/ 子目录后
 // super=runtime;把 partition 的这些兄弟模块引入 runtime 命名空间,子文件经
 // `super::<mod>` 即解析到此别名(子模块可见父私有 use)。
@@ -136,7 +41,7 @@ use crate::lock::{DistributedLock, LockGuard};
 /// ACK 不确定态的 worker 内有限重试次数。
 ///
 /// XACK 幂等，返回值可从 1 收敛到 0；当前串行 worker 在重试期间继续持有批次 permit 和
-/// `InFlight` 状态，因此停机会等待该确认过程。只有未来把 ACK 与 worker 解耦时才需要独立 ticket。
+/// `InFlight` 状态，因此停机会等待该确认过程；若 ACK 与 worker 解耦，则必须引入独立 ticket 保持该停机不变量。
 const ACK_RETRY: u32 = 3;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -325,7 +230,7 @@ pub struct GroupRuntime {
     claimed: Arc<std::sync::RwLock<Vec<u32>>>,
     /// 发布序号(诊断用)。
     pub_seq: AtomicU64,
-    /// round-robin 发布计数器(F6:partition=null 时全局轮转均摊)。
+    /// round-robin 发布计数器；partition=null 时全局轮转均摊。
     rr_counter: AtomicU64,
     /// (topic,event) → handler 路由表(start 时一次性注入,此后只读——
     /// coordinator 与各 worker 共享查表,无锁)。
@@ -414,8 +319,8 @@ impl GroupRuntime {
         // **per-group resolved StreamCfg**(多组:不再读全局,由调用方按组 override→全局 resolve 后传入)。
         stream_cfg: crate::config::StreamCfg,
     ) -> Result<Arc<GroupRuntime>> {
-        // 事件通道容量:claims×2 + 控制余量( 容量公式的 R4.1 取值;
-        // 发送端一律 send().await,容量只影响吞吐不作正确性依据)
+        // 事件通道容量 = claims×2 + 控制余量；发送端始终等待容量，容量只影响吞吐而不承担正确性。
+        // 该上限同时避免极端配置把 channel 元数据本身放大。
         let (event_tx, event_rx) = mpsc::channel::<Event>(count as usize * 2 + 16);
         // 队列按在飞批次预算定界；额外封顶避免极端配置把 channel 元数据本身放大。
         // 每个已确认批次在完成前仍持有 inflight permit，因此正常路径不会产生无界发送者。
@@ -518,7 +423,7 @@ impl GroupRuntime {
     }
 
     /// 发布:路由已算好(partition 编号),组信封 → XADD。
-    /// F6 round-robin 发布:无路由 key 时全局轮转均摊到各分区(对照 原实现 publish(partition==null))。
+    /// round-robin 发布：无路由 key 时全局轮转均摊到各分区，对齐既有 publish(partition==null)。
     pub(super) async fn publish_round_robin<T: Serialize>(
         &self,
         topic: &str,
@@ -910,7 +815,7 @@ impl GroupRuntime {
         Ok(ids)
     }
 
-    /// 通用 liveness-takeover(①.4):强制接管卡死的在途 *Publishing/Dropping(原 op 已死)。
+    /// 通用 liveness-takeover：原 op 已死时强制接管卡死的在途 *Publishing/Dropping。
     /// 用稳定 `direct:{p}:{park_id}` op 覆写后续作——崩溃重入用同 op 续作幂等。
     pub(super) async fn force_takeover(&self, p: u32) -> Result<Vec<String>> {
         let of = self.require_owner_direct(p).await?;
@@ -966,7 +871,7 @@ impl GroupRuntime {
 // 再平衡:心跳 + fair 配额 + 抢占/让出(对照 原实现 rebalance;V1 墙钟语义)
 // ─────────────────────────────────────────────────────────────────────────
 
-// ── 子模块(架构自检 R2:runtime.rs 拆分;各文件精确 import,无 use super::* 之外的
+// ── 子模块（各文件精确 import，无 use super::* 之外的
 //    blanket allow——)──
 mod asyncdel;
 mod autotrim;

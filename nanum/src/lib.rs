@@ -11,8 +11,8 @@
 //! - 泛型比较 `eq/gt/...` 的 f64 `NaN` 走 Rust `PartialOrd`;需 原实现 `Double.compareTo` 总序用 [`eq_f64`] 等专用族(**已提供,非偏离**)。
 //!
 //! 要点:
-//! - **`multiply`/`divide`**(+全 8 mode):整数部分整数、**余数部分 f64**,复刻 原实现 `roundHalfUp`/`applyRounding`(L784/L813/L744)。
-//! - **`to_fixed_f64`**:`Math.round(val×10^scale)`,**经 f64**,ties→+∞(L466)。
+//! - **`multiply`/`divide`**（全部八种 mode）：整数部分使用整数、余数部分使用 f64，兼容原实现 `roundHalfUp`/`applyRounding`。
+//! - **`to_fixed_f64`**：`Math.round(val×10^scale)`，经 f64 计算，ties 向正无穷方向舍入。
 //!   **`to_fixed_str`**:对**十进制/科学计数法**输入按 `Math.round(parseDouble×10^scale)` 语义对齐;解析走 Rust
 //!   `str::parse::<f64>()`,**非 原实现 `Double.parseDouble` 全集**(十六进制浮点字面量如 `"0x1.0p0"` 返 `Err`)。
 //! - **`scale` 上限 = [`MAX_SCALE`] = 8**,对齐 原实现 `MAX_FIXED_SCALE`(超则 `Err`)。
@@ -206,7 +206,7 @@ pub fn is_odd(num: i128) -> bool {
 // Rust 单一 `i128` 版即覆盖全部(调用方 `is_even(x as i128)`),无数值分歧,故不复刻四重载。
 
 /// 业务作用: 把整数 `number` 的十进制 ASCII 字节(负数含 `-`)写入 `chars[start..]`,返回写入长度。
-/// 对照 原实现 `Numeric.copyToCharArray(long,char[],int)`(其 JDK 位运算只是 `StringBuilder` 提速 hack,
+/// 对照既有系统的 `Numeric.copyToCharArray(long,char[],int)`（其中 JDK 位运算只是 `StringBuilder` 的性能优化，
 /// 输出与本实现逐字节一致;原实现 `char[]` 存 ASCII 数字,Rust 用字节缓冲是地道等价)。
 ///
 /// # Panics

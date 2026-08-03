@@ -1,6 +1,6 @@
 # napp-macro
 
-`#[nasa::application(...)]` 属性宏的实现 crate。业务项目不直接依赖它，经 `nasa` 门面的 `application` feature 使用；运行时语义见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/release/1.0.0/napp/README.md) 与 [应用架构说明](https://github.com/nasa-runtime/nasa-runtime-rust/blob/release/1.0.0/app.md)。
+`#[nasa::application(...)]` 属性宏的实现 crate。业务项目不直接依赖它，经 `nasa` 门面的 `application` feature 使用；运行时语义见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/release/1.0.0/napp/README.md) 与 [运维指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/release/1.0.0/docs/operations.md)。
 
 宏把业务的异步 `main` 改写为统一进程入口：
 

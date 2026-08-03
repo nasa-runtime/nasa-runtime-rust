@@ -1,8 +1,7 @@
 //! 幂等 store 的 MySQL 后端。
 //!
 //! 实现 [`naidempotency::IdempotencyStore`],经 [`natx::conn`] 取连接:
-//! - 在 `natx::run`(`#[transactional]`)**事务内**调用 → 幂等记录与业务写**共享同一事务**,原子提交/回滚
-//!。
+//! - 在 `natx::run`（`#[transactional]`）**事务内**调用 → 幂等记录与业务写**共享同一事务**，原子提交或回滚。
 //! - 事务外调用(如框架幂等中间件)→ 走连接池,得到**跨重启/跨副本**持久化的 response-cache 语义。
 //!
 //! `begin` 用 `INSERT`(唯一主键)竞态安全地占位:插入成功=首次;主键冲突则 `SELECT` 现有行裁决

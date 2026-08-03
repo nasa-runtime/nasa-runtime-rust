@@ -1,5 +1,5 @@
 // ============================================================================
-// src/pubsub.rs —— Pub/Sub 消息(F1;对照 原实现 RedisProxy subscribe/pub/publish + Subscriber)。
+// src/pubsub.rs：对齐既有 RedisProxy subscribe/pub/publish 与 Subscriber 语义。
 //
 // · publish:经 `Conn`(单节点/cluster 通用);classic Pub/Sub 在 cluster 下跨节点传播。
 // · subscribe:派生**专用** Pub/Sub 连接

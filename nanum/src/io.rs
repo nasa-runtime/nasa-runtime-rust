@@ -3,13 +3,13 @@
 use crate::{check_scale, pow10, NumericError, Result};
 
 /// 业务作用: 原实现 `Math.round(double)` = `floor(x + 0.5)`,**ties 朝 +∞**(非远离零)。
-/// 用于 `to_fixed_str`/`to_fixed_f64`,对齐 原实现 `Numeric.toFixed`(L466/L478)。
+/// 用于 `to_fixed_str`/`to_fixed_f64`，兼容原实现 `Numeric.toFixed`。
 /// **注意**:这与 `multiply/divide` 的 `roundHalfUp`(ties away-from-zero)是**两套**——原实现 本就不一致。
 pub(crate) fn compat_math_round(x: f64) -> f64 {
     (x + 0.5).floor()
 }
 
-/// 业务作用: **十进制 / 科学计数法字符串** → 定点 i128。在该解析子集内对齐 原实现 `Numeric.toFixed(String,scale)`(L464)的
+/// 业务作用: 将十进制或科学计数法字符串转换为定点 i128，在该解析子集内兼容原实现 `Numeric.toFixed(String,scale)` 的
 /// `Math.round(Double.parseDouble(val) × 10^scale)` 语义,**经 f64**(故受 f64 53 位尾数限制,与 原实现 一致)。
 /// **非** 原实现 `Double.parseDouble` 全语言全集(见下「解析语言偏离」)。
 ///
@@ -39,7 +39,7 @@ pub fn to_fixed_str(val: &str, scale: u32) -> Result<i128> {
     to_fixed_f64(parsed, scale)
 }
 
-/// 业务作用: f64 → 定点 i128。**有限 f64 逐值复刻 原实现 `Numeric.toFixed(double,scale)`**(L476):`Math.round(val × 10^scale)`,
+/// 业务作用: 将有限 f64 转换为定点 i128，兼容原实现 `Numeric.toFixed(double,scale)` 的 `Math.round(val × 10^scale)` 规则，
 /// **ties 朝 +∞**(`floor(x+0.5)`,非远离零)。
 ///
 /// **NaN/Infinity 返 `Err`(有意安全偏离,非逐值复刻 bug)**——原实现 `Math.round(NaN)=0`、

@@ -1,6 +1,6 @@
 // ============================================================================
-// src/partition/command.rs —— 管理命令 outbox / result key(R4.2c)。
-// (架构文档: 定向 outbox + per-operation result key)
+// src/partition/command.rs —— 管理命令 outbox / result key。
+// 采用定向 outbox 与 per-operation result key。
 //
 // 解决的问题:
 //   · 管理请求(resume/drop/force)可能落到任意节点,而处置必须由当前 partition owner
@@ -28,7 +28,7 @@
 //     ACK Unknown 时新 owner 只补清理,不重复执行);
 //   ④deadline 过期/非法动作同样先写 Rejected result 再 ACK(不静默丢弃)。
 //
-// R4.2c 简化(注明):owner 接管旧 PEL 用 XAUTOCLAIM(Partition 持锁语义下 admin group
+// owner 接管旧 PEL 使用 XAUTOCLAIM(Partition 持锁语义下 admin group
 // 同样单 owner,无 owner 混淆——XAUTOCLAIM 在 Partition 协议内是允许的);result TTL
 // 终态后 24h(应长于客户端查询窗口)。
 // ============================================================================
@@ -72,7 +72,7 @@ pub enum CmdAction {
     Drop,
     /// 强制重发或推进处置,由调用方显式承担重复风险。
     Force,
-    /// 把 Parked 消息发布到 DLQ stream(planned-ID 协议;R4.2d)。
+    /// 把 Parked 消息发布到 DLQ stream(planned-ID 协议)。
     Dlq,
 }
 
@@ -93,10 +93,10 @@ pub struct CmdResult {
     /// 终态信息:Succeeded 的 new_ids / Rejected 的原因。
     #[serde(default)]
     pub detail: String,
-    /// Phase 3:owner 执行**前**捕获的 disposition marker version(0=无 marker/未捕获)。
+    /// owner 执行**前**捕获的 disposition marker version（0 表示无 marker 或未捕获）。
     #[serde(default)]
     pub marker_version_before: u64,
-    /// Phase 3:执行**后**的 disposition marker version。`after>before` 证明本 op 确实
+    /// 执行**后**的 disposition marker version。`after>before` 证明本 op 确实
     /// 推进了状态机(claim_transition 成功);`after==before` = 命中幂等/重入未推进 —— 用于
     /// 事后区分"真执行"与"去重命中",定位重复提交/丢响应导致的可疑重放。
     #[serde(default)]
@@ -139,7 +139,7 @@ pub(crate) async fn redis_now(client: &Arc<RedisClient>) -> Result<u64> {
 /// 否则同 op_id+action 不同 timeout 的重试 digest 相同,会静默返回旧 result(含已死的 Rejected/
 /// DeadlineExceeded),新 timeout 被吞、该 op_id 永久拿回死结果。纳入后:同 timeout → 幂等返回现状;
 /// 不同 timeout → `OperationIdConflict`(暴露给调用方,强制换 op_id 或识别冲突)。
-/// (16 位 crc16 的碰撞域问题是 N4 大件,改 ≥128 位摘要随 operation_id BLAKE3 同批。)
+/// 摘要采用足够宽的碰撞域，并与 operation_id 一起约束重复请求的业务语义。
 ///
 /// # 参数
 /// - `action`: 分区控制命令对应的动作。
@@ -344,7 +344,7 @@ pub async fn execute_one(
         }
     }
     // ④ Executing(中断重入:disposition 动作自身幂等/单向,直接重做)。
-    // Phase 3:执行前捕获 disposition marker version(审计基线;无 marker → 0)
+    // 执行前捕获 disposition marker version 作为审计基线；无 marker 时记为 0。
     r.marker_version_before = super::disposition::marker_version(rt_client, layout, p)
         .await
         .unwrap_or(0);

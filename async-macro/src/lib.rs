@@ -668,13 +668,13 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     // 过载保护(仅 fixed_rate 有意义):max_in_flight=并发上限;skip_if_running=true 等价 max_in_flight=1。
     let mut max_in_flight: Option<u64> = None;
     let mut skip_if_running: Option<bool> = None;
-    // 集群执行模式(d.md):"local"(默认,每节点跑)/ "leader"(仅 leader 触发)。
+    // 集群执行模式："local"（默认，每节点执行）或 "leader"（仅 leader 触发）。
     let mut cluster: Option<String> = None;
-    // 漏触发补偿(d.md):"skip"(默认)/ "fire_once"(仅 cron 有意义)。
+    // 漏触发补偿："skip"（默认）或 "fire_once"（仅 cron 有意义）。
     let mut misfire: Option<String> = None;
-    // 任务级超时 ms(d.md #7):tokio::time::timeout 协作式;超时记 RunStatus::TimedOut(不强杀阻塞 I/O)。
+    // 任务级超时采用 tokio::time::timeout 的协作式取消；超时记为 TimedOut，不强杀阻塞 I/O。
     let mut timeout_ms: Option<u64> = None;
-    // 分组 leader(d.md):仅 cluster=leader 有意义;决定用哪个 group gate。
+    // 分组 leader：仅 cluster=leader 有意义，决定使用哪个 group gate。
     let mut group: Option<String> = None;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("cron") {
@@ -744,9 +744,9 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_ident = func.sig.ident.clone();
     let name = name_attr.unwrap_or_else(|| fn_ident.to_string());
     // 稳定 task id —— FireOnce/ClaimOnly 的 claim key:跨节点一致、**路径无关**(不含 #root),且 repeatable
-    // 「同名 + 不同 cron」不会撞同一 claim field(调度设计约束)。cron 任务 = `name|cron|expr|zone`;
+    // “同名 + 不同 cron”不会撞同一 claim field；cron 任务签名为 `name|cron|expr|zone`；
     // 非 cron = `name`(非 cron 不参与 claim)。RunEvent 仍用 name 作展示名;id 仅供 FireLog claim/去重。
-    // zone 归一(调度设计约束 #5):UTC 等价字面量(空 / UTC / GMT / Z,忽略大小写)→ "UTC",
+    // 将空值、UTC、GMT、Z 等价字面量统一归一为 "UTC"，避免相同语义形成不同启动指纹。
     // 保证语义相同的 zone 产出同一 task id(claim key 稳定);IANA / 固定 offset 原样保留。
     let zone_id: String = match zone.as_deref().map(str::trim) {
         None | Some("") => "UTC".to_string(),
@@ -760,7 +760,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => name.clone(),
     };
 
-    // ②.5 归一化 + 触发源选择:cron / fixed_rate / fixed_delay 恰好一个;initial_delay 仅配合或单独=一次性。
+    // 归一化并选择唯一触发源：cron、fixed_rate、fixed_delay 恰好一个；initial_delay 可配合或单独表示一次性任务。
     // 每"家族"可由多种来源给(_ms 主名 / 旧别名 / 数字+time_unit / duration string),最终都折算成 ms,且最多一个来源。
     // time_unit 规范化单位(默认毫秒)。对齐原语义,它的作用对象有两类:
     //   ① 数字版 fixed_rate/fixed_delay/initial_delay → 值按该单位折成 ms;
@@ -925,7 +925,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     //   - 标准 Result(见 is_result_return,仅 std/core/anyhow 形态)→ `Err` 打 error 日志(带任务名)、`Ok(_)` 忽略;
     //   - 其它任意返回类型(含 `()`/`u32`/自定义 `xxx::Result`/类型别名)→ `let _ =` 忽略。
     // 注:Err 分支**不格式化错误值**(不打 `{:?}`),以免给 `E` 强加 `Debug` 约束而破坏"返回值忽略";要错误详情请在任务体内自行记录。
-    // run 的 async 体须产出 #root::RunOutcome(供 ExecutionRecorder 区分 Success/Failed,d.md):
+    // async 函数体必须产出 #root::RunOutcome，供 ExecutionRecorder 区分 Success/Failed：
     //   - 标准 Result → Ok=Success / Err=Failed(并打 error 日志;**不格式化错误值**,不要求 E: Debug);
     //   - 其它任意返回类型 → 一律 Success(非 Result 任务不表达失败)。
     // 用显式 ::core::result::Result::{Ok,Err} 模式:std/core/anyhow::Result 都是 core::result::Result,均可匹配。
@@ -962,7 +962,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
             if !is_cron {
                 bail!("#[scheduled]: misfire=\"fire_once\" 仅用于 cron(fixed_rate/fixed_delay/initial_delay 无应触发时刻)");
             }
-            // fire_once 补的是 leader 无主窗口漏触发,必须配 cluster="leader"(d.md)。提前到编译期拦,
+            // fire_once 用于补偿 leader 无主窗口的漏触发，必须配 cluster="leader"。提前在编译期拒绝，
             // 而非等运行期 start_scheduled_with 才报(FireLog 依赖仍只能运行期校验)。
             if cluster.as_deref() != Some("leader") {
                 bail!("#[scheduled]: misfire=\"fire_once\" 需配合 cluster=\"leader\"(它补的是 leader 无主窗口漏触发;Local 任务每节点各跑、无此问题)");
@@ -988,7 +988,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     if group.is_some() && cluster.as_deref() != Some("leader") {
         bail!("#[scheduled]: group=... 仅配合 cluster=\"leader\"(它选 group leader gate;local 任务不看 gate)");
     }
-    // timeout_ms=0 会让每拍 tokio::time::timeout(0) 立即超时(全部 TimedOut)→ 编译期拦(调度设计约束 #3)。
+    // timeout_ms=0 会让每次 tokio::time::timeout(0) 立即超时，因此在编译期直接拒绝。
     if timeout_ms == Some(0) {
         bail!("#[scheduled]: timeout_ms 必须 > 0(0 会让每次执行立即超时)");
     }

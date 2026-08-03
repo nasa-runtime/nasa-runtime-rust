@@ -1,12 +1,12 @@
 //! 定点算术:加减乘除 + 精度对齐 + 全 RoundingMode。
 //!
 //! **既定设计**:`multiply`/`divide` 的算法**必须与 原实现 `Numeric` 一致**——
-//! 整数部分纯整数(`a/m*b` / `a/b*m`),**余数部分走 `f64`**(对照 原实现 L784/L813 的 `(double)` 中转),
+//! 整数部分使用纯整数（`a/m*b` / `a/b*m`），余数部分经 `f64` 中转以兼容原实现的 `(double)` 路径，
 //! 逐值复刻 原实现(含其 f64 量化)。`add/subtract/align*` 是纯整数(原实现 也是),不变。
 
 use crate::{check_scale, check_scale_pair, pow10, NumericError, Result, RoundingMode};
 
-/// 业务作用: 余数 f64 → i128,**逐位复刻 原实现 `Numeric.roundHalfUp`(L731)** = `f>=0 ? floor(f+0.5) : -floor(-f+0.5)`。
+/// 业务作用: 将余数从 f64 舍入为 i128，兼容原实现 `Numeric.roundHalfUp` 的 `f>=0 ? floor(f+0.5) : -floor(-f+0.5)` 规则。
 ///
 /// ⚠ **必须直接算 `floor(f+0.5)`,不能拆成 `floor(f)+(diff>=0.5)`**:大 `f`(超 f64 半整数域)时
 /// `f+0.5` 在 f64 里会进位(如 `8888888799999999.0 + 0.5` 舍入到 `8888888800000000.0`),
@@ -23,7 +23,7 @@ fn round_half_up_f64(f: f64) -> f64 {
     }
 }
 
-/// 业务作用: 余数 f64 → i128 舍入(全 8 RoundingMode),逐分支复刻 原实现 `Numeric.applyRounding(double,mode,long)`(L744)。
+/// 业务作用: 按全部八种 `RoundingMode` 将余数从 f64 舍入为 i128，兼容原实现 `Numeric.applyRounding(double,mode,long)`。
 /// 返回**舍入加数**(调用方再加到 `int_part`);HALF_EVEN 的 tie 方向用 `int_part` 定奇偶。
 ///
 /// ⚠ HALF_UP 分支用 `floor(abs)`+`diff` 判定,与 [`round_half_up_f64`] 的 `floor(f+0.5)` **大值不等**——
@@ -124,7 +124,7 @@ pub fn subtract(a: i128, b: i128) -> Result<i128> {
 
 // ==================== 乘 / 除(定点,默认 HalfUp)====================
 
-/// 业务作用: 两个定点数相乘,结果仍定点(同 scale),默认 **HalfUp**。**逐值复刻 原实现 `Numeric.multiply(a,b,scale)`**(L784)。
+/// 业务作用: 两个定点数相乘并保持相同 scale，默认使用 HalfUp，兼容原实现 `Numeric.multiply(a,b,scale)`。
 ///
 /// 算法 = `a/m*b + roundHalfUp((double)(a%m)/m*b)`(整数部分整数、**余数部分 f64**)。
 ///
@@ -167,7 +167,7 @@ pub fn multiply_rounding(a: i128, b: i128, scale: u32, mode: RoundingMode) -> Re
     int_part.checked_add(add).ok_or(NumericError::Overflow)
 }
 
-/// 业务作用: 两个定点数相除,结果仍定点(同 scale),默认 **HalfUp**。**逐值复刻 原实现 `Numeric.divide(a,b,scale)`**(L813)。
+/// 业务作用: 两个定点数相除并保持相同 scale，默认使用 HalfUp，兼容原实现 `Numeric.divide(a,b,scale)`。
 ///
 /// 算法 = `a/b*m + roundHalfUp((double)(a%b)/b*m)`(整数部分整数、**余数部分 f64**)。
 ///

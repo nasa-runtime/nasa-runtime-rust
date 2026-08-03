@@ -21,7 +21,7 @@ use crate::{KafkaProxy, KafkaProxyInner};
 
 /// 单个物理 producer lane 的共享句柄。
 ///
-/// lane 在 `connect` 后按配置名冻结；不同 lane 的底层队列、准入和观察器在 P1 中独立创建。
+/// lane 在 `connect` 后按配置名冻结；不同 lane 的底层队列、准入和观察器相互独立。
 #[derive(Clone)]
 pub struct ProducerLane {
     /// 每个配置 lane 唯一的共享内部资源域。
@@ -1115,7 +1115,7 @@ fn validate_destination(topic: &str, fields: &BuilderFields) -> Result<()> {
     Ok(())
 }
 
-/// 解析命名 lane 的有效覆盖，供 P1 底层配置构建使用。
+/// 解析命名 lane 的有效覆盖，供底层配置构建使用。
 ///
 /// # 参数
 ///

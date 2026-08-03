@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 /// RetryBackoff 到期重投:逐 ID `XPENDING 精确查 + XCLAIM 0` 取回 payload(PEL 路径,
-/// 不变量 5;ExactTargetRetry 的无 marker 简化版——XCLAIM Unknown 的 retry-op 对账 = R4.2)。
+/// 不变量 5：ExactTargetRetry 的无 marker 简化版；XCLAIM Unknown 通过 retry-op 对账收敛。
 pub(super) async fn retry_redeliver(
     rt: &Arc<GroupRuntime>,
     slots: &mut HashMap<u32, ClaimSlot>,
@@ -23,7 +23,7 @@ pub(super) async fn retry_redeliver(
     let claim_term = slot.generation;
     let op_id = super::retryop::operation_id(&rt.layout, &rt.node_id, claim_term, &ids);
 
-    // ── attempt 权威值(R4.2c):意图先落盘(ensure_pending 顺带取回 PEL 真实
+    // ── attempt 权威值:意图先落盘(ensure_pending 顺带取回 PEL 真实
     // delivery count = desired-1),阈值比较取 max(本地 attempt, PEL count)——
     // 进程重启/owner 转移后本地计数清零,PEL count 是跨生命周期的事实源。
     let intents =
@@ -48,7 +48,7 @@ pub(super) async fn retry_redeliver(
         return;
     }
     // ── 逐 ID 毒消息判定──
-    //   · 不用批次最大 count 连坐(R5);每 ID 独立判定;
+    //   · 不用批次最大 count 连坐;每 ID 独立判定;
     //   · **以实际 PEL delivery count 为准,不信 marker desired**(:损坏 desired 会
     //     绕过 CAS 五规则直接 Drop 正常消息)。actual_count < desired-1 = marker 损坏
     //     (CAS 的 CORRUPT 规则)→ **冻结整分区重试,绝不 Drop/Park/DLQ**,等人工/受控修复。
@@ -141,13 +141,13 @@ pub(super) async fn retry_redeliver(
     }
     let retryable_ids: Vec<String> = retryable.iter().map(|i| i.id.clone()).collect();
 
-    // ── retry-op CAS 执行(仅 retryable 子集;意图已落盘;R4.2b 五规则)──
+    // ── retry-op CAS 执行(仅 retryable 子集;意图已落盘;五规则)──
     // count==desired-1 才 XCLAIM RETRYCOUNT(唯一递增点),==desired 只 XRANGE 取 payload
     // (不重复递增),owner 变/Superseded/Corrupt 放弃。
     let mut records: Vec<(String, Vec<u8>)> = Vec::new();
     let mut resolved_ids: Vec<String> = Vec::new(); // 墓碑/已出 PEL:fenced ACK 清残留
     {
-        // N2:retry-op CAS 现 owner-fenced——构造本任期凭据(holder + fence,无 fence_meta=原实现V1)
+        // retry-op CAS 必须受 owner fence 保护：构造本任期凭据；缺少 fence_meta 时按既有协议兼容。
         let fence_key = rt
             .fence_meta
             .as_ref()
@@ -425,8 +425,8 @@ async fn handle_poison(
                     let parked_ids: Vec<String> =
                         records.iter().map(|(id, _)| id.clone()).collect();
                     rt.enqueue_async_delete(p, &parked_ids).await;
-                    // owner-fenced(R4.2f-A):worker 持 slot.guard + slot.stamp,直接构造 owner 凭据。
-                    // ①.1:operation_id 用**可识别稳定** `auto:{p}:{park_id}`(非一次性 park_id)——
+                    // owner-fenced:worker 持 slot.guard + slot.stamp,直接构造 owner 凭据。
+                    // operation_id 使用可识别且稳定的 `auto:{p}:{park_id}`，不能退化为一次性值；
                     // auto-DLQ 是 owner 内部触发、无外部重提主体,publish 中途崩溃后接管方据 `auto:` 前缀
                     // 识别并自动续作到终态(见 takeover_disposition 的 AutoResume + coordinator)。
                     let auto_op = super::disposition::auto_op_id(p, &park_id);
@@ -672,7 +672,7 @@ pub(super) async fn sweep_partition(
 }
 
 /// 解析 `XAUTOCLAIM ... JUSTID` 响应:`[next-cursor, [id...], [deleted-id...]]`。
-/// 响应形态异常即 Err(协议错误,**不猜成空**,R4)。
+/// 响应形态异常即 Err(协议错误,**不猜成空**)。
 ///
 /// # 参数
 /// - `v`: 待转换的值。
@@ -755,4 +755,4 @@ pub(super) async fn fetch_pel_records(
     Ok(records)
 }
 
-// ── 毒消息管理入口(单 owner 进程内直调;跨节点路由 = command outbox,R4.2b)──
+// ── 毒消息管理入口(单 owner 进程内直调;跨节点路由 = command outbox)──

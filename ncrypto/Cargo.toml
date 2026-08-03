@@ -1,9 +1,9 @@
-# ncrypto —— 密码学工具 crate(L1,对照 原实现 原工具包 Encryptor 静态工具类)。
-# 组件设计与兼容边界见 README.md。本 crate 只提供无 Web 依赖的 L1 密码原语；端点透明加解密
+# ncrypto —— 无状态密码学工具 crate，兼容原工具包 Encryptor 静态工具类。
+# 组件设计与兼容边界见 README.md。本 crate 只提供无 Web 依赖的密码原语；端点透明加解密
 # 由 mapping 路由属性和安全运行时编排，不在这里增加独立属性宏或 Axum 依赖。
 #
-# 字节保真(架构文档 §4):hex 大小写按函数区分、AES key=key 串 UTF-8 字节、AES-GCM 布局 IV‖ct‖tag、
-#   RSA=PKCS1v1.5、自动分段、RSA 私钥加密=PKCS1 type-1(§4.1,低层手工 padding)。
+# 字节保真：hex 大小写按函数区分、AES key 使用 key 串 UTF-8 字节、AES-GCM 布局为 IV‖ct‖tag，
+# RSA 使用 PKCS1v1.5 并自动分段，RSA 私钥加密使用 PKCS1 type-1 低层 padding。
 # 安全改良:随机值(salt/AES key/GCM IV)一律用 OS 安全 RNG,不复刻 原实现 的 Math.random()。
 [package]
 name = "ncrypto"
@@ -44,7 +44,7 @@ ecb = { version = "0.1", features = ["alloc"] }
 aes-gcm = "0.10"
 # 块密码 trait + PKCS7 padding(cbc/ecb 的 new_from_slices / encrypt_padded_vec_mut 由它提供)
 cipher = { version = "0.4", features = ["block-padding", "alloc"] }
-# 非对称 RSA(含低层 BigUint 供 §4.1 私钥 type-1)+ Ed25519
+# 非对称 RSA（含低层 BigUint 私钥 type-1 能力）与 Ed25519。
 rsa = { version = "0.9", features = ["sha2"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 pkcs8 = "0.10"

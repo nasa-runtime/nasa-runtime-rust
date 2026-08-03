@@ -1,6 +1,6 @@
 // ============================================================================
 // src/endpoint.rs —— 端点 + 事件 handler(闭包 builder)。架构说明。
-// handler 拆 Inline(同步,不可 await/阻塞)与 Async(提交 tokio,后续加并发上限)。
+// handler 分为 Inline（同步且不可 await/阻塞）与 Async（提交 tokio 并受服务端并发门禁约束）。
 // 不用注解/反射(贴合地道 Rust 决定)。
 // ============================================================================
 
@@ -21,7 +21,7 @@ pub type BoxFut = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub enum EventHandler {
     /// 读循环内同步执行:只允许短 CPU 操作,**不可 await/阻塞**。
     Inline(Arc<dyn Fn(SessionHandle, Bytes) + Send + Sync>),
-    /// 提交 tokio 后台执行:可 await;不阻塞读循环(R0.2 直接 spawn,并发上限后续加)。
+    /// 提交 Tokio 后台执行：可 await，不阻塞读循环，并受服务端统一并发门禁约束。
     Async(Arc<dyn Fn(SessionHandle, Bytes) -> BoxFut + Send + Sync>),
 }
 
@@ -173,8 +173,8 @@ impl EndpointBuilder {
 /// 杜绝"已注册 endpoint 的成功控制帧必超限 → 永远连不上且只见静默断开"的半可用配置。
 pub const MAX_ENDPOINT_LEN: usize = 256;
 
-/// endpoint path 不变量(`register` 与 `replace` **共用**,任何写入口都不得绕过;
-///R23 P2):非空 + ≤ `MAX_ENDPOINT_LEN`(path 即 socket.io namespace,
+/// endpoint path 不变量由 `register` 与 `replace` **共用**，任何写入口都不得绕过：
+/// 非空且不超过 `MAX_ENDPOINT_LEN`（path 即 socket.io namespace，
 /// 过长会让 CONNECT ok 超 max_frame)。
 ///
 /// # 参数
@@ -249,7 +249,7 @@ impl EndpointRegistry {
 
     /// 注册;path 空或已存在则返回 Err(不静默覆盖)。用 DashMap entry **原子**判重+插入,
     /// 避免 contains_key→insert 的竞态。分配**全新 generation**
-    /// (unregister 后重 register 不复用旧代际;R25 P1)。
+    /// (unregister 后重 register 不复用旧代际)。
     ///
     /// # 参数
     /// - `ep`: 要注册的 endpoint 快照,其 path 作为路由表 key。
@@ -293,7 +293,7 @@ impl EndpointRegistry {
     }
 
     /// 注销。成功后触发 mutation hook——Server 装配的 hook 会主动关闭该 path 的**所有**
-    /// 会话(不再是"只挡新连接"的假下线;R25 P1)。
+    /// 会话(不再是"只挡新连接"的假下线)。
     ///
     /// # 参数
     /// - `path`: 要注销的 endpoint 路径。

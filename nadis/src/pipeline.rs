@@ -12,7 +12,7 @@
 //     tokio::spawn,task 调度顺序 ≠ 入队顺序,实测 2000 轮出现 6 次乱序——撤回):
 //     现经 `MultiplexedConnection::send_packed_commands(&Pipeline, 0, n)` 单条消息进
 //     driver、单次 flush、严格按入队顺序;返回裸 `Vec<Value>`,server error 以
-//     `Value::ServerError` **逐槽位内联**(R0 spike #1 实测:聚合成整批 Err 只发生在
+//     `Value::ServerError` **逐槽位内联**；聚合成整批 Err 只发生在
 //     `Pipeline::query_async` 包装层,绕开包装层即得逐命令隔离)。
 //   · 失败语义:传输层错误(写出后断线等)= 整 session 未确认结果统一
 //     ExecutionUnknown;`Value::ServerError` = 单命令确定性失败,不污染同批其它命令。
@@ -109,7 +109,7 @@ impl<T: FromRedisValue> Ticket<T> {
 /// 第 1001 条进新批),不必等 `execute()`。各段经 `flush_chain` **链式串行**(段 N 落库后才发段 N+1),保证跨段
 /// 严格按 seal 顺序(同 slot 跨段保序;cluster 跨 slot 同单批限制)。每段命令各自的 `Ticket` 在该段后台 dispatch
 /// 完成时回填——auto-flush 段的 ticket 可能在 `execute()` 前就绪。`execute()` 等齐各段 + 发最后一段未满批,并
-/// **聚合各段批级传输错误上抛**(P2)。**已 auto-flush 段=已提交**(同 原实现),会话未 `execute` 即 drop 也会后台
+/// **聚合各段批级传输错误上抛**。**已 auto-flush 段=已提交**(同 原实现),会话未 `execute` 即 drop 也会后台
 /// 完成(仅最后一段未满批按 `NotExecuted`)。
 ///
 /// ⚠ **时间可见性**(对照 原实现 的契约差异):原实现 `pipelineAutoFlush` 在入队线程内同步 `pipelineForce()`;Rust
@@ -173,7 +173,7 @@ impl PipelineSession {
         self.cmds.push((cmd, tx));
         // 滚动自动 flush(对齐 原实现 pipelineAutoFlush;**不报错**):**push 后**判断——第 1000 条入队后
         // `len==session_max_commands` 立即 seal 后台发出(exact-1000 即提交,对齐 原实现 line 1540;复审
-        // P1 off-by-one 修正:此前 push 前判断,要等第 1001 条才 seal 前 1000)。字节阈值同样 push 后判断
+        // off-by-one 修正:此前 push 前判断,要等第 1001 条才 seal 前 1000)。字节阈值同样 push 后判断
         // (`bytes >= max_bytes`),单条命令本身超限时它自己一段发出,不死循环。
         if self.cmds.len() >= self.cfg.session_max_commands
             || self.bytes >= self.cfg.session_max_bytes
@@ -192,7 +192,7 @@ impl PipelineSession {
     /// 空批直接返回。
     fn seal_and_flush(&mut self) {
         // helper 是同步的——若调用方在**无 tokio runtime** 的上下文攒批(罕见),无法后台 flush:不 seal,
-        // 保留缓冲,留待 `execute().await`(必在 runtime 内)统一发出。既不 panic 也不报错。
+        // 保留缓冲并由 `execute().await`（必在 runtime 内）统一发出，既不 panic 也不提前报错。
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -2508,7 +2508,7 @@ impl Drop for PipelineSession {
     }
 }
 
-// ═══════════════════ F5 自动微批(时间轮合批 + caller-runs 背压)═══════════════════
+// ═══════════════════ 自动微批（时间轮合批 + caller-runs 背压）═══════════════════
 //
 // 对照 原实现 LettucePipeline 自动微批:多生产者把命令丢进有界队列,后台任务按**时间窗 + 批量上限**
 // 合并成一条 pipeline 一次发出;队列满时 `execute().await` 阻塞 = caller-runs 背压(天然限流)。

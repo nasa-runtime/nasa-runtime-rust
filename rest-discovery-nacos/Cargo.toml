@@ -1,6 +1,6 @@
 # rest-discovery-nacos —— RestDiscovery + Nacos 一键装配【便利层】。
 #
-# 边界(对照 lb.md §D):
+# 组件边界：
 #   · rest-discovery 本体保持 provider-neutral(只认 discovery::DiscoveryClient,绝不依赖 nacos);
 #   · 本 crate 收敛「读 DiscoveryConfig → 连 Nacos → 可选注册 → 装配 RestDiscovery」的装配逻辑;
 #   · nasa 把本 crate 的 init_from_config 重导出成统一门面路径 nasa::discovery::init_from_config(业务不直接 dep 本 crate)。

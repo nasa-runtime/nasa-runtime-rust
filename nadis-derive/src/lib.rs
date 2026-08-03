@@ -2,7 +2,7 @@
 //!
 //! 根据结构体上的 `#[rs(...)]` 元数据生成索引描述、键片段、字段持久化和反序列化辅助代码。
 // ============================================================================
-// nadis-derive —— #[derive(RedisDocument)](R5.2,架构文档)。
+// nadis-derive：实现 #[derive(RedisDocument)]。
 //
 // 对照 原实现 注解全集(annotation/ 包)与 MetaResolver 启动期解析:
 //   @RsDocument(index, prefix, type, bucketCount) → 结构体级 #[rs(...)]
@@ -61,14 +61,14 @@ struct FieldInfo {
     is_id: bool,
     sortable: bool,
     weight: f64,
-    // S3 TAG 属性
+    // TAG 字段属性。
     separator: Option<char>,
     case_sensitive: bool,
-    // S4 TEXT 属性
+    // TEXT 字段属性。
     no_stem: bool,
     phonetic: Option<String>,
     no_index: bool,
-    // S8 TAG/TEXT:WITHSUFFIXTRIE(后缀/中缀查询)
+    // TAG/TEXT 的 WITHSUFFIXTRIE 后缀与中缀查询能力。
     with_suffix_trie: bool,
     alias: String,
     json_path: Option<String>,
@@ -77,7 +77,7 @@ struct FieldInfo {
     decl_idx: usize, // 声明顺序(array_key 同 order 时报错的诊断 & 稳定排序)
 }
 
-/// 业务作用：字段类型是否 f64/f32(M1:to_fields 浮点用 原实现_double_to_string 对齐 原实现)。
+/// 业务作用：判断字段是否为 f64/f32，以便持久化时使用兼容的浮点格式。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -230,19 +230,19 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 } else if meta.path.is_ident("weight") {
                     info.weight = meta.value()?.parse::<LitFloat>()?.base10_parse()?;
                 } else if meta.path.is_ident("separator") {
-                    // S3:`separator = '|'`(单字符;TAG 多值分隔符)
+                    // separator 只接受单字符，用作 TAG 多值分隔符。
                     info.separator = Some(meta.value()?.parse::<LitChar>()?.value());
                 } else if meta.path.is_ident("casesensitive") {
                     info.case_sensitive = true;
                 } else if meta.path.is_ident("nostem") {
                     info.no_stem = true;
                 } else if meta.path.is_ident("phonetic") {
-                    // S4:`phonetic = "dm:en"`(PHONETIC 匹配器)
+                    // phonetic 配置 PHONETIC 匹配器，例如 `dm:en`。
                     info.phonetic = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.path.is_ident("noindex") {
                     info.no_index = true;
                 } else if meta.path.is_ident("suffix") {
-                    // S8:WITHSUFFIXTRIE(后缀/中缀查询)
+                    // suffix 为字段启用 WITHSUFFIXTRIE 后缀与中缀查询。
                     info.with_suffix_trie = true;
                 } else if meta.path.is_ident("alias") {
                     info.alias = meta.value()?.parse::<LitStr>()?.value();
@@ -368,7 +368,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     // ── to_fields() / from_fields():全部字段(含未标注)──
-    // M1:f64/f32 字段用 `原实现_double_to_string` 对齐 原实现 Double.toString(整数补 `.0`、科学计数法 E),
+    // f64/f32 字段使用兼容格式化函数对齐既有系统的 Double.toString（整数补 `.0`、科学计数法 E），
     // 否则 HASH 存储跨语言字节分叉。其余类型仍 `to_string`。
     let to_pairs: Vec<TokenStream2> = fields
         .iter()

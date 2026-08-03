@@ -1,5 +1,5 @@
 // ============================================================================
-// src/proxy.rs —— ConsumeMode PROXY(F3;对照 原实现 RedisProxy.loadStreamSubscribe PROXY 路径)。
+// src/proxy.rs：对齐既有 RedisProxy.loadStreamSubscribe 的 PROXY 消费路径。
 //
 // **共享 group 多 consumer 并行消费**(高吞吐、无序),区别于 PARTITION(每分区串行 + owner 锁 +
 // fenced ACK):PROXY 是**单共享 stream + 一个 consumer group**,N 个 consumer 并行 `XREADGROUP >`,
@@ -476,7 +476,7 @@ impl RunningProxy {
         // 正常 drain(全 task 已 join 退出,无在途 XAUTOCLAIM):**仅删 PEL 为空的 consumer**——
         // `XGROUP DELCONSUMER` 会把该 consumer **未 ACK 的 PEL pending 一并删除丢失**(不是重分配)。PROXY 是
         // at-least-once,handler 失败/在途的消息故意留 PEL 等 XAUTOCLAIM 重投;无条件 DELCONSUMER = 确定性丢消息。
-        // 故查每 consumer 的 pending 数,**只清理 pending==0 的空 consumer**(防堆积),有 PEL 的保留待 reclaim。
+        // 因此检查每个 consumer 的 pending 数，只清理 pending==0 的空 consumer；有 PEL 的交给 reclaim。
         let pending = consumer_pending_counts(&self.client, &self.stream, &self.group)
             .await
             .unwrap_or_default();
@@ -941,7 +941,7 @@ async fn pending_counts(shared: &ProxyShared, ids: &[String]) -> Result<HashMap<
 }
 
 /// 毒消息处置。
-/// ⚠ Dlq 路径(XRANGE→XADD→XACK 三步**非事务**,第十二轮 P2):XADD 转存成功但 XACK 失败时,
+/// ⚠ Dlq 路径的 XRANGE→XADD→XACK 三步**非事务**：XADD 转存成功但 XACK 失败时，
 /// 该消息会 **DLQ 重复 + 源仍重投**——这是 PROXY at-least-once 语义的固有取舍(DLQ 消费方需幂等/去重),
 /// 可接受;若需精确一次转存可改 Lua 原子化(留 backlog)。
 ///
@@ -956,7 +956,7 @@ async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
         }
         ProxyPoison::Dlq => {
             // 转存 payload 到 {stream}:dlq 后 XACK 源(best-effort)。**批量化**——
-            // 此前循环内逐条 XRANGE+XADD(违规范 #11/#12)。改:① 一条 pipeline 批量 XRANGE 读全部原 entry,
+            // 循环内逐条 XRANGE+XADD 会放大往返并制造半完成窗口，因此先用一条 pipeline 批量读取全部原 entry，
             // ② 一条 pipeline 批量 XADD 写 DLQ(同 stream/同 dlq 单 key,cluster 同 slot)。
             let dlq = format!("{}:dlq", shared.stream);
             let mut conn = shared.client.conn();
@@ -1084,7 +1084,7 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// 处置**不可解析**的坏 entry(无 `data` 字段 / `data` 非 Envelope JSON):本轮 P1/P2——
+/// 处置**不可解析**的坏 entry（无 `data` 字段或 `data` 不是 Envelope JSON）：
 /// 此前坏 entry 被 parser 静默跳过 → 永久卡 PEL。坏 entry 确定性不可解析(重读必再失败),故
 /// **立即处置不重投**:`Drop` → XACK 丢弃;`Dlq` → 把 `{reason, stream, group, id, raw 字段}` 转存
 /// `{stream}:dlq` 后 XACK 源(原始字段 lossless 保留供运维复盘)。Dlq 转存失败 → 不 ACK,留 PEL 待下轮重试(不丢)。

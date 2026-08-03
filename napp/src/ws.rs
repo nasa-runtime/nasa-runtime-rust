@@ -259,7 +259,7 @@ impl ApplicationComponent for WsComponent {
             })?;
 
             // Sender 是 Ready 才存在的晚绑定状态：资源容器此刻已封存，只能进 RuntimeState。
-            // 发布必须早于 bind——bind 之后 handler 随时可能被触发，届时广播能力必须已经就绪。
+            // 发布必须早于 bind：bind 之后 handler 随时可能被触发，广播能力必须预先就绪。
             application.set_ws_sender(server.sender().clone())?;
 
             let running = server.bind().await.map_err(|error| {

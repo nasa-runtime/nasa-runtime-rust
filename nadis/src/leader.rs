@@ -1,10 +1,10 @@
 // ============================================================================
-// src/leader.rs —— me-leader 选举(文档;①.2)。
+// src/leader.rs：me-leader 租约选举。
 //
 // **lease-based 选举,建在 DistributedLock 之上**:leader = 持有某 well-known lock key 的节点;
 // 锁看门狗持续续租 = 维持领导权;leader 进程死/失联 → lease 过期 → 别的节点 try_lock 抢到 → 改选。
 //
-// 语义 = **leader-local-once**(对照 原实现 `execIfIsMeOnce` 的 ONCE_CON 语义,文档):
+// 语义为 **leader-local-once**，对齐既有 `execIfIsMeOnce` 的 ONCE_CON 行为：
 //   · 同一 leader 任内,`run_if_leader` 的副作用按调用方自己的节流执行;
 //   · **换主后**新 leader 仍可能重跑同名逻辑——**不是集群范围恰好一次**;
 //   · 故 leader 上跑的任务必须**幂等**(autoTrim 的 XTRIM MINID 天然幂等)。

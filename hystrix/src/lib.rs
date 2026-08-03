@@ -373,7 +373,7 @@ pub struct Command {
     concurrent: AtomicI64, // 当前并发(gauge)：进入 +1、离开 -1
     // 进程生命周期内的并发峰值(fetch_max 只增不减,无窗口衰减)。喂 rollingMaxConcurrentExecutionCount
     // ——注意与真实 Hystrix 语义偏离:原版是滚动窗口内峰值(随窗口回落),这里一次尖峰会永久显示;
-    // 若要对齐需按 10s 桶记 per-bucket max(见 s.md 改进项)。
+    // 当前窗口按总样本聚合，不维护 per-bucket max；调用方不能据此推断单桶峰值。
     rolling_max_concurrent: AtomicI64,
     stats: Mutex<Rolling>, // 滚动窗口统计（成功/失败/超时/拒绝 + 延迟），加锁访问
     // 是否计入全局 TPS + 计数权重。对标 原实现 的 @TPS 注解：

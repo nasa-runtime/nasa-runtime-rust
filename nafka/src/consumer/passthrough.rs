@@ -19,7 +19,7 @@ pub struct KafkaHeaderRef<'a> {
 
 /// 有序多值借用 header 视图。
 ///
-/// 内部表示不属于公共 ABI，P7 可替换为直接游标而不改变业务调用方式。
+/// 内部表示不属于公共 ABI，可替换为直接游标而不改变业务调用方式。
 pub struct KafkaHeadersRef<'a> {
     /// 当前消息按 wire 顺序排列的 header 描述符。
     inner: &'a [KafkaHeaderRef<'a>],

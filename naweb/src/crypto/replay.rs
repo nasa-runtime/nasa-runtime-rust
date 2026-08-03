@@ -75,7 +75,7 @@ pub struct ReplayKey {
     pub key_scope: Arc<str>,
     /// 已在本地有限 key ring 中验证的公开 kid。
     pub kid: Arc<str>,
-    /// 固定方向文本；第一版请求占位使用 `request`。
+    /// 固定方向文本；请求方向占位使用 `request`。
     pub direction: &'static str,
     /// 发起方生成并经 AEAD 认证的 16 字节请求标识。
     pub rid: [u8; 16],

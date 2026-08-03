@@ -1,5 +1,5 @@
 // ============================================================================
-// src/cluster.rs —— 集群:跨节点 fan-out + 防回环(R0.6)。
+// src/cluster.rs —— 集群:跨节点 fan-out + 防回环。
 // 架构说明:ClusterEvent 显式带 message_mode(已在 proto)。
 //
 // 分层:Notifier(transport 接缝,可换内存实现/Redis/Kafka)+ Cluster(transport 无关编排)。
@@ -159,7 +159,7 @@ pub struct ClusterStats {
     pub tombstone_count: usize,
     /// 数据事件 publish 被 transport 拒(Full/Closed)的累计数。
     pub publish_dropped: u64,
-    /// presence publish 被拒的累计数(周期 FULL 自愈,但应可观测;R20 P3)。
+    /// presence publish 被拒的累计数(周期 FULL 自愈,但应可观测)。
     pub presence_dropped: u64,
     /// data plane 因 producer 容量不足被拒的累计数。
     pub data_full: u64,
@@ -195,7 +195,7 @@ pub struct Cluster {
     data_publisher: std::sync::OnceLock<Arc<dyn ClusterDataPublisher>>,
     /// 数据事件 publish 被 transport 拒(Full/Closed)的累计数;warn 按 2 的幂限频。
     publish_dropped: std::sync::atomic::AtomicU64,
-    /// presence publish 被拒的累计数(原先完全静默;周期 FULL 自愈,但需可观测;R20 P3)。
+    /// presence publish 被拒的累计数(原先完全静默;周期 FULL 自愈,但需可观测)。
     presence_dropped: std::sync::atomic::AtomicU64,
     /// data producer 容量拒绝计数。
     data_full: std::sync::atomic::AtomicU64,
@@ -207,7 +207,7 @@ pub struct Cluster {
 
 impl Cluster {
     /// 用**注入的、已校验的** `Incarnation` 构造。`Incarnation` 保证非空 + 纯 ASCII 十进制 + 正整数
-    /// (空串/非正会破坏 fencing,已在类型层挡住;R12 P1)。同 node_id 须用**同一定宽方案**
+    /// (空串/非正会破坏 fencing,已在类型层挡住)。同 node_id 须用**同一定宽方案**
     /// (`Incarnation::from_epoch` 恒 20 位)使字典序 == 数值序。
     ///
     /// # 参数
@@ -552,7 +552,7 @@ impl Cluster {
 
         // 统一**解析并校验** source_incarnation 为数值(非空 + 纯 ASCII 十进制 + ≤u128);
         // 非法/缺失一律拒绝,不续命、不更新目录、不投递(不 fail-open;数值比较避免变长错序,
-        //R9 P1 / R14 P1)。
+        // 非法来源不能续命、更新目录或进入本地投递链。
         let inc = match ev
             .source_incarnation
             .as_deref()
@@ -702,7 +702,7 @@ impl Incarnation {
         }
     }
 
-    /// 解析 incarnation 字符串为**数值**(供 fence **按数值比较**,避免变长字典序错序,R14 P1)。
+    /// 解析 incarnation 字符串为**数值**(供 fence **按数值比较**,避免变长字典序错序)。
     /// 要求:非空、全 ASCII 十进制、数值 > 0、且不溢出 u128。否则返回 None(接收端据此拒绝)。
     ///
     /// # 参数
@@ -908,7 +908,7 @@ impl NodeRegistry {
 
     /// 数据事件:**先 incarnation 围栏再刷新存活**(用本机时间 `now_local`),不动 groups。
     /// 数据事件:**先 incarnation 围栏再刷新存活**。`incarnation` 必须**非空**(调用方 on_received
-    /// 已强制,缺失/空一律在更上层拒绝;不 fail-open,R9 P1)。返回是否接受(被拒=旧实例
+    /// 已强制,缺失/空一律在更上层拒绝;不 fail-open)。返回是否接受(被拒=旧实例
     /// 迟到数据,调用方应丢弃、不分发)。
     ///
     /// # 参数
@@ -980,7 +980,7 @@ impl NodeRegistry {
         let info = m
             .entry(node.to_string())
             .or_insert_with(|| NodeInfo::fresh(now_local));
-        // 先围栏再刷新存活(同 apply_full;R6 P1)。
+        // 先围栏再刷新存活(同 apply_full)。
         if info.fence(incarnation) {
             info.last_seen_local = now_local;
             info.expired = false;

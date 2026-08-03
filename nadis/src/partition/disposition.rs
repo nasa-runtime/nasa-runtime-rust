@@ -1,8 +1,8 @@
 // ============================================================================
-// src/partition/disposition.rs —— 毒消息处置:Park / Resume / Drop(R4.2a)。
-// (架构设计文档 disposition 状态机的子集)
+// src/partition/disposition.rs —— 毒消息处置:Park / Resume / Drop。
+// 实现 disposition 状态机及其恢复边界。
 //
-// ┌─ Key 布局(Cluster 同槽:④B 经 KeyLayout 把 prefix 包成 `{group}` hash-tag,本组所有 key  ┐
+// ┌─ Key 布局（Cluster 下由 KeyLayout 将 prefix 包成 `{group}` hash-tag，本组所有 key） ┐
 // │  含同一 tag 落同 slot;**非** keytag::derive_same_slot_key——后者为 per-key 细粒度同槽派生,  │
 // │  当前 group 级 relayout 不走它,见 keytag.rs 注)                                            │
 // │ disposition marker : {prefix}:disposition:{p}     (HASH,每分区同时最多一宗)  │
@@ -11,7 +11,7 @@
 // │ parked 索引        : {prefix}:parked:{p} = park_id (新 owner 接管时恢复停拉)   │
 // └────────────────────────────────────────────────────────────────────────┘
 //
-// marker 状态机(本轮子集;ResumeIndeterminate/ForceRepublish = R4.2b):
+// marker 状态机包含 ResumeIndeterminate 与 ForceRepublish：
 //   (无) → Parked → ResumePublishing → Resumed(终态,带 TTL 保留供对账)
 //                  ↘ Dropped(终态)
 //
@@ -23,7 +23,7 @@
 //   注意:Lua 运行时错误不回滚(实测)——本脚本写入顺序经过设计:
 //   quarantine 先于 XACK(源被 ACK 前 payload 必有副本),重入按 park_id 幂等覆盖。
 //
-// resume = planned-ID reservations 协议(R4.2b, 定稿):
+// resume = planned-ID reservations 协议(定稿):
 //   ①读 last-generated-id,为批内每条预约【严格递增的显式 ID】(seq 溢出进位 ms+1,
 //     StreamIdExhausted 不 wrapping—— 算法封口);
 //   ②planned_ids[] **先整体持久化进 marker**,再逐条 `XADD 显式 ID`;
@@ -44,7 +44,7 @@ use super::KeyLayout;
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// disposition marker key(每分区一个:R4.2a 约束"同一分区同时最多一宗 Park",
+/// disposition marker key（每分区一个，约束“同一分区同时最多一宗 Park”，
 /// 与 的 park_id 多宗模型的差异已在头部注明)。
 ///
 /// # 参数
@@ -258,7 +258,7 @@ async fn assert_op_owns(client: &Arc<RedisClient>, marker: &str, op_id: &str) ->
     }
 }
 
-/// **auto-poison 处置的 operation_id**(①.1 liveness-takeover/auto-DLQ 崩溃可恢复)。
+/// **auto-poison 处置的 operation_id**，用于 liveness-takeover 与 auto-DLQ 崩溃恢复。
 /// auto-DLQ 由 owner **内部**触发(非 producer/admin 命令),无外部重提主体——若 publish 中途崩溃,
 /// 旧实现用一次性 `park_id` 作 op,接管方无从续作 → 分区永久冻结。
 /// 改用**可识别 + 稳定**的 `auto:{p}:{park_id}`:① `auto:` 前缀让接管方识别"这是 auto 处置、可自动续作"
@@ -419,7 +419,7 @@ end
 --    **DEL 整个 marker**,否则新 Park 会继承旧 planned/uncertain/new_ids/forced/force_audit/
 --    owner_holder 字段(污染本轮 resume/force),且 HSET 不清 TTL → 新 Parked marker 会继承上一轮
 --    终态的剩余 TTL 在仍 Parked 时自动消失,留下 index-only 冻结。DEL 一次性清字段+清 TTL。
---    (跨轮审计保留靠 per-park_id marker 隔离,属 R4.2f 后续;本刀先消除污染与 TTL 继承。)
+--    跨轮审计由 per-park_id marker 隔离；重建时必须消除字段污染与 TTL 继承。
 -- version 跨 Park 轮**单调递增**——DEL 前先读旧 version,新 marker 用 old+1
 -- (而非恒置 1)。否则慢命令读 before=旧高值后阻塞,被 DEL 重置成 1 的 marker 让其 after<before,
 -- 破坏 command 审计的"after≥before"不变量(把正常执行误标可疑重放/降级)。审计是信任根(规范1)。
@@ -527,7 +527,7 @@ pub enum TakeoverDisposition {
     NotParked,
     /// 处置在途(marker 非终态)→ 冻结分区禁业务 poll(park_id 来自 marker)。
     Frozen { park_id: String },
-    /// **auto-DLQ 在途**(marker=`DlqPublishing` 且 op 为 `auto:`;①.1):无外部重提主体,接管方
+    /// **auto-DLQ 在途**（marker=`DlqPublishing` 且 op 为 `auto:`）：无外部重提主体，接管方
     /// **自动续作** dlq_from_parked 到终态(成功→恢复消费,基础设施错误→暂冻结下轮再续),
     /// 不像普通 `*Publishing` 那样永久等 producer/admin 重提。
     AutoResumeDlq {
@@ -541,12 +541,12 @@ pub enum TakeoverDisposition {
 /// marker 的非终态(冻结业务消费)与终态集合。
 const DISPOSITION_NON_TERMINAL: &[&str] = &[
     "Parked",
-    //删除 "Parking" ——**全代码无任何 Lua HSET 它**(PARK_LUA 一步直接写 Parked),
-    // 是不可达死项,违"状态集合=可达状态"(#20)。移除后若真冒出 "Parking" 标记(不存在),takeover 落
+    // 删除 "Parking"：PARK_LUA 会直接写入 Parked，因此该值不属于可达状态集合。
+    // 若存量数据中意外出现 "Parking"，takeover 会进入
     // Inconsistent→fail-closed 弃管+告警,反而比静默当 Frozen 更安全。
     "ResumePublishing",
     "DlqPublishing",
-    //-P1a(实测复现):**ForcePublishing 必须在此**——force_republish 把
+    // **ForcePublishing 必须在此**：force_republish 把
     // ResumeIndeterminate→ForcePublishing 后崩溃/失锁,接管 `takeover_disposition` 读到它若不在
     // 本白名单 → 落 `Some(other)→Inconsistent` → coordinator fail-closed 放弃接管 → 分区**永久冻结**。
     // 加入后崩溃可被接管为 Frozen,再经 command/control 续作(同 resume/dlq 的 *Publishing)。
@@ -596,9 +596,9 @@ pub async fn takeover_disposition(
                     "disposition marker 非终态但 parked index 不一致(以 marker 为准冻结)"
                 ),
             }
-            // ①.1:auto-DLQ 在途(DlqPublishing + `auto:` op)→ 接管方自动续作(非永久冻结)。
+            // auto-DLQ 在途（DlqPublishing + `auto:` op）由接管方自动续作，不能永久冻结。
             // 只有 auto-DLQ 这一种 owner 内部触发的在途态可自动续(无外部重提主体);其余
-            // *Publishing(producer resume/dlq、direct)仍 Frozen 等原 op/admin 重提(①.4 再推广)。
+            // 其它 *Publishing（producer resume/dlq、direct）保持 Frozen，等待原 op 或 admin 重提。
             if s == "DlqPublishing" {
                 if let Some(op) = mop.as_deref() {
                     if is_auto_op(op) {
@@ -673,8 +673,8 @@ fn plan_ids(base: (u64, u64), n: usize) -> Result<Vec<String>> {
 }
 
 /// XINFO 等响应的 key/value 兼容取文本:SimpleString(`+`)或 BulkString(`$`)都接受。
-///各命令 RESP3 Map key 类型**不统一**(FT.*=SimpleString、XINFO/CONFIG=BulkString,
-/// 架构文档 实测),硬匹配单一形态会在 Redis 版本变更 key 类型时**静默漏字段** → fail-closed。
+/// 各命令的 RESP3 Map key 类型并不统一（FT.*=SimpleString、XINFO/CONFIG=BulkString）。
+/// 硬匹配单一形态会在 Redis 版本变更 key 类型时静默漏字段，因此必须 fail-closed。
 /// 统一兼容(对齐 actuator::val_str)消除"必须记住每个命令 key 类型"的 footgun。
 ///
 /// # 参数
@@ -835,7 +835,7 @@ pub async fn resume(
 
     match state.as_str() {
         "Parked" => {
-            // Phase 2:**先 CAS 认领** Parked → ResumePublishing(并发管理操作只一个成功;
+            // **先 CAS 认领** Parked → ResumePublishing（并发管理操作只允许一个成功；
             // 冲突 → 本 op 放弃,不重复副作用),认领成功后才规划发布。
             claim_transition(client, &marker, "Parked", "ResumePublishing", lease).await?;
             publish_step(
@@ -965,7 +965,7 @@ async fn publish_reserved(
     qkey: &str,
     planned: &[String],
     payloads: &[Vec<u8>],
-    // R4.2d 泛化:resume 回源 / dlq 写 DLQ stream 共用同一 reservations 协议,
+    // 泛化:resume 回源 / dlq 写 DLQ stream 共用同一 reservations 协议,
     // 仅目标 stream 与终态/不确定态标签不同(Resumed/ResumeIndeterminate vs Dlqed/DlqIndeterminate)。
     target_stream: &str,
     final_state: &str,
@@ -1056,7 +1056,7 @@ pub fn dlq_stream_key(layout: &KeyLayout) -> String {
 }
 
 /// Dlq:把 Parked 的消息按 planned-ID 协议发布到 DLQ stream,marker 终态 Dlqed。
-/// (R4.2d;PoisonPolicy::Dlq = fenced Park 转存 + 本函数自动执行——中途崩溃回退为
+/// (PoisonPolicy::Dlq = fenced Park 转存 + 本函数自动执行——中途崩溃回退为
 ///  Parked 可管理态;DlqPublishing 重入/DlqIndeterminate 语义与 resume 完全同构)
 ///
 /// # 参数
@@ -1081,7 +1081,7 @@ pub async fn dlq_from_parked(
     let qkey = quarantine_key(layout, &park_id);
     match state.as_str() {
         "Parked" => {
-            // Phase 2:先 CAS 认领 Parked → DlqPublishing(与 resume 同构),再规划发布
+            // 先 CAS 认领 Parked → DlqPublishing（与 resume 同构），再规划发布。
             claim_transition(client, &marker, "Parked", "DlqPublishing", lease).await?;
             publish_step(
                 client,
@@ -1164,7 +1164,7 @@ pub async fn force_republish(
         assert_op_owns(client, &marker, lease.operation_id).await?;
     }
 
-    // ── Phase 0:**只读预检,绝不改状态**(旧实现先切 ForcePublishing 再校验,
+    // ── **只读预检，绝不改状态**（旧实现先切 ForcePublishing 再校验，
     //    损坏 marker 会被状态污染)。任一校验失败 → Err,marker 仍停 ResumeIndeterminate ──
     let park_id: String = client.h_get(&marker, "park_id").await?.unwrap_or_default();
     if park_id.is_empty() {
@@ -1215,7 +1215,7 @@ pub async fn force_republish(
             )));
         }
     }
-    // 预读全部 uncertain payload(fail-closed:缺任一条即拒,不到 Phase 2 才发现一半)
+    // 预读全部 uncertain payload；缺任一条即 fail-closed，避免进入发布阶段后才发现数据不完整。
     let mut payloads: Vec<(usize, Vec<u8>)> = Vec::with_capacity(uncertain.len());
     for &i in &uncertain {
         let payload: Vec<u8> = client.h_get::<Vec<u8>>(&qkey, &i.to_string()).await?.ok_or_else(|| {
@@ -1226,7 +1226,7 @@ pub async fn force_republish(
         payloads.push((i, payload));
     }
 
-    // ── Phase 1:预检全过才 CAS 认领 ResumeIndeterminate → ForcePublishing(ForcePublishing 重入跳过)──
+    // 预检全部通过后才 CAS 认领 ResumeIndeterminate → ForcePublishing；重入时跳过认领。
     if st == Some("ResumeIndeterminate") {
         claim_transition(
             client,
@@ -1238,7 +1238,7 @@ pub async fn force_republish(
         .await?;
     }
 
-    // ── Phase 2:逐 index 对账/重发。
+    // 逐 index 对账并按需重发。
     //    **每个 index 在 XADD 前先持久化 `force:{i}`=target**;重入对账**已持久化的同一 target**:
     //    已发布(Ok(true))复用、RETRYABLE 同 target 幂等补发——绝不为这两种情形重新分配,杜绝
     //    "崩溃一次多一条副本"的无界重复。**唯一例外**:已持久 target 被越过且从未发布(Ok(false))=死
@@ -1266,7 +1266,7 @@ pub async fn force_republish(
                     continue;
                 }
                 Ok(false) => {
-                    //第十七轮 P1-C(确证死结修复):已提交 target 被越过且**从未发布**=死 target。
+                    // 已提交 target 被越过且从未发布时，它已成为不可达目标，必须重新分配。
                     // 此前直接 return PublishIndeterminate → 同 op 重入恒读此死 target、恒 Ok(false) → marker
                     // 永停 ForcePublishing、quarantine/index 不删、producer 永远拿不到终态;且 op_id 稳定
                     // (`direct:{p}:{park_id}`)→ force_takeover 覆写后仍是同 op、读同一死 target → **不自愈**。
@@ -1307,7 +1307,7 @@ pub async fn force_republish(
         final_ids[i] = target;
     }
 
-    // ── Phase 3 收尾:**先写完整 terminal 事实,再删唯一恢复数据(quarantine)**。
+    // 收尾必须**先写完整 terminal 事实，再删除唯一恢复数据 quarantine**。
     //    旧顺序先 DEL quarantine,crash 在写终态前 → 无 payload + ForcePublishing 永久冻结 ──
     client.h_set(&marker, "forced", "1").await?;
     client
@@ -1331,7 +1331,7 @@ pub async fn force_republish(
 }
 
 /// force 的显式-ID XADD:写**已提交的 target**。断线 → `ExecutionUnknown`(可能已执行,
-/// 留待重入按 `force:{i}` 复账,绝不重分配);"equal/smaller(被越过)"→ 复账,确认已发布则成功,
+/// 重入时按 `force:{i}` 复账且绝不重分配；"equal/smaller(被越过)" 会复账，确认已发布则成功，
 /// 否则 `PublishIndeterminate`(target 丢失,须新 operation)。
 ///
 /// # 参数
@@ -1419,7 +1419,7 @@ pub async fn drop_parked(
     Ok(())
 }
 
-/// **通用 liveness-takeover(①.4)**:operator 显式接管某分区**卡死的在途 `*Publishing`/`Dropping`**
+/// **通用 liveness-takeover**：operator 显式接管某分区卡死的在途 `*Publishing`/`Dropping`
 /// ——原 op 永久丢失(进程死)、无法自行重提,普通续作因 `assert_op_owns` 异 op → `OperationConflict`
 /// 推不动,分区冻结。本函数**强制覆写** `transition_operation_id` 为本 `lease.operation_id`(显式接受
 /// "可能与原 op 重复推进"的风险,取向同 `force_republish`),再按当前 state 续作到终态。
@@ -1430,7 +1430,7 @@ pub async fn drop_parked(
 ///     不在此越过安全闸);
 ///   · **state-CAS 覆写**:仅当覆写瞬间 state 未变才覆写——若原 op 其实还活着、刚把 state 推进了,CAS 失败
 ///     返 `OperationConflict`,避免"接管把活 op 的推进覆盖掉"。
-/// ⚠ 这是 **operator 显式恢复逃生舱**(确认原 op 已死后才用),非自动路径;auto-DLQ 的自动续作见 ①.1。
+/// ⚠ 这是 operator 显式恢复逃生舱，仅在确认原 op 已死后使用；auto-DLQ 由接管方自动续作。
 ///
 /// # 参数
 /// - `client`: 执行强制接管状态机的 Redis 客户端。

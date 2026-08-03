@@ -1,7 +1,7 @@
 # nacos —— Nacos 配置中心 + 注册中心的【传输/机制】门面(抽自各业务 app,机制写一次复用)。
 # 业务项目经 nasa 门面使用:nasa::config::nacos(配置中心)/ nasa::discovery::nacos(注册中心)(--features nacos-sdk)。
 #
-# 边界(对照 nacos.md §3):本 crate 只给【机制】——连接/鉴权、配置拉取与 watch(只吐裸文本)、
+# 边界：本 crate 只提供连接/鉴权、配置拉取与仅输出裸文本的 watch、
 #   服务注册/心跳/优雅下线(drop best-effort deregister + 显式 deregister)/发现/订阅;**绝不认识业务 AppConfig**。
 #   配置的 parse+merge+apply 是 app 策略,留在各 app。
 [package]

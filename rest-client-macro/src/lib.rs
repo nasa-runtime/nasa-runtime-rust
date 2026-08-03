@@ -140,10 +140,10 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
                 let s = meta.value()?.parse::<LitStr>()?;
                 a.client = Some(format_ident!("{}", s.value()));
             }
-            // rest_field 第一版不支持(client 的 RestDiscovery 字段固定为 `rest`):显式拒绝,避免 silent no-op 误导。
+            // client 的 RestDiscovery 字段固定为 `rest`，因此显式拒绝 rest_field，避免 silent no-op 误导。
             "rest_field" => {
                 return Err(
-                    meta.error("第一版不支持 rest_field,client 的 RestDiscovery 字段固定为 `rest`")
+                    meta.error("不支持 rest_field，client 的 RestDiscovery 字段固定为 `rest`")
                 );
             }
             other => return Err(meta.error(format!("rest_client 不支持的参数 `{other}`"))),
@@ -855,7 +855,7 @@ fn gen_method(
     if body_count > 0 && matches!(http_str.as_str(), "GET" | "DELETE") {
         return Err(syn::Error::new(
             m.sig.span(),
-            "GET/DELETE 第一版不支持 #[RequestBody]",
+            "GET/DELETE 不支持 #[RequestBody]",
         ));
     }
     // raw body 与 form 一样仅 POST/PUT/PATCH(GET/DELETE 不带 body)。

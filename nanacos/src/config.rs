@@ -545,7 +545,7 @@ fn resolved_group(group: &Option<String>, default_group: &str) -> String {
 
 /// 业务作用：纯编排:按 `refs` 顺序调用 `fetch_one` 拉取,组装成保序的 [`ConfigBundle`]。
 ///
-/// - `optional=true` 拉取失败:warn + 跳过(第一版兼容策略——暂不细分「配置不存在」与鉴权/网络错误,
+/// - `optional=true` 拉取失败：warn + 跳过（兼容策略不细分“配置不存在”与鉴权/网络错误，
 ///   后续应细分,避免环境故障被静默吞掉)。
 /// - `optional=false` 拉取失败:返回 `Err`,启动/重拉 fail-fast。
 ///

@@ -3,7 +3,7 @@
 # 只面向 `discovery::DiscoveryClient` 抽象做客户端负载均衡 + URL 重写;**绝不依赖 nacos crate**
 # (换 eureka/consul 时本 crate 不动)。后端由调用方在 main 里 connect 后装成 `Arc<dyn DiscoveryClient>` 注入。
 #
-# 三档识别(lb.md「实现基准 §A」):
+# 三档识别：
 #   档1 service_request(service, method, path) / OpenFeign service=  → 显式内部直连
 #   档2 lb://service/path                                            → 显式内部直连
 #   档3 http(s)://host/path  → 默认普通外部 HTTP;`heuristic_http=Enabled` 时命中服务名索引(ServiceNameIndex)才走 LB(已实现)

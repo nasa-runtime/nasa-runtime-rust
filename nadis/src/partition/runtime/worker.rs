@@ -24,7 +24,7 @@ pub(super) async fn worker_loop(
             _ = cancel.cancelled() => return,
         };
         let generation = batch.generation;
-        // P0:handler panic 必须被捕获——裸 panic 会杀死本 worker task,WorkFinished
+        // handler panic 必须被捕获——裸 panic 会杀死本 worker task,WorkFinished
         // 永不发出 → 该分区永卡 InFlight 且 permit 泄漏。catch_unwind 包整个批处理。
         //**批处理期间必须监听 cancel**——此前只在等下一批时 select! cancel,
         // 一旦进入 process_batch().await 就不再监听,导致停机 deadline 到了 handler future 仍在
@@ -76,7 +76,7 @@ pub(super) async fn process_batch(
 ) -> WorkOutcome {
     let all_ids: Vec<String> = batch.records.iter().map(|(id, _)| id.clone()).collect();
 
-    // ── fencing 检查 #1:业务调用前(V1 双检查协议;Unknown 也不执行)──
+    // 第一次 fencing 检查必须发生在业务调用前；Unknown 也不得执行。
     match rt.lock.holds_status(lock_key, lock_holder).await {
         HoldStatus::Held => {}
         HoldStatus::Lost => return WorkOutcome::LostOwnership,
@@ -155,7 +155,7 @@ pub(super) async fn process_batch(
         }
     }
 
-    // ── fencing 检查 #2:ACK 前(双检查;Unknown/Lost 一律不 ACK,留 PEL)──
+    // 第二次 fencing 检查必须发生在 ACK 前；Unknown/Lost 一律不 ACK，并保留 PEL。
     match rt.lock.holds_status(lock_key, lock_holder).await {
         HoldStatus::Held => {}
         HoldStatus::Lost => return WorkOutcome::LostOwnership,
@@ -169,7 +169,7 @@ pub(super) async fn process_batch(
             AckResult::Lost => return WorkOutcome::LostOwnership,
             AckResult::Failed => {
                 // ACK 耗尽:这批未确认 → 并入 failed 重投(handler 已成功,重投会重跑 =
-                // at-least-once;AckTicket 化的"只重试 ACK 不重跑 handler"列 R4.2e)
+                // at-least-once；AckTicket 只重试 ACK 而不重跑 handler，避免重复业务副作用。
                 failed_ids.extend(ack_ids);
             }
         }

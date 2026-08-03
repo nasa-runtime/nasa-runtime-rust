@@ -148,7 +148,7 @@ fn resolve_placeholders_inner(
 
 /// 终扫:定位第一个仍含 `${` 的字符串叶子并报错。
 /// 走到这里说明多趟替换没能消掉它——轮转型循环引用(值在多个键间轮转,每趟都是「树命中」)、
-/// 未闭合 `${`,或嵌套默认值等第一版不支持的写法。
+/// 未闭合 `${`，或嵌套默认值等当前语法不支持的写法。
 ///
 /// # 参数
 /// - `v`: 待转换的值。
@@ -168,7 +168,7 @@ fn scan_unresolved(v: &serde_json::Value, path: &str) -> anyhow::Result<()> {
         serde_json::Value::String(s) => {
             anyhow::ensure!(
                 !s.contains("${"),
-                "yml: 占位符 {MAX_ROUNDS} 轮后仍未解析 at `{path}`: `{s}`(疑似循环引用、未闭合 `${{` 或嵌套默认值;嵌套默认值第一版不支持)"
+                "yml: 占位符 {MAX_ROUNDS} 轮后仍未解析 at `{path}`: `{s}`(疑似循环引用、未闭合 `${{` 或嵌套默认值;当前不支持嵌套默认值)"
             );
         }
         _ => {}
@@ -296,7 +296,7 @@ fn substitute_whole_value(
         Err(e) => return Err(e),
     };
     // 树命中类型保真、env/default 标量类型化(见 ResolvedValue::into_value)。
-    // 若值本身仍含 `${`(链式引用中间态),它必然是字符串,留待下一趟继续解析。
+    // 若值本身仍含 `${`（链式引用中间态），它必然是字符串，并由下一趟继续解析。
     Ok(Some(resolved.into_value()))
 }
 

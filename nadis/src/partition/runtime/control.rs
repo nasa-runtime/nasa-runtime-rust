@@ -238,7 +238,7 @@ pub(super) async fn run_command(rt: &Arc<GroupRuntime>, p: u32, op_id: &str) -> 
         }
     };
     let action = pre.action;
-    // owner-fenced(R4.2f-A):control loop 执行管理动作前必须证明本节点仍是 p 的 owner;
+    // owner-fenced:control loop 执行管理动作前必须证明本节点仍是 p 的 owner;
     // owner_ctx 无该分区(失锁/未持有)→ 不执行副作用,保留 PEL 交新 owner(命令幂等)。
     //:用**命令的稳定 operation_id** 构造凭据——同 op_id 重试幂等续作、异 op_id 不接管在途
     let of = match rt.require_owner_for_op(p, op_id) {

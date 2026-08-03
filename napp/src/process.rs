@@ -63,7 +63,7 @@ where
         .shutdown_timeout(preflight.shutdown_timeout)
         .with_process_signals();
     // 逐个声明组件构造运行对象；声明了却未编译/未支持的组件必须 fail-fast，
-    // 不允许"通过宏校验但运行期静默无视"（M2 装配缺陷修复）。
+    // 不允许“通过宏校验但运行期静默无视”，避免装配配置在运行期失效。
     for component in spec.components() {
         let component = match build_component(*component, &spec, pinned_application.as_ref()) {
             Ok(component) => component,

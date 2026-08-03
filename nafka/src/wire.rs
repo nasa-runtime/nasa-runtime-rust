@@ -157,8 +157,8 @@ impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
     /// JSON 反序列化失败时返回 codec 错误。**错误文本不得包含 payload 内容**：
     /// 该错误会进 DLT reason header 与公开的 `GroupHealth.last_error`（均不可信下游可见），
     /// 而 serde_json 的 `Display` 对类型不符会内嵌出错的输入值
-    /// （`invalid type: string "sk-live-…"`），转出去就是 B5 / R5 那一类凭据外泄
-    /// ——R5 只堵了解码 panic 分支，这条更常见的 serde Err 主路径同样必须脱敏。
+    /// （`invalid type: string "sk-live-…"`），原样转出会造成凭据外泄；解码 panic 与更常见的
+    /// serde Err 主路径都必须统一脱敏。
     /// 只保留不含内容的定位信息：错误类别、行列位置与目标类型名（编译期常量）。
     fn decode(bytes: &[u8]) -> Result<Self> {
         serde_json::from_slice(bytes).map_err(|e| {

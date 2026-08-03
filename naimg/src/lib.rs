@@ -29,7 +29,7 @@
 //! ## 有意不迁移:`imgFormatMap`/`getImgFormat`/`addImgFormat`(浏览器 MIME 子类型映射)
 //! 原实现 `ImageUtils` 还含 `jpg→jpeg`/`tif→tiff` 等扩展名→MIME 子类型映射。**本 crate 只负责压缩,不做 MIME 映射**:
 //! 本组件只负责压缩,不设置 Content-Type,故浏览器 MIME 子类型映射由上传层按需处理。
-//! 若业务后续需要按扩展名拼 `image/{subtype}`,应在上传或 Web 层处理(或届时再加 `get_img_format`/`add_img_format`)。
+//! 按扩展名派生 `image/{subtype}` 属于上传或 Web 层职责，不在本 crate 中隐式推断。
 //!
 //! ## 参数校验(对照 原实现 thumbnailator fail-fast)
 //! 非法 `scale<=0` / `width|height==0` / `quality∉0.0..=1.0` 返 [`ImageError::InvalidArgument`],**不静默修正**

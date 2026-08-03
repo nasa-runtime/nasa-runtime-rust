@@ -99,7 +99,7 @@ pub struct PartitionExecutor {
     /// worker 句柄:shutdown 时取走并 join(保证「返回即所有 worker 已退出」)。
     /// 用 Option 实现幂等:take 过即为 None。
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
-    /// 每个 partition 的存活标记(#1 防黑洞):worker 正常运行=true;
+    /// 每个 partition 的存活标记：worker 正常运行时为 true，用于阻止任务进入已死亡分区。
     /// worker 异常死亡(loop panic / 被 cancel / future 被 drop)或 send 失败时置 false。
     /// 死后该 slot 的 submit 直接拒收 + 告警, 而不是把同 key 资金任务静默滞留成黑洞。
     alive: Vec<Arc<AtomicBool>>,
@@ -278,7 +278,7 @@ impl PartitionExecutor {
             return Err(SubmitError::ShuttingDown);
         }
         let slot = self.slot_of(key);
-        // #1 防黑洞:该 slot 的 worker 已死则拒收 + 告警(不静默吞同 key 资金任务)
+        // 该 slot 的 worker 已死亡时必须拒收并告警，不能静默吞掉同 key 的资金任务。
         if !self.alive[slot].load(SeqCst) {
             tracing::error!(
                 "PartitionExecutor partition {} dead; rejecting submit (avoid black hole)",
@@ -289,7 +289,7 @@ impl PartitionExecutor {
         }
         let job: Job = Box::pin(async move { f().await });
         // 此刻 shutdown 必在等 inflight 清零(它已观测到我们的 +1)→ 通道仍有消费者(未 Closed)。
-        // #2 满→QueueFull(非丢失,可背压);Closed→标记死亡+PartitionDead,均对调用方可见。
+        // 队列满返回 QueueFull 形成可见背压；关闭则标记死亡并返回 PartitionDead。
         let res = self.try_enqueue(slot, job);
         // 出闸
         self.inflight.fetch_sub(1, SeqCst);
@@ -478,7 +478,7 @@ impl Default for PartitionExecutor {
 // worker
 // ════════════════════════════════════════════════════════════════════════════
 
-/// worker 死亡哨兵(#1):靠 Drop 捕获 worker 的【异常退出】——
+/// worker 死亡哨兵：通过 Drop 捕获 worker 的异常退出；
 /// loop 体 panic、被 cancel、整个 worker future 被 drop,都会触发 Drop。
 /// 正常退出(收到 shutdown / 通道关闭后 break)会先把 `clean=true`,Drop 不再判死。
 /// 死亡时 alive true→false(仅记一次)+ dead_partitions+1 + 告警,使 submit 后续拒收该 slot。

@@ -1,12 +1,12 @@
 // ============================================================================
-// src/partition/fencing.rs —— V2 FencingStamp / bootstrap 状态机(R4.2d)。
-// (架构文档: per-tag 状态 + 全局三态 + 弱承诺版)
+// src/partition/fencing.rs —— V2 FencingStamp / bootstrap 状态机。
+// 采用 per-tag 状态、全局三态和弱承诺 bootstrap。
 //
 // 解决的问题:holds 双检查(V1 协议)在"检查与 ACK 之间"仍有失锁窗口——V2 用
 // **单 Lua 原子校验 holder + 任期 stamp 后才 XACK**,旧 owner(更早任期)的迟到 ACK
 // 被 counter 比较拒绝(STALE)。
 //
-// ┌─ Key 布局(单 tag 简化形态:tag = 组前缀;多 tag/Cluster = R4.2e)──────────┐
+// ┌─ Key 布局(单 tag 简化形态：tag = 组前缀；多 tag/Cluster 仍保持同槽)──────┐
 // │ 全局 bootstrap marker : nasa:fence-bootstrap:{namespace}(JSON:state         │
 // │   Initializing|Activating|Ready + round + owner_term + nonce)                │
 // │ per-tag fence HASH    : {prefix}:fence(fields:state/round/nonce/epoch +     │
@@ -19,7 +19,7 @@
 //   → per-tag activate(同 round/nonce)→ **重验全部 tag Ready** → 全局 Ready。
 //   任一阶段崩溃:重跑 bootstrap 以同 round/nonce 幂等续建。
 //
-// ── R4.2e:bootstrap owner TTL lease + owner_term 接管──
+// ── bootstrap owner TTL lease + owner_term 接管──
 // 为什么需要 lease:无 lease 时两节点并发走到"Initializing→Activating"会**各自生成
 // nonce 抢写 marker**——tag 可能用 A 的 nonce 激活而 marker 落 B 的 nonce,verify
 // 永久失败。lease 把"推进状态机"收敛到单 owner:
@@ -55,7 +55,7 @@ pub fn bootstrap_key(namespace: &str) -> String {
     format!("nasa:fence-bootstrap:{namespace}")
 }
 
-/// bootstrap owner lease key(R4.2e;SET NX PX 独占,值 = owner token)。
+/// bootstrap owner lease key(SET NX PX 独占,值 = owner token)。
 ///
 /// # 参数
 /// - `namespace`: Redis 协议命名空间。
@@ -122,7 +122,7 @@ pub struct FenceMeta {
 
 /// per-tag init Lua
 /// ①不存在→建 Initializing;②round 相同且字段完整→幂等;③本地 round 更大→拒;
-/// ④输入更大→仅覆盖 Initializing&&counter 全零的旧态(R4.2d 单 tag 简化:覆盖即重建);
+/// ④输入更大→仅覆盖 Initializing&&counter 全零的旧态(单 tag 简化:覆盖即重建);
 /// ⑤字段残缺→CORRUPT(禁猜值修复)。
 const TAG_INIT_LUA: &str = r#"
 local state = redis.call('HGET', KEYS[1], 'state')
@@ -188,7 +188,7 @@ return n
 /// 执行 bootstrap(幂等可重入;任一阶段崩溃后由新 owner 同 round 续建)。
 /// 返回 FenceMeta(round/nonce/epoch)供 acquire/ACK 使用。
 ///
-/// R4.2e 流程:Ready 快路径 → 否则抢 owner lease;抢到 = 单 owner 推进状态机
+/// 流程:Ready 快路径 → 否则抢 owner lease;抢到 = 单 owner 推进状态机
 /// (接管半成品时 owner_term+1);没抢到 = 轮询 marker 等 owner 完成,lease 过期
 /// (owner 崩溃)后下一轮重新抢——活着的节点里总有一个能当上 owner。
 ///

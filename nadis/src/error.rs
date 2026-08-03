@@ -111,7 +111,7 @@ impl NasaRedisError {
     /// 终态、不得 ACK+XDEL command——保留 PEL 交下一轮或新 owner 重试;反之**确定性失败**
     /// (WRONGTYPE / 语法 ERR / NOPERM / EXECABORT / 解析等)立即 Rejected,绝不空转重试。
     ///
-    /// R4 修正:此前把整个 `Redis(_)` 与 `Parsing(_)` 一律当可重试——WRONGTYPE 这类
+    /// 修正:此前把整个 `Redis(_)` 与 `Parsing(_)` 一律当可重试——WRONGTYPE 这类
     /// 确定性错误会一直留 Executing 空转到 deadline 才转 Rejected,诊断延迟且浪费 Redis。
     /// 现按 `redis::RedisError` 的 IO/超时/断连判定 + 服务端 code 分类。
     pub fn is_infra_retryable(&self) -> bool {

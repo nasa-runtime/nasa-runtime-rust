@@ -3,16 +3,16 @@
 //! 业务通常通过 `nasa::redis` 门面接入；本 crate 承载单点/集群 Redis 的类型化命令、
 //! 连接治理和分布式协作能力。
 // ============================================================================
-// nadis —— Redis 五件套移植的基础层(架构设计文档)。
+// nadis：Redis 五件套能力的基础层。
 //
 // 对照 原实现 原框架-boot-starter-原工具包 的 cache/redis 包:
 //   RedisProxy            → client::RedisClient + commands(类型化命令层)
 //   LettucePipeline       → pipeline::PipelineSession(显式批,typed ticket)
 //   LettuceDistributedLock→ lock::DistributedLock(4 Lua 逐字节照搬,V1 可与 原实现 互锁)
-//   RedisPartition        → (R4,reducer 阶段后)
-//   RediSearch            → (R5)
+//   RedisPartition        → partition 分区消费运行时
+//   RediSearch            → search 类型化查询与索引管理
 //
-// 本轮已实现(R1+R2+R3):
+// 核心模块:
 //   config  —— RedisConfig + CompatibilityProfile(无默认值,缺失即配置错)
 //   error   —— 统一错误(含 ExecutionUnknown:写出后断线="可能已执行")
 //   keytag  —— redis_slot 逐字节复刻(CRC16+有效 hash tag 规则)+ synthetic tag 表
@@ -50,7 +50,7 @@ pub mod pipeline;
 pub mod proxy;
 /// Redis pub/sub 订阅和发布封装。
 pub mod pubsub;
-/// RediSearch/RedisJSON 封装(feature "search";R5)——只用 lock/pipeline/
+/// RediSearch/RedisJSON 封装(feature "search")——只用 lock/pipeline/
 /// partition 的服务不编译它(门面侧经 "redis-search" 透传)。
 #[cfg(feature = "search")]
 pub mod search;

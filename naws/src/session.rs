@@ -56,7 +56,7 @@ pub enum Transport {
     Ws,
 }
 
-/// 连接所用的 wire 协议:NASA 原生二进制帧 / socket.io 文本包(R0.7)。
+/// 连接所用的 wire 协议:NASA 原生二进制帧 / socket.io 文本包。
 /// fan-out 时按它决定给该会话发二进制帧还是 socket.io 文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -303,7 +303,7 @@ pub struct Session {
     protocol: Protocol,
     uid: OnceLock<String>,
     endpoint: OnceLock<String>,
-    /// 鉴权时绑定的 endpoint 快照(generation + Arc;R25 P1)。
+    /// 鉴权时绑定的 endpoint 快照(generation + Arc)。
     bound: OnceLock<BoundEndpoint>,
     /// socket.io 会话连接的 namespace(出站事件按此成帧);NASA 会话不设,默认 "/"。
     sio_namespace: OnceLock<String>,
@@ -339,7 +339,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// **框架内部构造**(`pub(crate)`,R12 P1):业务不得自行造 Session 并注册,
+    /// **框架内部构造**(`pub(crate)`):业务不得自行造 Session 并注册,
     /// 否则可绕过鉴权/生命周期不变量。
     pub(crate) fn new(
         id: String,
@@ -407,7 +407,7 @@ impl Session {
     }
 
     /// 按**会话协议**编码并发一条业务 EVENT 给本会话(供 `SessionHandle::send_event` 复用,
-    /// 与 fan_out 的单会话编码一致;R18 P1):
+    /// 与 fan_out 的单会话编码保持一致：
     /// - NASA → **JSON_BYTES** EVENT 帧(浏览器 SDK 只收 JSON;Rust Client 也接受);
     /// - socket.io → 经 `PayloadBridge` + namespace 生成标准 `42[...]` 文本。
     pub(crate) fn encode_and_send_event(&self, event: &str, payload: &[u8]) -> SendOutcome {
@@ -509,7 +509,7 @@ impl Session {
         let _ = self.endpoint.set(ep);
     }
 
-    /// 框架内部:鉴权时绑定 endpoint 快照(generation + Arc;R25 P1)。
+    /// 框架内部:鉴权时绑定 endpoint 快照(generation + Arc)。
     pub(crate) fn bind_endpoint(&self, generation: u64, endpoint: Arc<Endpoint>) {
         let _ = self.bound.set(BoundEndpoint {
             generation,
@@ -528,7 +528,7 @@ impl Session {
     }
 
     /// endpoint 下线/替换时向本会话发协议化的"endpoint removed"关闭通知
-    /// (NASA → CLOSE(ENDPOINT_REMOVED) 帧;socket.io → `41` DISCONNECT;R25 P1)。
+    /// (NASA → CLOSE(ENDPOINT_REMOVED) 帧;socket.io → `41` DISCONNECT)。
     /// 须在 cleanup **之前**调用(cleanup 置 closed 后控制帧不再入队)。
     pub(crate) fn send_endpoint_removed_close(&self) {
         match self.protocol {
@@ -581,7 +581,7 @@ impl Session {
         self.closed_token.clone()
     }
 
-    /// 进入 `Connecting`(即将执行 on_connect;R28 P1)。须在 `set_authenticated`
+    /// 进入 `Connecting`(即将执行 on_connect)。须在 `set_authenticated`
     /// **之前**调——保证"authenticated=true 而 phase 仍 Pending"的窗口不存在,cleanup 的
     /// 阶段裁决因此完备。返回 false = 会话已被并发下线,调用方跳过 on_connect(也无配对
     /// disconnect 需要触发)。
@@ -656,14 +656,14 @@ impl Session {
     }
 
     /// 发**业务**帧(整帧)。**`pub(crate)`**:业务只能经 `SessionHandle::send_event`(框架编码、
-    /// 帧类型恒 EVENT),不能直接塞整帧(否则可把类型设成 CLOSE/AUTH_RESP;R16 P0)。
+    /// 帧类型恒 EVENT),不能直接塞整帧(否则可把类型设成 CLOSE/AUTH_RESP)。
     ///
-    /// 两道统一闸门(所有业务发送入口在此收口,R20):
+    /// 两道统一闸门(所有业务发送入口在此收口):
     /// 1. **鉴权 pending 拒绝**:register 之后、成功 control(AUTH_RESP/connect_ok)入队并
     ///    `set_authenticated(true)` 之前,session 已对 fan-out 可见但**不得**接收业务帧——
     ///    否则并发投递的 EVENT 会抢在鉴权成功帧之前上线,Rust Client 直接握手失败。
     /// 2. **出站 max_frame**:超过单帧上限的业务帧入队前拦截(接收端同上限会协议断开,
-    ///    一条大广播 = 全群断线风暴;R20 P2)。+4 为 NASA 帧 4B 长度头(与 FrameCodec 的
+    ///    一条大广播会形成全群断线风暴。+4 为 NASA 帧 4B 长度头(与 FrameCodec 的
     ///    `len ≤ max_frame` 语义对齐);socket.io 文本帧同上限。
     pub(crate) fn send_business(&self, frame: Bytes) -> SendOutcome {
         if self.is_closed() {
@@ -782,7 +782,7 @@ impl Session {
     /// - 阶段 `Active` → 返回 true(正常路径,调用方立即触发);
     /// - 阶段 `Connecting`(on_connect 尚在执行)→ 置 `ClosingDuringConnect` 并返回
     ///   **false**:逻辑注销同步完成,但 on_disconnect **延迟**到 on_connect 返回后由
-    ///   `finish_connect` 触发——绝不与 on_connect 并发倒序(R28 P1:否则 disconnect
+    ///   `finish_connect` 触发——绝不与 on_connect 并发倒序(否则 disconnect
     ///   先释放、connect 随后创建的资源永久泄漏);
     /// - 阶段 `Pending`(真实路径=未认证;手工裸装配可能已 set_authenticated)→ 按
     ///   authenticated 兼容旧语义。
@@ -925,7 +925,7 @@ impl SessionHandle {
     }
 
     /// 发**业务事件**给本会话:由**框架按会话协议**编码(NASA→JSON EVENT 帧 / socket.io→`42[...]`
-    /// 文本;R18 P1)。**只接 event+payload**,不接整帧——业务无法把帧类型设成 CLOSE/AUTH_RESP
+    /// 文本)。**只接 event+payload**,不接整帧——业务无法把帧类型设成 CLOSE/AUTH_RESP
     /// 注入控制帧。
     ///
     /// # 参数
@@ -1139,7 +1139,7 @@ impl SessionRegistry {
     }
 
     /// 注入群 0/1 跃迁回调(集群装配时调)。**`pub(crate)`**:业务不得覆盖集群 presence hook
-    /// (否则静默切断跨节点 presence;R16 P0)。
+    /// (否则静默切断跨节点 presence)。
     pub(crate) fn set_group_change_hook(&self, hook: GroupChangeHook) {
         *self.group_change.lock().unwrap() = Some(hook);
     }

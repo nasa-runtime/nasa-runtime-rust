@@ -81,7 +81,7 @@ fn default_client_name() -> String {
 pub struct ProducerConfig {
     /// ack 策略("0"/"1"/"all");默认 "1" 与参照实现一致。需要副本级持久性的场景显式配 "all"。
     pub acks: String,
-    /// 发送失败重试次数;必须显式写死默认 3——底层库原生默认是 i32::MAX,不写死会静默偏离(决策 #12)。
+    /// 发送失败重试次数；默认值必须显式设为 3，避免继承底层库的 i32::MAX 而静默偏离。
     pub retries: u32,
     /// 重试退避毫秒。
     pub retry_backoff_ms: u64,
@@ -104,13 +104,13 @@ pub struct ProducerConfig {
     pub partitioner: String,
     /// 压缩算法(none/gzip/snappy/lz4/zstd;zstd 需开同名 feature)。
     pub compression: String,
-    /// 幂等 producer 开关;开启时 validate 校验 acks/retries/in-flight 约束(P1 落地)。
+    /// 幂等 producer 开关；开启时 validate 校验 acks/retries/in-flight 约束。
     pub enable_idempotence: bool,
     /// 单连接最大并行在途请求数；默认 1，在启用重试时锁住同分区发送顺序。
     pub max_in_flight_requests_per_connection: u32,
     /// fire() 的 delivery 观察队列容量:先预留后入队,防"已发送却不可观察"窗口。
     pub fire_observer_capacity: usize,
-    /// 原生入队队列的最大消息数(队满走退避重试至 publish 超时,替代参照实现的阻塞语义,决策 #7)。
+    /// 原生入队队列的最大消息数；队满时退避重试至 publish 超时，避免无限阻塞。
     pub queue_buffering_max_messages: usize,
     /// 原生入队队列的最大 KiB 数;socket lane 必须显式配置而非继承 1 GiB 通用默认。
     pub queue_buffering_max_kbytes: usize,
@@ -391,7 +391,7 @@ impl fmt::Debug for AdminConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnmatchedPolicy {
-    /// 跳过并前移(默认)。参照实现不前移会让 group 位点永久卡住,判定为缺陷不移植(决策 #6)。
+    /// 跳过并前移（默认）。不前移会让 group 位点永久卡住，因此不保留该缺陷语义。
     Skip,
     /// 转发 DLT 后前移:需要审计"谁在发无主消息"的场景。
     DeadLetter,
@@ -424,7 +424,7 @@ pub struct BehaviorConfig {
     pub max_progress_records: usize,
     /// 每 group in-flight outcome 总上限(跨分区 permit 池);validate 要求 >= max_progress_records。
     pub max_group_progress_records: usize,
-    /// 正常流量的 commit 时间触发毫秒;安全水位逐条推进、broker commit 按数/时间批量(决策 #32)。
+    /// 正常流量的 commit 时间触发毫秒；安全水位逐条推进，broker commit 按数量或时间批量提交。
     pub commit_interval_ms: u64,
     /// 正常流量的 commit 记录数触发。
     pub commit_batch_records: usize,
@@ -454,7 +454,7 @@ pub struct BehaviorConfig {
     pub dlt_producer_lane: String,
     /// durability-first 开关:true 时 DLT 未确认绝不前移原 offset;false 显式选择可用性优先(丢消息)。
     pub dead_letter_required: bool,
-    /// DLT 全 pipeline 保留 envelope 数上限(queue+in-flight+completion+retry,决策 #31)。
+    /// DLT 整条 pipeline 保留的 envelope 数量上限，覆盖 queue、in-flight、completion 与 retry。
     pub dlt_queue_capacity: usize,
     /// DLT 全 pipeline 保留 payload 字节上限;validate 要求 >= max(max_batch_bytes, max_record_bytes)。
     pub dlt_queue_max_bytes: usize,
@@ -607,7 +607,7 @@ impl KafkaConfig {
     /// 启动期全量校验:任何一条不满足立即返回 [`NafkaError::Config`],绝不带病启动。
     ///
     /// 校验清单与协议合同一一对应;与运行环境相关的少数项(幂等参数与底层库约束的
-    /// 交叉校验)在 P1 构建 producer 时补齐,缺席只会更严格拒绝的场景变宽松,不产生错误行为。
+    /// 交叉校验)在构建 producer 时补齐；缺席只会放宽本应拒绝的配置，不产生隐式副作用。
     ///
     /// # 错误
     /// 首个违反项以 `Config(说明)` 返回;说明含字段名与实际值,便于运维直接定位。
@@ -987,9 +987,9 @@ impl KafkaConfig {
                 "SSL 证书或私钥字段要求 security.protocol 显式包含 SSL",
             ));
         }
-        // enable_idempotence=true 与 acks/retries/max.in.flight 的交叉约束在 P1 组装原生
+        // enable_idempotence=true 与 acks/retries/max.in.flight 的交叉约束在组装原生
         // producer 配置时校验(需要与底层库约束逐项对照);此处不做即"更宽松",
-        // 不会产生错误行为,P1 收紧。
+        // 不会产生额外副作用，但底层构建阶段仍会收紧配置。
         Ok(())
     }
 }

@@ -487,7 +487,7 @@ fn decode_record<T: DecodePayload>(raw: &RawRecord) -> Result<ErasedRecord> {
             // **刻意丢弃 panic payload 文本**：该错误会进 `GroupHealth.last_error`(公开 API,
             // 不截断)与 DLT reason header。而解码器常写成 `from_slice::<T>(p).unwrap()`,
             // serde 的 panic 文本里**嵌着出错的输入片段**(`invalid type: string "sk-live-…"`),
-            // 转出去就是 B5 那一类凭据外泄。napp/src/panic_hook.rs 同理拒读 payload。
+            // 转交原始错误会泄露凭据；napp/src/panic_hook.rs 同样拒绝读取 payload。
             // 定位靠固定字面量 + 具体消息类型名(编译期常量,不含任何记录内容)。
             NafkaError::Codec(format!(
                 "payload 解码 panic(内容已抑制,类型 {})",

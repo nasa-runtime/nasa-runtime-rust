@@ -1,7 +1,6 @@
-# nadis —— Redis 五件套移植的基础层(对照 原实现 原工具包/cache/redis;架构设计文档 v3.12)。
-# 本 crate 当前覆盖实施计划 R1(client/commands/codec/keytag)+ R2(显式 PipelineSession)
-# + R3(分布式锁,V1 与 原实现 可互锁);partition/search/leader 按文档在 reducer 阶段后实现。
-# 业务项目最终经 nasa 门面(feature "redis")引用;门面接入在 R7。
+# nadis：对齐既有工具包、cache 与 Redis 五件套公开语义的基础层。
+# 本 crate 提供 client、commands、codec、keytag、显式 PipelineSession、分布式锁、
+# partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
 name = "nadis"
 version.workspace = true
@@ -18,11 +17,11 @@ categories.workspace = true
 [lib]
 name = "nadis"
 [features]
-# search:RediSearch/RedisJSON 封装(SearchActuator/JsonArrayOps/查询 AST;R5)。
+# search：RediSearch/RedisJSON 封装，包括 SearchActuator、JsonArrayOps 与查询 AST。
 # 默认关——只用 lock/pipeline/partition 的服务不应编译 search(门面 §五.1 同款纪律;
 # 门面侧经 "redis-search" 透传)。
 search = []
-# derive:re-export #[derive(RedisDocument)](nadis-derive;R5.2)。
+# derive：重新导出 nadis-derive 的 #[derive(RedisDocument)]。
 # 生成代码根路径经 nasa-macro-support 发现(直依=::nadis/门面=::nasa::redis),
 # 故 derive 蕴含 search;消费者只需依赖 nadis(开 derive),无需直依宏 crate。
 derive = ["dep:nadis-derive", "search"]
@@ -33,7 +32,7 @@ redis = { version = "1", features = ["tokio-comp", "script", "connection-manager
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-# preserve_order:Value 保持字段插入序(= 结构体声明序),S8 省略 null 时不被
+# preserve_order：Value 保持字段插入顺序（即结构体声明顺序），省略 null 时不会
 # BTreeMap 字母序重排,维持与 原实现(Jackson 声明序)的 JSON 字节对齐。
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"

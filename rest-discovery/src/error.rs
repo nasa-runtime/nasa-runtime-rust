@@ -40,9 +40,8 @@ pub enum RestDiscoveryError {
 
     /// discovery 启用但未装配任何 provider。
     ///
-    /// 注:当前 `init_with_discovery` 必传 provider、`init_external_only` 明确 disabled、nacos 配置门面的
-    /// provider enum 只有 `Nacos`,因此本 variant 当前【没有触发路径】,属为未来「多 provider / 配置 enabled=true
-    /// 但 provider 缺失或 unsupported」预留。届时在配置门面补返回点即可。
+    /// `init_with_discovery` 要求传入 provider，`init_external_only` 明确禁用 discovery；本分支作为
+    /// “启用 discovery 但 provider 缺失或不受支持”的稳定错误边界，供配置门面直接映射。
     #[error("discovery 已启用但没有任何 provider")]
     NoDiscoveryProvider,
 

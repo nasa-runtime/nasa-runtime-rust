@@ -1,11 +1,11 @@
-//! # ncrypto —— 密码学工具(L1)
+//! # ncrypto —— 密码学工具
 //!
 //! 对照 原实现 `原工具包` 的 `Encryptor` 静态工具类移植。
-//! 本 crate 是 **L1 纯函数工具**:hash / hmac / pbkdf2 / aes / rsa / ed25519 / base64 —— 无 self、无注解、
+//! 本 crate 提供无状态的 hash / hmac / pbkdf2 / aes / rsa / ed25519 / base64 工具——无 self、无注解、
 //! 无 web 依赖,直接 `use ncrypto::*` 调用(经 `nasa` 门面接入后为 `use nasa::crypto::*`,门面模块名仍 `crypto`)。
 //! crate 命名 `ncrypto`(非裸 `crypto`)以避开 RustCrypto 生态 `crypto` 门面 crate 的同包名碰撞。
 //!
-//! ## 字节保真(架构文档,跨语言互通硬约束)
+//! ## 字节保真与跨语言互通约束
 //! - hex 大小写按函数区分:`sha256` 与 **AES-HEX 密文**(`encrypt_aes_hex`/`EncOutput::Hex`)**大写**
 //!   (对照 原实现 `StringUtils.toHex`);`md5`/`sha1`/`sha384`/`sha512`/`hmac*`/`pbkdf2`/`generate_salt`/
 //!   `generate_aes_key_hex` 均**小写**(`toHex` 后再 `toLowerCase`)。

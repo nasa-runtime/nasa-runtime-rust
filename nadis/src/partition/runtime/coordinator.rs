@@ -58,7 +58,7 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
                 // ② 在 deadline 内**并发** join 所有 worker,到期 abort 剩余;
                 // ③ unlock 用剩余预算,耗尽即返回靠 lease(超时丢弃 guard 仍触发 Drop best-effort)。
                 let drained: Vec<(u32, ClaimSlot)> = slots.drain().collect();
-                rt.owner_ctx.lock().expect("owner_ctx").clear(); // 停机:清空 owner 凭据(R4.2f-A)
+                rt.owner_ctx.lock().expect("owner_ctx").clear(); // 停机:清空 owner 凭据
                 let mut handles = Vec::new();
                 let mut guards = Vec::new();
                 for (p, slot) in drained {
@@ -138,10 +138,10 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
         for p in lost {
             if let Some(mut slot) = slots.remove(&p) {
                 slot.worker_cancel.cancel();
-                // 失锁:立即撤销 owner 凭据(R4.2f-A)——此后任何 direct/control 管理操作都因
+                // 失锁:立即撤销 owner 凭据——此后任何 direct/control 管理操作都因
                 // owner_ctx 无该分区被拒(fenced Lua 的 holder/counter 校验是二次兜底)
                 rt.owner_ctx.lock().expect("owner_ctx").remove(&p);
-                // N8：锁已丢且无法等待优雅退出，必须立即中止 recovery 和 worker，避免失权任务继续写 Redis。
+                // 锁已丢且无法等待优雅退出，必须立即中止 recovery 和 worker，避免失权任务继续写 Redis。
                 if let Some(mut h) = slot.recovery_handle.take() {
                     h.abort();
                 }
@@ -164,7 +164,7 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
             *rt.sweepable.lock().expect("sweepable") = tickets;
         }
         // (orphan sweep 已移出本循环 → 后台 sweep_loop,经 Event::OrphansClaimed 回灌,
-        //  避免串行 Redis I/O 阻塞 coordinator 处理 shutdown/lost/event;R5 P1)
+        // 避免串行 Redis I/O 阻塞 coordinator 处理 shutdown、lost 和 event。
 
         // ── 3. RetryBackoff 到期:先拿 permit,再走 PEL 精确重投(禁 `>`,不变量 5)──
         //(架构观察,**非正确性缺陷,已评审决定维持**):retry_redeliver 改 slots 状态,
@@ -190,7 +190,7 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
         }
 
         // ── 4. Ready 且拿到 permit 的分区 → 合批 NOBLOCK XREADGROUP(不变量 2/3)──
-        // **OverloadPolicy = SkipPoll(P5:本架构的唯一正确策略,by-design)**:预算(inflight_max
+        // **OverloadPolicy = SkipPoll**：预算 inflight_max
         // semaphore)耗尽时**不拉取**那些分区,消息**留在 Redis**(可靠队列,无丢失)、下轮预算回收后再拉。
         // 原实现 的 {Inline/Wait/DropOnOverload} 多态对应**executor 架构**,在 Rust 的 async coordinator-loop +
         // 独立 worker 模型里都不适用:Wait=在 coordinator 循环阻塞等 permit 会卡死所有分区进度(workers 靠
@@ -283,11 +283,11 @@ pub(super) async fn handle_event(
                     tracing::warn!(p, "fencing 判定所有权丢失,移除本地 claim");
                     let mut slot = slots.remove(&p).expect("刚 get 过");
                     slot.worker_cancel.cancel();
-                    rt.owner_ctx.lock().expect("owner_ctx").remove(&p); // 撤销 owner 凭据(R4.2f-A)
+                    rt.owner_ctx.lock().expect("owner_ctx").remove(&p); // 撤销 owner 凭据
                     if let Some(mut h) = slot.recovery_handle.take() {
                         h.abort(); //:所有权已失,abort recovery 杜绝迟到 XAUTOCLAIM
                     }
-                    slot.worker_handle.abort(); // N8:同 abort worker,杜绝失锁后继续动 Redis
+                    slot.worker_handle.abort(); // 立即中止 worker，杜绝失锁后继续操作 Redis。
                     drop(slot.guard); // Drop best-effort(锁多半已被他人持有/过期)
                     rt.claimed.write().expect("claimed").retain(|x| *x != p);
                 }
@@ -309,7 +309,7 @@ pub(super) async fn handle_event(
                         Err(e) => {
                             // stamp 获取失败:不接管(fence 未就绪即 fail-closed)
                             tracing::error!(p, err = %e, "acquire_stamp 失败,放弃接管");
-                            let _ = guard.unlock().await; // 冷路径直接 await(P2:不留游离 task)
+                            let _ = guard.unlock().await; // 冷路径直接 await(不留游离 task)
                             return;
                         }
                     }
@@ -318,7 +318,7 @@ pub(super) async fn handle_event(
             };
             // 归约 disposition marker + parked index(**在 spawn worker 之前**,便于 fail-closed
             // 直接放弃接管)。**marker 是权威事实源**,不能只信 parked index——
-            // marker=Parked 而 index 缺失会被当"未 Park"恢复消费(fail-open)。R4 保留:
+            // marker=Parked 而 index 缺失会被误判为“未 Park”并恢复消费，因此必须 fail-closed：
             // 读失败(Redis/WRONGTYPE/损坏)→ fail-closed 放弃接管、释锁退避(不静默消费)。
             let dispo = match super::disposition::takeover_disposition(&rt.client, &rt.layout, p)
                 .await
@@ -326,7 +326,7 @@ pub(super) async fn handle_event(
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!(p, err = %e, "接管时读 disposition 失败,放弃接管(fail-closed,不消费)");
-                    let _ = guard.unlock().await; // 冷路径直接 await(P2:不留游离 task)
+                    let _ = guard.unlock().await; // 冷路径直接 await(不留游离 task)
                     return;
                 }
             };
@@ -342,7 +342,7 @@ pub(super) async fn handle_event(
                     );
                     ClaimState::Parked { park_id }
                 }
-                // ①.1:接管到 **auto-DLQ 在途**(owner 内部触发、无外部重提主体)→ **自动续作** DLQ
+                // 接管到 auto-DLQ 在途时，因其由 owner 内部触发且无外部重提主体，必须自动续作 DLQ。
                 // 发布到终态,消除原"publish 中途崩溃 → 分区永久冻结、admin 异 op 也续不了"的确定性死结。
                 super::disposition::TakeoverDisposition::AutoResumeDlq {
                     park_id,
@@ -400,7 +400,7 @@ pub(super) async fn handle_event(
                         reason,
                         "disposition 状态不一致,放弃接管(fail-closed,不消费)"
                     );
-                    let _ = guard.unlock().await; // 冷路径直接 await(P2:不留游离 task)
+                    let _ = guard.unlock().await; // 冷路径直接 await(不留游离 task)
                     return;
                 }
             };
@@ -511,7 +511,7 @@ pub(super) async fn handle_event(
             for p in victims {
                 let slot = slots.remove(&p).expect("victims 来自 slots");
                 slot.worker_cancel.cancel();
-                rt.owner_ctx.lock().expect("owner_ctx").remove(&p); // 撤销 owner 凭据(R4.2f-A)
+                rt.owner_ctx.lock().expect("owner_ctx").remove(&p); // 撤销 owner 凭据
                 draining.push((p, slot));
             }
             let released = !draining.is_empty();
@@ -609,7 +609,7 @@ pub(super) async fn handle_event(
                     slot.state = ClaimState::RetryBackoff {
                         ids,
                         attempt: 0,
-                        // R2:sweep 收编同样 1s 平滑,避免一次性重投风暴
+                        // sweep 收编同样 1s 平滑,避免一次性重投风暴
                         until: tokio::time::Instant::now() + Duration::from_millis(1_000),
                     };
                 }

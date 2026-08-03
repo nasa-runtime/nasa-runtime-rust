@@ -1,7 +1,7 @@
 # naobject
 
 `naobject` 是实验性 provider-neutral 对象存储合同，并提供 path-style S3-compatible SigV4 adapter。
-第一版只处理有硬上限的单对象缓冲，不伪装成 multipart 或无限流式上传。
+当前实现只处理有硬上限的单对象缓冲，不伪装成 multipart 或无限流式上传。
 
 ```toml
 [dependencies]
