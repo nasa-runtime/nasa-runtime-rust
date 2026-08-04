@@ -20,7 +20,7 @@ exclude = ["t.md"]
 name = "nafana"
 
 [dependencies]
-nafana-macro = { version = "1.0.1", path = "../nafana-macro" }
+nafana-macro = { version = "1.0.1" }
 # axum: handler 与 middleware 类型(Request/Next/Response/IntoResponse);经 __private 桥暴露给宏展开
 axum = "0.8"
 # tokio: bulkhead 信号量、单请求超时、周期请求汇总任务
