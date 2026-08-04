@@ -586,7 +586,7 @@ impl WatchDriver {
     ///   `RestartRequired` 并保留原 applied_version——本次 runtime 不会改变应用名、模式或 deadline。
     /// - 各已声明组件：相关配置段未变化则推进 applied_version；变化且登记过重应用句柄则调用它——
     ///   成功记 `Applied`，失败保留 last-known-good 版本并记 `ApplyFailed`（早先成功的组件不回滚，
-    /// 明确不是跨组件事务）；变化但没有句柄则如实记 `RestartRequired`。
+    ///   明确不是跨组件事务）；变化但没有句柄则如实记 `RestartRequired`。
     ///
     /// # 参数
     ///
