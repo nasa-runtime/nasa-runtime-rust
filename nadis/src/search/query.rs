@@ -33,39 +33,92 @@ pub enum NumOp {
 #[derive(Debug, Clone)]
 pub enum Cond {
     /// Tag 精确匹配:`@f:{v}`(值自动转义)。
-    TagEq { field: String, value: String },
+    TagEq {
+        /// 字段别名或字段名。
+        field: String,
+        /// 需要精确匹配的 Tag 字面值。
+        value: String,
+    },
     /// Tag 多选一:`@f:{v1|v2}`。
-    TagIn { field: String, values: Vec<String> },
+    TagIn {
+        /// 字段别名或字段名。
+        field: String,
+        /// 任一命中即可的 Tag 字面值集合。
+        values: Vec<String>,
+    },
     /// 数值闭区间:`@f:[min max]`。
-    NumBetween { field: String, min: f64, max: f64 },
+    NumBetween {
+        /// 字段别名或字段名。
+        field: String,
+        /// 闭区间下界。
+        min: f64,
+        /// 闭区间上界。
+        max: f64,
+    },
     /// 数值开区间与比较；FT 使用 `±inf` sentinel，避免用 `between(X, f64::MAX)` 模拟。
     NumCmp {
+        /// 字段别名或字段名。
         field: String,
+        /// 数值比较算子。
         op: NumOp,
+        /// 比较基准值。
         value: f64,
     },
     /// 全文匹配:`@f:(text)`。
-    TextMatch { field: String, text: String },
+    TextMatch {
+        /// 字段别名或字段名。
+        field: String,
+        /// 需要匹配的全文词项。
+        text: String,
+    },
     /// 全文**前缀**：`@f:(term*)`，匹配以 term 开头的词。
-    TextPrefix { field: String, prefix: String },
+    TextPrefix {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项前缀。
+        prefix: String,
+    },
     /// 全文**后缀**：`@f:(*term)`，字段必须启用 WITHSUFFIXTRIE。
-    TextSuffix { field: String, suffix: String },
+    TextSuffix {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项后缀。
+        suffix: String,
+    },
     /// 全文**包含/中缀**：`@f:(*term*)`，字段必须启用 WITHSUFFIXTRIE。
-    TextContains { field: String, infix: String },
+    TextContains {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项中必须包含的片段。
+        infix: String,
+    },
     /// 全文**模糊**：使用 Levenshtein 距离语法 `%term%`、`%%term%%` 或 `%%%term%%%`。
     TextFuzzy {
+        /// 字段别名或字段名。
         field: String,
+        /// 需要模糊匹配的词项。
         term: String,
+        /// 允许的 Levenshtein 距离。
         distance: u8,
     },
     /// 全文**短语**：`@f:("a b c")`，按词序精确匹配。
-    TextPhrase { field: String, phrase: String },
+    TextPhrase {
+        /// 字段别名或字段名。
+        field: String,
+        /// 按词序匹配的完整短语。
+        phrase: String,
+    },
     /// **地理半径圆内**：`@f:[lon lat radius unit]`。
     GeoWithin {
+        /// 字段别名或字段名。
         field: String,
+        /// 圆心经度。
         lon: f64,
+        /// 圆心纬度。
         lat: f64,
+        /// 搜索半径。
         radius: f64,
+        /// 搜索半径单位。
         unit: GeoUnit,
     },
     /// 原始表达式(★仅可信调用方:绕过校验与转义,注入风险自负)。
@@ -75,9 +128,13 @@ pub enum Cond {
 /// 地理半径单位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoUnit {
+    /// 米。
     M,
+    /// 千米。
     Km,
+    /// 英里。
     Mi,
+    /// 英尺。
     Ft,
 }
 

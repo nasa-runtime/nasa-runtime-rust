@@ -22,6 +22,12 @@ pub(crate) struct CommandCounters {
     pub(crate) canceled: AtomicU64,
     /// 降级响应产出累计。
     pub(crate) fallback: AtomicU64,
+    /// 全局降级成功产出业务响应累计。
+    pub(crate) global_fallback_handled: AtomicU64,
+    /// 全局处理器主动退回内置响应累计。
+    pub(crate) global_fallback_builtin: AtomicU64,
+    /// 全局处理器配置冲突、崩溃或递归累计。
+    pub(crate) global_fallback_failed: AtomicU64,
     /// TPS 累计:每请求(含被拒、被取消)按 tps_weight 增加;未标 TPS 的命令恒 0。
     pub(crate) tps: AtomicU64,
 }

@@ -14,23 +14,30 @@
 
 mod command;
 mod counters;
+mod fallback;
 mod isolation;
 mod prometheus;
 mod registry;
 mod rolling;
 
 pub use command::{current_tps, Command, FallbackFn};
+pub use fallback::{
+    global_fallback_installed, initialize_global_fallback, install_global_fallback, FallbackCause,
+    FallbackContext, FallbackDecision, GlobalFallbackHandler, GlobalFallbackInstallError,
+};
 pub use isolation::{dispatch, init_isolation, IsolationRule};
 pub use prometheus::{metrics, render_metrics};
 pub use registry::MonitorConflict;
 
 // ── re-export 过程宏 ──
-pub use nafana_macro::grafana;
+pub use nafana_macro::{global_fallback, grafana};
 
 /// 宏展开专用的第三方依赖桥:`#[grafana]` 生成代码经
 /// `<运行时根>::__private::axum` 引用 axum——业务只依赖 `nasa` 时无需再直接声明 axum。
 /// **不属于稳定业务 API**,随时可能变化。
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::fallback::{CollectedGlobalFallback, NAFANA_COLLECTED_GLOBAL_FALLBACKS};
     pub use axum;
+    pub use linkme;
 }

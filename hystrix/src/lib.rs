@@ -4,41 +4,48 @@
 //! 热点接口和需要被 Dashboard 观测的业务入口。
 #![recursion_limit = "512"] // hystrix snapshot_json 的 json!{} 字段多,提高宏递归上限
                             // ============================================================================
-                            // 路由级 bulkhead 隔离 + 超时 + Dashboard 指标流
-                            //
-                            // ★ 能力范围(明确,避免误读):本模块只做【信号量隔离(bulkhead)+ 超时 + 滚动窗口指标】,
-                            //   **不提供错误率触发的短路熔断**(无 Closed/Open/HalfOpen 状态机、无 error-threshold 短路;
-                            //   Dashboard 的 isCircuitBreakerOpen 恒 false、rollingCountShortCircuited 恒 0)。
-                            //   下游持续失败时靠并发上限 + 超时保护自身,不会自动短路。完整熔断器可作为独立状态机扩展。
-                            //
-                            // 对照参考实现的隔离 filter：
-                            //   - 它按 URL 给每类接口套【线程池/信号量隔离 + 超时 + 队列拒绝】并上报 /hystrix.stream
-                            //   - 本模块在 async Rust 里用【per-route 信号量(bulkhead)+ 超时 + 滚动窗口指标】等价实现
-                            //     （async 不需要线程池隔离：慢调用 .await 挂起不占 worker 线程，详见文档）
-                            //
-                            // 四部分：
-                            //   ① Command —— 一个被隔离+监控的“命令”(= 一条路由)：
-                            //        · tokio::Semaphore 限并发(bulkhead)，try_acquire 满了立刻拒(429)，不排队
-                            //        · tokio::time::timeout 限时(对应 executionTimeoutInMilliseconds)
-                            //        · 滚动窗口(10s)统计 success/failure/timeout/rejected + 延迟百分位
-                            //        · 当前并发数 gauge(currentConcurrentExecutionCount)
-                            //      用法：作为 axum middleware 包在某条路由上(见 main.rs)。
-                            //
-                            //   ② hystrix_stream —— GET /hystrix.stream 的 SSE 端点：
-                            //        每秒把所有已注册 Command 的快照序列化成 Hystrix Dashboard 认得的 JSON 推出去。
-                            //        字段名严格对齐 SerialHystrixDashboardData(type=HystrixCommand / rollingCountXxx / latencyExecute...)。
-                            //
-                            //   ③ CostTime 风格的定时延迟日志(融合自 原工具包 CostTime)：
-                            //        【每个 Command 在 build() 里各自 spawn 一个独立的 10s 周期任务】(相位锚定创建时刻、
-                            //        互相错开，对齐 原实现「每 url 各起一个 TimingWheel 任务」)，每拍打一行
-                            //        `path N次/10s min/avg/max (ms)`，复用 ① 的 Rolling 滚动窗口、不另存计数器。
-                            //        是"每请求延迟日志"的低开销聚合替代。可选 extra 钩子(set_extra)对齐 CostTime 的 Function<Long,String>。
-                            //
-                            //   ④ 配置驱动隔离(init_isolation + dispatch) —— 对标 原实现 HystrixDashboardFilter：
-                            //        yml 配 hystrix.isolation 的路由前缀模式(/download/*) → 建 matchit Trie；
-                            //        一个全局中间件 dispatch 每请求拿 path 匹配 Trie，命中就按模式懒加载 Command 套上 ①。
-                            //        与"硬编码 per-route Command"(main.rs 的 SpotKline/HeavySlow)并存，对照两种范式。
-                            // ============================================================================
+
+mod fallback;
+
+pub use fallback::{
+    global_fallback_installed, initialize_global_fallback, install_global_fallback, FallbackCause,
+    FallbackContext, FallbackDecision, GlobalFallbackHandler, GlobalFallbackInstallError,
+};
+// 路由级 bulkhead 隔离 + 超时 + Dashboard 指标流
+//
+// ★ 能力范围(明确,避免误读):本模块只做【信号量隔离(bulkhead)+ 超时 + 滚动窗口指标】,
+//   **不提供错误率触发的短路熔断**(无 Closed/Open/HalfOpen 状态机、无 error-threshold 短路;
+//   Dashboard 的 isCircuitBreakerOpen 恒 false、rollingCountShortCircuited 恒 0)。
+//   下游持续失败时靠并发上限 + 超时保护自身,不会自动短路。完整熔断器可作为独立状态机扩展。
+//
+// 对照参考实现的隔离 filter：
+//   - 它按 URL 给每类接口套【线程池/信号量隔离 + 超时 + 队列拒绝】并上报 /hystrix.stream
+//   - 本模块在 async Rust 里用【per-route 信号量(bulkhead)+ 超时 + 滚动窗口指标】等价实现
+//     （async 不需要线程池隔离：慢调用 .await 挂起不占 worker 线程，详见文档）
+//
+// 四部分：
+//   ① Command —— 一个被隔离+监控的“命令”(= 一条路由)：
+//        · tokio::Semaphore 限并发(bulkhead)，try_acquire 满了立刻拒(429)，不排队
+//        · tokio::time::timeout 限时(对应 executionTimeoutInMilliseconds)
+//        · 滚动窗口(10s)统计 success/failure/timeout/rejected + 延迟百分位
+//        · 当前并发数 gauge(currentConcurrentExecutionCount)
+//      用法：作为 axum middleware 包在某条路由上(见 main.rs)。
+//
+//   ② hystrix_stream —— GET /hystrix.stream 的 SSE 端点：
+//        每秒把所有已注册 Command 的快照序列化成 Hystrix Dashboard 认得的 JSON 推出去。
+//        字段名严格对齐 SerialHystrixDashboardData(type=HystrixCommand / rollingCountXxx / latencyExecute...)。
+//
+//   ③ CostTime 风格的定时延迟日志(融合自 原工具包 CostTime)：
+//        【每个 Command 在 build() 里各自 spawn 一个独立的 10s 周期任务】(相位锚定创建时刻、
+//        互相错开，对齐 原实现「每 url 各起一个 TimingWheel 任务」)，每拍打一行
+//        `path N次/10s min/avg/max (ms)`，复用 ① 的 Rolling 滚动窗口、不另存计数器。
+//        是"每请求延迟日志"的低开销聚合替代。可选 extra 钩子(set_extra)对齐 CostTime 的 Function<Long,String>。
+//
+//   ④ 配置驱动隔离(init_isolation + dispatch) —— 对标 原实现 HystrixDashboardFilter：
+//        yml 配 hystrix.isolation 的路由前缀模式(/download/*) → 建 matchit Trie；
+//        一个全局中间件 dispatch 每请求拿 path 匹配 Trie，命中就按模式懒加载 Command 套上 ①。
+//        与"硬编码 per-route Command"(main.rs 的 SpotKline/HeavySlow)并存，对照两种范式。
+// ============================================================================
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -53,6 +60,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
+
+use fallback::{execute_global_fallback, GlobalFallbackExecution};
 
 /// 公开构造器保持非 fallible，因此把无实际意义的极端时长收敛到安全 deadline 上限。
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -135,6 +144,13 @@ enum Outcome {
     Canceled, // 执行 future 在产生正常结局前被丢弃/unwind（对应 rollingCountCanceled）
 }
 
+/// 降级执行面的最终结局，与主业务执行结局分轨统计。
+#[derive(Clone, Copy)]
+enum FallbackOutcome {
+    Success,
+    Failure,
+}
+
 /// 滚动窗口中的一个 1 秒统计桶。
 ///
 /// 把一秒内的成功、失败、超时、拒绝和降级次数聚在同一桶里；窗口内最多保留 `WINDOW_SECS` 个桶。
@@ -146,9 +162,8 @@ struct Bucket {
     timeout: u64,  // 这一秒内的超时次数
     rejected: u64, // 这一秒内被 bulkhead 拒绝的次数
     canceled: u64, // 这一秒内执行 future 被丢弃/unwind 的次数(客户端断连、外层超时、panic)
-    // 这一秒内产出降级响应的次数(对照 FALLBACK_SUCCESS):拒绝/超时分支返回 fn / 静态串 / 默认壳都算一次。
-    // 当前 FallbackFn 产出 Response 无错误模型,故只统计 success;失败/拒绝细分需先扩展返回类型。
     fallback_success: u64,
+    fallback_failure: u64,
 }
 
 /// Hystrix 命令的滚动统计窗口。
@@ -235,9 +250,16 @@ impl Rolling {
         }
     }
 
-    /// 记一次"产出了降级响应"(fallback_success)。在拒绝/超时分支记完 primary outcome 后调用,
-    /// 与 record 共用当前秒的桶(同一把锁内连续调用,见 run_fn)。
-    fn record_fallback_success(&mut self) {
+    /// 业务作用：记录一次降级执行结局，与主请求的拒绝或超时结局保持独立口径。
+    ///
+    /// # 参数说明
+    ///
+    /// - `outcome`: 局部或全局降级最终成功、失败或被自身资源边界拒绝的结局。
+    ///
+    /// # 返回
+    ///
+    /// 无返回值；当前秒滚动桶对应计数增加一次。
+    fn record_fallback(&mut self, outcome: FallbackOutcome) {
         let now = self.now_sec();
         self.evict(now);
         if self.buckets.back().map(|b| b.sec) != Some(now) {
@@ -246,12 +268,24 @@ impl Rolling {
                 ..Default::default()
             });
         }
-        self.buckets.back_mut().unwrap().fallback_success += 1;
+        let bucket = self.buckets.back_mut().unwrap();
+        match outcome {
+            FallbackOutcome::Success => bucket.fallback_success += 1,
+            FallbackOutcome::Failure => bucket.fallback_failure += 1,
+        }
     }
 
-    /// 汇总当前滚动窗口。
+    /// 业务作用：汇总当前滚动窗口的主请求与降级结局，作为 Dashboard 单一事实源。
     ///
     /// 会先驱逐过期桶和样本,再把窗口内计数相加并计算延迟百分位,供熔断判断和 `/hystrix.stream` 输出。
+    ///
+    /// # 参数说明
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回当前有效窗口内的计数和延迟分位快照。
     fn snapshot(&mut self) -> WindowSum {
         let now = self.now_sec();
         self.evict(now);
@@ -264,6 +298,7 @@ impl Rolling {
             sum.rejected += b.rejected;
             sum.canceled += b.canceled;
             sum.fallback_success += b.fallback_success;
+            sum.fallback_failure += b.fallback_failure;
         }
         // 延迟百分位：取出窗口内全部延迟样本，排序后算分位
         let mut lat: Vec<u64> = self.latencies.iter().map(|&(_, ms)| ms).collect();
@@ -301,6 +336,7 @@ struct WindowSum {
     rejected: u64,         // 窗口内被 bulkhead 拒绝总数
     canceled: u64,         // 窗口内执行被取消/中止总数
     fallback_success: u64, // 窗口内产出降级响应总数(FALLBACK_SUCCESS)
+    fallback_failure: u64, // 窗口内全局降级配置冲突、panic 或递归总数
     latency: Percentiles,  // 窗口内延迟百分位
 }
 
@@ -481,7 +517,7 @@ impl Command {
     /// - `group`: 消费组、服务分组或任务分组名称。
     /// - `max_concurrent`: 熔断隔离允许的最大并发数。
     /// - `timeout`: 等待或执行超时时间,用于控制阻塞边界。
-    /// - `tps_weight`: 吞吐权重,用于按规则计算限流阈值。
+    /// - `tps_weight`: REST 事务权重,用于计算该命令对全局 TPS 的贡献。
     fn build(
         name: &str,
         group: &str,
@@ -708,6 +744,87 @@ impl Command {
         let _ = self.timeout_fb.set(fb);
     }
 
+    /// 业务作用：按“局部函数、局部静态响应、全局处理器、内置响应”的固定顺序解析一次降级。
+    ///
+    /// # 参数说明
+    ///
+    /// - `cause`: 已完成主结局记账的并发拒绝或执行超时原因。
+    ///
+    /// # 返回
+    ///
+    /// 返回最终 HTTP 响应；全局处理器配置冲突、崩溃或递归时安全回退到内置响应。
+    async fn resolve_fallback(&self, cause: FallbackCause) -> Response {
+        match cause {
+            FallbackCause::BulkheadRejected { .. } => {
+                if let Some(fallback) = self.reject_fb.get() {
+                    let response = fallback().await;
+                    self.stats().record_fallback(FallbackOutcome::Success);
+                    return response;
+                }
+                if let Some(body) = self.reject_body.get() {
+                    self.stats().record_fallback(FallbackOutcome::Success);
+                    return custom_response(body);
+                }
+            }
+            FallbackCause::ExecutionTimeout { .. } => {
+                if let Some(fallback) = self.timeout_fb.get() {
+                    let response = fallback().await;
+                    self.stats().record_fallback(FallbackOutcome::Success);
+                    return response;
+                }
+                if let Some(body) = self.timeout_body.get() {
+                    self.stats().record_fallback(FallbackOutcome::Success);
+                    return custom_response(body);
+                }
+            }
+        }
+
+        let path = self.path.get().map(String::as_str).unwrap_or(&self.name);
+        let context = FallbackContext::new(&self.name, &self.group, path, self.tps_weight, cause);
+        match execute_global_fallback(context) {
+            GlobalFallbackExecution::Handled(response) => {
+                self.stats().record_fallback(FallbackOutcome::Success);
+                return response;
+            }
+            GlobalFallbackExecution::UseBuiltin | GlobalFallbackExecution::NotInstalled => {
+                self.stats().record_fallback(FallbackOutcome::Success);
+            }
+            GlobalFallbackExecution::InvalidConfiguration => {
+                self.stats().record_fallback(FallbackOutcome::Failure);
+                tracing::error!(
+                    command = %self.name,
+                    ?cause,
+                    "全局降级配置冲突，使用内置终态响应"
+                );
+            }
+            GlobalFallbackExecution::Panicked => {
+                self.stats().record_fallback(FallbackOutcome::Failure);
+                tracing::error!(
+                command = %self.name,
+                ?cause,
+                    "全局降级处理器发生 panic，使用内置终态响应"
+                );
+            }
+            GlobalFallbackExecution::Recursive => {
+                self.stats().record_fallback(FallbackOutcome::Failure);
+                tracing::warn!(
+                    command = %self.name,
+                    ?cause,
+                    "全局降级发生递归调用，使用内置终态响应"
+                );
+            }
+        }
+
+        match cause {
+            FallbackCause::BulkheadRejected { max_concurrent, .. } => {
+                rejected_response(&self.name, max_concurrent)
+            }
+            FallbackCause::ExecutionTimeout { timeout, .. } => {
+                timeout_response(&self.name, timeout)
+            }
+        }
+    }
+
     /// 【融合自 CostTime】打印本命令最近一个窗口的延迟聚合日志，由 build() 里给本命令起的那个独立 10s 周期任务每拍调一次。
     /// 复用现成的滚动窗口 snapshot（不像 原实现 CostTime 那样 restore 清零——因为这份 Rolling
     /// 同时喂着 SSE 流，清零会破坏 SSE；滑动窗口每 10s 读一次即"最近 10s"，语义等价）。
@@ -781,7 +898,7 @@ impl Command {
         self.run_fn(move || next.run(req)).await
     }
 
-    /// 【通用执行入口】用本命令的 bulkhead + 超时保护【任意 async 执行体】，并把
+    /// 业务作用：【通用执行入口】用本命令的 bulkhead + 超时保护【任意 async 执行体】，并把
     /// 成功/失败/超时/拒绝记入滚动窗口（→ /hystrix.stream → Dashboard）。
     ///
     /// 为什么需要它：`run` 是中间件签名 `(req, next)`，只适合 `.layer(...)`。而 `#[hystrix]` 属性宏
@@ -791,8 +908,13 @@ impl Command {
     /// 参数 f：`FnOnce() -> Future<Output = Response>`，即"要被保护的那段执行体"。
     ///   只有 try_acquire 抢到许可后才会调用 f()（拿不到许可直接 429，f 根本不执行）。
     ///
-    /// # 参数
+    /// # 参数说明
+    ///
     /// - `f`: 被当前命令保护的异步执行体,只有通过 bulkhead 后才会被调用。
+    ///
+    /// # 返回
+    ///
+    /// 返回业务响应、局部降级响应、全局降级响应或组件内置拒绝/超时响应。
     pub async fn run_fn<F, Fut>(self: Arc<Self>, f: F) -> Response
     where
         F: FnOnce() -> Fut,
@@ -809,26 +931,21 @@ impl Command {
             Some(sem) => match sem.try_acquire() {
                 Ok(p) => Some(p),
                 Err(_) => {
-                    // 信号量满 → 记一次 Rejected（延迟无意义传 0）+ 一次 fallback_success（下面必产出降级响应），打告警
-                    {
-                        let mut st = self.stats();
-                        st.record(Outcome::Rejected, 0);
-                        st.record_fallback_success();
-                    }
+                    // 主请求只记录 Rejected；降级执行结局在局部/全局策略真正完成后单独记账，避免失败误报成功。
+                    self.stats().record(Outcome::Rejected, 0);
                     let max = self.max_concurrent.unwrap_or(0);
                     tracing::warn!(
                         command = %self.name,
                         max = max,
                         "bulkhead full, rejecting request (429)"
                     );
-                    // 降级优先级:reject_fn(闭包)→ reject_response(静态 JSON,HTTP 200)→ 默认 429 壳。
-                    if let Some(fb) = self.reject_fb.get() {
-                        return fb().await;
-                    }
-                    return match self.reject_body.get() {
-                        Some(v) => custom_response(v),
-                        None => rejected_response(&self.name, max),
-                    };
+                    let inflight = self.concurrent.load(Ordering::Relaxed).max(0) as usize;
+                    return self
+                        .resolve_fallback(FallbackCause::BulkheadRejected {
+                            max_concurrent: max,
+                            current_inflight: inflight,
+                        })
+                        .await;
                 }
             },
         };
@@ -846,7 +963,8 @@ impl Command {
             Some(d) => tokio::time::timeout(d, f()).await,
             None => Ok(f().await),
         };
-        let latency_ms = start.elapsed().as_millis() as u64;
+        let elapsed = start.elapsed();
+        let latency_ms = elapsed.as_millis() as u64;
 
         // ── 4. 释放许可与并发计数（降级不占 bulkhead 容量，也不算业务执行并发）──
         // drop(permit) 显式归还信号量许可（RAII：即便不写也会在作用域结束自动还，这里提前释放）
@@ -872,30 +990,31 @@ impl Command {
             // 只有 self.timeout=Some(d) 时才可能走到这里（None 永远返回 Ok），故 unwrap_or 只是防御。
             Err(_elapsed) => {
                 let dur = self.timeout.unwrap_or_default();
-                // 记一次 Timeout + 一次 fallback_success（下面必产出降级响应）
-                {
-                    let mut st = self.stats();
-                    st.record(Outcome::Timeout, latency_ms);
-                    st.record_fallback_success();
-                }
+                // 主请求只记录 Timeout；降级执行结局在局部/全局策略真正完成后单独记账。
+                self.stats().record(Outcome::Timeout, latency_ms);
                 tracing::warn!(
                     command = %self.name,
                     timeout_ms = dur.as_millis() as u64,
                     "command timed out (504)"
                 );
-                // 降级优先级:timeout_fn(闭包)→ timeout_response(静态 JSON)→ 默认 504 壳。
-                if let Some(fb) = self.timeout_fb.get() {
-                    return fb().await;
-                }
-                match self.timeout_body.get() {
-                    Some(v) => custom_response(v),
-                    None => timeout_response(&self.name, dur),
-                }
+                self.resolve_fallback(FallbackCause::ExecutionTimeout {
+                    timeout: dur,
+                    elapsed,
+                })
+                .await
             }
         }
     }
 
-    /// 生成 Hystrix Dashboard 认得的一条 HystrixCommand JSON。
+    /// 业务作用：生成包含主请求与全局降级真实结局的 Hystrix Dashboard 命令快照。
+    ///
+    /// # 参数说明
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回 Dashboard 可消费的 `HystrixCommand` JSON，不改变运行时状态。
     fn snapshot_json(&self) -> Value {
         // 取窗口汇总：成功/失败/超时/拒绝计数 + 延迟百分位
         let w = self.stats().snapshot();
@@ -940,8 +1059,8 @@ impl Command {
             "rollingCountThreadPoolRejected": 0,             // 线程池拒绝数（信号量模式无，恒 0）
             "rollingCountBadRequests": 0,                    // 错误请求数（未用，恒 0）
             "rollingCountExceptionsThrown": 0,               // 抛异常数（未用，恒 0）
-            "rollingCountFallbackFailure": 0,                // fallback 失败数（当前 fallback 产出 Response 无错误模型，恒 0）
-            "rollingCountFallbackRejection": 0,              // fallback 被拒数（无 fallback 限流，恒 0）
+            "rollingCountFallbackFailure": w.fallback_failure, // fallback 配置冲突、panic 或递归数
+            "rollingCountFallbackRejection": 0, // 终态 fallback 不设置独立并发门禁，因此恒为 0
             "rollingCountFallbackSuccess": w.fallback_success, // fallback 成功数 = 拒绝/超时产出降级响应的次数
             "rollingCountResponsesFromCache": 0,             // 命中请求缓存数（无缓存，恒 0）
             "rollingCountCollapsedRequests": 0,              // 请求合并数（未用，恒 0）
@@ -968,7 +1087,7 @@ impl Command {
             //   语义上对应"线程隔离"的属性，信号量模式下用不到，但必须存在：给等价值即可。
             "propertyValue_executionIsolationThreadTimeoutInMilliseconds": self.timeout.map_or(0, |d| d.as_millis() as u64), // 线程隔离超时(必填占位)
             "propertyValue_executionIsolationThreadInterruptOnTimeout": true,                          // 超时是否中断线程(必填占位)
-            "propertyValue_fallbackIsolationSemaphoreMaxConcurrentRequests": 0,                         // fallback 并发上限:本实现无 fallback 信号量(不限),按本模块约定用 0 表示不限(诚实展示,不虚标 10)
+            "propertyValue_fallbackIsolationSemaphoreMaxConcurrentRequests": 0, // 终态 fallback 不叠加第二层并发保护
             "propertyValue_metricsRollingStatisticalWindowInMilliseconds": WINDOW_SECS * 1000,          // 滚动统计窗口(ms)=10000
             "propertyValue_circuitBreakerEnabled": false,                  // 熔断器开关（关）
             "propertyValue_circuitBreakerForceOpen": false,                // 强制打开熔断（否）
@@ -1250,12 +1369,14 @@ pub async fn dispatch(req: Request, next: Next) -> Response {
 }
 
 // ── re-export 过程宏 ──
-pub use hystrix_macro::hystrix;
+pub use hystrix_macro::{global_fallback, hystrix};
 
 /// 宏展开专用的第三方依赖桥:`#[hystrix]` 生成代码经
 /// `<运行时根>::__private::axum` 引用 axum——业务只依赖 `nasa` 时无需再直接声明 axum。
 /// **不属于稳定业务 API**,随时可能变化。
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::fallback::{CollectedGlobalFallback, HYSTRIX_COLLECTED_GLOBAL_FALLBACKS};
     pub use axum;
+    pub use linkme;
 }

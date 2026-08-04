@@ -2,10 +2,10 @@
 # 过程宏【必须】单独放一个 crate，且声明 [lib] proc-macro = true
 [package]
 name = "hystrix-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[hystrix] 属性宏(bulkhead + 超时 + Dashboard 上报)"
+description = "#[hystrix] 接口保护与 #[global_fallback] 终态降级属性宏"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

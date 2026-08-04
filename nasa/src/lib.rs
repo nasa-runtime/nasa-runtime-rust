@@ -33,18 +33,18 @@ pub use application_impl::Application;
 #[cfg(feature = "application")]
 pub use application_macro::application;
 
-/// 熔断/隔离/Dashboard 监控 + `#[hystrix]`(对标 Hystrix Command)。
+/// 路由级隔离、Dashboard 监控、`#[hystrix]` 与 `#[global_fallback]` 终态降级。
 #[cfg(feature = "hystrix")]
 pub mod hystrix {
     pub use hystrix_impl::*;
-    pub use hystrix_macro::hystrix;
+    pub use hystrix_macro::{global_fallback, hystrix};
 }
 
-/// 接口级隔离监控 + `#[grafana]`：bulkhead、超时、降级、Prometheus `/metrics` 与 Grafana 面板。
+/// 接口级隔离监控：`#[grafana]`、`#[global_fallback]`、Prometheus `/metrics` 与 Grafana 面板。
 #[cfg(feature = "grafana")]
 pub mod grafana {
     pub use grafana_impl::*;
-    pub use grafana_macro::grafana;
+    pub use grafana_macro::{global_fallback, grafana};
 
     /// nafana → napp 统一 hub 兼容源。
     ///

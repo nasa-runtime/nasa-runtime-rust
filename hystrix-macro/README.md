@@ -1,6 +1,7 @@
 # hystrix-macro
 
-`hystrix-macro` 提供 `#[hystrix]` 属性宏。业务通常从 `nasa::hystrix::hystrix` 使用，不直接依赖本宏 crate。
+`hystrix-macro` 提供 `#[hystrix]` 与 `#[global_fallback]` 属性宏。业务通常从 `nasa::hystrix` 门面使用，
+不直接依赖本宏 crate。
 
 ```toml
 [dependencies]
@@ -41,6 +42,24 @@ async fn kline() -> impl axum::response::IntoResponse {
 
 `reject_fn` 与 `reject_response` 互斥，`timeout_fn` 与 `timeout_response` 互斥。
 
+进程级终态响应使用独立属性宏自动收集：
+
+```rust
+use nasa::hystrix::{FallbackCause, FallbackContext};
+
+#[nasa::hystrix::global_fallback]
+fn service_fallback(context: FallbackContext) -> impl axum::response::IntoResponse {
+    match context.cause() {
+        FallbackCause::BulkheadRejected { .. } => "service busy",
+        FallbackCause::ExecutionTimeout { .. } => "service timeout",
+        _ => "service unavailable",
+    }
+}
+```
+
+`#[global_fallback]` 不接受属性参数，只能标注恰好接收一个 `FallbackContext` 的同步函数；返回值可以是任意
+Axum `IntoResponse`。处理函数是故障路径的最终响应生成器，不配置自身并发或超时，也不访问数据库、缓存或 RPC。
+
 ## YML 配置与使用
 
 `hystrix-macro` 没有运行期 yml。宏参数是编译期固定策略；如果需要通过 yml 调整隔离规则，请使用 `hystrix::init_isolation` 的配置驱动模式。
@@ -77,5 +96,6 @@ hystrix:
 
 - 只支持异步函数；宏参数中的静态响应必须是合法 JSON。
 - 同一路径的函数降级和静态降级互斥。
+- 同一组件只能声明一个 `#[global_fallback]`，多个声明会被运行时确定性拒绝。
 - mapping 组合时属性顺序固定为 `#[hystrix]` 在上、`#[*_mapping]` 在下。
 - 宏只提供并发隔离和超时，不实现错误率驱动的熔断状态机。

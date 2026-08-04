@@ -1082,12 +1082,19 @@ pub fn normalize_attributes(info: &redis::Value) -> HashMap<String, String> {
 /// 一个字段的 FT.INFO 实测画像，用于比较 type、修饰 flag、WEIGHT 与 SEPARATOR 漂移。
 #[derive(Debug, Default, Clone)]
 pub struct AttrInfo {
+    /// RediSearch 字段类型。
     pub ftype: String,
+    /// 是否支持排序。
     pub sortable: bool,
+    /// 是否关闭词干还原。
     pub no_stem: bool,
+    /// 是否仅存储而不建立索引。
     pub no_index: bool,
+    /// 是否使用大小写敏感匹配。
     pub case_sensitive: bool,
+    /// 可选的全文相关性权重。
     pub weight: Option<f64>,
+    /// 可选的多值 Tag 分隔符。
     pub separator: Option<String>,
 }
 

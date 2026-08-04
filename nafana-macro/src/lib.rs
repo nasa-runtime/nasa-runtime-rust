@@ -4,7 +4,114 @@
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
+use syn::{parse_macro_input, FnArg, ItemFn, LitInt, LitStr};
+
+/// 业务作用：把一个同步终态响应函数收集为 nafana 进程级全局降级入口。
+///
+/// 属性不接受参数；函数必须同步、恰好接收一个 `FallbackContext`，并返回任意
+/// `IntoResponse`。具体参数和返回类型由生成代码交给 Rust 类型系统校验。
+///
+/// # 参数说明
+///
+/// - `attr`: 属性参数，必须为空。
+/// - `item`: 被收集的同步终态响应函数。
+///
+/// # 返回
+///
+/// 返回原函数与 linkme 描述项；签名不满足终态处理约束时返回定位明确的编译错误。
+#[proc_macro_attribute]
+pub fn global_fallback(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let root = match nasa_macro_support::runtime_root("grafana", "nafana") {
+        Ok(root) => root,
+        Err(message) => return quote! { ::core::compile_error!(#message); }.into(),
+    };
+    expand_global_fallback(attr, item, root, "nafana")
+}
+
+/// 业务作用：校验全局终态处理函数形态并生成组件级链接切片注册项。
+///
+/// # 参数说明
+///
+/// - `attr`: 属性参数，必须为空。
+/// - `item`: 被注解函数的源码 token。
+/// - `root`: 当前依赖形态下的 nafana 运行时根路径。
+/// - `component`: 编译错误中使用的组件名。
+///
+/// # 返回
+///
+/// 返回可直接交给编译器的展开结果；失败时返回 `compile_error!`。
+fn expand_global_fallback(
+    attr: TokenStream,
+    item: TokenStream,
+    root: proc_macro2::TokenStream,
+    component: &str,
+) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("#[{component}::global_fallback] 不接受参数"),
+        )
+        .to_compile_error()
+        .into();
+    }
+    let function = parse_macro_input!(item as ItemFn);
+    if function.sig.asyncness.is_some() {
+        return syn::Error::new_spanned(
+            function.sig.asyncness,
+            format!("#[{component}::global_fallback] 必须用于同步 fn"),
+        )
+        .to_compile_error()
+        .into();
+    }
+    if function.sig.constness.is_some()
+        || function.sig.unsafety.is_some()
+        || function.sig.abi.is_some()
+        || function.sig.variadic.is_some()
+        || !function.sig.generics.params.is_empty()
+        || function.sig.generics.where_clause.is_some()
+    {
+        return syn::Error::new_spanned(
+            &function.sig,
+            format!(
+                "#[{component}::global_fallback] 不支持 const、unsafe、extern、可变参数或泛型函数"
+            ),
+        )
+        .to_compile_error()
+        .into();
+    }
+    if function.sig.inputs.len() != 1
+        || !matches!(function.sig.inputs.first(), Some(FnArg::Typed(_)))
+    {
+        return syn::Error::new_spanned(
+            &function.sig.inputs,
+            format!("#[{component}::global_fallback] 函数必须恰好接收一个 FallbackContext 参数"),
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let ident = &function.sig.ident;
+    quote! {
+        #function
+
+        const _: () = {
+            #[#root::__private::linkme::distributed_slice(
+                #root::__private::NAFANA_COLLECTED_GLOBAL_FALLBACKS
+            )]
+            #[linkme(crate = #root::__private::linkme)]
+            static __NAFANA_GLOBAL_FALLBACK: #root::__private::CollectedGlobalFallback =
+                #root::__private::CollectedGlobalFallback {
+                    source: ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#ident)),
+                    handle: |context| #root::FallbackDecision::Respond(
+                        #root::__private::axum::response::IntoResponse::into_response(
+                            #ident(context)
+                        )
+                    ),
+                };
+        };
+    }
+    .into()
+}
 
 /// 业务作用：# `#[grafana]` —— 给 axum handler 加 bulkhead 隔离 + 超时 + Prometheus 指标
 ///

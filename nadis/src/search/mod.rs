@@ -25,8 +25,11 @@
 // └──────────────────────────────────────────────────────────────────────┘
 // ============================================================================
 
+/// RediSearch 索引生命周期、文档读写、查询和聚合执行器。
 pub mod actuator;
+/// RedisJSON 数组与分桶数组的原子 Lua 操作。
 pub mod array;
+/// 类型化 RediSearch 查询 AST 及安全渲染器。
 pub mod query;
 
 use std::collections::HashMap;
@@ -98,8 +101,11 @@ pub enum FieldType {
     /// `separator` 是多值分隔符（默认 `,`，None 表示使用 RediSearch 默认值），`case_sensitive`
     /// (CASESENSITIVE,默认大小写不敏感)——必须与 原实现 建索引时一致,否则分词/匹配不一致。
     Tag {
+        /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
+        /// 多值 Tag 分隔符；`None` 表示使用 RediSearch 默认值。
         separator: Option<char>,
+        /// 是否启用大小写敏感匹配。
         case_sensitive: bool,
         /// WITHSUFFIXTRIE 会建立后缀树，启用 `*foo`（后缀）和 `*foo*`（包含）查询。
         with_suffix_trie: bool,
@@ -108,10 +114,15 @@ pub enum FieldType {
     /// `no_stem`（NOSTEM 关闭词干还原）、`phonetic`（例如 `dm:en`）和 `no_index`
     /// (NOINDEX 只存不建倒排,仅 SORTABLE/投影用)。
     Text {
+        /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
+        /// 全文字段在相关性评分中的权重。
         weight: f64,
+        /// 是否关闭词干还原。
         no_stem: bool,
+        /// 可选的 RediSearch phonetic matcher 名称。
         phonetic: Option<String>,
+        /// 是否只存储字段而不建立倒排索引。
         no_index: bool,
         /// WITHSUFFIXTRIE 会建立后缀树，启用 `*foo`（后缀）和 `*foo*`（包含）查询。
         with_suffix_trie: bool,
@@ -119,7 +130,12 @@ pub enum FieldType {
     /// 数值范围;FT 语法 `@f:[min max]`。
     ///`no_index`(NOINDEX 只存不建数值索引,仅 SORTABLE/投影用——对齐 原实现
     /// `@NumericField(indexed=false)`,补齐 Tag/Text 已有的 NOINDEX 对称性)。
-    Numeric { sortable: bool, no_index: bool },
+    Numeric {
+        /// 是否允许 RediSearch 对该字段排序。
+        sortable: bool,
+        /// 是否只存储字段而不建立数值索引。
+        no_index: bool,
+    },
     /// 地理坐标；存储为 `"lon,lat"`，FT 语法为 `@f:[lon lat radius unit]`。
     Geo,
 }
@@ -133,6 +149,7 @@ pub struct FieldMeta {
     pub alias: String,
     /// JSON 模式的显式 JSONPath(None = `$.{name}`;HASH 模式忽略)。
     pub json_path: Option<String>,
+    /// 字段的索引类型与 RediSearch 修饰参数。
     pub ftype: FieldType,
 }
 
@@ -169,7 +186,9 @@ pub struct DocMeta {
     ///   · 含 `{field}` 占位符:如 `"order:SMO:{sym}:{d}:"`,动态段运行时填充;
     ///   · ARRAY 系:完整 key = prefix + @JsonArrayKey 值拼接(占位符在 ARRAY 系禁用)。
     pub prefix: String,
+    /// 文档在 Redis 中的存储与索引形态。
     pub data_type: DataType,
+    /// 参与索引、查询和编解码的字段元数据。
     pub fields: Vec<FieldMeta>,
     /// @RsId 字段的存储名(JSONPath idFilter `@.{id_name}==…` 与 HASH 回填用)。
     pub id_name: String,

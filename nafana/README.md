@@ -7,6 +7,7 @@
 
 - `#[grafana]`：按 handler 监控请求，可选并发上限、超时、TPS 权重和降级响应。
 - `Command`：保护任意异步执行体，不要求 handler 使用 mapping 宏。
+- 进程级全局降级：统一处理未声明局部策略的并发拒绝和执行超时。
 - 配置驱动隔离：通过 `IsolationRule`、`init_isolation` 和 `dispatch` 按路由模式保护接口。
 - `/metrics`：Prometheus 文本指标入口。
 - Grafana Dashboard：直接查询 Prometheus；选择多个实例时，接口折线、错误率、结果、并发和延迟均按集群聚合。
@@ -514,6 +515,49 @@ async fn invalid() -> &'static str {
     "never compiled"
 }
 ```
+
+### 4.18 进程级全局降级
+
+大量端点采用同一种业务降级协议时，可以声明一个 Nafana 全局终态处理器。推荐用
+`#[nasa::grafana::global_fallback]` 自动收集唯一入口，无需在启动函数手动注册；它与其它隔离组件不共享状态。
+
+```rust
+use axum::{http::StatusCode, response::IntoResponse, Json};
+use nasa::grafana::{FallbackCause, FallbackContext};
+
+#[nasa::grafana::global_fallback]
+fn service_fallback(context: FallbackContext) -> impl IntoResponse {
+    let cause = match context.cause() {
+        FallbackCause::BulkheadRejected { .. } => "busy",
+        FallbackCause::ExecutionTimeout { .. } => "timeout",
+        _ => "unavailable",
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "code": "SERVICE_DEGRADED",
+            "cause": cause,
+            "command": context.command(),
+            "path": context.path(),
+            "transaction_weight": context.transaction_weight(),
+        })),
+    )
+}
+```
+
+`#[global_fallback]` 不接受参数，只能标注恰好接收一个 `FallbackContext` 的同步函数，返回类型可以是任意
+Axum `IntoResponse`。它是故障路径的终态响应生成器，应只做本地、确定性、常量时间的响应组装，不应阻塞
+线程或访问数据库、缓存、RPC 等外部资源。Nafana 不会给它再配置 `max_concurrent` 或 `timeout_ms`，也不会
+在它失败后调用第二个业务降级；配置冲突、panic 或递归只会收敛到内置 429/504。
+
+固定优先级为：端点局部函数 → 端点局部静态响应 → Nafana 全局处理器 → 内置 429/504。同一组件只能
+收集一个属性入口；首次需要时自动初始化。希望在开放流量前检查唯一性时，可调用
+`initialize_global_fallback()`。没有使用属性宏时，仍可实现同步 `GlobalFallbackHandler` 并调用
+`install_global_fallback(Arc<_>)`；手动实现可返回 `FallbackDecision::UseBuiltin`，但不能覆盖自动收集项。
+
+`tps` 表示 REST 事务权重。主请求在进入 Nafana 时已经按权重记账一次，全局降级只读取
+`FallbackContext::transaction_weight()`，不会重复增加 TPS。`nafana_global_fallback_total` 按
+`handled`、`builtin`、`failed` 区分全局处理结局；终态处理器不暴露第二层并发容量。
 
 ## 5. 显式 `Command`
 

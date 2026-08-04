@@ -12,8 +12,10 @@ on:
           - 1b
           - 2
           - 3
+          - 3p
+          - 4
       confirm:
-        description: "输入 publish-1.0.0 确认执行不可逆发布"
+        description: "常规批次输入 publish-1.0.0；3p 宏补丁输入 publish-1.0.1"
         required: true
         type: string
 
@@ -41,7 +43,11 @@ jobs:
             echo "仅允许从 release/1.0.0 发布，当前 ref: $GITHUB_REF" >&2
             exit 1
           fi
-          if [[ "$RELEASE_CONFIRM" != "publish-1.0.0" ]]; then
+          expected_confirm="publish-1.0.0"
+          if [[ "${{ inputs.batch }}" == "3p" ]]; then
+            expected_confirm="publish-1.0.1"
+          fi
+          if [[ "$RELEASE_CONFIRM" != "$expected_confirm" ]]; then
             echo "确认文本不匹配，拒绝发布" >&2
             exit 1
           fi
@@ -51,11 +57,11 @@ jobs:
     needs: guard
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
         with:
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
@@ -74,6 +80,12 @@ jobs:
             3)
               echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
               ;;
+            3p)
+              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              ;;
+            4)
+              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -87,6 +99,8 @@ jobs:
             --user-agent "nasa-runtime-release/1.0" \
             "https://crates.io/api/v1/crates/nabase/1.0.0" >/dev/null
       - name: verify registry dependency policy
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
         shell: bash
         run: |
           published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto"
@@ -94,6 +108,10 @@ jobs:
           while IFS=$'\t' read -r owner dependency dependency_path; do
             case " $published_crates " in
               *" $dependency "*)
+                if [[ "$RELEASE_BATCH" == "3p" && ( "$dependency" == "hystrix-macro" || "$dependency" == "nafana-macro" ) ]]; then
+                  echo "$owner 临时通过 path 验证尚未发布的 $dependency 1.0.1；3p 发布后第四批必须移除"
+                  continue
+                fi
                 echo "$owner 仍通过 path 引用已发布 crate $dependency: $dependency_path" >&2
                 failed=true
                 ;;
@@ -140,8 +158,12 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            if [[ "$version" != "1.0.0" ]]; then
-              echo "$crate_name 版本不是 1.0.0: $version" >&2
+            expected_version="1.0.0"
+            if [[ "${{ inputs.batch }}" == "3p" ]]; then
+              expected_version="1.0.1"
+            fi
+            if [[ "$version" != "$expected_version" ]]; then
+              echo "$crate_name 版本不是 $expected_version: $version" >&2
               exit 1
             fi
             archive="target/package/${crate_name}-${version}.crate"
@@ -176,7 +198,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: crates-io
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
       - name: select release crates
         env:
@@ -195,6 +217,12 @@ jobs:
               ;;
             3)
               echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
+              ;;
+            3p)
+              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              ;;
+            4)
+              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -269,8 +297,12 @@ jobs:
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            if [[ "$version" != "1.0.0" ]]; then
-              echo "$crate_name 版本不是 1.0.0: $version" >&2
+            expected_version="1.0.0"
+            if [[ "${{ inputs.batch }}" == "3p" ]]; then
+              expected_version="1.0.1"
+            fi
+            if [[ "$version" != "$expected_version" ]]; then
+              echo "$crate_name 版本不是 $expected_version: $version" >&2
               exit 1
             fi
 

@@ -214,9 +214,9 @@ full = [
 application_impl = { package = "napp", version = "1.0.0", path = "../napp", optional = true }
 application_macro = { package = "napp-macro", version = "1.0.0", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", path = "../hystrix", optional = true }
-hystrix_macro = { package = "hystrix-macro", version = "1.0.0", optional = true }
+hystrix_macro = { package = "hystrix-macro", version = "1.0.1", path = "../hystrix-macro", optional = true }
 grafana_impl = { package = "nafana", version = "1.0.0", path = "../nafana", optional = true }
-grafana_macro = { package = "nafana-macro", version = "1.0.0", optional = true }
+grafana_macro = { package = "nafana-macro", version = "1.0.1", path = "../nafana-macro", optional = true }
 cache_impl = { package = "cacheable", version = "1.0.0", path = "../cacheable", optional = true }
 nacache_macro = { package = "nacache-macro", version = "1.0.0", optional = true }
 tx_impl = { package = "natx", version = "1.0.0", path = "../natx", optional = true }
