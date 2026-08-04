@@ -1509,7 +1509,7 @@ dependencies = [
  "async-stream",
  "axum",
  "dashmap",
- "hystrix-macro",
+ "hystrix-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "linkme",
  "matchit",
  "serde",
@@ -1521,6 +1521,19 @@ dependencies = [
 [[package]]
 name = "hystrix-macro"
 version = "1.0.1"
+dependencies = [
+ "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "hystrix-macro"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263609c4b0ca702044e0eb34908954773b7fe861ea45044aa2805186fede47ae"
 dependencies = [
  "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
@@ -2252,7 +2265,7 @@ dependencies = [
  "dashmap",
  "linkme",
  "matchit",
- "nafana-macro",
+ "nafana-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "tokio",
@@ -2262,6 +2275,19 @@ dependencies = [
 [[package]]
 name = "nafana-macro"
 version = "1.0.1"
+dependencies = [
+ "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "nafana-macro"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab5fb19b86be8c1c0f9bacab4a240ebde62bbce1b850a6f5ae6c2ca72f8a65cc"
 dependencies = [
  "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
@@ -2760,7 +2786,7 @@ dependencies = [
  "cacheable",
  "config-boot",
  "hystrix",
- "hystrix-macro",
+ "hystrix-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit-mysql",
  "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2769,7 +2795,7 @@ dependencies = [
  "nadis",
  "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana",
- "nafana-macro",
+ "nafana-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka",
  "nagrpc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
