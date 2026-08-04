@@ -21,7 +21,7 @@ path = "src/lib.rs"
 # JSON_BYTES 模式用 serde + serde_json(地道 Rust 序列化栈),靠 NON_EMPTY/camelCase/有符号
 # 字节数组等属性对齐 原实现 Jackson 的输出(golden 对拍验证)。
 [dependencies]
-naws-proto-derive = { package = "naws-proto-derive", version = "1.0.0", path = "../naws-proto-derive" }
+naws-proto-derive = { package = "naws-proto-derive", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"

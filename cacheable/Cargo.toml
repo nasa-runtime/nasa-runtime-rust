@@ -16,7 +16,7 @@ categories.workspace = true
 [lib]
 name = "cacheable"
 [dependencies]
-nacache-macro = { package = "nacache-macro", version = "1.0.0", path = "../nacache-macro" }
+nacache-macro = { package = "nacache-macro", version = "1.0.0" }
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 moka = { version = "0.12", features = ["future"] }
 dashmap = "6"
@@ -25,10 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 # `CacheBackend` 抽象需要对象安全的 async trait(`Arc<dyn CacheBackend>`),原生 async-fn-in-trait
-# 尚不支持 dyn,故用 async-trait(§6.2:窄接口隔离,不让 redis 具体连接类型泄露到 CacheLayer)。
+# 原生 async-fn-in-trait 尚不支持 dyn，因此使用 async-trait 保持窄接口并隔离具体 Redis 连接类型。
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 futures-util = "0.3"
 tracing = "0.1"
-# 编译期收集 #[cached] 生成的 CacheSceneUsage 静态 descriptor(§22.5,与 naweb-macro 同款)。
+# 编译期收集 #[cached] 生成的 CacheSceneUsage 静态 descriptor，与 naweb-macro 使用同类机制。
 linkme = "0.3"

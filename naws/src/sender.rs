@@ -115,7 +115,7 @@ impl Sender {
         *self.cluster_publish.lock().unwrap() = Some(f);
     }
 
-    /// 框架内部:注入 endpoint 代际解析器(出站投递兜底;R25 P1)。
+    /// 框架内部:注入 endpoint 代际解析器(出站投递兜底)。
     pub(crate) fn set_endpoint_gen_resolver(&self, f: EndpointGenResolver) {
         *self.endpoint_gen.lock().unwrap() = Some(f);
     }
@@ -280,7 +280,7 @@ impl Sender {
         if targets.is_empty() {
             return report;
         }
-        // NASA 整帧:**懒编码**——只有存在 NASA 目标时才编一次(全 socket.io 目标时不浪费;P2#11)。
+        // NASA 整帧:**懒编码**——只有存在 NASA 目标时才编一次(全 socket.io 目标时不浪费)。
         let mut nasa_frame: Option<Bytes> = None;
         // socket.io 目标:文本包按**目标会话的 namespace** 另编(不与 NASA 共享字节)。
         // bridge.outbound 只依赖 msg,可跨 namespace 复用(只 namespace 前缀不同)。

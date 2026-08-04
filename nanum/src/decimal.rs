@@ -38,7 +38,7 @@ use std::str::FromStr;
 /// 超界返 `Err(Scale)`,**不 panic、不 OOM**,符合 crate 错误模型。
 pub const MAX_DECIMAL_EXPANSION: u64 = 1_000_000;
 
-/// 校验 `10^exp` 展开位数不超 [`MAX_DECIMAL_EXPANSION`](防 OOM),返 `usize` 供 `int_pow`。超界 → `Err(Scale)`。
+/// 业务作用: 校验 `10^exp` 展开位数不超 [`MAX_DECIMAL_EXPANSION`](防 OOM),返 `usize` 供 `int_pow`。超界 → `Err(Scale)`。
 ///
 /// # 参数
 /// - `exp`: 十进制缩放指数。
@@ -51,7 +51,7 @@ fn checked_decimal_exp(exp: u64) -> Result<usize> {
     Ok(exp as usize)
 }
 
-/// `10^exp`(BigInt)。`exp` 须已过 [`checked_decimal_exp`]。
+/// 业务作用: `10^exp`(BigInt)。`exp` 须已过 [`checked_decimal_exp`]。
 ///
 /// # 参数
 /// - `exp`: 十进制缩放指数。
@@ -61,7 +61,7 @@ fn pow10_bigint(exp: usize) -> bigdecimal::num_bigint::BigInt {
     int_pow(BigInt::from(10), exp)
 }
 
-/// 按 `mode` 把 `num_abs / den_abs`(均 ≥ 0,`den_abs > 0`)舍入为带符号 `BigInt` 商。`Unnecessary` 遇余数非 0 → `Err`。
+/// 业务作用: 按 `mode` 把 `num_abs / den_abs`(均 ≥ 0,`den_abs > 0`)舍入为带符号 `BigInt` 商。`Unnecessary` 遇余数非 0 → `Err`。
 /// 全 8 `RoundingMode`,被 [`divide_scaled_exact`] 与 [`set_scale_round_checked`] 复用。
 ///
 /// # 参数
@@ -107,7 +107,7 @@ fn round_bigint_div(
     Ok(q)
 }
 
-/// 把 `val` 舍入到目标 `scale`,**全程 checked + BigInt**,不调 `bigdecimal::with_scale_round`。对照 原实现
+/// 业务作用: 把 `val` 舍入到目标 `scale`,**全程 checked + BigInt**,不调 `bigdecimal::with_scale_round`。对照 原实现
 /// `BigDecimal.setScale(int, mode)`。
 ///
 /// **`bigdecimal::with_scale_round` 内部多处 i64 派生量(`new_scale - self.scale`、
@@ -147,7 +147,7 @@ fn set_scale_round_checked(val: &BigDecimal, scale: i64, mode: RoundingMode) -> 
     }
 }
 
-/// checked BigDecimal 加/减,**不调 bigdecimal 的 `+`/`-`**(其内部 `(lhs.scale - rhs.scale) as u64` 在极端 operand
+/// 业务作用: checked BigDecimal 加/减,**不调 bigdecimal 的 `+`/`-`**(其内部 `(lhs.scale - rhs.scale) as u64` 在极端 operand
 /// scale 下整数溢出 panic + `ten_to_the` 天量分配)。对齐到 `max(a_scale,b_scale)` 后 BigInt 加减,
 /// scale 对齐展开过 [`checked_decimal_exp`]。
 ///
@@ -187,7 +187,7 @@ fn checked_add_bd(a: &BigDecimal, b: &BigDecimal, subtract: bool) -> Result<BigD
     Ok(BigDecimal::new(combined, common))
 }
 
-/// checked BigDecimal 乘,**不调 bigdecimal 的 `*`**(其内部 `self.scale + rhs.scale` 未 checked,极端 operand scale
+/// 业务作用: checked BigDecimal 乘,**不调 bigdecimal 的 `*`**(其内部 `self.scale + rhs.scale` 未 checked,极端 operand scale
 /// 溢出 panic)。unscaled 直接 BigInt 相乘,结果 scale = `a_scale + b_scale`(checked)。
 ///
 /// # 参数
@@ -211,7 +211,7 @@ fn checked_mul_bd(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
 
 // ==================== BigDecimal 段(对照 原实现 Numeric BigDecimal API)====================
 
-/// BigDecimal 加法(精确)。对照 原实现 `add(BigDecimal,BigDecimal)`。
+/// 业务作用: BigDecimal 加法(精确)。对照 原实现 `add(BigDecimal,BigDecimal)`。
 ///
 /// **返 `Result`**:operand 自带极端 scale(如 `BigDecimal::new(_, i64::MAX/MIN)`)对齐时会溢出,
 /// 走 checked 算术返 `Err(Scale)` 而非 panic(crate "溢出→Result、不 panic" 契约)。正常输入永不出错。
@@ -224,7 +224,7 @@ pub fn add(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_add_bd(a, b, false)
 }
 
-/// BigDecimal 减法(精确)。对照 原实现 `subtract`。返 `Result`(同 [`add`])。
+/// 业务作用: BigDecimal 减法(精确)。对照 原实现 `subtract`。返 `Result`(同 [`add`])。
 ///
 /// # 参数
 ///
@@ -234,7 +234,7 @@ pub fn subtract(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_add_bd(a, b, true)
 }
 
-/// BigDecimal 乘法(精确)。对照 原实现 `multiply(BigDecimal,BigDecimal)`。返 `Result`(同 [`add`])。
+/// 业务作用: BigDecimal 乘法(精确)。对照 原实现 `multiply(BigDecimal,BigDecimal)`。返 `Result`(同 [`add`])。
 ///
 /// # 参数
 ///
@@ -244,7 +244,7 @@ pub fn multiply(a: &BigDecimal, b: &BigDecimal) -> Result<BigDecimal> {
     checked_mul_bd(a, b)
 }
 
-/// BigDecimal 乘法,结果对齐到 `scale`(HALF_UP)。对照 原实现 `multiply(a,b,scale)`。
+/// 业务作用: BigDecimal 乘法,结果对齐到 `scale`(HALF_UP)。对照 原实现 `multiply(a,b,scale)`。
 ///
 /// 返 `Result`:乘法本身(`checked_mul_bd`)与对齐(`set_scale_round_checked`)均 checked,极端 scale 返 `Err(Scale)`。
 ///
@@ -257,7 +257,7 @@ pub fn multiply_scale(a: &BigDecimal, b: &BigDecimal, scale: i64) -> Result<BigD
     set_scale_round_checked(&checked_mul_bd(a, b)?, scale, RoundingMode::HalfUp)
 }
 
-/// BigDecimal 除法,指定 `scale`(HALF_UP;避免无限循环小数)。对照 原实现 `divide(a,b,scale)`。
+/// 业务作用: BigDecimal 除法,指定 `scale`(HALF_UP;避免无限循环小数)。对照 原实现 `divide(a,b,scale)`。
 ///
 /// # 参数
 ///
@@ -268,7 +268,7 @@ pub fn divide(a: &BigDecimal, b: &BigDecimal, scale: i64) -> Result<BigDecimal> 
     divide_mode(a, b, scale, RoundingMode::HalfUp)
 }
 
-/// BigDecimal 除法,指定 `scale` 与舍入模式。对照 原实现 `divide(a,b,scale,mode)`。
+/// 业务作用: BigDecimal 除法,指定 `scale` 与舍入模式。对照 原实现 `divide(a,b,scale,mode)`。
 ///
 /// `b==0` → `Err(DivByZero)`;`Unnecessary` 模式遇需舍入 → `Err(RoundingNecessary)`(对照 原实现
 /// `divide(...UNNECESSARY)` 抛 `ArithmeticException`)。
@@ -288,7 +288,7 @@ pub fn divide_mode(
     divide_scaled_exact(a, b, scale, mode)
 }
 
-/// 按目标 `scale` **直接用 BigInt 整数除法 + 舍入**,真任意精度。对照 原实现 `BigDecimal.divide(b, scale, mode)`。
+/// 业务作用: 按目标 `scale` **直接用 BigInt 整数除法 + 舍入**,真任意精度。对照 原实现 `BigDecimal.divide(b, scale, mode)`。
 ///
 /// **旧实现先 `let q = a / b` 再 `q.with_scale_round(scale)`,但 `bigdecimal` 的 `/` 默认中间
 /// 精度仅 ~100 位有效数字,`scale` 超过后 `with_scale_round` 只会**补零**(如 `divide(1,3,120)` 约 100 位后全 0),
@@ -340,7 +340,7 @@ fn divide_scaled_exact(
     Ok(BigDecimal::new(q, scale))
 }
 
-/// BigDecimal 截到 `scale` 位(HALF_UP)。对照 原实现 `align(val,scale)`。
+/// 业务作用: BigDecimal 截到 `scale` 位(HALF_UP)。对照 原实现 `align(val,scale)`。
 ///
 /// 返 `Result`:极端 scale 经 `set_scale_round_checked` 返 `Err(Scale)` 而非 panic/OOM。
 ///
@@ -352,7 +352,7 @@ pub fn align(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::HalfUp)
 }
 
-/// BigDecimal 向上(+∞,CEILING)取到 `scale`。对照 原实现 `alignUp`。返 `Result`(同 [`align`])。
+/// 业务作用: BigDecimal 向上(+∞,CEILING)取到 `scale`。对照 原实现 `alignUp`。返 `Result`(同 [`align`])。
 ///
 /// # 参数
 ///
@@ -362,7 +362,7 @@ pub fn align_up(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::Ceiling)
 }
 
-/// BigDecimal 向下(−∞,FLOOR)取到 `scale`。对照 原实现 `alignDown`。返 `Result`(同 [`align`])。
+/// 业务作用: BigDecimal 向下(−∞,FLOOR)取到 `scale`。对照 原实现 `alignDown`。返 `Result`(同 [`align`])。
 ///
 /// # 参数
 ///
@@ -372,7 +372,7 @@ pub fn align_down(val: &BigDecimal, scale: i64) -> Result<BigDecimal> {
     set_scale_round_checked(val, scale, RoundingMode::Floor)
 }
 
-/// BigDecimal 求和,空 → `0`。对照 原实现 `sum(BigDecimal...)` / `sum(Iterable)`。
+/// 业务作用: BigDecimal 求和,空 → `0`。对照 原实现 `sum(BigDecimal...)` / `sum(Iterable)`。
 ///
 /// **返 `Result`**:走 `checked_add_bd`,极端 operand scale 返 `Err(Scale)` 而非 panic。
 /// 注:原实现 版会**跳过 `null` 元素**;Rust 用类型系统消除了 `null`(此处是 `&BigDecimal`,无 null 可传),
@@ -389,7 +389,7 @@ pub fn sum<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I) -> Result<BigDec
     Ok(r)
 }
 
-/// BigDecimal 平均值,对齐到 `scale`(HALF_UP);空 → `0`。对照 原实现 `avg(Iterable,scale)`。
+/// 业务作用: BigDecimal 平均值,对齐到 `scale`(HALF_UP);空 → `0`。对照 原实现 `avg(Iterable,scale)`。
 ///
 /// 返 `Result`:求和阶段走 `checked_add_bd`、除法走 `divide_scaled_exact`,极端 scale
 /// 全程返 `Err(Scale)` 而非 panic(指出旧实现 `s += v` 求和阶段仍会 panic)。正常 scale 永不出错。
@@ -413,7 +413,7 @@ pub fn avg<'a, I: IntoIterator<Item = &'a BigDecimal>>(vals: I, scale: i64) -> R
 
 // ==================== 最小单位 / 随机步长(BigDecimal,构造不展开、不受 8 位限)====================
 
-/// 指定精度的最小正值 `1×10^-scale`。对照 原实现 `scaleMin(int)`(`BigDecimal.valueOf(1, scale)`,**不受 8 位限**)。
+/// 业务作用: 指定精度的最小正值 `1×10^-scale`。对照 原实现 `scaleMin(int)`(`BigDecimal.valueOf(1, scale)`,**不受 8 位限**)。
 /// 构造本身不展开 `10^n`(只设 unscaled=1 + scale 字段),故任意 `i64 scale` 都安全;但把结果送入 `align*`/`divide`
 /// 等会触发 `MAX_DECIMAL_EXPANSION` 边界。
 ///
@@ -428,7 +428,7 @@ pub fn scale_min(scale: i64) -> BigDecimal {
     BigDecimal::new(1.into(), scale)
 }
 
-/// 在最小精度位上取步长随机值,范围 `[min, (step-1)×min]`(`min=10^-scale`)。对照 原实现 `randomStep(long,scale)`。
+/// 业务作用: 在最小精度位上取步长随机值,范围 `[min, (step-1)×min]`(`min=10^-scale`)。对照 原实现 `randomStep(long,scale)`。
 ///
 /// `step<=0` → `scale_min(scale)`;`rand=0` 时也返回 `min`(不返 0,与 原实现 一致)。构造不展开,任意 `i64 scale` 安全。
 ///
@@ -445,7 +445,7 @@ pub fn random_step(step: i64, scale: i64) -> BigDecimal {
     BigDecimal::new(unscaled.into(), scale)
 }
 
-/// `BigDecimal` 步长版,对照 原实现 `randomStep(BigDecimal step, int scale)` = `randomStep(step.longValue(), scale)`。
+/// 业务作用: `BigDecimal` 步长版,对照 原实现 `randomStep(BigDecimal step, int scale)` = `randomStep(step.longValue(), scale)`。
 ///
 /// `step` 先按 原实现 `BigDecimal.longValue()` 截断为整数(朝零截尾)取 `i64`;**超 i64 域时饱和**到
 /// `i64::MAX`/`MIN`(有意安全偏离 原实现 的低 64 位回绕——回绕对"步长"无意义且易出错)。
@@ -458,7 +458,7 @@ pub fn random_step_bd(step: &BigDecimal, scale: i64) -> BigDecimal {
     random_step(bigdecimal_to_i64_saturating(step), scale)
 }
 
-/// 原实现 `BigDecimal.longValue()` 等价:**朝零截断**取整数部分,超 `i64` 域**按符号饱和**。
+/// 业务作用: 原实现 `BigDecimal.longValue()` 等价:**朝零截断**取整数部分,超 `i64` 域**按符号饱和**。
 ///
 /// **纯位数 / 字符串运算实现,不调 `with_scale_round`(其极端 scale 会 panic),也不构造 `10^exp`
 /// (避免 OOM)。修正"仅凭 exponent 正负判断"的语义错误——如 `3×10^(MAX+1)` scale=`MAX+1` 的真实值是 `3`,
@@ -505,7 +505,7 @@ fn bigdecimal_to_i64_saturating(v: &BigDecimal) -> i64 {
 // ==================== Decimal 后缀便捷段(String/double → BigDecimal)====================
 // 对照 原实现 `addDecimal/subtractDecimal/...`:String 用 `new BigDecimal(s)` 精确解析,double 先转字符串避免二进制噪音。
 
-/// 解析字符串为 BigDecimal(精确,对照 原实现 `new BigDecimal(String)`)。
+/// 业务作用: 解析字符串为 BigDecimal(精确,对照 原实现 `new BigDecimal(String)`)。
 ///
 /// # 参数
 ///
@@ -514,7 +514,7 @@ pub fn parse(s: &str) -> Result<BigDecimal> {
     BigDecimal::from_str(s).map_err(|e| NumericError::Parse(format!("BigDecimal 解析失败: {e}")))
 }
 
-/// double → BigDecimal,**经字符串**精确化(对照 原实现 `BigDecimal.valueOf(double)` 避免 `new BigDecimal(0.1)` 噪音)。
+/// 业务作用: double → BigDecimal,**经字符串**精确化(对照 原实现 `BigDecimal.valueOf(double)` 避免 `new BigDecimal(0.1)` 噪音)。
 ///
 /// **scale / `toString` 偏离(只保证数值等价)**:原实现 `BigDecimal.valueOf(double)` 内部走 `Double.toString`,
 /// 会保留量级 scale(`1.0 → "1.0"` scale=1、`1e-7 → "1.0E-7"` scale=8);本 crate 用 Rust `format!("{v}")`
@@ -531,7 +531,7 @@ fn from_f64(v: f64) -> Result<BigDecimal> {
     parse(&format!("{v}"))
 }
 
-/// `addDecimal(String,String)`。
+/// 业务作用: `addDecimal(String,String)`。
 ///
 /// # 参数
 ///
@@ -541,7 +541,7 @@ pub fn add_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     add(&parse(a)?, &parse(b)?)
 }
 
-/// `addDecimal(double,double)`。
+/// 业务作用: `addDecimal(double,double)`。
 ///
 /// # 参数
 ///
@@ -551,7 +551,7 @@ pub fn add_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     add(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// `subtractDecimal(String,String)`。
+/// 业务作用: `subtractDecimal(String,String)`。
 ///
 /// # 参数
 ///
@@ -561,7 +561,7 @@ pub fn subtract_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     subtract(&parse(a)?, &parse(b)?)
 }
 
-/// `subtractDecimal(double,double)`。
+/// 业务作用: `subtractDecimal(double,double)`。
 ///
 /// # 参数
 ///
@@ -571,7 +571,7 @@ pub fn subtract_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     subtract(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// `multiplyDecimal(String,String)`。
+/// 业务作用: `multiplyDecimal(String,String)`。
 ///
 /// # 参数
 ///
@@ -581,7 +581,7 @@ pub fn multiply_decimal_str(a: &str, b: &str) -> Result<BigDecimal> {
     multiply(&parse(a)?, &parse(b)?)
 }
 
-/// `multiplyDecimal(double,double)`。
+/// 业务作用: `multiplyDecimal(double,double)`。
 ///
 /// # 参数
 ///
@@ -591,7 +591,7 @@ pub fn multiply_decimal_f64(a: f64, b: f64) -> Result<BigDecimal> {
     multiply(&from_f64(a)?, &from_f64(b)?)
 }
 
-/// `multiplyDecimal(String,String,scale)`。
+/// 业务作用: `multiplyDecimal(String,String,scale)`。
 ///
 /// # 参数
 ///
@@ -602,7 +602,7 @@ pub fn multiply_decimal_str_scale(a: &str, b: &str, scale: i64) -> Result<BigDec
     multiply_scale(&parse(a)?, &parse(b)?, scale)
 }
 
-/// `multiplyDecimal(double,double,scale)`。
+/// 业务作用: `multiplyDecimal(double,double,scale)`。
 ///
 /// # 参数
 ///
@@ -613,7 +613,7 @@ pub fn multiply_decimal_f64_scale(a: f64, b: f64, scale: i64) -> Result<BigDecim
     multiply_scale(&from_f64(a)?, &from_f64(b)?, scale)
 }
 
-/// `divideDecimal(String,String,scale)`。
+/// 业务作用: `divideDecimal(String,String,scale)`。
 ///
 /// # 参数
 ///
@@ -624,7 +624,7 @@ pub fn divide_decimal_str(a: &str, b: &str, scale: i64) -> Result<BigDecimal> {
     divide(&parse(a)?, &parse(b)?, scale)
 }
 
-/// `divideDecimal(double,double,scale)`。
+/// 业务作用: `divideDecimal(double,double,scale)`。
 ///
 /// # 参数
 ///
@@ -635,7 +635,7 @@ pub fn divide_decimal_f64(a: f64, b: f64, scale: i64) -> Result<BigDecimal> {
     divide(&from_f64(a)?, &from_f64(b)?, scale)
 }
 
-/// `divideDecimal(String,String,scale,mode)`。
+/// 业务作用: `divideDecimal(String,String,scale,mode)`。
 ///
 /// # 参数
 ///
@@ -652,7 +652,7 @@ pub fn divide_decimal_str_mode(
     divide_mode(&parse(a)?, &parse(b)?, scale, mode)
 }
 
-/// `divideDecimal(double,double,scale,mode)`。
+/// 业务作用: `divideDecimal(double,double,scale,mode)`。
 ///
 /// # 参数
 ///
@@ -669,7 +669,7 @@ pub fn divide_decimal_f64_mode(
     divide_mode(&from_f64(a)?, &from_f64(b)?, scale, mode)
 }
 
-/// `alignDecimal(String,scale)`。
+/// 业务作用: `alignDecimal(String,scale)`。
 ///
 /// # 参数
 ///
@@ -679,7 +679,7 @@ pub fn align_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align(&parse(val)?, scale)
 }
 
-/// `alignDecimal(double,scale)`。
+/// 业务作用: `alignDecimal(double,scale)`。
 ///
 /// # 参数
 ///
@@ -689,7 +689,7 @@ pub fn align_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align(&from_f64(val)?, scale)
 }
 
-/// `alignUpDecimal(String,scale)`。
+/// 业务作用: `alignUpDecimal(String,scale)`。
 ///
 /// # 参数
 ///
@@ -699,7 +699,7 @@ pub fn align_up_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align_up(&parse(val)?, scale)
 }
 
-/// `alignUpDecimal(double,scale)`。
+/// 业务作用: `alignUpDecimal(double,scale)`。
 ///
 /// # 参数
 ///
@@ -709,7 +709,7 @@ pub fn align_up_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align_up(&from_f64(val)?, scale)
 }
 
-/// `alignDownDecimal(String,scale)`。
+/// 业务作用: `alignDownDecimal(String,scale)`。
 ///
 /// # 参数
 ///
@@ -719,7 +719,7 @@ pub fn align_down_decimal_str(val: &str, scale: i64) -> Result<BigDecimal> {
     align_down(&parse(val)?, scale)
 }
 
-/// `alignDownDecimal(double,scale)`。
+/// 业务作用: `alignDownDecimal(double,scale)`。
 ///
 /// # 参数
 ///
@@ -729,7 +729,7 @@ pub fn align_down_decimal_f64(val: f64, scale: i64) -> Result<BigDecimal> {
     align_down(&from_f64(val)?, scale)
 }
 
-/// `sumDecimal(String...)`(跳过解析失败?——原实现 直接 `new BigDecimal(v)`,这里非法即 `Err`)。
+/// 业务作用: `sumDecimal(String...)`(跳过解析失败?——原实现 直接 `new BigDecimal(v)`,这里非法即 `Err`)。
 ///
 /// # 参数
 ///
@@ -739,7 +739,7 @@ pub fn sum_decimal_str(vals: &[&str]) -> Result<BigDecimal> {
     sum(&parsed?)
 }
 
-/// `sumDecimal(double...)`。
+/// 业务作用: `sumDecimal(double...)`。
 ///
 /// # 参数
 ///
@@ -749,7 +749,7 @@ pub fn sum_decimal_f64(vals: &[f64]) -> Result<BigDecimal> {
     sum(&parsed?)
 }
 
-/// `avgDecimal(String[],scale)`。
+/// 业务作用: `avgDecimal(String[],scale)`。
 ///
 /// # 参数
 ///
@@ -760,7 +760,7 @@ pub fn avg_decimal_str(vals: &[&str], scale: i64) -> Result<BigDecimal> {
     avg(&parsed?, scale)
 }
 
-/// `avgDecimal(double[],scale)`。
+/// 业务作用: `avgDecimal(double[],scale)`。
 ///
 /// # 参数
 ///

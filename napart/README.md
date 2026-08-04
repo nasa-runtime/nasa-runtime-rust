@@ -2,17 +2,17 @@
 
 `napart` 是同 key 串行执行器。它保证相同 key 的任务按提交顺序串行执行，不同 key 分散到多个分区并发执行。适合订单、账户、用户维度的异步事件处理。
 
-业务项目通过门面开启 `partition`：
+直接依赖：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["partition"] }
+napart = "1"
 ```
 
 ## 基本使用
 
 ```rust
-use nasa::partition::{PartitionExecutor, SubmitError};
+use napart::{PartitionExecutor, SubmitError};
 
 async fn run() -> Result<(), SubmitError> {
     let executor = PartitionExecutor::with_partitions(16);
@@ -21,7 +21,7 @@ async fn run() -> Result<(), SubmitError> {
         // 同一个 user key 下的任务会串行。
     })?;
 
-    executor.submit("user:1002", async {
+    executor.submit("user:1002", || async {
         // 不同 key 可能并发。
     })?;
 
@@ -35,11 +35,11 @@ async fn run() -> Result<(), SubmitError> {
 适合保护内存，避免提交速度远超消费速度。
 
 ```rust
-let executor = nasa::partition::PartitionExecutor::with_partitions_and_capacity(32, 1024);
+let executor = napart::PartitionExecutor::with_partitions_and_capacity(32, 1024);
 
 match executor.submit("order:1", || async {}) {
     Ok(()) => {}
-    Err(nasa::partition::SubmitError::QueueFull) => {
+    Err(napart::SubmitError::QueueFull) => {
         // 调用方可选择重试、降级或返回 429。
     }
     Err(e) => return Err(e),
@@ -49,7 +49,7 @@ match executor.submit("order:1", || async {}) {
 `submit_async` 会等待容量，适合内部后台生产者使用真背压：
 
 ```rust
-executor.submit_async("order:1", async {}).await?;
+executor.submit_async("order:1", || async {}).await?;
 ```
 
 ## panic 隔离和停机
@@ -93,18 +93,23 @@ partition_executor:
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `partitions` | 由业务决定 | 分区数量；越大不同 key 并发度越高，但每个分区都有队列和 worker 成本。 |
-| `queue_capacity` | 无界入口不需要 | 每个分区队列容量；有界队列满时 `submit` 返回错误。 |
-| `shutdown_timeout_ms` | 业务自定 | 优雅停机等待窗口；超时后应放弃继续接收任务。 |
+| `partitions` | `2 × CPU` 后向上取 2 的幂 | 显式值也会至少取 1 并向上取 2 的幂。 |
+| `queue_capacity` | `65536` | 每个分区的有界容量；最小按 1 处理，满时 `submit` 返回错误。 |
+| `shutdown_timeout_ms` | `2000` | 排空与 join 的总等待上限；超时会 abort 残余 worker 和在途任务。 |
 | `full_policy` | `reject` | 满队列策略；本组件返回 `QueueFull`，重试/降级由业务决定。 |
 
 启动代码：
 
 ```rust
-let executor = nasa::partition::PartitionExecutor::with_partitions_and_capacity(
+use std::time::Duration;
+
+let executor = napart::PartitionExecutor::with_partitions_and_capacity(
     cfg.partition_executor.partitions,
     cfg.partition_executor.queue_capacity,
-);
+)
+.with_stop_timeout(Duration::from_millis(
+    cfg.partition_executor.shutdown_timeout_ms,
+));
 ```
 
 同 key 的任务必须使用稳定 key，例如 `order:{id}`、`account:{id}`。不要把随机值、时间戳或请求 ID 放进 key，否则会破坏串行语义。

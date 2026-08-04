@@ -26,7 +26,7 @@ use syn::{
 
 // ── 入口宏 ──
 
-/// trait 级生成器:读 trait → 生成 client struct + `new(rest)` + `#[async_trait] impl`。
+/// 业务作用: trait 级生成器:读 trait → 生成 client struct + `new(rest)` + `#[async_trait] impl`。
 ///
 /// # 参数
 ///
@@ -44,6 +44,7 @@ pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 正常路径下它们贴在 `#[rest_client]` trait 方法上,由外层宏先读取并删除,不会独立展开。
 macro_rules! mapping_stub {
     ($name:ident) => {
+        /// 业务作用: 在方法映射属性脱离 `#[rest_client]` 使用时生成明确的编译期错误。
         ///
         /// # 参数
         /// - `attr`: 属性宏括号内的 token stream。
@@ -71,10 +72,10 @@ mapping_stub!(DeleteMapping);
 
 // ── 运行时根路径解析(直接依赖 rest-discovery → ::rest_discovery;门面 nasa → ::nasa::discovery::rest) ──
 
-/// 解析 REST 门面的根路径；用于生成宏展开时引用的公共类型。
+/// 业务作用: 解析 REST 门面的根路径；用于生成宏展开时引用的公共类型。
 fn rest_root() -> TokenStream2 {
     use proc_macro_crate::{crate_name, FoundCrate};
-    /// 尝试查找调用方依赖图中的 `rest-discovery` crate。
+    /// 业务作用: 尝试查找调用方依赖图中的 `rest-discovery` crate。
     ///
     /// 支持 Cargo 重命名；查不到时返回 `None`,外层会继续尝试 `nasa` 门面或裸路径兜底。
     fn crate_name_compat() -> Option<FoundCrate> {
@@ -116,7 +117,7 @@ struct TraitArgs {
     client: Option<Ident>,
 }
 
-/// 解析 parse trait args 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用: 解析 trait 级客户端属性，形成服务名、路径前缀、scheme 与生成类型配置。
 ///
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -139,10 +140,10 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
                 let s = meta.value()?.parse::<LitStr>()?;
                 a.client = Some(format_ident!("{}", s.value()));
             }
-            // rest_field 第一版不支持(client 的 RestDiscovery 字段固定为 `rest`):显式拒绝,避免 silent no-op 误导。
+            // client 的 RestDiscovery 字段固定为 `rest`，因此显式拒绝 rest_field，避免 silent no-op 误导。
             "rest_field" => {
                 return Err(
-                    meta.error("第一版不支持 rest_field,client 的 RestDiscovery 字段固定为 `rest`")
+                    meta.error("不支持 rest_field，client 的 RestDiscovery 字段固定为 `rest`")
                 );
             }
             other => return Err(meta.error(format!("rest_client 不支持的参数 `{other}`"))),
@@ -171,7 +172,7 @@ struct MappingArgs {
     headers: Vec<(String, String)>,
 }
 
-/// 是否为客户端方法映射之一,返回对应 HTTP method ident(GET/POST/...)。
+/// 业务作用: 是否为客户端方法映射之一,返回对应 HTTP method ident(GET/POST/...)。
 ///
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -188,7 +189,7 @@ fn http_method_of(attr: &Attribute) -> Option<Ident> {
     Some(format_ident!("{m}"))
 }
 
-/// 解析 parse mapping attr 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用: 解析方法级 mapping 属性，形成路径、服务、媒体类型、解包和固定 header 配置。
 ///
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -247,7 +248,7 @@ fn parse_mapping_attr(attr: &Attribute) -> syn::Result<MappingArgs> {
     }
 }
 
-/// 解析 parse header tuple 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用: 把 mapping 中的固定 header 二元组解析为名称和值，并拒绝非字符串字面量。
 ///
 /// # 参数
 /// - `elem`: 当前正在解析的语法元素。
@@ -265,7 +266,7 @@ fn parse_header_tuple(elem: &Expr) -> syn::Result<(String, String)> {
     ))
 }
 
-/// 读取表达式里的字符串字面量；用于校验注解参数值。
+/// 业务作用: 读取表达式里的字符串字面量；用于校验注解参数值。
 ///
 /// # 参数
 /// - `e`: 错误对象或外部错误值。
@@ -318,7 +319,7 @@ enum ParamBind {
     },
 }
 
-/// 解析单个参数的 helper attr 并从签名删除;返回绑定信息(`None` 表示无显式注解,由调用方按 method 默认决定)。
+/// 业务作用: 解析单个参数的 helper attr 并从签名删除;返回绑定信息(`None` 表示无显式注解,由调用方按 method 默认决定)。
 ///
 /// # 参数
 /// - `pt`: 过程宏解析出的 Rust 类型节点。
@@ -443,7 +444,7 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
     }
 }
 
-/// 取 helper attr 的显式名字串(`#[RequestParam("x")]` → Some("x");`#[RequestParam]` → None)。
+/// 业务作用: 取 helper attr 的显式名字串(`#[RequestParam("x")]` → Some("x");`#[RequestParam]` → None)。
 ///
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -459,7 +460,7 @@ fn explicit_name(attr: &Attribute) -> syn::Result<Option<String>> {
     }
 }
 
-/// 解析 `#[RequestBody]` 形态:裸 `#[RequestBody]` → json body(`false`);`#[RequestBody(raw)]` → 原样字节(`true`)。
+/// 业务作用: 解析 `#[RequestBody]` 形态:裸 `#[RequestBody]` → json body(`false`);`#[RequestBody(raw)]` → 原样字节(`true`)。
 /// 拒绝 `#[RequestBody("x")]`(body 不带名字)、`#[RequestBody(其它标识)]`、`#[RequestBody(raw, ..)]` 等任何其它形态。
 ///
 /// # 参数
@@ -492,7 +493,7 @@ fn parse_request_body_raw(attr: &Attribute) -> syn::Result<bool> {
     }
 }
 
-/// 返回当前对象的 option 状态。
+/// 业务作用: 判断参数类型是否为 `Option<T>`，供可选 query/header/body 生成分支使用。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -505,7 +506,7 @@ fn is_option(ty: &Type) -> bool {
     false
 }
 
-/// 合法 HTTP header name(RFC 7230 token:非空,字符 ∈ ALPHA/DIGIT/`!#$%&'*+-.^_`` `|~`)。
+/// 业务作用: 合法 HTTP header name(RFC 7230 token:非空,字符 ∈ ALPHA/DIGIT/`!#$%&'*+-.^_`` `|~`)。
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -533,7 +534,7 @@ fn is_valid_header_name(name: &str) -> bool {
         })
 }
 
-/// 合法 HTTP header value(visible ASCII + SP + HTAB;挡控制字符/CR/LF,对齐 `HeaderValue::from_str`)。
+/// 业务作用: 合法 HTTP header value(visible ASCII + SP + HTAB;挡控制字符/CR/LF,对齐 `HeaderValue::from_str`)。
 ///
 /// # 参数
 /// - `val`: 要写入 Redis 或发送到下游的值。
@@ -542,12 +543,12 @@ fn is_valid_header_value(val: &str) -> bool {
         .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
-/// query 参数是否「多值」(`Vec<T>` 或 `Option<Vec<T>>`)→ 生成重复 key `name=v1&name=v2`。
+/// 业务作用: query 参数是否「多值」(`Vec<T>` 或 `Option<Vec<T>>`)→ 生成重复 key `name=v1&name=v2`。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
 fn is_multi_query(ty: &Type) -> bool {
-    /// 读取泛型包装类型的参数；用于识别请求体、查询和响应包装。
+    /// 业务作用: 读取泛型包装类型的参数；用于识别请求体、查询和响应包装。
     ///
     /// # 参数
     /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -574,7 +575,7 @@ fn is_multi_query(ty: &Type) -> bool {
     false
 }
 
-/// 从 `-> anyhow::Result<T>` / `Result<T>` 抽取 `T`;非该形状报错。
+/// 业务作用: 从 `-> anyhow::Result<T>` / `Result<T>` 抽取 `T`;非该形状报错。
 ///
 /// # 参数
 /// - `ret`: 接口方法声明的返回类型信息。
@@ -621,7 +622,7 @@ fn extract_result_inner(ret: &ReturnType) -> syn::Result<Type> {
     ))
 }
 
-/// 返回当前对象的 unit 状态。
+/// 业务作用: 判断成功返回类型是否为 `()`，供无响应体请求选择发送路径。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -629,7 +630,7 @@ fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(t) if t.elems.is_empty())
 }
 
-/// 提取模板里的 `{name}` 占位名。
+/// 业务作用: 提取模板里的 `{name}` 占位名。
 ///
 /// # 参数
 /// - `template`: 路径、URL 或缓存 key 模板。
@@ -663,7 +664,7 @@ const FORBIDDEN_HEADERS: &[&str] = &[
 
 // ── 主流程 ──
 
-/// 生成 REST 客户端实现；用于把 trait 方法转换为请求构造代码。
+/// 业务作用: 生成 REST 客户端实现；用于把 trait 方法转换为请求构造代码。
 ///
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -715,7 +716,7 @@ fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<Token
     })
 }
 
-/// 生成单个远程方法实现；用于处理路径、参数、请求体和响应解析。
+/// 业务作用: 生成单个远程方法实现；用于处理路径、参数、请求体和响应解析。
 ///
 /// # 参数
 /// - `m`: trait 中待展开的远程调用方法声明。
@@ -854,7 +855,7 @@ fn gen_method(
     if body_count > 0 && matches!(http_str.as_str(), "GET" | "DELETE") {
         return Err(syn::Error::new(
             m.sig.span(),
-            "GET/DELETE 第一版不支持 #[RequestBody]",
+            "GET/DELETE 不支持 #[RequestBody]",
         ));
     }
     // raw body 与 form 一样仅 POST/PUT/PATCH(GET/DELETE 不带 body)。
@@ -1073,7 +1074,7 @@ fn gen_method(
     Ok(quote! { #(#attrs)* #sig { #body } })
 }
 
-/// 生成请求体构造代码；用于按注解和参数类型选择序列化方式。
+/// 业务作用: 生成请求体构造代码；用于按注解和参数类型选择序列化方式。
 ///
 /// # 参数
 /// - `mapping`: HTTP 映射属性解析结果。

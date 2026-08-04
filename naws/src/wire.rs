@@ -1,7 +1,7 @@
 // ============================================================================
 // src/wire.rs —— wire 帧:[4B len BE][1B type][1B mode][payload]。
 // len = 2 + payload.len(覆盖 type+mode+payload)。架构说明 / 附录 A.0。
-// TCP 与 WS 共享此 codec(WS 在 R0.4 把 binary message 喂进同一解码)。
+// TCP 与 WS 共享此 codec，WS 将 binary message 交给同一解码器处理。
 // ============================================================================
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};

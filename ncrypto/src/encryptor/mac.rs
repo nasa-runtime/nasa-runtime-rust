@@ -14,9 +14,10 @@ use sha2::{Sha256, Sha512};
 /// 生成 `hmac_xxx`(hex 小写)+ `hmac_xxx_base64` 函数。HMAC 接受任意长度 key,`new_from_slice` 不会失败。
 macro_rules! hmac_hex {
     ($name:ident, $d:ty, $doc:literal) => {
+        /// 业务作用: 使用指定摘要算法计算消息认证码，并输出小写 hex 文本。
         ///
         /// # 参数
-        /// - `content`: 待处理的文本内容。
+        /// - `content`: 待认证的文本内容。
         /// - `secret`: 签名、加密或摘要使用的密钥材料。
         #[doc = $doc]
         pub fn $name(content: &str, secret: &str) -> String {
@@ -28,9 +29,10 @@ macro_rules! hmac_hex {
 }
 macro_rules! hmac_b64 {
     ($name:ident, $d:ty, $doc:literal) => {
+        /// 业务作用: 使用指定摘要算法计算消息认证码，并输出标准 Base64 文本。
         ///
         /// # 参数
-        /// - `content`: 待处理的文本内容。
+        /// - `content`: 待认证的文本内容。
         /// - `secret`: 签名、加密或摘要使用的密钥材料。
         #[doc = $doc]
         pub fn $name(content: &str, secret: &str) -> String {
@@ -70,9 +72,10 @@ hmac_b64!(hmac_sha512_base64, Sha512, "HMAC-SHA512(Base64)。");
 /// `expected_hex` 非法 hex / 长度不符 → `false`(hex 合法性非机密,不影响 MAC 比较的常量时间性)。
 macro_rules! hmac_verify {
     ($name:ident, $d:ty, $doc:literal) => {
+        /// 业务作用: 以常量时间比较给定 hex 消息认证码，避免比较过程泄露首个差异位置。
         ///
         /// # 参数
-        /// - `content`: 待处理的文本内容。
+        /// - `content`: 待认证的文本内容。
         /// - `secret`: 签名、加密或摘要使用的密钥材料。
         /// - `expected_hex`: 期望的十六进制 MAC 摘要。
         #[doc = $doc]

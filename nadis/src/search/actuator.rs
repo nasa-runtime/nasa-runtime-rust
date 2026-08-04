@@ -1,5 +1,5 @@
 // ============================================================================
-// src/search/actuator.rs —— SearchActuator:capability / 索引策略 / 读写查询(R5.1)。
+// src/search/actuator.rs —— SearchActuator:capability / 索引策略 / 读写查询。
 // (文档;对照 原实现 RediSearch.Actuator<T> + RsCommandExecutor)
 //
 // 红线:
@@ -9,7 +9,7 @@
 //     IndexPolicy{ValidateOnly|CreateIfMissing|RecreateExplicitly},**禁自动 DROP**:
 //     发现漂移 ValidateOnly 报错带 diff,Recreate 必须显式选择;
 //   · 双通道(对照 原实现):本 actuator = 查询/管理通道;批量写并入 PipelineSession
-//     是 R5.2(单条 save 在此)。
+//     单条 save 由本模块负责。
 // ============================================================================
 
 use std::collections::HashMap;
@@ -193,7 +193,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(())
     }
 
-    /// FT.INFO 实测归一化 → 与 meta 期望全量比较(S7)。
+    /// 将 FT.INFO 实测结果归一化后与 meta 期望全量比较。
     /// 抓四类漂移(任一不符即 fail-fast,**禁自动 DROP**,引导 RecreateExplicitly):
     ///   ① ON HASH/JSON(key_type 不符 → save 写进去也建不进倒排,查询恒空);
     ///   ② PREFIX(literal head 不在实测 prefixes → 文档不被索引拾取);
@@ -383,7 +383,7 @@ impl<T: RedisDocument> SearchActuator<T> {
                 Ok(cmd)
             }
             _ => {
-                // bind 已拒 ARRAY 系,这里只剩 Json;S8:省略 null 字段对齐 原实现 NON_NULL
+                // bind 已拒绝 ARRAY 系；Json 写入时省略 null 字段以对齐既有 NON_NULL 语义。
                 let body = super::to_json_omit_null(doc)?;
                 let mut cmd = redis::cmd("JSON.SET");
                 cmd.arg(key).arg("$").arg(&body);
@@ -563,7 +563,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     /// JSON.NUMINCRBY(**整数** delta;direct executor,对照 原实现 `jsonNumIncrBy(type,id,path,long)`)——
     /// 撮合部分成交/持仓加减热路径,不必为单次自增手工开 pipeline。返回 RedisJSON 回的结果串(如 `[6]`)。
-    /// ⚠ 仅 JSON 模式;整数 delta 保持 JSON 整数 shape(见 pipeline `json_num_incr_by` 的 P1 说明)。
+    /// ⚠ 仅 JSON 模式；整数 delta 保持 JSON 整数 shape，与 pipeline `json_num_incr_by` 一致。
     ///
     /// # 参数
     /// - `id`: JSON 文档业务 ID,仅适用于无占位符 prefix 的 JSON 文档。
@@ -749,7 +749,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .arg(0)
             .arg(0)
             .arg("DIALECT")
-            .arg(2) // N15:对齐 原实现
+            .arg(2) // 使用既有查询语义所需的 RediSearch dialect。
             .query_async(&mut self.client.conn())
             .await?;
         //total 取值兼容 Int/Double/Bulk/Simple——RediSearch 8 RESP3 下 total_results
@@ -768,7 +768,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Err(NasaRedisError::Config("FT.SEARCH 计数响应形态异常".into()))
     }
 
-    /// FT.AGGREGATE(R5.2 最小封装):Query 出过滤表达式 + Aggregate 出聚合管道,
+    /// FT.AGGREGATE(最小封装):Query 出过滤表达式 + Aggregate 出聚合管道,
     /// 返回结果行(列名→值;列 = GROUPBY 字段 + reducer 输出别名)。
     /// RESP2 响应形态:[total, [k1,v1,k2,v2,...], [..], ...]。
     ///
@@ -789,10 +789,10 @@ impl<T: RedisDocument> SearchActuator<T> {
         for a in agg.render_args(self.meta)? {
             cmd.arg(a);
         }
-        cmd.arg("DIALECT").arg(2); // N15:对齐 原实现
+        cmd.arg("DIALECT").arg(2); // 使用既有查询语义所需的 RediSearch dialect。
         let v: redis::Value = cmd.query_async(&mut self.client.conn()).await?;
         // RESP3(协商 HELLO 3):`{total_results, results:[{extra_attributes:{...}},...]}`
-        // ——逐行 extra_attributes → 列表(S1:与 count/find 一致归一化,此前直接报错)。
+        // 逐行提取 extra_attributes，与 count/find 共用一致的 RESP3 归一化语义。
         if let redis::Value::Map(pairs) = &v {
             let mut out = Vec::new();
             if let Some(redis::Value::Array(rows)) = resp3_map_get(pairs, "results") {
@@ -825,7 +825,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(out)
     }
 
-    /// 把单文档 field→value 表转为 T(RESP2/RESP3 共用,S1 修复)。
+    /// 把单文档 field→value 表转为 T，供 RESP2/RESP3 共用。
     ///
     /// # 参数
     /// - `map`: 当前函数读取或更新的键值映射。
@@ -853,7 +853,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     /// 解析 FT.SEARCH 响应。RESP2:`[total, key1, [f1,v1,...], key2, [..], ...]`;
     /// RESP3(协商 HELLO 3):`{total_results, results:[{id,extra_attributes:{...}},...]}`
-    /// ——两形态都归一化(S1:此前 RESP3 直接报错,与已处理 RESP3 的 count 不一致)。
+    /// 两种响应形态都会归一化，避免 RESP3 与 count 路径产生语义分叉。
     ///
     /// # 参数
     /// - `v`: 待转换的值。
@@ -1079,19 +1079,26 @@ pub fn normalize_attributes(info: &redis::Value) -> HashMap<String, String> {
     out
 }
 
-/// 一个字段的 FT.INFO 实测画像(S7:全量漂移用——type + 修饰 flag + WEIGHT/SEPARATOR)。
+/// 一个字段的 FT.INFO 实测画像，用于比较 type、修饰 flag、WEIGHT 与 SEPARATOR 漂移。
 #[derive(Debug, Default, Clone)]
 pub struct AttrInfo {
+    /// RediSearch 字段类型。
     pub ftype: String,
+    /// 是否支持排序。
     pub sortable: bool,
+    /// 是否关闭词干还原。
     pub no_stem: bool,
+    /// 是否仅存储而不建立索引。
     pub no_index: bool,
+    /// 是否使用大小写敏感匹配。
     pub case_sensitive: bool,
+    /// 可选的全文相关性权重。
     pub weight: Option<f64>,
+    /// 可选的多值 Tag 分隔符。
     pub separator: Option<String>,
 }
 
-/// FT.INFO 归一化后的整索引画像(S7:把"字段集合/类型"扩到"建索引全形态")。
+/// FT.INFO 归一化后的整索引画像，覆盖建索引所需的完整形态。
 #[derive(Debug, Default)]
 pub struct IndexProfile {
     /// index_definition.key_type:"HASH" / "JSON"(各版本可能缺,缺=空串→比对放行)。

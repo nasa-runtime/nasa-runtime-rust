@@ -1,20 +1,20 @@
 // ============================================================================
-// src/search/query.rs —— 类型化查询 AST + renderer(R5.1;文档)。
+// src/search/query.rs —— 类型化查询 AST + renderer(文档)。
 //
 // 红线
 //   · 查询构造成【类型化 AST】,由 renderer 生成 FT.SEARCH 查询串——字段名/类型在
 //     render(meta) 时校验(不存在的别名、Tag 字段配 between 等在发命令前报错);
 //   · Tag 值转义 RediSearch 特殊字符(防注入/语法破坏);
-//   · 仅 AND 组合(对照 原实现 Criteria;OR 走 FT.AGGREGATE = R5.2);
+//   · 基础查询仅组合 AND；OR 由 FT.AGGREGATE 表达式承担；
 //   · 只有显式 RawQuery 允许可信调用方传原始表达式(注入防护边界明示)。
 // move 语义:render 取 &self 可重复渲染;Query 本身是普通值(原实现 RsQuery 的
-// "池化一次性"在 Rust 由所有权天然消解, #6)。
+// “池化一次性”在 Rust 中由所有权天然消解。
 // ============================================================================
 
 use super::{DocMeta, FieldType};
 use crate::error::{NasaRedisError, Result};
 
-/// 数值开区间/比较算子(S1:对齐 原实现 NumericField EQ/GT/GTE/LT/LTE)。
+/// 数值开区间与比较算子，对齐既有系统的 NumericField EQ/GT/GTE/LT/LTE 语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumOp {
     /// `> v`:FT `[(v +inf]`、JSONPath `@.f>v`。
@@ -33,51 +33,108 @@ pub enum NumOp {
 #[derive(Debug, Clone)]
 pub enum Cond {
     /// Tag 精确匹配:`@f:{v}`(值自动转义)。
-    TagEq { field: String, value: String },
-    /// Tag 多选一:`@f:{v1|v2}`。
-    TagIn { field: String, values: Vec<String> },
-    /// 数值闭区间:`@f:[min max]`。
-    NumBetween { field: String, min: f64, max: f64 },
-    /// 数值开区间/比较(S1:gt/gte/lt/lte/eq;FT 用 `±inf` sentinel,不再 `between(X, f64::MAX)`)。
-    NumCmp {
+    TagEq {
+        /// 字段别名或字段名。
         field: String,
+        /// 需要精确匹配的 Tag 字面值。
+        value: String,
+    },
+    /// Tag 多选一:`@f:{v1|v2}`。
+    TagIn {
+        /// 字段别名或字段名。
+        field: String,
+        /// 任一命中即可的 Tag 字面值集合。
+        values: Vec<String>,
+    },
+    /// 数值闭区间:`@f:[min max]`。
+    NumBetween {
+        /// 字段别名或字段名。
+        field: String,
+        /// 闭区间下界。
+        min: f64,
+        /// 闭区间上界。
+        max: f64,
+    },
+    /// 数值开区间与比较；FT 使用 `±inf` sentinel，避免用 `between(X, f64::MAX)` 模拟。
+    NumCmp {
+        /// 字段别名或字段名。
+        field: String,
+        /// 数值比较算子。
         op: NumOp,
+        /// 比较基准值。
         value: f64,
     },
     /// 全文匹配:`@f:(text)`。
-    TextMatch { field: String, text: String },
-    /// 全文**前缀**(S2):`@f:(term*)`——匹配以 term 开头的词。
-    TextPrefix { field: String, prefix: String },
-    /// 全文**后缀**(S8,需字段 WITHSUFFIXTRIE):`@f:(*term)`——匹配以 term 结尾的词。
-    TextSuffix { field: String, suffix: String },
-    /// 全文**包含/中缀**(S8,需字段 WITHSUFFIXTRIE):`@f:(*term*)`——匹配含 term 的词。
-    TextContains { field: String, infix: String },
-    /// 全文**模糊**(S2,Levenshtein):`@f:(%term%)` LD1 / `%%term%%` LD2 / `%%%term%%%` LD3。
-    TextFuzzy {
+    TextMatch {
+        /// 字段别名或字段名。
         field: String,
+        /// 需要匹配的全文词项。
+        text: String,
+    },
+    /// 全文**前缀**：`@f:(term*)`，匹配以 term 开头的词。
+    TextPrefix {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项前缀。
+        prefix: String,
+    },
+    /// 全文**后缀**：`@f:(*term)`，字段必须启用 WITHSUFFIXTRIE。
+    TextSuffix {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项后缀。
+        suffix: String,
+    },
+    /// 全文**包含/中缀**：`@f:(*term*)`，字段必须启用 WITHSUFFIXTRIE。
+    TextContains {
+        /// 字段别名或字段名。
+        field: String,
+        /// 词项中必须包含的片段。
+        infix: String,
+    },
+    /// 全文**模糊**：使用 Levenshtein 距离语法 `%term%`、`%%term%%` 或 `%%%term%%%`。
+    TextFuzzy {
+        /// 字段别名或字段名。
+        field: String,
+        /// 需要模糊匹配的词项。
         term: String,
+        /// 允许的 Levenshtein 距离。
         distance: u8,
     },
-    /// 全文**短语**(S2,顺序精确):`@f:("a b c")`。
-    TextPhrase { field: String, phrase: String },
-    /// **地理半径圆内**(S5):`@f:[lon lat radius unit]`。
-    GeoWithin {
+    /// 全文**短语**：`@f:("a b c")`，按词序精确匹配。
+    TextPhrase {
+        /// 字段别名或字段名。
         field: String,
+        /// 按词序匹配的完整短语。
+        phrase: String,
+    },
+    /// **地理半径圆内**：`@f:[lon lat radius unit]`。
+    GeoWithin {
+        /// 字段别名或字段名。
+        field: String,
+        /// 圆心经度。
         lon: f64,
+        /// 圆心纬度。
         lat: f64,
+        /// 搜索半径。
         radius: f64,
+        /// 搜索半径单位。
         unit: GeoUnit,
     },
     /// 原始表达式(★仅可信调用方:绕过校验与转义,注入风险自负)。
     Raw(String),
 }
 
-/// 地理半径单位(S5)。
+/// 地理半径单位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoUnit {
+    /// 米。
     M,
+    /// 千米。
     Km,
+    /// 英里。
     Mi,
+    /// 英尺。
     Ft,
 }
 
@@ -160,7 +217,7 @@ impl Query {
         self
     }
 
-    /// 数值比较(S1 开区间):`gt/gte/lt/lte/eq`——FT 用 `±inf` sentinel,
+    /// 数值开区间比较：`gt/gte/lt/lte/eq`；FT 使用 `±inf` sentinel，
     /// 不再用 `between(X, f64::MAX)` 与 原实现 `[(X +inf]` 跨语言分叉。
     ///
     /// # 参数
@@ -234,7 +291,7 @@ impl Query {
         self
     }
 
-    /// 全文前缀匹配(S2):`@f:(prefix*)`。
+    /// 全文前缀匹配：`@f:(prefix*)`。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -247,7 +304,7 @@ impl Query {
         self
     }
 
-    /// 全文后缀匹配(S8,需字段建索引时 WITHSUFFIXTRIE):`@f:(*suffix)`。
+    /// 全文后缀匹配：`@f:(*suffix)`，字段建索引时必须启用 WITHSUFFIXTRIE。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
@@ -260,7 +317,7 @@ impl Query {
         self
     }
 
-    /// 全文包含/中缀匹配(S8,需字段建索引时 WITHSUFFIXTRIE):`@f:(*infix*)`。
+    /// 全文包含或中缀匹配：`@f:(*infix*)`，字段建索引时必须启用 WITHSUFFIXTRIE。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
@@ -273,7 +330,7 @@ impl Query {
         self
     }
 
-    /// 全文模糊匹配(S2,Levenshtein 距离 1..=3,越界 clamp)。
+    /// 全文模糊匹配，Levenshtein 距离限制为 1..=3，越界时收敛到有效范围。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -288,7 +345,7 @@ impl Query {
         self
     }
 
-    /// 全文短语匹配(S2,词序精确):`@f:("a b c")`。
+    /// 全文短语匹配：`@f:("a b c")`，词序必须精确。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -301,7 +358,7 @@ impl Query {
         self
     }
 
-    /// 地理半径圆内(S5):查 `field`(GEO)在 (lon,lat) 半径 `radius unit` 内的文档。
+    /// 查询 GEO 字段在指定圆心和半径内的文档。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 GEO 字段别名或字段名。
@@ -336,7 +393,7 @@ impl Query {
         self
     }
 
-    /// 单字段降序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE,R5.2)。
+    /// 单字段降序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
     ///
     /// # 参数
     /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
@@ -345,7 +402,7 @@ impl Query {
         self
     }
 
-    /// 单字段升序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE,R5.2)。
+    /// 单字段升序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
     ///
     /// # 参数
     /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
@@ -423,7 +480,7 @@ impl Query {
                         )));
                     }
                     // 注:FT NUMERIC 解析 "1"/"1.0"/"1.0E10" 等价,**查询渲染格式不影响匹配**(Redis 按
-                    // 解析后的数值比较),故此处保留 Rust 格式;M1 跨语言对齐只需在**存储**(to_fields)做。
+                    // 解析后的数值比较），故此处保留 Rust 格式；跨语言格式对齐只需在**存储**路径完成。
                     format!("@{}:[{} {}]", f.alias_or_name(), min, max)
                 }
                 Cond::NumCmp { field, op, value } => {
@@ -591,7 +648,7 @@ fn require_field<'a>(meta: &'a DocMeta, alias: &str, ctx: &str) -> Result<&'a su
     })
 }
 
-/// S8:后缀/中缀查询要求字段是 Text/Tag **且** 建索引时开了 WITHSUFFIXTRIE——
+/// 后缀与中缀查询要求字段是 Text/Tag **且** 建索引时启用 WITHSUFFIXTRIE；
 /// 否则引擎扫不出结果(静默空),提前 fail-fast 引导改 schema。
 ///
 /// # 参数
@@ -636,7 +693,7 @@ fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
 }
 
 impl Query {
-    /// 渲染为 RedisJSON JSONPath filter(R5.2,ARRAY 模式查询通道;
+    /// 渲染为 RedisJSON JSONPath filter(ARRAY 模式查询通道;
     /// 对照 原实现 RsQuery.toJsonPathFilter + Criteria.appendJsonPath)。
     ///
     /// # 参数
@@ -647,7 +704,7 @@ impl Query {
     ///   · 不支持显式分页(limit_explicit;默认 limit 视为未分页);
     ///   · TextMatch/Raw 无法翻译成 JSONPath(TEXT 是 FT 引擎语义;Raw 是 FT 语法)→ 拒绝;
     ///   · 无条件 = `$[*]`(全量);
-    ///   · TagEq → `@.f=='v'`(单引号字面量,P1);TagIn → `(@.f=='v1' || @.f=='v2')`;NumBetween →
+    ///   · TagEq → `@.f=='v'`(单引号字面量);TagIn → `(@.f=='v1' || @.f=='v2')`;NumBetween →
     ///     `(@.f>=min && @.f<=max)`;多条件空格语义换 ` && `(JSONPath AND)。
     /// 字段引用用 alias(`@.alias`)——与 FT.SEARCH/JSON 文档字段名保持一致。
     pub fn render_json_path_filter(&self, meta: &DocMeta) -> Result<String> {
@@ -688,7 +745,7 @@ impl Query {
                     let f = require_field(meta, field, "NumBetween")?;
                     require_type(f, matches!(f.ftype, FieldType::Numeric { .. }), "Numeric")?;
                     if !min.is_finite() || !max.is_finite() {
-                        // NaN/Infinity 不是合法 JSON 数字,RedisJSON parser 直接报错(对照 原实现 #6)
+                        // NaN/Infinity 不是合法 JSON 数字，RedisJSON parser 会直接报错。
                         return Err(NasaRedisError::Config(
                             "JSONPath 数值必须有限(NaN/Infinity 非法)".into(),
                         ));
@@ -741,7 +798,7 @@ impl Query {
     }
 }
 
-// ───────────────────────── FT.AGGREGATE(R5.2 最小封装)─────────────────────────
+// ───────────────────────── FT.AGGREGATE(最小封装)─────────────────────────
 
 /// 聚合 reducer(对照 原实现 query/Reducer)。
 #[derive(Debug, Clone)]
@@ -768,16 +825,16 @@ pub enum Reducer {
     FirstValue(String),
 }
 
-/// FT.AGGREGATE 构建器(GROUPBY/REDUCE/SORTBY/LIMIT 最小能力面;
-/// 表达式级 APPLY/FILTER 留待后续)。与 Query 组合:Query 出过滤表达式,
+/// FT.AGGREGATE 构建器，覆盖 LOAD/GROUPBY/REDUCE/APPLY/FILTER/SORTBY/LIMIT。
+/// 与 Query 组合时，Query 负责过滤表达式，
 /// Aggregate 出聚合管道——`actuator.aggregate(&q, &agg)`。
 #[derive(Debug, Clone, Default)]
 pub struct Aggregate {
-    load: Vec<String>, // S6:LOAD 字段(从文档加载到管道)
+    load: Vec<String>, // LOAD 字段（从文档加载到管道）
     group_by: Vec<String>,
     reducers: Vec<(Reducer, String)>, // (reducer, 输出别名)
-    applies: Vec<(String, String)>,   // S6:APPLY (表达式, 输出别名)
-    filters: Vec<String>,             // S6:FILTER 表达式
+    applies: Vec<(String, String)>,   // APPLY 表达式和输出别名
+    filters: Vec<String>,             // FILTER 表达式
     sort_by: Vec<(String, bool)>,     // 多字段 SORTBY:[(别名, desc)] —— 可指向 reducer/APPLY 输出
     limit: Option<(usize, usize)>,
 }
@@ -788,7 +845,7 @@ impl Aggregate {
         Self::default()
     }
 
-    /// LOAD 字段(S6):从文档加载字段进聚合管道(REDUCE 不引用、但 APPLY/FILTER/SORTBY 要用的原始字段)。
+    /// 从文档加载字段进入聚合管道，供 APPLY/FILTER/SORTBY 使用。
     ///
     /// # 参数
     /// - `fields`: 需要加载到聚合管道的 `DocMeta` 字段别名列表。
@@ -797,7 +854,7 @@ impl Aggregate {
         self
     }
 
-    /// APPLY(S6):计算表达式并命名为输出列(如 `apply("@sum / @n", "avg")`)。**表达式由可信调用方
+    /// 计算 APPLY 表达式并命名为输出列（例如 `apply("@sum / @n", "avg")`）。**表达式由可信调用方
     /// 提供**(RediSearch 表达式语法,绕过转义;同 Raw 的信任边界)。
     ///
     /// # 参数
@@ -808,7 +865,7 @@ impl Aggregate {
         self
     }
 
-    /// FILTER(S6):按表达式过滤聚合行(如 `filter("@count > 10")`)。**表达式由可信调用方提供**。
+    /// 按 FILTER 表达式过滤聚合行（例如 `filter("@count > 10")`）。**表达式由可信调用方提供**。
     ///
     /// # 参数
     /// - `expr`: RediSearch 聚合过滤表达式,直接拼入 FT.AGGREGATE 参数。
@@ -872,7 +929,7 @@ impl Aggregate {
     /// - `meta`: 当前文档类型的元数据,用于校验 LOAD/GROUPBY/REDUCE 引用的字段。
     pub fn render_args(&self, meta: &DocMeta) -> Result<Vec<String>> {
         let mut args = Vec::new();
-        // S6:LOAD 最先(把文档字段加载进管道)。`LOAD n f1 f2 ...`(字段经 meta 校验,渲染 `@alias`)。
+        // LOAD 必须最先把文档字段载入管道；字段经 meta 校验后渲染为 `@alias`。
         if !self.load.is_empty() {
             args.push("LOAD".into());
             args.push(self.load.len().to_string());
@@ -933,7 +990,7 @@ impl Aggregate {
                 args.push(alias.clone());
             }
         }
-        // S6:APPLY(GROUPBY/REDUCE 后:可对 reducer 输出再计算)→ FILTER(对结果行过滤)。
+        // APPLY 位于 GROUPBY/REDUCE 后，可继续计算 reducer 输出；随后用 FILTER 过滤结果行。
         // 表达式由可信调用方提供(RediSearch 表达式语法),原样下发。
         for (expr, alias) in &self.applies {
             //空表达式/别名会拼成 Redis 语法错(对照 原实现 isBlank 抛错)——提前 fail-fast。

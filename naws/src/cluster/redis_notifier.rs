@@ -8,7 +8,7 @@
 // 接收走【独立任务】XREAD BLOCK 循环,解出 "d" 字段交给 on_message。
 //
 // 投递语义:**at-most-once**——XADD 失败 / 发布队列满 / 连接重连窗口内的消息可能丢失;
-// 上层(presence 周期对账、行情"最新覆盖")据此设计。需 at-least-once 见任务 #21。
+// 上层（presence 周期对账、行情“最新覆盖”）必须按该语义设计；需要 at-least-once 时应选择持久化通道。
 // ============================================================================
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

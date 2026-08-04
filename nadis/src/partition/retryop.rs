@@ -1,6 +1,6 @@
 // ============================================================================
-// src/partition/retryop.rs —— ExactTargetRetry 的 retry-op marker 协议(R4.2b)。
-// (架构文档: 引入、 升级为 CAS 五规则)
+// src/partition/retryop.rs —— ExactTargetRetry 的 retry-op marker 协议。
+// 业务约束由持久化意图和 CAS 五规则共同保证。
 //
 // 解决的问题
 //   · `XCLAIM RETRYCOUNT n` 是【直接置值】可把 delivery count 调低——"盲目重放"会回退
@@ -107,7 +107,7 @@ pub enum RetryOutcome {
 ///  → 按 RESOLVED 处理:tombstone 语义。**注**:RESOLVED 当前**不 XACK**
 ///  ——该 ID 直接被本宗放弃(从 records 缺席),PEL 中的 tombstone 引用保留(无 payload,
 ///  无害);若来自 XAUTOCLAIM 的 deleted 段,Redis 已自动移出 PEL,无残留。fenced
-///  tombstone ACK 清理 PEL 列 R4.2e EntryDeleted 墓碑终态。)
+/// tombstone ACK 清理 PEL 时按 EntryDeleted 墓碑终态处理。
 /// owner/fence 凭据:retry-op CAS 改 PEL 前必须证明本节点持锁 + 任期最新
 /// ——此前只比 PEL consumer 名,失锁后旧 owner 仍能 XCLAIM RETRYCOUNT 跨 owner 改 PEL(实测)。
 /// `fence_key` 空 = 原实现V1(holder-only)。
@@ -121,7 +121,7 @@ pub struct FenceArgs<'a> {
 }
 
 const RETRY_CAS_LUA: &str = r#"
--- N2 owner/fence 前缀:KEYS[2]=lock KEYS[3]=fence;ARGV[5]=holder ARGV[6]=has_fence
+-- owner/fence 前缀：KEYS[2]=lock KEYS[3]=fence；ARGV[5]=holder ARGV[6]=has_fence
 --   ARGV[7]=round ARGV[8]=nonce ARGV[9]=p ARGV[10]=counter。任一不符 → 'OWNER'(交新 owner)。
 if redis.call('hexists', KEYS[2], ARGV[5]) == 0 then return {'OWNER'} end
 if ARGV[6] == '1' then
@@ -179,8 +179,8 @@ return {'CLAIMED', pl}
 /// 确保 Pending 意图已持久化(**按 op_id 键控**):marker 不存在 → 按当前 PEL 算
 /// desired 写新 Pending + TTL;已 Pending(同 op_id = 同 operation,op_id 由 ids 派生)→
 /// 读回沿用已落盘 desired(重放幂等,不重算)。
-/// op_id 键控后**不再有"per-partition 单 marker 被不同 operation 覆盖/串"的问题**(
-////),R6 的"合并"逻辑随之取消;仅保留 op_id 碰撞防御(marker ids 与请求不一致 →
+/// op_id 键控后**不再有“per-partition 单 marker 被不同 operation 覆盖或串扰”的问题**，
+/// 因此只保留 op_id 碰撞防御(marker ids 与请求不一致 →
 /// fail-closed)。
 ///
 /// # 参数

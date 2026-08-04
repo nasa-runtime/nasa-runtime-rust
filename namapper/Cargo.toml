@@ -20,7 +20,7 @@ grouped-cache = ["dep:cacheable"]
 redis-cache = ["dep:redis"]
 
 [dependencies]
-namapper-macro = { package = "namapper-macro", version = "1.0.0", path = "../namapper-macro" }
+namapper-macro = { package = "namapper-macro", version = "1.0.0" }
 natx = { package = "natx", version = "1.0.0", path = "../natx" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"

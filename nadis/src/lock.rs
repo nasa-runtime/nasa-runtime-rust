@@ -4,7 +4,7 @@
 // V1 互锁保证:4 个 Lua **逐字节照搬** 原实现(hash 结构 + holder field + 重入计数),
 // 原实现/Rust 节点可竞争同一把锁;解锁通知通道 = `{完整锁 key}:pub`(原实现 :444 同款)。
 //
-// 与 原实现 的显式差异(文档 #5,均为审定语义):
+// 与既有实现的显式差异如下，均为稳定语义：
 //   · 本地重入:首次 acquire 仅一次服务端 LOCK(服务端计数恒 1);`guard.reenter()` 只加
 //     本地 permit;最后一个 permit 显式 unlock 才发服务端 UNLOCK;提前 unlock 返回
 //     Err(StillReentered)。互斥语义与 原实现 一致,崩溃残留同靠 lease 过期回收。
@@ -317,7 +317,7 @@ impl DistributedLock {
                             // coordinator 误下健康分区致 rebalance 抖动;② break 后永不恢复续租,把可恢复抖动
                             // 变成不可逆丢锁(被暂停的 RENEW 在 pause 结束后仍会迟到执行、续上锁,实测锁仍在)。
                             // 真分区下本节点也连不上 Redis、无法造成双写危害(且 RustV2 fencing 兜底陈旧写),
-                            // 分区愈合后 RENEW 自然返 1(锁还在)或 0(被抢)→ 届时再据 0 判 lost。
+                            // 分区愈合后 RENEW 会返回 1（锁仍在）或 0（已被抢占），返回 0 时再判定 lost。
                             Ok(Err(e)) => tracing::warn!(key = %wd.lock_key, err = %e, "看门狗续期异常(Unknown),继续重试"),
                             Err(_) => tracing::warn!(key = %wd.lock_key, "看门狗续期超时(Unknown),继续重试"),
                         }
@@ -352,7 +352,7 @@ impl DistributedLock {
                 //不再 `timeout_at(d, lock_inner)` 直接在 deadline
                 // 处 drop 在途 LOCK——那会把"服务端已加锁但本地 future 被取消"留成幽灵锁(无 guard
                 // 可释放,只能等 lease 过期)。改为 **spawn** 获取任务(可取消安全)+ 内层自感知 deadline。
-                // **返回时机(P2 修正)**:
+                // **返回时机(修正)**:
                 //   · 争用未果(常态):内层 lock_inner 在 napping/重试间到点自返 LockTimeout → 在 **~t** 返回;
                 //   · 某次 redis await 真挂死(连接抖动):内层卡在 await 无法自返 → 外层 timeout_at 命中后给
                 //     一小段 grace 让**那一次在途 LOCK** 收敛:若拿到 guard 则持有它干净 `unlock()`(绝无幽灵)
@@ -360,7 +360,7 @@ impl DistributedLock {
                 // 即上界为 **deadline + grace**(grace 仅覆盖挂死那一次 LOCK 的 1-RTT 收敛,非每次都吃满)。
                 let this = self.clone();
                 let lk = lock_key.clone();
-                // P2:把 deadline 传入内层——争用场景内层到点自返 LockTimeout(在 ~t),外层 timeout_at+grace
+                // 把 deadline 传入内层——争用场景内层到点自返 LockTimeout(在 ~t),外层 timeout_at+grace
                 // 此后只在"某次 redis await 真挂死"时兜底(grace 让在途 LOCK 1-RTT 收敛,防幽灵)。
                 let mut task = tokio::spawn(async move { this.lock_inner(&lk, Some(d)).await });
                 match tokio::time::timeout_at(d, &mut task).await {
@@ -422,7 +422,7 @@ impl DistributedLock {
         deadline: Option<tokio::time::Instant>,
     ) -> Result<LockGuard> {
         loop {
-            // P2:争用未果时内层到点自返——只在 try_lock **之间**检查(不打断在途 LOCK,无幽灵)。
+            // 争用未果时内层到点自返——只在 try_lock **之间**检查(不打断在途 LOCK,无幽灵)。
             if deadline.is_some_and(|dl| tokio::time::Instant::now() >= dl) {
                 return Err(NasaRedisError::LockTimeout(lock_key.to_string()));
             }
@@ -466,7 +466,7 @@ impl DistributedLock {
                 ms if ms >= 0 => (ms as u64).clamp(20, self.lease_ms),
                 _ => 20,
             });
-            // P2:把 nap 夹到剩余预算——否则可能在一个长 nap 里"睡过" deadline,导致 lock(k,Some(t)) 远超 t。
+            // 把 nap 夹到剩余预算——否则可能在一个长 nap 里"睡过" deadline,导致 lock(k,Some(t)) 远超 t。
             // 夹紧后到点醒来 → 下轮 loop 顶部即返 LockTimeout(争用场景在 ~t 返回)。
             let nap = match deadline {
                 Some(dl) => nap.min(dl.saturating_duration_since(tokio::time::Instant::now())),
@@ -504,7 +504,7 @@ impl DistributedLock {
     }
 
     /// 三态持有检测(HOLDS_LUA + 异常→Unknown;对照 原实现 holdsStatus)。
-    /// M3 根治:`full_key` 现幂等(见上),即使误传已含前缀的 `guard.lock_key()` 也不再双前缀恒判
+    /// `full_key` 保持幂等；即使误传已含前缀的 `guard.lock_key()`，也不会因双前缀而恒判
     /// Lost;持有自己锁的便捷查询仍推荐 `guard.still_held()`(零前缀风险)。
     ///
     /// # 参数

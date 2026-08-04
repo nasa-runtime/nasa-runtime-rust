@@ -4,7 +4,7 @@ use super::hex_lower;
 use crate::{CryptoError, Result};
 use sha2::Sha256;
 
-/// PBKDF2-HMAC-SHA256 派生密钥(**小写** hex)。
+/// 业务作用: PBKDF2-HMAC-SHA256 派生密钥(**小写** hex)。
 /// `iterations` 推荐 >= 100000;`key_bits` 如 128/256。salt 取其 UTF-8 字节(对照 原实现)。
 ///
 /// **`iterations==0` / `key_bits==0` fail-fast**(对照 原实现 `PBEKeySpec` 抛
@@ -34,7 +34,7 @@ pub fn pbkdf2(password: &str, salt: &str, iterations: u32, key_bits: u32) -> Res
     Ok(hex_lower(&out))
 }
 
-/// PBKDF2 默认(100000 次迭代,256 位密钥)。
+/// 业务作用: PBKDF2 默认(100000 次迭代,256 位密钥)。
 ///
 /// # 参数
 /// - `password`: 派生密钥使用的口令文本。

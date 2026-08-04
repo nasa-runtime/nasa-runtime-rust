@@ -24,10 +24,10 @@ application = ["dep:application_impl", "dep:application_macro"]
 
 hystrix = ["dep:hystrix_impl", "dep:hystrix_macro"]
 # 接口级隔离监控(nafana):bulkhead、超时、降级与 Prometheus/Grafana 观测。
-# 出口 = Prometheus /metrics + Grafana 面板(合同 nafana/nafana.md)。
+# 出口 = Prometheus `/metrics` + Grafana 面板。
 grafana = ["dep:grafana_impl", "dep:grafana_macro"]
 cache = ["dep:cache_impl", "dep:nacache_macro", "application_impl?/cache"]
-# 弱依赖桥:同时启用 application 时,把 napp 的 db 组件编入(§16),使 #[application("db", ...)] 生效。
+# 弱依赖桥：同时启用 application 时把 napp 的 db 组件编入，使 #[application("db", ...)] 生效。
 tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
 # Inbox 去重标记与业务副作用共享 tx ambient MySQL 事务。
 inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl"]
@@ -51,10 +51,10 @@ object-store-experimental = ["dep:object_impl"]
 grpc-experimental = ["dep:grpc_impl"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。
 oauth = ["dep:oauth_impl"]
-# 弱依赖桥:同时启用 application 时,把 napp 的 scheduling 组件编入(§16)。
+# 弱依赖桥：同时启用 application 时把 napp 的 scheduling 组件编入。
 scheduling = ["dep:scheduling_impl", "dep:async_macro", "application_impl?/scheduling"]
 # 集群定时:打开 scheduling 的 nadis adapter(NadisLeaderGate / start_scheduled_clustered*)并拉起 redis,
-# 业务可从 nasa::redis 构造 Leader。注:cluster="leader" + 自定义 LeaderGate 只开 scheduling 即可(d.md §4.4)。
+# 业务可从 nasa::redis 构造 Leader；cluster="leader" 配合自定义 LeaderGate 时只需开启 scheduling。
 scheduling-cluster = ["scheduling", "scheduling_impl/cluster", "redis", "application_impl?/scheduling-cluster"]
 web = ["dep:web_impl", "dep:web_macro", "application_impl?/web"]
 # Web 身份运行时；普通 Web 用户不会因此引入异步身份组件。
@@ -73,9 +73,9 @@ mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/ma
 # 同 key 串行消费执行器(对照 原实现 TimingWheel.partition)。无重依赖, 仅 tokio 运行时原语。
 partition = ["dep:partition_impl"]
 
-# 弱依赖桥:同时启用 application 时,把 napp 的 ws 组件编入(§16)。
+# 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
 ws = ["dep:ws_impl", "application_impl?/ws"]
-# WebSocket 子能力向下透传(维护约束 §五.2)。
+# WebSocket 子能力向下透传到实现 crate。
 ws-redis = ["ws", "ws_impl/redis"]
 ws-socketio = ["ws", "ws_impl/socketio"]
 # 长连接消息队列数据面；同时启用两端实现并暴露 nasa::ws::kafka。
@@ -88,11 +88,11 @@ kafka-tls = ["kafka", "kafka_impl/tls"]
 kafka-gssapi = ["kafka", "kafka_impl/gssapi"]
 kafka-zstd = ["kafka", "kafka_impl/zstd"]
 
-# 弱依赖桥:同时启用 application 时,把 napp 的 redis 组件编入(§16)。
+# 弱依赖桥：同时启用 application 时，把 napp 的 redis 组件编入。
 redis = ["dep:redis_impl", "application_impl?/redis"]
-# rate-limit：跨副本分布式业务配额(§7.2 / PR-7）——RateLimitProvider + nadis Redis 后端,经 nasa::application 暴露。
+# rate-limit：跨副本分布式业务配额，由 RateLimitProvider 与 nadis Redis 后端实现并经 nasa::application 暴露。
 rate-limit = ["redis", "application_impl?/rate-limit"]
-# telemetry：OpenTelemetry traces 组件(§9)。启用后可声明 #[application("telemetry")];
+# telemetry：OpenTelemetry traces 组件。启用后可声明 #[application("telemetry")]；
 # 传播由 Web trace 中间件自动完成,v1 无业务直调 API(配置驱动 + 日志 sink)。
 telemetry = ["application_impl?/telemetry"]
 # Redis 子能力向下透传(同 ws-* 纪律):search = RediSearch/RedisJSON 封装;
@@ -100,12 +100,12 @@ telemetry = ["application_impl?/telemetry"]
 redis-search = ["redis", "redis_impl/search"]
 redis-derive = ["redis-search", "redis_impl/derive"]
 
-# 密码学工具(对照 原实现 原工具包 crypto;crate = ncrypto,L1 已实现;L2 Web 透明加解密待 §10 待决项)。
+# 密码学工具由 ncrypto 提供；Web 端点透明加解密由 naweb 安全运行时负责。
 crypto = ["dep:crypto_impl"]
 # 纯工具层的受控迁移开关；不进入 `full`。
 crypto-legacy-rsa = ["crypto", "crypto_impl/legacy-rsa-private"]
 
-# 定点精确算术(对照 原实现 原工具包 Numeric;crate = nanum,方案 P:原实现 对齐 + i128 安全扩展 + BigDecimal 段)。
+# 定点精确算术由 nanum 提供，对齐既有数值语义并使用 i128 扩展安全范围。
 numeric = ["dep:numeric_impl"]
 
 # 日期时间工具(对照 原实现 原工具包 DateUtils;crate = nadate,基于 chrono,i64 epoch ms + GMT+8 默认)。
@@ -113,20 +113,20 @@ date = ["dep:date_impl"]
 
 # 日志(对照 原实现 原工具包 logback-原框架.xml;crate = nalog,tracing + 原实现 风格 formatter +
 # 按天/按大小滚动 + maxHistory/totalSizeCap 保留 + 独立 error.log + 级别热切)。
-# 弱依赖桥:同时启用 application 时,把 napp 的 log 组件编入(§16),使 #[application("log", ...)] 生效。
+# 弱依赖桥：同时启用 application 时把 napp 的 log 组件编入，使 #[application("log", ...)] 生效。
 log = ["dep:log_impl", "application_impl?/log"]
 
 # 通用响应壳 BaseResponse(对照 原实现 原工具包 com.nasa.common.base.BaseResponse;crate = nabase)。
 # base 只暴露轻量公共 API 和纯工具;date/numeric/crypto/image 继续走 nasa 顶层 feature。
 base = ["dep:base_impl"]
 
-# 通用分层 YAML 配置加载器(对照 yml.md「yml 配置加载下沉方案」;crate = naml)。
+# 通用分层 YAML 配置加载器由 naml 提供。
 # 本地主配置 + profile + overlay(含 Nacos 多配置)+ env + ${} 占位符 → 强类型 T;不认识业务 AppConfig。
 # 「按 import 调 Nacos 拉取拼 overlay」的胶水在门面层(yml 本身零 Nacos 依赖)。
 yml = ["dep:yml_impl"]
 
 # 配置引导胶水(yml × nacos;crate = config-boot):按 import 拉远端配置、拼有序 overlay(nasa::yml::nacos)。
-# 同时拉起 yml + nacos(纯类型/方法,SDK 由 nacos-sdk 另开);对应 yml.md Q1=B 的门面层胶水。
+# 同时拉起 yml 与 nacos 的纯类型/方法；SDK 由 nacos-sdk 单独开启。
 # application 配置中心组件的业务侧精确名称；保留 config-boot 作为底层装配能力名称。
 nacos-config = ["config-boot"]
 # 弱依赖桥：同时启用 application 时编入配置中心组件，使 #[application("nacos-config", ...)] 生效。
@@ -212,51 +212,51 @@ full = [
 [dependencies]
 # 依赖 key 用 *_impl,避免与门面公共模块同名(维护约束 §四)。
 application_impl = { package = "napp", version = "1.0.0", path = "../napp", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.0", path = "../napp-macro", optional = true }
+application_macro = { package = "napp-macro", version = "1.0.0", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", path = "../hystrix", optional = true }
-hystrix_macro = { package = "hystrix-macro", version = "1.0.0", path = "../hystrix-macro", optional = true }
+hystrix_macro = { package = "hystrix-macro", version = "1.0.1", path = "../hystrix-macro", optional = true }
 grafana_impl = { package = "nafana", version = "1.0.0", path = "../nafana", optional = true }
-grafana_macro = { package = "nafana-macro", version = "1.0.0", path = "../nafana-macro", optional = true }
+grafana_macro = { package = "nafana-macro", version = "1.0.1", path = "../nafana-macro", optional = true }
 cache_impl = { package = "cacheable", version = "1.0.0", path = "../cacheable", optional = true }
-nacache_macro = { package = "nacache-macro", version = "1.0.0", path = "../nacache-macro", optional = true }
+nacache_macro = { package = "nacache-macro", version = "1.0.0", optional = true }
 tx_impl = { package = "natx", version = "1.0.0", path = "../natx", optional = true }
-natx_macro = { package = "natx-macro", version = "1.0.0", path = "../natx-macro", optional = true }
-inbox_core_impl = { package = "nainbox-core", version = "1.0.0", path = "../nainbox-core", optional = true }
+natx_macro = { package = "natx-macro", version = "1.0.0", optional = true }
+inbox_core_impl = { package = "nainbox-core", version = "1.0.0", optional = true }
 inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.0", path = "../nainbox-mysql", optional = true }
-outbox_core_impl = { package = "naoutbox-core", version = "1.0.0", path = "../naoutbox-core", optional = true }
+outbox_core_impl = { package = "naoutbox-core", version = "1.0.0", optional = true }
 outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.0", path = "../naoutbox-mysql", optional = true }
-idempotency_impl = { package = "naidempotency", version = "1.0.0", path = "../naidempotency", optional = true }
+idempotency_impl = { package = "naidempotency", version = "1.0.0", optional = true }
 idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.0", path = "../naidempotency-mysql", optional = true }
 idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.0", path = "../naidempotency-redis", optional = true }
-openapi_impl = { package = "naopenapi", version = "1.0.0", path = "../naopenapi", optional = true }
-audit_impl = { package = "naaudit", version = "1.0.0", path = "../naaudit", optional = true }
+openapi_impl = { package = "naopenapi", version = "1.0.0", optional = true }
+audit_impl = { package = "naaudit", version = "1.0.0", optional = true }
 audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.0", path = "../naaudit-mysql", optional = true }
-secret_impl = { package = "nasecret", version = "1.0.0", path = "../nasecret", optional = true }
-secret_http_impl = { package = "nasecret-http", version = "1.0.0", path = "../nasecret-http", optional = true }
-secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", path = "../nasecret-vault", optional = true }
-object_impl = { package = "naobject", version = "1.0.0", path = "../naobject", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.0.0", path = "../nagrpc", optional = true }
-oauth_impl = { package = "nauth-oauth", version = "1.0.0", path = "../nauth-oauth", optional = true }
+secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
+secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
+secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
+object_impl = { package = "naobject", version = "1.0.0", optional = true }
+grpc_impl = { package = "nagrpc", version = "1.0.0", optional = true }
+oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.0", path = "../nasched", optional = true }
-async_macro = { package = "async-macro", version = "1.0.0", path = "../async-macro", optional = true }
+async_macro = { package = "async-macro", version = "1.0.0", optional = true }
 web_impl = { package = "naweb", version = "1.0.0", path = "../naweb", optional = true }
-web_macro = { package = "naweb-macro", version = "1.0.0", path = "../naweb-macro", optional = true }
+web_macro = { package = "naweb-macro", version = "1.0.0", optional = true }
 mapper_impl = { package = "namapper", version = "1.0.0", path = "../namapper", optional = true }
-namapper_macro = { package = "namapper-macro", version = "1.0.0", path = "../namapper-macro", optional = true }
-partition_impl = { package = "napart", version = "1.0.0", path = "../napart", optional = true }
+namapper_macro = { package = "namapper-macro", version = "1.0.0", optional = true }
+partition_impl = { package = "napart", version = "1.0.0", optional = true }
 ws_impl = { package = "naws", version = "1.0.0", path = "../naws", optional = true, default-features = false }
 kafka_impl = { package = "nafka", version = "1.0.0", path = "../nafka", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true, default-features = false }
-crypto_impl = { package = "ncrypto", version = "1.0.0", path = "../ncrypto", optional = true }
-numeric_impl = { package = "nanum", version = "1.0.0", path = "../nanum", optional = true }
-date_impl = { package = "nadate", version = "1.0.0", path = "../nadate", optional = true }
-log_impl = { package = "nalog", version = "1.0.0", path = "../nalog", optional = true }
-base_impl = { package = "nabase", version = "1.0.0", path = "../nabase", optional = true }
-yml_impl = { package = "naml", version = "1.0.0", path = "../naml", optional = true }
+crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
+numeric_impl = { package = "nanum", version = "1.0.0", optional = true }
+date_impl = { package = "nadate", version = "1.0.0", optional = true }
+log_impl = { package = "nalog", version = "1.0.0", optional = true }
+base_impl = { package = "nabase", version = "1.0.0", optional = true }
+yml_impl = { package = "naml", version = "1.0.0", optional = true }
 config_boot_impl = { package = "config-boot", version = "1.0.0", path = "../config-boot", optional = true }
-image_impl = { package = "naimg", version = "1.0.0", path = "../naimg", optional = true }
-discovery_impl = { package = "nadisc", version = "1.0.0", path = "../nadisc", optional = true }
-nacos_impl = { package = "nanacos", version = "1.0.0", path = "../nanacos", optional = true, default-features = false }
+image_impl = { package = "naimg", version = "1.0.0", optional = true }
+discovery_impl = { package = "nadisc", version = "1.0.0", optional = true }
+nacos_impl = { package = "nanacos", version = "1.0.0", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "1.0.0", path = "../rest-discovery", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "1.0.0", path = "../rest-client-macro", optional = true }
+rest_client_macro = { package = "rest-client-macro", version = "1.0.0", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.0", path = "../rest-discovery-nacos", optional = true, default-features = false }

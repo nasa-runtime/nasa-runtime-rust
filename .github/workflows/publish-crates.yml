@@ -1,17 +1,21 @@
-name: Publish crates.io first batch
+name: Publish crates.io batches
 
 on:
   workflow_dispatch:
     inputs:
       batch:
-        description: "选择发布子批次；1B 只能在 nabase 1.0.0 已进入 crates.io 索引后执行"
+        description: "选择发布批次；后续批次只能在前置依赖已进入 crates.io 索引后执行"
         required: true
         type: choice
         options:
           - 1a
           - 1b
+          - 2
+          - 3
+          - 3p
+          - 4
       confirm:
-        description: "输入 publish-1.0.0 确认执行不可逆发布"
+        description: "常规批次输入 publish-1.0.0；3p 宏补丁输入 publish-1.0.1"
         required: true
         type: string
 
@@ -19,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-first-batch
+  group: crates-io-release
   cancel-in-progress: false
 
 env:
@@ -39,7 +43,11 @@ jobs:
             echo "仅允许从 release/1.0.0 发布，当前 ref: $GITHUB_REF" >&2
             exit 1
           fi
-          if [[ "$RELEASE_CONFIRM" != "publish-1.0.0" ]]; then
+          expected_confirm="publish-1.0.0"
+          if [[ "${{ inputs.batch }}" == "3p" ]]; then
+            expected_confirm="publish-1.0.1"
+          fi
+          if [[ "$RELEASE_CONFIRM" != "$expected_confirm" ]]; then
             echo "确认文本不匹配，拒绝发布" >&2
             exit 1
           fi
@@ -49,11 +57,11 @@ jobs:
     needs: guard
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
         with:
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
@@ -65,6 +73,18 @@ jobs:
               ;;
             1b)
               echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
+            2)
+              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              ;;
+            3)
+              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
+              ;;
+            3p)
+              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              ;;
+            4)
+              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -78,20 +98,57 @@ jobs:
           curl --fail --silent --show-error \
             --user-agent "nasa-runtime-release/1.0" \
             "https://crates.io/api/v1/crates/nabase/1.0.0" >/dev/null
+      - name: verify registry dependency policy
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
+        shell: bash
+        run: |
+          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto"
+          failed=false
+          while IFS=$'\t' read -r owner dependency dependency_path; do
+            case " $published_crates " in
+              *" $dependency "*)
+                if [[ "$RELEASE_BATCH" == "3p" && ( "$dependency" == "hystrix-macro" || "$dependency" == "nafana-macro" ) ]]; then
+                  echo "$owner 临时通过 path 验证尚未发布的 $dependency 1.0.1；3p 发布后第四批必须移除"
+                  continue
+                fi
+                echo "$owner 仍通过 path 引用已发布 crate $dependency: $dependency_path" >&2
+                failed=true
+                ;;
+            esac
+          done < <(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
+          )
+          if [[ "$failed" == "true" ]]; then
+            exit 1
+          fi
+
+          for crate_name in $RELEASE_CRATES; do
+            local_dependencies="$(
+              cargo metadata --locked --no-deps --format-version 1 |
+                jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .dependencies[] | select(.path != null) | "\(.name)=\(.path)"'
+            )"
+            if [[ -n "$local_dependencies" ]]; then
+              echo "$crate_name 发布 manifest 仍含本地依赖:" >&2
+              echo "$local_dependencies" >&2
+              exit 1
+            fi
+          done
       - name: verify formatting
         run: cargo fmt --all -- --check
       - name: verify clippy
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
-            cargo clippy --locked -p "$crate_name" --all-targets -- -D warnings
+            cargo clippy --locked -p "$crate_name" --all-targets --all-features -- -D warnings
           done
       - name: verify rustdoc
         shell: bash
         run: |
           for crate_name in $RELEASE_CRATES; do
             RUSTDOCFLAGS="-D missing_docs -D warnings" \
-              cargo doc --locked --no-deps -p "$crate_name"
+              cargo doc --locked --no-deps --all-features -p "$crate_name"
           done
       - name: verify package archives
         shell: bash
@@ -101,8 +158,12 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            if [[ "$version" != "1.0.0" ]]; then
-              echo "$crate_name 版本不是 1.0.0: $version" >&2
+            expected_version="1.0.0"
+            if [[ "${{ inputs.batch }}" == "3p" ]]; then
+              expected_version="1.0.1"
+            fi
+            if [[ "$version" != "$expected_version" ]]; then
+              echo "$crate_name 版本不是 $expected_version: $version" >&2
               exit 1
             fi
             archive="target/package/${crate_name}-${version}.crate"
@@ -137,7 +198,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: crates-io
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
       - name: select release crates
         env:
@@ -150,6 +211,18 @@ jobs:
               ;;
             1b)
               echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
+            2)
+              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              ;;
+            3)
+              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
+              ;;
+            3p)
+              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              ;;
+            4)
+              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -224,8 +297,12 @@ jobs:
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            if [[ "$version" != "1.0.0" ]]; then
-              echo "$crate_name 版本不是 1.0.0: $version" >&2
+            expected_version="1.0.0"
+            if [[ "${{ inputs.batch }}" == "3p" ]]; then
+              expected_version="1.0.1"
+            fi
+            if [[ "$version" != "$expected_version" ]]; then
+              echo "$crate_name 版本不是 $expected_version: $version" >&2
               exit 1
             fi
 

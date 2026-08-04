@@ -651,7 +651,7 @@ pub fn translate_from_to(lang_from: &str, lang_to: &str, word: &str) -> String {
     }
 
     // 条带锁单飞:同 key 恒落同一 stripe 串行。poison 时 `into_inner` 恢复——调用方注入的引擎若
-    // panic,不永久毒化整条 stripe(修 P3:panic 引擎污染 per-key 锁)。
+    // panic 时仍恢复锁内值，避免一次引擎故障永久毒化整条 stripe。
     let stripe = &state().locks[lock_stripe(&key)];
     let _guard = stripe
         .lock()

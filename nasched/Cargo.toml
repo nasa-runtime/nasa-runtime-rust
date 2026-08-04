@@ -18,17 +18,17 @@ name = "nasched"
 [features]
 default = []
 # 只启用 nadis adapter(NadisLeaderGate / start_scheduled_clustered*),不是启用 cluster 语义本身——
-# cluster="leader" + 自定义 LeaderGate 在默认 feature 下即可用(d.md §2/§4.2)。
+# cluster="leader" 配合自定义 LeaderGate 时，默认 feature 即可使用。
 cluster = ["dep:nadis"]
 
 [dependencies]
-async-macro = { version = "1.0.0", path = "../async-macro" }
+async-macro = { version = "1.0.0" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
 nadis = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true }
 linkme = "0.3"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-cron-scheduler = "0.13"
-# misfire 补偿(d.md §17.5)算"上一拍应触发时刻":tokio-cron-scheduler 内部用 croner,这里直依赖同款做反向搜索。
+# misfire 补偿需要计算上一拍应触发时刻；tokio-cron-scheduler 内部使用 croner，因此直接依赖同款做反向搜索。
 croner = "2"
 tracing = "0.1"
 anyhow = "1"

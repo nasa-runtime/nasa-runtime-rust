@@ -167,7 +167,7 @@ pub(super) fn parse_xreadgroup(
     protocol_err: &mut std::collections::HashSet<u32>,
 ) -> bool {
     use redis::Value as V;
-    //第十四轮 P1(疑似 P0):XREADGROUP NOBLOCK **无新消息时返回 Nil**(RESP2 `*-1`)——这是稳态
+    // XREADGROUP NOBLOCK 无新消息时返回 Nil（RESP2 `*-1`），这是正常稳态而非协议错误。
     // 最常见路径,**绝不是协议错误**。此前 Nil 落 else→return false→调用方把全部 polled 分区判协议错误转
     // Recovering→空 PEL 立即回 Ready→下轮又 Nil→**无限 busy-spin**(每秒数千 XAUTOCLAIM)+ 分区几乎从不停
     // 在 Ready→ReleaseExcess 的 victim(仅收 Ready|Backoff)恒空→**再均衡不收敛**(即 two_nodes_rebalance
@@ -207,7 +207,7 @@ pub(super) fn parse_xreadgroup(
 /// entries/entry/fields 段形态异常 → 该分区记入 `protocol_err`(转 Recovering 收编)。
 /// 返回 `false` = **stream key 无法反解出分区号**(理论不可达:key 是我们自己拼的 STREAMS 入参;
 /// 仅 prefix 损坏/RESP3 异形态触发)。调用方据此**全 polled 转 Recovering 兜底**(
-/// 解析不出 p ≠ 没消息,不可静默丢整 stream,规范 #3/#20)。
+/// 解析不出分区号不等于没有消息，不可因此静默丢弃整个 stream。
 ///
 /// # 参数
 /// - `layout`: 分区 key 布局,用于生成 stream、marker 和 lock key。

@@ -20,10 +20,10 @@ use redis::AsyncCommands;
 use crate::config::{CompatibilityProfile, RedisConfig};
 use crate::error::{NasaRedisError, Result};
 
-/// 传输抽象(④A Cluster transport):单节点 `ConnectionManager` 或 `cluster_async::ClusterConnection`。
+/// 传输抽象：单节点使用 `ConnectionManager`，Cluster 使用 `cluster_async::ClusterConnection`。
 /// 两者均 impl `ConnectionLike`(故 `AsyncCommands`/`query_async` 在 `Conn` 上通用),Clone 廉价(多路
 /// 复用句柄)。Cluster 变体**跟随 MOVED/ASK**,单键命令按 slot 路由到正确节点;多键 Lua/MULTI 仍要求
-/// 同槽 key(否则 CROSSSLOT)——partition 多键脚本的同槽保证见 ④B relayout。
+/// 同槽 key（否则 CROSSSLOT）；partition 多键脚本由 group 级 relayout 保证同槽。
 #[derive(Clone)]
 pub enum Conn {
     /// 单点 Redis 连接管理器。
@@ -274,7 +274,7 @@ pub struct RedisClient {
     conn: Conn,
     /// 底层 client:派生专用连接(Pub/Sub、阻塞命令)用(cluster 下为 seed 节点;classic pubsub 跨节点)。
     raw: redis::Client,
-    /// 目标是否 Cluster 模式(④A:transport 为 ClusterConnection;partition 多键脚本需 ④B relayout)。
+    /// 目标是否为 Cluster 模式；partition 多键脚本依赖 group 级 relayout 保证同槽。
     is_cluster: bool,
     /// **pipeline 专用 lane**:独立多路复用连接,与 direct/control/lock 隔离,
     /// 防大批量 pipeline 头阻塞共享连接。**惰性**——首次 pipeline 才建连(`pipeline.dedicated_conn=true` 时)。
@@ -366,7 +366,7 @@ impl RedisClient {
         .map_err(|e| connect_probe("connect", &cfg, e))?;
 
         //`cluster_enabled:1` 在 **`INFO`(cluster 段)**(不在 `CLUSTER INFO`)。
-        // ④A:检测到 Cluster → 用 `cluster_async::ClusterConnection`(跟随 MOVED/ASK)。
+        // 检测到 Cluster 后必须使用 `cluster_async::ClusterConnection` 跟随 MOVED/ASK。
         //**INFO 失败 = 连接故障,不是 standalone 信号**——实测健康 standalone 的
         // `INFO cluster` 成功返回 `cluster_enabled:0`(不报错),故 INFO 报错/超时只能是 unreachable/超时/
         // ACL 禁 INFO。此前"INFO 失败→静默当 standalone"会把连接故障误判成拓扑决策(目标实为 cluster 时
@@ -412,8 +412,8 @@ impl RedisClient {
             }
         };
         let mut conn = if is_cluster {
-            // ④A Cluster transport:seed URL 触发拓扑发现,跟随 MOVED/ASK 路由。
-            // P1-B:同样设连接级 response_timeout(覆盖 cluster 下裸命令)。
+            // Cluster transport 由 seed URL 触发拓扑发现，并跟随 MOVED/ASK 路由。
+            // 同样设连接级 response_timeout(覆盖 cluster 下裸命令)。
             let mut builder = redis::cluster::ClusterClient::builder(vec![cfg.url.as_str()]);
             if resp_timeout > 0 {
                 let d = Duration::from_millis(resp_timeout);
@@ -423,7 +423,7 @@ impl RedisClient {
                 .build()
                 .map_err(|e| connect_probe("cluster-discovery", &cfg, e))?;
             tracing::info!(namespace = %cfg.namespace, "目标 Redis 为 Cluster 模式,启用 cluster_async transport(跟随 MOVED/ASK)");
-            // P1:cluster 建连也套整体 deadline(get_async_connection 触发拓扑发现,可能久挂)
+            // cluster 建连也套整体 deadline(get_async_connection 触发拓扑发现,可能久挂)
             Conn::Cluster(
                 await_with_deadline(cc.get_async_connection(), resp_timeout, "cluster 建连")
                     .await
@@ -474,7 +474,7 @@ impl RedisClient {
         }))
     }
 
-    /// 目标是否 Cluster 模式(④A)。partition 多键脚本在 cluster 下需 ④B relayout 保证同槽。
+    /// 返回目标是否为 Cluster 模式；partition 多键脚本通过 group 级 relayout 保证同槽。
     pub fn is_cluster(&self) -> bool {
         self.is_cluster
     }
@@ -563,7 +563,7 @@ impl RedisClient {
 
     /// 受控原始入口:不暴露 ConnectionManager 等底层类型,
     /// 调用方组装 redis::Cmd,本方法执行——逃生舱,非常规路径。
-    /// M2:同样套 `command.timeout_ms`(单命令逃生舱也受单命令超时约束)。
+    /// 同样受 `command.timeout_ms` 约束，确保单命令逃生路径不会无限等待。
     ///
     /// # 参数
     /// - `cmd`: 底层 Redis 命令对象。

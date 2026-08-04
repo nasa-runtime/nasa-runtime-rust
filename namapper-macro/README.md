@@ -1,6 +1,6 @@
 # namapper-macro
 
-`namapper-macro` 是 `namapper` 的过程宏实现，提供 `#[Mapper]`、`#[Query]`、`#[Insert]`、`#[Update]`、`#[Delete]`、`#[Execute]` 等声明式 Mapper 宏。业务应优先阅读 [namapper README](../namapper/README.md)，通常不直接依赖本 crate。
+`namapper-macro` 是 `namapper` 的过程宏实现，提供 `#[Mapper]`、`#[Query]`、`#[Insert]`、`#[Update]`、`#[Delete]`、`#[Execute]` 等声明式 Mapper 宏。业务应优先阅读 [namapper README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/release/1.0.0/namapper/README.md)，通常不直接依赖本 crate。
 
 ```toml
 [dependencies]

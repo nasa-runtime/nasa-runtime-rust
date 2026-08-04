@@ -2,7 +2,7 @@
 //!
 //! 根据结构体上的 `#[rs(...)]` 元数据生成索引描述、键片段、字段持久化和反序列化辅助代码。
 // ============================================================================
-// nadis-derive —— #[derive(RedisDocument)](R5.2,架构文档)。
+// nadis-derive：实现 #[derive(RedisDocument)]。
 //
 // 对照 原实现 注解全集(annotation/ 包)与 MetaResolver 启动期解析:
 //   @RsDocument(index, prefix, type, bucketCount) → 结构体级 #[rs(...)]
@@ -61,14 +61,14 @@ struct FieldInfo {
     is_id: bool,
     sortable: bool,
     weight: f64,
-    // S3 TAG 属性
+    // TAG 字段属性。
     separator: Option<char>,
     case_sensitive: bool,
-    // S4 TEXT 属性
+    // TEXT 字段属性。
     no_stem: bool,
     phonetic: Option<String>,
     no_index: bool,
-    // S8 TAG/TEXT:WITHSUFFIXTRIE(后缀/中缀查询)
+    // TAG/TEXT 的 WITHSUFFIXTRIE 后缀与中缀查询能力。
     with_suffix_trie: bool,
     alias: String,
     json_path: Option<String>,
@@ -77,7 +77,7 @@ struct FieldInfo {
     decl_idx: usize, // 声明顺序(array_key 同 order 时报错的诊断 & 稳定排序)
 }
 
-/// 字段类型是否 f64/f32(M1:to_fields 浮点用 原实现_double_to_string 对齐 原实现)。
+/// 业务作用：判断字段是否为 f64/f32，以便持久化时使用兼容的浮点格式。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -90,7 +90,7 @@ fn is_float_type(ty: &Type) -> bool {
     false
 }
 
-/// 展开 Redis 文档派生宏；用于生成键、元数据和序列化辅助实现。
+/// 业务作用：展开 Redis 文档派生宏；用于生成键、元数据和序列化辅助实现。
 ///
 /// # 参数
 ///
@@ -104,7 +104,7 @@ pub fn derive_redis_document(input: TokenStream) -> TokenStream {
     }
 }
 
-/// 解析派生输入并生成实现代码；用于把结构体声明转换为文档契约。
+/// 业务作用：解析派生输入并生成实现代码；用于把结构体声明转换为文档契约。
 ///
 /// # 参数
 /// - `input`: 宏或解析器收到的原始输入。
@@ -230,19 +230,19 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 } else if meta.path.is_ident("weight") {
                     info.weight = meta.value()?.parse::<LitFloat>()?.base10_parse()?;
                 } else if meta.path.is_ident("separator") {
-                    // S3:`separator = '|'`(单字符;TAG 多值分隔符)
+                    // separator 只接受单字符，用作 TAG 多值分隔符。
                     info.separator = Some(meta.value()?.parse::<LitChar>()?.value());
                 } else if meta.path.is_ident("casesensitive") {
                     info.case_sensitive = true;
                 } else if meta.path.is_ident("nostem") {
                     info.no_stem = true;
                 } else if meta.path.is_ident("phonetic") {
-                    // S4:`phonetic = "dm:en"`(PHONETIC 匹配器)
+                    // phonetic 配置 PHONETIC 匹配器，例如 `dm:en`。
                     info.phonetic = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.path.is_ident("noindex") {
                     info.no_index = true;
                 } else if meta.path.is_ident("suffix") {
-                    // S8:WITHSUFFIXTRIE(后缀/中缀查询)
+                    // suffix 为字段启用 WITHSUFFIXTRIE 后缀与中缀查询。
                     info.with_suffix_trie = true;
                 } else if meta.path.is_ident("alias") {
                     info.alias = meta.value()?.parse::<LitStr>()?.value();
@@ -368,7 +368,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     // ── to_fields() / from_fields():全部字段(含未标注)──
-    // M1:f64/f32 字段用 `原实现_double_to_string` 对齐 原实现 Double.toString(整数补 `.0`、科学计数法 E),
+    // f64/f32 字段使用兼容格式化函数对齐既有系统的 Double.toString（整数补 `.0`、科学计数法 E），
     // 否则 HASH 存储跨语言字节分叉。其余类型仍 `to_string`。
     let to_pairs: Vec<TokenStream2> = fields
         .iter()
@@ -404,7 +404,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #root::RedisDocument for #struct_name {
-            /// 返回派生生成的文档元数据；用于运行时读取索引和字段定义。
+            /// 业务作用：返回派生生成的文档元数据；用于运行时读取索引和字段定义。
             fn meta() -> &'static #root::DocMeta {
                 static META: ::std::sync::OnceLock<#root::DocMeta> =
                     ::std::sync::OnceLock::new();
@@ -420,17 +420,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
             }
 
-            /// 生成文档实例的主键字符串；用于定位 Redis 中的具体对象。
+            /// 业务作用：生成文档实例的主键字符串；用于定位 Redis 中的具体对象。
             fn id(&self) -> ::std::string::String {
                 self.#id_ident.to_string()
             }
 
-            /// 转换为 fields 表示；用于对接下游接口。
+            /// 业务作用：转换为 fields 表示；用于对接下游接口。
             fn to_fields(&self) -> ::std::vec::Vec<(::std::string::String, ::std::string::String)> {
                 vec![#(#to_pairs),*]
             }
 
-            /// 从 fields 构造结果；用于统一输入适配。
+            /// 业务作用：从 fields 构造结果；用于统一输入适配。
             ///
             /// # 参数
             /// - `fields`: Hash 字段名列表,用于批量读取或删除。
@@ -442,12 +442,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
             }
 
-            /// 收集占位符字段值；用于按模板拼接文档键。
+            /// 业务作用：收集占位符字段值；用于按模板拼接文档键。
             fn placeholder_parts(&self) -> ::std::vec::Vec<::std::string::String> {
                 vec![#(self.#placeholder_idents.to_string()),*]
             }
 
-            /// 收集数组键字段值；用于生成数组成员的定位键。
+            /// 业务作用：收集数组键字段值；用于生成数组成员的定位键。
             fn array_key_parts(&self) -> ::std::vec::Vec<::std::string::String> {
                 vec![#(self.#array_key_idents.to_string()),*]
             }
@@ -455,7 +455,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// id_numeric 判定:字段类型路径末段是数值类型 → JSON 里渲染为数字
+/// 业务作用：id_numeric 判定:字段类型路径末段是数值类型 → JSON 里渲染为数字
 /// (决定 idFilter 字面量形态,见 DocMeta.id_numeric 注释)。
 ///
 /// # 参数
@@ -483,7 +483,7 @@ fn is_numeric_type(ty: &Type) -> bool {
     )
 }
 
-/// 展开期解析 prefix 占位符(与 nadis::DocMeta::segments 同语法:
+/// 业务作用：展开期解析 prefix 占位符(与 nadis::DocMeta::segments 同语法:
 /// `{name}` 不嵌套、括号配对、name 非空)。返回占位符名按出现顺序。
 ///
 /// # 参数

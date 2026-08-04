@@ -43,7 +43,7 @@ pub struct CryptoLimits {
 }
 
 impl Default for CryptoLimits {
-    /// 建立与架构文档样例一致的保守上限。
+    /// 建立适合普通 JSON API 的保守资源上限。
     ///
     /// # 返回
     ///

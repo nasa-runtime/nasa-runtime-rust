@@ -1,7 +1,7 @@
 // ============================================================================
-// src/search/array.rs —— JSON_ARRAY / JSON_ARRAY_BUCKET 操作(R5.2)。
-// (架构文档"四 DataType + 5 Lua 保留";对照 原实现 JsonArraySupport +
-//  JsonArrayLuaScripts + JsonArrayOperations)
+// src/search/array.rs —— JSON_ARRAY / JSON_ARRAY_BUCKET 操作。
+// 保留四种 DataType 与五段 Lua，并对齐既有 JsonArraySupport、
+// JsonArrayLuaScripts 与 JsonArrayOperations。
 //
 // 模型:
 //   · JsonArray:1 个 ARRAY key(prefix + @JsonArrayKey 值拼接)装多个子文档,
@@ -270,7 +270,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         })
     }
 
-    /// 子文档存在性:只判 JSON.GET filter 是否命中,不反序列化(对照 原实现 #11 优化)。
+    /// 子文档存在性：只判断 JSON.GET filter 是否命中，不做反序列化。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
@@ -339,7 +339,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
             .await
     }
 
-    /// 条件计数全 array(只数个数,不构造实体——对照 原实现 #11)。
+    /// 条件计数遍历完整 array，但只累计数量，不构造实体。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段;BUCKET 模式下用于生成全部桶 key。
@@ -451,7 +451,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// - `key`: 当前 Redis 命令操作的 key。
     /// - `filter`: 待应用的查询、日志或字段过滤条件。
     async fn json_del(&self, key: &str, filter: &str) -> Result<u64> {
-        //`JSON.DEL` 对 missing key **返 0 不报错**(实测 ReJSON 8.2.1)——故此前前置
+        // `JSON.DEL` 对 missing key 返回 0 而不报错，因此此前前置
         // `EXISTS` 既无必要、又引入两步非原子的 TOCTTOU 窗口(EXISTS 后、DEL 前被并发删)。直接 `JSON.DEL`
         // (本就幂等)单条 RTT。
         let n: i64 = redis::cmd("JSON.DEL")

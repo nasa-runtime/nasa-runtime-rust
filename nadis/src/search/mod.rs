@@ -1,8 +1,8 @@
 // ============================================================================
-// src/search/mod.rs —— RediSearch 封装:元数据 trait / 文档编解码(R5.1+R5.2)。
-// (架构文档;对照 原实现 RediSearch + annotation/meta/convert 配套)
+// src/search/mod.rs —— RediSearch 封装:元数据 trait / 文档编解码。
+// 对齐既有 RediSearch 与 annotation/meta/convert 配套语义。
 //
-// ┌─ R5.1 已实现 ─────────────────────────────────────────────────────────┐
+// ┌─ 核心能力 ───────────────────────────────────────────────────────┐
 // │ · RedisDocument trait(静态元数据 + HASH 编解码;对照 原实现 @RsDocument/    │
 // │   @RsId/@TagField/@TextField/@NumericField + MetaResolver/EntityMeta)     │
 // │ · DocMeta 构建期校验(字段重名/空 alias/ARRAY 约束——错误在 bind 时暴露,  │
@@ -12,7 +12,7 @@
 // │   实测归一化比较,**禁自动 DROP**(actuator.rs)                            │
 // │ · capability 探测(缺 FT/JSON 模块给明确错误,非协议错)                   │
 // │ · DataType::Hash / Json 两形态(id 直达 + FT.SEARCH 查询)                 │
-// ├─ R5.2 已实现 ─────────────────────────────────────────────────────────┤
+// ├─ 数组与聚合能力 ─────────────────────────────────────────────────┤
 // │ · prefix {field} 占位符(对照 原实现 KeyParts/KeySegment:prefix 编译成      │
 // │   literal/field 交替段;key_of_parts 按占位符顺序拼 key;动态段禁 :{}      │
 // │   防撞 key;literal_prefix 给 FT.CREATE PREFIX)                           │
@@ -21,14 +21,15 @@
 // │   floorMod(原实现_string_hash(渲染后 subId), bucketCount) **持久化协议**)   │
 // │ · #[derive(RedisDocument)] 过程宏(nadis-derive crate,纯语法糖——   │
 // │   生成的代码只调用本模块的公开 API)                                       │
-// │ · FT.AGGREGATE 最小封装(actuator.rs:GROUPBY/REDUCE/SORTBY/LIMIT)        │
-// ├─ 留待 ────────────────────────────────────────────────────────────────┤
-// │ · GeoField / OR 组合(FT.AGGREGATE 表达式级)/ RESP3 Map 全形态归一化     │
+// │ · FT.AGGREGATE 封装（LOAD/GROUPBY/REDUCE/APPLY/FILTER/SORTBY/LIMIT）   │
 // └──────────────────────────────────────────────────────────────────────┘
 // ============================================================================
 
+/// RediSearch 索引生命周期、文档读写、查询和聚合执行器。
 pub mod actuator;
+/// RedisJSON 数组与分桶数组的原子 Lua 操作。
 pub mod array;
+/// 类型化 RediSearch 查询 AST 及安全渲染器。
 pub mod query;
 
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ use std::collections::HashMap;
 use crate::error::{NasaRedisError, Result};
 use crate::partition::compat_string_hash;
 
-/// S8:序列化为 JSON 字符串并**省略 null 字段**,对齐 原实现 `@JsonInclude(NON_NULL)`。
+/// 序列化为 JSON 字符串并**省略 null 字段**，对齐既有系统的 `@JsonInclude(NON_NULL)`。
 /// Rust serde 默认写 `"f":null`,原实现 默认省略 → 同一子文档跨语言字节分叉,
 /// JSON_ARRAY 共享 key 时尤其致命(原实现 写的数组 Rust 读回会多/少字段)。
 /// 这里序列化到 `serde_json::Value` 后**递归剔除对象里值为 null 的成员**(数组元素、
@@ -97,32 +98,45 @@ impl DataType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
     /// 精确匹配(离散值:ID/状态/枚举);FT 语法 `@f:{v}`。
-    /// S3:`separator`(多值分隔符,默认 `,`,None=不输出用 RediSearch 默认)、`case_sensitive`
+    /// `separator` 是多值分隔符（默认 `,`，None 表示使用 RediSearch 默认值），`case_sensitive`
     /// (CASESENSITIVE,默认大小写不敏感)——必须与 原实现 建索引时一致,否则分词/匹配不一致。
     Tag {
+        /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
+        /// 多值 Tag 分隔符；`None` 表示使用 RediSearch 默认值。
         separator: Option<char>,
+        /// 是否启用大小写敏感匹配。
         case_sensitive: bool,
-        /// S8:WITHSUFFIXTRIE——建后缀树,启用 `*foo`(后缀)/`*foo*`(包含)查询。
+        /// WITHSUFFIXTRIE 会建立后缀树，启用 `*foo`（后缀）和 `*foo*`（包含）查询。
         with_suffix_trie: bool,
     },
     /// 全文搜索;FT 语法 `@f:(词)`。
-    /// S4:`no_stem`(NOSTEM 关词干还原)、`phonetic`(PHONETIC 匹配器如 `dm:en`)、`no_index`
+    /// `no_stem`（NOSTEM 关闭词干还原）、`phonetic`（例如 `dm:en`）和 `no_index`
     /// (NOINDEX 只存不建倒排,仅 SORTABLE/投影用)。
     Text {
+        /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
+        /// 全文字段在相关性评分中的权重。
         weight: f64,
+        /// 是否关闭词干还原。
         no_stem: bool,
+        /// 可选的 RediSearch phonetic matcher 名称。
         phonetic: Option<String>,
+        /// 是否只存储字段而不建立倒排索引。
         no_index: bool,
-        /// S8:WITHSUFFIXTRIE——建后缀树,启用 `*foo`(后缀)/`*foo*`(包含)查询。
+        /// WITHSUFFIXTRIE 会建立后缀树，启用 `*foo`（后缀）和 `*foo*`（包含）查询。
         with_suffix_trie: bool,
     },
     /// 数值范围;FT 语法 `@f:[min max]`。
     ///`no_index`(NOINDEX 只存不建数值索引,仅 SORTABLE/投影用——对齐 原实现
     /// `@NumericField(indexed=false)`,补齐 Tag/Text 已有的 NOINDEX 对称性)。
-    Numeric { sortable: bool, no_index: bool },
-    /// 地理坐标(S5);存储 `"lon,lat"`,FT 语法 `@f:[lon lat radius unit]`(半径圆内)。
+    Numeric {
+        /// 是否允许 RediSearch 对该字段排序。
+        sortable: bool,
+        /// 是否只存储字段而不建立数值索引。
+        no_index: bool,
+    },
+    /// 地理坐标；存储为 `"lon,lat"`，FT 语法为 `@f:[lon lat radius unit]`。
     Geo,
 }
 
@@ -135,6 +149,7 @@ pub struct FieldMeta {
     pub alias: String,
     /// JSON 模式的显式 JSONPath(None = `$.{name}`;HASH 模式忽略)。
     pub json_path: Option<String>,
+    /// 字段的索引类型与 RediSearch 修饰参数。
     pub ftype: FieldType,
 }
 
@@ -151,7 +166,7 @@ impl FieldMeta {
 
 /// prefix 编译段(对照 原实现 KeySegment):要么字面文本,要么占位符字段引用。
 /// 原实现 启动期编译缓存进 EntityMeta;Rust 侧 DocMeta 是手写/derive 的 plain struct,
-/// 在 key 构建时按需解析(IO 路径上解析成本可忽略;若热点可后续加 OnceLock 缓存)。
+/// 在 key 构建时按需解析；该 IO 路径的解析成本可控，并保持实现无额外全局缓存。
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeySeg {
     /// 字面段:原样拼接。
@@ -168,10 +183,12 @@ pub struct DocMeta {
     pub index: String,
     /// Redis key 前缀。三种形态:
     ///   · 纯字面量:完整 key = prefix + id;
-    ///   · 含 `{field}` 占位符(R5.2):如 `"order:SMO:{sym}:{d}:"`,动态段运行时填充;
+    ///   · 含 `{field}` 占位符:如 `"order:SMO:{sym}:{d}:"`,动态段运行时填充;
     ///   · ARRAY 系:完整 key = prefix + @JsonArrayKey 值拼接(占位符在 ARRAY 系禁用)。
     pub prefix: String,
+    /// 文档在 Redis 中的存储与索引形态。
     pub data_type: DataType,
+    /// 参与索引、查询和编解码的字段元数据。
     pub fields: Vec<FieldMeta>,
     /// @RsId 字段的存储名(JSONPath idFilter `@.{id_name}==…` 与 HASH 回填用)。
     pub id_name: String,
@@ -258,7 +275,7 @@ impl DocMeta {
         self.fields.iter().find(|f| f.alias_or_name() == alias)
     }
 
-    // ───────────────── prefix {field} 占位符(R5.2,对照 原实现 KeySegment)─────────────────
+    // ───────────────── prefix {field} 占位符(对照 原实现 KeySegment)─────────────────
 
     /// 解析 prefix 为编译段。返回 None = 无占位符(fast path:prefix + id)。
     /// 语法:`{name}`,不嵌套;`{`/`}` 必须配对;name 非空。
@@ -396,7 +413,7 @@ impl DocMeta {
         Ok(out)
     }
 
-    // ───────────────── ARRAY key 派生(R5.2,对照 原实现 EntityMeta.arrayKey 族)─────────────────
+    // ───────────────── ARRAY key 派生(对照 原实现 EntityMeta.arrayKey 族)─────────────────
 
     /// ARRAY key 主体:parts 按 array_keys 顺序以 `:` 拼接(逐段 check_part)。
     ///

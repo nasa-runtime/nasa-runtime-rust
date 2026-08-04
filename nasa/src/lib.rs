@@ -33,18 +33,18 @@ pub use application_impl::Application;
 #[cfg(feature = "application")]
 pub use application_macro::application;
 
-/// 熔断/隔离/Dashboard 监控 + `#[hystrix]`(对标 Hystrix Command)。
+/// 路由级隔离、Dashboard 监控、`#[hystrix]` 与 `#[global_fallback]` 终态降级。
 #[cfg(feature = "hystrix")]
 pub mod hystrix {
     pub use hystrix_impl::*;
-    pub use hystrix_macro::hystrix;
+    pub use hystrix_macro::{global_fallback, hystrix};
 }
 
-/// 接口级隔离监控 + `#[grafana]`：bulkhead、超时、降级、Prometheus `/metrics` 与 Grafana 面板。
+/// 接口级隔离监控：`#[grafana]`、`#[global_fallback]`、Prometheus `/metrics` 与 Grafana 面板。
 #[cfg(feature = "grafana")]
 pub mod grafana {
     pub use grafana_impl::*;
-    pub use grafana_macro::grafana;
+    pub use grafana_macro::{global_fallback, grafana};
 
     /// nafana → napp 统一 hub 兼容源。
     ///
@@ -360,7 +360,7 @@ pub mod kafka {
     pub use kafka_impl::*;
 }
 
-/// Redis 基础层(对照 原实现 RedisProxy 五件套移植;架构设计文档):
+/// Redis 基础层，对齐既有 RedisProxy 五件套的公开语义：
 /// client/commands/pipeline(typed ticket)/lock(V1 与 原实现 互锁)/partition
 /// (PollCoordinator)。子能力经 feature 透传:`redis-search`(RediSearch/
 /// RedisJSON 封装)、`redis-derive`(`#[derive(RedisDocument)]`,蕴含 search)。
@@ -375,7 +375,7 @@ pub mod redis {
 
 /// 密码学工具(对照 原实现 原工具包 `Encryptor`;crate = `ncrypto`)。
 /// `nasa = { features = ["crypto"] }` → `use nasa::crypto::{encrypt_aes, sha256, sign_rsa, ...};`
-/// L1 提供 hash/hmac/pbkdf2/aes/rsa/ed25519/base64；Web 端点加解密由 mapping 路由属性
+/// 提供 hash/hmac/pbkdf2/aes/rsa/ed25519/base64；Web 端点加解密由 mapping 路由属性
 /// `decrypt = true` / `encrypt = true` 和统一 Web 安全运行时编排，不提供相互冲突的独立属性宏。
 #[cfg(feature = "crypto")]
 pub mod crypto {
@@ -531,7 +531,7 @@ pub mod discovery {
 }
 
 /// 配置中心(provider-neutral 命名空间,对照 原框架 配置分离):各后端子模块。
-/// 后端**只吐裸配置原文 + watch 回调,绝不认识业务 AppConfig**;parse+merge+apply 由 app 自己做(机制 vs 策略,见 nacos.md)。
+/// 后端只提供原始配置文本与 watch 回调，不解析业务 `AppConfig`；解析、合并与应用策略由应用层负责。
 /// `nasa = { features = ["nacos-sdk"] }` → `use nasa::config::nacos::{NacosConfigClient, NacosProps};`
 ///   `client.fetch(data_id, group)`(裸 yaml)/ `client.watch(...)`(推送回调拿裸 yaml)。
 /// (配置与注册各用独立 client,共享 `NacosProps`:只用一边不会被迫初始化另一边。)

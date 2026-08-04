@@ -16,7 +16,7 @@ categories.workspace = true
 [lib]
 name = "natx"
 [dependencies]
-natx-macro = { package = "natx-macro", version = "1.0.0", path = "../natx-macro" }
+natx-macro = { package = "natx-macro", version = "1.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 anyhow = "1"

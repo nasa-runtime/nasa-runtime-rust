@@ -279,7 +279,7 @@ impl RestHttpOptions {
     }
 }
 
-/// 跨实例重试策略(第一版默认全关;第四阶段再扩)。
+/// 跨实例重试策略；默认全部关闭，调用方必须显式开启所需重试条件。
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RetryOptions {

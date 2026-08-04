@@ -8,7 +8,7 @@ use chrono::Months;
 
 // ==================== 加减(毫秒域 checked)====================
 
-/// 按倍率累加时间毫秒值；用于统一处理天、小时等时间单位换算。
+/// 业务作用: 按倍率累加时间毫秒值；用于统一处理天、小时等时间单位换算。
 ///
 /// # 参数
 /// - `ms`: 毫秒时间值。
@@ -20,7 +20,7 @@ fn add_scaled(ms: i64, n: i64, factor: i64) -> Result<i64> {
         .ok_or(DateError::Overflow)
 }
 
-/// 加毫秒(可负)。对照 原实现 `addMillis`。
+/// 业务作用: 加毫秒(可负)。对照 原实现 `addMillis`。
 ///
 /// # 参数
 ///
@@ -30,7 +30,7 @@ pub fn add_millis(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, 1)
 }
 
-/// 加秒(可负)。对照 原实现 `addSeconds`。
+/// 业务作用: 加秒(可负)。对照 原实现 `addSeconds`。
 ///
 /// # 参数
 ///
@@ -40,7 +40,7 @@ pub fn add_seconds(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, 1000)
 }
 
-/// 加分钟(可负)。对照 原实现 `addMinutes`。
+/// 业务作用: 加分钟(可负)。对照 原实现 `addMinutes`。
 ///
 /// # 参数
 ///
@@ -50,7 +50,7 @@ pub fn add_minutes(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, 60 * 1000)
 }
 
-/// 加小时(可负)。对照 原实现 `addHours`。
+/// 业务作用: 加小时(可负)。对照 原实现 `addHours`。
 ///
 /// # 参数
 ///
@@ -60,7 +60,7 @@ pub fn add_hours(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, 60 * 60 * 1000)
 }
 
-/// 加天(可负)。对照 原实现 `addDays`。
+/// 业务作用: 加天(可负)。对照 原实现 `addDays`。
 ///
 /// # 参数
 ///
@@ -70,7 +70,7 @@ pub fn add_days(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, DAY_MS)
 }
 
-/// 加周(可负)。对照 原实现 `addWeeks`。
+/// 业务作用: 加周(可负)。对照 原实现 `addWeeks`。
 ///
 /// # 参数
 ///
@@ -80,7 +80,7 @@ pub fn add_weeks(ms: i64, n: i64) -> Result<i64> {
     add_scaled(ms, n, 7 * DAY_MS)
 }
 
-/// 加月(可负),**GMT+8 日历**,月末按 chrono 规则收缩(如 1/31 + 1 月 = 2/28,对齐 原实现 `Calendar`)。对照 原实现 `addMonths`。
+/// 业务作用: 加月(可负),**GMT+8 日历**,月末按 chrono 规则收缩(如 1/31 + 1 月 = 2/28,对齐 原实现 `Calendar`)。对照 原实现 `addMonths`。
 ///
 /// # 参数
 ///
@@ -97,7 +97,7 @@ pub fn add_months(ms: i64, n: i32) -> Result<i64> {
     Ok(shifted.timestamp_millis())
 }
 
-/// 加年(可负),**GMT+8 日历**(= 加 `n×12` 月,2/29 + 1 年 = 2/28)。对照 原实现 `addYears`。
+/// 业务作用: 加年(可负),**GMT+8 日历**(= 加 `n×12` 月,2/29 + 1 年 = 2/28)。对照 原实现 `addYears`。
 ///
 /// # 参数
 ///
@@ -131,7 +131,7 @@ pub enum Unit {
     Years,
 }
 
-/// 按指定时间单位推进毫秒时间戳；用于日期区间枚举的核心位移。
+/// 业务作用: 按指定时间单位推进毫秒时间戳；用于日期区间枚举的核心位移。
 ///
 /// # 参数
 /// - `ms`: 当前 epoch 毫秒时间戳。
@@ -152,7 +152,7 @@ fn step(ms: i64, unit: Unit, n: i64) -> Result<i64> {
 
 // ==================== 截断 / 区间 ====================
 
-/// 取 `ms` 在 `原实现_pattern` 精度下的**最早时刻**(GMT+8)。
+/// 业务作用: 取 `ms` 在 `原实现_pattern` 精度下的**最早时刻**(GMT+8)。
 /// = `parse(format(ms, pat), pat)`:格式化丢弃低于精度的位,再解析回。对照 原实现 `earliest`。
 ///
 /// 例:`earliest(t, "yyyy-MM-dd")` → 当天 00:00:00(GMT+8)。
@@ -166,7 +166,7 @@ pub fn earliest(ms: i64, pattern: &str) -> Result<i64> {
     parse(&s, pattern)
 }
 
-/// `[start, end)` 区间内、按 `precision_pattern` 精度对齐、以 `unit` 步进的所有时刻,用 `return_pattern` 格式化。
+/// 业务作用: `[start, end)` 区间内、按 `precision_pattern` 精度对齐、以 `unit` 步进的所有时刻,用 `return_pattern` 格式化。
 /// 对照 原实现 `allTime`(do-while 逐值复刻):`start > end` 返空;否则**先产出对齐后的起点、
 /// 再步进判断 `cur >= end` 终止**——因此 `start == end` 时返回含起点的 1 个元素(非严格右开区间)。
 ///
@@ -199,7 +199,7 @@ pub fn all_time(
     Ok(out)
 }
 
-/// `[start, end)` 内逐日的字符串(按 `yyyy-MM-dd` 精度对齐,步进 1 天)。
+/// 业务作用: `[start, end)` 内逐日的字符串(按 `yyyy-MM-dd` 精度对齐,步进 1 天)。
 ///
 /// # 参数
 ///
@@ -210,7 +210,7 @@ pub fn all_days(start: i64, end: i64, return_pattern: &str) -> Result<Vec<String
     all_time(start, end, F_Y_M_D, return_pattern, Unit::Days)
 }
 
-/// `[start, end)` 内逐月的字符串(按 `yyyyMM` 精度对齐,步进 1 月)。对照 原实现 `allMonth`。
+/// 业务作用: `[start, end)` 内逐月的字符串(按 `yyyyMM` 精度对齐,步进 1 月)。对照 原实现 `allMonth`。
 ///
 /// # 参数
 ///
@@ -223,17 +223,17 @@ pub fn all_months(start: i64, end: i64, return_pattern: &str) -> Result<Vec<Stri
 
 // ==================== 当下 ====================
 
-/// 当前时刻按默认格式 `yyyy-MM-dd HH:mm:ss`(GMT+8)。对照 原实现 `now`。
+/// 业务作用: 当前时刻按默认格式 `yyyy-MM-dd HH:mm:ss`(GMT+8)。对照 原实现 `now`。
 pub fn now() -> Result<String> {
     format(now_ms(), F_Y_M_D_H_M_S)
 }
 
-/// 今天(`yyyy-MM-dd`,GMT+8)。对照 原实现 `today()`。
+/// 业务作用: 今天(`yyyy-MM-dd`,GMT+8)。对照 原实现 `today()`。
 pub fn today() -> Result<String> {
     format(now_ms(), F_Y_M_D)
 }
 
-/// 今天按指定 pattern(GMT+8)。对照 原实现 `today(f)`。
+/// 业务作用: 今天按指定 pattern(GMT+8)。对照 原实现 `today(f)`。
 ///
 /// # 参数
 ///
@@ -242,12 +242,12 @@ pub fn today_fmt(pattern: &str) -> Result<String> {
     format(now_ms(), pattern)
 }
 
-/// 昨天(`yyyy-MM-dd`,GMT+8)。对照 原实现 `yesterday()`。
+/// 业务作用: 昨天(`yyyy-MM-dd`,GMT+8)。对照 原实现 `yesterday()`。
 pub fn yesterday() -> Result<String> {
     format(add_days(now_ms(), -1)?, F_Y_M_D)
 }
 
-/// 昨天按指定 pattern(GMT+8)。对照 原实现 `yesterday(f)`。
+/// 业务作用: 昨天按指定 pattern(GMT+8)。对照 原实现 `yesterday(f)`。
 ///
 /// # 参数
 ///

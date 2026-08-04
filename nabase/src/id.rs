@@ -222,7 +222,7 @@ impl SnowflakeConfig {
         )
     }
 
-    /// [`build`](Self::build) 的别名,对齐 base.md 的合同名——「local」强调只做本地构造
+    /// [`build`](Self::build) 的别名；“local”强调只做本地构造，
     /// (位长校验 + 纯算法,无副作用),不含 Redis workerId 分配;分布式分配走
     /// `nadis::SnowflakeConfig::build_with_redis`。
     pub fn build_local(&self) -> Result<Snowflake, SnowflakeError> {

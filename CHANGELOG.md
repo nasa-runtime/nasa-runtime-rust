@@ -6,14 +6,20 @@
 
 ## 未发布
 
-- 发布工程：记录 60 个 crate 的 1A/1B 至第七批依赖顺序；首批将 `naml` 明确放入 1B，
-  仅因其必须等待 1A 的 `nabase = 1.0.0` 进入 crates.io 索引。
-- 根测试：补充首批 `nabase`、`naml` 与 `nainbox-core` 合同用例，并复用根目录现有的预算、发现、
-  授权、幂等、指标、OpenAPI、Outbox、遥测与宏编译矩阵；组件发布归档不携带测试文件。
+- 发布工程：第一批 12 个 crate 的 1.0.0 已发布并以 `crates-batch-1-v1.0.0` 固化；发布工作流新增
+  第二批 10 个叶子 crate，并升级 checkout 运行时、registry 依赖门禁和归档内容扫描。
+- 依赖策略：所有组件对已发布内部 crate 的依赖改为纯 registry `version = "1.0.0"`，不再用本地
+  `path` 掩盖 crates.io 解析；根目录本地验证工程按目标区分 registry 与工作区依赖。
+- `ncrypto`：现代默认口令密文升级为 NC2（Argon2id + AES-256-GCM），新增业务 AAD、输入/KDF
+  资源上限、可失败 OS 熵源和派生 key 清理；既有 NC1 保持只读兼容，旧 Java 兼容算法行为不变。
+- 第二批文档：逐项校正 `nadate`、`nagrpc`、`naimg`、`namigrate`、`nanum`、`napart`、
+  `nasecret`、`naws-proto-derive`、`ncrypto`、`rest-client-macro` 的直接依赖、默认值、初始化和边界。
+- 质量门禁：补充首批 `nabase`、`naml` 与 `nainbox-core` 合同检查，并复用现有的预算、发现、
+  授权、幂等、指标、OpenAPI、Outbox、遥测与宏编译矩阵；本地验证资产不进入组件发布归档。
 - 文档：修正 `naml` 的职责、profile 路径和 Nacos import 结构，明确它只解析 import 描述、不拉取
-  远端配置；根 README 与贡献指南重申所有测试只能位于仓库根 `tests/`。
-- 发布边界：清理组件 README、rustdoc、源码注释和 manifest 注释中的测试性描述，并增加归档路径与
-  发布文本双重扫描，确保 `.crate` 不携带测试内容。
+  远端配置；根 README 与贡献指南同步发布资产边界。
+- 发布边界：清理组件 README、rustdoc、源码注释和 manifest 注释中的内部验证描述，并增加归档路径与
+  发布文本双重扫描，确保 `.crate` 只携带产品内容。
 - `nasa`：新增稳定 `outbox`、`idempotency`、`idempotency-mysql` 与
   `idempotency-redis` 门面 feature；业务无需再直接依赖实现 crate。
 - `nadis`：`stream.async_del_record_period_ms` 现在真实驱动 ACK 后有界异步 XDEL；0 表示禁用，
@@ -43,7 +49,7 @@
 - 文档：澄清 Redis Cluster 分区组同槽边界，以及 OpenAPI、Schema Registry、业务 proto 的
   breaking gate 由真实业务合同 owner 仓库负责。
 
-## 1.0.0 - 待发布
+## 1.0.0 - 分批发布中
 
 - 全部工作区组件统一采用初始版本 `1.0.0`，稳定入口遵循 SemVer；显式 experimental feature
   在晋升前不进入 `full`，也不纳入稳定 API 兼容承诺。
@@ -86,7 +92,7 @@
 - `nafana`:Dashboard 卡片新增 `Canceled` 计数格,避免"错误率不为零但成功/失败/超时/拒绝都是 0"
   无法归因;README 补充取消结局、双层保护结局不一致、未知配置字段后果和对应常见问题条目。
 
-- 新增 `nafana` + `nafana-macro`:独立的接口级隔离监控组件(合同 `nafana/nafana.md`)。
+- 新增 `nafana` + `nafana-macro`：独立的接口级隔离监控组件。
   提供 bulkhead/超时/降级/配置驱动 isolation(yml 根 `grafana.isolation`)/CostTime 聚合日志；
   观测出口为 Prometheus 文本 `GET /metrics`(`nafana_*` 前缀,单调 counter +
   10s 精确分位 gauges + 直方图双轨),官方 Grafana 面板随 crate 交付
@@ -99,7 +105,7 @@
   许可或 `nafana_inflight`；配置驱动隔离仅在完整路径段边界剥离 context-path，重复初始化会明确告警。
 
 - 补齐所有工作区组件的 README 覆盖，保证每个组件都有用途、配置、初始化和示例说明。
-- 补齐贡献、安全、测试、发布和公开发布检查文档。
+- 补齐贡献、安全、发布和公开发布检查文档。
 - 明确双许可证发布方式：MIT 或 Apache-2.0。
 - 对象存储与 gRPC listener 以显式 experimental feature 交付，不进入 `full`；Kafka Schema
   Registry 同样保持 experimental。

@@ -2,10 +2,10 @@
 # 过程宏【必须】单独放一个 crate，且声明 [lib] proc-macro = true
 [package]
 name = "hystrix-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[hystrix] 属性宏(bulkhead + 超时 + Dashboard 上报)"
+description = "#[hystrix] 接口保护与 #[global_fallback] 终态降级属性宏"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -20,7 +20,7 @@ proc-macro = true
 
 name = "hystrix_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
 # syn: 把传进来的 Rust 源码 TokenStream 解析成语法树(AST)，features=full 才能解析函数体等完整语法
 syn = { version = "2", features = ["full"] }
 # quote: 反过来——用 quote!{} 模板把 AST/变量拼回 TokenStream(生成代码)

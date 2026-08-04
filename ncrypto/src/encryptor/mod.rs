@@ -1,4 +1,4 @@
-//! L1 工具函数(对照 原实现 `Encryptor`)。按算法族拆子模块,统一在此 re-export 成扁平 `ncrypto::*`。
+//! 无状态工具函数（兼容原实现 `Encryptor`）。按算法族拆分子模块，并在此统一导出为扁平 `ncrypto::*`。
 
 mod aes;
 mod ed25519;

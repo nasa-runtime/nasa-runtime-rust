@@ -28,7 +28,7 @@ pub struct VaultOptions {
 }
 
 impl Default for VaultOptions {
-    /// 使用 3 秒、256 KiB 且只信任 endpoint 自身 host 的保守缺省。
+    /// 业务作用：使用 3 秒、256 KiB 且只信任 endpoint 自身 host 的保守缺省。
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(3),
@@ -66,7 +66,7 @@ pub struct VaultKvV2Provider {
 }
 
 impl std::fmt::Debug for VaultKvV2Provider {
-    /// 仅展示 host、mount 与响应上限，固定隐藏 bootstrap token。
+    /// 业务作用：仅展示 host、mount 与响应上限，固定隐藏 bootstrap token。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VaultKvV2Provider")
@@ -79,7 +79,7 @@ impl std::fmt::Debug for VaultKvV2Provider {
 }
 
 impl VaultKvV2Provider {
-    /// 创建 adapter；bootstrap token 必须来自 env/file/root-of-trust，不能由该 provider 自身解析。
+    /// 业务作用：创建 adapter；bootstrap token 必须来自 env/file/root-of-trust，不能由该 provider 自身解析。
     pub fn new(
         endpoint: &str,
         mount: impl Into<String>,
@@ -137,7 +137,7 @@ impl VaultKvV2Provider {
         })
     }
 
-    /// 校验 `path#field`、执行有界 KV v2 请求并只提取目标字符串字段。
+    /// 业务作用：校验 `path#field`、执行有界 KV v2 请求并只提取目标字符串字段。
     async fn read_inner(&self, key: &str) -> Result<SecretBytes, SecretProviderError> {
         if key.len() > MAX_VAULT_KEY_BYTES {
             return Err(SecretProviderError);
@@ -200,13 +200,13 @@ impl VaultKvV2Provider {
 
 #[async_trait::async_trait]
 impl SecretProvider for VaultKvV2Provider {
-    /// 通过统一 provider 合同读取一个 Vault KV v2 字段。
+    /// 业务作用：通过统一 provider 合同读取一个 Vault KV v2 字段。
     async fn read(&self, key: &str) -> Result<SecretBytes, SecretProviderError> {
         self.read_inner(key).await
     }
 }
 
-/// 限制 mount、path 与 field 为单个有界 ASCII 路径段。
+/// 业务作用：限制 mount、path 与 field 为单个有界 ASCII 路径段。
 fn safe_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -233,19 +233,19 @@ struct VaultData {
 struct SecretJsonString(Zeroizing<String>);
 
 impl SecretJsonString {
-    /// 判断返回字段是否为空。
+    /// 业务作用：判断返回字段是否为空。
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// 借用 UTF-8 secret 字节，避免额外普通字符串复制。
+    /// 业务作用：借用 UTF-8 secret 字节，避免额外普通字符串复制。
     fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }
 
 impl<'de> serde::Deserialize<'de> for SecretJsonString {
-    /// 使用自定义 visitor 直接把 JSON 字符串放入可清零容器。
+    /// 业务作用：使用自定义 visitor 直接把 JSON 字符串放入可清零容器。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -256,12 +256,12 @@ impl<'de> serde::Deserialize<'de> for SecretJsonString {
         impl<'de> serde::de::Visitor<'de> for Visitor {
             type Value = SecretJsonString;
 
-            /// 描述反序列化器期望的 secret 字符串类型。
+            /// 业务作用：描述反序列化器期望的 secret 字符串类型。
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a secret string")
             }
 
-            /// 复制借用字符串到可清零所有权容器。
+            /// 业务作用：复制借用字符串到可清零所有权容器。
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -269,7 +269,7 @@ impl<'de> serde::Deserialize<'de> for SecretJsonString {
                 Ok(SecretJsonString(Zeroizing::new(value.to_owned())))
             }
 
-            /// 直接接管已有 String 并包装为可清零容器。
+            /// 业务作用：直接接管已有 String 并包装为可清零容器。
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,

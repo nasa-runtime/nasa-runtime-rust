@@ -22,7 +22,7 @@ pub const MAX_STR_LEN: usize = 16 * 1024 * 1024;
 /// 单个 byte[] 字段最大长度,用于 payload 与集群转发消息体的防御性解码上限。
 pub const MAX_BYTES_LEN: usize = 16 * 1024 * 1024;
 
-/// 已知 tag 的 wire type 校验(附录 A.3)。派生宏生成的 decode 用。
+/// 业务作用：已知 tag 的 wire type 校验(附录 A.3)。派生宏生成的 decode 用。
 ///
 /// # 参数
 /// - `tag`: 当前正在解码的 schema 字段 tag,用于错误里定位字段。
@@ -79,7 +79,7 @@ pub enum CodecError {
 }
 
 impl fmt::Display for CodecError {
-    /// 把编解码错误格式化为日志和上层错误链可读的文本。
+    /// 业务作用：把编解码错误格式化为日志和上层错误链可读的文本。
     ///
     /// # 参数
     /// - `f`: 标准格式化器,由错误展示路径提供。
@@ -94,7 +94,7 @@ pub type Result<T> = std::result::Result<T, CodecError>;
 
 /* ============================== zigzag(附录 A.2)============================== */
 
-/// 有符号整型 → 无符号 varint 友好编码。`<<` 在 Rust 是位移不做溢出检查,与 原实现 一致。
+/// 业务作用：有符号整型 → 无符号 varint 友好编码。`<<` 在 Rust 是位移不做溢出检查,与 原实现 一致。
 ///
 /// # 参数
 /// - `v`: schema 中的有符号整数值,会映射成适合 varint 的无符号值。
@@ -103,7 +103,7 @@ pub fn zigzag_enc(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
 
-/// 解码 ZigZag 整数；用于从无符号变长编码还原有符号值。
+/// 业务作用：解码 ZigZag 整数；用于从无符号变长编码还原有符号值。
 ///
 /// # 参数
 /// - `v`: 从 varint 读取出的无符号 ZigZag 编码值。
@@ -112,7 +112,7 @@ pub fn zigzag_dec(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
-/// 往 Vec 写一个无符号 varint(LEB128)。free 函数,供数组内部累积用。
+/// 业务作用：往 Vec 写一个无符号 varint(LEB128)。free 函数,供数组内部累积用。
 ///
 /// # 参数
 /// - `buf`: 目标编码缓冲区,函数会把 varint 字节追加到末尾。
@@ -135,12 +135,12 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// 创建空协议写入器。
+    /// 业务作用：创建空协议写入器。
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
-    /// VARINT_TLV 的字段头:`varint(tag<<3 | wiretype)`。
+    /// 业务作用：VARINT_TLV 的字段头:`varint(tag<<3 | wiretype)`。
     ///
     /// # 参数
     /// - `tag`: schema 字段 tag。
@@ -149,7 +149,7 @@ impl Writer {
         write_varint(&mut self.buf, (tag << 3) | wt);
     }
 
-    /// BITPACK 头部 bitmap,`k` 字节小端。
+    /// 业务作用：BITPACK 头部 bitmap,`k` 字节小端。
     ///
     /// # 参数
     /// - `bm`: BITPACK 字段存在性位图。
@@ -163,7 +163,7 @@ impl Writer {
         }
     }
 
-    /// LENGTH_DELIMITED:`varint(len) + payload`。
+    /// 业务作用：LENGTH_DELIMITED:`varint(len) + payload`。
     ///
     /// # 参数
     /// - `payload`: 要写入的字符串、字节数组或数组内部编码内容。
@@ -172,7 +172,7 @@ impl Writer {
         self.buf.extend_from_slice(payload);
     }
 
-    /// VARINT 值(有符号整型,zigzag):long / int / short / byte。
+    /// 业务作用：VARINT 值(有符号整型,zigzag):long / int / short / byte。
     ///
     /// # 参数
     /// - `v`: schema 中的有符号整数值,写入前会先做 ZigZag 编码。
@@ -180,7 +180,7 @@ impl Writer {
         write_varint(&mut self.buf, zigzag_enc(v));
     }
 
-    /// VARINT 值(bool,**不 zigzag**,裸 varint 0/1)。
+    /// 业务作用：VARINT 值(bool,**不 zigzag**,裸 varint 0/1)。
     ///
     /// # 参数
     /// - `b`: schema 中的布尔值,写成裸 varint 0 或 1。
@@ -188,7 +188,7 @@ impl Writer {
         write_varint(&mut self.buf, if b { 1 } else { 0 });
     }
 
-    /// 写入字符串值；用于把文本字段编码进协议缓冲区。
+    /// 业务作用：写入字符串值；用于把文本字段编码进协议缓冲区。
     ///
     /// # 参数
     /// - `s`: schema 字符串字段值,按 UTF-8 字节写入 LENGTH_DELIMITED。
@@ -196,7 +196,7 @@ impl Writer {
         self.len_delim(s.as_bytes());
     }
 
-    /// 写入字节值；用于把二进制字段编码进协议缓冲区。
+    /// 业务作用：写入字节值；用于把二进制字段编码进协议缓冲区。
     ///
     /// # 参数
     /// - `b`: schema byte[] 字段值,原样写入 LENGTH_DELIMITED。
@@ -204,7 +204,7 @@ impl Writer {
         self.len_delim(b);
     }
 
-    /// String[](LD):内部 `[count][每元素 len+bytes]`,null 元素 → len 0。
+    /// 业务作用：String[](LD):内部 `[count][每元素 len+bytes]`,null 元素 → len 0。
     ///
     /// **归一化(lossy)边界**:`Some("")` 与 `None` 都编码为长度 0,解码端一律还原成 `None`
     /// (与既有 wire 格式逐字节一致;同 json.rs 声明的 JSON 模式 Some(空)↔None 归一)。
@@ -237,7 +237,7 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    /// 构造读取器并把游标定位到输入开头。
+    /// 业务作用：构造读取器并把游标定位到输入开头。
     ///
     /// # 参数
     /// - `data`: 待解码的完整协议 payload 字节切片。
@@ -245,13 +245,13 @@ impl<'a> Reader<'a> {
         Self { data, pos: 0 }
     }
 
-    /// 返回未读取字节数；用于判断协议包是否还有字段。
+    /// 业务作用：返回未读取字节数；用于判断协议包是否还有字段。
     #[inline]
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
 
-    /// 解析 read byte 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 read byte 输入；用于把文本或语法节点转换为内部结构。
     #[inline]
     fn read_byte(&mut self) -> Result<u8> {
         if self.pos >= self.data.len() {
@@ -262,7 +262,7 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
-    /// 无符号 varint:最多 10 字节,第 10 字节只允许最低位(溢出检测)。
+    /// 业务作用：无符号 varint:最多 10 字节,第 10 字节只允许最低位(溢出检测)。
     pub fn read_varint(&mut self) -> Result<u64> {
         let mut result: u64 = 0;
         for i in 0..10 {
@@ -278,7 +278,7 @@ impl<'a> Reader<'a> {
         Err(CodecError::VarintOverflow)
     }
 
-    /// LENGTH_DELIMITED 的长度:varint 且 ≤ 剩余字节(防伪造长度触发巨量分配)。
+    /// 业务作用：LENGTH_DELIMITED 的长度:varint 且 ≤ 剩余字节(防伪造长度触发巨量分配)。
     pub fn read_len(&mut self) -> Result<usize> {
         let len = self.read_varint()?;
         if len > self.remaining() as u64 {
@@ -287,17 +287,17 @@ impl<'a> Reader<'a> {
         Ok(len as usize)
     }
 
-    /// 解析 read i64 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 read i64 输入；用于把文本或语法节点转换为内部结构。
     pub fn read_i64(&mut self) -> Result<i64> {
         Ok(zigzag_dec(self.read_varint()?))
     }
 
-    /// 解析 read bool 输入；用于把文本或语法节点转换为内部结构。
+    /// 业务作用：解析 read bool 输入；用于把文本或语法节点转换为内部结构。
     pub fn read_bool(&mut self) -> Result<bool> {
         Ok(self.read_varint()? != 0)
     }
 
-    /// 从当前位置取出指定长度的字节片段并推进游标。
+    /// 业务作用：从当前位置取出指定长度的字节片段并推进游标。
     ///
     /// # 参数
     /// - `n`: 要从当前 payload 中读取的字节数。
@@ -310,7 +310,7 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
-    /// 读取 UTF-8 字符串字段。
+    /// 业务作用：读取 UTF-8 字符串字段。
     pub fn read_str(&mut self) -> Result<String> {
         let n = self.read_len()?;
         if n > MAX_STR_LEN {
@@ -322,7 +322,7 @@ impl<'a> Reader<'a> {
             .map_err(|_| CodecError::Utf8)
     }
 
-    /// 读取 byte[] 字段。
+    /// 业务作用：读取 byte[] 字段。
     pub fn read_bytes(&mut self) -> Result<Vec<u8>> {
         let n = self.read_len()?;
         if n > MAX_BYTES_LEN {
@@ -331,7 +331,7 @@ impl<'a> Reader<'a> {
         Ok(self.take(n)?.to_vec())
     }
 
-    /// String[]:外层 LD,内层 `[count][每元素 len+bytes]`;元素 len=0 → None(与 原实现 一致)。
+    /// 业务作用：String[]:外层 LD,内层 `[count][每元素 len+bytes]`;元素 len=0 → None(与 原实现 一致)。
     pub fn read_str_array(&mut self) -> Result<Vec<Option<String>>> {
         let n = self.read_len()?;
         let inner = self.take(n)?;
@@ -366,7 +366,7 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
-    /// 读 k 字节小端 bitmap。
+    /// 业务作用：读 k 字节小端 bitmap。
     ///
     /// # 参数
     /// - `k`: BITPACK 位图占用字节数,必须由 schema 字段数量计算得出。
@@ -381,7 +381,7 @@ impl<'a> Reader<'a> {
         Ok(bm)
     }
 
-    /// 跳过未知 tag 的 value(VARINT_TLV 跨版本兼容)。
+    /// 业务作用：跳过未知 tag 的 value(VARINT_TLV 跨版本兼容)。
     ///
     /// # 参数
     /// - `wt`: 未知字段的 wire type,决定按 varint 还是 length-delimited 跳过。
@@ -404,7 +404,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// 解码收尾:不允许 trailing bytes。
+    /// 业务作用：解码收尾:不允许 trailing bytes。
     pub fn expect_end(&self) -> Result<()> {
         if self.remaining() != 0 {
             return Err(CodecError::TrailingBytes(self.remaining()));

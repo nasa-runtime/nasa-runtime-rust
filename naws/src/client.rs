@@ -1,7 +1,7 @@
 // ============================================================================
-// src/client.rs —— Rust 异步客户端 SDK(R0.5)。
+// src/client.rs —— Rust 异步客户端 SDK。
 // 连接 + AUTH 握手 + 收发(event/uid/group/endpoint)+ 自动心跳 + 回调。
-// 兼作协议与压测的 Rust 侧收发工具。架构说明(R0.5)。
+// 兼作协议与压测的 Rust 侧收发工具。架构说明。
 // 设计同服务端:writer task 独占 mpsc outbox;reader task 解帧分派到 handler。
 // ============================================================================
 
@@ -172,7 +172,7 @@ impl Client {
         let (resp, framed) = match establish_once(self.inner.clone()).await {
             Ok(v) => v,
             Err(e) => {
-                // 首连失败/被 close 取消 → 释放门禁**并唤醒** wait_closed(否则永久挂起;R7 P1)。
+                // 首连失败/被 close 取消 → 释放门禁**并唤醒** wait_closed(否则永久挂起)。
                 self.inner.release_running();
                 return Err(e);
             }

@@ -31,7 +31,7 @@ pub struct MessageRef<'a> {
 }
 
 impl MessageRef<'_> {
-    /// 计算指定模式的精确编码长度。
+    /// 业务作用：计算指定模式的精确编码长度。
     ///
     /// # 参数
     ///
@@ -52,7 +52,7 @@ impl MessageRef<'_> {
         }
     }
 
-    /// 把当前信封直接编码进调用方提供的最终缓冲区。
+    /// 业务作用：把当前信封直接编码进调用方提供的最终缓冲区。
     ///
     /// # 参数
     ///
@@ -87,7 +87,7 @@ impl MessageRef<'_> {
         Ok(expected)
     }
 
-    /// 构造语义等价的拥有型信封。
+    /// 业务作用：构造语义等价的拥有型信封。
     ///
     /// 仅在目标协议必须拥有数据时调用；原生二进制直推路径不需要执行该转换。
     ///
@@ -109,7 +109,7 @@ impl MessageRef<'_> {
     }
 }
 
-/// 借用字符串数组转为兼容 JSON 路径的拥有型数组。
+/// 业务作用：借用字符串数组转为兼容 JSON 路径的拥有型数组。
 ///
 /// # 参数
 ///
@@ -118,7 +118,7 @@ fn own_array(value: Option<&[&str]>) -> Option<Vec<Option<String>>> {
     value.map(|items| items.iter().map(|item| Some((*item).to_owned())).collect())
 }
 
-/// 校验单字段和数组上限，避免写入期发生不可控放大。
+/// 业务作用：校验单字段和数组上限，避免写入期发生不可控放大。
 ///
 /// # 参数
 ///
@@ -160,7 +160,7 @@ fn validate_fields(message: &MessageRef<'_>) -> Result<()> {
     Ok(())
 }
 
-/// 计算 BITPACK_TLV 长度。
+/// 业务作用：计算 BITPACK_TLV 长度。
 ///
 /// # 参数
 ///
@@ -190,7 +190,7 @@ fn bitpack_len(message: &MessageRef<'_>) -> Result<usize> {
     checked_add(total, unsigned_varint_len(zigzag_enc(message.ack_id)))
 }
 
-/// 计算 VARINT_TLV 长度。
+/// 业务作用：计算 VARINT_TLV 长度。
 ///
 /// # 参数
 ///
@@ -226,7 +226,7 @@ fn varint_len(message: &MessageRef<'_>) -> Result<usize> {
     checked_add(total, unsigned_varint_len(zigzag_enc(message.ack_id)))
 }
 
-/// 编码 BITPACK_TLV。
+/// 业务作用：编码 BITPACK_TLV。
 ///
 /// # 参数
 ///
@@ -280,7 +280,7 @@ fn encode_bitpack<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
     put_varint(output, zigzag_enc(message.ack_id));
 }
 
-/// 编码 VARINT_TLV。
+/// 业务作用：编码 VARINT_TLV。
 ///
 /// # 参数
 ///
@@ -323,7 +323,7 @@ fn encode_varint<B: BufMut>(message: &MessageRef<'_>, output: &mut B) {
     put_varint(output, zigzag_enc(message.ack_id));
 }
 
-/// 写字符串数组的 LENGTH_DELIMITED 值。
+/// 业务作用：写字符串数组的 LENGTH_DELIMITED 值。
 ///
 /// # 参数
 ///
@@ -343,7 +343,7 @@ fn put_array<B: BufMut>(output: &mut B, values: &[&str]) {
     }
 }
 
-/// 写字段 key。
+/// 业务作用：写字段 key。
 ///
 /// # 参数
 ///
@@ -354,7 +354,7 @@ fn put_key<B: BufMut>(output: &mut B, tag: u64, wire_type: u64) {
     put_varint(output, (tag << 3) | wire_type);
 }
 
-/// 把原始 payload 直接写入最终调用方缓冲区。
+/// 业务作用：把原始 payload 直接写入最终调用方缓冲区。
 ///
 /// # 参数
 ///
@@ -364,7 +364,7 @@ fn put_payload<B: BufMut>(output: &mut B, payload: &[u8]) {
     put_len_delimited(output, payload);
 }
 
-/// 写 LENGTH_DELIMITED 值。
+/// 业务作用：写 LENGTH_DELIMITED 值。
 ///
 /// # 参数
 ///
@@ -375,7 +375,7 @@ fn put_len_delimited<B: BufMut>(output: &mut B, value: &[u8]) {
     output.put_slice(value);
 }
 
-/// 写无符号 varint。
+/// 业务作用：写无符号 varint。
 ///
 /// # 参数
 ///
@@ -389,7 +389,7 @@ fn put_varint<B: BufMut>(output: &mut B, mut value: u64) {
     output.put_u8(value as u8);
 }
 
-/// 计算字段 key 长度。
+/// 业务作用：计算字段 key 长度。
 ///
 /// # 参数
 ///
@@ -399,7 +399,7 @@ fn field_key_len(tag: u64, wire_type: u64) -> usize {
     unsigned_varint_len((tag << 3) | wire_type)
 }
 
-/// 计算字符串数组的完整 LENGTH_DELIMITED 长度。
+/// 业务作用：计算字符串数组的完整 LENGTH_DELIMITED 长度。
 ///
 /// # 参数
 ///
@@ -413,7 +413,7 @@ fn array_value_len(values: &[&str]) -> Result<usize> {
     checked_add(unsigned_varint_len(inner as u64), inner)
 }
 
-/// 计算 LENGTH_DELIMITED 值长度。
+/// 业务作用：计算 LENGTH_DELIMITED 值长度。
 ///
 /// # 参数
 ///
@@ -422,7 +422,7 @@ fn length_delimited_len(value_len: usize) -> Result<usize> {
     checked_add(unsigned_varint_len(value_len as u64), value_len)
 }
 
-/// 计算无符号 varint 字节数。
+/// 业务作用：计算无符号 varint 字节数。
 ///
 /// # 参数
 ///
@@ -436,7 +436,7 @@ fn unsigned_varint_len(mut value: u64) -> usize {
     len
 }
 
-/// 执行 checked 长度加法。
+/// 业务作用：执行 checked 长度加法。
 ///
 /// # 参数
 ///

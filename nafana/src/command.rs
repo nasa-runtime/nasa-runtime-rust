@@ -20,6 +20,9 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::counters::{CommandCounters, LatencyHistogram};
+use crate::fallback::{
+    execute_global_fallback, FallbackCause, FallbackContext, GlobalFallbackExecution,
+};
 use crate::registry::{self, CommandKey, CommandParams, MonitorConflict};
 use crate::rolling::{Outcome, RollingWindow, WINDOW_SECS};
 
@@ -365,6 +368,93 @@ impl Command {
         let _ = self.timeout_fb.set(fb);
     }
 
+    /// 业务作用：按“局部函数、局部静态响应、全局处理器、内置响应”的固定顺序解析一次降级。
+    ///
+    /// # 参数说明
+    ///
+    /// - `cause`: 已完成主结局记账的并发拒绝或执行超时原因。
+    ///
+    /// # 返回
+    ///
+    /// 返回最终 HTTP 响应；全局处理器配置冲突、崩溃或递归时安全回退到内置响应。
+    async fn resolve_fallback(&self, cause: FallbackCause) -> Response {
+        match cause {
+            FallbackCause::BulkheadRejected { .. } => {
+                if let Some(fallback) = self.reject_fb.get() {
+                    return fallback().await;
+                }
+                if let Some(body) = self.reject_body.get() {
+                    return custom_response(body);
+                }
+            }
+            FallbackCause::ExecutionTimeout { .. } => {
+                if let Some(fallback) = self.timeout_fb.get() {
+                    return fallback().await;
+                }
+                if let Some(body) = self.timeout_body.get() {
+                    return custom_response(body);
+                }
+            }
+        }
+
+        let path = self.path.get().map(String::as_str).unwrap_or(&self.command);
+        let context =
+            FallbackContext::new(&self.command, &self.group, path, self.tps_weight, cause);
+        match execute_global_fallback(context) {
+            GlobalFallbackExecution::Handled(response) => {
+                self.counters
+                    .global_fallback_handled
+                    .fetch_add(1, Ordering::Relaxed);
+                return response;
+            }
+            GlobalFallbackExecution::UseBuiltin => {
+                self.counters
+                    .global_fallback_builtin
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            GlobalFallbackExecution::NotInstalled => {}
+            GlobalFallbackExecution::InvalidConfiguration => {
+                self.counters
+                    .global_fallback_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    command = %self.command,
+                    ?cause,
+                    "全局降级配置冲突，使用内置终态响应"
+                );
+            }
+            GlobalFallbackExecution::Panicked => {
+                self.counters
+                    .global_fallback_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                command = %self.command,
+                ?cause,
+                    "全局降级处理器发生 panic，使用内置终态响应"
+                );
+            }
+            GlobalFallbackExecution::Recursive => {
+                self.counters
+                    .global_fallback_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    command = %self.command,
+                    ?cause,
+                    "全局降级发生递归调用，使用内置终态响应"
+                );
+            }
+        }
+
+        match cause {
+            FallbackCause::BulkheadRejected { max_concurrent, .. } => {
+                rejected_response(&self.command, max_concurrent)
+            }
+            FallbackCause::ExecutionTimeout { timeout, .. } => {
+                timeout_response(&self.command, timeout)
+            }
+        }
+    }
+
     /// 【中间件形态】用本命令保护下游,`run_fn` 的薄封装。
     ///
     /// # 参数
@@ -374,14 +464,19 @@ impl Command {
         self.run_fn(move || next.run(req)).await
     }
 
-    /// 【通用执行入口】bulkhead + 超时保护任意 async 执行体,并把结局写入双轨指标。
+    /// 业务作用：【通用执行入口】用 bulkhead 与超时保护任意异步执行体，并把主结局和降级结局写入双轨指标。
     ///
     /// 执行顺序(合同):try_acquire(满 → 拒) → 并发 gauge/峰值采样 → (可选)超时
     /// 包裹执行 → 结局归类(5xx=failure,429/504 由本组件自己产出不参与归类) → 双轨记录。
     /// 调用方丢弃执行 future 时由 RAII 守卫补记 canceled，并归还 inflight。
     ///
-    /// # 参数
+    /// # 参数说明
+    ///
     /// - `f`: 被保护的异步执行体,只有通过 bulkhead 后才会被调用。
+    ///
+    /// # 返回
+    ///
+    /// 返回业务响应、局部降级响应、全局降级响应或组件内置拒绝/超时响应。
     pub async fn run_fn<F, Fut>(self: Arc<Self>, f: F) -> Response
     where
         F: FnOnce() -> Fut,
@@ -409,13 +504,13 @@ impl Command {
                         max = max,
                         "bulkhead full, rejecting request (429)"
                     );
-                    if let Some(fb) = self.reject_fb.get() {
-                        return fb().await;
-                    }
-                    return match self.reject_body.get() {
-                        Some(v) => custom_response(v),
-                        None => rejected_response(&self.command, max),
-                    };
+                    let inflight = self.inflight.load(Ordering::Relaxed).max(0) as usize;
+                    return self
+                        .resolve_fallback(FallbackCause::BulkheadRejected {
+                            max_concurrent: max,
+                            current_inflight: inflight,
+                        })
+                        .await;
                 }
             },
         };
@@ -470,13 +565,11 @@ impl Command {
                     timeout_ms = dur.as_millis() as u64,
                     "command timed out (504)"
                 );
-                if let Some(fb) = self.timeout_fb.get() {
-                    return fb().await;
-                }
-                match self.timeout_body.get() {
-                    Some(v) => custom_response(v),
-                    None => timeout_response(&self.command, dur),
-                }
+                self.resolve_fallback(FallbackCause::ExecutionTimeout {
+                    timeout: dur,
+                    elapsed,
+                })
+                .await
             }
         }
     }
@@ -529,7 +622,15 @@ impl Command {
         );
     }
 
-    /// 导出 `/metrics` 渲染所需的全量数据(锁滚动窗口一次做快照)。
+    /// 业务作用：导出 `/metrics` 所需的主请求、全局降级、TPS、并发与延迟一致性快照。
+    ///
+    /// # 参数说明
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回当前命令的只读渲染视图；仅在取滚动窗口快照时短暂持锁。
     pub(crate) fn export(&self) -> CommandExport {
         let window = self.rolling_state().snapshot();
         let inflight = self.inflight.load(Ordering::Relaxed).max(0) as u64;
@@ -550,6 +651,15 @@ impl Command {
             rejected: self.counters.rejected.load(Ordering::Relaxed),
             canceled: self.counters.canceled.load(Ordering::Relaxed),
             fallback: self.counters.fallback.load(Ordering::Relaxed),
+            global_fallback_handled: self
+                .counters
+                .global_fallback_handled
+                .load(Ordering::Relaxed),
+            global_fallback_builtin: self
+                .counters
+                .global_fallback_builtin
+                .load(Ordering::Relaxed),
+            global_fallback_failed: self.counters.global_fallback_failed.load(Ordering::Relaxed),
             tps: self.counters.tps.load(Ordering::Relaxed),
             inflight,
             rolling_max_inflight: window.rolling_max_inflight.max(inflight),
@@ -604,6 +714,12 @@ pub(crate) struct CommandExport {
     pub(crate) canceled: u64,
     /// 降级累计。
     pub(crate) fallback: u64,
+    /// 全局降级成功响应累计。
+    pub(crate) global_fallback_handled: u64,
+    /// 全局处理器主动使用内置响应累计。
+    pub(crate) global_fallback_builtin: u64,
+    /// 全局降级执行失败累计。
+    pub(crate) global_fallback_failed: u64,
     /// TPS 累计。
     pub(crate) tps: u64,
     /// 当前并发。

@@ -1,4 +1,4 @@
-//! `double`(f64)便捷算术段。**对照 原实现 `Numeric` 的 `double` 重载**(L934-L1018)。
+//! `double`（f64）便捷算术，兼容原实现 `Numeric` 的 `double` 重载。
 //!
 //! 原实现 用方法重载区分 `long` / `double` / `BigDecimal` 三套同名 API;Rust 无重载,故 f64 段
 //! 收到 `numeric::float` 模块下(i128 定点在 crate 根、BigDecimal 在 `numeric::decimal`)。
@@ -10,14 +10,14 @@
 //! **大有限值偏离(既定设计,非缺口)**:原实现 经 `long` 中转,`Math.round` 超 i64 域会**饱和**到
 //! `Long.MAX/MIN`,后续 long 运算还会**回绕**(如 `add(1e19,1.0,0)` 在 原实现 回绕为负)。本 crate 用 i128,不复刻
 //! 这条 原实现 溢出 bug——见 crate 根文档「类型用 i128」一节。原实现 自身 原实现doc 也把支持域限定在
-//! `|val×10^scale| < 10^16`(`Numeric.toFixed` L459-460),大有限值本就在 原实现 支持域外。
+//! `|val×10^scale| < 10^16`；更大的有限值原本就在 `Numeric.toFixed` 支持域外。
 
 use crate::{
     align_rounding, check_scale, divide as fixed_divide, multiply as fixed_multiply, pow10,
     to_fixed_f64, NumericError, Result, RoundingMode, DEFAULT_SCALE,
 };
 
-/// 10^scale 作 f64 因子(scale 已校验 ≤8,精确可表)。
+/// 业务作用: 10^scale 作 f64 因子(scale 已校验 ≤8,精确可表)。
 ///
 /// # 参数
 /// - `scale`: 小数精度或缩放位数。
@@ -26,7 +26,7 @@ fn m(scale: u32) -> f64 {
     pow10(scale) as f64
 }
 
-/// `double` 加法,scale 位精度(内部走定点防漂移)。对照 原实现 `Numeric.add(double,double,int)`。
+/// 业务作用: `double` 加法,scale 位精度(内部走定点防漂移)。对照 原实现 `Numeric.add(double,double,int)`。
 ///
 /// # 参数
 ///
@@ -40,7 +40,7 @@ pub fn add(a: f64, b: f64, scale: u32) -> Result<f64> {
     Ok(sum as f64 / m(scale))
 }
 
-/// `double` 加法,默认精度(scale=[`DEFAULT_SCALE`]=8)。对照 原实现 `Numeric.add(double,double)`。
+/// 业务作用: `double` 加法,默认精度(scale=[`DEFAULT_SCALE`]=8)。对照 原实现 `Numeric.add(double,double)`。
 ///
 /// # 参数
 ///
@@ -50,7 +50,7 @@ pub fn add_default(a: f64, b: f64) -> Result<f64> {
     add(a, b, DEFAULT_SCALE)
 }
 
-/// `double` 减法,scale 位精度。对照 原实现 `Numeric.subtract(double,double,int)`。
+/// 业务作用: `double` 减法,scale 位精度。对照 原实现 `Numeric.subtract(double,double,int)`。
 ///
 /// # 参数
 ///
@@ -64,7 +64,7 @@ pub fn subtract(a: f64, b: f64, scale: u32) -> Result<f64> {
     Ok(diff as f64 / m(scale))
 }
 
-/// `double` 减法,默认精度(scale=8)。对照 原实现 `Numeric.subtract(double,double)`。
+/// 业务作用: `double` 减法,默认精度(scale=8)。对照 原实现 `Numeric.subtract(double,double)`。
 ///
 /// # 参数
 ///
@@ -74,7 +74,7 @@ pub fn subtract_default(a: f64, b: f64) -> Result<f64> {
     subtract(a, b, DEFAULT_SCALE)
 }
 
-/// `double` 乘法,scale 位精度(复用 i128 定点乘核)。对照 原实现 `Numeric.multiply(double,double,int)`。
+/// 业务作用: `double` 乘法,scale 位精度(复用 i128 定点乘核)。对照 原实现 `Numeric.multiply(double,double,int)`。
 ///
 /// # 参数
 ///
@@ -87,7 +87,7 @@ pub fn multiply(a: f64, b: f64, scale: u32) -> Result<f64> {
     Ok(fixed_multiply(af, bf, scale)? as f64 / m(scale))
 }
 
-/// `double` 乘法,默认精度(scale=8)。对照 原实现 `Numeric.multiply(double,double)`。
+/// 业务作用: `double` 乘法,默认精度(scale=8)。对照 原实现 `Numeric.multiply(double,double)`。
 ///
 /// # 参数
 ///
@@ -97,7 +97,7 @@ pub fn multiply_default(a: f64, b: f64) -> Result<f64> {
     multiply(a, b, DEFAULT_SCALE)
 }
 
-/// `double` 除法,scale 位精度(复用 i128 定点除核;b 折定点为 0 → `DivByZero`)。
+/// 业务作用: `double` 除法,scale 位精度(复用 i128 定点除核;b 折定点为 0 → `DivByZero`)。
 /// 对照 原实现 `Numeric.divide(double,double,int)`。
 ///
 /// # 参数
@@ -111,7 +111,7 @@ pub fn divide(a: f64, b: f64, scale: u32) -> Result<f64> {
     Ok(fixed_divide(af, bf, scale)? as f64 / m(scale))
 }
 
-/// `double` 除法,默认精度(scale=8)。对照 原实现 `Numeric.divide(double,double)`。
+/// 业务作用: `double` 除法,默认精度(scale=8)。对照 原实现 `Numeric.divide(double,double)`。
 ///
 /// # 参数
 ///
@@ -121,7 +121,7 @@ pub fn divide_default(a: f64, b: f64) -> Result<f64> {
     divide(a, b, DEFAULT_SCALE)
 }
 
-/// `double` 截取到 scale 位(HALF_UP/ties→+∞)。对照 原实现 `Numeric.align(double,int)`。
+/// 业务作用: `double` 截取到 scale 位(HALF_UP/ties→+∞)。对照 原实现 `Numeric.align(double,int)`。
 ///
 /// # 参数
 ///
@@ -131,7 +131,7 @@ pub fn align(val: f64, scale: u32) -> Result<f64> {
     Ok(to_fixed_f64(val, scale)? as f64 / m(scale))
 }
 
-/// `double` 向上截取到 scale 位(`ceil`)。对照 原实现 `Numeric.alignUp(double,int)`。
+/// 业务作用: `double` 向上截取到 scale 位(`ceil`)。对照 原实现 `Numeric.alignUp(double,int)`。
 /// 非有限值返 `Err`(同 [`crate::to_fixed_f64`] 安全偏离)。
 ///
 /// # 参数
@@ -149,7 +149,7 @@ pub fn align_up(val: f64, scale: u32) -> Result<f64> {
     Ok(aligned as f64 / m(work))
 }
 
-/// `double` 向下截取到 scale 位(`floor`)。对照 原实现 `Numeric.alignDown(double,int)`。
+/// 业务作用: `double` 向下截取到 scale 位(`floor`)。对照 原实现 `Numeric.alignDown(double,int)`。
 /// 非有限值返 `Err`。
 ///
 /// # 参数

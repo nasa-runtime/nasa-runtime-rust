@@ -46,12 +46,12 @@ cargo metadata --no-deps --format-version 1 \
     done
 ```
 
-初次发布要求全部返回 `404`。若返回 `200`，必须继续查询
+尚未发布的包应返回 `404`。若返回 `200`，必须继续查询
 `https://crates.io/api/v1/crates/<crate>/owners`：只有 owner 明确属于本项目发布账号时才能沿用；
 否则先修改 crate 名、门面依赖、README、发布拓扑和下游示例，再重新执行全量检查。
 
-截至 2026-08-03 的实时检查中，当前 60 个名称均返回 `404`。该结果会随外部注册表变化，
-不能替代正式发布前的最后一次复查。
+前三批已经由本项目账号完成发布。其余批次的名称状态会随外部注册表变化，历史结果不能替代
+正式上传前的最后一次复查。
 
 ## 发布批次与顺序
 
@@ -79,14 +79,25 @@ cargo metadata --no-deps --format-version 1 \
 
 如果某个 crate 依赖另一个本地 crate，必须先发布被依赖项。
 
+前三批已完成实际发布；后续批次状态不能因本地工作区可编译就提前标记为可发布。
+
+一旦内部 crate 的目标版本已进入 crates.io，所有组件 manifest 必须移除指向它的 `path`，只保留
+registry `version`。`path + version` 仅允许用于尚未发布的后续拓扑边；不参与发布的根级质量工程
+可按验证目的显式选择工作区路径。发布工作流会扫描全工作区，拒绝任何组件继续通过 `path` 引用
+已发布 crate，并拒绝当前待发布 crate 含任意本地依赖。
+
 ## 发布演练
 
-对当前阶段的每个 crate 先运行 dry-run：
+对当前阶段的每个 crate 先运行归档验证或 dry-run：
 
 ```bash
 cargo publish --dry-run -p macro-support
 cargo publish -p macro-support
 ```
+
+GitHub Actions 的 `.github/workflows/publish-crates.yml` 通过手工输入选择发布批次。必须从受保护的
+release 分支选择目标批次并输入工作流要求的确认文本。crates.io token 只授予当前批次需要的 scope，
+并将当前批次的精确 crate 名加入允许范围。
 
 发布后等待 crates.io API 和稀疏索引均能解析该版本，再继续同阶段下一个包。阶段完成后，以干净
 临时目录执行下一阶段 dry-run；不得使用 `[patch]` 或本地 path 成功冒充注册表依赖可解析。
@@ -100,8 +111,7 @@ cargo publish -p macro-support
 - `edition`；
 - `repository`、`homepage` 和统一 MSRV（Rust 1.94）；
 - `.crate` 归档中的两份许可证正文及 `NOTICE`；
-- `.crate` 归档不包含任何测试目录、文件、代码、fixture、证书、脚本或相关说明；组件 README、
-  rustdoc、源码注释和 manifest 注释同样不得携带测试性内容；
+- `.crate` 归档只包含产品源码、公开文档和再分发所需文件，不携带内部验证资产、证书或脚本；
 - 不依赖只适用于私有本地环境的 path-only 依赖；
 - README 与该 crate 的公开 API 一致。
 

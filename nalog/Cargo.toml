@@ -25,7 +25,7 @@ categories.workspace = true
 [lib]
 name = "nalog"
 [dependencies]
-nabase = { package = "nabase", version = "1.0.0", path = "../nabase" }
+nabase = { package = "nabase", version = "1.0.0" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

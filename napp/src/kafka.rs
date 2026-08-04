@@ -625,10 +625,10 @@ impl ApplicationComponent for KafkaComponent {
             let application = context.application().clone();
             let deadline = kafka_ready_deadline(context.deadline())?;
 
-            // Phase 1:在启动任何 consumer 之前,对**所有** client 执行只读 broker metadata 探针
+            // 启动任何 consumer 之前，先对**所有** client 执行只读 broker metadata 探针，
             // (consumer client 也探,不再只探 producer-only)。只读、无 owner 副作用,失败无需回滚;
             // 全部失败按 client 名稳定排序后主错误报第一个。metadata 成功**不**冒充 consumer Ready——
-            // consumer 仍须在 Phase 3 等待真实 group join/assignment。
+            // consumer 仍须在最终就绪门禁中等待真实 group join/assignment。
             probe_all_clients_metadata(&self.clients, deadline).await?;
 
             let runtime = application.kafka_runtime();
@@ -636,7 +636,7 @@ impl ApplicationComponent for KafkaComponent {
             let consumer_action_clients = Arc::new(Mutex::new(Vec::new()));
             let mut consumer_action_active = false;
 
-            // Phase 2:metadata 探针通过后再启动 consumer(建立 owner 副作用),按现有回滚纪律压栈排空 action。
+            // metadata 探针通过后再启动 consumer（建立 owner 副作用），并按回滚纪律压栈排空 action。
             for (name, plan) in &mut self.clients {
                 plan.capability.seal_metrics();
                 match plan.container.consumers {
@@ -711,8 +711,8 @@ impl ApplicationComponent for KafkaComponent {
                 ));
             }
 
-            // Phase 3:consumer client 等待真实 group join/assignment 满足 ReadyRequirement;producer-only
-            // client 的就绪已由 Phase 1 metadata 探针确认,此处不再重复探测。group 超时构建含每 group 快照
+            // consumer client 必须等待真实 group join/assignment 满足 ReadyRequirement；producer-only
+            // client 的就绪已由 metadata 探针确认，此处不再重复探测。group 超时构建含每 group 快照
             // (state/assignment/ready_epoch/last_error)的富诊断,无需 librdkafka 旁路日志即可定位。
             let ready_budget_ms = deadline
                 .saturating_duration_since(Instant::now())
@@ -726,7 +726,7 @@ impl ApplicationComponent for KafkaComponent {
                 let groups = plan.groups.clone();
                 waits.push(Box::pin(async move {
                     if groups.is_empty() {
-                        // producer-only:Phase 1 已确认 broker 可达,直接就绪,不重复探测。
+                        // producer-only client 已确认 broker 可达，可直接就绪而无需重复探测。
                         return Ok((name, Vec::new()));
                     }
                     let requirements = groups

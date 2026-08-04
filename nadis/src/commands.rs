@@ -212,7 +212,7 @@ impl RedisClient {
 
     /// SCAN 流式遍历(替代 KEYS; 第 4 条)。返回收集后的 Vec——
     /// AsyncIter 借用连接,先在内部消费完(单页 count 由 Redis 决定,遍历期间可被并发修改)。
-    /// M2 注:**多往返游标不套 `command.timeout_ms`**(单命令超时语义不适用于整轮 SCAN);
+    /// **多往返游标不套 `command.timeout_ms`**：单命令超时语义不适用于完整 SCAN 周期；
     /// 需整体超时由调用方在外层 `tokio::time::timeout` 包裹。
     ///
     /// # 参数
@@ -741,7 +741,7 @@ impl RedisClient {
         self.timed(c.spop(key)).await
     }
 
-    /// SPOP key count:随机弹出至多 count 个成员(对照 原实现 sPop(key,count);第九轮 P2 对称补全)。
+    /// SPOP key count：随机弹出至多 count 个成员，与参照实现的批量语义一致。
     /// redis-rs `spop` 无 count 形态,这里直接拼命令(execute_raw 已套 timeout)。
     ///
     /// # 参数

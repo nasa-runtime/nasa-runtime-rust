@@ -1,6 +1,6 @@
 // ============================================================================
 // src/partition/mod.rs —— Kafka 式 Stream 分区框架:路由 / Key 布局 / 发布 / typestate。
-// (架构设计文档;对照 原实现 RedisPartition + BatchStreamMessageListenerContainer)
+// 对齐既有 RedisPartition 与 BatchStreamMessageListenerContainer 的公开语义。
 //
 // 当前实现边界：
 //   · 兼容路由、三阶段 typestate、串行 worker、全局在飞预算、PEL 重投与再平衡已接线；
@@ -92,7 +92,7 @@ fn command_timeout_millis(timeout: std::time::Duration) -> Result<u64> {
         .map_err(|_| NasaRedisError::Config("partition command timeout 毫秒值溢出".into()))
 }
 
-/// **原实现 `Double.toString` 逐位复刻(M1:浮点跨语言格式化对齐)**。
+/// **逐位复刻既有系统的 `Double.toString`，保证浮点值跨语言格式一致**。
 /// Rust `f64::to_string()` 与 原实现 系统性分叉:整数值无 `.0`(`1.0`→"1" vs 原实现 "1.0")、科学计数法阈值
 /// 与写法不同(`1e10`→"10000000000" vs 原实现 "1.0E10")。浮点作 @JsonArrayKey/id/bucket subId 或 HASH 字段
 /// 存储时,格式不一致 = 跨语言 key/值字节分叉、数据不通。本函数对齐 原实现 规则:
@@ -213,7 +213,7 @@ impl KeyLayout {
 /// - `count`: Redis 命令、分页或批处理使用的数量上限。
 fn assert_same_slot_cluster(layout: &KeyLayout, lock_prefix: &str, count: u32) -> Result<()> {
     use crate::keytag::redis_slot;
-    // group 为空 → prefix=`{}` 空 tag → 整 key 参与哈希、各 key 不同 slot(P2 同源)。
+    // group 为空 → prefix=`{}` 空 tag → 整 key 参与哈希、各 key 不同 slot(同源)。
     if layout.group().is_empty() {
         return Err(NasaRedisError::Config(
             "cluster 同槽自检:default_group 为空,`{}` 空 hash-tag 会使各 key 落不同 slot → 多键 Lua CROSSSLOT".into(),
@@ -269,7 +269,7 @@ async fn build_group_layout(
             "partition 组 \"{base}\" count 必须 > 0"
         )));
     }
-    // ④B Cluster 同槽 relayout(group 级 hash-tag):本组全部 key(stream/marker/lock/fence/...)含同一
+    // Cluster 同槽 relayout 使用 group 级 hash-tag，使本组全部 key（stream/marker/lock/fence 等）含同一
     // tag `base` → 同 slot;单节点 prefix 不变。consumer group 名 = prefix(`group()`),包裹后两端一致。
     let prefix = if client.is_cluster() {
         format!("{{{base}}}")
@@ -345,7 +345,7 @@ where
 
 /// stream 消息体(写入 entry 的 `data` field;对照 原实现 `PooledEvtData` 四字段,字段名对齐)。
 /// **标准 serde JSON**——任意语言(原实现 default-typing=false 等)写出的 `{topic,event,data,passthrough}`
-/// 与本结构逐字段互通。**反序列化忽略 null / 容忍缺省**(P1):topic/event 缺省或 null → `""`、data 缺省或
+/// 与本结构逐字段互通。**反序列化忽略 null / 容忍缺省**:topic/event 缺省或 null → `""`、data 缺省或
 /// null → `Value::Null`、passthrough 缺省或 null → `None`(Option 原生),故"原实现 不传 data / 写 topic:null"
 /// 等不再解码失败进毒。序列化仍输出纯标准 JSON(passthrough=None 时省略)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,7 +447,7 @@ impl PreparedPartition {
     pub async fn prepare(client: Arc<RedisClient>, lock: Arc<DistributedLock>) -> Result<Self> {
         // 产品决定(2026-06-14):partition 的线格式是**标准 serde JSON**(`Envelope`),与 原实现
         // (default-typing=false 标准 JSON)双向互通——原实现 写 Rust 消费、Rust 写 原实现 消费均可。
-        // 故 原实现V1 / RustV2 **两 profile 的 partition 都支持**(不再因"待实现 jackson-compat"拒绝
+        // 故 原实现V1 / RustV2 **两 profile 的 partition 都支持**(不再因缺少 jackson-compat 而拒绝
         // 原实现V1);profile 仅影响 fencing:RustV2 用 V2 fence stamp(更强,对 原实现 不可见),原实现V1
         // 用 V1 holds 双检查 + 裸 XACK(与 原实现 锁层一致)。**不支持的只有 Jackson default-typing=true**
         // 那套多态字节(已声明)。⚠ 跨语言共享 stream 前应做 golden-bytes 验证 原实现 标准 JSON
@@ -504,7 +504,7 @@ impl PreparedPartition {
 
         // 隔离组(yml partition.groups.{逻辑名};顺序无关,topic 路由唯一即可)
         for (logical, gcfg) in &cfg.groups {
-            // 与 connect 期使用相同的名称合同；此处保留二道防线，防未来新增绕过 validate 的构造路径。
+            // 与 connect 期使用相同的名称合同；此处保留二道防线，阻止任何绕过 validate 的构造路径。
             if logical.trim().is_empty()
                 || logical != logical.trim()
                 || logical.len() > MAX_REDIS_NAME_BYTES
@@ -738,7 +738,7 @@ impl RunningPartition {
             .await
     }
 
-    /// **round-robin 发布(F6)**:无路由 key,全局轮转均摊到各分区(对照 原实现 `publish(partition==null)`)。
+    /// **round-robin 发布**：无路由 key 时全局轮转均摊到各分区，对齐既有 `publish(partition==null)`。
     /// 适合无需同 key 顺序保证、只要均摊吞吐的场景;需同 key 顺序请用 `publish`/`publish_i64`。
     ///
     /// # 参数
@@ -802,7 +802,7 @@ impl RunningPartition {
         self.inner.claimed_partitions().await
     }
 
-    // ── 毒消息管理 API(R4.2a;单 owner 进程内直调,跨节点 = command outbox R4.2b)──
+    // ── 毒消息管理 API（单 owner 进程内直调，跨节点通过 command outbox 路由）──
 
     /// 查询分区是否 Parked(返回 park_id;诊断/运维入口)。
     ///
@@ -830,12 +830,12 @@ impl RunningPartition {
     }
 
     /// dlq:把 Parked 消息按 planned-ID 协议发布到 DLQ stream({prefix}:dlq),
-    /// marker 终态 Dlqed,分区恢复消费(R4.2d)。
+    /// marker 终态 Dlqed,分区恢复消费。
     ///
     /// # 参数
     /// - `p`: 默认组内的分区编号。
     pub async fn dlq_parked(&self, p: u32) -> Result<Vec<String>> {
-        // owner-fenced(R4.2f-A):经 inner 校验本节点是 owner 后再处置 + 通知解除 Parked
+        // owner-fenced:经 inner 校验本节点是 owner 后再处置 + 通知解除 Parked
         self.inner.dlq_parked(p).await
     }
 
@@ -849,7 +849,7 @@ impl RunningPartition {
         self.inner.force_republish(p).await
     }
 
-    /// **通用 liveness-takeover(①.4)**:operator **确认原 op 已死后**,强制接管某分区卡死的在途
+    /// **通用 liveness-takeover**：operator 确认原 op 已死后，强制接管某分区卡死的在途
     /// `*Publishing`/`Dropping`(原 op 永久丢失、无法自行重提 → 普通续作 `OperationConflict` 推不动)。
     /// 覆写 transition op 为本节点稳定 op 后续作到终态,分区恢复消费。⚠ **显式接受"可能与原 op 重复推进"
     /// 风险**(取向同 `force_republish`);仅在确认原 op 进程已死时使用。返回续作产出的新 entry IDs。
@@ -860,7 +860,7 @@ impl RunningPartition {
         self.inner.force_takeover(p).await
     }
 
-    // ── 管理命令 outbox(R4.2c:跨节点管理路由;任意节点可提交,owner 执行)──
+    // ── 管理命令 outbox(跨节点管理路由;任意节点可提交,owner 执行)──
 
     /// 提交管理命令(at-least-once:Unknown 后可同 op_id 重复提交,owner 按 result 去重)。
     /// deadline 以 Redis TIME 为基准(producer 传相对 timeout_ms,防节点时钟漂移)。

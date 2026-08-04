@@ -818,7 +818,7 @@ fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughM
     })
 }
 
-/// 返回类型化注册项的稳定 route 描述，供 P3 冲突校验复用。
+/// 返回类型化注册项的稳定 route 描述，供注册冲突校验复用。
 ///
 /// # 参数
 ///

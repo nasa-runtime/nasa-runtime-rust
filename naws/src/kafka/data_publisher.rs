@@ -101,7 +101,7 @@ impl KafkaClusterDataPublisher {
     /// 二者来自两个独立配置：egress 的 `Source-Node` 由 Cluster 提供，
     /// ingress 的回环判定用 `WsKafkaRuntimeConfig.local_node`。不一致时 Loopback 永不命中，
     /// **本节点发出的每条消息都会被自己再投递一次**，且没有任何报错——
-    /// E11 #10 把它列为发布阻断项。这里在首次发布时比对并大声告警。
+    /// 首次发布时必须比对该值并显式告警，避免编解码配置不一致导致静默数据损坏。
     ///
     /// 不拒绝发布：此刻拒绝等于让一次配置疏漏直接切断数据面，代价大于重复投递。
     ///

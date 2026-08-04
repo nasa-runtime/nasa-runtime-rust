@@ -12,6 +12,6 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1"
-nainbox-core = { version = "1.0.0", path = "../nainbox-core" }
+nainbox-core = { version = "1.0.0" }
 natx = { version = "1.0.0", path = "../natx" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

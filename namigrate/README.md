@@ -4,27 +4,32 @@
 在监听流量前检查 pending、checksum drift 和 dirty 状态；`apply` 还使用同 session advisory lock
 串行化多个实例。
 
-业务通过应用门面登记嵌入式 migrator：
+直接依赖并在开放业务流量前执行门禁：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "tx", "web"] }
-sqlx = { version = "0.8", features = ["migrate", "mysql"] }
+namigrate = "1"
+sqlx = { version = "0.9", features = ["migrate", "mysql"] }
 ```
 
 ```rust
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+use namigrate::{run_gate, MigrationMode, MigrationSettings, Migrator};
 
-#[nasa::application("db", "web")]
-async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    app.configure_migrations("default", MIGRATOR)?;
-    Ok(())
-}
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+let settings = MigrationSettings {
+    mode: MigrationMode::Validate,
+    ..Default::default()
+};
+let report = run_gate(&pool, &MIGRATOR, &settings).await?;
 ```
 
-不使用 Service 生命周期的批处理可显式调用 `run_gate`，并自行保证它发生在业务读写之前。
+`namigrate` 不启动连接池，也不读取应用配置。调用方负责创建 `MySqlPool`、嵌入 migration，并保证
+`run_gate` 成功发生在 listener Ready 和任何业务读写之前。
 
 ## YML 配置
+
+下列形状由应用映射为 `MigrationSettings`，不是本 crate 自动读取的固定 schema。
 
 ```yaml
 database:
@@ -46,4 +51,5 @@ database:
 - 生产常态使用 `validate`；`apply` 只用于单实例、本地环境或专门迁移任务。
 - dirty 代表 DDL 可能部分提交，运行时无法安全推断修复动作，必须人工检查。
 - advisory lock、查询和执行绑定同一 MySQL session；取消时关闭 session 兜底释放锁。
+- `lock_timeout_ms` 是从获取池连接开始的端到端预算；`0` 明确表示不设置外层截止时间。
 - 公开错误只含版本和稳定分类，不包含 SQL、schema 正文或连接信息。

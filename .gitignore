@@ -6,6 +6,3 @@ node_modules/
 **/tests/
 tests/*
 scripts/
-
-# 本地开发架构文档，不进入远端仓库。
-/

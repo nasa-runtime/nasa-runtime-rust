@@ -61,7 +61,7 @@ impl Default for DiscoveryConfig {
     }
 }
 
-/// 后端类型。第一版只 Nacos;留枚举位扩 eureka/consul。
+/// 后端类型；当前仅支持 Nacos，未知类型会在配置解析阶段被拒绝。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -623,7 +623,7 @@ async fn init_from_config_impl(
 
             // init_with_discovery 内部按 heuristic_http 决定是否首拉 list_services + 启动索引(走 connect)。
             // 传入自定义 LoadBalancer 时改走 init_with_discovery_and_load_balancer(忽略 cfg.rest.lb_strategy)。
-            // 失败时【显式回滚注册】(对齐 D1「正式下线不靠 Drop」):已注册的实例先 deregister 摘流再返回错,
+            // 失败时必须显式回滚注册：已注册的实例先 deregister 摘流再返回错误，不能依赖 Drop 正式下线。
             // 否则会留下一个「已注册但 RestDiscovery 未装配」的僵尸实例,只能等 Drop best-effort。
             let init_result = match load_balancer {
                 Some(lb) => {

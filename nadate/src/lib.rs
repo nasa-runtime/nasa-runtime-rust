@@ -89,7 +89,7 @@ pub enum DateError {
 }
 
 impl core::fmt::Display for DateError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用: 实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -110,12 +110,12 @@ pub type Result<T> = core::result::Result<T, DateError>;
 
 // ==================== 时区 / 当前时刻 ====================
 
-/// GMT+8(北京/上海)固定偏移,默认时区。
+/// 业务作用: GMT+8(北京/上海)固定偏移,默认时区。
 pub fn gmt8() -> FixedOffset {
     FixedOffset::east_opt(GMT8_OFFSET_SECS).expect("GMT+8 偏移合法")
 }
 
-/// 构造东 `hours` 时区偏移(如 `offset_hours(8)` = GMT+8;负数为西区)。
+/// 业务作用: 构造东 `hours` 时区偏移(如 `offset_hours(8)` = GMT+8;负数为西区)。
 ///
 /// # 参数
 ///
@@ -128,14 +128,14 @@ pub fn offset_hours(hours: i32) -> Result<FixedOffset> {
         .ok_or(DateError::Offset)
 }
 
-/// 当前 epoch 毫秒。
+/// 业务作用: 当前 epoch 毫秒。
 pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
 // ==================== 原实现 pattern → chrono strftime ====================
 
-/// 把 原实现 SimpleDateFormat pattern 转 chrono strftime pattern。
+/// 业务作用: 把 原实现 SimpleDateFormat pattern 转 chrono strftime pattern。
 ///
 /// 支持:`yyyy`→`%Y`、`yy`→`%y`、`MM`→`%m`、`dd`→`%d`、`HH`→`%H`、`mm`→`%M`、`ss`→`%S`、`SSS`→`%3f`;
 /// `'T'` 等单引号内为字面量;`- / : . 空格` 等为字面量(`%` 字面量转义为 `%%`)。
@@ -180,7 +180,7 @@ pub(crate) fn pattern_to_chrono(pat: &str) -> String {
     out
 }
 
-/// 向格式化结果写入字面字符；用于保留模式串里的普通文本。
+/// 业务作用: 向格式化结果写入字面字符；用于保留模式串里的普通文本。
 ///
 /// # 参数
 /// - `out`: chrono pattern 输出缓冲区。
@@ -195,7 +195,7 @@ fn push_literal(out: &mut String, c: char) {
 
 // ==================== 内部:ms ↔ DateTime ====================
 
-/// 转换为带固定时区偏移的 datetime。
+/// 业务作用: 转换为带固定时区偏移的 datetime。
 ///
 /// # 参数
 /// - `off`: 目标固定时区偏移。
@@ -207,7 +207,7 @@ pub(crate) fn to_datetime(off: FixedOffset, ms: i64) -> Result<DateTime<FixedOff
 
 // ==================== 格式化 ====================
 
-/// 用指定时区偏移 + 原实现 pattern 格式化 epoch 毫秒。
+/// 业务作用: 用指定时区偏移 + 原实现 pattern 格式化 epoch 毫秒。
 ///
 /// # 参数
 ///
@@ -220,7 +220,7 @@ pub fn format_offset(off: FixedOffset, ms: i64, pattern: &str) -> Result<String>
     Ok(dt.format(&cp).to_string())
 }
 
-/// 用 **GMT+8** + 原实现 pattern 格式化 epoch 毫秒。对照 原实现 `format(long, f)`。
+/// 业务作用: 用 **GMT+8** + 原实现 pattern 格式化 epoch 毫秒。对照 原实现 `format(long, f)`。
 ///
 /// # 参数
 ///
@@ -230,7 +230,7 @@ pub fn format(ms: i64, pattern: &str) -> Result<String> {
     format_offset(gmt8(), ms, pattern)
 }
 
-/// 默认格式 `yyyy-MM-dd HH:mm:ss`(GMT+8)。对照 原实现 `format(long)`。
+/// 业务作用: 默认格式 `yyyy-MM-dd HH:mm:ss`(GMT+8)。对照 原实现 `format(long)`。
 ///
 /// # 参数
 ///
@@ -239,7 +239,7 @@ pub fn format_default(ms: i64) -> Result<String> {
     format(ms, F_Y_M_D_H_M_S)
 }
 
-/// `yyyy-MM-dd`(GMT+8)。对照 原实现 `format_y_M_d`。
+/// 业务作用: `yyyy-MM-dd`(GMT+8)。对照 原实现 `format_y_M_d`。
 ///
 /// # 参数
 ///
@@ -248,7 +248,7 @@ pub fn format_y_m_d(ms: i64) -> Result<String> {
     format(ms, F_Y_M_D)
 }
 
-/// `yyyy-MM`(GMT+8)。对照 原实现 `format_y_M`。
+/// 业务作用: `yyyy-MM`(GMT+8)。对照 原实现 `format_y_M`。
 ///
 /// # 参数
 ///
@@ -257,7 +257,7 @@ pub fn format_y_m(ms: i64) -> Result<String> {
     format(ms, F_Y_M)
 }
 
-/// `yyyyMMdd`(GMT+8)。对照 原实现 `format_yMd`。
+/// 业务作用: `yyyyMMdd`(GMT+8)。对照 原实现 `format_yMd`。
 ///
 /// # 参数
 ///
@@ -266,7 +266,7 @@ pub fn format_ymd(ms: i64) -> Result<String> {
     format(ms, F_YMD)
 }
 
-/// `yyyyMMddHHmmss`(GMT+8)。对照 原实现 `format_yMdHms`。
+/// 业务作用: `yyyyMMddHHmmss`(GMT+8)。对照 原实现 `format_yMdHms`。
 ///
 /// # 参数
 ///
@@ -275,7 +275,7 @@ pub fn format_ymdhms(ms: i64) -> Result<String> {
     format(ms, F_YMDHMS)
 }
 
-/// `yyyy/MM/dd`(GMT+8,路径风格)。对照 原实现 `format_yMd_path`。
+/// 业务作用: `yyyy/MM/dd`(GMT+8,路径风格)。对照 原实现 `format_yMd_path`。
 ///
 /// # 参数
 ///
@@ -286,7 +286,7 @@ pub fn format_ymd_path(ms: i64) -> Result<String> {
 
 // ==================== 解析 ====================
 
-/// 用指定时区偏移 + 原实现 pattern 解析为 epoch 毫秒。缺失的字段按默认补(年 1970/月日 01/时分秒 00)。
+/// 业务作用: 用指定时区偏移 + 原实现 pattern 解析为 epoch 毫秒。缺失的字段按默认补(年 1970/月日 01/时分秒 00)。
 ///
 /// # 参数
 ///
@@ -303,7 +303,7 @@ pub fn parse_offset(off: FixedOffset, input: &str, pattern: &str) -> Result<i64>
     Ok(dt.timestamp_millis())
 }
 
-/// 用 **GMT+8** + 原实现 pattern 解析为 epoch 毫秒。对照 原实现 `parseLong(dt, f)`。
+/// 业务作用: 用 **GMT+8** + 原实现 pattern 解析为 epoch 毫秒。对照 原实现 `parseLong(dt, f)`。
 ///
 /// # 参数
 ///
@@ -313,7 +313,7 @@ pub fn parse(input: &str, pattern: &str) -> Result<i64> {
     parse_offset(gmt8(), input, pattern)
 }
 
-/// **自动识别**日期字符串格式(GMT+8)解析为 epoch 毫秒。对照 原实现 `parseLong(dt)`(内部 `getFormat`)。
+/// 业务作用: **自动识别**日期字符串格式(GMT+8)解析为 epoch 毫秒。对照 原实现 `parseLong(dt)`(内部 `getFormat`)。
 ///
 /// # 参数
 ///
@@ -323,7 +323,7 @@ pub fn parse_auto(input: &str) -> Result<i64> {
     parse(input, pat)
 }
 
-/// 识别日期字符串的 原实现 pattern(顺序匹配预置正则,与 原实现 `getFormat` 同源)。
+/// 业务作用: 识别日期字符串的 原实现 pattern(顺序匹配预置正则,与 原实现 `getFormat` 同源)。
 ///
 /// # 参数
 ///
@@ -338,7 +338,7 @@ pub fn get_format(input: &str) -> Result<&'static str> {
     Err(DateError::UnknownFormat(s.to_string()))
 }
 
-/// 把不含 Y/m/d/H/M/S 的字段补默认后用 chrono 解析为 NaiveDateTime。
+/// 业务作用: 把不含 Y/m/d/H/M/S 的字段补默认后用 chrono 解析为 NaiveDateTime。
 ///
 /// # 参数
 /// - `input`: 待解析的日期时间文本。
@@ -375,7 +375,7 @@ fn augment_parse(input: &str, chrono_pat: &str) -> Result<NaiveDateTime> {
         .map_err(|e| DateError::Parse(format!("{input:?} 不匹配 {chrono_pat:?}: {e}")))
 }
 
-/// 极简正则匹配。
+/// 业务作用: 极简正则匹配。
 ///
 /// 只支持本 crate `AUTO_FORMATS` 用到的 `^`、`$`、`\d{n}` 和字面量，
 /// 避免为了日期格式识别引入完整 regex 依赖。

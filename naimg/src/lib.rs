@@ -1,6 +1,7 @@
-//! # image —— 图片压缩/缩放(对照 原实现 原工具包 `ImageUtils`)
+//! # naimg —— 图片压缩/缩放(对照 原实现 原工具包 `ImageUtils`)
 //!
-//! (crate 名 `image`;内部依赖 crates.io 的 `image` 已别名为 `image_crate` 避免同名冲突。)
+//! 公开 crate 名为 `naimg`；内部依赖 crates.io 的 `image` 已别名为 `image_crate`，避免使用方误把
+//! 底层 codec API 当作本组件稳定合同。
 //!
 //! 把图片按**质量(quality)**与**尺寸(scale/width/height)**压缩后写出。原实现 用 thumbnailator,Rust 用
 //! [`image`](https://docs.rs/image) crate(`DynamicImage::resize` + `JpegEncoder` quality)。
@@ -28,7 +29,7 @@
 //! ## 有意不迁移:`imgFormatMap`/`getImgFormat`/`addImgFormat`(浏览器 MIME 子类型映射)
 //! 原实现 `ImageUtils` 还含 `jpg→jpeg`/`tif→tiff` 等扩展名→MIME 子类型映射。**本 crate 只负责压缩,不做 MIME 映射**:
 //! 本组件只负责压缩,不设置 Content-Type,故浏览器 MIME 子类型映射由上传层按需处理。
-//! 若业务后续需要按扩展名拼 `image/{subtype}`,应在上传或 Web 层处理(或届时再加 `get_img_format`/`add_img_format`)。
+//! 按扩展名派生 `image/{subtype}` 属于上传或 Web 层职责，不在本 crate 中隐式推断。
 //!
 //! ## 参数校验(对照 原实现 thumbnailator fail-fast)
 //! 非法 `scale<=0` / `width|height==0` / `quality∉0.0..=1.0` 返 [`ImageError::InvalidArgument`],**不静默修正**
@@ -60,7 +61,7 @@ pub enum Filter {
 }
 
 impl Filter {
-    /// 转换为 `image` crate 的过滤器表示。
+    /// 业务作用: 转换为 `image` crate 的过滤器表示。
     ///
     /// 这是内部适配层，避免把第三方 crate 的类型直接暴露到业务配置结构中。
     fn to_image(self) -> image_crate::imageops::FilterType {
@@ -107,7 +108,7 @@ pub enum ImageError {
 }
 
 impl core::fmt::Display for ImageError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用: 实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -126,7 +127,7 @@ impl std::error::Error for ImageError {}
 /// 本 crate 统一 `Result`。
 pub type Result<T> = core::result::Result<T, ImageError>;
 
-/// 主入口:字节入 → 字节出。`format = None` 保留输入格式(对照历史图片处理路径),`Some(f)` 显式覆盖。
+/// 业务作用: 主入口:字节入 → 字节出。`format = None` 保留输入格式(对照历史图片处理路径),`Some(f)` 显式覆盖。
 ///
 /// 对照 原实现 `compress(InputStream, ...)` 全家族。缩放规则:`width&&height` 优先,否则 `scale`,都无则不缩放。
 ///
@@ -158,7 +159,7 @@ pub fn compress(data: &[u8], opts: &CompressOpts, format: Option<ImageFormat>) -
 /// resize 输出像素上界(防 OOM):100 MP ≈ 400MB RGBA。超过则 [`compress`] 返回 `InvalidArgument`。
 const MAX_OUTPUT_PIXELS: u64 = 100_000_000;
 
-/// 计算 resize 后的目标尺寸上界,与 [`resize`] 的分支一致(keep-aspect 的实际输出 ≤ (w,h),取上界足够)。
+/// 业务作用: 计算 resize 后的目标尺寸上界,与 [`resize`] 的分支一致(keep-aspect 的实际输出 ≤ (w,h),取上界足够)。
 ///
 /// # 参数
 /// - `src_w`: 输入图片解码后的原始宽度。
@@ -191,7 +192,7 @@ fn resize_target_dims(src_w: u32, src_h: u32, opts: &CompressOpts) -> (u32, u32)
     }
 }
 
-/// 便捷:质量 + 等比缩放(对照 原实现 `compress(is, compSize, scale, os)`)。
+/// 业务作用: 便捷:质量 + 等比缩放(对照 原实现 `compress(is, compSize, scale, os)`)。
 ///
 /// # 参数
 /// - `data`: 原始图片编码字节。
@@ -212,7 +213,7 @@ pub fn compress_scale(
     compress(data, &opts, format)
 }
 
-/// 便捷:质量 + 定宽高 + keepAspectRatio(对照 原实现 `compress(is, compSize, width, height, keepAspectRatio, os)`)。
+/// 业务作用: 便捷:质量 + 定宽高 + keepAspectRatio(对照 原实现 `compress(is, compSize, width, height, keepAspectRatio, os)`)。
 ///
 /// # 参数
 /// - `data`: 原始图片编码字节。
@@ -241,7 +242,7 @@ pub fn compress_size(
 
 // ==================== 内部 ====================
 
-/// 参数校验,**对齐 原实现 thumbnailator 的 fail-fast**(非法参数不静默修正)。
+/// 业务作用: 参数校验,**对齐 原实现 thumbnailator 的 fail-fast**(非法参数不静默修正)。
 /// - `quality`:`Some` 时须有限且 ∈ `0.0..=1.0`(原实现 `outputQuality` 同界;注:`0.0` 合法,JPEG 编码器侧会落到
 ///   最低质量 1,见 [`encode`])。
 /// - `scale`:`Some` 时须有限且 `> 0`(`1.0` 合法=no-op,同 原实现 `scale(1.0)`)。
@@ -273,7 +274,7 @@ fn validate_opts(opts: &CompressOpts) -> Result<()> {
     Ok(())
 }
 
-/// 调整图片尺寸。
+/// 业务作用: 调整图片尺寸。
 ///
 /// # 参数
 /// - `img`: 已解码的输入图片。
@@ -312,7 +313,7 @@ fn resize(img: DynamicImage, opts: &CompressOpts) -> DynamicImage {
     }
 }
 
-/// 将处理后的图片重新编码成目标格式。
+/// 业务作用: 将处理后的图片重新编码成目标格式。
 ///
 /// # 参数
 /// - `img`: 已完成 resize 的图片。

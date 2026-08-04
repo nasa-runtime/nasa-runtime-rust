@@ -1,7 +1,7 @@
 # yml —— 通用分层 YAML 配置加载器(从各 app 的 config.rs 下沉,机制写一次复用)。
 # 业务经门面 `use nasa::yml::{YmlLoader, YmlOverlay};` 引用(crate 真名 naml,业务无感知)。
 #
-# 职责(对照 yml.md §2):本地主配置 + profile + 内存 overlay(含 Nacos 拉回的多配置)+ 环境变量,
+# 职责：合并本地主配置、profile、内存 overlay（含 Nacos 拉回的多配置）与环境变量，
 #   叠加后解析 ${...} 占位符,再反序列化成调用方给定的强类型 T。
 # 边界:**不连接 Nacos、不存全局、不热替换、不认识业务 AppConfig**;
 #   import 解析只产出中性 YmlImport(File/Nacos 描述),真正的 Nacos 拉取由门面层胶水完成。
@@ -21,11 +21,11 @@ categories.workspace = true
 [lib]
 name = "naml"
 [dependencies]
-nabase = { package = "nabase", version = "1.0.0", path = "../nabase" }
+nabase = { package = "nabase", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 分层配置合并器:本地文件 / profile / 内存 overlay / 环境变量,**叶子级深合并**(yml.md Q5 硬约束)。
-# 格式按 file_extension 决定(yml.md §13.9):yaml/json/toml 三种 parser 都要,其它格式 fail-fast 不猜。
+# 分层配置合并器：本地文件、profile、内存 overlay 与环境变量按叶子级深合并。
+# 格式由 file_extension 决定：支持 yaml/json/toml，其它格式 fail-fast 而不猜测。
 config = { version = "0.15", default-features = false, features = ["yaml", "json", "toml"] }
 anyhow = "1"
 tracing = "0.1"

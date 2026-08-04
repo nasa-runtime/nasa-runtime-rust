@@ -67,7 +67,7 @@ pub enum JwksError {
 }
 
 impl std::fmt::Display for JwksError {
-    /// 输出结构化 JWKS 错误；只在安全时携带已校验 kid，不包含 key material。
+    /// 业务作用：输出结构化 JWKS 错误；只在安全时携带已校验 kid，不包含 key material。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JwksError::Parse(detail) => write!(formatter, "JWKS parse failed: {detail}"),
@@ -92,22 +92,22 @@ impl std::fmt::Display for JwksError {
 impl std::error::Error for JwksError {}
 
 impl JwkSet {
-    /// 从 JWKS JSON 文本解析。
+    /// 业务作用：从 JWKS JSON 文本解析。
     pub fn parse(json: &str) -> Result<Self, JwksError> {
         serde_json::from_str(json).map_err(|error| JwksError::Parse(error.to_string()))
     }
 
-    /// 按 `kid` 查找 key。
+    /// 业务作用：按 `kid` 查找 key。
     pub fn find(&self, kid: &str) -> Option<&Jwk> {
         self.keys.iter().find(|key| key.kid == kid)
     }
 
-    /// 结构校验：使用缺省 key 数上限。
+    /// 业务作用：结构校验：使用缺省 key 数上限。
     pub fn validate(&self) -> Result<(), JwksError> {
         self.validate_with_max_keys(DEFAULT_MAX_KEYS)
     }
 
-    /// 结构与能力校验：非空、有界、`kid` 非空且唯一，并且每个 key 都是可用的 RSA/RS256
+    /// 业务作用：结构与能力校验：非空、有界、`kid` 非空且唯一，并且每个 key 都是可用的 RSA/RS256
     /// signing key，含可解码且非空的 `n` / `e`。
     pub fn validate_with_max_keys(&self, max_keys: usize) -> Result<(), JwksError> {
         if self.keys.is_empty() {
@@ -173,7 +173,7 @@ pub struct JwksRegistry {
 }
 
 impl JwksRegistry {
-    /// warmup:用初始 key set 建注册表,generation=1;初值必须先通过 [`JwkSet::validate`]。
+    /// 业务作用：warmup:用初始 key set 建注册表,generation=1;初值必须先通过 [`JwkSet::validate`]。
     ///
     /// # 错误
     ///
@@ -186,7 +186,7 @@ impl JwksRegistry {
         })
     }
 
-    /// rotate:**先校验候选**,通过则原子发布并 generation++,返回新 generation;
+    /// 业务作用：rotate:**先校验候选**,通过则原子发布并 generation++,返回新 generation;
     /// 校验失败**保留 last-good**、generation 不变、返回错误(startup 刷新失败即走此路径)。
     pub fn rotate(&self, candidate: JwkSet) -> Result<u64, JwksError> {
         candidate.validate()?; // 失败:直接返回,current/generation 不变
@@ -194,17 +194,17 @@ impl JwksRegistry {
         Ok(self.generation.fetch_add(1, Ordering::AcqRel) + 1)
     }
 
-    /// 当前 key set(原子快照)。
+    /// 业务作用：当前 key set(原子快照)。
     pub fn current(&self) -> Arc<JwkSet> {
         self.current.load_full()
     }
 
-    /// 当前 generation(每次成功 rotate +1)。
+    /// 业务作用：当前 generation(每次成功 rotate +1)。
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// 便捷:从当前 key set 按 `kid` 取 key 的克隆。
+    /// 业务作用：便捷:从当前 key set 按 `kid` 取 key 的克隆。
     pub fn find(&self, kid: &str) -> Option<Jwk> {
         self.current().find(kid).cloned()
     }

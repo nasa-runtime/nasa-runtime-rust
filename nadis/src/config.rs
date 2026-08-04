@@ -38,7 +38,7 @@ pub enum CompatibilityProfile {
     /// 原实现 互通/灰度:key 命名、锁 Lua、wire 与 原实现 逐字节一致。
     /// legacy 表示整套历史协议模式,不是单个 helper 的局部兼容逻辑。
     LegacyV1,
-    /// 纯 Rust 集群:V2 fencing(任期 stamp)+ 原子 fenced ACK 等增强(R4 起生效)。
+    /// 纯 Rust 集群：启用 V2 fencing 任期 stamp 与原子 fenced ACK 等增强能力。
     /// **心跳时钟**:
     ///   · **RustV2 = Redis TIME**(`nodes` ZSET 分数与过期驱逐 `now_ms` 同走服务端时钟,全集群单一
     ///     时钟源,节点墙钟漂移不再误判存活);
@@ -503,7 +503,7 @@ impl RedisConfig {
                 "stream.inflight_max 超过 Tokio semaphore 容量上限 {semaphore_max}"
             ));
         }
-        // ①.3:**autoTrim 已实现**(data_expire_ms/auto_trim_rate_ms 接线到 auto_trim_loop)——放开校验。
+        // autoTrim 已接入 auto_trim_loop；启用时必须校验保留窗口，避免误删刚写入的 entry。
         // `auto_trim_rate_ms=0` = 禁用自动裁剪;启用(>0)时 `data_expire_ms` 必须 >0(否则保留窗为 0
         // 会把刚写入的 entry 也裁掉)。
         if self.stream.auto_trim_rate_ms > 0 && self.stream.data_expire_ms == 0 {
@@ -549,7 +549,7 @@ impl RedisConfig {
 pub struct CommandCfg {
     /// 单命令响应超时 ms(0 = 不限),由 `timed()` helper 套在类型化命令 future 上。
     pub timeout_ms: u64,
-    /// **连接级**响应超时 ms(0 = 不限;第十一轮 P1-B)。直接设到 ConnectionManager/
+    /// **连接级**响应超时 ms(0 = 不限)。直接设到 ConnectionManager/
     /// ClusterClient,**覆盖所有命令**(含 partition runtime 绕过 `timed()` 的裸 query_async)——
     /// Redis "可达但不响应"(CLIENT PAUSE/慢 Lua/TCP 黑洞)时让 future 返错而非永久 pending,
     /// 避免 coordinator 长循环卡在 Redis I/O 致 shutdown 挂死 + 分区锁泄漏。默认 30s(宽松兜底,
@@ -618,7 +618,7 @@ impl Default for LockCfg {
     }
 }
 
-/// stream 配置(R4 使用;默认值对齐,现在就固化防漂移)。
+/// stream 配置；默认值在类型层统一固化，避免不同入口发生漂移。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamCfg {
@@ -627,10 +627,10 @@ pub struct StreamCfg {
     pub poll_timeout_ms: u64,
     /// XREADGROUP COUNT。**已接线**。
     pub batch_size: usize,
-    /// 自动裁剪保留窗,原实现 默认 1 小时。**已接线**(①.3 autoTrim):leader 每 `auto_trim_rate_ms`
+    /// 自动裁剪保留窗，既有默认值为 1 小时。leader 每 `auto_trim_rate_ms`
     /// 对各分区 stream `XTRIM MINID ~ {now-本值}`。`auto_trim_rate_ms=0` 时本值不生效(裁剪禁用)。
     pub data_expire_ms: u64,
-    /// 本地 XTRIM 周期,原实现 默认 60s。**已接线**(①.3):leader autoTrim 周期;**0 = 禁用自动裁剪**。
+    /// 本地 XTRIM 周期，既有默认值为 60s；**0 表示禁用自动裁剪**。
     pub auto_trim_rate_ms: u64,
     /// ACK 成功后的异步 XDEL 批删周期。单 owner + 有界通道，队列满时反压消费；删除失败留到
     /// 下一周期，停机在业务 drain 后做末次 flush。**0 = 禁用**，此时 entry 留在 stream；
@@ -655,8 +655,7 @@ impl Default for StreamCfg {
     }
 }
 
-/// 毒消息处置策略(文档 RetryPolicy;R4.2a 实现 Drop/Park 两态,
-/// Dlq = R4.2b——需要 planned-ID reservations 协议先落地)。
+/// 毒消息处置策略；Drop、Park 与 Dlq 均通过显式状态和 planned-ID reservations 协议收敛。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PoisonPolicy {
     /// 丢弃:fenced ACK 清 PEL + error 日志(消息不可恢复——显式选择才允许)。
@@ -665,12 +664,12 @@ pub enum PoisonPolicy {
     /// 等管理 API resume/drop 显式处置(分区顺序让位于人工介入)。
     Park,
     /// 死信:转存后立即按 planned-ID 协议发布到 DLQ stream({prefix}:dlq),源 PEL 清空,
-    /// 分区**继续消费**(R4.2d;实现 = Park 转存 + 自动 dlq 处置——中途崩溃自然回退为
+    /// 分区**继续消费**（先 Park 转存再自动执行 dlq 处置；中途崩溃自然回退为
     /// Parked 可管理态,无半完成状态)。
     Dlq,
 }
 
-/// partition 配置(R4 使用;默认值对齐)。
+/// partition 配置；所有入口共享同一组默认值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionCfg {

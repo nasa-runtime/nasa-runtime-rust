@@ -1,7 +1,7 @@
 # nafana-macro
 
-`nafana-macro` 实现 `#[grafana]`。它在编译期校验隔离、超时、TPS 和降级参数，把异步 handler 包装进
-`nafana` 命令运行时，同时保留原函数签名。
+`nafana-macro` 实现 `#[grafana]` 与 `#[global_fallback]`。前者在编译期校验隔离、超时、TPS 和局部降级参数，
+把异步 handler 包装进 `nafana` 命令运行时；后者把唯一的同步终态响应函数自动收集到进程级降级入口。
 
 业务只从门面使用：
 
@@ -27,6 +27,24 @@ async fn detail() -> impl axum::response::IntoResponse {
 
 与 mapping 组合时，`#[grafana]` 必须写在 mapping 属性上方，宏才能取得稳定路由名。
 
+进程级终态响应通常通过门面声明：
+
+```rust
+use nasa::grafana::{FallbackCause, FallbackContext};
+
+#[nasa::grafana::global_fallback]
+fn service_fallback(context: FallbackContext) -> impl axum::response::IntoResponse {
+    match context.cause() {
+        FallbackCause::BulkheadRejected { .. } => "service busy",
+        FallbackCause::ExecutionTimeout { .. } => "service timeout",
+        _ => "service unavailable",
+    }
+}
+```
+
+`#[global_fallback]` 不接受属性参数，只能标注恰好接收一个 `FallbackContext` 的同步函数；返回值可以是任意
+Axum `IntoResponse`。处理函数只组装最终响应，不配置自身并发或超时，也不访问数据库、缓存或 RPC。
+
 ## 参数
 
 | 参数 | 说明 |
@@ -47,4 +65,5 @@ async fn detail() -> impl axum::response::IntoResponse {
 - 只支持 `async fn` handler。
 - 静态降级正文必须是合法 JSON。
 - 同一路径的函数降级和静态降级不能同时声明。
+- 同一组件只能声明一个 `#[global_fallback]`，多个声明会被运行时确定性拒绝。
 - 宏只做包装和路径解析；指标目录、执行状态和导出由 `nafana` 负责。

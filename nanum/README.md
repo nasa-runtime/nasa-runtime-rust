@@ -1,10 +1,10 @@
 # nanum
 
-`nanum` 是定点精确算术工具，面向金额、价格、撮合 tick 等场景。业务通常通过门面使用：
+`nanum` 是定点与任意精度算术工具，面向金额、价格、撮合 tick 等场景。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["numeric"] }
+nanum = "1"
 ```
 
 核心表示：
@@ -18,7 +18,7 @@ nasa = { version = "1", features = ["numeric"] }
 ## 定点运算
 
 ```rust
-use nasa::numeric::{to_fixed_str, to_plain_string, multiply, divide};
+use nanum::{divide, multiply, to_fixed_str, to_plain_string};
 
 let price = to_fixed_str("123.45", 8)?;
 let qty = to_fixed_str("2", 8)?;
@@ -34,7 +34,7 @@ let half = divide(price, to_fixed_str("2", 8)?, 8)?;
 ## 精度对齐
 
 ```rust
-use nasa::numeric::{align_down, align_up};
+use nanum::{align_down, align_up};
 
 let value = to_fixed_str("0.20021365", 8)?;
 let tick_down = align_down(value, 8, 4)?;
@@ -48,7 +48,7 @@ let tick_up = align_up(value, 8, 4)?;
 scale 大于 8 或需要任意精度时使用 `decimal` 模块：
 
 ```rust
-use nasa::numeric::decimal;
+use nanum::decimal;
 
 let a = decimal::parse("1")?;
 let b = decimal::parse("3")?;
@@ -60,7 +60,7 @@ BigDecimal 运算有 `MAX_DECIMAL_EXPANSION` 防 OOM 边界，极端 scale 会�
 ## f64 便捷路径
 
 ```rust
-let v = nasa::numeric::float::divide(1.0, 3.0, 8)?;
+let v = nanum::float::divide(1.0, 3.0, 8)?;
 ```
 
 f64 路径是便捷入口，内部仍走定点化以减少普通浮点误差；涉及 NaN 比较时使用 `eq_f64` / `gt_f64` 等兼容比较函数。

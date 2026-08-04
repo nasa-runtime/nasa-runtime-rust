@@ -355,7 +355,7 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     )?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Scheduling)?;
     // cache:redis 先于 cache(配 redis_ref 时复用其连接),cache 先于 kafka/web。cache 不强制
-    // Service、可用于 Batch;纯 L1(未来)不强制 redis,故只在二者同时声明时校验相对序。
+    // Service 和 Batch 都可使用该能力；仅在同时声明 Redis 时校验相对顺序，避免把可选后端误设为强依赖。
     ensure_before_if_both(components, ComponentId::Redis, ComponentId::Cache)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Web)?;

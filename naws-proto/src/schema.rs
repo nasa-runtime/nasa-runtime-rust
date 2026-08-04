@@ -111,7 +111,7 @@ pub struct AuthRequest {
 }
 
 impl std::fmt::Debug for AuthRequest {
-    /// 格式化鉴权请求;`token` 脱敏(只标记是否存在),其余字段正常。
+    /// 业务作用：格式化鉴权请求;`token` 脱敏(只标记是否存在),其余字段正常。
     ///
     /// # 参数
     /// - `f`: 标准格式化器,由日志或调试输出提供。

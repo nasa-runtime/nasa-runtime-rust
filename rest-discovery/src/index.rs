@@ -113,7 +113,7 @@ impl ServiceNameIndex {
         let mut removed: Vec<String> = Vec::new();
         for (key, old_entry) in old.iter() {
             if conflicted.contains(key) {
-                continue; // 冲突=歧义,不报 removed(语义不明,旧 watch 留待显式调用)
+                continue; // 冲突表示歧义，不发送 removed；旧 watch 只能由调用方显式解除。
             }
             if let Some(new_entry) = next.get(key) {
                 if new_entry.canonical_name != old_entry.canonical_name {

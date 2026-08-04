@@ -1,16 +1,16 @@
 # naimg
 
-`naimg` 是图片压缩和缩放工具，对齐历史 `ImageUtils` 的核心能力。业务通常通过门面使用：
+`naimg` 是图片压缩和缩放工具，对齐历史 `ImageUtils` 的核心能力。它统一使用内存字节输入输出，不负责文件 I/O、MIME 映射或对象存储。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["image"] }
+naimg = "1"
 ```
 
 质量加等比缩放：
 
 ```rust
-let out = nasa::image::compress_scale(
+let out = naimg::compress_scale(
     &input_bytes,
     0.82,
     0.5,
@@ -21,20 +21,20 @@ let out = nasa::image::compress_scale(
 固定尺寸压缩：
 
 ```rust
-let out = nasa::image::compress_size(
+let out = naimg::compress_size(
     &input_bytes,
     Some(0.85),
     800,
     600,
     Some(true),
-    Some(nasa::image::ImageFormat::Jpeg),
+    Some(naimg::ImageFormat::Jpeg),
 )?;
 ```
 
 完整选项：
 
 ```rust
-let opts = nasa::image::CompressOpts {
+let opts = naimg::CompressOpts {
     quality: Some(0.9),
     width: Some(1024),
     height: Some(768),
@@ -42,7 +42,7 @@ let opts = nasa::image::CompressOpts {
     ..Default::default()
 };
 
-let out = nasa::image::compress(&input_bytes, &opts, None)?;
+let out = naimg::compress(&input_bytes, &opts, None)?;
 ```
 
 注意：

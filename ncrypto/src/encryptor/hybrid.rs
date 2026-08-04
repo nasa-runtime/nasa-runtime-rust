@@ -17,7 +17,7 @@ use super::rng::random_ascii;
 use super::rsa::{decrypt_rsa_public, encrypt_rsa_private};
 use crate::Result;
 
-/// RSA+AES 混合**封装**(服务端加密响应方向;对照 原实现 `CryptoTactics.RSA_AES` ENCRYPT)。
+/// 业务作用: RSA+AES 混合**封装**(服务端加密响应方向;对照 原实现 `CryptoTactics.RSA_AES` ENCRYPT)。
 ///
 /// # 参数
 /// - `plaintext`: 待加密的 UTF-8 响应明文。
@@ -48,7 +48,7 @@ pub fn rsa_aes_seal(
     Ok((aes, data))
 }
 
-/// RSA+AES 混合**解封**(客户端解密响应方向;[`rsa_aes_seal`] 的逆)。
+/// 业务作用: RSA+AES 混合**解封**(客户端解密响应方向;[`rsa_aes_seal`] 的逆)。
 ///
 /// 用 RSA **公钥**解出 AES key(`decryptRSAPublic(aes)`),再 AES 解 `data` 得明文。
 ///

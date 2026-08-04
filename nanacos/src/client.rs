@@ -31,7 +31,7 @@ pub struct NacosProps {
 }
 
 impl Default for NacosProps {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             server_addr: String::new(),
@@ -46,7 +46,7 @@ impl Default for NacosProps {
 }
 
 impl NacosProps {
-    /// 起手式:只给必填的 `server_addr`(`"ip:port[,ip:port]"`),其余取默认;再链式 `with_*` 覆盖。
+    /// 业务作用：起手式:只给必填的 `server_addr`(`"ip:port[,ip:port]"`),其余取默认;再链式 `with_*` 覆盖。
     /// 配合 `#[non_exhaustive]`:这是外部 crate 构造 `NacosProps` 的推荐入口,字段增减都不破坏调用方。
     ///
     /// # 参数
@@ -58,7 +58,7 @@ impl NacosProps {
         }
     }
 
-    /// 命名空间【ID】(public 空间留空)。
+    /// 业务作用：命名空间【ID】(public 空间留空)。
     ///
     /// # 参数
     /// - `namespace`: Nacos namespace ID,不是控制台显示名;会 trim 首尾空白。
@@ -67,7 +67,7 @@ impl NacosProps {
         self
     }
 
-    /// 默认分组(配置/命名共用)。
+    /// 业务作用：默认分组(配置/命名共用)。
     ///
     /// # 参数
     /// - `group`: 默认 Nacos group;会 trim 首尾空白。
@@ -76,7 +76,7 @@ impl NacosProps {
         self
     }
 
-    /// 应用名(Nacos 端来源标识/审计)。
+    /// 业务作用：应用名(Nacos 端来源标识/审计)。
     ///
     /// # 参数
     /// - `app_name`: Nacos 端展示和审计使用的应用名;会 trim 首尾空白。
@@ -85,7 +85,7 @@ impl NacosProps {
         self
     }
 
-    /// HTTP 鉴权用户名 + 密码(Nacos 1.2+ 开启鉴权时必填)。
+    /// 业务作用：HTTP 鉴权用户名 + 密码(Nacos 1.2+ 开启鉴权时必填)。
     /// 用户名按账号名处理会 trim 首尾空白;密码是 opaque secret,保持原样不修改。
     ///
     /// # 参数
@@ -97,7 +97,7 @@ impl NacosProps {
         self
     }
 
-    /// 注册中心实例对外 IP(见字段说明);非空时在 `register` 覆盖 `Instance.ip`。
+    /// 业务作用：注册中心实例对外 IP(见字段说明);非空时在 `register` 覆盖 `Instance.ip`。
     ///
     /// # 参数
     /// - `discovery_ip`: 服务注册给消费者拨号的对外 IP;会 trim 首尾空白。
@@ -106,7 +106,7 @@ impl NacosProps {
         self
     }
 
-    /// 同 [`with_discovery_ip`](Self::with_discovery_ip),但接受 `Option`:`Some` 设置、**`None` 是 no-op(保持当前值,不清空)**。
+    /// 业务作用：同 [`with_discovery_ip`](Self::with_discovery_ip),但接受 `Option`:`Some` 设置、**`None` 是 no-op(保持当前值,不清空)**。
     /// 便于从可选配置直接链式传入(`...with_discovery_ip_opt(cfg.discovery_ip.as_deref())`),省去 `if let`。
     /// ⚠️ 要【清空】已设的 discovery_ip 用 [`without_discovery_ip`](Self::without_discovery_ip),不是传 `None`。
     ///
@@ -119,14 +119,14 @@ impl NacosProps {
         self
     }
 
-    /// 清空 discovery_ip(回到"注册 IP 由 `Instance.ip` 决定")。与 `with_discovery_ip_opt(None)`(no-op)区分。
+    /// 业务作用：清空 discovery_ip(回到"注册 IP 由 `Instance.ip` 决定")。与 `with_discovery_ip_opt(None)`(no-op)区分。
     pub fn without_discovery_ip(mut self) -> Self {
         self.discovery_ip = None;
         self
     }
 }
 
-/// 清理字符串参数两端空白；用于配置转换前统一输入形态。
+/// 业务作用：清理字符串参数两端空白；用于配置转换前统一输入形态。
 ///
 /// # 参数
 /// - `value`: Nacos 配置项中的字符串字段。
@@ -135,7 +135,7 @@ fn trim_into(value: impl Into<String>) -> String {
 }
 
 impl std::fmt::Debug for NacosProps {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -167,7 +167,7 @@ impl std::fmt::Debug for NacosProps {
     }
 }
 
-/// 连接参数基本校验(共享层 fail-fast,胜过把空地址交给 SDK 拿到晦涩的内部错误)。两 client 的 connect 共用。
+/// 业务作用：连接参数基本校验(共享层 fail-fast,胜过把空地址交给 SDK 拿到晦涩的内部错误)。两 client 的 connect 共用。
 #[cfg(feature = "nacos")]
 pub(crate) fn validate_props(props: &NacosProps) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -183,7 +183,7 @@ pub(crate) fn validate_props(props: &NacosProps) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 校验 ensure no outer ws 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 ensure no outer ws 约束；用于在进入运行流程前 fail-fast。
 pub(crate) fn ensure_no_outer_ws(name: &str, value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         value == value.trim(),
@@ -192,7 +192,7 @@ pub(crate) fn ensure_no_outer_ws(name: &str, value: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// 由 [`NacosProps`] 造 SDK 的 `ClientProps`(config/naming builder 各取一份;builder 取所有权,不可复用)。
+/// 业务作用：由 [`NacosProps`] 造 SDK 的 `ClientProps`(config/naming builder 各取一份;builder 取所有权,不可复用)。
 #[cfg(feature = "nacos")]
 pub(crate) fn sdk_client_props(props: &NacosProps) -> nacos_sdk::api::props::ClientProps {
     nacos_sdk::api::props::ClientProps::new()

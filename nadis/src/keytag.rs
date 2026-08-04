@@ -7,7 +7,7 @@
 //   · 含括号 key 包一层会被第一个 '}' 截断(slot("{foo{}{bar}}:q")=7673);
 //   · 无生效 tag 的 key 派生辅助 key:用 synthetic tag 表(0..16383 全覆盖,固定算法 v1,
 //     每项构造时断言 CRC16(tag)%16384==slot)。
-// source digest(防同 slot 不同 source 碰撞)属 R4 disposition/lease key,届时引入
+// source digest 用于避免同 slot 下不同 source 发生 disposition/lease key 碰撞。
 // ≥128 位稳定摘要;本模块保持零外部依赖。
 // ============================================================================
 
@@ -99,7 +99,7 @@ fn synthetic_table() -> &'static Vec<String> {
 
 /// 取目标 slot 的 synthetic tag(构造期已保证 CRC16(tag)%16384 == slot)。
 ///
-///**当前 partition cluster 同槽走 ④B 的 group 级 `{group}` relayout(整组同 slot),
+/// 当前 partition cluster 同槽使用 group 级 `{group}` relayout（整组位于同一 slot），
 /// 不经此函数**。`synthetic_tag`/`derive_same_slot_key` 是 **per-key 细粒度同槽派生**的预留能力,
 /// 留给后续 **PollDomain / pipeline 按 slot 分桶**(把不同分区散到不同 slot 同时保证每组 Lua 的 key 同槽)。
 /// 保留为 pub API(非死代码，后续按 slot 分布会用);现阶段 group 级 relayout 不调用。

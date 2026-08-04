@@ -53,7 +53,7 @@ pub struct MigrationSettings {
 }
 
 impl Default for MigrationSettings {
-    /// 使用生产保守的 validate 模式、30 秒锁预算并拒绝 dirty override。
+    /// 业务作用: 使用生产保守的 validate 模式、30 秒锁预算并拒绝 dirty override。
     fn default() -> Self {
         Self {
             mode: MigrationMode::default(),
@@ -64,7 +64,7 @@ impl Default for MigrationSettings {
 }
 
 impl MigrationSettings {
-    /// 校验安全合同。
+    /// 业务作用: 校验安全合同。
     ///
     /// `allow_dirty=true` 不能通用地解释成“从失败处继续”：MySQL DDL 可能已经部分提交，runtime
     /// 无法推断 schema 的真实修复点。该旋钮保留用于给旧配置稳定报错，调用方必须先人工修复并删除
@@ -115,7 +115,7 @@ pub enum MigrationError {
 }
 
 impl std::fmt::Display for MigrationError {
-    /// 输出版本号与稳定失败分类，不包含 migration SQL 或数据库连接信息。
+    /// 业务作用: 输出版本号与稳定失败分类，不包含 migration SQL 或数据库连接信息。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MigrationError::Pending(versions) => {
@@ -153,12 +153,12 @@ impl std::fmt::Display for MigrationError {
 
 impl std::error::Error for MigrationError {}
 
-/// 把任意数据库细节收敛为不泄露 SQL、schema 或凭据的稳定错误。
+/// 业务作用: 把任意数据库细节收敛为不泄露 SQL、schema 或凭据的稳定错误。
 fn backend<E>(_error: E) -> MigrationError {
     MigrationError::Backend("database error".to_owned())
 }
 
-/// 嵌入的 up migration:`(version, checksum)`,按 version 升序。
+/// 业务作用: 嵌入的 up migration:`(version, checksum)`,按 version 升序。
 fn embedded_ups(migrator: &Migrator) -> Vec<(i64, Vec<u8>)> {
     let mut ups: Vec<(i64, Vec<u8>)> = migrator
         .iter()
@@ -175,7 +175,7 @@ struct AppliedState {
     dirty: Option<i64>,
 }
 
-/// 查询已应用/dirty migration；`_sqlx_migrations` 不存在视为空。
+/// 业务作用: 查询已应用/dirty migration；`_sqlx_migrations` 不存在视为空。
 async fn applied_state(connection: &mut MySqlConnection) -> Result<AppliedState, MigrationError> {
     // 表不存在(从未 apply 过)→ 返回空表,交由上层按"全部未应用"处理。
     let exists: i64 = sqlx::query(
@@ -214,7 +214,7 @@ async fn applied_state(connection: &mut MySqlConnection) -> Result<AppliedState,
     Ok(AppliedState { applied, dirty })
 }
 
-/// 与 SQLx MySQL migrator 使用同一算法计算 advisory lock ID。
+/// 业务作用: 与 SQLx MySQL migrator 使用同一算法计算 advisory lock ID。
 ///
 /// SQLx 内部是 `format!("{:x}", 0x3d32ad9e * CRC32(database_name))`；在服务端计算可避免复制
 /// 私有 Rust helper，同时保证其它直接使用 SQLx migrator 的进程与本门禁互斥。
@@ -235,13 +235,12 @@ struct MigrationLock {
 }
 
 impl MigrationLock {
-    /// 在单一端到端预算内取得池连接、计算 SQLx lock ID 并竞争 MySQL advisory lock。
+    /// 业务作用: 在单一端到端预算内取得池连接、计算 SQLx lock ID 并竞争 MySQL advisory lock。
     async fn acquire(pool: &MySqlPool, timeout_ms: u64) -> Result<Self, MigrationError> {
         let deadline = (timeout_ms != 0)
             .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
-        // `lock_timeout_ms` is an end-to-end acquisition budget. Counting only GET_LOCK would
-        // still permit an exhausted pool or a slow connection handshake to wait indefinitely
-        // before the database lock timeout even starts.
+        // `lock_timeout_ms` 覆盖连接池获取、握手、lock ID 计算和 GET_LOCK 全链路；若只限制
+        // GET_LOCK，连接池耗尽或握手缓慢仍可能在数据库锁计时开始前无限等待。
         let connection = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, pool.acquire())
                 .await
@@ -293,19 +292,19 @@ impl MigrationLock {
         }
     }
 
-    /// 借用仍由 lock guard 独占的底层 MySQL 连接。
+    /// 业务作用: 借用仍由 lock guard 独占的底层 MySQL 连接。
     fn connection(&mut self) -> &mut MySqlConnection {
         self.connection
             .as_mut()
             .expect("migration lock connection must exist until release")
     }
 
-    /// 移走连接使 Drop 不再执行 close-on-drop；仅用于确认未取得 session lock 的路径。
+    /// 业务作用: 移走连接使 Drop 不再执行 close-on-drop；仅用于确认未取得 session lock 的路径。
     fn disarm(mut self) {
         let _ = self.connection.take();
     }
 
-    /// 显式释放 advisory lock；只有服务端确认释放后才允许连接安全回池。
+    /// 业务作用: 显式释放 advisory lock；只有服务端确认释放后才允许连接安全回池。
     async fn release(mut self) {
         let lock_id = self.lock_id.clone();
         let released: Result<Option<i64>, _> = sqlx::query_scalar("SELECT RELEASE_LOCK(?)")
@@ -319,7 +318,7 @@ impl MigrationLock {
 }
 
 impl Drop for MigrationLock {
-    /// 未确认 RELEASE_LOCK 的路径关闭物理连接，防止 session lock 随池连接泄漏。
+    /// 业务作用: 未确认 RELEASE_LOCK 的路径关闭物理连接，防止 session lock 随池连接泄漏。
     fn drop(&mut self) {
         if let Some(connection) = self.connection.as_mut() {
             connection.close_on_drop();
@@ -327,7 +326,7 @@ impl Drop for MigrationLock {
     }
 }
 
-/// 复制业务 migrator 的完整设置，仅关闭 SQLx 自带的无限等待 lock；外层已经取得同 ID 的有界锁。
+/// 业务作用: 复制业务 migrator 的完整设置，仅关闭 SQLx 自带的无限等待 lock；外层已经取得同 ID 的有界锁。
 fn unlocked_migrator(migrator: &Migrator) -> Migrator {
     Migrator {
         migrations: migrator.migrations.clone(),
@@ -339,7 +338,7 @@ fn unlocked_migrator(migrator: &Migrator) -> Migrator {
     }
 }
 
-/// 按 `settings.mode` 运行 migration 门禁。见 crate 文档。
+/// 业务作用: 按 `settings.mode` 运行 migration 门禁。见 crate 文档。
 ///
 /// # 参数
 /// - `pool`:目标 datasource 连接池。
@@ -411,7 +410,7 @@ pub async fn run_gate(
     }
 }
 
-/// 把 sqlx `MigrateError` 脱敏映射(checksum 漂移单列,其余归 Backend)。
+/// 业务作用: 把 sqlx `MigrateError` 脱敏映射(checksum 漂移单列,其余归 Backend)。
 fn map_migrate_err(error: sqlx::migrate::MigrateError) -> MigrationError {
     match error {
         sqlx::migrate::MigrateError::VersionMismatch(version) => {

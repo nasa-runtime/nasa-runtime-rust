@@ -1,5 +1,5 @@
 // ============================================================================
-// src/server.rs —— 单机 TCP + WebSocket server(R0.2/R0.3/R0.4)。
+// src/server.rs —— 单机 TCP + WebSocket server。
 // transport 无关的连接状态机(鉴权/心跳/分派)对 `Inbound` 编程;
 // TCP 与 WS 只共享 NASA frame codec,各自的读/写实现分离。
 // 架构说明。
@@ -173,17 +173,17 @@ pub struct ServerConfig {
     /// 认证成功后允许多久未收到 PING 心跳。
     pub heartbeat_timeout: Duration,
     /// 单条 NASA frame 的**内层 declared 长度**上限(type+mode+payload,与 FrameCodec
-    /// 同语义)。合法范围受三重约束(build 期校验;R21/R24):
+    /// 同语义)。合法范围受三重约束(build 期校验):
     /// `MIN_MAX_FRAME ≤ max_frame ≤ u32::MAX`(NASA 帧头是 4 字节无符号长度域),
     /// 且派生的 WS 外层上限必须可表示。
     pub max_frame: usize,
     /// WS 单条 message 的**外层聚合**字节上限(一条 Binary 可携带多条 NASA frame,
-    /// `max_frame` 只约束**每条** NASA frame;R22 P2)。粗粒度 DoS 保护。
+    /// `max_frame` 只约束**每条** NASA frame）。该字段提供粗粒度 DoS 保护。
     /// `None` = 自动 `4 × (max_frame + 4)`;显式设置时 build 校验 ≥ max_frame + 4。
     pub max_ws_message_bytes: Option<usize>,
     /// 业务出站队列条数上限。
     pub outbox_cap: usize,
-    /// 业务出站队列字节上限(防小帧多条/大帧少条积压;P0#2)。
+    /// 业务出站队列字节上限(防小帧多条/大帧少条积压)。
     pub outbox_max_bytes: usize,
     /// 出站队列满时的背压策略。
     pub backpressure: BackpressurePolicy,
@@ -235,7 +235,7 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// WS 外层 message 上限的**生效值**:显式配置或自动 `4 × (max_frame + 4)`
-    /// (容多条最大帧聚合;R22 P2)。**饱和运算兜底**:字段公开,
+    /// (容多条最大帧聚合)。**饱和运算兜底**:字段公开,
     /// 调用方可绕过 builder 直接构造——极端 max_frame 在此绝不 panic/回绕,溢出语义
     /// 校验由 `build()` 用 checked 运算在启动期完成。
     pub fn ws_message_limit(&self) -> usize {
@@ -260,7 +260,7 @@ pub(crate) struct Shared {
     pub active: Arc<ConnTracker>,
     /// 未认证连接计数(慢握手/慢鉴权 DoS 背压)。
     pub unauthenticated: Arc<ConnTracker>,
-    /// socket.io payload 桥接(R0.7)。仅 socketio 路径读取;非 socketio 构建下不读(允许 dead)。
+    /// socket.io payload 桥接。仅 socketio 路径读取;非 socketio 构建下不读(允许 dead)。
     #[cfg_attr(not(feature = "socketio"), allow(dead_code))]
     pub bridge: Arc<dyn PayloadBridge>,
     /// 全局取消信号:所有 accept/连接/writer/handler 循环都 select 它,cancel 即退出。
@@ -593,7 +593,7 @@ impl ServerBuilder {
     }
 
     /// 注入已校验的集群 incarnation fencing token(业务用 `Incarnation::from_epoch(Redis INCR)` 构造)。
-    /// 不设则用墙钟默认(单机可用,生产必须注入;R9/R12)。
+    /// 不设则用墙钟默认(单机可用,生产必须注入)。
     ///
     /// # 参数
     /// - `incarnation`: 当前进程 boot id,同 node_id 重启时用于拒绝旧实例迟到消息。
@@ -731,7 +731,7 @@ impl ServerBuilder {
                     Arc::new(move |m, mode| {
                         s.send_local(&m, mode);
                     });
-                // 校验已保证启用集群必有 incarnation(不退化墙钟;R14 P1)。
+                // 校验已保证启用集群必有 incarnation(不退化墙钟)。
                 let inc = cluster_incarnation.expect("validated: cluster requires incarnation");
                 let c = Cluster::with_incarnation(node, notifier, on_local, inc);
                 if let Some(publisher) = cluster_data_publisher {
@@ -900,8 +900,8 @@ impl Server {
         }
     }
 
-    /// 取 Sender(**bind 前**即可,消除"listener 已 accept 但 Sender 尚未注入"的丢消息窗口;
-    ///R16 P2)。业务可在 `build()` 后、`bind()` 前注入到自己的 handler 上下文。
+    /// 取 Sender（**bind 前**即可），消除“listener 已 accept 但 Sender 尚未注入”的丢消息窗口。
+    /// 业务可在 `build()` 后、`bind()` 前注入到自己的 handler 上下文。
     pub fn sender(&self) -> &Arc<Sender> {
         &self.shared.sender
     }
@@ -978,7 +978,7 @@ impl Server {
 ///
 /// # 参数
 /// - `query`: 查询对象或 query 参数集合。
-#[cfg(feature = "socketio")] // 未编译 socketio 时不参与判定(is_sio 恒 false;R24 P2)
+#[cfg(feature = "socketio")] // 未编译 socketio 时不参与判定(is_sio 恒 false)
 fn is_socketio_query(query: &str) -> bool {
     let mut eio_v4 = false;
     let mut ws_transport = false;
@@ -1142,7 +1142,7 @@ impl WsInbound {
 /// - `unauth_guard`: 未认证连接名额的 RAII 占位守卫。
 async fn handle_tcp(stream: TcpStream, shared: Arc<Shared>, unauth_guard: Option<UnauthGuard>) {
     let _guard = ConnGuard::new(shared.active.clone());
-    // 连接级唯一鉴权 deadline:接入即起算(WS 路径同;R20 P2 单一窗口)。
+    // 连接级唯一鉴权 deadline:接入即起算(WS 路径同;单一窗口)。
     let auth_deadline = Instant::now() + shared.config.auth_timeout;
     let (read_half, write_half) = stream.into_split();
     let (outbox, rx) = Outbox::new(
@@ -1349,8 +1349,8 @@ async fn handle_socketio(
     let mut ticker = tokio::time::interval(Duration::from_millis(ping_interval));
     ticker.tick().await;
     let mut authed = false;
-    // 鉴权 deadline = **连接级**绝对截止点(含 Upgrade 握手已耗时,与 NASA 同一窗口;
-    //R20 P2):客户端必须在该截止点前完成 CONNECT,否则关闭。
+    // 鉴权 deadline 是连接级绝对截止点，包含 Upgrade 握手耗时并与 NASA 使用同一窗口；
+    // 客户端必须在该截止点前完成 CONNECT，否则关闭。
     // 连接级关闭令牌:外部 cleanup → 主循环立即退出(与 NASA 同语义)。
     let closed = session.closed_token();
 
@@ -1672,8 +1672,8 @@ fn new_session(
 }
 
 /// transport 无关:鉴权 → 分派循环。清理交给 ConnCleanup(Drop 时执行,panic 也保证跑)。
-/// `auth_deadline` 为**连接级**绝对截止点(TCP=接入时刻、WS=Upgrade 前起算,与握手共用同一份;
-///R20 P2)。
+/// `auth_deadline` 为**连接级**绝对截止点：TCP 从接入时刻起算，WS 从 Upgrade 前起算，
+/// 并与握手共用同一份预算。
 ///
 /// # 参数
 /// - `inbound`: 已建立连接的入站读半边抽象。
@@ -1697,7 +1697,7 @@ async fn serve(
 }
 
 /// 鉴权状态机。外层 timeout 覆盖"等 AUTH 帧 + authorize 执行",用**连接级绝对
-/// deadline**(WS 与 Upgrade 握手共用,总窗口恒 = auth_timeout;R20 P2);
+/// deadline**（WS 与 Upgrade 握手共用，总窗口恒为 auth_timeout）；
 /// 同时可被 shutdown 取消——否则 authorize 慢/挂会让摘流延迟受 auth_timeout 控制。
 ///
 /// # 参数
@@ -1762,7 +1762,7 @@ async fn run_auth(
     };
 
     // **鉴权 ready 状态机**
-    //   ① set_uid + **绑定 endpoint 快照**(generation + Arc;R25 P1),
+    //   ① set_uid + **绑定 endpoint 快照**(generation + Arc),
     //      保持 authenticated=false ——"已注册但未 ready"的 pending 态;
     //   ② register:session 进 uid/endpoint 索引、对 fan-out 可见,但 send_business 统一
     //      拒绝未认证会话 → 并发投递不可能抢在成功帧前上线;

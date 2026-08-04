@@ -29,12 +29,12 @@ enum Kind {
 }
 
 impl Kind {
-    /// 判断字段是否可为空；用于派生编码时选择空值位图策略。
+    /// 业务作用: 判断字段是否可为空；用于派生编码时选择空值位图策略。
     fn nullable(self) -> bool {
         matches!(self, Kind::Str | Kind::Bytes | Kind::StrArray)
     }
 
-    /// 返回当前对象的 len 状态。
+    /// 业务作用: 判断字段是否使用 length-delimited wire type，供 key 编码和 wire type 校验复用。
     fn is_len(self) -> bool {
         self.nullable()
     }
@@ -47,7 +47,7 @@ struct FieldInfo {
     kind: Kind,
 }
 
-/// 展开协议字节派生宏；用于为结构体生成二进制编解码实现。
+/// 业务作用: 展开协议字节派生宏；用于为结构体生成二进制编解码实现。
 ///
 /// # 参数
 ///
@@ -143,7 +143,7 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl #name {
-            /// 生成位图编码方法；用于紧凑表示布尔字段集合。
+            /// 业务作用: 生成位图编码方法；用于紧凑表示布尔字段集合。
             fn __encode_bitpack(&self) -> ::std::vec::Vec<u8> {
                 let mut bm: u64 = 0;
                 #(#bitpack_presence)*
@@ -153,7 +153,7 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
                 w.buf
             }
 
-            /// 生成位图解码方法；用于从紧凑字节恢复布尔字段集合。
+            /// 业务作用: 生成位图解码方法；用于从紧凑字节恢复布尔字段集合。
             ///
             /// # 参数
             /// - `data`: BITPACK_TLV 模式下的协议字节。
@@ -170,14 +170,14 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
                 ::core::result::Result::Ok(out)
             }
 
-            /// 生成变长整数编码方法；用于压缩数值字段的线路体积。
+            /// 业务作用: 生成变长整数编码方法；用于压缩数值字段的线路体积。
             fn __encode_varint(&self) -> ::std::vec::Vec<u8> {
                 let mut w = crate::__rt::Writer::new();
                 #(#varint_write)*
                 w.buf
             }
 
-            /// 生成变长整数解码方法；用于从线路字节恢复数值字段。
+            /// 业务作用: 生成变长整数解码方法；用于从线路字节恢复数值字段。
             ///
             /// # 参数
             /// - `data`: VARINT_TLV 模式下的协议字节。
@@ -198,7 +198,7 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
         }
 
         impl crate::WireCodec for #name {
-            /// 编码 encode 数据；用于生成可传输或可存储的字节。
+            /// 业务作用: 按协议模式把 schema 编码为线路字节，统一拒绝尚未实现的固定布局模式。
             ///
             /// # 参数
             /// - `mode`: 当前操作使用的编码、舍入、订阅或执行模式。
@@ -211,7 +211,7 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
                 }
             }
 
-            /// 解码 decode 数据；用于把输入还原为内部字节或结构。
+            /// 业务作用: 按协议模式把线路字节恢复为 schema，统一拒绝尚未实现的固定布局模式。
             ///
             /// # 参数
             /// - `mode`: 当前操作使用的编码、舍入、订阅或执行模式。
@@ -229,7 +229,7 @@ pub fn derive_protocol_bytes(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// 收集字段(按 tag 升序),解析 #[proto(tag = N)] 与类型分类。
+/// 业务作用: 收集字段(按 tag 升序),解析 #[proto(tag = N)] 与类型分类。
 ///
 /// # 参数
 /// - `ast`: 派生宏解析出的结构体语法树。
@@ -282,7 +282,7 @@ fn collect_fields(ast: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
     Ok(out)
 }
 
-/// 解析 parse tag 输入；用于把文本或语法节点转换为内部结构。
+/// 业务作用: 从字段的 `#[proto(tag = N)]` 属性读取 wire tag，缺失时给出编译期错误。
 ///
 /// # 参数
 /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
@@ -306,7 +306,7 @@ fn parse_tag(field: &syn::Field) -> syn::Result<u64> {
     Err(syn::Error::new_spanned(field, "字段缺 #[proto(tag = N)]"))
 }
 
-/// Rust 类型 → Kind。
+/// 业务作用: Rust 类型 → Kind。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -345,7 +345,7 @@ fn classify(ty: &Type) -> Option<Kind> {
     None
 }
 
-/// `Option<T>` → Some(T)。
+/// 业务作用: `Option<T>` → Some(T)。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -353,7 +353,7 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     generic_inner(ty, "Option")
 }
 
-/// `Vec<T>` → Some(T)。
+/// 业务作用: `Vec<T>` → Some(T)。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -361,7 +361,7 @@ fn vec_inner(ty: &Type) -> Option<&Type> {
     generic_inner(ty, "Vec")
 }
 
-/// 读取包装类型的内部泛型；用于识别 Option 和 Vec 的字段元素类型。
+/// 业务作用: 读取包装类型的内部泛型；用于识别 Option 和 Vec 的字段元素类型。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
@@ -381,7 +381,7 @@ fn generic_inner<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
     })
 }
 
-/// 返回当前对象的 path 状态。
+/// 业务作用: 判断 Rust 类型路径的末段是否匹配目标名称，供字段类型白名单识别复用。
 ///
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。

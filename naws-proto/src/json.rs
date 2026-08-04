@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{CodecError, Result};
 
-/// 序列化任意 schema 对象为 JSON 字节(派生宏的 JsonBytes 分支调用)。
+/// 业务作用：序列化任意 schema 对象为 JSON 字节(派生宏的 JsonBytes 分支调用)。
 ///
 /// # 参数
 /// - `v`: 待编码的协议结构体或派生 schema 实例。
@@ -24,7 +24,7 @@ pub fn to_vec<T: Serialize>(v: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(v).map_err(|e| CodecError::Json(e.to_string()))
 }
 
-/// 从 JSON 字节反序列化(派生宏的 JsonBytes 分支调用)。
+/// 业务作用：从 JSON 字节反序列化(派生宏的 JsonBytes 分支调用)。
 ///
 /// # 参数
 /// - `data`: 入站 JSON_BYTES 载荷,通常来自网络帧或 golden 对拍样本。
@@ -34,7 +34,7 @@ pub fn from_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T> {
 
 /* ============================== serde 字段属性辅助 ============================== */
 
-/// NON_EMPTY:Option<String> 为 None 或空串时省略。
+/// 业务作用：NON_EMPTY:Option<String> 为 None 或空串时省略。
 ///
 /// # 参数
 /// - `v`: 待判断的可空字符串字段。
@@ -42,7 +42,7 @@ pub fn opt_str_empty(v: &Option<String>) -> bool {
     v.as_ref().is_none_or(|s| s.is_empty())
 }
 
-/// NON_EMPTY:字符串数组为 None 或空数组时省略。
+/// 业务作用：NON_EMPTY:字符串数组为 None 或空数组时省略。
 ///
 /// # 参数
 /// - `v`: 待判断的可空字符串数组字段。
@@ -50,7 +50,7 @@ pub fn opt_strvec_empty(v: &Option<Vec<Option<String>>>) -> bool {
     v.as_ref().is_none_or(|a| a.is_empty())
 }
 
-/// NON_EMPTY:字节数组为 None 或空时省略。
+/// 业务作用：NON_EMPTY:字节数组为 None 或空时省略。
 ///
 /// # 参数
 /// - `v`: 待判断的可空 byte[] 字段。
@@ -58,7 +58,7 @@ pub fn opt_bytes_empty(v: &Option<Vec<u8>>) -> bool {
     v.as_ref().is_none_or(|a| a.is_empty())
 }
 
-/// byte[] 出站:每字节按 **有符号** i8 写(对齐 原实现 byte)。skip 已挡掉 None/空。
+/// 业务作用：byte[] 出站:每字节按 **有符号** i8 写(对齐 原实现 byte)。skip 已挡掉 None/空。
 ///
 /// # 参数
 /// - `v`: 待序列化的可空字节数组字段。
@@ -73,7 +73,7 @@ pub fn ser_opt_bytes_signed<S: Serializer>(
     }
 }
 
-/// byte[] 入站:仅接受 原实现 byte 兼容范围 `-128..=255`(有符号 i8 或无符号 u8 两种写法),
+/// 业务作用：byte[] 入站:仅接受 原实现 byte 兼容范围 `-128..=255`(有符号 i8 或无符号 u8 两种写法),
 /// 越界(如 256 / -129)立即报错,**不静默截断**成另一份合法数据。
 ///
 /// # 参数

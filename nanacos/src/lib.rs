@@ -4,7 +4,7 @@
 // ============================================================================
 // nacos —— Nacos 配置中心 + 注册中心的【传输/机制】层(抽自各业务 app,机制写一次复用)
 //
-// 设计边界(对照 nacos.md「传输/机制 vs 应用策略」):
+// 设计边界：传输机制与应用策略保持分离。
 //   进本 crate(机制,与配置类型无关):
 //     · 连接/鉴权/命名空间:NacosConfigClient::connect(配置)/ NacosDiscoveryClient::connect(注册),各建各的 SDK service
 //     · 配置:fetch(data_id, group) -> 裸文本;watch(...) -> 推送回调拿裸文本 + WatchGuard(drop 注销)

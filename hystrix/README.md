@@ -50,6 +50,7 @@ async fn detail() -> Result<Json<serde_json::Value>, AppError> {
 
 - per-command 信号量隔离，超过并发上限立即拒绝。
 - 单请求超时。
+- 局部降级与进程级全局终态降级；全局处理器同步生成一次最终响应，不叠加第二层并发或超时保护。
 - rolling window 指标、延迟分位、当前并发、TPS。
 - `/hystrix.stream` SSE 输出，兼容 Hystrix Dashboard。
 
@@ -68,6 +69,53 @@ async fn detail() -> Result<Json<serde_json::Value>, AppError> {
 
 指标口径注意:`rollingMaxConcurrentExecutionCount` 是**进程生命周期内的并发峰值**(只增不减),不是滚动窗口内峰值——一次流量尖峰后 Dashboard 会持续显示该值。其余 rollingCount* 为 10s 滚动窗口。同名 Command 重复构造会在 Dashboard 出现重复圈(各自独立统计),注解宏路径已按 handler 缓存避免;
 手动 `Command::new` 请自行复用实例——重复构造同 (group, name) 时会打一条 `warn` 提示。
+
+## 全局降级
+
+业务端点没有配置局部降级函数或静态响应时，可以由一个进程级处理器统一接管并发拒绝和执行超时。
+推荐用 `#[nasa::hystrix::global_fallback]` 自动收集唯一入口，无需在启动函数手动注册：
+
+```rust
+use axum::{http::StatusCode, response::IntoResponse, Json};
+use nasa::hystrix::{FallbackCause, FallbackContext};
+
+#[nasa::hystrix::global_fallback]
+fn service_fallback(context: FallbackContext) -> impl IntoResponse {
+    let cause = match context.cause() {
+        FallbackCause::BulkheadRejected { .. } => "busy",
+        FallbackCause::ExecutionTimeout { .. } => "timeout",
+        _ => "unavailable",
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "code": "SERVICE_DEGRADED",
+            "cause": cause,
+            "command": context.command(),
+            "path": context.path(),
+            "transaction_weight": context.transaction_weight(),
+        })),
+    )
+}
+```
+
+`#[global_fallback]` 不接受参数，只能标注恰好接收一个 `FallbackContext` 的同步函数，返回类型可以是任意
+Axum `IntoResponse`。它是故障路径的终态响应生成器，应只做本地、确定性、常量时间的响应组装，不应阻塞
+线程或访问数据库、缓存、RPC 等外部资源。组件不会再给它配置 `max_concurrent` 或 `timeout_ms`，也不会在
+它失败后调用第二个业务降级；配置冲突、panic 或递归只会收敛到内置 429/504。
+
+固定优先级为：端点局部函数 → 端点局部静态响应 → 本组件全局处理器 → 内置 429/504。同一组件只能
+收集一个属性入口；首次需要时自动初始化。希望在开放流量前检查唯一性时，可调用
+`initialize_global_fallback()`，多个声明会返回按源码位置排序的
+`GlobalFallbackInstallError::MultipleCollectedHandlers`。没有使用属性宏时，仍可实现同步
+`GlobalFallbackHandler` 并调用 `install_global_fallback(Arc<_>)`；手动实现可返回
+`FallbackDecision::UseBuiltin`，但不能覆盖已经收集的属性入口。
+
+`FallbackContext::transaction_weight()` 只传递端点声明的 REST 事务权重。主请求进入组件时已经按该权重
+完成一次 TPS 记账，执行全局降级不会重复增加 TPS。Dashboard 的
+`rollingCountFallbackSuccess` 记录局部或全局成功产出的降级响应，`rollingCountFallbackFailure` 记录全局
+配置冲突、panic 或递归。由于终态处理器没有第二层隔离舱，
+`rollingCountFallbackRejection` 与 `propertyValue_fallbackIsolationSemaphoreMaxConcurrentRequests` 恒为 0。
 
 ## 显式 Command
 

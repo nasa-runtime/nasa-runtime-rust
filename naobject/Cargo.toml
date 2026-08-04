@@ -15,7 +15,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hex = "0.4"
 hmac = "0.12"
-nasecret = { version = "1.0.0", path = "../nasecret" }
+nasecret = { version = "1.0.0" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10"
 zeroize = "1"

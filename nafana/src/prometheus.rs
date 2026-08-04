@@ -23,7 +23,13 @@ pub async fn metrics() -> impl IntoResponse {
     )
 }
 
-/// 渲染全量指标文本。注册表快照(排序、放锁)→ 逐命令 export → 按族输出。
+/// 业务作用：渲染包含主请求、全局降级与事务权重事实的稳定 Prometheus 文本。
+///
+/// 注册表快照(排序、放锁)→ 逐命令 export → 按族输出。
+///
+/// # 参数说明
+///
+/// 参数说明: 无。
 ///
 /// # 返回
 ///
@@ -64,6 +70,23 @@ pub fn render_metrics() -> String {
         "拒绝/超时分支产出降级响应的单调计数。",
         |e| e.fallback,
     );
+    out.push_str("# HELP nafana_global_fallback_total 全局降级处理器结局单调计数。\n");
+    out.push_str("# TYPE nafana_global_fallback_total counter\n");
+    for e in &exports {
+        for (outcome, value) in [
+            ("handled", e.global_fallback_handled),
+            ("builtin", e.global_fallback_builtin),
+            ("failed", e.global_fallback_failed),
+        ] {
+            out.push_str(&format!(
+                "nafana_global_fallback_total{{command=\"{}\",group=\"{}\",outcome=\"{}\"}} {}\n",
+                escape_label(&e.command),
+                escape_label(&e.group),
+                outcome,
+                value
+            ));
+        }
+    }
     push_counter_family(
         &mut out,
         &exports,

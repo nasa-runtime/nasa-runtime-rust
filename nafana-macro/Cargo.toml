@@ -2,10 +2,10 @@
 # 编译期校验参数、提取 mapping path，并生成 nafana Command 包装代码。
 [package]
 name = "nafana-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[grafana] 属性宏(bulkhead + 超时 + 降级 + Prometheus 指标)"
+description = "#[grafana] 接口保护与 #[global_fallback] 终态降级属性宏"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -18,7 +18,7 @@ proc-macro = true
 
 name = "nafana_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
 # syn: 解析被注解函数与注解参数(features=full 才能解析函数体)
 syn = { version = "2", features = ["full"] }
 # quote: 用 quote!{} 模板把 AST/变量拼回 TokenStream

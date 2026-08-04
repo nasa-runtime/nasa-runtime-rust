@@ -8,7 +8,7 @@
 // 设计取舍(给后续维护者,免翻外部源码即可理解):
 //   1) 任务收集靠 linkme 的 distributed_slice(链接器在编译期把各处 #[scheduled] 生成的注册项汇总进
 //      SCHEDULED_TASKS),**不做运行期反射/扫描**——Rust 没有容器,也不需要。
-//   2) cron 任务分两路(d.md):misfire=Skip 走现成 tokio-cron-scheduler;misfire=FireOnce/ClaimOnly 走
+//   2) cron 任务分两路：misfire=Skip 走 tokio-cron-scheduler；misfire=FireOnce/ClaimOnly 走
 //      【自管 CronPlan driver】(croner 算名义触发时刻),因为前者回调拿不到"本拍名义 scheduled_at",而 FireLog
 //      claim 去重要跨节点一致的 scheduled_at(FireOnce 额外挂 misfire 巡检补漏,ClaimOnly 只每拍 claim)。非 cron(固定频率/固定延迟/一次性)**自管 tokio::time**
 //      (该库对 non-cron 的 Duration 会按秒截断 + 固定 500ms tick,毫秒级会失真)。
@@ -32,7 +32,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 
 // ============================================================================
 // 集群门控(cluster gate)—— 让 #[scheduled(cluster="leader")] 只由当前 leader 触发。
-// 详见 d.md/。core 不依赖 Redis;接 nadis::Leader 的 adapter 在 `cluster` feature 下(见文件末)。
+// core 不依赖 Redis；连接 nadis::Leader 的 adapter 位于 `cluster` feature 下。
 // ============================================================================
 
 /// 任务的集群执行模式(由 `#[scheduled(cluster=...)]` 决定,默认 `Local`)。
@@ -45,12 +45,12 @@ pub enum ClusterMode {
     /// ⚠️ **leader-only,不是 exactly-once**:`is_leader()` 是触发瞬间的时间点判定。lease 交接 / 脑裂窗口里
     /// 两个节点可能同时自认 leader,**同一拍可能被双触发**。要「同一 `scheduled_at` 跨节点去重」请用
     /// `misfire="fire_once"`/`"claim_only"`(经 [`FireLog`] 原子 claim 去重),或在业务侧做幂等 / done-marker。
-    /// claim 只表示「有人负责触发了这一拍」,**不等于业务执行成功**(见 d.md)。
+    /// claim 只表示“某个节点负责触发了这一拍”，不等于业务执行成功。
     Leader,
 }
 
 /// leader 判定的注入点:调度层只依赖它读 `is_leader()`,不直接持有 `nadis::Leader`——
-/// 该边界允许接入不同选主实现，调度层不依赖具体租约客户端。详见 d.md。
+/// 该边界允许接入不同选主实现，调度层不依赖具体租约客户端。
 pub trait LeaderGate: Send + Sync + 'static {
     /// 返回当前节点此刻是否拥有任务触发权。
     fn is_leader(&self) -> bool;
@@ -64,27 +64,27 @@ pub struct ClusterOptions {
     pub gate_id: String,
 }
 
-/// 调度器启动选项。`#[non_exhaustive]`:只用构造器 + `with_*` builder 构造,后续加字段对调用方非破坏。
+/// 调度器启动选项。`#[non_exhaustive]` 要求调用方使用构造器与 `with_*` builder，新增字段不会破坏调用方。
 #[non_exhaustive]
 pub struct SchedulerOptions {
     /// 默认集群执行配置;未设置时所有 `cluster="leader"` 任务都会跳过。
     pub cluster: Option<ClusterOptions>,
-    /// 运行记录器(d.md);默认 `NoopRecorder`(什么都不记)。用 `with_recorder` 设。
+    /// 运行记录器；默认 `NoopRecorder`（不记录）。用 `with_recorder` 设置。
     pub recorder: Arc<dyn ExecutionRecorder>,
     /// 记录用的节点标识(写进 `RunEvent.node`);默认空串。用 `with_node_id` 设。
     pub node_id: String,
-    /// misfire claim 存储(d.md);`misfire=FireOnce`/`ClaimOnly` 任务必需,否则可 `None`。用 `with_fire_log` 设。
+    /// misfire claim 存储；`misfire=FireOnce`/`ClaimOnly` 任务必需，否则可为 `None`。用 `with_fire_log` 设置。
     pub fire_log: Option<Arc<dyn FireLog>>,
-    /// misfire 巡检周期(默认 30s;d.md)。仅 `misfire=FireOnce` 任务用;开发可调小、生产按时钟偏差调优。用 `with_misfire_sweep_interval` 设。
+    /// misfire 巡检周期（默认 30s）。仅 `misfire=FireOnce` 任务使用，应按部署环境的时钟偏差调整。
     pub misfire_sweep_interval: Duration,
     /// misfire claim 容差 ms(默认 5000):应覆盖最大节点间时钟偏差 + 一个 sweep 周期。用 `with_misfire_tolerance_ms` 设。
     pub misfire_tolerance_ms: i64,
-    /// 分组 leader gate(d.md):`#[scheduled(cluster="leader", group="g")]` 任务用 `group_gates["g"]`,
+    /// 分组 leader gate：`#[scheduled(cluster="leader", group="g")]` 任务使用 `group_gates["g"]`，
     /// 未给 group 或该 group 未注册时用 `cluster` 默认 gate。让不同任务族由不同 leader 节点承载(负载分散)。
     /// 用 `with_group_gate` / `with_group_gate_id` 设;空 = 全部用默认 gate(= 现状,向后兼容)。
     pub group_gates: std::collections::HashMap<String, Arc<dyn LeaderGate>>,
     /// 各 group gate 的稳定标识(如该 group 的 leader lock key);仅 `with_group_gate_id` 注册时有。
-    /// 进启动指纹 → 同进程二次启动、同 group 名换了底层 gate(key)能被 fail-fast(调度设计约束 #3)。
+    /// 纳入启动指纹，使同进程二次启动或同 group 更换底层 gate key 时能够 fail-fast。
     /// 热路径仍只调用 `LeaderGate::is_leader()`;这里的 id 只用于启动期配置漂移检测,不泄露 gate 内部实现。
     pub group_gate_ids: std::collections::HashMap<String, String>,
 }
@@ -191,7 +191,7 @@ impl SchedulerOptions {
 
     /// 同 [`with_group_gate`](Self::with_group_gate),但额外带该 group gate 的**稳定标识** `gate_id`
     /// (建议填该 group 的 leader lock key)→ 进启动指纹,使"同进程二次启动、同 group 名换了底层 gate"被
-    /// fail-fast 抓到(调度设计约束 #3)。不暴露 `nadis::Leader` 内部字段,由业务显式传 id。
+    /// 通过启动指纹 fail-fast 捕获。不暴露 `nadis::Leader` 内部字段，由业务显式传入 id。
     /// 未调用本方法而只用 `with_group_gate` 时,指纹只能确认 group 集合是否变化,不能确认底层 gate 是否替换。
     ///
     /// # 参数
@@ -211,8 +211,8 @@ impl SchedulerOptions {
     }
 }
 
-/// 全局启动配置指纹(替代裸 bool;防 local/clustered 静默混用 + 同 gate 下 group/FireLog 配置漂移,详见 d.md)。
-/// 注:`recorder` 不进指纹——`Arc<dyn ExecutionRecorder>` 无稳定标识、无法比对(已知限制;调度设计约束 #6)。
+/// 全局启动配置指纹，用于防止 local/clustered 静默混用以及同一 gate 下 group/FireLog 配置漂移。
+/// `recorder` 不进入指纹：`Arc<dyn ExecutionRecorder>` 没有可稳定比较的标识。
 /// group gate 按 (group 名, 可选 gate_id) 比对:`with_group_gate_id` 给了 id 则连底层 gate key 一起比;
 /// 仅 `with_group_gate`(无 id)则只比 group 名。FireLog 底层 key 经 `FireLog::fingerprint()` 比对。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,7 +266,7 @@ impl SchedulerOptions {
     }
 }
 
-/// 触发时刻判定本节点是否应执行该任务(对照 d.md)。
+/// 触发时刻判定本节点是否应执行该任务。
 /// `Local` 恒 true;`Leader` 读 gate;`Leader` 但无 gate = 不应发生(启动期已 fail-fast),保守 false。
 ///
 /// # 参数
@@ -280,7 +280,7 @@ fn should_run(cluster: ClusterMode, gate: &Option<Arc<dyn LeaderGate>>) -> bool 
 }
 
 // ============================================================================
-// 运行记录(ExecutionRecorder)—— d.md。trait 注入、默认 no-op、core 不碰 Redis。
+// 运行记录通过 trait 注入，默认 no-op，core 不依赖 Redis。
 // 观测面 = fire-and-forget:绝不阻塞 tick、绝不让记录失败/ panic 影响任务(safe_record 隔离 panic)。
 // ============================================================================
 
@@ -292,7 +292,7 @@ pub enum RunStatus {
     /// 任务 future 正常完成但返回失败结果。
     Failed,
     /// 任务级 timeout(`#[scheduled(timeout_ms=...)]`)超时:`tokio::time::timeout` 到点 → 协作式 abort run、记本状态。
-    /// **仅 await 边界生效**——阻塞 I/O / CPU 死循环 / 已 detach 的子任务杀不掉(d.md #7)。
+    /// **仅在 await 边界生效**：无法终止阻塞 I/O、CPU 死循环或已 detach 的子任务。
     TimedOut,
     /// 任务 future panic,已被调度运行时隔离。
     Panicked,
@@ -369,7 +369,7 @@ impl ExecutionRecorder for NoopRecorder {
 
 /// 把每个 [`RunEvent`] 扇出给多个 [`ExecutionRecorder`](让「业务运行记录 + metrics 记录」等并存)。
 /// 每个子 recorder 经内部安全记录入口**独立隔离 panic**——一个子 recorder 出错/ panic 不影响其它子 recorder,
-/// 也不影响任务本身。为后续 metrics-as-recorder(metrics 即一个 recorder)留扇出位(d.md)。
+/// 也不影响任务本身；该扇出机制允许业务记录器与 metrics 记录器并存。
 pub struct CompositeRecorder {
     recorders: Vec<Arc<dyn ExecutionRecorder>>,
 }
@@ -564,8 +564,7 @@ pub enum Schedule {
 }
 
 /// 任务一次执行的结果(供 [`ExecutionRecorder`] 区分 Success/Failed)。
-/// **不携带错误值** → 不对任务的 `E` 强加 `Debug/Display` 约束(沿用宏对返回类型零约束的策略;
-/// 故偏离 d.md 字面的 `Err(String)`:Rust 侧无法在不要求 `Debug` 的前提下取错误文本)。
+/// 不携带错误值，因此不会对任务的 `E` 强加 `Debug`/`Display` 约束；在不增加该约束时无法提取错误文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
     /// 任务业务逻辑成功完成。
@@ -583,7 +582,7 @@ pub struct ScheduledTask {
     /// 展示用任务名,用于日志、指标和 recorder 事件。
     pub name: &'static str,
     /// 稳定唯一 task id(宏生成;`FireOnce`/`ClaimOnly` 的 FireLog claim key)。cron=`name|cron|expr|zone`,非 cron=`name`。
-    /// 与 `name`(展示名)分离:repeatable 同名 + 不同 cron 的 fire_once,claim 不互撞(d.md;asynct)。
+    /// 与 `name`（展示名）分离：repeatable 同名但 cron 不同时，fire_once claim 不会互相冲突。
     pub id: &'static str,
     /// 任务触发方式和时间参数。
     pub schedule: Schedule,
@@ -604,7 +603,7 @@ pub struct ScheduledTask {
 pub static SCHEDULED_TASKS: [ScheduledTask];
 
 // ============================================================================
-// misfire 补偿(漏触发)—— d.md。仅 cron + cluster=leader + FireOnce 任务用。
+// misfire 补偿仅用于 cron + cluster=leader + FireOnce 任务。
 // 无主窗口漏掉的那拍,由独立低频巡检任务在 leader 上补一次;靠 FireLog 的原子 claim 做
 // 集群级"至多一次"去重(正常触发与补偿、双主下的多 leader 都经同一 claim)。
 // ============================================================================
@@ -617,13 +616,13 @@ pub enum MisfirePolicy {
     /// 每拍经 FireLog claim 去重(同一 `scheduled_at` 跨节点只触发一次)**+ misfire 巡检补漏**无主窗口漏掉的一拍。
     FireOnce,
     /// 每拍经 FireLog claim 去重(同一 `scheduled_at` 跨节点只触发一次),但**不做** misfire 补漏。
-    /// 适合"怕双跑、但不需要补漏拍"的任务——把"同拍去重"与"misfire 补偿"解耦(d.md)。
+    /// 适合需要同拍去重但不需要补漏拍的任务，将“同拍去重”与“misfire 补偿”解耦。
     ClaimOnly,
 }
 
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// 每任务"上次已认领触发时刻"的集群共享存储(d.md)。`misfire=FireOnce`/`ClaimOnly` 任务需要,业务给 Redis/DB 实现。
+/// 每个任务“上次已认领触发时刻”的集群共享存储。`misfire=FireOnce`/`ClaimOnly` 任务需要，业务可用 Redis/DB 实现。
 /// 注意:记录的是 claim(谁负责触发了这一拍),**不是业务执行成功**;执行结果由 [`ExecutionRecorder`] 记。
 pub trait FireLog: Send + Sync + 'static {
     /// 读取最近一次 fire；用于续跑和幂等判断。
@@ -647,7 +646,7 @@ pub trait FireLog: Send + Sync + 'static {
         stale_before_ms: i64,
     ) -> BoxFut<'a, anyhow::Result<bool>>;
 
-    /// 启动指纹(调度设计约束 #3):本 FireLog 的稳定标识(如 Redis key),供 `StartFingerprint` 检测同进程
+    /// 本 FireLog 的稳定启动指纹（例如 Redis key），供 `StartFingerprint` 检测同进程
     /// 二次启动时 FireLog 底层 key 漂移。默认 `None`(不可标识的实现 → 仅按"是否装了 FireLog"判定)。
     fn fingerprint(&self) -> Option<String> {
         None
@@ -656,7 +655,7 @@ pub trait FireLog: Send + Sync + 'static {
 
 /// cron 时区(启动期解析一次):UTC / IANA / 固定 offset。**FireOnce/ClaimOnly 自管 driver 与(仅 FireOnce 的)misfire 巡检共用此解析**
 /// (它俩参与 claim 去重,须对同一拍算出同一 `scheduled_at`);**Skip cron 由 tokio-cron-scheduler 自身解析**
-/// (不参与 claim、不做名义对账,仅要求语义一致)。对照 d.md(=改文档)。
+/// 不参与 claim 或名义时刻对账，只要求各实现保持相同语义。
 enum CronZone {
     Utc,
     Iana(chrono_tz::Tz),
@@ -684,7 +683,7 @@ fn resolve_cron_zone(zone: Option<&str>) -> anyhow::Result<CronZone> {
     }
 }
 
-/// 自管 cron 计划(d.md):启动期解析表达式 + zone(失败即启动失败),给出【名义】触发时刻(epoch ms,UTC)。
+/// 自管 cron 计划：启动期解析表达式和 zone（失败即启动失败），并给出名义触发时刻（epoch ms，UTC）。
 /// FireOnce/ClaimOnly 自管 driver 与(仅 FireOnce 的)misfire 巡检**共用同一 plan**,保证同一拍跨节点/跨路径算出完全一致的 `scheduled_at`。
 pub struct CronPlan {
     cron: croner::Cron,
@@ -814,7 +813,7 @@ fn fire_once_guarded(
             .try_claim_fire(id, scheduled_at_ms, stale_before_ms)
             .await
         {
-            // fire_at_ms 用 nominal scheduled_at(非 now_ms)→ 运行记录能和 FireLog claim 对账(d.md)。
+            // fire_at_ms 使用 nominal scheduled_at 而非 now_ms，使运行记录能与 FireLog claim 对账。
             Ok(true) => {
                 recorded_run(
                     run,
@@ -844,7 +843,7 @@ fn fire_once_guarded(
                     SkipReason::ClaimLost,
                 );
             }
-            // fail-closed(d.md):claim 不可用时不执行,等后续正常触发/巡检补。
+            // claim 不可用时 fail-closed，避免绕过去重门禁；等待正常触发或巡检补偿。
             Err(e) => {
                 tracing::error!(
                     "[scheduled] {} try_claim_fire 失败,fail-closed 跳过:{}",
@@ -881,7 +880,7 @@ struct FireOnceTask {
     gate: Option<Arc<dyn LeaderGate>>,
 }
 
-/// FireOnce/ClaimOnly cron 的【自管 driver】(d.md):不走 tokio-cron-scheduler——因为它的回调拿不到名义触发时刻。
+/// FireOnce/ClaimOnly cron 的自管 driver：不使用 tokio-cron-scheduler，因为其回调拿不到名义触发时刻。
 /// driver 自己用 `CronPlan::next_after` 算出本拍的【精确名义 `scheduled_at`】,睡到点后用它做 claim + recorder,
 /// 跨节点一致 → claim 去重成立。run 用内层 JoinSet spawn(长任务不阻塞下一拍的计算);shutdown 时随 JoinSet abort。
 ///
@@ -959,7 +958,7 @@ async fn fire_once_cron_driver(
     }
 }
 
-/// misfire 巡检后台 loop(d.md):仅 leader 上、低频地为每个 FireOnce cron 任务补漏一拍。
+/// misfire 巡检后台循环：仅在 leader 上低频地为每个 FireOnce cron 任务补漏一拍。
 /// 不挂在 cron 回调上(cron 两次触发间无 tick)。tolerance 吸收节点间时钟偏差 + 一个 sweep 周期。
 /// 补偿用 spawn(不 inline await):单个长任务不拖垮整轮巡检。
 ///
@@ -1023,7 +1022,7 @@ async fn misfire_sweep_loop(
     }
 }
 
-/// misfire 巡检周期 + claim 容差(默认值;d.md)。
+/// misfire 巡检周期与 claim 容差的默认值。
 const MISFIRE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// 避免极端配置在 Tokio interval deadline 中溢出。
 const MAX_MISFIRE_SWEEP_INTERVAL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -1031,7 +1030,7 @@ const MISFIRE_TOLERANCE_MS: i64 = 5_000;
 
 /// FireOnce/ClaimOnly 的 claim 以稳定 **task id** 作 key(见 [`ScheduledTask::id`];`NadisFireLog` 用它当 Redis HASH field)。
 /// 两个任务若 id 相同(= 同 `name` + 同 `cron`+`zone`)会共享同一 claim field → `scheduled_at` 序列互相覆盖/阻塞,
-/// 故**启动期 fail-fast**(调度设计约束)。id 已含 cron 签名,故 repeatable「同名 + 不同 cron」天然不撞——
+/// 因此必须在启动期 fail-fast。id 已含 cron 签名，repeatable 的“同名 + 不同 cron”天然不冲突；
 /// 只有真正等价的两个任务才会触发本错误。
 ///
 /// # 参数
@@ -1052,7 +1051,7 @@ fn ensure_unique_fireonce_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> any
 static SCHED: Mutex<Option<JobScheduler>> = Mutex::new(None);
 // non-cron 后台 loop 的句柄(供 shutdown abort)。
 static NON_CRON_HANDLES: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
-// 幂等 + 并发安全的启动状态。存【启动配置指纹】而非裸 bool(d.md):
+// 幂等且并发安全的启动状态。保存启动配置指纹而不是裸 bool：
 //   None=未启动;Some(fp)=已用 fp 启动。重复启动只允许同指纹(幂等 Ok),不同指纹报错——
 //   防"先 local 再 clustered"等静默混用。async Mutex 把 start/shutdown 串行化,消除并发假成功。
 static START_STATE: tokio::sync::Mutex<Option<StartFingerprint>> =
@@ -1139,7 +1138,7 @@ pub async fn start_scheduled() -> anyhow::Result<()> {
 /// # 参数
 /// - `opts`: 调度器启动选项,包含本地/集群模式、记录器、misfire 和分组 gate 配置。
 ///
-/// **启动指纹幂等**(d.md):同配置重复调用返回 Ok;不同配置(如先 local 后 clustered、或换了
+/// 启动指纹保证幂等：同配置重复调用返回 Ok；不同配置（如先 local 后 clustered，或更换
 /// gate_id)返回 Err,提示先 `shutdown_scheduled()`。校验在 spawn 任何 loop 之前完成,失败不留半启动。
 pub async fn start_scheduled_with(opts: SchedulerOptions) -> anyhow::Result<()> {
     let fp = opts.fingerprint();
@@ -1353,7 +1352,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
     let fire_log = opts.fire_log.clone();
     let misfire_sweep_interval = opts.misfire_sweep_interval;
     let misfire_tolerance_ms = opts.misfire_tolerance_ms;
-    // 边界校验(调度设计约束 #3):sweep_interval=0 会让 tokio::time::interval panic;tolerance 不能为负。
+    // sweep_interval=0 会让 tokio::time::interval panic，且 tolerance 不能为负，因此启动前统一校验。
     anyhow::ensure!(
         !misfire_sweep_interval.is_zero(),
         "[scheduled] misfire_sweep_interval 不能为 0(tokio interval 会 panic)"
@@ -1366,7 +1365,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
         misfire_tolerance_ms >= 0,
         "[scheduled] misfire_tolerance_ms 不能为负(当前 {misfire_tolerance_ms})"
     );
-    // gate 改为【按任务 group 解析】(per-group leader,d.md):每个 cluster=leader 任务在阶段1 解析自己的 gate
+    // 按任务 group 解析 gate：每个 cluster=leader 任务在启动校验阶段解析自己的 gate，
     // (`group_gates[group]` 或默认 gate),随任务带到 driver;无对应 gate 即 fail-fast(替代原全局"无 LeaderGate"检查)。
     let mut cron_sched: Option<JobScheduler> = None;
     // 收集 non-cron,**全部 fallible 步骤成功后**再 spawn(防半启动)。
@@ -1420,7 +1419,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                 match misfire {
                     // FireOnce 与 ClaimOnly 都走自管 CronPlan driver(每拍 claim 去重);区别仅在是否 misfire 补漏(sweep)。
                     MisfirePolicy::FireOnce | MisfirePolicy::ClaimOnly => {
-                        // d.md:不进 tokio-cron-scheduler(回调拿不到名义触发时刻),走自管 driver。
+                        // 回调拿不到名义触发时刻，因此不进入 tokio-cron-scheduler，改走自管 driver。
                         // 启动期解析 CronPlan + zone(失败即启动失败,杜绝运行期 unwrap_or(now))。
                         if cluster != ClusterMode::Leader {
                             anyhow::bail!("[scheduled] 任务 {name}:misfire={misfire:?} 需配合 cluster=leader(claim 去重/补漏针对 leader 触发;Local 任务每节点各跑、无此问题)");
@@ -1464,7 +1463,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                 }
             }
             other => {
-                // fail-fast(d.md):cluster=leader 不支持 one-shot(只检查一次,非 leader 会永久跳过)。
+                // cluster=leader 不支持 one-shot：它只检查一次，若当时不是 leader 将永久漏执行，因此启动期拒绝。
                 if cluster == ClusterMode::Leader && matches!(other, Schedule::OneShot { .. }) {
                     anyhow::bail!(
                         "[scheduled] 任务 {name}:cluster=leader 不支持 one-shot;请改用 fixed_delay/cron,或用业务 done-marker"
@@ -1489,7 +1488,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
         }
     }
 
-    // FireOnce/ClaimOnly claim 以稳定 task id 作 key;同 id(同 name+cron+zone)会互相干扰 → 启动期 fail-fast(调度设计约束)。
+    // FireOnce/ClaimOnly claim 以稳定 task id 作 key；相同 id 会互相干扰，因此启动期 fail-fast。
     ensure_unique_fireonce_ids(fireonce_tasks.iter().map(|t| t.id))?;
 
     // ── 阶段 2:起 cron 调度器(可失败)──
@@ -1577,7 +1576,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                             _ = ticker.tick() => {
                                 // 先非阻塞回收已完成的(并记录 panic),拿到准确在飞计数(JoinSet::len 含未回收的已完成项)。
                                 while let Some(res) = inflight.try_join_next() { log_join(res, name); }
-                                // leader gate 在限流之前(d.md):非 leader 跳过本拍,不占 in-flight、不影响限流指标。
+                                // leader gate 必须先于限流判断，非 leader 跳过本拍时不占 in-flight，也不污染限流指标。
                                 if !should_run(cluster, &gate) {
                                     record_skip(recorder.as_ref(), name, id, cluster, node_id.as_ref(), now_ms(), SkipReason::NotLeader);
                                     continue;
@@ -1659,7 +1658,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
         handles.push(handle);
     }
 
-    // FireOnce/ClaimOnly cron(d.md):每任务一个【自管 driver】(正常触发,给精确名义 scheduled_at)+ 仅 FireOnce 再挂一个共享
+    // FireOnce/ClaimOnly cron 为每个任务启动一个自管 driver（正常触发并给出精确名义 scheduled_at），仅 FireOnce 再挂一个共享
     // 【misfire 巡检】(补无主窗口漏触发)。两者共用同一 CronPlan。fire_log/gate 已在阶段 1 校验存在;
     // 全部纳入 NON_CRON_HANDLES → shutdown 一并 abort。
     if !fireonce_tasks.is_empty() {
@@ -1749,7 +1748,7 @@ pub mod __private {
 }
 
 // ============================================================================
-// cluster feature —— 接 nadis::Leader 的 adapter + 便捷启动函数(d.md)。
+// cluster feature 提供 nadis::Leader adapter 与便捷启动函数。
 // 关 feature 时整段不编译,scheduling core 不依赖 nadis / Redis。
 // ============================================================================
 #[cfg(feature = "cluster")]
@@ -1785,7 +1784,7 @@ mod cluster_adapter {
         }
     }
 
-    /// 把 misfire claim 存到 Redis 的 [`FireLog`] 开箱实现(`misfire="fire_once"`/`"claim_only"` 必需;d.md)。
+    /// 把 misfire claim 存入 Redis 的 [`FireLog`] 实现，供 `misfire="fire_once"`/`"claim_only"` 使用。
     ///
     /// 存储 = **单个 HASH**:`field = 稳定 task id`(= [`crate::ScheduledTask::id`],非展示 name),`value = 已认领的名义 scheduled_at`(epoch ms)。
     /// [`try_claim_fire`](FireLog::try_claim_fire) 用一段 Lua **原子**完成「HGET→比较→HSET」:仅当字段为空
@@ -1893,13 +1892,13 @@ return 0
         }
     }
 
-    /// 把运行记录(`RunEvent`)落到 Redis **Stream** 的开箱 [`ExecutionRecorder`](d.md)。
+    /// 把运行记录（`RunEvent`）写入 Redis Stream 的 [`ExecutionRecorder`] 实现。
     ///
     /// **非阻塞**:`record()` 只把事件字段 `try_send` 进**有界** channel(同步、不打 Redis);后台 task 异步 `XADD`
     /// 到 stream(`id="*"`),每 `trim_every` 条做一次 `XTRIM MAXLEN ~ maxlen` 控制保留量。channel 接收端随
     /// recorder(tx)drop 关闭 → 后台 task 自然退出(无需显式 abort)。
     ///
-    /// **背压**(调度设计约束 #1/#3):channel 满(Redis 跟不上 / 高频 skipped)→ `try_send` 丢弃本条运行记录(内存有界、
+    /// **背压**：channel 满（Redis 跟不上或 skipped 过密）时，`try_send` 丢弃本条运行记录以保持内存有界，
     /// 绝不阻塞任务),累计丢弃数由 [`dropped()`](Self::dropped) 暴露 + 限频 `warn`;容量经 [`with_capacity`](Self::with_capacity) 可配。
     ///
     /// 字段:`task`(展示名)、`id`(稳定 task id)、`node`、`fire_at`(名义 scheduled_at,关联键)、`phase`(started/finished/skipped),
@@ -1948,7 +1947,7 @@ return 0
             Self::with_capacity(client, key, maxlen, DEFAULT_RECORDER_CHANNEL_CAP)
         }
 
-        /// 同 [`with_maxlen`](Self::with_maxlen),再指定**有界 channel 容量** `capacity`(背压上限,满即丢弃;调度设计约束 #3)。
+        /// 同 [`with_maxlen`](Self::with_maxlen)，并指定有界 channel 容量 `capacity`；满时丢弃以限制背压。
         ///
         /// # 参数
         /// - `client`: 已初始化的 Redis 客户端,后台任务通过它写入 Stream。
@@ -1961,13 +1960,13 @@ return 0
             maxlen: u64,
             capacity: usize,
         ) -> Self {
-            let maxlen = maxlen.max(1); // maxlen=0 会让 XTRIM 删空 → 兜底 ≥1(调度设计约束 #3)。
+            let maxlen = maxlen.max(1); // maxlen=0 会让 XTRIM 删空，因此下限固定为 1。
             let capacity = capacity.max(1); // 容量 ≥1。
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<(&'static str, String)>>(capacity);
             let key = key.into();
             let trim_every = (maxlen / 10).max(1);
             // 后台落库 task:① rx 随 recorder(tx)drop 关闭 → recv 返回 None → 退出(自清理);
-            // ② shutdown 信号 → 把已缓冲的 try_recv 干完再退(优雅停机,调度设计约束 P2)。
+            // ② shutdown 信号 → 把已缓冲的 try_recv 干完再退，保证优雅停机不丢运行记录。
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             let shutdown_drain = shutdown.clone();
             let handle = tokio::spawn(async move {
@@ -2026,7 +2025,7 @@ return 0
             self.dropped.load(std::sync::atomic::Ordering::Relaxed)
         }
 
-        /// 优雅停机(调度设计约束 P2):通知后台 drain 把**已缓冲**的运行记录写完,再 await 它退出。
+        /// 优雅停机：通知后台 drain 把**已缓冲**的运行记录写完，再 await 它退出。
         /// 用于优雅停机前确保尾部记录落库(默认 drop 路径是 best-effort,进程立即退可能丢尾部)。
         /// 幂等:重复调用 / drop 后调用安全(handle 已 take 则直接返回);停机后再 `record` 的事件会被丢弃。
         pub async fn shutdown(&self) {
@@ -2089,7 +2088,7 @@ return 0
         start_scheduled_clustered_with_id("nadis", leader).await
     }
 
-    /// 集群模式启动 + 稳定 `gate_id`(建议填 leader lock key;见 d.md 启动指纹)。
+    /// 集群模式启动并设置稳定 `gate_id`，建议使用 leader lock key 以参与启动指纹校验。
     ///
     /// # 参数
     /// - `gate_id`: nadis leader gate 的稳定业务标识,会进入启动指纹。

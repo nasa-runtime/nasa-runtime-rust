@@ -16,7 +16,7 @@ proc-macro = true
 name = "namapper_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0", path = "../macro-support" }
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"

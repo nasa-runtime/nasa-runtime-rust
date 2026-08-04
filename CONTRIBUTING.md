@@ -8,7 +8,6 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
@@ -22,7 +21,7 @@ RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
 - 每个组件 README 必须说明：用途、feature 或依赖接入方式、yml 配置、初始化方式、至少一个正常使用示例，以及主要边界条件。
 - 根 README 只作为索引和门面使用指南；组件细节应写在组件自己的 README 中。
 - 公开 `struct`、`trait`、`enum`、`fn` 和重要参数需要业务上下文注释，不能写泛泛的占位说明。
-- `namapper/README.md` 保持业务使用指南，不写测试目录或测试属性示例。
+- `namapper/README.md` 保持业务使用指南，不写内部验证资产或实现细节。
 - 不要把真实密钥、本地密码、私有主机名或内部网络地址写进已提交文档。
 
 ## 代码规则
@@ -32,24 +31,21 @@ RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
 - 修改宏行为时，若生成代码对使用者可见，需要同步更新宏 crate README 和运行时 crate README。
 - 修改缓存和事务行为时，必须明确说明一致性语义。
 - 修改 Redis、MySQL、WebSocket、服务发现或调度行为时，相关文档应说明失败处理、超时、队列或资源上限。
-- 修改公开 API 时，应先补测试或同步更新现有测试，再更新文档。
+- 修改公开 API 时，应先完成对应回归门禁，再更新文档。
 
-## 测试要求
+## 发布资产边界
 
-所有测试、fixture、探针和实机场景只能位于 gitignored 的仓库根 `tests/`，或仓库外
-`application-demo` / `application-demo2`。任何组件 crate 内都禁止新增 `tests/`、`#[cfg(test)]`
-测试模块、测试 target、测试专用接口或测试脚本；测试文件不得进入产品 `.crate` 归档。
-fixture 不得包含凭据和私钥。
-任何进入 `.crate` 的 README、rustdoc、源码注释和 manifest 注释也不得描述测试资产、测试命令或
-测试实现。协议本身使用的同名字段不属于测试内容，例如 `namapper` 动态 SQL 的 `test` 属性。
+本地质量验证资产由不参与产品发布的根级工程统一管理。组件 crate 不得携带验证目录、专用接口、
+脚本、凭据、私钥或证书；这些内容不得进入产品 `.crate` 归档。进入归档的 README、rustdoc、源码
+注释和 manifest 注释只能描述公开能力、协议、边界及失败后果。
 
 | 变更类型 | 最小检查 |
 | --- | --- |
 | 只改 README 或注释 | 格式检查、禁用词扫描、README 覆盖扫描 |
-| 单个基础工具 crate | 根 `tests/` 对应合同用例 + 工作区 clippy |
-| 宏展开行为 | 根 `tests/` 的 `trybuild`/fixture 与下游编译矩阵 |
-| Redis 或缓存行为 | 根 `tests/` 合同测试 + 涉及协议、TTL 或真实缓存语义时跑 live 验收 |
-| MySQL、mapper 或事务行为 | 根 `tests/` 状态机/SQL 合同测试 + 涉及真实事务语义时跑 live 验收 |
+| 单个基础工具 crate | 根级合同检查 + 工作区 clippy |
+| 宏展开行为 | 下游编译矩阵与公开展开结果检查 |
+| Redis 或缓存行为 | 根级合同检查；涉及协议、TTL 或真实缓存语义时执行 live 验收 |
+| MySQL、mapper 或事务行为 | 状态机/SQL 合同检查；涉及真实事务语义时执行 live 验收 |
 | 门面 feature 编排 | `cargo check -p nasa --features full --all-targets` |
 
 ## 维护重点

@@ -1,6 +1,6 @@
 //! 分区连续安全水位状态机:at-least-once 保证的正确性核心。
 //!
-//! 本模块是纯逻辑,不依赖底层客户端。P3 poll_task 负责:
+//! 本模块是纯逻辑,不依赖底层客户端。poll_task 负责:
 //! 把每条记录的处理结果映射成 [`RecordOutcome`] 喂给 [`PartitionOffsetState::observe`]、
 //! 读 [`PartitionOffsetState::committable_next`] 决定同步 commit 到哪、读
 //! [`PartitionOffsetState::retry_from`] 决定失败 seek 回哪、commit 成功后调
@@ -106,7 +106,7 @@ pub(crate) enum SkipReason {
 /// 单条已观察记录的处理结果;`is_safe` 决定它是否可被提交越过。
 ///
 /// 说明:协议合同的 `Failed(FailureUnit)` 里 FailureUnit(失败单元是单条还是连续 run)
-/// 属重投层(P2 retry.rs)概念,frontier 计算并不需要它,故此处 `Failed` 只保留"不安全"这一位,
+/// 属重投层(retry.rs)概念,frontier 计算并不需要它,故此处 `Failed` 只保留"不安全"这一位,
 /// 失败单元归属由 retry.rs 管理,不在本纯状态机内耦合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordOutcome {

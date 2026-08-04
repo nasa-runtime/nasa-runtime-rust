@@ -36,7 +36,7 @@ impl Default for ApplicationSettings {
     ///
     /// # 参数
     ///
-    /// 本方法无参数；默认值与设计文档和配置示例保持一致。
+    /// 本方法无参数；默认值与公开配置示例保持一致。
     fn default() -> Self {
         Self {
             name: None,
@@ -124,7 +124,7 @@ impl Preflight {
         let info = ApplicationInfo::new(name, profile.as_deref(), mode)?;
 
         // 初始视图同时含 Application 与所有已声明组件的 version=1 状态，
-        // 使 `reload_status()` 对已声明目标从第一版起就有确定值。
+        // 使 `reload_status()` 对每个已声明目标从初始化完成起就有确定值。
         let mut reload_statuses = spec
             .components()
             .iter()
