@@ -22,7 +22,7 @@ default = []
 cluster = ["dep:nadis"]
 
 [dependencies]
-async-macro = { version = "1.0.0", path = "../async-macro" }
+async-macro = { version = "1.0.0" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
 nadis = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true }
 linkme = "0.3"

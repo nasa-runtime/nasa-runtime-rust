@@ -50,7 +50,7 @@ cargo metadata --no-deps --format-version 1 \
 `https://crates.io/api/v1/crates/<crate>/owners`：只有 owner 明确属于本项目发布账号时才能沿用；
 否则先修改 crate 名、门面依赖、README、发布拓扑和下游示例，再重新执行全量检查。
 
-第一、二批已经由本项目账号完成发布。其余批次的名称状态会随外部注册表变化，历史结果不能替代
+前三批已经由本项目账号完成发布。其余批次的名称状态会随外部注册表变化，历史结果不能替代
 正式上传前的最后一次复查。
 
 ## 发布批次与顺序
@@ -79,7 +79,7 @@ cargo metadata --no-deps --format-version 1 \
 
 如果某个 crate 依赖另一个本地 crate，必须先发布被依赖项。
 
-第一、二批已完成实际发布；后续批次状态不能因本地工作区可编译就提前标记为可发布。
+前三批已完成实际发布；后续批次状态不能因本地工作区可编译就提前标记为可发布。
 
 一旦内部 crate 的目标版本已进入 crates.io，所有组件 manifest 必须移除指向它的 `path`，只保留
 registry `version`。`path + version` 仅允许用于尚未发布的后续拓扑边；不参与发布的根级质量工程

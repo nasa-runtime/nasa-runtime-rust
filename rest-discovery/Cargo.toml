@@ -51,4 +51,4 @@ bytes = "1"
 percent-encoding = "2"
 httpdate = "1"
 # live-nacos 才编入:真 Nacos 后端(可选,不进默认依赖图)。
-nanacos = { package = "nanacos", version = "1.0.0", path = "../nanacos", optional = true, default-features = false }
+nanacos = { package = "nanacos", version = "1.0.0", optional = true, default-features = false }

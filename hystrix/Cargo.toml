@@ -16,7 +16,7 @@ categories.workspace = true
 [lib]
 name = "hystrix"
 [dependencies]
-hystrix-macro = { version = "1.0.0", path = "../hystrix-macro" }
+hystrix-macro = { version = "1.0.0" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

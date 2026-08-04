@@ -16,7 +16,7 @@ categories.workspace = true
 [lib]
 name = "cacheable"
 [dependencies]
-nacache-macro = { package = "nacache-macro", version = "1.0.0", path = "../nacache-macro" }
+nacache-macro = { package = "nacache-macro", version = "1.0.0" }
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 moka = { version = "0.12", features = ["future"] }
 dashmap = "6"

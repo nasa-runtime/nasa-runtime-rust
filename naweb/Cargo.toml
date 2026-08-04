@@ -34,7 +34,7 @@ legacy-rsa-private = ["crypto", "ncrypto/legacy-rsa-private"]
 security = ["auth", "crypto"]
 
 [dependencies]
-naweb-macro = { version = "1.0.0", path = "../naweb-macro" }
+naweb-macro = { version = "1.0.0" }
 axum = "0.8"
 linkme = "0.3"
 tracing = "0.1"

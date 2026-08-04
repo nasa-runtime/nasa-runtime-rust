@@ -64,7 +64,7 @@ naidempotency = { version = "1.0.0" }
 naauthz = { version = "1.0.0" }
 natelemetry = { version = "1.0.0" }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
-nauth-oauth = { version = "1.0.0", path = "../nauth-oauth", optional = true }
+nauth-oauth = { version = "1.0.0", optional = true }
 naopenapi = { version = "1.0.0", optional = true }
 # 仅 web 特性使用：auth 组件远程拉取 `jwks_uri`；rustls-tls 对齐 rest-discovery 的 TLS 栈。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
@@ -75,9 +75,9 @@ cacheable = { version = "1.0.0", path = "../cacheable", optional = true }
 # 仅 cache 组件使用：实现 cacheable 的 async trait `CacheBackend`，适配受管 Redis 连接。
 async-trait = { version = "0.1", optional = true }
 nadis = { version = "1.0.0", path = "../nadis", optional = true }
-nalog = { version = "1.0.0", path = "../nalog", optional = true }
+nalog = { version = "1.0.0", optional = true }
 nafka = { version = "1.0.0", path = "../nafka", optional = true, default-features = false }
-nanacos = { version = "1.0.0", path = "../nanacos", optional = true, default-features = false }
+nanacos = { version = "1.0.0", optional = true, default-features = false }
 nasched = { version = "1.0.0", path = "../nasched", optional = true }
 naws = { version = "1.0.0", path = "../naws", optional = true, default-features = false }
 rest-discovery-nacos = { version = "1.0.0", path = "../rest-discovery-nacos", optional = true, default-features = false }
