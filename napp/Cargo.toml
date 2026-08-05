@@ -68,7 +68,7 @@ nauth-oauth = { version = "1.0.0", optional = true }
 naopenapi = { version = "1.0.0", optional = true }
 # 仅 web 特性使用：auth 组件远程拉取 `jwks_uri`；rustls-tls 对齐 rest-discovery 的 TLS 栈。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
-namapper = { version = "1.0.0", path = "../namapper", optional = true, default-features = false }
+namapper = { version = "1.0.0", optional = true, default-features = false }
 natx = { version = "1.0.0", optional = true }
 namigrate = { version = "1.0.0", optional = true }
 cacheable = { version = "1.0.0", optional = true }
@@ -78,9 +78,9 @@ nadis = { version = "1.0.0", optional = true }
 nalog = { version = "1.0.0", optional = true }
 nafka = { version = "1.0.0", optional = true, default-features = false }
 nanacos = { version = "1.0.0", optional = true, default-features = false }
-nasched = { version = "1.0.0", path = "../nasched", optional = true }
-naws = { version = "1.0.0", path = "../naws", optional = true, default-features = false }
-rest-discovery-nacos = { version = "1.0.0", path = "../rest-discovery-nacos", optional = true, default-features = false }
+nasched = { version = "1.0.0", optional = true }
+naws = { version = "1.0.0", optional = true, default-features = false }
+rest-discovery-nacos = { version = "1.0.0", optional = true, default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
