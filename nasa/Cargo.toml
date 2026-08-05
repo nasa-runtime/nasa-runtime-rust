@@ -211,7 +211,7 @@ full = [
 
 [dependencies]
 # 依赖 key 用 *_impl,避免与门面公共模块同名(维护约束 §四)。
-application_impl = { package = "napp", version = "1.0.0", path = "../napp", optional = true }
+application_impl = { package = "napp", version = "1.0.0", optional = true }
 application_macro = { package = "napp-macro", version = "1.0.0", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
@@ -230,7 +230,7 @@ idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.0", o
 idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.0", optional = true }
 openapi_impl = { package = "naopenapi", version = "1.0.0", optional = true }
 audit_impl = { package = "naaudit", version = "1.0.0", optional = true }
-audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.0", path = "../naaudit-mysql", optional = true }
+audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.0", optional = true }
 secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
