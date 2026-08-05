@@ -24,7 +24,7 @@ cluster = ["dep:nadis"]
 [dependencies]
 async-macro = { version = "1.0.0" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
-nadis = { package = "nadis", version = "1.0.0", path = "../nadis", optional = true }
+nadis = { package = "nadis", version = "1.0.0", optional = true }
 linkme = "0.3"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-cron-scheduler = "0.13"

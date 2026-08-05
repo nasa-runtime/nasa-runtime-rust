@@ -14,6 +14,7 @@ on:
           - 3
           - 3p
           - 4
+          - 5
       confirm:
         description: "常规批次输入 publish-1.0.0；3p 宏补丁输入 publish-1.0.1"
         required: true
@@ -86,6 +87,9 @@ jobs:
             4)
               echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
               ;;
+            5)
+              echo "RELEASE_CRATES=naidempotency-mysql naidempotency-redis nainbox-mysql namapper naoutbox-mysql nasched naws rest-discovery-nacos" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -103,7 +107,7 @@ jobs:
           RELEASE_BATCH: ${{ inputs.batch }}
         shell: bash
         run: |
-          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto"
+          published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery"
           failed=false
           while IFS=$'\t' read -r owner dependency dependency_path; do
             case " $published_crates " in
@@ -223,6 +227,9 @@ jobs:
               ;;
             4)
               echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
+              ;;
+            5)
+              echo "RELEASE_CRATES=naidempotency-mysql naidempotency-redis nainbox-mysql namapper naoutbox-mysql nasched naws rest-discovery-nacos" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2

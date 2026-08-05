@@ -30,7 +30,7 @@ nacos-sdk = ["nanacos/nacos"]
 live-nacos = ["nacos-sdk"]
 
 [dependencies]
-rest-discovery = { version = "1.0.0", path = "../rest-discovery" }
+rest-discovery = { version = "1.0.0" }
 # 只用 nacos 后端的 client/props/guard + 中性 Instance(re-export);default-features=false:真实后端由 nacos-sdk feature 透传。
 nanacos = { package = "nanacos", version = "1.0.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
