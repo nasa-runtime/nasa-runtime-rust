@@ -79,7 +79,7 @@ cargo metadata --no-deps --format-version 1 \
 
 如果某个 crate 依赖另一个本地 crate，必须先发布被依赖项。
 
-前五批已完成实际发布；后续批次状态不能因本地工作区可编译就提前标记为可发布。
+前六批已完成实际发布；后续批次状态不能因本地工作区可编译就提前标记为可发布。
 
 一旦内部 crate 的目标版本已进入 crates.io，所有组件 manifest 必须移除指向它的 `path`，只保留
 registry `version`。`path + version` 仅允许用于尚未发布的后续拓扑边；不参与发布的根级质量工程
