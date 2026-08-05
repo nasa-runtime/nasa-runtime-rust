@@ -22,12 +22,19 @@ use serde_json::Value;
 /// engine.io 包类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineType {
+    /// 建立 Engine.IO 会话并下发握手参数。
     Open = 0,
+    /// 请求关闭当前 Engine.IO 会话。
     Close = 1,
+    /// 发起心跳探测，要求对端返回 `Pong`。
     Ping = 2,
+    /// 响应对端的 `Ping`，证明连接仍然存活。
     Pong = 3,
+    /// 承载 Socket.IO 包或其它应用消息。
     Message = 4,
+    /// 确认传输层升级已经完成。
     Upgrade = 5,
+    /// 保持协议时序但不携带业务动作的空操作包。
     Noop = 6,
 }
 
@@ -58,7 +65,9 @@ impl EngineType {
 /// engine.io 文本包:`<type><data>`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnginePacket {
+    /// 决定 Engine.IO 帧控制语义的包类型。
     pub typ: EngineType,
+    /// 类型字符之后的协议载荷；控制包允许为空。
     pub data: String,
 }
 
@@ -97,10 +106,15 @@ impl EnginePacket {
 /// socket.io 包类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SioType {
+    /// 建立指定 namespace 的 Socket.IO 逻辑会话。
     Connect = 0,
+    /// 断开指定 namespace 的 Socket.IO 逻辑会话。
     Disconnect = 1,
+    /// 携带事件名与业务 JSON 参数。
     Event = 2,
+    /// 响应带有 ack id 的事件。
     Ack = 3,
+    /// 返回 namespace 建连或认证失败原因。
     ConnectError = 4,
 }
 
@@ -129,9 +143,13 @@ impl SioType {
 /// socket.io 包:`<type>[/ns,][ackId]<json>`。默认 namespace "/" 省略。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SioPacket {
+    /// 决定 Socket.IO 包处理分支的协议类型。
     pub typ: SioType,
+    /// 目标 namespace；根 namespace 使用 `/`。
     pub namespace: String,
+    /// 事件确认标识；仅需要对端应答时存在。
     pub ack_id: Option<u64>,
+    /// CONNECT、EVENT、ACK 或错误包携带的 JSON 数据。
     pub data: Value,
 }
 
@@ -310,11 +328,19 @@ pub fn sio_ack(ack_id: u64, data: Value) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inbound {
     /// sio CONNECT,携带 auth token(取自 connect data 的 "token" 字段)。
-    Auth { token: String, namespace: String },
+    Auth {
+        /// 交给框架认证链校验的客户端凭据。
+        token: String,
+        /// 客户端申请加入的 Socket.IO namespace。
+        namespace: String,
+    },
     /// sio EVENT:事件名 + 第二参数(opaque,作 NASA payload)+ 可选 ackId(带则需回 ACK)。
     Event {
+        /// 用于路由业务处理器的事件名。
         event: String,
+        /// 保持原始 JSON 语义的事件数据。
         data: Value,
+        /// 客户端要求确认时携带的 ack id。
         ack_id: Option<u64>,
     },
     /// engine.io PING(EIO v3 客户端发;服务端回 PONG)。

@@ -12,5 +12,5 @@ categories.workspace = true
 
 [dependencies]
 naoutbox-core = { version = "1.0.0" }
-natx = { version = "1.0.0", path = "../natx" }
+natx = { version = "1.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

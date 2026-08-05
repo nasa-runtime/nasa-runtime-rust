@@ -21,7 +21,7 @@ redis-cache = ["dep:redis"]
 
 [dependencies]
 namapper-macro = { package = "namapper-macro", version = "1.0.0" }
-natx = { package = "natx", version = "1.0.0", path = "../natx" }
+natx = { package = "natx", version = "1.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"
 anyhow = "1"
@@ -35,5 +35,5 @@ tokio = { version = "1", features = ["sync", "time"] }
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-cacheable = { version = "1.0.0", path = "../cacheable", optional = true }
+cacheable = { version = "1.0.0", optional = true }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"], optional = true }
