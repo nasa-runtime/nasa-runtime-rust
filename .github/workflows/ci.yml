@@ -68,8 +68,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
-      - run: cargo clippy -p nafka -p naws --features naws/kafka --all-targets -- -D warnings
-      - run: cargo test -p nafka -p naws --features naws/kafka
+      # 第四批发布后 workspace 与 registry 同时存在同名 nafka；按 manifest 分开选择，避免 -p 把依赖来源误判为歧义。
+      - run: cargo clippy --manifest-path nafka/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path naws/Cargo.toml --features kafka --all-targets -- -D warnings
+      - run: cargo test --manifest-path nafka/Cargo.toml
+      - run: cargo test --manifest-path naws/Cargo.toml --features kafka
 
   fmt:
     name: rustfmt
