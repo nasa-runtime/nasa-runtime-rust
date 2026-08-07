@@ -1,0 +1,17 @@
+[package]
+name = "nasaga-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Saga provider-neutral definition, identity, outcome and state machine contract"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# 本 crate 是纯逻辑层：不依赖 MySQL、Kafka 或任何运行时，store 与 transport 由上层通过 trait 注入。
+# 依赖只保留确定性派生所需的摘要与 UUIDv5 能力，保证同一输入在任何进程算出同一身份。
+[dependencies]
+sha2 = "0.10"
+uuid = { version = "1", features = ["v5"] }

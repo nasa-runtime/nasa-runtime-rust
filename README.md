@@ -126,6 +126,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | SQL Mapper | `mapper` | `nasa::mapper::{Mapper, Query, Insert, Update, Delete}` |
 | Mapper L2 缓存 | `mapper-redis-cache` | `#[Query(..., cache = true)]` |
 | MySQL 事务 | `tx` | `nasa::tx::{transactional, run}` |
+| Saga 纯合同 | `saga` | `nasa::saga::{WorkflowDefinition, SagaOutcome}` |
+| Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}` |
+| Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
@@ -163,7 +166,9 @@ use nasa::ws::Server;                // WebSocket 服务端
 #[nasa::web::get_mapping("/x")]   // Axum MVC 风格路由
 ```
 
-已经发布到 crates.io 的内部依赖只保留精确 `version`，确保工作区持续验证真实 registry 解析；尚未发布的后续批次才允许临时使用 `path + version`，并在依赖项上架后立即移除 `path`。根目录本地验证工程不进入产品归档，可按验证目标引用工作区路径。通过仓库引用不需要 `[patch]` 段或私有注册表。
+已经进入 crates.io 的内部依赖只保留 registry 坐标；尚未公开的同仓依赖可在开发期使用 `path`，
+进入归档前必须移除，避免本地路径掩盖缺失依赖。根级质量工程不进入产品归档。通过仓库引用
+不需要 `[patch]` 段或私有注册表。
 
 ### crates.io 依赖
 
@@ -265,6 +270,10 @@ scheduling:             # scheduling 组件
 | [namapper-macro](namapper-macro/README.md) | `mapper` | Mapper 派生和 SQL 注解宏 | 由 `namapper` 运行时读取 |
 | [natx](natx/README.md) | `tx` | ambient MySQL 事务、after-commit 回调、多数据源 | `mysql.*`、`datasources.*` |
 | [natx-macro](natx-macro/README.md) | `tx` | `#[transactional]` 事务宏 | 由 `natx` 运行时读取 |
+| [nasaga-core](nasaga-core/README.md) | `saga` | Saga 身份、definition、状态机、结果与补偿计划合同 | 无 I/O；definition 由业务注册 |
+| [nasaga-mysql](nasaga-mysql/README.md) | runtime 内部 store | Saga journal、CAS、timer fencing、参与方 gate 与 migration | 复用 `natx` MySQL pool |
+| [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` | Orchestrator、参与方事务 adapter、管理审计、指标与 Kafka result consumer | 由业务注入 definition、topic owner 与投递策略 |
+| [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
 | [nadis](nadis/README.md) | `redis` | Redis 单点或集群、流水线、数据流、锁 | `redis.*` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
 | [cacheable](cacheable/README.md) | `cache` | L1/L2 缓存、刷新保护、失效广播 | `cache.*`、`redis.*` |
@@ -319,7 +328,7 @@ scheduling:             # scheduling 组件
   随机盐 + Argon2id + AES-256-GCM，返回自描述 `NC2.*` 令牌；业务可用 AAD 绑定租户或记录上下文。
   既有 PBKDF2-HMAC-SHA256 的 `NC1.*` 仅保持兼容读取，错误口令、AAD 错配或密文篡改都会失败。
 
-- **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前无修复版本。**
+- **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前没有上游修复。**
   由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；历史
   PKCS#1 v1.5 私钥解密与私钥 type-1 运算受专用编译 feature 和 Web 运行时开关双重隔离，
   且不进入 `full`。`deny.toml` 仍按包级 advisory 显式登记，待上游发布修复即移除。
@@ -337,12 +346,12 @@ scheduling:             # scheduling 组件
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-features -- -D warnings
-cargo deny check          # 需要 cargo-deny，用于供应链门禁
+cargo deny check          # 需要 cargo-deny，用于供应链检查
 cargo publish --dry-run -p nabase
 ```
 
 持续集成（`.github/workflows/ci.yml`）只依赖产品源码入口执行格式、静态检查、构建和依赖审计。
-本地质量验证资产由不参与产品发布的根级工程统一管理，组件 crate 与 `.crate` 归档只能携带产品
+本地质量资产由不参与产品发布的根级工程统一管理，组件 crate 与 `.crate` 归档只能携带产品
 源码、公开文档和再分发所需文件。
 真实后端连接信息只能由本地环境注入，不要把内网地址、账号或密码写进说明文档或持续集成配置。
 
@@ -351,13 +360,13 @@ cargo publish --dry-run -p nabase
 | 文档 | 用途 |
 | --- | --- |
 | [快速开始](docs/quickstart.md) | 业务应用如何依赖 `nasa`、选择特性、配置 yml 和编写最小示例。 |
-| [部署指南](docs/deployment.md) | 应用模式构建、配置注入、容器信号、探针和发布前门禁。 |
+| [部署指南](docs/deployment.md) | 应用模式构建、配置注入、容器信号、健康端点和接流条件。 |
 | [运维指南](docs/operations.md) | 运行状态、退出码、停机顺序、配置刷新和故障排查。 |
-| [发布检查清单](docs/release-checklist.md) | 发布前仓库、构建、文档、后端验收和发布检查项。 |
-| [发布说明](docs/publishing.md) | 多包发布顺序、试运行、版本和许可说明。 |
-| [贡献指南](CONTRIBUTING.md) | 贡献规则、验证矩阵、文档和代码维护约束重点。 |
+| [交付就绪清单](docs/release-checklist.md) | 产品归档、组件边界和生产环境批准条件。 |
+| [公开归档说明](docs/publishing.md) | 多包依赖拓扑、归档内容和许可说明。 |
+| [贡献指南](CONTRIBUTING.md) | 贡献规则、文档、注释和代码维护约束。 |
 | [安全说明](SECURITY.md) | 安全报告方式、敏感面和默认安全策略。 |
-| [变更记录](CHANGELOG.md) | 版本变更记录模板和当前未发布变更。 |
+| [当前变更说明](CHANGELOG.md) | 当前工作区的业务能力变化。 |
 
 ## 许可证
 

@@ -1,0 +1,21 @@
+[package]
+name = "nasaga-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Saga #[saga] participant step attribute macro with compile-time contract checks"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+name = "nasaga_macro"
+
+[dependencies]
+nasa-macro-support = { package = "macro-support", version = "1.0.0" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

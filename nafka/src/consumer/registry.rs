@@ -640,7 +640,7 @@ fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
         .collect()
 }
 
-/// 固定 FNV-1a 64 位哈希，保证广播 group 派生跨版本可复现。
+/// 固定 FNV-1a 64 位哈希，保证广播 group 派生在协议演进期间可复现。
 ///
 /// # 参数
 ///

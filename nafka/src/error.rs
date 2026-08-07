@@ -126,6 +126,21 @@ pub enum NafkaError {
     #[error("consumer handler panic: {0}")]
     HandlerPanic(String),
 
+    /// 业务 handler 已确认消息违反不可恢复合同，要求保留原文并立即进入 DLT。
+    ///
+    /// 该错误不会消耗普通重试预算；durability-first 模式仍要等 DLT broker delivery
+    /// 成功后才允许提交来源 offset。
+    #[error("consumer handler 请求 DLT: {0}")]
+    HandlerDeadLetter(String),
+
+    /// 业务 handler 因可恢复控制态请求延后；保留 offset 并退避，但不消耗
+    /// `max_consume_attempts`，也不自动进入 DLT。
+    ///
+    /// 该分支只适用于 `PAUSED` 等由外部受审计操作明确解除的门禁；普通瞬态失败使用
+    /// [`NafkaError::Broker`]，避免永久故障绕过毒消息预算形成无限重投。
+    #[error("consumer handler 请求延后: {0}")]
+    HandlerDeferred(String),
+
     /// 在 AckMode::Auto 的 route 上调用了手动 ack:配置误用,尽早暴露。
     #[error("当前 consumer 未启用手动 ack")]
     AckNotManual,

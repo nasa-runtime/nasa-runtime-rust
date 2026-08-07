@@ -59,6 +59,16 @@ pub struct ConsumeCtx {
     pub partition: i32,
     /// 当前记录 offset。
     pub offset: i64,
+    /// 当前 owner 对该 offset 的投递序号，从一开始；失败退避重投时单调增加。
+    ///
+    /// 该值由框架覆盖来源侧同名 header 后生成，用于实际投递审计与 DLT 证据；consumer
+    /// 会话重建后可能重新从一开始，因此业务幂等仍必须依赖消息身份和 Inbox，不能依赖此计数。
+    pub delivery_attempt: u32,
+    /// 当前普通失败预算中的尝试序号，从一开始；`HandlerDeferred` 不推进该序号。
+    ///
+    /// 该值用于把外部暂停门禁与毒消息预算隔离。它与 `delivery_attempt` 一样只在当前
+    /// consumer 会话内可信，不能充当跨重启幂等键。
+    pub retry_attempt: u32,
     /// broker 消息时间戳毫秒；缺失时由内部约定值表达。
     pub timestamp: i64,
     /// UTF-8 key；非 UTF-8 key 在 typed 路由前处理阶段拒绝。

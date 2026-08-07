@@ -176,7 +176,7 @@ pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
                     config.connect_timeout_ms
                 )
             })??;
-    // 探测连接只用于验证握手，立即显式关闭，避免把一条连接遗留到池外。
+    // 探测连接只用于确认握手，立即显式关闭，避免把一条连接遗留到池外。
     connection.close().await?;
     Ok(())
 }

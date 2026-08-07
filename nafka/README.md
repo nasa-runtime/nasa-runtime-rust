@@ -165,7 +165,7 @@ Ready 前等待真实 join/assignment 或 producer metadata。
 
 ### 两段停机 API
 
-容器使用绝对 deadline 版本保证所有 action 共享同一预算：
+容器使用接收绝对 deadline 的入口，保证所有 action 共享同一预算：
 
 ```rust
 proxy.stop_consumers_until(deadline).await?; // 停 owner，producer 仍可用于退出收尾
@@ -1133,6 +1133,8 @@ kafka:
 ```
 
 - 业务 handler `Err`/panic/timeout：按 `max_consume_attempts` 和退避策略重试，耗尽后进入 DLT/Halt。
+- 受审计控制态暂不允许处理时可返回 `NafkaError::HandlerDeferred`：仍 pause/seek/退避，但不消耗
+  `max_consume_attempts`；只有确有外部恢复动作的门禁可使用，普通故障不得借此无限重投。
 - 确定坏格式、缺 payload、codec 不匹配：不消耗业务重试次数，直接应用 `invalid_record_policy`。
 - topic/event 没有 route：应用 `unmatched_policy`。
 - DLT 成功完成后来源记录才获得安全结果；DLT required 场景不会因 DLT 暂时不可用而静默跳过。
@@ -1144,6 +1146,10 @@ kafka:
 - Auto 模式只在 handler `Ok(())` 后产生安全确认。
 - Manual 模式还要求业务显式 ack；最终提交仍不能越过未确认空洞。
 - 业务 `Err`、panic 和 timeout 进入相同的失败状态机，按配置重试或进入 DLT。
+- `HandlerDeferred` 保留来源 offset 并退避，但与普通毒消息预算隔离；恢复后同一消息重新进入 handler。
+- `ConsumeCtx.delivery_attempt` 统计当前会话内的全部真实 handler 投递，包含 `HandlerDeferred`，并进入
+  DLT 证据；`ConsumeCtx.retry_attempt` 只统计普通失败预算，暂停期间保持不变。业务重试策略必须使用
+  后者，不能因暂停次数追溯性地耗尽毒消息预算。
 - 格式确定无效的记录按 `InvalidRecordPolicy` 进入 DLT 或 Halt，不消耗业务重试次数。
 - DLT 使用 job 数和 retained bytes 双重有界队列，DLT 完成后才能推进来源记录水位。
 - revoke、shutdown 和控制命令共享明确 deadline；结果未知不会伪装成未执行。
@@ -1218,14 +1224,3 @@ let exists = admin.topic_exists("orders").await?;
 生产部署通常预建 topic，并在启动阶段调用 `describe_topic()` 校验分区数、RF 和关键配置。在线增加分区会改变
 key→partition 映射，只能在业务明确接受顺序边界变化时调用 `increase_partitions()`；删除 topic 和修改配置也应由
 受控运维流程执行。
-
-## 发布前验证
-
-```bash
-cargo check -p nafka --all-targets
-cargo clippy -p nafka --all-targets -- -D warnings
-cargo doc -p nafka --no-deps
-```
-
-协议、真实 broker、故障注入和长稳验证由 Git 忽略的本地验证工作区及仓库外业务样板执行，不进入
-产品提交和发布包。故障注入只能指向专用集群，连接信息只能由本地环境提供。

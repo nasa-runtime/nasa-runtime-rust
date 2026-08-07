@@ -6,6 +6,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::error::{NafkaError, Result};
+use crate::types::{KafkaHeader, KafkaHeaders};
 
 // ==================== 固定 header(与参照实现逐字节一致,禁止改名) ====================
 
@@ -15,12 +16,14 @@ pub const DEFAULT_EVENT: &str = "DEFAULT";
 pub const HEADER_EVENT: &str = "X-Nasa-Event";
 /// payload 编码标记 header;值固定为 [`PAYLOAD_CODEC_PROTOCOL_BYTES`],JSON 不打此 header(兼容旧消息)。
 pub const HEADER_PAYLOAD_CODEC: &str = "X-Nasa-Payload-Codec";
-/// ProtocolBytes 的 Mode 名 header:消费端校验与类型声明一致,防跨版本/跨语言解码错乱。
+/// ProtocolBytes 的 Mode 名 header:消费端校验与类型声明一致,防协议代次或异构实现解码错乱。
 pub const HEADER_PAYLOAD_MODE: &str = "X-Nasa-Payload-Mode";
 /// 透传快照 header(JSON):trace 等跨服务上下文放 header 而非 payload,与二进制 payload 共存。
 pub const HEADER_PASSTHROUGH: &str = "X-Nasa-Passthrough";
 /// W3C Trace Context；producer 写子 span context，consumer 解析后继续同一 trace。
 pub const HEADER_TRACEPARENT: &str = "traceparent";
+/// 当前记录在本 consumer 会话中的可信投递次数；owner 会覆盖来源侧同名值，业务不得自报。
+pub const HEADER_DELIVERY_ATTEMPT: &str = "X-Nasa-Delivery-Attempt";
 /// DLT 记录的来源 topic。
 pub const HEADER_DLT_ORIGIN_TOPIC: &str = "X-Nasa-DLT-Origin-Topic";
 /// DLT 记录的来源分区。
@@ -29,6 +32,10 @@ pub const HEADER_DLT_ORIGIN_PARTITION: &str = "X-Nasa-DLT-Origin-Partition";
 pub const HEADER_DLT_ORIGIN_OFFSET: &str = "X-Nasa-DLT-Origin-Offset";
 /// DLT 原因(截断后的安全文本,<=1024 字节,不含 payload/凭据)。
 pub const HEADER_DLT_REASON: &str = "X-Nasa-DLT-Reason";
+/// DLT 前已发生的业务 handler 投递次数；与原始 envelope、headers 和来源 offset 一起留证。
+pub const HEADER_DLT_DELIVERY_ATTEMPTS: &str = "X-Nasa-DLT-Delivery-Attempts";
+/// DLT 记录的来源 consumer group；用于归属告警和人工重放审计。
+pub const HEADER_DLT_ORIGIN_GROUP: &str = "X-Nasa-Dlt-Origin-Group";
 /// [`HEADER_PAYLOAD_CODEC`] 的唯一合法值。
 pub const PAYLOAD_CODEC_PROTOCOL_BYTES: &str = "protocol-bytes";
 
@@ -44,11 +51,112 @@ pub fn is_reserved_header(name: &str) -> bool {
             | HEADER_PAYLOAD_MODE
             | HEADER_PASSTHROUGH
             | HEADER_TRACEPARENT
+            | HEADER_DELIVERY_ATTEMPT
             | HEADER_DLT_ORIGIN_TOPIC
             | HEADER_DLT_ORIGIN_PARTITION
             | HEADER_DLT_ORIGIN_OFFSET
             | HEADER_DLT_REASON
+            | HEADER_DLT_DELIVERY_ATTEMPTS
+            | HEADER_DLT_ORIGIN_GROUP
     )
+}
+
+/// 业务作用：为 durability-first DLT 构造唯一可信的来源证据 headers。
+///
+/// 原始业务 headers 保持顺序与重复项；producer 可伪造的 delivery/DLT 同名字段会先按
+/// 大小写不敏感规则全部剥离，再由 consumer owner 写入唯一可信值。该函数不复制 payload，
+/// 仅集中跨自定义 DLT 与受管 DLT 都必须遵守的证据格式。
+///
+/// 参数说明：
+/// - `original`: 来源记录的原始有序 headers。
+/// - `group`: 实际消费来源记录的稳定 group。
+/// - `topic`: 来源 topic。
+/// - `partition`: 来源分区。
+/// - `offset`: 来源 offset。
+/// - `reason`: 已脱敏失败原因；按 UTF-8 边界截断到 1024 字节。
+/// - `delivery_attempts`: 进入 DLT 前的可信投递次数，零会收敛为一。
+///
+/// 返回：保留业务 headers 并追加来源、原因和次数证据的新集合。
+pub fn dead_letter_headers(
+    original: &KafkaHeaders,
+    group: &str,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+    reason: &str,
+    delivery_attempts: u32,
+) -> KafkaHeaders {
+    let mut headers = original
+        .iter()
+        .filter(|header| !is_dead_letter_evidence_header(&header.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let delivery_attempts = delivery_attempts.max(1);
+    headers.extend([
+        KafkaHeader {
+            name: HEADER_DELIVERY_ATTEMPT.into(),
+            value: Some(delivery_attempts.to_string().into_bytes()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_ORIGIN_TOPIC.into(),
+            value: Some(topic.as_bytes().to_vec()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_ORIGIN_PARTITION.into(),
+            value: Some(partition.to_string().into_bytes()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_ORIGIN_OFFSET.into(),
+            value: Some(offset.to_string().into_bytes()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_REASON.into(),
+            value: Some(truncate_utf8_bytes(reason, 1024).as_bytes().to_vec()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_DELIVERY_ATTEMPTS.into(),
+            value: Some(delivery_attempts.to_string().into_bytes()),
+        },
+        KafkaHeader {
+            name: HEADER_DLT_ORIGIN_GROUP.into(),
+            value: Some(group.as_bytes().to_vec()),
+        },
+    ]);
+    KafkaHeaders::from_vec(headers)
+}
+
+/// 业务作用：识别必须由 consumer owner 覆盖的投递/DLT 证据字段。
+///
+/// 参数说明：
+/// - `name`: 来源 header 名。
+///
+/// 返回：属于框架证据字段时返回真；比较大小写不敏感，防止变体绕过清理。
+fn is_dead_letter_evidence_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(HEADER_DELIVERY_ATTEMPT)
+        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_TOPIC)
+        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_PARTITION)
+        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_OFFSET)
+        || name.eq_ignore_ascii_case(HEADER_DLT_REASON)
+        || name.eq_ignore_ascii_case(HEADER_DLT_DELIVERY_ATTEMPTS)
+        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_GROUP)
+}
+
+/// 业务作用：按 UTF-8 字节上限安全截断 DLT 原因，避免多字节文本突破 broker header 合同。
+///
+/// 参数说明：
+/// - `value`: 待截断文本。
+/// - `max_bytes`: 最大字节数。
+///
+/// 返回：不超过上限且仍位于字符边界的前缀。
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &value[..boundary]
 }
 
 // ==================== Mode 名映射(跨语言) ====================

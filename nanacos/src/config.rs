@@ -137,6 +137,101 @@ impl NacosConfigClient {
         }
     }
 
+    /// 拉取配置及服务端 md5；dataId 尚不存在时返回 `Ok(None)`。
+    ///
+    /// 该接口只把 Nacos 的 `ConfigNotFound` 降级为“未初始化”，鉴权、网络和服务端错误仍然上抛，
+    /// 避免调用方把故障误判成首次发布。
+    pub async fn fetch_optional_with_md5(
+        &self,
+        data_id: &str,
+        group: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        #[cfg(not(feature = "nacos"))]
+        {
+            let _ = (data_id, group);
+            anyhow::bail!(client::DISABLED_MSG);
+        }
+        #[cfg(feature = "nacos")]
+        {
+            validate_cfg(data_id, group)?;
+            match self
+                .config
+                .get_config(data_id.to_string(), group.to_string())
+                .await
+            {
+                Ok(resp) => Ok(Some((resp.content().to_string(), resp.md5().to_string()))),
+                Err(nacos_sdk::api::error::Error::ConfigNotFound(_)) => Ok(None),
+                Err(e) => Err(anyhow::anyhow!(
+                    "nacos: get_config({data_id},{group}) failed: {e}"
+                )),
+            }
+        }
+    }
+
+    /// 首次发布尚不存在的配置。
+    ///
+    /// 发布前先读取一次，已存在时返回 `Ok(false)`，避免常规调用覆盖现有配置。并发首发最终以
+    /// Nacos 服务端返回值为准；调用方应在失败后重新读取并比较内容。
+    pub async fn publish_initial(
+        &self,
+        data_id: &str,
+        group: &str,
+        content: &str,
+        content_type: &str,
+    ) -> anyhow::Result<bool> {
+        #[cfg(not(feature = "nacos"))]
+        {
+            let _ = (data_id, group, content, content_type);
+            anyhow::bail!(client::DISABLED_MSG);
+        }
+        #[cfg(feature = "nacos")]
+        {
+            validate_cfg(data_id, group)?;
+            anyhow::ensure!(!content.trim().is_empty(), "nacos: content 不能为空");
+            anyhow::ensure!(
+                !content_type.trim().is_empty(),
+                "nacos: content_type 不能为空"
+            );
+            if self
+                .fetch_optional_with_md5(data_id, group)
+                .await?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            self.config
+                .publish_config_param(
+                    data_id.to_string(),
+                    group.to_string(),
+                    content.to_string(),
+                    Some(content_type.to_string()),
+                    None,
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("nacos: initial publish({data_id},{group}) failed: {e}")
+                })
+        }
+    }
+
+    /// 删除配置；主要用于隔离 live 测试创建的唯一 dataId。
+    pub async fn remove(&self, data_id: &str, group: &str) -> anyhow::Result<bool> {
+        #[cfg(not(feature = "nacos"))]
+        {
+            let _ = (data_id, group);
+            anyhow::bail!(client::DISABLED_MSG);
+        }
+        #[cfg(feature = "nacos")]
+        {
+            validate_cfg(data_id, group)?;
+            self.config
+                .remove_config(data_id.to_string(), group.to_string())
+                .await
+                .map_err(|e| anyhow::anyhow!("nacos: remove_config({data_id},{group}) failed: {e}"))
+        }
+    }
+
     /// 业务作用：CAS(compare-and-set)发布配置:仅当 Nacos 端【当前内容 md5】等于 `cas_md5` 时才写入。
     ///
     /// 用于「并发编辑安全」场景:调用方先 [`fetch_with_md5`](Self::fetch_with_md5) 拿到基线 md5,写入时带上它;

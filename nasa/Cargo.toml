@@ -47,6 +47,13 @@ secret-http = ["secret", "dep:secret_http_impl"]
 secret-vault = ["secret", "dep:secret_vault_impl"]
 # 实验性对象存储；不进入 full，待两个真实业务合同收敛后稳定。
 object-store-experimental = ["dep:object_impl"]
+# Saga 纯逻辑层（nasaga-core：身份派生/状态机/补偿计划，无 I/O）。
+saga = ["dep:saga_core_impl"]
+# Saga 运行时（Orchestrator/参与方 adapter/#[saga] 宏；MySQL store + Outbox/Inbox 通道）。
+# 单独一层开关：只用纯逻辑合同的调用方不必编入 SQLx 依赖面。
+saga-runtime = ["saga", "dep:saga_runtime_impl", "dep:nasaga_macro"]
+# Saga 真实 Kafka hosted transport；要求同时启用 nasa Kafka 门面并向下打开 runtime adapter。
+saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
 # 实验性 gRPC listener 生命周期；不进入 full，稳定组件合同待真实项目收敛。
 grpc-experimental = ["dep:grpc_impl"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。
@@ -235,6 +242,10 @@ secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
 object_impl = { package = "naobject", version = "1.0.0", optional = true }
+# 同仓 path 保证门面与 Saga 组件使用同一工作区状态。
+saga_core_impl = { package = "nasaga-core", version = "1.0.0", path = "../nasaga-core", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.0", path = "../nasaga-runtime", optional = true }
+nasaga_macro = { package = "nasaga-macro", version = "1.0.0", path = "../nasaga-macro", optional = true }
 grpc_impl = { package = "nagrpc", version = "1.0.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.0", optional = true }
@@ -256,7 +267,7 @@ yml_impl = { package = "naml", version = "1.0.0", optional = true }
 config_boot_impl = { package = "config-boot", version = "1.0.0", optional = true }
 image_impl = { package = "naimg", version = "1.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "1.0.0", optional = true }
-nacos_impl = { package = "nanacos", version = "1.0.0", optional = true, default-features = false }
+nacos_impl = { package = "nanacos", path = "../nanacos", version = "1.0.0", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "1.0.0", optional = true }
 rest_client_macro = { package = "rest-client-macro", version = "1.0.0", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.0", optional = true, default-features = false }
