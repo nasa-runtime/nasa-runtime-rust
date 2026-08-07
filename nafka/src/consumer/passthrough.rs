@@ -28,7 +28,7 @@ pub struct KafkaHeadersRef<'a> {
 impl<'a> KafkaHeadersRef<'a> {
     /// 从调用方持有的有序 header slice 构造只读视图。
     ///
-    /// 该方法主要用于协议适配器验证与自定义同步组合；构造不会复制 header 名和值。
+    /// 该方法用于协议适配器和自定义同步组合；构造不会复制 header 名和值。
     ///
     /// # 参数
     ///

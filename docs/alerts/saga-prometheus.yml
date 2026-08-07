@@ -1,0 +1,121 @@
+groups:
+  - name: nasaga-production
+    rules:
+      - alert: NasaSagaManualInterventionPending
+        expr: nasaga_manual_intervention > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga 人工介入队列非空"
+          description: "先调用受权审计 API 核对 attempt、transition 和 conflict，不得盲目重放 DLT。"
+
+      - alert: NasaSagaResolutionBacklog
+        expr: nasaga_waiting_resolution > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga Unknown 解决队列持续非空"
+          description: "检查 resolve consumer、外部查询通道和 resolution budget，不得把未知结果直接改为 Rejected。"
+
+      - alert: NasaSagaDueTimerBacklog
+        expr: nasaga_due_timer > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga durable timer 到期积压"
+          description: "检查 timer worker、MySQL 锁等待和 fencing 丢失日志。"
+
+      - alert: NasaSagaConflictDetected
+        expr: increase(nasaga_conflict_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga 收到互斥强事实"
+          description: "通过审计 API 核对 incoming event 与先到事实，排查 producer 或跨 phase 数据损坏。"
+
+      - alert: NasaSagaResultRetryStorm
+        expr: rate(nasaga_kafka_result_retry_total[5m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga result Kafka 重试风暴"
+          description: "检查 MySQL 连接、锁竞争、暂停实例和 consumer lag；不要通过提交 offset 消除告警。"
+
+      - alert: NasaSagaCommandRetryStorm
+        expr: rate(nasaga_kafka_command_retry_total[5m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga command Kafka 重试风暴"
+          description: "检查参与方 MySQL、step gate 锁竞争、外部依赖和 consumer lag；不得绕过事务直接 ACK。"
+
+      - alert: NasaSagaResultDltRequested
+        expr: increase(nasaga_kafka_result_dlt_requested_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga result 请求进入 DLT"
+          description: "同时核对 nafka dlt_total/dlt_failed_total；只有 broker 确认 DLT 后原 offset 才能提交。"
+
+      - alert: NasaSagaCommandDltRequested
+        expr: increase(nasaga_kafka_command_dlt_requested_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga command 请求进入 DLT"
+          description: "核对受信 producer、workflow/version/digest/step 路由和 participant contract；禁止把未授权命令送入业务 Inbox。"
+
+      - alert: NasaSagaHttpResultReplayCapacityHigh
+        expr: nasaga_http_result_replay_max_utilization_per_mille >= 800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga HTTP result 单信任边 nonce 水位过高"
+          description: "核对获批峰值与异常 producer；不得淘汰仍在验签窗口内的 claim，也不得挤占管理恢复配额。"
+
+      - alert: NasaSagaHttpManagementReplayCapacityHigh
+        expr: nasaga_http_management_replay_max_utilization_per_mille >= 800
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga HTTP 管理恢复 path nonce 水位过高"
+          description: "立即核对异常管理请求和容量审批；pause/resume/retry 各 path 必须维持不可互相挤占的配额。"
+
+      - alert: NasaSagaHttpReplayCapacityRejected
+        expr: increase(nasaga_http_result_replay_capacity_rejected_total[5m]) + increase(nasaga_http_management_replay_capacity_rejected_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga HTTP nonce 容量已 fail-closed"
+          description: "先隔离异常信任边并区分流量攻击与容量低估；禁止清空有效 claim 恢复请求。"
+
+      - alert: NasaSagaHttpAuthenticationFailures
+        expr: increase(nasaga_http_result_replay_authentication_failed_total[5m]) + increase(nasaga_http_management_replay_authentication_failed_total[5m]) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga HTTP transport 认证失败突增"
+          description: "检查 producer key、签名时钟和伪造流量；该告警与 capacity rejection 使用不同处置流程。"
+
+      - alert: NasaSagaHttpCommandDeadLettered
+        expr: increase(nasaga_http_command_dlt_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga HTTP command 确定性拒绝已进入 DLT"
+          description: "核对 workflow/version/digest/producer 投影与发布顺序；禁止把 DLT 行改回普通无限重试。"
+
+      - alert: NasaKafkaDltDeliveryFailed
+        expr: increase(dlt_failed_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka DLT broker delivery 失败"
+          description: "durability-first 模式下失败分区应停止前移；检查 DLT topic、ACL 和 broker 可用性。"

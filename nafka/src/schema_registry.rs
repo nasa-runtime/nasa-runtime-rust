@@ -239,7 +239,7 @@ pub trait SchemaRegistryClient: Send + Sync {
         schema: &str,
     ) -> Result<bool, SchemaRegistryError>;
 
-    /// 注册新版本；adapter 必须显式启用 `auto_register`。
+    /// 注册新的 schema 修订；adapter 必须显式启用 `auto_register`。
     async fn register(
         &self,
         subject: &str,
@@ -320,7 +320,7 @@ struct SchemaCache {
 }
 
 impl SchemaCache {
-    /// 创建空缓存；容量已由 adapter 构造器验证为正。
+    /// 创建空缓存；容量已由 adapter 构造器校验为正。
     fn new(capacity: usize) -> Self {
         Self {
             entries: BTreeMap::new(),

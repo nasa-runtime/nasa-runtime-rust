@@ -27,8 +27,7 @@ use crate::rd::consumer::{
 };
 use crate::types::{KafkaHeader, KafkaHeaders, StartOffset, Tp};
 use crate::wire::{
-    PayloadCodec, DEFAULT_EVENT, HEADER_DLT_ORIGIN_OFFSET, HEADER_DLT_ORIGIN_PARTITION,
-    HEADER_DLT_ORIGIN_TOPIC, HEADER_DLT_REASON, HEADER_EVENT, HEADER_PASSTHROUGH,
+    PayloadCodec, DEFAULT_EVENT, HEADER_DELIVERY_ATTEMPT, HEADER_EVENT, HEADER_PASSTHROUGH,
     HEADER_PAYLOAD_CODEC, HEADER_PAYLOAD_MODE, PAYLOAD_CODEC_PROTOCOL_BYTES,
 };
 use crate::KafkaProxyInner;
@@ -85,6 +84,15 @@ enum MaintenanceFlow {
     StopOwner,
 }
 
+/// 业务作用：把可信投递序号与毒消息预算分开计数，避免控制态延后伪造投递次数或耗尽 DLT 预算。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RetryAttemptState {
+    /// 当前 offset 已经完成但未成功的 handler 投递次数，包含控制态延后。
+    failed_deliveries: u32,
+    /// 当前 offset 已消耗的普通失败次数，不包含控制态延后。
+    bounded_failures: u32,
+}
+
 /// owner 应用处理结果时共享的可变状态引用集合。
 struct ActionContext<'a> {
     /// 所属运行时。
@@ -99,8 +107,8 @@ struct ActionContext<'a> {
     commands: &'a std::sync::mpsc::Receiver<OwnerCommand>,
     /// 当前订阅方式。
     mode: &'a mut OwnerMode,
-    /// 本进程失败尝试表。
-    attempts: &'a mut BTreeMap<(Tp, i64), u32>,
+    /// 本进程失败尝试表；投递序号与 DLT 预算在值内独立推进。
+    attempts: &'a mut BTreeMap<(Tp, i64), RetryAttemptState>,
     /// 每分区非阻塞重试退避状态。
     retries: &'a mut BTreeMap<Tp, PartitionRetry>,
     /// 每分区至多一个在途 DLT 任务。
@@ -143,6 +151,11 @@ trait DeadLetterSource {
 
     /// 复制原始有序 headers。
     fn source_headers(&self) -> KafkaHeaders;
+
+    /// 返回进入 DLT 前已经发生的可信业务投递次数。
+    fn delivery_attempts(&self) -> u32 {
+        1
+    }
 }
 
 impl DeadLetterSource for RdMessage<'_> {
@@ -307,6 +320,11 @@ impl DeadLetterSource for RawRecord {
     /// 克隆已解析 typed 原始记录的 headers 供 DLT 独立持有。
     fn source_headers(&self) -> KafkaHeaders {
         self.ctx.headers.clone()
+    }
+
+    /// 返回 owner 在本次 handler 调用前写入的可信投递序号。
+    fn delivery_attempts(&self) -> u32 {
+        self.ctx.delivery_attempt
     }
 }
 
@@ -480,7 +498,7 @@ fn restart_delay(runtime: &Arc<KafkaProxyInner>, attempt: u32, seed: u64) -> Dur
     )
 }
 
-/// 用显式数值计算 consumer 指数退避，便于无 broker 边界验证。
+/// 用显式数值计算 consumer 指数退避，使边界计算不依赖 broker 状态。
 ///
 /// # 参数
 ///
@@ -606,7 +624,7 @@ fn wait_restart_backoff(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return RestartBackoffOutcome::Stopped
+                return RestartBackoffOutcome::Stopped;
             }
         }
     }
@@ -664,7 +682,7 @@ pub(crate) fn run_owner(
         return;
     }
 
-    let mut attempts: BTreeMap<(Tp, i64), u32> = BTreeMap::new();
+    let mut attempts: BTreeMap<(Tp, i64), RetryAttemptState> = BTreeMap::new();
     let mut restart_history = VecDeque::new();
     let mut initial_consumer = Some(initial_consumer);
     // 对外发布的 assignment_epoch 必须跨会话单调：底层 epoch 计数器随 ConsumerClient
@@ -843,14 +861,14 @@ fn wait_startup_gate(
 /// - `plan`: group 路由计划；动态订阅会更新其中的 mode。
 /// - `commands`: 跨会话保留的有界控制命令接收端。
 /// - `health`: 跨会话保留的健康快照。
-/// - `initial_consumer`: 首轮由 startup handshake 预先构造的 consumer；重建轮次为 None。
+/// - `initial_consumer`: 首次会话由 startup handshake 预先构造的 consumer；后续重建为 None。
 #[allow(clippy::too_many_arguments)] // owner 会话参数本就逐项显式;第 8 个是 共享错误单槽,合并会造隐式上下文
 fn run_owner_session(
     runtime_ref: &Arc<KafkaProxyInner>,
     plan: &mut GroupPlan,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     health_ref: &Arc<RwLock<GroupHealth>>,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     initial_consumer: Option<ConsumerClient>,
     epoch_base: &std::sync::atomic::AtomicU64,
     global_error: &Arc<std::sync::Mutex<Option<String>>>,
@@ -1671,7 +1689,7 @@ fn collect_typed_batch(
 fn execute_command(
     consumer: &ConsumerClient,
     mode: &mut OwnerMode,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     health: &Arc<RwLock<GroupHealth>>,
     auto_offset_reset: &str,
     command: OwnerCommand,
@@ -1863,7 +1881,7 @@ fn seek_conflicts_with_dlt(
 /// - `attempts`: owner 尝试表。
 /// - `tps`: 已被 operator 改变位置的分区。
 fn clear_attempts<'a>(
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     tps: impl IntoIterator<Item = &'a Tp>,
 ) {
     let targets: BTreeSet<Tp> = tps.into_iter().cloned().collect();
@@ -2114,7 +2132,7 @@ fn apply_rebalance(
     assignment: &mut Vec<Tp>,
     epoch: &mut u64,
     progress: &mut GroupOffsetState,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     retries: &mut BTreeMap<Tp, PartitionRetry>,
     dlt_pending: &mut BTreeMap<Tp, PendingDlt>,
     dlt_admission: &mut Option<PendingDltAdmission>,
@@ -2604,7 +2622,7 @@ fn commit_until_resolved(
     health: &Arc<RwLock<GroupHealth>>,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     mode: &mut OwnerMode,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     last_commit: &mut Instant,
     backoff_ms: u64,
     transient_exit: &mut Option<String>,
@@ -2643,7 +2661,7 @@ fn commit_until_resolved_inner(
     health: &Arc<RwLock<GroupHealth>>,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     mode: &mut OwnerMode,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     last_commit: &mut Instant,
     backoff_ms: u64,
     transient_exit: &mut Option<String>,
@@ -3081,15 +3099,17 @@ fn apply_process_action<S: DeadLetterSource + ?Sized>(
     }
 }
 
-/// 应用单条 handler 可重试失败，并在耗尽时转入 DLT。
+/// 业务作用：登记单条普通 handler 失败，推进总投递与毒消息预算，并在耗尽时转入 DLT。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `context`: owner 本轮共享状态。
 /// - `source`: 原始消息视图。
 /// - `tp`: 来源 topic-partition。
 /// - `offset`: 失败 offset。
 /// - `error`: 已脱敏失败原因。
+///
+/// 返回：已安排退避、DLT 或安全停分区后的 owner 流程动作；容量或持久化不变量失败时停止
+/// 当前分区/owner，绝不越过失败 offset。
 fn apply_retry_action<S: DeadLetterSource + ?Sized>(
     context: &mut ActionContext<'_>,
     source: &S,
@@ -3130,10 +3150,11 @@ fn apply_retry_action<S: DeadLetterSource + ?Sized>(
         );
         return ActionFlow::StopPartition;
     }
-    let count = context.attempts.entry((tp.clone(), offset)).or_insert(0);
-    *count = count.saturating_add(1);
+    let state = context.attempts.entry((tp.clone(), offset)).or_default();
+    state.failed_deliveries = state.failed_deliveries.saturating_add(1);
+    state.bounded_failures = state.bounded_failures.saturating_add(1);
     let exhausted = context.runtime.config.behavior.max_consume_attempts != 0
-        && *count >= context.runtime.config.behavior.max_consume_attempts;
+        && state.bounded_failures >= context.runtime.config.behavior.max_consume_attempts;
     if exhausted {
         if context
             .runtime
@@ -3370,14 +3391,16 @@ fn observe_safe_run(
     }
 }
 
-/// 将一次 single/batch handler 调用结果映射为安全前缀或连续失败后缀。
+/// 业务作用：把 single/batch handler 结论映射为安全前缀、普通失败预算或控制态延后。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `context`: owner 本轮共享状态。
 /// - `route`: 本次调用的冻结 route。
 /// - `sources`: 与 handler 输入一一对应的原始记录。
 /// - `outcome`: 擦除 adapter 返回的严格确认结果。
+///
+/// 返回：已提交安全前缀、安排退避/DLT 或停止会话后的 owner 流程动作；非法 handler 形态
+/// 返回停止动作并发布不变量错误。
 fn apply_invocation_outcome(
     context: &mut ActionContext<'_>,
     route: &Arc<dyn crate::consumer::erased::ErasedConsumer>,
@@ -3439,8 +3462,38 @@ fn apply_invocation_outcome(
                     context,
                     &sources[acked_prefix..],
                     "手动确认未覆盖连续 run 后缀".into(),
+                    RetryBudget::Bounded,
                 )
             }
+        }
+        InvocationOutcome::Failed(NafkaError::HandlerDeadLetter(reason)) => {
+            context.runtime.counter(
+                "handler_dead_letter_total",
+                1,
+                &[("group", context.group), ("consumer_id", route.meta().id)],
+            );
+            let Some(source) = sources.first() else {
+                update_state(
+                    context.health,
+                    GroupState::Crashed,
+                    Some("请求 DLT 的 handler run 不能为空".into()),
+                );
+                return ActionFlow::StopOwner;
+            };
+            let tp = source.ctx.topic_partition();
+            // DLT 与来源 offset 的提交由同一 owner 状态机串联：只有 broker 已确认死信后，
+            // completion 才把该 offset 标为安全并提交，进程在两者之间崩溃只会重放原消息。
+            apply_direct_dlt_action(context, source, &tp, source.ctx.offset, reason)
+        }
+        InvocationOutcome::Failed(NafkaError::HandlerDeferred(reason)) => {
+            context.runtime.counter(
+                "handler_deferred_total",
+                1,
+                &[("group", context.group), ("consumer_id", route.meta().id)],
+            );
+            // 延后仍执行与普通失败相同的 pause/seek/退避，并推进可信投递序号；
+            // 但它不推进毒消息预算，恢复控制态后必须重新交给同一 handler。
+            apply_retry_run(context, sources, reason, RetryBudget::Deferred)
         }
         InvocationOutcome::Failed(error) => {
             context.runtime.counter(
@@ -3448,7 +3501,7 @@ fn apply_invocation_outcome(
                 1,
                 &[("group", context.group), ("consumer_id", route.meta().id)],
             );
-            apply_retry_run(context, sources, error.to_string())
+            apply_retry_run(context, sources, error.to_string(), RetryBudget::Bounded)
         }
         InvocationOutcome::Fatal(error) => {
             context.runtime.counter(
@@ -3462,17 +3515,30 @@ fn apply_invocation_outcome(
     }
 }
 
-/// 应用 BatchConsumer 的连续失败 run；尝试次数、seek 和 DLT 都绑定首 offset。
+/// 业务作用：区分普通毒消息预算与可恢复控制态延后，防止两层重试策略互相覆盖。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryBudget {
+    /// 计入 `max_consume_attempts`，耗尽后进入 DLT。
+    Bounded,
+    /// 只做 pause/seek/退避，不计入 DLT 预算。
+    Deferred,
+}
+
+/// 业务作用：应用 typed consumer 的连续失败 run，并按门禁类型决定是否消耗 DLT 预算。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `context`: owner 本轮共享状态。
 /// - `sources`: 同分区且按交付顺序排列的非空失败后缀。
 /// - `error`: 已脱敏失败原因。
+/// - `budget`: 是否计入底层毒消息预算。
+///
+/// 返回：已安排退避重投、DLT 或分区停止后的 owner 流程动作；空 run 或跨分区 run
+/// 返回停止动作并发布不变量错误。
 fn apply_retry_run(
     context: &mut ActionContext<'_>,
     sources: &[RawRecord],
     error: String,
+    budget: RetryBudget,
 ) -> ActionFlow {
     let Some(first) = sources.first() else {
         update_state(
@@ -3516,6 +3582,11 @@ fn apply_retry_run(
     }
     context.progress.reset_partition(&tp);
     publish_commit_snapshot(context.consumer, context.progress);
+    context.runtime.counter(
+        "retried_total",
+        u64::try_from(sources.len()).unwrap_or(u64::MAX),
+        &[("group", context.group), ("topic", tp.topic.as_str())],
+    );
     if !context.attempts.contains_key(&(tp.clone(), first_offset))
         && context.attempts.len() >= context.runtime.config.behavior.max_retry_entries
     {
@@ -3528,18 +3599,17 @@ fn apply_retry_run(
         );
         return ActionFlow::StopPartition;
     }
-    let count = context
+    let state = context
         .attempts
         .entry((tp.clone(), first_offset))
-        .or_insert(0);
-    *count = count.saturating_add(1);
-    context.runtime.counter(
-        "retried_total",
-        u64::try_from(sources.len()).unwrap_or(u64::MAX),
-        &[("group", context.group), ("topic", tp.topic.as_str())],
-    );
+        .or_default();
+    state.failed_deliveries = state.failed_deliveries.saturating_add(1);
+    if budget == RetryBudget::Deferred {
+        return schedule_retry_flow(context, &tp, first_offset);
+    }
+    state.bounded_failures = state.bounded_failures.saturating_add(1);
     let exhausted = context.runtime.config.behavior.max_consume_attempts != 0
-        && *count >= context.runtime.config.behavior.max_consume_attempts;
+        && state.bounded_failures >= context.runtime.config.behavior.max_consume_attempts;
     if exhausted {
         if context
             .runtime
@@ -3621,7 +3691,12 @@ fn schedule_single_dlt<S: DeadLetterSource + ?Sized>(
 ) -> Result<()> {
     let tp = Tp::new(source.source_topic(), source.source_partition());
     let offset = source.source_offset();
-    let record = build_dlt_record(context.runtime, context.group, source, reason)?;
+    let record = build_dlt_record(
+        &context.runtime.config.behavior.dead_letter_topic_suffix,
+        context.group,
+        source,
+        reason,
+    )?;
     schedule_dlt_job(
         context,
         tp,
@@ -3651,7 +3726,14 @@ fn schedule_dlt_run(
         .ok_or_else(|| NafkaError::Lifecycle("DLT 失败 run 不能为空".into()))?;
     let records = sources
         .iter()
-        .map(|source| build_dlt_record(context.runtime, context.group, source, reason))
+        .map(|source| {
+            build_dlt_record(
+                &context.runtime.config.behavior.dead_letter_topic_suffix,
+                context.group,
+                source,
+                reason,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let offsets = sources
         .iter()
@@ -4272,7 +4354,7 @@ fn prepare_typed_message(
                             crate::consumer::InvalidRecordReason::MalformedRoute,
                             "event header 不是 UTF-8",
                         ),
-                    }
+                    };
                 }
             },
         },
@@ -4369,12 +4451,18 @@ fn prepare_typed_message(
         },
         None => None,
     };
+    let mut headers = headers;
+    // 来源 producer 无权自报投递次数；首次交付也必须先覆盖同名值，避免伪造 header
+    // 影响 Saga 等有界重试消费者的 ACK/DLT 裁决。
+    headers.replace_framework_value(HEADER_DELIVERY_ATTEMPT, b"1".to_vec());
     let raw = RawRecord {
         payload,
         ctx: ConsumeCtx {
             topic,
             partition,
             offset,
+            delivery_attempt: 1,
+            retry_attempt: 1,
             timestamp,
             key,
             headers,
@@ -4414,6 +4502,44 @@ fn consume_trace_id(ctx: &ConsumeCtx) -> &str {
         .unwrap_or("")
 }
 
+/// 业务作用：在每次调用业务 handler 前，同步可信总投递序号与独立的普通失败预算序号。
+///
+/// 同一 offset 退避后会重新解码为新的记录；这里仍在最终调用点覆盖一次，确保 batch 合并、
+/// 预取与失败后缀裁剪都不会把旧序号带入本次业务裁决。来源侧同名 header 被全部删除，
+/// 防止生产者伪造“已耗尽预算”诱导消息跳过正常重试。
+///
+/// 参数说明：
+/// - `sources`: DLT 与 offset 裁决保留的原始记录。
+/// - `decoded`: 即将交给业务 handler 的已解码记录。
+/// - `delivery_attempt`: 包含控制态延后的本次总投递序号。
+/// - `retry_attempt`: 排除控制态延后的本次普通失败预算序号。
+///
+/// 返回：无；两个视图都携带相同的可信投递元数据。
+fn annotate_delivery_attempt(
+    sources: &mut [RawRecord],
+    decoded: &mut [ErasedRecord],
+    delivery_attempt: u32,
+    retry_attempt: u32,
+) {
+    let value = delivery_attempt.to_string().into_bytes();
+    for source in sources {
+        source.ctx.delivery_attempt = delivery_attempt;
+        source.ctx.retry_attempt = retry_attempt;
+        source
+            .ctx
+            .headers
+            .replace_framework_value(HEADER_DELIVERY_ATTEMPT, value.clone());
+    }
+    for record in decoded {
+        record.ctx.delivery_attempt = delivery_attempt;
+        record.ctx.retry_attempt = retry_attempt;
+        record
+            .ctx
+            .headers
+            .replace_framework_value(HEADER_DELIVERY_ATTEMPT, value.clone());
+    }
+}
+
 /// 驱动一次类型擦除 single/batch handler future，并应用统一超时边界。
 ///
 /// # 参数
@@ -4441,10 +4567,9 @@ fn invoke_typed_handler(
     }
 }
 
-/// 按 partition-first 与轮转起点处理一次 typed 逻辑批。
+/// 业务作用：按 partition-first 与轮转起点处理 typed 逻辑批，并在最终调用点注入双重可信序号。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `runtime`: 所属运行时。
 /// - `consumer`: owner 唯一 consumer。
 /// - `plan`: 当前 group 冻结计划。
@@ -4458,8 +4583,7 @@ fn invoke_typed_handler(
 /// - `partition_cursor`: 跨批轮转分区起点。
 /// - `transient_exit`: 维护性 poll 捕获的临时会话错误。
 ///
-/// # 返回
-///
+/// 返回：
 /// owner 必须停止当前会话时返回 true。
 #[allow(clippy::too_many_arguments)]
 fn process_logical_typed_batch(
@@ -4468,7 +4592,7 @@ fn process_logical_typed_batch(
     plan: &mut GroupPlan,
     health: &Arc<RwLock<GroupHealth>>,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
-    attempts: &mut BTreeMap<(Tp, i64), u32>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     retries: &mut BTreeMap<Tp, PartitionRetry>,
     dlt_pending: &mut BTreeMap<Tp, PendingDlt>,
     dlt_sender: &tokio::sync::mpsc::Sender<DltCompletion>,
@@ -4608,15 +4732,24 @@ fn process_logical_typed_batch(
                             decoded_records.push(decoded);
                         }
                     }
+                    let first_offset = sources[0].ctx.offset;
+                    let state = attempts.get(&(tp.clone(), first_offset));
+                    let delivery_attempt = state
+                        .map_or(0, |state| state.failed_deliveries)
+                        .saturating_add(1);
+                    let retry_attempt = state
+                        .map_or(0, |state| state.bounded_failures)
+                        .saturating_add(1);
+                    annotate_delivery_attempt(
+                        &mut sources,
+                        &mut decoded_records,
+                        delivery_attempt,
+                        retry_attempt,
+                    );
                     let first = &sources[0].ctx;
                     let last_offset = sources
                         .last()
                         .map_or(first.offset, |source| source.ctx.offset);
-                    let attempt = attempts
-                        .get(&(tp.clone(), first.offset))
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(1);
                     let trace_id = consume_trace_id(first);
                     let consumer_span = first.trace_context().and_then(|parent| {
                         runtime.span_recorder.as_ref().map(|recorder| {
@@ -4638,7 +4771,8 @@ fn process_logical_typed_batch(
                             last_offset,
                             count = sources.len(),
                             event = %route.meta().event,
-                            attempt,
+                            delivery_attempt,
+                            retry_attempt,
                             trace_id
                         );
                         span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
@@ -4651,7 +4785,8 @@ fn process_logical_typed_batch(
                             partition = first.partition,
                             offset = first.offset,
                             event = %route.meta().event,
-                            attempt,
+                            delivery_attempt,
+                            retry_attempt,
                             trace_id
                         );
                         span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
@@ -4792,7 +4927,7 @@ fn process_message(
                 runtime,
                 crate::consumer::InvalidRecordReason::MalformedRoute,
                 "header 名不是 UTF-8",
-            )
+            );
         }
     };
     let event = match last_header(&headers, HEADER_EVENT) {
@@ -4805,7 +4940,7 @@ fn process_message(
                     runtime,
                     crate::consumer::InvalidRecordReason::MalformedRoute,
                     "event header 不是 UTF-8",
-                )
+                );
             }
         },
     };
@@ -5115,25 +5250,11 @@ fn invalid_action(
     }
 }
 
-/// 判断一个 header 名是否属于框架写入的 DLT 来源标记。
-///
-/// 转发前必须剥掉来源记录上的同名 header：它们可能由外部生产者伪造，
-/// 与框架追加的真实值共存会让 DLT 侧去重读到歧义值。
-///
-/// # 参数
-///
-/// - `name`: 待判定的 header 名。
-fn is_dlt_origin_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_TOPIC)
-        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_PARTITION)
-        || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_OFFSET)
-}
-
 /// 从原始消息构造保留来源身份的单条死信记录。
 ///
 /// # 参数
 ///
-/// - `runtime`: 提供冻结的 DLT 后缀。
+/// - `suffix`: 冻结的 DLT topic 后缀。
 /// - `group`: 来源 group。
 /// - `message`: 原始消息视图。
 /// - `reason`: 已脱敏失败原因。
@@ -5142,13 +5263,11 @@ fn is_dlt_origin_header(name: &str) -> bool {
 ///
 /// 原记录已经来自 DLT 时返回递归错误。
 fn build_dlt_record<S: DeadLetterSource + ?Sized>(
-    runtime: &Arc<KafkaProxyInner>,
+    suffix: &str,
     group: &str,
     message: &S,
     reason: &str,
 ) -> Result<DltRecord> {
-    let original = message.source_headers();
-    let suffix = runtime.config.behavior.dead_letter_topic_suffix.as_str();
     // 递归判定只能用**不可伪造**的信号：记录是否真的来自死信 topic。
     //
     // 规范 原文写的是"原记录已带 X-Nasa-DLT-Origin-Topic 时"判定为递归，但该 header
@@ -5166,43 +5285,36 @@ fn build_dlt_record<S: DeadLetterSource + ?Sized>(
     }
     // 剥掉来源侧可能携带的同名 origin header，避免伪造值与框架写入值共存导致
     // DLT 消费者按 的 "origin topic + partition + offset 去重" 时读到歧义值。
-    let mut headers = original
-        .iter()
-        .filter(|header| !is_dlt_origin_header(&header.name))
-        .cloned()
-        .collect::<Vec<_>>();
-    headers.extend([
-        KafkaHeader {
-            name: HEADER_DLT_ORIGIN_TOPIC.into(),
-            value: Some(message.source_topic().as_bytes().to_vec()),
-        },
-        KafkaHeader {
-            name: HEADER_DLT_ORIGIN_PARTITION.into(),
-            value: Some(message.source_partition().to_string().into_bytes()),
-        },
-        KafkaHeader {
-            name: HEADER_DLT_ORIGIN_OFFSET.into(),
-            value: Some(message.source_offset().to_string().into_bytes()),
-        },
-        KafkaHeader {
-            name: HEADER_DLT_REASON.into(),
-            value: Some(reason.chars().take(1024).collect::<String>().into_bytes()),
-        },
-        KafkaHeader {
-            name: "X-Nasa-Dlt-Origin-Group".into(),
-            value: Some(group.as_bytes().to_vec()),
-        },
-    ]);
+    let delivery_attempts = source_delivery_attempts(message);
+    let headers = crate::wire::dead_letter_headers(
+        &message.source_headers(),
+        group,
+        message.source_topic(),
+        message.source_partition(),
+        message.source_offset(),
+        reason,
+        delivery_attempts,
+    );
     Ok(DltRecord {
         topic: format!("{}{suffix}", message.source_topic()),
         payload: message.source_payload().map(<[u8]>::to_vec),
         key: message.source_key().map(<[u8]>::to_vec),
-        headers: KafkaHeaders::from_vec(headers),
+        headers,
         timestamp: (message.source_timestamp() >= 0).then(|| message.source_timestamp()),
     })
 }
 
-/// 用显式数值计算 DLT 指数退避，保持算法可做无运行时依赖的边界验证。
+/// 业务作用：把 DLT 投递次数收敛为从一开始的安全值，避免异常实现写出零次死信证据。
+///
+/// 参数说明：
+/// - `source`: 待隔离的原始消息视图。
+///
+/// 返回：至少为一的可信投递次数。
+fn source_delivery_attempts<S: DeadLetterSource + ?Sized>(source: &S) -> u32 {
+    source.delivery_attempts().max(1)
+}
+
+/// 用显式数值计算 DLT 指数退避，使边界计算不依赖运行时状态。
 ///
 /// # 参数
 ///

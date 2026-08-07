@@ -706,7 +706,7 @@ impl ProducerClient {
             && now.duration_since(recovery.last_rebuild_at) >= self.stalled_rebuild_cooldown
     }
 
-    /// 在写锁内复核非 fatal 无进展窗口并单飞切换 generation。
+    /// 在写锁内再次确认非 fatal 无进展窗口并单飞切换 generation。
     fn replace_stalled_native(
         &self,
         observed: &NativeProducerSnapshot,

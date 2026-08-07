@@ -1,22 +1,17 @@
-# 发布检查清单
+# 交付就绪清单
 
-公开打 tag 或发布包前，按本清单逐项确认。
+生成公开归档或生产制品前，逐项确认当前能力、资产边界和运行前提。
 
-## 仓库检查
+## 仓库内容
 
-- [ ] `LICENSE`、`LICENSE-MIT`、`LICENSE-APACHE` 已存在，并与 `Cargo.toml` 的 license 一致。
-- [ ] `NOTICE` 已存在，且每个 `.crate` 归档都包含两份许可证正文与 `NOTICE`。
-- [ ] `README.md` 已列出所有工作区组件和门面 feature。
-- [ ] 每个组件 crate 都有自己的 `README.md`。
-- [ ] 每个组件 README 都包含配置、初始化、示例和边界说明。
-- [ ] `CHANGELOG.md` 已写入本次发布条目。
-- [ ] `SECURITY.md` 已覆盖当前安全敏感面。
-- [ ] `CONTRIBUTING.md` 已包含当前检查命令和维护约束规则。
-- [ ] CI 能在干净 Linux runner 上通过。
-- [ ] 远端默认分支已建立并推送，分支保护规则已配置。
-- [ ] GitHub private vulnerability reporting 已开启，`SECURITY.md` 中的私密报告链接可用。
+- [ ] `LICENSE`、`LICENSE-MIT`、`LICENSE-APACHE` 与 `NOTICE` 完整，并进入每个公开归档。
+- [ ] 根 README 能索引全部组件，组件 README 均包含用途、接入、初始化、yml 和主要边界。
+- [ ] `SECURITY.md`、`CONTRIBUTING.md` 与当前实现一致。
+- [ ] 公开文档、rustdoc、源码注释和 manifest 注释只描述当前业务能力、配置、边界和失败后果。
+- [ ] 根级质量工程、fixture、故障注入工具、凭据和证书不进入产品归档。
+- [ ] 文档与示例不包含真实密钥、私有地址、内部主机名或业务数据。
 
-## 构建检查
+## 代码质量
 
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
@@ -24,40 +19,40 @@
 - [ ] `RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps`
 - [ ] `cargo check -p nasa --features full --all-targets`
 - [ ] `cargo deny check`
-- [ ] 本地质量验证资产不参与产品发布，`.crate` 归档只包含产品源码、公开文档和再分发所需文件。
-- [ ] 当前批次每个 crate 的 `cargo package --locked --offline` 通过，并解包扫描 README、许可证、NOTICE、依赖与内容边界。
+- [ ] 每个公开 crate 的离线归档构建成功，归档内容仅包含产品源码、公开文档和再分发所需文件。
 
-## 文档检查
+## 组件边界
 
-- [ ] 禁用词扫描在 `target/` 之外无命中。
-- [ ] 已删除组件残留扫描在 `target/` 之外无命中。
-- [ ] README 覆盖扫描显示根 README 和所有组件 README 都是 `cfg=ok code=ok usage=ok`。
-- [ ] 所有组件 README、rustdoc、源码注释和 manifest 注释不含内部验证内容或临时开发标记。
-- [ ] yml 示例不包含真实私有地址、密码或 token。
+- [ ] feature 单独开启与常用组合都能编译，门面路径在依赖改名后仍正确。
+- [ ] 配置未知字段、非法零值、冲突配置和缺少凭据均在开放流量前失败。
+- [ ] MySQL 写路径的事务归属、提交结果不确定处理和回滚语义明确。
+- [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] 认证、授权、重放保护、密钥轮换和敏感信息脱敏符合 `SECURITY.md`。
+- [ ] 指标 label 维持低基数，日志不暴露凭据、payload 或完整业务身份。
 
-## 后端检查
+## Saga 运行条件
 
-- [ ] SQL 或缓存行为变化时，Mapper 真实 MySQL + Redis 验收通过。
-- [ ] 命令、pipeline、锁、Stream 或缓存行为变化时，Redis 真实后端验收通过。
-- [ ] 认证、帧处理、端点、通知或背压行为变化时，WebSocket 真实后端验收通过。
-- [ ] 集群锁、重复抑制或 cron 行为变化时，调度真实后端验收通过。
-- [ ] 注册映射、watch 或负载均衡行为变化时，服务发现真实后端验收通过。
-- [ ] 所有真实后端验收都清理 Redis key 和数据库临时数据。
+- [ ] Orchestrator、参与方、Inbox、Outbox 和业务表按本地事务边界部署，不存在伪跨库原子提交。
+- [ ] 所有活跃流程定义来自同一受信、不可变快照；Ready 前完成摘要和 descriptor 对齐。
+- [ ] command、result 与 DLT topic 的 owner、路由、consumer group 和默认拒绝 ACL 已批准。
+- [ ] ACK 只发生在 COMMIT 明确成功或 Inbox 明确重复之后；提交结果不确定时保留原消息。
+- [ ] 确定性拒绝先持久化 DLT，再推进源 offset 或 Outbox；DLT 不可达时同分区不前移。
+- [ ] Unknown、取消屏障、冻结补偿计划、HALTED 与人工重开路径符合封闭状态机。
+- [ ] 每个参与方 phase 入口都要求已认证 producer，并精确绑定 workflow、定义版本、摘要与 owner。
+- [ ] 多副本 HTTP 类入口使用共享强一致 nonce claim；每条信任边和恢复动作拥有独立配额。
+- [ ] 每个 Orchestrator 副本使用唯一且重启稳定的 owner；timer 副作用前重新核对租约、token、
+      generation 与实例版本。
+- [ ] 数据库迁移按固定顺序执行；摘要封口、在线 DDL、排序规则转换和回退方案均有批准记录。
+- [ ] replay horizon 覆盖消息最大保留期；Inbox、participant gate、journal、DLT 和审计事实不会过早清理。
+- [ ] 峰值、retry storm、timer/Outbox/DLT 积压、连接池与存储余量有明确预算和告警阈值。
+- [ ] `docs/alerts/saga-prometheus.yml` 已接入 Prometheus 和值班路由。
 
-## 发布检查
+## 生产环境批准
 
-- [ ] 工作区包版本与发布计划一致。
-- [ ] 所有公开 crate 的 `description` 准确。
-- [ ] 所有 crate 均解析为 `1.0.0`，并继承统一的 repository、homepage、Rust 1.94 MSRV、keywords 和 categories。
-- [ ] 初次发布前实时查询 crates.io；不存在非本项目 owner 占用的同名 crate。
-- [ ] `nasa` 门面 feature 包含所有计划公开的可选组件。
-- [ ] 所有组件对已发布内部 crate 只使用 registry `version`；当前待发布 crate 不含本地依赖。
-- [ ] 当前拓扑阶段每个待发布 crate 的 `cargo publish --dry-run -p <crate>` 通过。
-- [ ] 发布顺序符合 `docs/publishing.md` 的七批依赖顺序（第一批分 1A/1B），且上一批已能从 crates.io 解析。
+- [ ] MySQL 主从拓扑、提升流程、备份恢复点、复制延迟阈值和数据丢失目标已签署。
+- [ ] Kafka broker 拓扑、副本因子、最小同步副本、ACL、凭据轮换和故障策略已签署。
+- [ ] 候选硬件上的目标峰值、积压清空速率、资源余量和服务等级目标已签署。
+- [ ] 在线 DDL 的锁等待、总耗时、磁盘余量、维护窗和回退条件已签署。
+- [ ] 灾难恢复流程、恢复时间目标、值班升级链路和演练记录已签署。
 
-## 发布后检查
-
-- [ ] tag 已推送。
-- [ ] 发布说明链接到 `CHANGELOG.md`。
-- [ ] 门面 crate 和主要组件 crate 的文档能正常渲染。
-- [ ] 干净下游示例只依赖已发布门面包即可编译。
+本地容器环境可以确认协议与故障语义，不能替代候选拓扑容量、真实 ACL 或灾难恢复签字。

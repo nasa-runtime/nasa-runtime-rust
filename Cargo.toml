@@ -60,6 +60,10 @@ members = [
     "naoutbox-mysql",
     "nainbox-core",
     "nainbox-mysql",
+    "nasaga-core",
+    "nasaga-mysql",
+    "nasaga-runtime",
+    "nasaga-macro",
     "naopenapi",
     "namigrate",
     "naauthz",
@@ -86,3 +90,8 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
+
+# 工作树统一验证下一补丁版 natx，避免 Saga/Inbox/Outbox 各自装载不同 source 的
+# task-local ambient transaction。发布后的业务项目仍只使用 crates.io 版本依赖。
+[patch.crates-io]
+natx = { path = "natx" }

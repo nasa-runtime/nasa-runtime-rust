@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 tx feature；内部迁移可直接依赖 natx 包。
 [package]
 name = "natx"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "ambient 事务门面(task_local + #[transactional])"

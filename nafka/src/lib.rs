@@ -54,10 +54,12 @@ pub use types::{
     AssignmentHandle, Delivery, KafkaHeader, KafkaHeaders, KafkaPartitionLag, StartOffset, Tp,
 };
 pub use wire::{
-    mode_from_wire_name, mode_wire_name, DecodePayload, EncodePayload, PayloadCodec, Proto,
-    ProtoMode, DEFAULT_EVENT, HEADER_DLT_ORIGIN_OFFSET, HEADER_DLT_ORIGIN_PARTITION,
-    HEADER_DLT_ORIGIN_TOPIC, HEADER_DLT_REASON, HEADER_EVENT, HEADER_PASSTHROUGH,
-    HEADER_PAYLOAD_CODEC, HEADER_PAYLOAD_MODE, HEADER_TRACEPARENT, PAYLOAD_CODEC_PROTOCOL_BYTES,
+    dead_letter_headers, mode_from_wire_name, mode_wire_name, DecodePayload, EncodePayload,
+    PayloadCodec, Proto, ProtoMode, DEFAULT_EVENT, HEADER_DELIVERY_ATTEMPT,
+    HEADER_DLT_DELIVERY_ATTEMPTS, HEADER_DLT_ORIGIN_GROUP, HEADER_DLT_ORIGIN_OFFSET,
+    HEADER_DLT_ORIGIN_PARTITION, HEADER_DLT_ORIGIN_TOPIC, HEADER_DLT_REASON, HEADER_EVENT,
+    HEADER_PASSTHROUGH, HEADER_PAYLOAD_CODEC, HEADER_PAYLOAD_MODE, HEADER_TRACEPARENT,
+    PAYLOAD_CODEC_PROTOCOL_BYTES,
 };
 
 #[cfg(feature = "macros")]

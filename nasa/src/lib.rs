@@ -277,10 +277,23 @@ pub mod secret {
 
 /// 实验性 provider-neutral 对象存储与 S3-compatible adapter。
 ///
-/// 此模块不进入 `full`；稳定公共合同仍需两个真实上传/导出/归档项目共同验证。
+/// 此模块不进入 `full`；稳定公共合同需由多个真实上传、导出和归档项目形成共同约束。
 #[cfg(feature = "object-store-experimental")]
 pub mod object {
     pub use object_impl::*;
+}
+
+/// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
+/// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
+///
+/// 该能力要求业务显式提供流程定义、参与方信任关系和持久化资源，因此不由 `full` 自动启用。
+#[cfg(feature = "saga")]
+pub mod saga {
+    #[cfg(feature = "saga-runtime")]
+    pub use nasaga_macro::saga;
+    pub use saga_core_impl::*;
+    #[cfg(feature = "saga-runtime")]
+    pub use saga_runtime_impl::*;
 }
 
 /// 实验性 gRPC transport、health/reflection 与 graceful drain。

@@ -91,6 +91,22 @@ impl KafkaHeaders {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// 业务作用：由 consumer owner 覆盖框架生成的可信 header，消除来源侧伪造的同名值。
+    ///
+    /// 参数说明：
+    /// - `name`: 框架保留 header 名。
+    /// - `value`: owner 根据本地状态生成的可信值。
+    ///
+    /// 返回：无；删除全部同名旧值后在末尾追加唯一可信值。
+    pub(crate) fn replace_framework_value(&mut self, name: &str, value: Vec<u8>) {
+        self.0
+            .retain(|header| !header.name.eq_ignore_ascii_case(name));
+        self.0.push(KafkaHeader {
+            name: name.to_owned(),
+            value: Some(value),
+        });
+    }
 }
 
 /// 发布成功后的 broker 落点,send()/delivery 路径的返回值。

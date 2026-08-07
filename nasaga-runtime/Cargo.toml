@@ -1,0 +1,37 @@
+[package]
+name = "nasaga-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Saga orchestrator runtime: forward/compensation progression, cancel barrier, durable deadlines and participant adapters"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow = "1"
+# linkme 作为收集点宿主，#[saga] 的 descriptor 静态注册项落在本 crate 的 distributed slice。
+linkme = "0.3"
+# 同仓 path 保证运行时、核心合同和 MySQL store 来自同一工作区状态。
+nasaga-core = { version = "1.0.0", path = "../nasaga-core" }
+nasaga-mysql = { version = "1.0.0", path = "../nasaga-mysql" }
+nainbox-core = { version = "1.0.0" }
+nainbox-mysql = { version = "1.0.0" }
+naoutbox-core = { version = "1.0.0" }
+naoutbox-mysql = { version = "1.0.0" }
+# `TxDecision` 是提交结果不确定处理的必要合同。
+natx = { version = "1.0.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v5"] }
+nafka = { version = "1.0.0", path = "../nafka", optional = true, default-features = false }
+tracing = "0.1"
+
+[features]
+default = []
+# 真实 Kafka hosted transport：手动 ACK、分区退避、可信投递次数与 durability-first DLT。
+kafka = ["dep:nafka"]

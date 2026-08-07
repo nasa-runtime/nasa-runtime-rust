@@ -1,0 +1,20 @@
+[package]
+name = "nasaga-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "NASA Saga MySQL store: instance/step/attempt/transition/timer with CAS inside the ambient natx transaction"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow = "1"
+# 同仓 path 保证当前工作区使用一致的 Saga 核心合同。
+nasaga-core = { version = "1.0.0", path = "../nasaga-core" }
+# Saga store、Inbox 与 Outbox 必须共享 natx 的同一 ambient transaction。
+natx = { version = "1.0.1" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
+uuid = { version = "1", features = ["v4", "v5"] }
