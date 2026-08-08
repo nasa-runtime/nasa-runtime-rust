@@ -2381,9 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "nafka"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0227ef3a0def8b85d7a3195a672bfcd9f03b9235b1e1ead618a477dc9e709f6"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -2406,6 +2404,8 @@ dependencies = [
 [[package]]
 name = "nafka"
 version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f75487f84f7cbf42dd3748f35e7f61d0827986a0f0a061fb2d968d282104f2bc"
 dependencies = [
  "async-trait",
  "base64",
@@ -2559,20 +2559,20 @@ dependencies = [
 
 [[package]]
 name = "nainbox-core"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc09343fe43d7d41deacff8e662e1534140f301447e4e2c3fb561ac624e7832"
+version = "1.0.1"
 
 [[package]]
 name = "nainbox-core"
 version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b72f8d6a49faf40541ece6d7c300b1eed8849f66fc1395b3f9d000e5b004bd8"
 
 [[package]]
 name = "nainbox-mysql"
 version = "1.0.1"
 dependencies = [
  "anyhow",
- "nainbox-core 1.0.0",
+ "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlx",
 ]
@@ -2584,7 +2584,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49ec2573c95cf1a07298e193dc83438f200ae44dd21dd8ca6ad6e5eb64d2c045"
 dependencies = [
  "anyhow",
- "nainbox-core 1.0.0",
+ "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlx",
 ]
@@ -2909,7 +2909,7 @@ dependencies = [
  "naauthz 1.0.0",
  "nabudget 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 1.0.1",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper 1.0.0",
@@ -2920,17 +2920,17 @@ dependencies = [
  "naopenapi 1.0.0",
  "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime 1.0.0",
  "nasched 1.0.0",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nauth-oauth 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naweb 1.0.0",
- "naws 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naws 1.0.0",
  "rand 0.8.6",
  "reqwest",
- "rest-discovery-nacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery-nacos 1.0.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2961,7 +2961,7 @@ dependencies = [
  "naauthz 1.0.0",
  "nabudget 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 1.0.1",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper 1.0.0",
@@ -2972,17 +2972,17 @@ dependencies = [
  "naopenapi 1.0.0",
  "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime 1.0.0",
  "nasched 1.0.0",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nauth-oauth 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naweb 1.0.0",
- "naws 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naws 1.0.0",
  "rand 0.8.6",
  "reqwest",
- "rest-discovery-nacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery-nacos 1.0.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3035,13 +3035,13 @@ dependencies = [
  "nadisc 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana 1.0.0",
  "nafana-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 1.0.1",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagrpc 1.0.0",
  "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 1.0.0",
  "naidempotency-redis 1.0.0",
  "naimg 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-core 1.0.0",
+ "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper 1.0.0",
@@ -3058,7 +3058,7 @@ dependencies = [
  "napp-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 1.0.0",
- "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime 1.0.0",
  "nasched 1.0.0",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3068,11 +3068,11 @@ dependencies = [
  "nauth-oauth 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naweb 1.0.0",
  "naweb-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naws 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naws 1.0.0",
  "ncrypto 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rest-client-macro 1.0.0",
- "rest-discovery 1.0.0",
- "rest-discovery-nacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery-nacos 1.0.0",
 ]
 
 [[package]]
@@ -3117,9 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "nasaga-mysql"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0b9f32bd54a149df9337106a43966f4aa68ed42d7077afca5b1f72f4a196b8a"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3131,33 +3129,13 @@ dependencies = [
 [[package]]
 name = "nasaga-mysql"
 version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c516131ab75f0a44807a524068c0806a92fe9950b52d38b9818e26ab3b9c087"
 dependencies = [
  "anyhow",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlx",
- "uuid",
-]
-
-[[package]]
-name = "nasaga-runtime"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "hmac 0.12.1",
- "linkme",
- "nafka 1.0.1",
- "nainbox-core 1.0.0",
- "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-mysql 1.0.0",
- "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
  "uuid",
 ]
 
@@ -3170,13 +3148,35 @@ dependencies = [
  "anyhow",
  "hmac 0.12.1",
  "linkme",
- "nafka 1.0.1",
- "nainbox-core 1.0.0",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-mysql 1.0.0",
+ "nasaga-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nasaga-runtime"
+version = "1.0.1"
+dependencies = [
+ "anyhow",
+ "hmac 0.12.1",
+ "linkme",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
@@ -3458,12 +3458,14 @@ dependencies = [
 [[package]]
 name = "naws"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f28b5ac0a3b3f3832d1617c8e2fc16c95bb2d646a3db7fa57b413d8dc70c7d4"
 dependencies = [
  "base64",
  "bytes",
  "dashmap",
  "futures",
- "nafka 1.0.1",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "naws-proto 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde_json",
@@ -3478,15 +3480,13 @@ dependencies = [
 
 [[package]]
 name = "naws"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f28b5ac0a3b3f3832d1617c8e2fc16c95bb2d646a3db7fa57b413d8dc70c7d4"
+version = "1.0.1"
 dependencies = [
  "base64",
  "bytes",
  "dashmap",
  "futures",
- "nafka 1.0.1",
+ "nafka 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "naws-proto 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde_json",
@@ -4350,32 +4350,6 @@ dependencies = [
 
 [[package]]
 name = "rest-discovery"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb651e8feaaa337573af7cbd1179299bc64ff8b31c2ce71808ddcca3dd7a46bd"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "bytes",
- "dashmap",
- "httpdate",
- "nabudget 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "natelemetry 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "rest-discovery"
 version = "1.0.1"
 dependencies = [
  "anyhow",
@@ -4400,15 +4374,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "rest-discovery-nacos"
-version = "1.0.0"
+name = "rest-discovery"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fea9c6db591848732b3b459977f0bfd5995e3ddca87913e8e814f016ad44194a"
 dependencies = [
  "anyhow",
- "nanacos 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "rest-discovery 1.0.0",
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "httpdate",
+ "nabudget 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "percent-encoding",
+ "reqwest",
  "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4419,7 +4407,19 @@ checksum = "8ce42e25775ebcce4bba0034ad012814c8198c80cc06d73072390fc4e3c2021c"
 dependencies = [
  "anyhow",
  "nanacos 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "rest-discovery 1.0.0",
+ "rest-discovery 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rest-discovery-nacos"
+version = "1.0.1"
+dependencies = [
+ "anyhow",
+ "nanacos 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "tokio",
  "tracing",

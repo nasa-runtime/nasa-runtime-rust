@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-runtime"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Saga orchestrator runtime: forward/compensation progression, cancel barrier, durable deadlines and participant adapters"
@@ -16,19 +16,19 @@ anyhow = "1"
 linkme = "0.3"
 # Saga 核心合同与 MySQL store 均固定使用公开坐标，避免运行时装载来源分裂的状态合同。
 nasaga-core = { version = "1.0.0" }
-nasaga-mysql = { version = "1.0.0" }
-nainbox-core = { version = "1.0.0" }
+nasaga-mysql = { version = "1.0.1" }
+nainbox-core = { version = "1.0.1" }
 nainbox-mysql = { version = "1.0.1" }
-naoutbox-core = { version = "1.0.0" }
+naoutbox-core = { version = "1.0.1" }
 naoutbox-mysql = { version = "1.0.1" }
 # `TxDecision` 是提交结果不确定处理的必要合同。
-natx = { version = "1.0.1" }
+natx = { version = "1.0.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v5"] }
-nafka = { version = "1.0.1", optional = true, default-features = false }
+nafka = { version = "1.0.2", optional = true, default-features = false }
 tracing = "0.1"
 
 [features]
