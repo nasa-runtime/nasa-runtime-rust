@@ -2105,7 +2105,7 @@ version = "1.0.0"
 dependencies = [
  "async-trait",
  "naaudit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2116,7 +2116,7 @@ checksum = "fe443f06833f3d35ba3af02c6e671f7749dc4880c703105438ab1ffc46f8d037"
 dependencies = [
  "async-trait",
  "naaudit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2587,6 +2587,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nainbox-mysql"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49ec2573c95cf1a07298e193dc83438f200ae44dd21dd8ca6ad6e5eb64d2c045"
+dependencies = [
+ "anyhow",
+ "nainbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+]
+
+[[package]]
 name = "nalog"
 version = "1.0.0"
 dependencies = [
@@ -2861,6 +2873,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "naoutbox-mysql"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32d5bd43e9d3542df277f2431967fb3d50c0db1dcbe344320ba51c009a412fa7"
+dependencies = [
+ "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "napart"
 version = "1.0.0"
 dependencies = [
@@ -2904,7 +2928,7 @@ dependencies = [
  "nanacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naopenapi 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime",
  "nasched 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2975,7 +2999,7 @@ dependencies = [
  "naidempotency-redis 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naimg 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-mysql",
+ "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2985,7 +3009,7 @@ dependencies = [
  "naobject 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naopenapi 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp",
  "napp-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3060,6 +3084,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasaga-mysql"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b9f32bd54a149df9337106a43966f4aa68ed42d7077afca5b1f72f4a196b8a"
+dependencies = [
+ "anyhow",
+ "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "nasaga-runtime"
 version = "1.0.0"
 dependencies = [
@@ -3068,11 +3105,11 @@ dependencies = [
  "linkme",
  "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nainbox-mysql",
+ "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naoutbox-mysql",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-mysql",
+ "nasaga-mysql 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
