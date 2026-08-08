@@ -73,6 +73,8 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
