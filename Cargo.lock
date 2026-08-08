@@ -2953,6 +2953,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "napp"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2296fd9e94e99917657d34c286835e83e57422f786f818596f1d4d1a069e8b5d"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "cacheable 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "config-boot 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures",
+ "ipnet",
+ "matchit",
+ "naauthz 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabudget 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadis 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naidempotency 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namapper 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nametrics-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "namigrate 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naml 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nanacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naopenapi 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasched 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nauth-oauth 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naweb 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naws 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rand 0.8.6",
+ "reqwest",
+ "rest-discovery-nacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
 name = "napp-macro"
 version = "1.0.1"
 dependencies = [
@@ -3004,14 +3056,14 @@ dependencies = [
  "namapper 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naml 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nanacos 1.0.0",
+ "nanacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanum 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naopenapi 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "napp",
+ "napp 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
