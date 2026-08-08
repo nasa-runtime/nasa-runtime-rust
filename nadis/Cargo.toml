@@ -3,7 +3,7 @@
 # partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
 name = "nadis"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Redis 基础层(client/commands/pipeline/lock;兼容 RedisProxy 五件套)"
@@ -26,7 +26,7 @@ search = []
 # 故 derive 蕴含 search;消费者只需依赖 nadis(开 derive),无需直依宏 crate。
 derive = ["dep:nadis-derive", "search"]
 [dependencies]
-nabase = { package = "nabase", version = "1.0.0" }
+nabase = { package = "nabase", version = "1.0.1" }
 nadis-derive = { package = "nadis-derive", version = "1.0.0", optional = true }
 redis = { version = "1", features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
