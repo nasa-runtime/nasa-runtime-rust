@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 hystrix feature；内部迁移可直接依赖 hystrix 包。
 [package]
 name = "hystrix"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "接口级隔离、超时、降级和 Dashboard 监控门面"

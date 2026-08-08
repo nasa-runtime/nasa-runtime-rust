@@ -3,7 +3,7 @@
 # 业务项目优先依赖 nasa 门面并开启 grafana feature;内部迁移可直接依赖 nafana 包。
 [package]
 name = "nafana"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "接口级隔离监控门面(Command/run_fn/isolation + Prometheus /metrics + #[grafana])"

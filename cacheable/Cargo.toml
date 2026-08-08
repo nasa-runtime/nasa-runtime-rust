@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 cache feature；内部迁移可直接依赖 cacheable 包。
 [package]
 name = "cacheable"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "两级缓存门面(L1 moka + L2 Redis 三防 + #[cached]/#[cache_invalidate])"
@@ -16,7 +16,7 @@ categories.workspace = true
 [lib]
 name = "cacheable"
 [dependencies]
-nacache-macro = { package = "nacache-macro", version = "1.0.0" }
+nacache-macro = { package = "nacache-macro", version = "1.0.1" }
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 moka = { version = "0.12", features = ["future"] }
 dashmap = "6"
