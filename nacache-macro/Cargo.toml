@@ -2,7 +2,7 @@
 # 提供 #[cached](读:两级缓存) 和 #[cache_invalidate](写:失效)
 [package]
 name = "nacache-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[cached]/#[cache_invalidate] 属性宏(两级缓存读写路径)"
@@ -17,7 +17,7 @@ proc-macro = true          # ★ 标记为过程宏 crate(只在编译期被调�
 
 name = "nacache_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0" }
+nasa-macro-support = { package = "macro-support", version = "1.0.1" }
 syn = { version = "2", features = ["full"] }   # 解析被注解的 fn 的源码 token → 语法树
 quote = "1"                                     # 用 quote!{} 把语法树/变量拼回 token(生成代码)
 proc-macro2 = "1"                               # syn/quote 操作的 TokenStream 类型

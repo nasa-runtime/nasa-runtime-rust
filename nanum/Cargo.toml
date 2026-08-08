@@ -9,7 +9,7 @@
 #   对照 原实现 BigDecimal API)+ `float` 模块(double 便捷算术)。
 [package]
 name = "nanum"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 定点精确算术(对照原工具包 Numeric):i128 定点 ×10^scale + 全 RoundingMode + align + I/O,撮合/金额用"

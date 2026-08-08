@@ -18,7 +18,7 @@ proc-macro = true
 
 name = "nafana_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0" }
+nasa-macro-support = { package = "macro-support", version = "1.0.1" }
 # syn: 解析被注解函数与注解参数(features=full 才能解析函数体)
 syn = { version = "2", features = ["full"] }
 # quote: 用 quote!{} 模板把 AST/变量拼回 TokenStream
