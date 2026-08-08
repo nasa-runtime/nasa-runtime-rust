@@ -1,6 +1,6 @@
 [package]
 name = "napp"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA application lifecycle runtime"
@@ -57,38 +57,38 @@ scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]
 anyhow = "1"
 arc-swap = "1"
 axum = { version = "0.8", optional = true }
-config-boot = { version = "1.0.0", optional = true }
+config-boot = { version = "1.0.1", optional = true }
 futures = { version = "0.3", optional = true }
-naweb = { version = "1.0.0", optional = true }
+naweb = { version = "1.0.1", optional = true }
 matchit = { version = "0.8", optional = true }
-naml = { version = "1.0.0" }
-nametrics-core = { version = "1.0.0" }
-nabudget = { version = "1.0.0" }
+naml = { version = "1.0.1" }
+nametrics-core = { version = "1.0.1" }
+nabudget = { version = "1.0.1" }
 nasecret = { version = "1.0.0" }
-naidempotency = { version = "1.0.0" }
-naauthz = { version = "1.0.0" }
-natelemetry = { version = "1.0.0" }
+naidempotency = { version = "1.0.1" }
+naauthz = { version = "1.0.1" }
+natelemetry = { version = "1.0.1" }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
 nauth-oauth = { version = "1.0.0", optional = true }
-naopenapi = { version = "1.0.0", optional = true }
+naopenapi = { version = "1.0.1", optional = true }
 # 仅 web 特性使用：auth 组件远程拉取 `jwks_uri`；rustls-tls 对齐 rest-discovery 的 TLS 栈。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
-namapper = { version = "1.0.0", optional = true, default-features = false }
-natx = { version = "1.0.1", optional = true }
+namapper = { version = "1.0.1", optional = true, default-features = false }
+natx = { version = "1.0.2", optional = true }
 namigrate = { version = "1.0.0", optional = true }
-cacheable = { version = "1.0.0", optional = true }
+cacheable = { version = "1.0.1", optional = true }
 # 仅 cache 组件使用：实现 cacheable 的 async trait `CacheBackend`，适配受管 Redis 连接。
 async-trait = { version = "0.1", optional = true }
-nadis = { version = "1.0.0", optional = true }
+nadis = { version = "1.0.1", optional = true }
 nalog = { version = "1.0.0", optional = true }
-nafka = { version = "1.0.1", optional = true, default-features = false }
-naoutbox-core = { version = "1.0.0", optional = true }
+nafka = { version = "1.0.2", optional = true, default-features = false }
+naoutbox-core = { version = "1.0.1", optional = true }
 naoutbox-mysql = { version = "1.0.1", optional = true }
-nasaga-runtime = { version = "1.0.0", optional = true }
-nanacos = { version = "1.0.0", optional = true, default-features = false }
-nasched = { version = "1.0.0", optional = true }
-naws = { version = "1.0.0", optional = true, default-features = false }
-rest-discovery-nacos = { version = "1.0.0", optional = true, default-features = false }
+nasaga-runtime = { version = "1.0.1", optional = true }
+nanacos = { version = "1.0.1", optional = true, default-features = false }
+nasched = { version = "1.0.1", optional = true }
+naws = { version = "1.0.1", optional = true, default-features = false }
+rest-discovery-nacos = { version = "1.0.1", optional = true, default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
