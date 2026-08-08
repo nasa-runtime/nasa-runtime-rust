@@ -10,15 +10,15 @@ nasa = { version = "1", features = ["inbox"] }
 
 ```rust
 use nasa::inbox::MySqlInbox;
-use nasa::tx::transactional;
-
-#[transactional]
 async fn consume(message_id: &str) -> anyhow::Result<()> {
-    let claim = MySqlInbox::new()
-        .claim("order-projection", message_id)
-        .await?;
-    if claim.should_process() {
-        update_projection().await?;
+    match MySqlInbox::new()
+        .process("order-projection", message_id, || async {
+            update_projection().await
+        })
+        .await?
+    {
+        nasa::inbox::InboxProcess::Applied(()) => {}
+        nasa::inbox::InboxProcess::Duplicate => {}
     }
     Ok(())
 }
@@ -41,5 +41,7 @@ database:
 
 - `claim` 在事务外明确失败，不会 autocommit。
 - 返回 `Claimed` 后必须在同一事务调用栈内完成业务 SQL。
+- `process` 统一执行 claim、业务闭包和提交，业务项目无需重复编写事务外壳；返回
+  `CommitUncertain` 或 `RollbackFailed` 时必须保留原消息继续收敛。
 - 回滚会同时撤销唯一标记和业务写，因此重投仍能继续。
 - 该合同不覆盖外部服务调用和消息再发布；这些副作用需要 Outbox 或目标系统幂等键。

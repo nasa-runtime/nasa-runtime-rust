@@ -377,6 +377,9 @@ impl Orchestrator {
     ///
     /// 返回：预检通过返回 `Ok`；缺失或摘要漂移返回错误，调用方不得宣告 Ready。
     pub async fn verify_startup(&self) -> anyhow::Result<()> {
+        // 本进程收集的步骤合同必须先于历史实例扫描校验；否则同一 binary 内重复 handler 或
+        // 合同漂移可能在数据库事实通过后才随首条命令暴露，形成已 Ready 但不可安全推进的窗口。
+        crate::verify_descriptors(&self.registry)?;
         self.registry
             .verify_non_terminal(&self.store, self.config.startup_scan_limit)
             .await
@@ -1539,7 +1542,8 @@ impl Orchestrator {
         let resolve_after_compensation_success = context.identity.phase == StepPhase::Resolve
             && context.instance.direction == Direction::Compensating
             && context.status == StepAttemptStatus::Rejected
-            && row.compensation_status == StepCompensationStatus::Succeeded;
+            && row.compensation_status == StepCompensationStatus::Succeeded
+            && patch.compensation_status == Some(StepCompensationStatus::Pending);
         if resolve_after_compensation_success
             || merge_deferred_projection(&row, &mut patch).is_err()
         {
@@ -1612,7 +1616,8 @@ impl Orchestrator {
         let resolve_after_compensation_success = context.identity.phase == StepPhase::Resolve
             && context.instance.direction == Direction::Compensating
             && context.status == StepAttemptStatus::Rejected
-            && row.compensation_status == StepCompensationStatus::Succeeded;
+            && row.compensation_status == StepCompensationStatus::Succeeded
+            && patch.compensation_status == Some(StepCompensationStatus::Pending);
         if resolve_after_compensation_success
             || merge_deferred_projection(&row, &mut patch).is_err()
         {
@@ -1907,6 +1912,68 @@ impl Orchestrator {
         }
     }
 
+    /// 业务作用：在消费解决应答前复验步骤投影，让已经提交的正向或补偿成功优先于更早查询形成的迟到应答。
+    ///
+    /// resolve handler 可能先读取到未知事实，随后原业务 attempt 才提交成功，最终两个结果按相反顺序
+    /// 到达 Orchestrator。attempt journal 会保留两条原始结论；步骤投影必须以已提交副作用为准，不能因
+    /// 迟到的 `Halted` 或 `Rejected` 把真实成功冻结成人工介入。
+    ///
+    /// 参数说明：
+    /// - `context`: 当前解决应答、实例快照、步骤合同与事件身份。
+    ///
+    /// 返回：发现已提交成功时写入单调解决投影、作废解决 timer，并返回推进后的状态；尚无成功事实时
+    /// 返回 `None` 交给正常解决分支；投影冲突、CAS 或持久化失败返回错误。
+    async fn settle_resolution_from_committed_success(
+        &self,
+        context: &ResultContext<'_>,
+    ) -> anyhow::Result<Option<SagaStatus>> {
+        let saga_id = &context.identity.saga_id;
+        let step = &context.identity.step;
+        let row = self
+            .store
+            .load_steps(saga_id)
+            .await?
+            .into_iter()
+            .find(|row| row.step == *step)
+            .ok_or_else(|| anyhow::anyhow!("step journal row is missing"))?;
+        let committed_success = match context.instance.direction {
+            Direction::Forward => row.forward_status == StepForwardStatus::Succeeded,
+            Direction::Compensating => row.compensation_status == StepCompensationStatus::Succeeded,
+        };
+        if !committed_success {
+            return Ok(None);
+        }
+
+        let mut patch = StepJournalPatch {
+            resolution_status: Some(StepResolutionStatus::Succeeded),
+            ..Default::default()
+        };
+        match context.instance.direction {
+            Direction::Forward => {
+                patch.forward_status = Some(StepForwardStatus::Succeeded);
+                patch.mark_finished = true;
+            }
+            Direction::Compensating => {
+                patch.compensation_status = Some(StepCompensationStatus::Succeeded);
+            }
+        }
+        if let Some(status) = self.apply_monotonic_projection(context, patch).await? {
+            return Ok(Some(status));
+        }
+
+        // 业务成功事实和解决投影必须先在本事务固定，再作废重查预算并推进；否则下一轮 timer
+        // 可能在状态迁移前再次发布查询，把已经收敛的副作用重新暴露给旧应答竞态。
+        self.cancel_resolution_timers(saga_id, step).await?;
+        let status = match context.instance.direction {
+            Direction::Forward => match context.step_def.timeout_policy() {
+                TimeoutPolicy::AcceptLateSuccess => self.proceed_forward(context).await?,
+                TimeoutPolicy::CompensateLateSuccess => self.enter_compensation(context).await?,
+            },
+            Direction::Compensating => self.continue_compensation(context).await?,
+        };
+        Ok(Some(status))
+    }
+
     /// 业务作用：裁决解决通道结果，按方向把唯一裁决送回正向或补偿推进。
     ///
     /// 参数说明：
@@ -1918,6 +1985,12 @@ impl Orchestrator {
             || context.instance.current_step.as_ref() != Some(&context.identity.step)
         {
             return self.project_deferred_result(context).await;
+        }
+        if let Some(status) = self
+            .settle_resolution_from_committed_success(context)
+            .await?
+        {
+            return Ok(status);
         }
         let saga_id = &context.identity.saga_id;
         let step = &context.identity.step;

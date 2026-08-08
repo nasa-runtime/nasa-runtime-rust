@@ -35,8 +35,16 @@ license = "MIT OR Apache-2.0"
 4. 应用组件桥与运行时；
 5. `nasa` 门面。
 
-同一阶段只有在前置 crate 已能从 registry 正常解析后才能继续。已公开的内部依赖只保留 registry
-坐标；尚未公开的同仓依赖可在开发期使用 `path`，进入归档前必须移除，避免本地路径掩盖缺失依赖。
+同一阶段只有在前置 crate 已能从 registry 正常解析后才能继续。同仓内部依赖在源码 manifest 中使用
+`path + version`，保证工作区解析本地源码；Cargo 生成公开归档时会移除 `path` 并保留 registry 版本
+约束。必须检查归档内规范化后的 manifest，并确认对应版本已经公开，不能用工作区路径掩盖缺失依赖。
+
+`natx` 的事务上下文以及 `naoutbox-mysql` 的提交唤醒都绑定到具体 package 实例。最终可执行制品若同时
+装入 registry 与本地路径副本，两份实例会各自持有互不可见的进程状态，表现为事务归属、消息收集或
+提交唤醒静默失效。每个制品在锁定依赖后必须分别执行 `cargo tree -i natx`、`cargo tree -i nafka`、
+`cargo tree -i naoutbox-core` 和 `cargo tree -i naoutbox-mysql`，确认每个包只有一个 package ID 和一个来源；发现分裂时应先统一依赖坐标，
+再重新生成锁文件。包内运行时检查不能替代这项门禁，因为彼此隔离的包实例无法枚举或读取对方的静态状态。
+`nainbox-mysql` 也必须执行相同检查，确保部署建表入口与 Saga 运行时使用同一份 schema 合同。
 
 ## 操作命令
 

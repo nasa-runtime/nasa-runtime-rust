@@ -21,6 +21,10 @@ pub enum ComponentId {
     Cache,
     /// Kafka 发布、消费和健康状态。
     Kafka,
+    /// 事务型 Outbox 持久化投递循环。
+    Outbox,
+    /// Saga 编排、参与方能力与 durable timer。
+    Saga,
     /// 身份认证运行时。
     Auth,
     /// HTTP 路由和治理入口。
@@ -40,11 +44,12 @@ pub enum ComponentId {
 }
 
 impl fmt::Display for ComponentId {
-    /// 写出不会包含配置值的稳定组件名称。
+    /// 业务作用：写出不会包含配置值的稳定组件名称，供生命周期错误安全归因。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `f`：接收组件名称的格式化缓冲区。
+    ///
+    /// 返回：名称写入成功时返回 `Ok`，底层格式化缓冲区失败时透传错误。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Application => "application",
@@ -56,6 +61,8 @@ impl fmt::Display for ComponentId {
             Self::Telemetry => "telemetry",
             Self::Cache => "cache",
             Self::Kafka => "kafka",
+            Self::Outbox => "outbox",
+            Self::Saga => "saga",
             Self::Auth => "auth",
             Self::Web => "web",
             Self::Ws => "ws",

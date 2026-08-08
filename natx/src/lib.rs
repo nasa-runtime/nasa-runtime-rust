@@ -318,7 +318,10 @@ fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
 fn pool_for(datasource: &str) -> anyhow::Result<MySqlPool> {
     validate_datasource_name(datasource)?;
     if datasource == DEFAULT_DATASOURCE {
-        return Ok(pool().clone());
+        return POOL
+            .get()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"));
     }
     let pools = DATASOURCE_POOLS
         .get()
@@ -362,16 +365,6 @@ pub fn in_transaction() -> bool {
 /// 返回：事务内返回 datasource 名称；无 ambient transaction 返回 `None`。
 pub fn current_datasource() -> Option<&'static str> {
     CUR_TX.try_with(|ctx| ctx.datasource).ok()
-}
-
-/// 业务作用：取得已初始化的默认连接池，保证事务封装与普通连接复用同一来源。
-///
-/// 参数说明: 无。
-///
-/// 返回：默认连接池引用；启动期未初始化属于编程错误并 panic。
-fn pool() -> &'static MySqlPool {
-    POOL.get()
-        .expect("tx 未初始化:请在 main 启动时调用 natx::init(db_pool)")
 }
 
 // ════════════════════════════════════════════════════════════════════════════

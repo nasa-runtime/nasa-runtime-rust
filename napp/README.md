@@ -26,7 +26,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## `application` 支持的组件字符串
 
-属性当前只接受下面 12 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
+属性当前只接受下面 14 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
 未知名称和重复名称，再按唯一规范顺序生成组件列表。字符串对应的门面 feature 没有启用时会在编译期
 拒绝，不会静默跳过。
 
@@ -38,49 +38,14 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"db"` | `tx` | `database` 或 `datasources.<name>` | 数据源探测、建池、资源注册和事务运行时注入 | `app.datasource(name).await` |
 | `"redis"` | `redis` | `redis` | 统一客户端建连与显式停机 | `app.redis(name).await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
+| `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)` |
+| `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、探针、监听与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
 | `"nacos-discovery"` | `nacos-discovery`；真实 provider 再加 `nacos-sdk` | `rest_discovery` | Start 装出站客户端、Ready 注册、停机先摘流后关客户端 | `app.nacos_discovery()` |
 | `"scheduling"` | `scheduling`；选主模式使用 `scheduling-cluster` | `scheduling` | Ready 末尾启动已收集任务；选主模式复用已声明的 Redis 客户端 | `app.scheduling()` |
-
-完整声明可以直接写成：
-
-```rust
-#[nasa::application(
-    "log",
-    "nacos-config",
-    "telemetry",
-    "db",
-    "redis",
-    "cache",
-    "kafka",
-    "auth",
-    "web",
-    "ws",
-    "nacos-discovery",
-    "scheduling"
-)]
-async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    app.configure_router(|router| router)?;
-    app.configure_ws(configure_socket_service)?;
-    Ok(())
-}
-```
-
-其中 `configure_socket_service` 是业务提供的 `fn(ServerBuilder) -> ServerBuilder`，至少需要注入鉴权回调；
-声明了 `"ws"` 却没有完成该定制时，长连接组件会在 Ready 阶段明确拒绝启动。
-
-对应的门面依赖至少为：
-
-```toml
-nasa = { version = "1", features = [
-    "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
-    "kafka", "oauth", "web",
-    "ws", "nacos-discovery", "scheduling",
-] }
-```
 
 只用部分能力时只填写需要的字符串。例如纯 Web 应用写 `#[nasa::application("web")]`；本地配置的
 数据库 Web 应用可写 `#[nasa::application("db", "web")]`。独立批处理仍可只开启 `kafka` feature 并显式
@@ -90,9 +55,85 @@ nasa = { version = "1", features = [
 不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
 
-规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> kafka -> auth ->
-web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
+规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> saga -> kafka -> outbox ->
+auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
 `auth` 缺少 `web` 会被拒绝，`cache.redis_ref` 指向受管 Redis 时还必须声明 `"redis"`。
+
+## Saga 受管模式
+
+`"saga"` 是组合组件：宏会隐式加入 DB 与 Outbox，业务不再重复写 `"db"`、`"outbox"` 或手工
+dispatcher。Inbox 没有后台生命周期，它由 Orchestrator 和参与方在本地事务中直接调用，因此不存在
+单独的 `"inbox"` 组件字符串。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测，只有业务明确
+选择 Kafka 托管消费时才声明 `"kafka"` 并启用 `saga-kafka`。
+
+为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
+`#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
+把同一个字符串写两次才按重复声明拒绝。
+
+业务在 UserHook 内装配 definition、运行角色和唯一发布端；Application 在 Ready 前完成流程合同、
+历史非终态实例、数据库与 Outbox 门禁，随后启动 timer 和 dispatcher：
+
+对应的门面依赖至少启用 `application` 与 `saga-runtime`；选用受管 Kafka transport 时再启用
+`saga-kafka`。
+
+```rust
+use std::sync::Arc;
+use nasa::application::SagaApplicationPlan;
+use nasa::saga::{DefinitionRegistry, Orchestrator, OrchestratorConfig};
+
+#[nasa::application("saga")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let mut definitions = DefinitionRegistry::new();
+    definitions.register(checkout_definition()?)?;
+    let orchestrator = Arc::new(Orchestrator::new(
+        definitions,
+        OrchestratorConfig::default(),
+    )?);
+    let publisher = Arc::new(build_command_publisher()?);
+    app.configure_saga(
+        SagaApplicationPlan::orchestrator(orchestrator, "checkout-orchestrator-a")?
+            .with_event_publisher(publisher)?,
+    )?;
+    Ok(())
+}
+```
+
+纯参与方使用 `SagaApplicationPlan::participant(name, runtime)`；同一进程承载多个参与方时使用
+`with_participant` 逐项追加。`app.saga()` 只在 Ready 门禁通过后返回能力，停机保护态拒绝新工作。
+`with_event_publisher` 接收 provider-neutral 的 `OutboxPublisher`。发布确认可以来自 Kafka、Redis Streams
+或 HTTP；未绑定发布端时组合组件拒绝 Ready，避免 Saga 已提交 command/result 却没有持续投递者。
+规范顺序为 `db -> saga -> kafka -> outbox -> web/ws`，反向停机时先关闭入口、停止 dispatcher 与消息
+消费，再关闭 Saga 能力和数据库。
+
+Saga 隐式 Outbox 默认采用 `Block`：首个未确认事件会阻塞同一 `outbox_event` 表的全部后续事件，避免
+把瞬态网络失败按固定次数误判为可以越过的 command/result。审计或其它事件若写入同一张表，绑定的唯一
+publisher 必须覆盖所有事件类型；否则应使用独立事务数据库和独立 Outbox 生命周期。`app.outbox()` 的
+`render_prometheus()` 输出无业务标签的积压、死信、发布量与失败轮次，必须接入值班告警。
+
+`saga` 配置段只控制宿主轮询预算：
+
+```yaml
+saga:
+  database_bootstrap: application
+  timer_poll_interval_ms: 500
+  timer_error_backoff_ms: 1000
+  timer_operation_timeout_ms: 5000
+  timer_failure_threshold: 3
+```
+
+`database_bootstrap` 默认为 `application`，DB 组件在 Start 阶段按 `database` 或 `datasources` 建池。
+确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件仍会在 Ready 前接管
+探针、健康监督和停机关闭；关闭所有权在 Start 阶段预占，确保受监督任务退出后才释放连接。Ready 后
+`app.datasource("default")` 返回同一受管池，停机态拒绝新的借用。该模式不读取
+`database`/`datasources` 的连接设置并会记录提示，不能用来绕过数据库门禁。
+
+timer owner 不从共享配置推断，必须随计划提供逐副本唯一且重启稳定的 canonical 身份。
+
+独立 Outbox 场景可显式声明 `#[nasa::application("outbox")]`，并在 UserHook 调用
+`app.configure_outbox(OutboxApplicationPlan::new(publisher))`。该声明会隐式加入 DB，但不会加入 Saga 或
+Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确认提交后会立即唤醒本进程 dispatcher；
+`outbox.poll_interval_ms` 是跨进程写入、进程重启和漏通知恢复的兜底上限，不会固定消耗每条 Saga
+步骤的执行预算。下游失败时提交通知不能绕过 `error_backoff_ms`。
 
 ## Kafka 受管模式
 
@@ -182,42 +223,10 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 安全协议、用户名、密码、证书路径和原生 properties 仍使用 `KafkaConfig` 对应字段；这些值不要写进示例、
 日志或管理端点。运行期配置变更只报告 `RestartRequired`，必须通过应用重启生效。
 
-### 可运行的 REST Producer → Consumer 验证
-
-同级 `application-demo` 项目是完整样板，而不是只做连接探测：
-
-- `POST /application-demo/ops/kafka/producer` 从请求 JSON 构造消息，通过受管 `ProducerLane` 等待 broker
-  delivery；`stateful=false` 发送到属性宏 consumer，`stateful=true` 发送到 UserHook 注册的有状态 consumer。
-- 两个 consumer 收到消息后都会打印包含事件名和业务序号的日志；日志不打印消息正文、broker 或凭据。
-- `GET /application-demo/ops/kafka` 返回 lifecycle、动态 Ready、group assignment/commit、producer delivery
-  统计，以及两类 consumer 的消费计数和最近业务序号。
-- `/readyz` 只有在真实 group join 满足 `ReadyRule` 后才返回 200；进入停机后立即失去 Ready，再按容器反序
-  停流量、排 consumer、停业务资源并最终 flush producer。
-
-启动与人工验证：
-
-```bash
-cd ../application-demo
-APP__KAFKA__BOOTSTRAP_SERVERS=127.0.0.1:9092 cargo run --offline
-
-curl -X POST http://127.0.0.1:38080/application-demo/ops/kafka/producer \
-  -H 'content-type: application/json' \
-  -d '{"sequence":1,"message":"from REST","stateful":false}'
-
-curl -X POST http://127.0.0.1:38080/application-demo/ops/kafka/producer \
-  -H 'content-type: application/json' \
-  -d '{"sequence":2,"message":"stateful from REST","stateful":true}'
-
-curl http://127.0.0.1:38080/application-demo/ops/kafka
-```
-
-该示例的 topic 是 `application-demo-events`，默认 group 是 `application-demo-group`。复制到业务服务时必须按
-上一节同步修改配置、宏、producer 和部署环境，不能只改 broker 地址。
-
 ## 生命周期要点
 
 - `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写只记 `RestartRequired`。
-- `mode: auto | service | batch`：auto 在声明 kafka/web/ws/nacos-discovery/scheduling 任一长生命周期组件时解析为 Service，否则 Batch；显式 Batch 不允许声明这些组件。
+- `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/scheduling 任一长生命周期组件时解析为 Service，否则 Batch；显式 Batch 不允许声明这些组件。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
 - 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。
 - 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化如实记 `RestartRequired`。`app.config_view()` 保证快照与状态表同版本。
@@ -232,10 +241,14 @@ curl http://127.0.0.1:38080/application-demo/ops/kafka
 | `app.configure_router(...)` | 启动 Hook | Web 逃生舱：手写路由、全局中间件、`/hystrix.stream` 等 |
 | `app.configure_mapping(...)` | 启动 Hook | 手动 global/scope/selector、窄 State 与安全运行时计划；`global = true` 的 interceptor 无需在此重复登记 |
 | `app.configure_ws(...)` | 启动 Hook | 长连接逃生舱：`authorize`、endpoint 事件表、集群 notifier（声明 `ws` 组件时必须至少提供 `authorize`） |
+| `app.configure_saga(plan)` | 启动 Hook | 提交唯一 Orchestrator/参与方计划；Ready 取走后入口永久封口 |
+| `app.configure_outbox(plan)` | 启动 Hook | 为脱离 Saga 的事件流提交唯一受管发布计划 |
 | `app.configure_kafka(name, ...)` | 启动 Hook | 在自动收集项之后追加有状态 consumer；Ready 取走后入口永久封口 |
 | `app.configure_kafka_metrics(name, sink)` | 启动 Hook | 为指定 client 安装一次无阻塞指标出口；未设置时为 Noop |
 | `app.datasource(name) / redis(name)` | Start 完成后 | 直接取得共享语义明确、且能被容器显式关闭的数据源池与缓存客户端 |
 | `app.kafka(name)` | Start 完成后至清理 | 受控发布、只读 metadata、健康快照和 consumer 控制命令；不暴露 connect/registry/shutdown |
+| `app.saga()` | Saga Ready 完成后至清理 | 取得已校验 Orchestrator 或命名参与方；停机保护态拒绝新工作 |
+| `app.outbox()` | Outbox Ready 完成后至清理 | 读取持久化积压、死信累计与低基数投递快照 |
 | `app.log() / nacos_config()` | 组件声明后至终态 | 日志初始化状态；配置中心只读拉取能力，不开放重配置、监听注册和关闭权 |
 | `app.web() / ws()` | 组件声明后至终态 | Web 只读状态与指标；长连接真实地址及底层广播发送器 |
 | `app.mapping()` | Web Ready 后至清理 | mapping generation、配置年龄、最近失败与统一生命周期的只读句柄 |

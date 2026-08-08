@@ -10,7 +10,7 @@
 # ============================================================================
 [package]
 name = "nafka"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -48,8 +48,9 @@ default = ["macros"]
 macros = ["dep:nafka-macro"]
 # SASL_SSL/SSL 场景内嵌静态 OpenSSL，运行时镜像无需 libssl。
 tls = ["rdkafka/ssl-vendored"]
-# 仅 Kerberos 使用 gssapi；SCRAM 仍依赖 OpenSSL，因此还需要 `tls`。
-gssapi = ["rdkafka/gssapi-vendored", "rdkafka/ssl-vendored"]
+# Kerberos/GSSAPI 使用目标系统提供的 Cyrus SASL；避免静态 SASL 插件在
+# librdkafka 构建阶段丢失目标系统的 GSS/Kerberos 链接依赖。
+gssapi = ["rdkafka/gssapi", "rdkafka/ssl-vendored"]
 zstd = ["rdkafka/zstd"]
 # 实验性 Confluent-compatible Schema Registry adapter；不进入默认/full，待真实业务合同收敛后再稳定。
 schema-registry = ["dep:async-trait", "dep:base64", "dep:nasecret", "dep:reqwest", "dep:zeroize"]

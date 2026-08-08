@@ -34,7 +34,7 @@ assert!(is_traffic_instance(&inst));
 
 流量过滤规则：实例必须启用、健康、权重大于 0、IP 非空且无首尾空白、端口非 0。
 
-## 流量过滤规则(实测)
+## 流量过滤规则
 
 `is_traffic_instance` 拒绝以下任一情况:`enabled=false`、`healthy=false`、weight ≤0 / NaN / ∞、IP 为空或带首尾空白、`port == 0`。负载均衡应只消费过滤后的实例。
 

@@ -66,7 +66,7 @@ executor.shutdown().await;
 - 只需要普通并发，不关心 key 顺序时，直接用 `tokio::spawn` 或普通队列。
 - 提交入口要处理 `SubmitError`，不要把满队列当成成功。
 
-## 行为边界(实测)
+## 行为边界
 
 - 同 key 严格 FIFO:乱耗时任务仍按提交序完成;不同 key 按分区并发。
 - `submit`/`submit_sync` 非阻塞,队满返回 `QueueFull`;`submit_async` 等待容量,**永不** QueueFull。

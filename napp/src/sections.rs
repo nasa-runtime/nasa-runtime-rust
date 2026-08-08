@@ -14,6 +14,8 @@ const RESERVED_ROOTS: &[(&str, ComponentId)] = &[
     ("redis", ComponentId::Redis),
     ("telemetry", ComponentId::Telemetry),
     ("cache", ComponentId::Cache),
+    ("saga", ComponentId::Saga),
+    ("outbox", ComponentId::Outbox),
     ("kafka", ComponentId::Kafka),
     ("kafkas", ComponentId::Kafka),
     ("auth", ComponentId::Auth),
@@ -44,16 +46,17 @@ pub(crate) fn warn_undeclared_sections(components: &[ComponentId], tree: &Value)
     }
 }
 
-/// 在发布候选配置前校验所有已声明内置组件的配置段。
+/// 业务作用：在发布候选配置前校验所有已声明内置组件的配置段，阻止非法整帧替换有效快照。
 ///
 /// 校验只做无副作用的反序列化：任一段非法时整帧候选都不发布，旧快照继续有效。
 /// `application` 段不在此校验范围内——它是 bootstrap-only 的，运行期只做原始 section 比较。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `components`：属性入口声明的组件列表，决定哪些段属于“已声明”。
 /// - `tree`：合并、插值完成但尚未对外发布的候选配置树。
 /// - `phase`：本轮校验所属生命周期；启动首帧与运行期热刷新必须如实区分。
+///
+/// 返回：全部已声明段合法时成功；任一段非法时返回对应组件错误并保留旧快照。
 pub(crate) fn validate_declared_sections(
     components: &[ComponentId],
     tree: &Value,
@@ -77,6 +80,10 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Telemetry => crate::telemetry::validate_telemetry_section(tree, phase)?,
             #[cfg(feature = "cache")]
             ComponentId::Cache => crate::cache::validate_cache_section(tree, phase)?,
+            #[cfg(feature = "saga")]
+            ComponentId::Saga => crate::saga::validate_saga_section(tree, phase)?,
+            #[cfg(feature = "outbox")]
+            ComponentId::Outbox => crate::outbox::validate_outbox_section(tree, phase)?,
             #[cfg(feature = "kafka")]
             ComponentId::Kafka => crate::kafka::validate_kafka_sections(tree, phase)?,
             #[cfg(feature = "web")]

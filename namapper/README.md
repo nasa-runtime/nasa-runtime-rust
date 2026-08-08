@@ -1310,9 +1310,12 @@ cargo clippy --all-targets -- -D warnings
 
 ## YML 配置与使用
 
-`namapper` 的 SQL、缓存开关、事务要求、datasource 名称都写在 trait 属性上；运行期 yml 只负责提供 MySQL 连接池、命名 datasource、L2 缓存和发布前校验开关。使用 `#[application]` 运行时的项目不需要下面的手工启动代码：连接池来自 `database` / `datasources` 配置根（db 组件），L2 安装与就绪前断言由 `cache` 组件与运行时接管。
+`namapper` 的 SQL、缓存开关、事务要求、datasource 名称都写在 trait 属性上。使用
+`#[nasa::application]` 的项目从 `database` / `datasources` 配置根取得受管连接池；存在缓存查询时，
+业务仍须在 UserHook 显式安装默认 Mapper L2，Application 会在 Ready 前拒绝遗漏装配。`cache` 组件
+管理通用两级缓存生命周期，不会猜测并替业务构造 Mapper L2。
 
-推荐配置：
+不使用 Application 的手工宿主可以自行定义连接池与 Mapper 配置投影，例如：
 
 ```yaml
 mysql:
@@ -1334,7 +1337,7 @@ mapper:
     hash_field_ttl_supported: true
 ```
 
-字段说明：
+以上手工投影的字段说明：
 
 | 键 | 说明 |
 | --- | --- |
@@ -1348,7 +1351,7 @@ mapper:
 | `mapper.redis_cache.key_prefix` | 业务给 Redis cache key 预留的前缀；具体拼接由注入的 cache 实现决定。 |
 | `mapper.redis_cache.hash_field_ttl_supported` | 本地 Redis 是否支持 hash field TTL；支持时可调用探测接口确认。 |
 
-启动代码：
+对应的手工启动代码：
 
 ```rust
 let default_pool = sqlx::mysql::MySqlPoolOptions::new()

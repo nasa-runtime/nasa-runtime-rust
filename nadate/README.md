@@ -63,7 +63,7 @@ let elapsed = MonotonicClock::now(&clock).saturating_duration_since(started);
 
 `MonotonicInstant` 只表示当前进程统一基准下的相对时刻，不能持久化或跨进程比较。
 
-## 行为边界(实测)
+## 行为边界
 
 - 默认 GMT+8:`format(0, "yyyy-MM-dd HH:mm:ss")` = `1970-01-01 08:00:00`;负 epoch(1970 前)可正常格式化。
 - 两位年 `yy` 可正常解析:`parse("230501", "yyMMdd")` → 2023-05-01。

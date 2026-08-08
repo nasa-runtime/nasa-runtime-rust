@@ -54,14 +54,14 @@ let out = naimg::compress(&input_bytes, &opts, None)?;
 - `scale <= 0`、`width/height = 0`、`quality` 越界会返回错误。
 - 输出像素上限为 100MP，用于防止异常放大导致 OOM。
 
-## 行为边界(实测)
+## 行为边界
 
 - 单维度缩放:只给 `width`(或只给 `height`)按原图比例等比推导另一维,例如 64x32 + `width=16` → 16x8。
 - EXIF orientation 不应用:带旋转标记的手机照片输出保持原始像素方向;需要旋正先自行处理(如 `kamadak-exif` + 旋转)。
 - 透明通道 → JPEG:RGBA 转 JPEG 丢弃 alpha,透明像素变黑;需要白底先自行合成。
 - 参数 fail-fast:`scale<=0`、`width|height==0`、`quality∉0.0..=1.0`、非图片字节均返回错误,不静默修正;1x1 超小图正常缩放不 panic。
 - 输出像素上限 100MP,超出返回 `InvalidArgument`(防 OOM)。
-- JPEG 质量实测有效(同图 quality 0.1 明显小于 0.95);PNG 等无损格式忽略 quality。
+- JPEG 编码使用 `quality` 控制有损压缩；PNG 等无损格式忽略该参数。
 
 ## YML 配置与使用
 

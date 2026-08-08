@@ -24,7 +24,26 @@ let orchestrator = Orchestrator::new(registry, OrchestratorConfig::default())?;
 orchestrator.verify_startup().await?;
 ```
 
-宿主负责拥有 Kafka 消费循环、timer 轮询循环和停机顺序；本 crate 不自行启动无限后台任务。
+使用 `#[nasa::application("saga")]` 时，将运行时提交给 Application，合同校验、历史实例门禁、timer
+轮询和停机保护态由组件统一执行：
+
+```rust
+let publisher = std::sync::Arc::new(build_command_publisher()?);
+app.configure_saga(
+    nasa::application::SagaApplicationPlan::orchestrator(
+        std::sync::Arc::new(orchestrator),
+        "checkout-orchestrator-a",
+    )?
+    .with_event_publisher(publisher)?,
+)?;
+```
+
+声明 `"saga"` 会隐式纳入数据库与 Outbox 生命周期，但不会隐式选择 Kafka。发布端只依赖
+`OutboxPublisher`，可映射到 Kafka、Redis Streams 或 HTTP；消费侧必须提供相同 ACK、重领和 DLT
+安全语义。当前内置托管消费适配器是可选的 Kafka adapter。
+
+不使用 Application 组件的宿主仍需自行拥有消息消费循环、timer 轮询循环和停机顺序；本 crate
+不自行启动无限后台任务。
 
 ## 参与方接入
 
@@ -51,14 +70,15 @@ kafka:
   security_protocol: SASL_SSL
 
 saga:
-  orchestrator_id: checkout-orchestrator-a
-  timer_poll_interval_ms: 200
-  timer_lease_ms: 5000
-  command_retry_limit: 16
+  database_bootstrap: application
+  timer_poll_interval_ms: 500
+  timer_error_backoff_ms: 1000
+  timer_operation_timeout_ms: 5000
+  timer_failure_threshold: 3
 ```
 
-`orchestrator_id` 需要逐副本唯一且重启稳定，用于租约归属和审计；实际 fencing capability 还绑定
-运行实例的随机 nonce，不能从配置注入。
+timer owner 通过 `SagaApplicationPlan::orchestrator` 提交，需要逐副本唯一且重启稳定，用于租约归属
+和审计；实际 fencing capability 还绑定运行实例的随机 nonce，不能从配置注入。
 
 ## 提交与投递
 
@@ -68,6 +88,8 @@ saga:
 - 确定性拒绝必须先持久化 DLT，再推进源 Outbox 或 offset。
 - PAUSED 不消耗普通毒消息预算；恢复后仍从独立失败预算开始。
 - Unknown 只能进入类型化 resolve 流程，不能直接按失败执行补偿。
+- resolve 查询与原业务提交发生竞态时，Orchestrator 以重新读取的已提交成功投影推进；迟到查询应答
+  仍进入 attempt journal，但不能把真实正向或补偿成功降级为人工介入。
 
 ## 管理与观测
 

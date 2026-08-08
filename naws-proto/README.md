@@ -56,11 +56,12 @@ struct JsonPayload {
 - 修改 schema 前需要做 golden 对拍，避免破坏旧客户端兼容。
 - 业务项目通常通过 `naws::proto` 或 `nasa::ws::proto` 使用。
 
-## 行为边界(实测)
+## 行为边界
 
 - JSON_BYTES / VARINT_TLV / BITPACK_TLV 三模式 round-trip 稳定(含 CJK、负数、bytes);FAST_FIXED 未实现,编码解码均返回 `Unsupported`。
 - **`Some("")` 与 `None` 归一**:字符串数组元素的空串与 null 在全部模式下同编码,解码一律还原为 `None`;业务不要依赖 `Some("")` round-trip。
-- 防御性解码:varint ≤10 字节、声明长度/count 不超剩余字节、单字段 ≤16MiB、单数组 ≤65536 元素、尾随字节报错;逐字节截断全扫描与随机噪声输入均不 panic(实测)。
+- 防御性解码：varint ≤10 字节、声明长度/count 不超剩余字节、单字段 ≤16MiB、单数组 ≤65536 元素、
+  尾随字节报错；截断或噪声输入返回错误，不触发 panic。
 - TLV 无总长度字段:截断恰落在字段边界时前缀仍可解码(后续字段按缺省),字段中间截断必报错——依赖外层帧长度保证完整性。
 
 ## YML 配置与使用

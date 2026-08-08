@@ -24,13 +24,21 @@
 ## 应用运行时
 
 - 完善受管组件的启动、Ready、反向停机、配置快照切换和资源 owner 语义。
+- `#[nasa::application("saga")]` 隐式纳入数据库与受管 Outbox，业务通过单一计划提交运行角色、
+  timer owner 与发布端；Kafka 保持显式 transport 选择。
+- Outbox 可以独立声明，提供持久化积压、死信、发布量和失败轮次观测；事务提交会立即唤醒本进程
+  dispatcher，固定轮询只承担跨进程与崩溃恢复兜底。
 - 数据库、Redis、Kafka、WebSocket、调度和 telemetry 后台任务具备显式容量、超时、取消与排空边界。
 - 配置解析拒绝未知字段和冲突组合，secret 与连接信息默认脱敏。
 
 ## 数据一致性
 
 - ambient MySQL 事务明确 rollback-only、after-commit、多 datasource 和任务继承边界。
+- Inbox 提供 claim、业务处理和提交一体化入口，并把提交不确定与回滚失败保留为 transport 可判定的
+  封闭错误类别。
 - Inbox、Outbox、幂等、审计和缓存失效能力按本地事务与至少一次投递组合。
+- Outbox 待投递与死信计数使用覆盖索引，批次领取先定位真实候选再回表读取事件列；生产结构由语义化
+  迁移文件治理。
 - 缓存不作为资金、库存或权限事实源，跨副本失效能力与降级行为显式配置。
 
 ## 传输与安全

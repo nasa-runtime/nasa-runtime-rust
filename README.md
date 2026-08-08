@@ -52,7 +52,7 @@ pub async fn save_user() -> anyhow::Result<()> {
 [dependencies]
 nasa = { git = "https://github.com/nasa-runtime/nasa-runtime-rust.git", features = [
     "application", "log", "config-boot", "tx", "mapper", "mapper-redis-cache",
-    "redis", "cache", "web",
+    "redis", "cache", "web", "scheduling",
 ] }
 ```
 
@@ -67,9 +67,10 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`kafka`、
-`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按上述规范顺序
-启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。
+可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`saga`、`kafka`、
+`outbox`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
+启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。`saga` 会隐式加入 `db` 与
+`outbox`，业务入口无需重复声明这两个组件；为兼容显式依赖，三者同时写出也合法且语义相同。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
 详见 [napp](napp/README.md)。
 
@@ -127,9 +128,10 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | Mapper L2 缓存 | `mapper-redis-cache` | `#[Query(..., cache = true)]` |
 | MySQL 事务 | `tx` | `nasa::tx::{transactional, run}` |
 | Saga 纯合同 | `saga` | `nasa::saga::{WorkflowDefinition, SagaOutcome}` |
-| Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}` |
+| Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
 | Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
+| 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
@@ -166,9 +168,9 @@ use nasa::ws::Server;                // WebSocket 服务端
 #[nasa::web::get_mapping("/x")]   // Axum MVC 风格路由
 ```
 
-已经进入 crates.io 的内部依赖只保留 registry 坐标；尚未公开的同仓依赖可在开发期使用 `path`，
-进入归档前必须移除，避免本地路径掩盖缺失依赖。根级质量工程不进入产品归档。通过仓库引用
-不需要 `[patch]` 段或私有注册表。
+同仓内部依赖在源码 manifest 中使用 `path + version`：工作区构建解析本地路径，Cargo 生成公开归档时
+会移除 `path` 并保留 registry 版本约束。下游 crate 只有在该版本已能从 registry 解析后才能发布，
+不得用 `[patch]` 掩盖缺失的前置发布。根级质量工程不进入产品归档。
 
 ### crates.io 依赖
 
@@ -206,6 +208,20 @@ nacos:                  # 配置中心（nacos-config 组件），与服务发�
 database:               # db 组件，多库使用 datasources.<name>
   url: ${APP_MYSQL_URL}
   max_connections: 16
+
+saga:                   # saga 组件；发布端由 SagaApplicationPlan 注入
+  database_bootstrap: application
+  timer_poll_interval_ms: 500
+  timer_error_backoff_ms: 1000
+  timer_operation_timeout_ms: 5000
+  timer_failure_threshold: 3
+
+outbox:                 # outbox 组件，也由 saga 隐式纳入
+  poll_interval_ms: 500
+  error_backoff_ms: 1000
+  operation_timeout_ms: 5000
+  batch_size: 100
+  failure_threshold: 3
 
 redis:                  # redis 组件
   url: ${APP_REDIS_URL}
@@ -247,7 +263,7 @@ scheduling:             # scheduling 组件
 5. `nanacos`、`rest-discovery` 初始化注册发现和 REST 负载均衡。
 6. `napp` Web 组件装配 naweb 路由并启动 HTTP 服务,`naws` 启动长连接服务,`nasched` 启动调度器。
 
-`#[nasa::application]` 按组件声明顺序自动完成上述全部步骤，并补齐手工装配普遍缺失的部分：
+`#[nasa::application]` 按规范组件顺序自动完成上述全部步骤，并补齐手工装配普遍缺失的部分：
 信号处理、启动失败反向回滚、统一停机预算与配置热刷新。
 
 ## 组件 README 索引
@@ -351,7 +367,7 @@ cargo publish --dry-run -p nabase
 ```
 
 持续集成（`.github/workflows/ci.yml`）只依赖产品源码入口执行格式、静态检查、构建和依赖审计。
-本地质量资产由不参与产品发布的根级工程统一管理，组件 crate 与 `.crate` 归档只能携带产品
+本地质量工程由不参与产品发布的根级入口统一管理，组件 crate 与 `.crate` 归档只能携带产品
 源码、公开文档和再分发所需文件。
 真实后端连接信息只能由本地环境注入，不要把内网地址、账号或密码写进说明文档或持续集成配置。
 
@@ -359,6 +375,7 @@ cargo publish --dry-run -p nabase
 
 | 文档 | 用途 |
 | --- | --- |
+| [架构说明]() | 门面分层、应用生命周期、可靠消息与生产边界。 |
 | [快速开始](docs/quickstart.md) | 业务应用如何依赖 `nasa`、选择特性、配置 yml 和编写最小示例。 |
 | [部署指南](docs/deployment.md) | 应用模式构建、配置注入、容器信号、健康端点和接流条件。 |
 | [运维指南](docs/operations.md) | 运行状态、退出码、停机顺序、配置刷新和故障排查。 |

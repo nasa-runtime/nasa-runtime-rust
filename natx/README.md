@@ -55,7 +55,7 @@ nasa::tx::try_init(pool)?;
 - 嵌套事务只支持同 datasource 复用外层事务，不支持 savepoint、独立子事务和跨 datasource 事务。
 - `after_commit` 只在最外层事务 commit 成功后执行，适合缓存失效和提交后通知。
 
-## 事务语义(实测)
+## 事务语义
 
 - 嵌套 `run` 复用外层事务、一起提交;内层 body 返回 Err 会标记 **rollback-only**——即便外层吞掉错误返回 Ok,最外层提交前整体回滚并返回 `RollbackOnly` 错误(`err.downcast_ref::<nasa::tx::RollbackOnly>()` 可识别)。
 - `after_commit` 仅事务内可注册(事务外返回 Err);提交成功后执行一次,回滚 / rollback-only 时全部丢弃。

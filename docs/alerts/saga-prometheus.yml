@@ -28,6 +28,32 @@ groups:
           summary: "Saga durable timer 到期积压"
           description: "检查 timer worker、MySQL 锁等待和 fencing 丢失日志。"
 
+      - alert: NasaOutboxPublishingStalled
+        expr: napp_outbox_pending > 0 and increase(napp_outbox_published_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 串行通道停止前移"
+          description: "检查首个未投递事件的类型、publisher 路由和下游可用性；Block 策略下禁止直接跳过 Saga command/result。"
+
+      - alert: NasaOutboxDispatcherFailures
+        expr: increase(napp_outbox_failed_rounds_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox dispatcher 出现失败轮次"
+          description: "区分数据库、超时、网络和永久路由错误；持续失败会阻塞同表后续全部事件。"
+
+      - alert: NasaOutboxDeadEventsPresent
+        expr: napp_outbox_dead > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 本地死信集合非空"
+          description: "核对已批准的毒丸策略和原始持久化事件；不得把死信行直接改成已发布。"
+
       - alert: NasaSagaConflictDetected
         expr: increase(nasaga_conflict_total[5m]) > 0
         labels:

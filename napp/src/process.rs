@@ -101,16 +101,17 @@ where
     }
 }
 
-/// 把一个声明组件构造成运行对象；声明了却未支持/未编译进来时返回明确错误。
+/// 业务作用：把声明组件构造成运行对象，确保声明的能力真实生效或在副作用前明确失败。
 ///
 /// 该分发是"声明即生效或立即报错"的唯一入口：既不静默无视声明，也不为未启用 feature 的
 /// 组件伪造行为。每个组件在其对应 feature 关闭时给出指向 nasa feature 的定向错误。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `id`：宏按声明顺序生成、已通过白名单校验的组件身份。
 /// - `spec`：提供 Web 工厂等运行期绑定的静态应用描述。
 /// - `pinned_application`：同步预读到的原始 `application.*`，供配置中心组件做 bootstrap-only 判定。
+///
+/// 返回：能力已编入时返回对应组件；内部身份或缺失能力返回定向启动错误。
 fn build_component(
     id: ComponentId,
     spec: &ApplicationSpec,
@@ -124,7 +125,9 @@ fn build_component(
         ComponentId::Redis => build_redis_component(),
         ComponentId::Telemetry => build_telemetry_component(),
         ComponentId::Cache => build_cache_component(),
+        ComponentId::Saga => build_saga_component(),
         ComponentId::Kafka => build_kafka_component(),
+        ComponentId::Outbox => build_outbox_component(),
         ComponentId::Auth => build_auth_component(),
         ComponentId::Ws => build_ws_component(),
         ComponentId::Scheduling => build_scheduling_component(),
@@ -261,6 +264,38 @@ fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
     #[cfg(not(feature = "db"))]
     {
         Err(feature_missing_error(ComponentId::Db, "tx"))
+    }
+}
+
+/// 业务作用：构造 Saga 生命周期组件；能力未编入时返回指向门面 feature 的定向错误。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `saga-runtime` 时返回受管组件，否则返回启动配置错误。
+fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "saga")]
+    {
+        Ok(Box::new(crate::saga::SagaComponent::new()))
+    }
+    #[cfg(not(feature = "saga"))]
+    {
+        Err(feature_missing_error(ComponentId::Saga, "saga-runtime"))
+    }
+}
+
+/// 业务作用：构造受管 Outbox dispatcher；能力未编入时拒绝把声明静默降级成手工轮询。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `outbox` 时返回生命周期组件，否则返回指向门面 feature 的启动错误。
+fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "outbox")]
+    {
+        Ok(Box::new(crate::outbox::OutboxComponent::new()))
+    }
+    #[cfg(not(feature = "outbox"))]
+    {
+        Err(feature_missing_error(ComponentId::Outbox, "outbox"))
     }
 }
 
