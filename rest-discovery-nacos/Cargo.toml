@@ -9,7 +9,7 @@
 #   main 在优雅停机时显式 deregister()【先摘流】再 drain HTTP —— 不放进程级 static(否则丢掉「先摘流再排空」顺序)。
 [package]
 name = "rest-discovery-nacos"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "RestDiscovery + Nacos 一键装配便利层(DiscoveryConfig / init_from_config / DiscoveryHandle);rest-discovery 仍 provider-neutral"
@@ -30,9 +30,9 @@ nacos-sdk = ["nanacos/nacos"]
 live-nacos = ["nacos-sdk"]
 
 [dependencies]
-rest-discovery = { version = "1.0.0" }
+rest-discovery = { version = "1.0.1" }
 # 只用 nacos 后端的 client/props/guard + 中性 Instance(re-export);default-features=false:真实后端由 nacos-sdk feature 透传。
-nanacos = { package = "nanacos", version = "1.0.0", default-features = false }
+nanacos = { package = "nanacos", version = "1.0.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 tracing = "0.1"

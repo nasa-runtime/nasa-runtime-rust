@@ -90,7 +90,7 @@ jobs:
               echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
               ;;
             8)
-              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -204,7 +204,7 @@ jobs:
               echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
               ;;
             8)
-              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2

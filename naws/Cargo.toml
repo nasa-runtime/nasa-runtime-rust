@@ -7,7 +7,7 @@
 # 依赖别名保持 `use proto::...` 与 `ws::proto` 不变。
 [package]
 name = "naws"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "纯 Rust 长连接消息中心框架(对照原长连接模块);通用 lib,业务无关。"
@@ -42,7 +42,7 @@ serde_json = { version = "1", optional = true }
 # 二进制 payload ↔ socket.io 文本的 base64 桥接(可选,随 socketio 启用)
 base64 = { version = "0.22", optional = true }
 # 消息队列数据面适配器；只在 socket 集群场景按需启用。
-nafka = { version = "1.0.0", optional = true, default-features = false }
+nafka = { version = "1.0.2", optional = true, default-features = false }
 smallvec = { version = "1", optional = true }
 
 [features]
