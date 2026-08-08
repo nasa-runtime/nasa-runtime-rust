@@ -245,7 +245,7 @@ secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = tr
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
 object_impl = { package = "naobject", version = "1.0.0", optional = true }
 saga_core_impl = { package = "nasaga-core", version = "1.0.0", optional = true }
-saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.0", path = "../nasaga-runtime", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.0", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "1.0.0", optional = true }
 grpc_impl = { package = "nagrpc", version = "1.0.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
