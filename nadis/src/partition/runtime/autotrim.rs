@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use super::GroupRuntime;
 
-/// Runs periodic stream trimming for partition logs.
+/// 业务作用：由当前 leader 周期裁剪分区日志，限制已确认历史占用的存储空间。
 pub(super) async fn auto_trim_loop(rt: Arc<GroupRuntime>) {
     let rate = rt.stream_cfg.auto_trim_rate_ms;
     if rate == 0 {
@@ -56,7 +56,7 @@ pub(super) async fn auto_trim_loop(rt: Arc<GroupRuntime>) {
     leader.shutdown().await;
 }
 
-/// 跑一轮全分区 XTRIM(leader 任内;`term` = 本任期失主信号,失主/停机即提前中断本轮)。
+/// 业务作用：跑一轮全分区 XTRIM(leader 任内;`term` = 本任期失主信号,失主/停机即提前中断本轮)。
 ///
 /// # 参数
 /// - `rt`: 分区消费组运行时状态。
@@ -108,7 +108,7 @@ async fn trim_round(rt: &Arc<GroupRuntime>, term: &tokio_util::sync::Cancellatio
     }
 }
 
-/// 取消费组 PEL 中最老的 pending 消息 id(XPENDING summary 的 min-id)。
+/// 业务作用：取消费组 PEL 中最老的 pending 消息 id(XPENDING summary 的 min-id)。
 /// summary 形态:`[count, min-id, max-id, [[consumer,count],...]]`;空 PEL 时 count==0、min/max 为 nil。
 ///
 ///**fail-closed**——只有 `count==0`(真·空 PEL)才返 `Ok(None)`(调用方仅按时间裁剪);
@@ -127,7 +127,7 @@ async fn oldest_pending_id(
     // Builds a Redis protocol parse error.
     ///
     /// # 参数
-    /// - `msg`: 业务消息体或事件载荷。
+    /// 业务作用：- `msg`: 业务消息体或事件载荷。
     fn parse_err(msg: &str) -> redis::RedisError {
         redis::RedisError::from((
             redis::ErrorKind::Parse,
@@ -159,7 +159,7 @@ async fn oldest_pending_id(
     }
 }
 
-/// 比较两个 stream id(`ms-seq`),返回**较小**者(数值比较,非字符串字典序——
+/// 业务作用：比较两个 stream id(`ms-seq`),返回**较小**者(数值比较,非字符串字典序——
 /// "100-0" < "99-0" 字典序会错判)。解析失败的一方视为较大(保守不参与压低边界)。
 ///
 /// # 参数
@@ -169,7 +169,7 @@ fn lesser_stream_id(a: &str, b: &str) -> String {
     // Parses a stream entry id into numeric parts.
     ///
     /// # 参数
-    /// - `id`: 业务标识,用于定位具体对象或记录。
+    /// 业务作用：- `id`: 业务标识,用于定位具体对象或记录。
     fn parse(id: &str) -> Option<(u64, u64)> {
         let mut it = id.splitn(2, '-');
         let ms = it.next()?.parse::<u64>().ok()?;

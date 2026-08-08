@@ -1,5 +1,5 @@
 # ============================================================================
-# rest-client-macro：OpenFeign 风格声明式 HTTP 客户端宏。
+# rest-client-macro：声明式 HTTP 客户端宏。
 #
 #   #[rest_client] 读 trait → 生成 {Trait}Client + new(rest) + #[async_trait] impl;
 #   方法属性 #[GetMapping]/#[PostMapping]/#[PutMapping]/#[PatchMapping]/#[DeleteMapping] 提供 HTTP 元数据;
@@ -14,7 +14,7 @@ name = "rest-client-macro"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "OpenFeign 风格声明式 HTTP 客户端宏(#[rest_client] + #[GetMapping/PostMapping/PutMapping/PatchMapping/DeleteMapping])"
+description = "声明式 HTTP 客户端宏(#[rest_client] + #[GetMapping/PostMapping/PutMapping/PatchMapping/DeleteMapping])"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

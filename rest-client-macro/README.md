@@ -1,6 +1,8 @@
 # rest-client-macro
 
-`rest-client-macro` 提供 OpenFeign 风格声明式 HTTP 客户端宏。`#[rest_client]` 读取 trait，生成 `{Trait}Client` 和 `async_trait` impl；方法上的 `#[GetMapping]`、`#[PostMapping]`、`#[PutMapping]`、`#[PatchMapping]`、`#[DeleteMapping]` 描述 HTTP 元数据。
+`rest-client-macro` 提供声明式 HTTP 客户端宏。`#[rest_client]` 读取 trait，生成 `{Trait}Client` 和
+`async_trait` impl；方法上的 `#[GetMapping]`、`#[PostMapping]`、`#[PutMapping]`、
+`#[PatchMapping]`、`#[DeleteMapping]` 描述 HTTP 元数据。
 
 本包只提供编译期展开；生成代码必须能解析到 `rest-discovery` 运行时。应用直接集成时同时依赖：
 

@@ -83,7 +83,7 @@ pub struct StreamPublishItem {
 }
 
 impl StreamPublishItem {
-    /// 由任意 `Serialize` 消息构造(序列化为 Value;失败返回 Err)。
+    /// 业务作用：由任意 `Serialize` 消息构造(序列化为 Value;失败返回 Err)。
     ///
     /// # 参数
     /// - `event`: 写入 Redis Stream entry 的 field 名,同时用于订阅侧选择 handler。
@@ -171,7 +171,7 @@ pub struct StreamSubscribeCfg {
 }
 
 impl Default for StreamSubscribeCfg {
-    /// 构造 stream 订阅默认配置。
+    /// 业务作用：构造 stream 订阅默认配置。
     ///
     /// 默认从当前时间开始做广播订阅,100 条批量、500ms block 和自动 ACK,适合普通事件监听。
     fn default() -> Self {
@@ -223,7 +223,7 @@ type Handler = Arc<dyn Fn(StreamEvent) -> BoxFut + Send + Sync>;
 // ───────────────────────── 发布 / 低层读 API(RedisClient) ─────────────────────────
 
 impl RedisClient {
-    /// 发布一条 stream 消息(event-field wire),等价于带 event 的 publish 入口。
+    /// 业务作用：发布一条 stream 消息(event-field wire),等价于带 event 的 publish 入口。
     /// 写 `XADD <stream> * <event> <StreamEnvelope JSON>`。空 stream/event 或 message 序列化为 JSON null → Err。
     ///
     /// # 参数
@@ -242,7 +242,7 @@ impl RedisClient {
             .await
     }
 
-    /// 使用默认 event = `STREAM_EVENT`(`"msg"`)发布一条 stream 消息。
+    /// 业务作用：使用默认 event = `STREAM_EVENT`(`"msg"`)发布一条 stream 消息。
     ///
     /// # 参数
     /// - `stream`: XADD 写入的 Redis Stream key。
@@ -251,7 +251,7 @@ impl RedisClient {
         self.publish(stream, STREAM_EVENT, message).await
     }
 
-    /// 同一条 entry 写多个 event field,
+    /// 业务作用：同一条 entry 写多个 event field,
     /// 每个 field 的 value 各自是独立 `{topic,data}` 信封。空 events 或任一 event 空 / data null → Err。
     ///
     /// # 参数
@@ -291,7 +291,7 @@ impl RedisClient {
         self.x_add_bytes(stream, "*", &fields).await
     }
 
-    /// 裸 XREAD(非消费组,单 stream)。`block_ms=Some` → BLOCK,**走专用连接**(每次新建,供偶发一次性读;
+    /// 业务作用：裸 XREAD(非消费组,单 stream)。`block_ms=Some` → BLOCK,**走专用连接**(每次新建,供偶发一次性读;
     /// 热循环请用 `subscribe()`);`None` → 非阻塞走共享连接。调用方自管游标(推进到读到的最后一条 id)。
     ///
     /// # 参数
@@ -334,7 +334,7 @@ impl RedisClient {
         parse_xread_reply(v)
     }
 
-    /// 裸 XREADGROUP(消费组,单 stream,读 `>` 新消息)。同 `x_read`:阻塞走专用连接。
+    /// 业务作用：裸 XREADGROUP(消费组,单 stream,读 `>` 新消息)。同 `x_read`:阻塞走专用连接。
     /// 不自动建组(需先 `XGROUP CREATE`);不自动 ACK(调用方按需 `x_ack`)。
     ///
     /// # 参数
@@ -385,7 +385,7 @@ impl RedisClient {
         parse_xread_reply(v)
     }
 
-    /// stream 订阅入口。返回 builder,链式 `.group()/.on()/.start()`。
+    /// 业务作用：stream 订阅入口。返回 builder,链式 `.group()/.on()/.start()`。
     /// 默认 Broadcast + Now;`.group(g,c)` 切消费组。
     ///
     ///
@@ -412,7 +412,7 @@ pub struct StreamSubscriber {
 }
 
 impl StreamSubscriber {
-    /// 整体替换运行参数。
+    /// 业务作用：整体替换运行参数。
     ///
     /// # 参数
     /// - `cfg`: stream 订阅运行配置。
@@ -421,7 +421,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 设为广播模式并指定起点。
+    /// 业务作用：设为广播模式并指定起点。
     ///
     /// # 参数
     /// - `start`: 广播模式读取起点。
@@ -430,7 +430,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 设为消费组模式(默认建组起点 New;可再用 group_from 调整)。
+    /// 业务作用：设为消费组模式(默认建组起点 New;可再用 group_from 调整)。
     ///
     /// # 参数
     /// - `group`: consumer group 名。
@@ -444,7 +444,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 调整消费组建组起点(仅在已是 Group 模式时生效;否则忽略)。
+    /// 业务作用：调整消费组建组起点(仅在已是 Group 模式时生效;否则忽略)。
     ///
     /// # 参数
     /// - `start`: 消费组首次建组时使用的起点。
@@ -462,7 +462,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 设置组模式 ACK 策略。
+    /// 业务作用：设置组模式 ACK 策略。
     ///
     /// # 参数
     /// - `policy`: handler 成功或失败后的 ACK 策略。
@@ -471,7 +471,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 注册某 event 的 handler(收到原始 `StreamEvent`,raw 是 field 原始字节)。
+    /// 业务作用：注册某 event 的 handler(收到原始 `StreamEvent`,raw 是 field 原始字节)。
     ///
     ///
     /// # 参数
@@ -487,7 +487,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 注册某 event 的类型化 handler:内部按 deserializeUnwrap 取 data 反序列化为 T 再回调。
+    /// 业务作用：注册某 event 的类型化 handler:内部按 deserializeUnwrap 取 data 反序列化为 T 再回调。
     /// 解包/反序列化失败 → 视为该 field 处理失败(记 error,按 ack 策略处置)。
     ///
     ///
@@ -524,7 +524,7 @@ impl StreamSubscriber {
         self
     }
 
-    /// 起后台订阅任务。启动阶段同步:建专用连接、解析 Broadcast 起点(XREVRANGE)/建消费组(XGROUP CREATE),
+    /// 业务作用：起后台订阅任务。启动阶段同步:建专用连接、解析 Broadcast 起点(XREVRANGE)/建消费组(XGROUP CREATE),
     /// 这些若失败当场返回 Err;之后进入读循环。返回 `StreamSubscription`(drop 即 best-effort 停,shutdown().await 优雅停)。
     pub async fn start(self) -> Result<StreamSubscription> {
         if self.stream.trim().is_empty()
@@ -635,7 +635,7 @@ pub struct StreamSubscription {
 }
 
 impl StreamSubscription {
-    /// 优雅停机:取消 + 等任务退出。
+    /// 业务作用：优雅停机:取消 + 等任务退出。
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         if let Some(h) = self.handle.take() {
@@ -645,7 +645,7 @@ impl StreamSubscription {
 }
 
 impl Drop for StreamSubscription {
-    /// 丢弃订阅句柄时触发协作取消。
+    /// 业务作用：丢弃订阅句柄时触发协作取消。
     ///
     /// 不直接 abort Tokio task；读、退避、重连、handler 与 XACK 的 `select` 会观察该信号。
     /// handler future 若正在等待会被丢弃，组消息不 ACK 并留在 PEL；纯 CPU 且不 yield 的 handler
@@ -666,7 +666,7 @@ enum ReadKind {
 // 订阅主循环:专用连接上 BLOCK 读 → 逐 entry 按 field 分发 → 广播推进游标 / 组按策略 XACK。
 ///
 /// # 参数
-/// - `client`: 底层客户端或连接句柄。
+/// 业务作用：- `client`: 底层客户端或连接句柄。
 /// - `stream`: 正在读取的 Redis Stream key。
 /// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
 /// - `handlers`: stream 消息类型到业务处理器的映射。
@@ -811,7 +811,7 @@ async fn run_loop(
     tracing::debug!(stream = %stream, "stream 订阅任务退出");
 }
 
-/// 等待退避或订阅取消；返回 `true` 表示取消已触发。
+/// 业务作用：等待退避或订阅取消；返回 `true` 表示取消已触发。
 async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
     tokio::select! {
         biased;
@@ -820,7 +820,7 @@ async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool
     }
 }
 
-/// 校验订阅断点必须是具体 Redis Stream entry ID，拒绝会在每轮重求“最新”的 `$`。
+/// 业务作用：校验订阅断点必须是具体 Redis Stream entry ID，拒绝会在每轮重求“最新”的 `$`。
 fn valid_stream_entry_id(value: &str) -> bool {
     let Some((milliseconds, sequence)) = value.split_once('-') else {
         return false;
@@ -836,7 +836,7 @@ fn valid_stream_entry_id(value: &str) -> bool {
 // 跑一个 handler:catch_unwind + 可选超时;成功=true。
 ///
 /// # 参数
-/// - `handler`: 业务处理函数,在匹配事件或任务时被调用。
+/// 业务作用：- `handler`: 业务处理函数,在匹配事件或任务时被调用。
 /// - `ev`: 当前投递给处理器的 stream 事件。
 /// - `timeout_ms`: 超时时间毫秒数。
 async fn dispatch_one(handler: &Handler, ev: StreamEvent, timeout_ms: u64) -> bool {
@@ -875,7 +875,7 @@ async fn dispatch_one(handler: &Handler, ev: StreamEvent, timeout_ms: u64) -> bo
 // BLOCK 上限:>= 连接级 response_timeout 会被误杀 → 收敛到其一半。
 ///
 /// # 参数
-/// - `block_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
+/// 业务作用：- `block_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
 /// - `resp_timeout_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
 fn effective_block(block_ms: u64, resp_timeout_ms: u64) -> u64 {
     if resp_timeout_ms > 0 && block_ms >= resp_timeout_ms {
@@ -888,7 +888,7 @@ fn effective_block(block_ms: u64, resp_timeout_ms: u64) -> u64 {
 // 编码一条 `{topic:stream, data}` 信封为 JSON 字节(passthrough/event 省略)。
 ///
 /// # 参数
-/// - `stream`: 将写入信封 `topic` 字段的 Redis Stream key。
+/// 业务作用：- `stream`: 将写入信封 `topic` 字段的 Redis Stream key。
 /// - `data`: 待写入信封 `data` 字段的 JSON 业务值。
 fn encode_envelope(stream: &str, data: &JsonValue) -> Result<Vec<u8>> {
     let env = StreamEnvelope {
@@ -901,7 +901,7 @@ fn encode_envelope(stream: &str, data: &JsonValue) -> Result<Vec<u8>> {
         .map_err(|e| NasaRedisError::Config(format!("envelope 序列化失败: {e}")))
 }
 
-/// stream 发布的**共享编码**:校验 stream/event 非空 + message 序列化(JSON null 拒)+ 编码
+/// 业务作用：stream 发布的**共享编码**:校验 stream/event 非空 + message 序列化(JSON null 拒)+ 编码
 /// `{topic,data}` 信封 → body 字节。`RedisClient::publish` 与 `PipelineSession::publish` 共用此路径,
 /// 从构造上保证两者逐字节一致(避免各自 copy 一份校验/序列化逻辑而漂移)。
 pub(crate) fn stream_publish_body<T: Serialize>(
@@ -927,7 +927,7 @@ pub(crate) fn stream_publish_body<T: Serialize>(
 // deserializeUnwrap:value 是 object 且 topic==stream → 取 data + passthrough;否则整体当裸 payload。
 ///
 /// # 参数
-/// - `raw`: 待解析的原始字符串、字节或配置值。
+/// 业务作用：- `raw`: 待解析的原始字符串、字节或配置值。
 /// - `stream`: 当前消费的 Redis Stream key,用于判断信封 `topic` 是否匹配。
 fn unwrap_envelope(
     raw: &[u8],
@@ -949,7 +949,7 @@ fn unwrap_envelope(
 // 构建 `XREAD COUNT n [BLOCK b] STREAMS <stream> <cursor>`。
 ///
 /// # 参数
-/// - `stream`: XREAD 的目标 Redis Stream key。
+/// 业务作用：- `stream`: XREAD 的目标 Redis Stream key。
 /// - `cursor`: stream 或分页查询继续读取的位置。
 /// - `count`: Redis 命令、分页或批处理使用的数量上限。
 /// - `block_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
@@ -966,7 +966,7 @@ fn build_xread_cmd(stream: &str, cursor: &str, count: usize, block_ms: Option<u6
 // 构建 `XREADGROUP GROUP g c COUNT n [BLOCK b] STREAMS <stream> <cursor>`。
 ///
 /// # 参数
-/// - `stream`: XREADGROUP 的目标 Redis Stream key。
+/// 业务作用：- `stream`: XREADGROUP 的目标 Redis Stream key。
 /// - `group`: 消费组、服务分组或任务分组名称。
 /// - `consumer`: Redis Stream consumer 名称。
 /// - `cursor`: stream 或分页查询继续读取的位置。
@@ -993,7 +993,7 @@ fn build_xreadgroup_cmd(
 // Broadcast 起点解析成具体 cursor(Now = XREVRANGE 取最后一条已有 entry id,空/流不存在则 0-0)。
 ///
 /// # 参数
-/// - `client`: 底层客户端或连接句柄。
+/// 业务作用：- `client`: 底层客户端或连接句柄。
 /// - `stream`: 需要计算订阅起点的 Redis Stream key。
 /// - `start`: 起始位置或范围下界。
 async fn resolve_broadcast_cursor(
@@ -1019,7 +1019,7 @@ async fn resolve_broadcast_cursor(
 // 幂等建消费组(BUSYGROUP 忽略)。
 ///
 /// # 参数
-/// - `client`: 底层客户端或连接句柄。
+/// 业务作用：- `client`: 底层客户端或连接句柄。
 /// - `stream`: 需要创建消费组的 Redis Stream key。
 /// - `group`: 消费组、服务分组或任务分组名称。
 /// - `start`: 起始位置或范围下界。
@@ -1054,7 +1054,7 @@ async fn ensure_group(
 // Group 模式下更会掩盖 XREADGROUP 已投递但本地解析跳过的 entry(留在 PEL 且诊断被延迟)。
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn parse_xread_reply(v: Value) -> Result<Vec<StreamEntry>> {
     let mut out = Vec::new();
     let stream_pairs: Vec<(Value, Value)> = match v {
@@ -1107,7 +1107,7 @@ fn parse_xread_reply(v: Value) -> Result<Vec<StreamEntry>> {
 // 解析 entry 的 field 段:RESP2 扁平 [f,v,f,v] 或 RESP3 Map(均保序、保重复)。field/value 须成对(奇数 → Err)。
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn parse_fields(v: Value) -> Result<Vec<StreamField>> {
     let mut fields = Vec::new();
     match v {
@@ -1142,7 +1142,7 @@ fn parse_fields(v: Value) -> Result<Vec<StreamField>> {
 // XREAD 响应形态异常错误(fail-closed;不静默吞掉,便于诊断协议漂移 / 解码变化)。
 ///
 /// # 参数
-/// - `what`: 错误或超时日志中标识当前操作的名称。
+/// 业务作用：- `what`: 错误或超时日志中标识当前操作的名称。
 /// - `got`: 实际读取到的 Redis 返回值。
 fn shape_err(what: &str, got: &Value) -> NasaRedisError {
     NasaRedisError::Config(format!("XREAD 响应形态异常:{what}(实得 {got:?})"))
@@ -1152,7 +1152,7 @@ fn shape_err(what: &str, got: &Value) -> NasaRedisError {
 // 非法形态(顶层非 Array/Nil、entry 非数组、id 非字符串)→ Err(视为协议失败上抛,**不**当空流回落)。
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn first_entry_id(v: &Value) -> Result<Option<String>> {
     let arr = match v {
         Value::Array(a) | Value::Set(a) => a,
@@ -1173,7 +1173,7 @@ fn first_entry_id(v: &Value) -> Result<Option<String>> {
 // Int/Nil/Map/Array 等 → Err(不把异常静默转成 "123" 继续)。
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn xread_string(v: &Value) -> Result<String> {
     match v {
         Value::BulkString(b) => Ok(String::from_utf8_lossy(b).into_owned()),
@@ -1186,7 +1186,7 @@ fn xread_string(v: &Value) -> Result<String> {
 // (不静默变空 payload——否则 Group+Auto 下异常 value 会被当空并 ACK,诊断更差)。
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn xread_bytes(v: &Value) -> Result<Vec<u8>> {
     match v {
         Value::BulkString(b) => Ok(b.clone()),

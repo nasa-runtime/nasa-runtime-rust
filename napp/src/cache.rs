@@ -38,13 +38,13 @@ struct RedisClientBackend {
 #[cfg(feature = "redis")]
 #[async_trait::async_trait]
 impl cacheable::cache::CacheBackend for RedisClientBackend {
-    /// 经受管客户端执行只读 `PING` 健康探针。
+    /// 业务作用：经受管客户端执行只读 `PING` 健康探针。
     async fn health_check(&self) -> anyhow::Result<()> {
         self.client.ping().await?;
         Ok(())
     }
 
-    /// 经受管客户端读一个 key(GET)。
+    /// 业务作用：经受管客户端读一个 key(GET)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -52,7 +52,7 @@ impl cacheable::cache::CacheBackend for RedisClientBackend {
         Ok(self.client.get::<String>(key).await?)
     }
 
-    /// 经受管客户端以毫秒 TTL 写一个 key(PSETEX)。
+    /// 业务作用：经受管客户端以毫秒 TTL 写一个 key(PSETEX)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -65,7 +65,7 @@ impl cacheable::cache::CacheBackend for RedisClientBackend {
         Ok(())
     }
 
-    /// 经受管客户端删一个 key(DEL)。
+    /// 业务作用：经受管客户端删一个 key(DEL)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -139,18 +139,18 @@ struct InvalidationConfig {
     redis_url: String,
 }
 
-/// 正常缓存值 TTL 缺省。
+/// 业务作用：正常缓存值 TTL 缺省。
 fn default_cache_ttl_secs() -> u64 {
     DEFAULT_CACHE_TTL_SECS
 }
 
-/// 空哨兵 TTL 缺省。
+/// 业务作用：空哨兵 TTL 缺省。
 fn default_null_ttl_secs() -> u64 {
     DEFAULT_NULL_TTL_SECS
 }
 
 impl CacheConfig {
-    /// 无副作用校验:`two_level` 必须给 L2 连接串;启用广播必须给广播连接串。
+    /// 业务作用：无副作用校验:`two_level` 必须给 L2 连接串;启用广播必须给广播连接串。
     ///
     /// # 参数
     ///
@@ -204,7 +204,7 @@ pub(crate) struct CacheComponent {
 }
 
 impl CacheComponent {
-    /// 创建尚未读取配置的缓存组件。
+    /// 业务作用：创建尚未读取配置的缓存组件。
     ///
     /// # 参数
     ///
@@ -217,7 +217,7 @@ impl CacheComponent {
     }
 }
 
-/// 周期探测当前 generation 的 L2 后端并刷新非关键 readiness。
+/// 业务作用：周期探测当前 generation 的 L2 后端并刷新非关键 readiness。
 ///
 /// Cache miss 可以回源，因此运行期后端失败只降级而不摘流；启动期无法建立后端仍然 fail closed。
 async fn run_cache_monitor(
@@ -255,7 +255,7 @@ async fn run_cache_monitor(
 }
 
 impl ApplicationComponent for CacheComponent {
-    /// 返回缓存组件稳定身份。
+    /// 业务作用：返回缓存组件稳定身份。
     ///
     /// # 参数
     ///
@@ -264,7 +264,7 @@ impl ApplicationComponent for CacheComponent {
         ComponentId::Cache
     }
 
-    /// 读取配置,`two_level` 时建 L2 + 失效广播、装入进程级 runtime,并压入 Stopping 停机 action。
+    /// 业务作用：读取配置,`two_level` 时建 L2 + 失效广播、装入进程级 runtime,并压入 Stopping 停机 action。
     ///
     /// 管道在 Start 建立(而非 Ready):Batch 不执行 Ready,但 Start 与停机都执行,故两种模式都能建立
     /// 并在退出前停机。装入进程级 `CacheRuntime` 早于流量入口 Ready,`#[cached]` 首次命中即可用 L2。
@@ -336,7 +336,7 @@ impl ApplicationComponent for CacheComponent {
         })
     }
 
-    /// 取出缓存后端健康 monitor，交给 Runner 在 Ready 后监督。
+    /// 业务作用：取出缓存后端健康 monitor，交给 Runner 在 Ready 后监督。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         self.critical_task
             .take()
@@ -352,7 +352,7 @@ struct CacheShutdown {
 }
 
 impl ShutdownAction for CacheShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -361,7 +361,7 @@ impl ShutdownAction for CacheShutdown {
         "cache-runtime"
     }
 
-    /// 排空并停止失效广播;只能停一次(消费 guard)。
+    /// 业务作用：排空并停止失效广播;只能停一次(消费 guard)。
     ///
     /// # 参数
     ///
@@ -376,7 +376,7 @@ impl ShutdownAction for CacheShutdown {
     }
 }
 
-/// 按 `cache` 配置构造 L2 `CacheLayer`:`redis_ref` 复用受管连接,否则自建集群连接。
+/// 业务作用：按 `cache` 配置构造 L2 `CacheLayer`:`redis_ref` 复用受管连接,否则自建集群连接。
 ///
 /// 复用路径经 [`RedisClientBackend`] 把受管 `RedisClient` 适配成 `CacheBackend`,不新开集群连接;受管实例
 /// 未声明/未就绪(`redis -> cache` 序保证 redis 先发布)时给清晰错误。自建路径保持 v1 的 `connect_cluster`。
@@ -443,7 +443,7 @@ async fn build_cache_layer(
     )))
 }
 
-/// 从最终配置读取 `cache` 段;缺失该段却声明了组件时报明确错误。
+/// 业务作用：从最终配置读取 `cache` 段;缺失该段却声明了组件时报明确错误。
 ///
 /// # 参数
 ///
@@ -466,7 +466,7 @@ fn read_cache_config(application: &Application) -> ApplicationResult<CacheConfig
     })
 }
 
-/// 在不建立任何连接的前提下校验候选配置树中的 `cache` 段。
+/// 业务作用：在不建立任何连接的前提下校验候选配置树中的 `cache` 段。
 ///
 /// # 参数
 ///
@@ -484,7 +484,7 @@ pub(crate) fn validate_cache_section(
     config.validate(phase)
 }
 
-/// 创建缓存组件的稳定生命周期错误。
+/// 业务作用：创建缓存组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -494,7 +494,7 @@ fn cache_error(phase: ApplicationPhase, message: impl Into<String>) -> Applicati
     ApplicationError::new(ComponentId::Cache, phase, message)
 }
 
-/// 创建带底层错误链的缓存组件错误(输出前统一脱敏)。
+/// 业务作用：创建带底层错误链的缓存组件错误(输出前统一脱敏)。
 ///
 /// # 参数
 ///

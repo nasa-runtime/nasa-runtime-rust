@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use crate::error::{NasaRedisError, Result};
 use crate::partition::compat_string_hash;
 
-/// 序列化为 JSON 字符串并**省略 null 字段**，对齐既有系统的 `@JsonInclude(NON_NULL)`。
+/// 业务作用：序列化为 JSON 字符串并**省略 null 字段**，对齐既有系统的 `@JsonInclude(NON_NULL)`。
 /// Rust serde 默认写 `"f":null`,原实现 默认省略 → 同一子文档跨语言字节分叉,
 /// JSON_ARRAY 共享 key 时尤其致命(原实现 写的数组 Rust 读回会多/少字段)。
 /// 这里序列化到 `serde_json::Value` 后**递归剔除对象里值为 null 的成员**(数组元素、
@@ -51,7 +51,7 @@ pub fn to_json_omit_null<T: serde::Serialize>(doc: &T) -> Result<String> {
     serde_json::to_string(&v).map_err(|e| NasaRedisError::Codec(e.to_string()))
 }
 
-/// 递归剔除 JSON 对象中值为 null 的成员(对象/数组深度遍历)。
+/// 业务作用：递归剔除 JSON 对象中值为 null 的成员(对象/数组深度遍历)。
 ///
 /// # 参数
 /// - `v`: 待转换的值。
@@ -88,7 +88,7 @@ pub enum DataType {
 }
 
 impl DataType {
-    /// 是否 ARRAY 系(JsonArrayOps 专属;SearchActuator 拒绝)。
+    /// 业务作用：是否 ARRAY 系(JsonArrayOps 专属;SearchActuator 拒绝)。
     pub fn is_array(&self) -> bool {
         matches!(self, DataType::JsonArray | DataType::JsonArrayBucket)
     }
@@ -154,7 +154,7 @@ pub struct FieldMeta {
 }
 
 impl FieldMeta {
-    /// Returns the field alias when present, otherwise the field name.
+    /// 业务作用：优先返回字段别名，未配置别名时返回原字段名。
     pub fn alias_or_name(&self) -> &str {
         if self.alias.is_empty() {
             &self.name
@@ -205,7 +205,7 @@ pub struct DocMeta {
 }
 
 impl DocMeta {
-    /// 构建期校验(字段在 metadata 期校验,不等到发命令才失败)。
+    /// 业务作用：构建期校验(字段在 metadata 期校验,不等到发命令才失败)。
     pub fn validate(&self) -> Result<()> {
         if self.index.is_empty() || self.prefix.is_empty() {
             return Err(NasaRedisError::Config(
@@ -267,7 +267,7 @@ impl DocMeta {
         Ok(())
     }
 
-    /// 按别名查字段(查询 renderer 用)。
+    /// 业务作用：按别名查字段(查询 renderer 用)。
     ///
     /// # 参数
     /// - `alias`: 调用方在查询、排序或聚合中使用的字段别名;空别名字段会回退匹配字段名。
@@ -277,7 +277,7 @@ impl DocMeta {
 
     // ───────────────── prefix {field} 占位符(对照 原实现 KeySegment)─────────────────
 
-    /// 解析 prefix 为编译段。返回 None = 无占位符(fast path:prefix + id)。
+    /// 业务作用：解析 prefix 为编译段。返回 None = 无占位符(fast path:prefix + id)。
     /// 语法:`{name}`,不嵌套;`{`/`}` 必须配对;name 非空。
     pub fn segments(&self) -> Result<Option<Vec<KeySeg>>> {
         if !self.prefix.contains('{') {
@@ -332,17 +332,17 @@ impl DocMeta {
         Ok(Some(segs))
     }
 
-    /// 是否含占位符(业务侧据此决定走单 id API 还是 parts API)。
+    /// 业务作用：是否含占位符(业务侧据此决定走单 id API 还是 parts API)。
     pub fn has_placeholder(&self) -> bool {
         self.prefix.contains('{')
     }
 
-    /// 占位符段数(key_of_parts 入参校验用)。
+    /// 业务作用：占位符段数(key_of_parts 入参校验用)。
     pub fn placeholder_count(&self) -> usize {
         self.prefix.matches('{').count()
     }
 
-    /// FT.CREATE PREFIX 参数用的 literal head:无占位符 = 整个 prefix;
+    /// 业务作用：FT.CREATE PREFIX 参数用的 literal head:无占位符 = 整个 prefix;
     /// 占位符模式 = 第一个 `{` 之前的字面头(FT PREFIX 按 startsWith 匹配,
     /// literal head 覆盖该 entity 全部 key 变体——对照 原实现 literalPrefix)。
     pub fn literal_prefix(&self) -> &str {
@@ -352,7 +352,7 @@ impl DocMeta {
         }
     }
 
-    /// 完整 Redis key(仅无占位符模式;占位符模式报错引导走 key_of_parts——
+    /// 业务作用：完整 Redis key(仅无占位符模式;占位符模式报错引导走 key_of_parts——
     /// 对照 原实现 EntityMeta.key(String) 同款 fail-fast)。
     ///
     /// # 参数
@@ -367,7 +367,7 @@ impl DocMeta {
         Ok(format!("{}{}", self.prefix, id))
     }
 
-    /// 占位符模式拼 key:parts 按占位符出现顺序,id 拼末尾。
+    /// 业务作用：占位符模式拼 key:parts 按占位符出现顺序,id 拼末尾。
     /// 动态段(占位符值 + id)一律 check_part 禁 `:`/`{`/`}` ——
     /// 不同输入拼出相同 key = 数据互相覆盖,必须写入前拒绝(对照 原实现 KeyParts)。
     /// 无占位符模式 parts 必须为空(退化为 prefix + id,id 不校验,与 原实现 fast path 一致)。
@@ -415,7 +415,7 @@ impl DocMeta {
 
     // ───────────────── ARRAY key 派生(对照 原实现 EntityMeta.arrayKey 族)─────────────────
 
-    /// ARRAY key 主体:parts 按 array_keys 顺序以 `:` 拼接(逐段 check_part)。
+    /// 业务作用：ARRAY key 主体:parts 按 array_keys 顺序以 `:` 拼接(逐段 check_part)。
     ///
     /// # 参数
     /// - `parts`: 路径、占位符或 SQL 片段拆分后的部分。
@@ -438,7 +438,7 @@ impl DocMeta {
         Ok(body)
     }
 
-    /// ARRAY 模式完整 key = prefix + body;BUCKET 模式 = 不含桶号的"前缀"
+    /// 业务作用：ARRAY 模式完整 key = prefix + body;BUCKET 模式 = 不含桶号的"前缀"
     /// (调用方再经 bucket_key/all_bucket_keys 追加;对照 原实现 arrayKeyOf)。
     ///
     /// # 参数
@@ -453,7 +453,7 @@ impl DocMeta {
         Ok(format!("{}{}", self.prefix, self.array_body(parts)?))
     }
 
-    /// BUCKET 模式:subId 所在桶号 = floorMod(原实现_string_hash(渲染后 subId), bucketCount)。
+    /// 业务作用：BUCKET 模式:subId 所在桶号 = floorMod(原实现_string_hash(渲染后 subId), bucketCount)。
     /// **持久化协议**:原实现 在 String.hashCode 上取模(MetaResolver.renderValue 先归一化,
     /// Rust 侧 id()/parts 已是渲染后字符串)——必须逐位一致,否则查不到 原实现 写的桶。
     /// floorMod(而非 abs%)规避 hashCode==i32::MIN 时 abs 溢出(对照 原实现 bucketOf 注释)。
@@ -471,7 +471,7 @@ impl DocMeta {
         Ok(((h % n + n) % n) as u32)
     }
 
-    /// BUCKET 模式:给定 parts + subId 定位单桶 key:
+    /// 业务作用：BUCKET 模式:给定 parts + subId 定位单桶 key:
     /// `prefix + "{" + body + "}" + ":bucket:" + idx`(`{body}` = Cluster hash tag,
     /// 同组所有桶必落同 slot,跨桶 Lua 不触发 CROSSSLOT)。
     ///
@@ -488,7 +488,7 @@ impl DocMeta {
         ))
     }
 
-    /// BUCKET 模式:全部 N 个桶 key(桶号 0..N-1 顺序;跨桶 Lua 的 KEYS 入参)。
+    /// 业务作用：BUCKET 模式:全部 N 个桶 key(桶号 0..N-1 顺序;跨桶 Lua 的 KEYS 入参)。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的业务 key 段,用于生成同组全部 bucket key。
@@ -504,7 +504,7 @@ impl DocMeta {
             .collect())
     }
 
-    /// `array_key_of` / `bucket_key` 的**逆向解析**(对照 原实现 EntityMeta.parseKey):
+    /// 业务作用：`array_key_of` / `bucket_key` 的**逆向解析**(对照 原实现 EntityMeta.parseKey):
     /// 从一个完整 key 还原出 array_key parts(scan 后按业务键归组时用)。
     /// 段数必须等于 array_keys 数,否则视为非本 entity 的 key → Err。
     /// 因 `check_part` 禁止 parts 含 `:`/`{`/`}`,对 body 直接 `split(':')` 无损还原:
@@ -550,7 +550,7 @@ impl DocMeta {
         Ok(parts)
     }
 
-    /// 实体路径的 ARRAY key(save 用):ARRAY = 单 key;BUCKET = 按 subId 定位单桶。
+    /// 业务作用：实体路径的 ARRAY key(save 用):ARRAY = 单 key;BUCKET = 按 subId 定位单桶。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的业务 key 段。
@@ -565,7 +565,7 @@ impl DocMeta {
         }
     }
 
-    /// 生成 FT.CREATE 的 SCHEMA 参数序列(actuator 建索引 + 归一化比较共用同一来源,
+    /// 业务作用：生成 FT.CREATE 的 SCHEMA 参数序列(actuator 建索引 + 归一化比较共用同一来源,
     /// 保证"期望 schema"只有一处定义)。
     pub fn schema_args(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -661,7 +661,7 @@ impl DocMeta {
     }
 }
 
-/// 动态 key 段校验(对照 原实现 KeyParts.checkPart):禁 `:`(key 分隔符)与
+/// 业务作用：动态 key 段校验(对照 原实现 KeyParts.checkPart):禁 `:`(key 分隔符)与
 /// `{`/`}`(Cluster hash tag 字符)——含它们的不同输入会拼出相同 key(数据互相
 /// 覆盖)或破坏 slot 归属,写入前 fail-fast。
 ///
@@ -682,30 +682,30 @@ pub fn check_part(s: &str, desc: &str) -> Result<()> {
 /// HASH 编解码内聚于 trait(对照 原实现 RsConverter:字段值 ↔ 存储字符串);
 /// JSON 模式经 serde(actuator 对 T: Serialize+DeserializeOwned 额外约束)。
 pub trait RedisDocument: Sized + Send + Sync {
-    /// 静态元数据(进程内单例;`OnceLock` 惯用)。
+    /// 业务作用：静态元数据(进程内单例;`OnceLock` 惯用)。
     fn meta() -> &'static DocMeta;
 
-    /// 文档 ID(完整 key = meta().prefix + id;对照 原实现 @RsId)。
+    /// 业务作用：文档 ID(完整 key = meta().prefix + id;对照 原实现 @RsId)。
     fn id(&self) -> String;
 
-    /// HASH 编码:全部字段 →(field, value)字符串对(含 id 字段本身)。
+    /// 业务作用：HASH 编码:全部字段 →(field, value)字符串对(含 id 字段本身)。
     /// 占位符模式注意:占位符字段也必须在内——值只存在 key 里且 key 不可逆推,
     /// 不写 HASH 则 find(query) 读回为 null(对照 原实现 storedFields 修复)。
     fn to_fields(&self) -> Vec<(String, String)>;
 
-    /// HASH 解码:从 field→value 表重建(缺字段按业务默认/报错,impl 决定)。
+    /// 业务作用：HASH 解码:从 field→value 表重建(缺字段按业务默认/报错,impl 决定)。
     ///
     /// # 参数
     /// - `fields`: Redis HASH 读取出的字段名到字符串值映射,由具体实体负责转成业务类型。
     fn from_fields(fields: &HashMap<String, String>) -> Result<Self>;
 
-    /// 占位符模式:按 prefix 占位符出现顺序返回渲染后的字段值
+    /// 业务作用：占位符模式:按 prefix 占位符出现顺序返回渲染后的字段值
     /// (对照 原实现 KeySegment 从 entity 反查;无占位符保持默认空)。
     fn placeholder_parts(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// ARRAY 模式:按 meta().array_keys 顺序返回渲染后的 @JsonArrayKey 字段值
+    /// 业务作用：ARRAY 模式:按 meta().array_keys 顺序返回渲染后的 @JsonArrayKey 字段值
     /// (对照 原实现 arrayKeyPartsOf;非 ARRAY 模式保持默认空)。
     fn array_key_parts(&self) -> Vec<String> {
         Vec::new()

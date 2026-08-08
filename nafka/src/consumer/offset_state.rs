@@ -69,7 +69,7 @@ pub(crate) enum OffsetStateError {
 }
 
 impl OffsetStateError {
-    /// 判断错误是否只是 outcome permit 暂时不足，而不是 offset/epoch 不变量破坏。
+    /// 业务作用：判断错误是否只是 outcome permit 暂时不足，而不是 offset/epoch 不变量破坏。
     pub(crate) fn is_capacity(&self) -> bool {
         matches!(
             self,
@@ -124,7 +124,7 @@ pub(crate) enum RecordOutcome {
 }
 
 impl RecordOutcome {
-    /// 是否可被提交越过:已确认 / 已跳过 / 已入死信为安全;失败与未处理为不安全。
+    /// 业务作用：是否可被提交越过:已确认 / 已跳过 / 已入死信为安全;失败与未处理为不安全。
     ///
     /// 这是整条水位规则唯一的分类点。
     fn is_safe(self) -> bool {
@@ -165,7 +165,7 @@ pub(crate) struct PartitionOffsetState {
 }
 
 impl PartitionOffsetState {
-    /// 在 assignment 时用起始位点初始化。
+    /// 业务作用：在 assignment 时用起始位点初始化。
     ///
     /// # 参数
     ///
@@ -189,13 +189,13 @@ impl PartitionOffsetState {
         })
     }
 
-    /// 返回 broker 已确认的 next offset。
+    /// 业务作用：返回 broker 已确认的 next offset。
     #[allow(dead_code)]
     pub(crate) fn last_confirmed(&self) -> Option<i64> {
         self.last_confirmed
     }
 
-    /// 记录一条已处理记录的结果。
+    /// 业务作用：记录一条已处理记录的结果。
     ///
     /// # 参数
     ///
@@ -234,7 +234,7 @@ impl PartitionOffsetState {
         Ok(())
     }
 
-    /// 在不修改状态的前提下校验一个连续交付 run 能否原子接纳。
+    /// 业务作用：在不修改状态的前提下校验一个连续交付 run 能否原子接纳。
     ///
     /// # 参数
     ///
@@ -272,7 +272,7 @@ impl PartitionOffsetState {
         Ok(())
     }
 
-    /// 计算当前可安全提交的 next-offset(高水位);`None` 表示没有比 last_confirmed 更高的安全前缀。
+    /// 业务作用：计算当前可安全提交的 next-offset(高水位);`None` 表示没有比 last_confirmed 更高的安全前缀。
     ///
     /// 规则见模块头:首个不安全 offset,或全安全时的末尾 offset + 1;并要求结果严格大于 last_confirmed
     /// 才有提交意义(否则本批没有推进已确认位点)。
@@ -293,7 +293,7 @@ impl PartitionOffsetState {
         })
     }
 
-    /// 返回失败重投的起点(首个不安全 offset);`None` 表示本批无失败记录。
+    /// 业务作用：返回失败重投的起点(首个不安全 offset);`None` 表示本批无失败记录。
     ///
     /// poll_task 据此 seek 回该 offset 重投,并让其后尚未派发的预取记录重新拉取。
     #[allow(dead_code)]
@@ -306,7 +306,7 @@ impl PartitionOffsetState {
             .map(|observed| observed.offset)
     }
 
-    /// broker 同步 commit 成功后调用:推进 last_confirmed 并裁剪已提交的观察记录。
+    /// 业务作用：broker 同步 commit 成功后调用:推进 last_confirmed 并裁剪已提交的观察记录。
     ///
     /// # 参数
     ///
@@ -339,21 +339,21 @@ impl PartitionOffsetState {
         Ok(())
     }
 
-    /// 清空当前 epoch 的进行中进度(rebalance 收回分区或作废本地 progress 时用)。
+    /// 业务作用：清空当前 epoch 的进行中进度(rebalance 收回分区或作废本地 progress 时用)。
     ///
     /// 只丢弃未提交的观察进度,不改动 last_confirmed(broker 已确认的位点由新 owner 重放继续)。
     pub(crate) fn reset(&mut self) {
         self.in_flight = None;
     }
 
-    /// 当前进行中观察记录数,供 per-partition 容量上限计量。
+    /// 业务作用：当前进行中观察记录数,供 per-partition 容量上限计量。
     pub(crate) fn observed_len(&self) -> usize {
         self.in_flight
             .as_ref()
             .map_or(0, |progress| progress.observed.len())
     }
 
-    /// 当前是否存在不安全（失败 / 未处理）的已观察记录。
+    /// 业务作用：当前是否存在不安全（失败 / 未处理）的已观察记录。
     fn has_unsafe_observation(&self) -> bool {
         self.in_flight.as_ref().is_some_and(|progress| {
             progress
@@ -380,7 +380,7 @@ pub(crate) struct GroupOffsetState {
 }
 
 impl GroupOffsetState {
-    /// 构造带双层容量上限的 group 状态。
+    /// 业务作用：构造带双层容量上限的 group 状态。
     ///
     /// # 参数
     ///
@@ -395,7 +395,7 @@ impl GroupOffsetState {
         }
     }
 
-    /// 原子接纳一条处理结果。
+    /// 业务作用：原子接纳一条处理结果。
     ///
     /// 容量检查先于状态修改；任一门禁失败都不会留下半条 progress。
     ///
@@ -442,7 +442,7 @@ impl GroupOffsetState {
         Ok(())
     }
 
-    /// 原子接纳同一分区的一个连续交付 run。
+    /// 业务作用：原子接纳同一分区的一个连续交付 run。
     ///
     /// 容量、epoch 与 offset 顺序全部预校验成功后才写入，避免批 handler 的部分 outcome
     /// 进入水位而剩余项因容量不足丢失。
@@ -514,7 +514,7 @@ impl GroupOffsetState {
         Ok(())
     }
 
-    /// 返回每个分区当前可以安全同步提交的 next-offset。
+    /// 业务作用：返回每个分区当前可以安全同步提交的 next-offset。
     ///
     /// # 错误
     ///
@@ -530,7 +530,7 @@ impl GroupOffsetState {
             .collect()
     }
 
-    /// 在一次 broker 批量同步提交成功后原子确认并裁剪全部对应分区。
+    /// 业务作用：在一次 broker 批量同步提交成功后原子确认并裁剪全部对应分区。
     ///
     /// # 参数
     ///
@@ -564,7 +564,7 @@ impl GroupOffsetState {
         Ok(())
     }
 
-    /// 丢弃指定分区未提交的本地进度。
+    /// 业务作用：丢弃指定分区未提交的本地进度。
     ///
     /// # 参数
     ///
@@ -579,7 +579,7 @@ impl GroupOffsetState {
         self.recount();
     }
 
-    /// 只保留新 assignment 仍归当前 owner 的分区，并清空它们的旧 epoch 观察。
+    /// 业务作用：只保留新 assignment 仍归当前 owner 的分区，并清空它们的旧 epoch 观察。
     ///
     /// # 参数
     ///
@@ -597,23 +597,23 @@ impl GroupOffsetState {
         self.recount();
     }
 
-    /// 清空全部本地进度；用于显式重订阅、取消订阅和 restart。
+    /// 业务作用：清空全部本地进度；用于显式重订阅、取消订阅和 restart。
     pub(crate) fn clear(&mut self) {
         self.partitions.clear();
         self.observed_total = 0;
     }
 
-    /// 返回当前未裁剪结果总数，作为按记录数触发 commit 的计量值。
+    /// 业务作用：返回当前未裁剪结果总数，作为按记录数触发 commit 的计量值。
     pub(crate) fn observed_total(&self) -> usize {
         self.observed_total
     }
 
-    /// 判断 group outcome permit 是否至少释放出一个位置。
+    /// 业务作用：判断 group outcome permit 是否至少释放出一个位置。
     pub(crate) fn has_group_capacity(&self) -> bool {
         self.observed_total < self.max_group_records
     }
 
-    /// 判断是否可以安全地恢复派发。
+    /// 业务作用：判断是否可以安全地恢复派发。
     ///
     /// 判据 = group 总量有余 **且** 触发本次反压的那个分区自身有余。
     ///
@@ -636,7 +636,7 @@ impl GroupOffsetState {
         })
     }
 
-    /// 是否存在已观察但不安全（失败 / 未处理）的记录，即"空洞仍在"。
+    /// 业务作用：是否存在已观察但不安全（失败 / 未处理）的记录，即"空洞仍在"。
     ///
     /// 规则 5 用它区分「等待重试/DLT 收尾的正常反压」与「满且无任何可推进理由」
     /// 的框架不变量破坏。
@@ -646,7 +646,7 @@ impl GroupOffsetState {
             .any(PartitionOffsetState::has_unsafe_observation)
     }
 
-    /// 重新汇总总结果数；只在提交裁剪或显式清理后调用。
+    /// 业务作用：重新汇总总结果数；只在提交裁剪或显式清理后调用。
     fn recount(&mut self) {
         self.observed_total = self
             .partitions
@@ -656,7 +656,7 @@ impl GroupOffsetState {
     }
 }
 
-/// 计算一段严格递增观察序列的提交上界(next-offset)。
+/// 业务作用：计算一段严格递增观察序列的提交上界(next-offset)。
 ///
 /// # 参数
 ///

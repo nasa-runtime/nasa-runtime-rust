@@ -37,14 +37,14 @@ pub type CryptoConditionFuture<'a> =
 
 /// 只能关闭静态声明方向的密码条件扩展点。
 pub trait CryptoCondition: Send + Sync + 'static {
-    /// 返回注册表使用的稳定 condition ID。
+    /// 业务作用：返回注册表使用的稳定 condition ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识。
     fn id(&self) -> &'static str;
 
-    /// 根据可信元数据收窄本请求的加解密方向。
+    /// 业务作用：根据可信元数据收窄本请求的加解密方向。
     ///
     /// # 参数
     ///
@@ -68,7 +68,7 @@ pub struct LegacyDisableHeaderCondition {
 }
 
 impl std::fmt::Debug for LegacyDisableHeaderCondition {
-    /// 输出 header 名但不输出作为 secret 的匹配值。
+    /// 业务作用：输出 header 名但不输出作为 secret 的匹配值。
     ///
     /// # 参数
     ///
@@ -86,7 +86,7 @@ impl std::fmt::Debug for LegacyDisableHeaderCondition {
 }
 
 impl LegacyDisableHeaderCondition {
-    /// 建立需要可信入口证明的 legacy 旁路条件。
+    /// 业务作用：建立需要可信入口证明的 legacy 旁路条件。
     ///
     /// # 参数
     ///
@@ -114,7 +114,7 @@ impl LegacyDisableHeaderCondition {
 }
 
 impl CryptoCondition for LegacyDisableHeaderCondition {
-    /// 返回架构固定的显式 condition ID。
+    /// 业务作用：返回架构固定的显式 condition ID。
     ///
     /// # 返回
     ///
@@ -123,7 +123,7 @@ impl CryptoCondition for LegacyDisableHeaderCondition {
         "legacy-disable-header"
     }
 
-    /// 只有 secret 匹配且存在可信入口证明时关闭已声明方向。
+    /// 业务作用：只有 secret 匹配且存在可信入口证明时关闭已声明方向。
     ///
     /// # 参数
     ///

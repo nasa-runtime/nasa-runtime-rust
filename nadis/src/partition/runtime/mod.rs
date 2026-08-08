@@ -83,17 +83,17 @@ enum ClaimState {
 struct AbortOnDropTask(Option<tokio::task::JoinHandle<()>>);
 
 impl AbortOnDropTask {
-    /// 接管一个必须在 owner drop 时结束的任务。
+    /// 业务作用：接管一个必须在 owner drop 时结束的任务。
     fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self(Some(handle))
     }
 
-    /// 正常 drain 路径取回 join handle；取出后由调用方负责 await 或 abort。
+    /// 业务作用：正常 drain 路径取回 join handle；取出后由调用方负责 await 或 abort。
     fn take(&mut self) -> tokio::task::JoinHandle<()> {
         self.0.take().expect("claim task handle 只能取一次")
     }
 
-    /// 异常所有权丢失路径立即 abort；重复调用无副作用。
+    /// 业务作用：异常所有权丢失路径立即 abort；重复调用无副作用。
     fn abort(&mut self) {
         if let Some(handle) = self.0.take() {
             handle.abort();
@@ -102,7 +102,7 @@ impl AbortOnDropTask {
 }
 
 impl Drop for AbortOnDropTask {
-    /// owner 未走正常 drain 时禁止任务 detach。
+    /// 业务作用：owner 未走正常 drain 时禁止任务 detach。
     fn drop(&mut self) {
         self.abort();
     }
@@ -290,7 +290,7 @@ pub(super) struct OwnerFence {
 }
 
 impl OwnerFence {
-    /// Returns a lease view for the owned partitions.
+    /// 业务作用：返回当前 owner 的借用式租约视图，供后续 fencing 操作复验权威。
     pub(super) fn lease(&self) -> super::disposition::OwnerLease<'_> {
         super::disposition::OwnerLease {
             partition: self.p,
@@ -306,7 +306,7 @@ impl OwnerFence {
 }
 
 impl GroupRuntime {
-    /// 校验并启动一个分区组的 claim、调度和消费任务，返回拥有全部后台任务的运行时句柄。
+    /// 业务作用：校验并启动一个分区组的 claim、调度和消费任务，返回拥有全部后台任务的运行时句柄。
     #[allow(clippy::too_many_arguments)] // 多组:layout/count/cfg/stream_cfg 都 per-group,内部入口不另封包
     pub(super) async fn start(
         client: Arc<RedisClient>,
@@ -422,7 +422,7 @@ impl GroupRuntime {
         Ok(rt)
     }
 
-    /// 发布:路由已算好(partition 编号),组信封 → XADD。
+    /// 业务作用：发布:路由已算好(partition 编号),组信封 → XADD。
     /// round-robin 发布：无路由 key 时全局轮转均摊到各分区，对齐既有 publish(partition==null)。
     pub(super) async fn publish_round_robin<T: Serialize>(
         &self,
@@ -434,7 +434,7 @@ impl GroupRuntime {
         self.publish(topic, event, p, data, None).await
     }
 
-    /// Publishes a payload to the selected partition stream.
+    /// 业务作用：把业务 payload 发布到指定分区 stream，并返回服务端生成的 entry id。
     pub(super) async fn publish<T: Serialize>(
         &self,
         topic: &str,
@@ -468,12 +468,12 @@ impl GroupRuntime {
         Ok(id)
     }
 
-    /// Returns the partitions currently owned by this runtime.
+    /// 业务作用：返回当前运行时已经取得所有权的分区快照。
     pub(super) async fn claimed_partitions(&self) -> Vec<u32> {
         self.claimed.read().expect("claimed 锁中毒").clone()
     }
 
-    /// 把已确认的 stream entry 交给单一异步删除 owner。
+    /// 业务作用：把已确认的 stream entry 交给单一异步删除 owner。
     ///
     /// XDEL 只负责回收 stream 空间，不参与消费正确性；配置为 0 时 entry 留在 stream，
     /// 仅在 autoTrim 同时启用时才会按保留窗回收。队列满时等待形成背压，避免 ACK 已成功后
@@ -506,12 +506,12 @@ impl GroupRuntime {
         }
     }
 
-    /// 返回本组已进入异步删除管道但尚未确认 XDEL 成功的 entry 数。
+    /// 业务作用：返回本组已进入异步删除管道但尚未确认 XDEL 成功的 entry 数。
     pub(super) fn async_delete_pending(&self) -> usize {
         self.async_delete_pending.load(Ordering::Acquire)
     }
 
-    /// 未走异步 drain 时的最后防线。
+    /// 业务作用：未走异步 drain 时的最后防线。
     ///
     /// `RunningPartition::drop` 无法等待网络 I/O，但必须关闭 admission 并 abort 所有 owner task；
     /// coordinator 被 abort 后会 drop `ClaimSlot`，其中的任务包装继续 abort worker/recovery。
@@ -540,7 +540,7 @@ impl GroupRuntime {
         }
     }
 
-    /// `RunningPartition::drop` 使用的异步清理入口。
+    /// 业务作用：`RunningPartition::drop` 使用的异步清理入口。
     ///
     /// 先同步关闭 admission，再由当前 Tokio runtime 执行与显式 shutdown 相同的 drain/unlock；
     /// 若已离开 runtime，只能退回立即 abort + lease 兜底。
@@ -566,7 +566,7 @@ impl GroupRuntime {
         }
     }
 
-    /// 停机
+    /// 业务作用：停机
     /// ① **先停后台任务**(bg_cancel:control/sweep/rebalance/wake)并等其退出——此期间
     ///    coordinator **仍持锁运行、watchdog 续租**,避免 control(resume/drop/dlq)、sweep
     ///    (XAUTOCLAIM)、rebalance(tryLock)在失锁后继续改 Redis;
@@ -712,7 +712,7 @@ impl GroupRuntime {
 // ─────────────────────────────────────────────────────────────────────────
 
 impl GroupRuntime {
-    /// 构造分区 owner-fenced 转换凭据:本节点非该分区 owner(owner_ctx 无记录)→
+    /// 业务作用：构造分区 owner-fenced 转换凭据:本节点非该分区 owner(owner_ctx 无记录)→
     /// None,调用方据此拒绝管理操作。RustV2 带 fence 三元组 + 任期 counter;原实现V1 fence_key 空,
     /// 只校验 holder 持锁。
     pub(super) fn owner_fence(&self, p: u32, operation_id: String) -> Option<OwnerFence> {
@@ -742,7 +742,7 @@ impl GroupRuntime {
         })
     }
 
-    /// command 路径专用:用命令的稳定 operation_id 构造凭据(:同 op_id 重试幂等续作)。
+    /// 业务作用：command 路径专用:用命令的稳定 operation_id 构造凭据(:同 op_id 重试幂等续作)。
     pub(super) fn require_owner_for_op(&self, p: u32, operation_id: &str) -> Result<OwnerFence> {
         self.owner_fence(p, operation_id.to_string())
             .ok_or_else(|| {
@@ -752,7 +752,7 @@ impl GroupRuntime {
             })
     }
 
-    /// direct API 的 owner 凭据:op_id **稳定派生自 (p, marker.park_id)**
+    /// 业务作用：direct API 的 owner 凭据:op_id **稳定派生自 (p, marker.park_id)**
     /// ——同一宗 Park 的 direct 重试得到**同一** op_id,崩溃重入(marker 已记 op_id)不再因每次新
     /// uuid 自撞 `OperationConflict` 永久冻结分区。无 park_id(无 Park 记录)→ 退回新 uuid(mutator
     /// 随后会以"无 Park 记录"报错,不进任何转换)。
@@ -776,7 +776,7 @@ impl GroupRuntime {
         })
     }
 
-    /// resume 后通知 coordinator 恢复消费(Parked → Ready)。
+    /// 业务作用：resume 后通知 coordinator 恢复消费(Parked → Ready)。
     pub(super) async fn resume_parked(&self, p: u32) -> Result<Vec<String>> {
         let of = self.require_owner_direct(p).await?;
         let ids = super::disposition::resume(&self.client, &self.layout, p, &of.lease()).await?;
@@ -784,7 +784,7 @@ impl GroupRuntime {
         Ok(ids)
     }
 
-    /// drop 后通知 coordinator 恢复消费(后续新消息照常)。
+    /// 业务作用：drop 后通知 coordinator 恢复消费(后续新消息照常)。
     pub(super) async fn drop_parked(&self, p: u32) -> Result<()> {
         let of = self.require_owner_direct(p).await?;
         super::disposition::drop_parked(&self.client, &self.layout, p, &of.lease()).await?;
@@ -792,7 +792,7 @@ impl GroupRuntime {
         Ok(())
     }
 
-    /// dlq 处置(owner-fenced;RunningPartition::dlq_parked 经此)。
+    /// 业务作用：dlq 处置(owner-fenced;RunningPartition::dlq_parked 经此)。
     pub(super) async fn dlq_parked(&self, p: u32) -> Result<Vec<String>> {
         let of = self.require_owner_direct(p).await?;
         let ids =
@@ -801,12 +801,12 @@ impl GroupRuntime {
         Ok(ids)
     }
 
-    /// 查询分区 Park 状态(None = 未 Park)。
+    /// 业务作用：查询分区 Park 状态(None = 未 Park)。
     pub(super) async fn parked_id(&self, p: u32) -> Result<Option<String>> {
         super::disposition::parked_id(&self.client, &self.layout, p).await
     }
 
-    /// ForceRepublish(仅 ResumeIndeterminate;显式接受重复/变序风险)成功后恢复消费。
+    /// 业务作用：ForceRepublish(仅 ResumeIndeterminate;显式接受重复/变序风险)成功后恢复消费。
     pub(super) async fn force_republish(&self, p: u32) -> Result<Vec<String>> {
         let of = self.require_owner_direct(p).await?;
         let ids =
@@ -815,7 +815,7 @@ impl GroupRuntime {
         Ok(ids)
     }
 
-    /// 通用 liveness-takeover：原 op 已死时强制接管卡死的在途 *Publishing/Dropping。
+    /// 业务作用：通用 liveness-takeover：原 op 已死时强制接管卡死的在途 *Publishing/Dropping。
     /// 用稳定 `direct:{p}:{park_id}` op 覆写后续作——崩溃重入用同 op 续作幂等。
     pub(super) async fn force_takeover(&self, p: u32) -> Result<Vec<String>> {
         let of = self.require_owner_direct(p).await?;
@@ -826,12 +826,12 @@ impl GroupRuntime {
     }
 }
 
-/// 生成一个管理操作的 operation_id(direct API 用)。
+/// 业务作用：生成一个管理操作的 operation_id(direct API 用)。
 fn new_operation_id() -> String {
     format!("op-{}", uuid::Uuid::new_v4().simple())
 }
 
-/// 分区锁的完整 Redis key(= 锁前缀 + 业务 key;fenced ACK Lua 的 hexists 用——
+/// 业务作用：分区锁的完整 Redis key(= 锁前缀 + 业务 key;fenced ACK Lua 的 hexists 用——
 /// worker 不持 guard,经配置重组;与 guard.lock_key() 等价)。
 ///
 /// # 参数
@@ -846,7 +846,7 @@ fn lock_key_full(rt: &Arc<GroupRuntime>, p: u32) -> String {
 }
 
 impl GroupRuntime {
-    /// XREADGROUP COUNT(接线 stream.batch_size,不再硬编码 100)。
+    /// 业务作用：XREADGROUP COUNT(接线 stream.batch_size,不再硬编码 100)。
     pub(super) fn cfg_batch(&self) -> usize {
         self.stream_cfg.batch_size
     }
@@ -857,7 +857,7 @@ impl GroupRuntime {
 // ─────────────────────────────────────────────────────────────────────────
 
 impl GroupRuntime {
-    /// 返回启动阶段注入的事件 handler 注册表。
+    /// 业务作用：返回启动阶段注入的事件 handler 注册表。
     ///
     /// worker 消费分区消息时通过该表按 `(topic,event)` 定位业务处理器；未注入说明 runtime 未按协议启动。
     fn handlers(&self) -> &HandlerMap {

@@ -98,43 +98,43 @@ struct AuthConfig {
     jwks_stale_secs: u64,
 }
 
-/// token 算法白名单缺省值:仅 RS256。
+/// 业务作用：token 算法白名单缺省值:仅 RS256。
 fn default_algorithms() -> Vec<String> {
     vec!["RS256".to_owned()]
 }
 
-/// 时钟偏移容忍缺省值:60 秒。
+/// 业务作用：时钟偏移容忍缺省值:60 秒。
 fn default_leeway_secs() -> u64 {
     60
 }
 
-/// JWKS 刷新间隔缺省值。
+/// 业务作用：JWKS 刷新间隔缺省值。
 fn default_jwks_refresh_secs() -> u64 {
     DEFAULT_JWKS_REFRESH_SECS
 }
 
-/// JWKS 拉取超时缺省值。
+/// 业务作用：JWKS 拉取超时缺省值。
 fn default_jwks_timeout_ms() -> u64 {
     DEFAULT_JWKS_TIMEOUT_MS
 }
 
-/// JWKS 响应大小上限缺省值。
+/// 业务作用：JWKS 响应大小上限缺省值。
 fn default_jwks_max_bytes() -> usize {
     DEFAULT_JWKS_MAX_BYTES
 }
 
-/// JWKS 单次快照最大 key 数缺省值。
+/// 业务作用：JWKS 单次快照最大 key 数缺省值。
 fn default_jwks_max_keys() -> usize {
     DEFAULT_JWKS_MAX_KEYS
 }
 
-/// JWKS last-good stale 上限缺省值。
+/// 业务作用：JWKS last-good stale 上限缺省值。
 fn default_jwks_stale_secs() -> u64 {
     DEFAULT_JWKS_STALE_SECS
 }
 
 impl AuthConfig {
-    /// 无副作用校验:issuer/audience 非空、算法白名单非空且不含 `none`、JWKS 结构合法。
+    /// 业务作用：无副作用校验:issuer/audience 非空、算法白名单非空且不含 `none`、JWKS 结构合法。
     ///
     /// # 参数
     ///
@@ -240,7 +240,7 @@ impl AuthConfig {
         Ok(())
     }
 
-    /// 校验 `jwks_uri` 的 scheme 与主机:必须 https(loopback 主机允 http),命中主机白名单。
+    /// 业务作用：校验 `jwks_uri` 的 scheme 与主机:必须 https(loopback 主机允 http),命中主机白名单。
     ///
     /// # 参数
     ///
@@ -274,7 +274,7 @@ impl AuthConfig {
         Ok(())
     }
 
-    /// 由配置构造 token 校验策略。
+    /// 业务作用：由配置构造 token 校验策略。
     fn token_policy(&self) -> TokenPolicy {
         TokenPolicy {
             expected_issuer: self.issuer.clone(),
@@ -295,7 +295,7 @@ pub(crate) struct AuthComponent {
 }
 
 impl AuthComponent {
-    /// 创建尚未读取配置的认证组件。
+    /// 业务作用：创建尚未读取配置的认证组件。
     ///
     /// # 参数
     ///
@@ -310,7 +310,7 @@ impl AuthComponent {
 }
 
 impl ApplicationComponent for AuthComponent {
-    /// 返回认证组件稳定身份。
+    /// 业务作用：返回认证组件稳定身份。
     ///
     /// # 参数
     ///
@@ -319,7 +319,7 @@ impl ApplicationComponent for AuthComponent {
         ComponentId::Auth
     }
 
-    /// 从最终配置读取并冻结认证设置;不做任何网络 I/O。
+    /// 业务作用：从最终配置读取并冻结认证设置;不做任何网络 I/O。
     ///
     /// # 参数
     ///
@@ -356,7 +356,7 @@ impl ApplicationComponent for AuthComponent {
         })
     }
 
-    /// warmup JWKS(静态内存或远程首拉)、构造并发布 Authenticator(必须早于 Web Ready);远程模式再
+    /// 业务作用：warmup JWKS(静态内存或远程首拉)、构造并发布 Authenticator(必须早于 Web Ready);远程模式再
     /// 注册 readiness contributor 并创建刷新任务。
     ///
     /// # 参数
@@ -486,7 +486,7 @@ impl ApplicationComponent for AuthComponent {
         })
     }
 
-    /// 取出远程 JWKS 刷新任务,交由 Runner 按关键任务监督。
+    /// 业务作用：取出远程 JWKS 刷新任务,交由 Runner 按关键任务监督。
     ///
     /// # 返回
     ///
@@ -517,7 +517,7 @@ struct JwksRefreshContext {
 
 /// # 参数
 ///
-/// - `context`:刷新任务独占的生命周期句柄、last-good registry、readiness contributor 和远程拉取边界。
+/// 业务作用：- `context`:刷新任务独占的生命周期句柄、last-good registry、readiness contributor 和远程拉取边界。
 async fn run_jwks_refresh(context: JwksRefreshContext) -> ApplicationResult<()> {
     loop {
         // 先睡:Ready 已完成首拉,下一次是间隔后的刷新。
@@ -570,7 +570,7 @@ async fn run_jwks_refresh(context: JwksRefreshContext) -> ApplicationResult<()> 
     }
 }
 
-/// 从远程 `jwks_uri` 拉取并解析 JWKS:超时、大小上限、UTF-8、结构校验。
+/// 业务作用：从远程 `jwks_uri` 拉取并解析 JWKS:超时、大小上限、UTF-8、结构校验。
 ///
 /// 只做一次 GET,不重试(重试由刷新任务的下一周期承担)。content-length 预检 + 读后复检双重限大小;正文
 /// 非 200、超限、非 UTF-8、解析失败、结构非法都返回错误,由调用方决定 fail-closed 或保留 last-good。
@@ -618,7 +618,7 @@ async fn fetch_jwks(
     Ok(jwks)
 }
 
-/// 从最终配置读取 `auth` 段;缺失该段却声明了组件时报明确错误。
+/// 业务作用：从最终配置读取 `auth` 段;缺失该段却声明了组件时报明确错误。
 ///
 /// # 参数
 ///
@@ -641,7 +641,7 @@ fn read_auth_config(application: &Application) -> ApplicationResult<AuthConfig> 
     })
 }
 
-/// 在不构造任何注册表的前提下校验候选配置树中的 `auth` 段。
+/// 业务作用：在不构造任何注册表的前提下校验候选配置树中的 `auth` 段。
 ///
 /// # 参数
 ///
@@ -659,7 +659,7 @@ pub(crate) fn validate_auth_section(
     config.validate(phase)
 }
 
-/// 创建认证组件的稳定生命周期错误。
+/// 业务作用：创建认证组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -669,7 +669,7 @@ fn auth_error(phase: ApplicationPhase, message: impl Into<String>) -> Applicatio
     ApplicationError::new(ComponentId::Auth, phase, message)
 }
 
-/// 创建带底层错误链的认证组件错误(输出前统一脱敏)。
+/// 业务作用：创建带底层错误链的认证组件错误(输出前统一脱敏)。
 ///
 /// # 参数
 ///

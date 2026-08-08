@@ -53,7 +53,7 @@ pub(crate) struct LatencyHistogram {
 }
 
 impl LatencyHistogram {
-    /// 构造全零直方图。
+    /// 业务作用：构造全零直方图。
     pub(crate) fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -62,7 +62,7 @@ impl LatencyHistogram {
         }
     }
 
-    /// 记录一次执行耗时。
+    /// 业务作用：记录一次执行耗时。
     ///
     /// # 参数
     /// - `elapsed`: 本次执行耗时(进入执行区到出结局)。
@@ -78,7 +78,7 @@ impl LatencyHistogram {
         self.sum_micros.fetch_add(micros, Ordering::Relaxed);
     }
 
-    /// 导出渲染视图:按 `le` 语义累计后的桶数组 + count + sum(秒)。
+    /// 业务作用：导出渲染视图:按 `le` 语义累计后的桶数组 + count + sum(秒)。
     pub(crate) fn export(&self) -> HistogramExport {
         let mut cumulative = [0u64; 13];
         let mut acc = 0u64;

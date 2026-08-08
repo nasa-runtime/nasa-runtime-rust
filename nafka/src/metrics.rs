@@ -7,7 +7,7 @@ pub type MetricLabels<'a> = &'a [(&'static str, &'a str)];
 ///
 /// 实现必须无阻塞、不可 panic；回调可能位于 producer 异步任务或 consumer owner 线程。
 pub trait MetricsSink: Send + Sync + 'static {
-    /// 累加一个单调 counter。
+    /// 业务作用：累加一个单调 counter。
     ///
     /// # 参数
     ///
@@ -16,7 +16,7 @@ pub trait MetricsSink: Send + Sync + 'static {
     /// - `labels`: 固定低基数字段，不包含 payload、header value 或错误详情。
     fn counter(&self, name: &'static str, delta: u64, labels: MetricLabels<'_>);
 
-    /// 设置一个瞬时 gauge。
+    /// 业务作用：设置一个瞬时 gauge。
     ///
     /// # 参数
     ///
@@ -30,9 +30,9 @@ pub trait MetricsSink: Send + Sync + 'static {
 pub(crate) struct NoopMetrics;
 
 impl MetricsSink for NoopMetrics {
-    /// 丢弃 counter。
+    /// 业务作用：丢弃 counter。
     fn counter(&self, _name: &'static str, _delta: u64, _labels: MetricLabels<'_>) {}
 
-    /// 丢弃 gauge。
+    /// 业务作用：丢弃 gauge。
     fn gauge(&self, _name: &'static str, _value: i64, _labels: MetricLabels<'_>) {}
 }

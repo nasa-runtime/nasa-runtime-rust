@@ -43,7 +43,7 @@ struct PlaceholderSpec<'a> {
 }
 
 impl<'a> PlaceholderSpec<'a> {
-    /// 从 `${` 与 `}` 之间的内容解析。`inner` 是 `${` 后、`}` 前的原文。
+    /// 业务作用：从 `${` 与 `}` 之间的内容解析。`inner` 是 `${` 后、`}` 前的原文。
     ///
     /// # 参数
     /// - `raw`: 待解析的原始字符串、字节或配置值。
@@ -73,7 +73,7 @@ enum ResolvedValue {
 }
 
 impl ResolvedValue {
-    /// 字符串内嵌位置的取值:无论来源一律转字符串拼接。
+    /// 业务作用：字符串内嵌位置的取值:无论来源一律转字符串拼接。
     /// 树命中的 String 取原文(`Value::to_string` 会带 JSON 引号,不可用);number/bool 走 to_string。
     fn into_string(self) -> String {
         match self {
@@ -83,7 +83,7 @@ impl ResolvedValue {
         }
     }
 
-    /// 整值位置的取值:树命中直接沿用原始 Value(类型保真,——`token: "8080"` 被
+    /// 业务作用：整值位置的取值:树命中直接沿用原始 Value(类型保真,——`token: "8080"` 被
     /// `${token}` 引用后必须仍是字符串);env/default 只有字符串来源,按 YAML 标量类型化。
     fn into_value(self) -> serde_json::Value {
         match self {
@@ -93,7 +93,7 @@ impl ResolvedValue {
     }
 }
 
-/// 在 Value 树上【原地】解析占位符,最多内部设定趟数(到稳定为止)。
+/// 业务作用：在 Value 树上【原地】解析占位符,最多内部设定趟数(到稳定为止)。
 ///
 /// # 参数
 /// - `tree`: 待解析的配置 Value 树,函数会原地替换其中的 `${...}` 占位符。
@@ -109,7 +109,7 @@ pub fn resolve_placeholders(tree: &mut serde_json::Value) -> anyhow::Result<()> 
     resolve_placeholders_inner(tree, false)
 }
 
-/// 在 Value 树上解析占位符,但未命中的占位符保留为字面量。
+/// 业务作用：在 Value 树上解析占位符,但未命中的占位符保留为字面量。
 ///
 /// 用途:调用方的配置里同时存在「加载期配置占位符」和「运行期 DSL 变量」时,前者照常解析,
 /// 后者保留给调用方自己的运行期解释器处理。
@@ -124,7 +124,7 @@ pub fn resolve_placeholders_preserving_unresolved(
 }
 ///
 /// # 参数
-/// - `tree`: 配置 Value 树。
+/// 业务作用：- `tree`: 配置 Value 树。
 /// - `preserve_unresolved`: 是否保留未解析占位符供后续 overlay 继续处理。
 fn resolve_placeholders_inner(
     tree: &mut serde_json::Value,
@@ -146,7 +146,7 @@ fn resolve_placeholders_inner(
     }
 }
 
-/// 终扫:定位第一个仍含 `${` 的字符串叶子并报错。
+/// 业务作用：终扫:定位第一个仍含 `${` 的字符串叶子并报错。
 /// 走到这里说明多趟替换没能消掉它——轮转型循环引用(值在多个键间轮转,每趟都是「树命中」)、
 /// 未闭合 `${`，或嵌套默认值等当前语法不支持的写法。
 ///
@@ -176,7 +176,7 @@ fn scan_unresolved(v: &serde_json::Value, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 把 Value 树压平成「点分路径 → 原始标量 Value」映射(:保留 string/number/bool
+/// 业务作用：把 Value 树压平成「点分路径 → 原始标量 Value」映射(:保留 string/number/bool
 /// 的原始类型,整值引用时不得把字符串 `"8080"` 猜成 number)。
 /// 数组不进映射(无法用点分路径引用数组元素),但数组里字符串叶子的占位符仍会被
 /// [`replace_in_tree`] 替换——两边职责分开:flatten 只建可被引用的标量映射。
@@ -201,7 +201,7 @@ fn flatten(v: &serde_json::Value, prefix: &str, out: &mut HashMap<String, serde_
     }
 }
 
-/// 拼接点分路径(根前缀为空时不加点)。
+/// 业务作用：拼接点分路径(根前缀为空时不加点)。
 ///
 /// # 参数
 /// - `prefix`: 父节点在配置树中的点分路径。
@@ -214,7 +214,7 @@ fn join_path(prefix: &str, key: &str) -> String {
     }
 }
 
-/// 遍历 Value 树,对每个字符串叶子做占位符替换;返回本趟是否发生过替换。
+/// 业务作用：遍历 Value 树,对每个字符串叶子做占位符替换;返回本趟是否发生过替换。
 /// `path` = 当前节点的点分路径:整值占位符需要它做自引用判定,错误信息需要它定位。
 ///
 /// # 参数
@@ -262,7 +262,7 @@ fn replace_in_tree(
     Ok(changed)
 }
 
-/// 整值占位符判定 + 替换:整个字符串恰好是一个 `${...}`(第一个 `}` 即最后一个字符)。
+/// 业务作用：整值占位符判定 + 替换:整个字符串恰好是一个 `${...}`(第一个 `}` 即最后一个字符)。
 /// 返回 `Ok(None)` = 不是整值形态,走字符串内嵌路径;`Ok(Some(v))` = 解析出的标量。
 ///
 /// # 参数
@@ -300,7 +300,7 @@ fn substitute_whole_value(
     Ok(Some(resolved.into_value()))
 }
 
-/// 字符串内嵌占位符替换(`url: http://x:${server.port}/api` 形态)。
+/// 业务作用：字符串内嵌占位符替换(`url: http://x:${server.port}/api` 形态)。
 /// 结果永远是字符串拼接,即使替换值看起来像数字也不类型化。
 /// 返回 (新串, 是否替换过)。`${` `}` 都是 ASCII,按字节切片安全。
 ///
@@ -352,7 +352,7 @@ fn substitute_string(
     Ok((result, changed))
 }
 
-/// 按固定优先级解析一个占位符,返回【带来源】的值
+/// 业务作用：按固定优先级解析一个占位符,返回【带来源】的值
 /// 配置树(跳过自身)→ 原样环境变量 → relaxed 环境变量 → 默认值 → Err。
 ///
 /// # 参数
@@ -407,7 +407,7 @@ fn resolve_placeholder_value(
     )
 }
 
-/// env / default 字符串来源的标量类型化
+/// 业务作用：env / default 字符串来源的标量类型化
 /// 引号包裹 → 字符串(去引号,`"8080"` 保持字符串);未加引号的整数/浮点 → number;
 /// `true`/`false` → bool;**其它一律原样字符串**——`/fore-rest` 这类含 `/`、`-` 的值
 /// 属于「其它」,必须原样输出,`/` 不是路径语义、`-` 不是分隔语义。
@@ -448,7 +448,7 @@ fn parse_scalar(raw: &str) -> serde_json::Value {
     }
 }
 
-/// `-?digits.digits` 简单浮点判定(恰好一个 `.`,两侧都有数字)。
+/// 业务作用：`-?digits.digits` 简单浮点判定(恰好一个 `.`,两侧都有数字)。
 ///
 /// # 参数
 /// - `s`: 要解析的输入字符串。

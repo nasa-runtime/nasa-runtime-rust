@@ -19,7 +19,7 @@ pub enum WebRouteOrigin {
 }
 
 impl WebRouteOrigin {
-    /// 返回适合日志、指标标签和管理端响应使用的稳定名称。
+    /// 业务作用：返回适合日志、指标标签和管理端响应使用的稳定名称。
     ///
     /// # 参数
     ///
@@ -68,7 +68,7 @@ pub struct RouteInfo {
 }
 
 impl RouteInfo {
-    /// 从一条已通过预检的业务路由元数据创建只读信息。
+    /// 业务作用：从一条已通过预检的业务路由元数据创建只读信息。
     ///
     /// # 参数
     ///
@@ -92,7 +92,7 @@ impl RouteInfo {
         }
     }
 
-    /// 创建一条由运行时拥有的管理路由信息。
+    /// 业务作用：创建一条由运行时拥有的管理路由信息。
     ///
     /// # 参数
     ///
@@ -122,7 +122,7 @@ impl RouteInfo {
         }
     }
 
-    /// 返回规范化的大写请求方法。
+    /// 业务作用：返回规范化的大写请求方法。
     ///
     /// # 参数
     ///
@@ -131,7 +131,7 @@ impl RouteInfo {
         self.method
     }
 
-    /// 返回相对于统一上下文前缀的路由模板。
+    /// 业务作用：返回相对于统一上下文前缀的路由模板。
     ///
     /// # 参数
     ///
@@ -140,7 +140,7 @@ impl RouteInfo {
         self.path
     }
 
-    /// 返回用于诊断的稳定处理器名称。
+    /// 业务作用：返回用于诊断的稳定处理器名称。
     ///
     /// # 参数
     ///
@@ -149,57 +149,57 @@ impl RouteInfo {
         self.handler
     }
 
-    /// 返回静态响应媒体类型。
+    /// 业务作用：返回静态响应媒体类型。
     pub const fn produces(&self) -> Option<&'static str> {
         self.produces
     }
 
-    /// 返回静态请求媒体类型。
+    /// 业务作用：返回静态请求媒体类型。
     pub const fn consumes(&self) -> Option<&'static str> {
         self.consumes
     }
 
-    /// 返回显式请求 DTO schema 工厂。
+    /// 业务作用：返回显式请求 DTO schema 工厂。
     pub const fn request_schema(&self) -> Option<naweb::ApiSchemaFactory> {
         self.request_schema
     }
 
-    /// 返回显式响应 DTO schema 工厂。
+    /// 业务作用：返回显式响应 DTO schema 工厂。
     pub const fn response_schema(&self) -> Option<naweb::ApiSchemaFactory> {
         self.response_schema
     }
 
-    /// 返回显式 query 参数集工厂。
+    /// 业务作用：返回显式 query 参数集工厂。
     pub const fn query_parameters(&self) -> Option<naweb::ApiParametersFactory> {
         self.query_parameters
     }
 
-    /// 返回显式 header 参数集工厂。
+    /// 业务作用：返回显式 header 参数集工厂。
     pub const fn header_parameters(&self) -> Option<naweb::ApiParametersFactory> {
         self.header_parameters
     }
 
-    /// 返回主要成功 HTTP 状态码。
+    /// 业务作用：返回主要成功 HTTP 状态码。
     pub const fn success_status(&self) -> u16 {
         self.success_status
     }
 
-    /// 返回额外响应集工厂。
+    /// 业务作用：返回额外响应集工厂。
     pub const fn additional_responses(&self) -> Option<naweb::ApiResponsesFactory> {
         self.additional_responses
     }
 
-    /// 返回是否为流式响应。
+    /// 业务作用：返回是否为流式响应。
     pub const fn streaming(&self) -> bool {
         self.streaming
     }
 
-    /// 返回端点属性是否要求认证；运行时 route policy 可能进一步把公开声明收紧。
+    /// 业务作用：返回端点属性是否要求认证；运行时 route policy 可能进一步把公开声明收紧。
     pub const fn auth_required(&self) -> bool {
         self.auth_required
     }
 
-    /// 返回该路由属于业务端点还是运行时管理端点。
+    /// 业务作用：返回该路由属于业务端点还是运行时管理端点。
     ///
     /// # 参数
     ///
@@ -225,7 +225,7 @@ pub enum WebReadinessState {
 }
 
 impl WebReadinessState {
-    /// 返回适合管理端响应和指标标签使用的稳定名称。
+    /// 业务作用：返回适合管理端响应和指标标签使用的稳定名称。
     ///
     /// # 参数
     ///
@@ -240,7 +240,7 @@ impl WebReadinessState {
         }
     }
 
-    /// 判断 Web 数据面是否处于统一应用定义的可接流状态。
+    /// 业务作用：判断 Web 数据面是否处于统一应用定义的可接流状态。
     ///
     /// # 参数
     ///
@@ -251,7 +251,7 @@ impl WebReadinessState {
 }
 
 impl From<ApplicationState> for WebReadinessState {
-    /// 将统一应用状态映射为 Web 数据面的对外状态。
+    /// 业务作用：将统一应用状态映射为 Web 数据面的对外状态。
     ///
     /// # 参数
     ///
@@ -285,7 +285,7 @@ pub struct WebMetricsSnapshot {
 }
 
 impl WebMetricsSnapshot {
-    /// 返回已经进入 Web 观测边界的请求总数。
+    /// 业务作用：返回已经进入 Web 观测边界的请求总数。
     ///
     /// # 参数
     ///
@@ -294,7 +294,7 @@ impl WebMetricsSnapshot {
         self.requests_started
     }
 
-    /// 返回已经正常生成响应的请求总数。
+    /// 业务作用：返回已经正常生成响应的请求总数。
     ///
     /// # 参数
     ///
@@ -303,7 +303,7 @@ impl WebMetricsSnapshot {
         self.requests_completed
     }
 
-    /// 返回读取快照时仍处于处理过程中的请求数。
+    /// 业务作用：返回读取快照时仍处于处理过程中的请求数。
     ///
     /// # 参数
     ///
@@ -312,7 +312,7 @@ impl WebMetricsSnapshot {
         self.requests_in_flight
     }
 
-    /// 返回已经生成的 4xx 响应总数。
+    /// 业务作用：返回已经生成的 4xx 响应总数。
     ///
     /// # 参数
     ///
@@ -321,7 +321,7 @@ impl WebMetricsSnapshot {
         self.responses_client_error
     }
 
-    /// 返回已经生成的 5xx 响应总数。
+    /// 业务作用：返回已经生成的 5xx 响应总数。
     ///
     /// # 参数
     ///
@@ -344,7 +344,7 @@ pub struct WebHandle {
 }
 
 impl WebHandle {
-    /// 从容器内部共享状态创建一个只读能力句柄。
+    /// 业务作用：从容器内部共享状态创建一个只读能力句柄。
     ///
     /// # 参数
     ///
@@ -357,7 +357,7 @@ impl WebHandle {
         }
     }
 
-    /// 返回监听器成功绑定后的真实本地地址。
+    /// 业务作用：返回监听器成功绑定后的真实本地地址。
     ///
     /// # 参数
     ///
@@ -369,7 +369,7 @@ impl WebHandle {
             .map(|published| published.local_addr)
     }
 
-    /// 返回 Web 配置采用的统一上下文前缀。
+    /// 业务作用：返回 Web 配置采用的统一上下文前缀。
     ///
     /// # 参数
     ///
@@ -382,7 +382,7 @@ impl WebHandle {
             .unwrap_or("")
     }
 
-    /// 返回绑定成功时发布的不可变路由清单。
+    /// 业务作用：返回绑定成功时发布的不可变路由清单。
     ///
     /// 清单包含自动收集端点和运行时探针；通过不透明路由定制闭包追加的端点无法可靠枚举，因而不在清单中。
     ///
@@ -397,7 +397,7 @@ impl WebHandle {
             .unwrap_or_else(|| Arc::from([]))
     }
 
-    /// 从与 Application 共用的原子状态来源读取 Web 就绪状态。
+    /// 业务作用：从与 Application 共用的原子状态来源读取 Web 就绪状态。
     ///
     /// # 参数
     ///
@@ -406,7 +406,7 @@ impl WebHandle {
         self.application_state.load().into()
     }
 
-    /// 返回当前 Web 请求计数的只读瞬时快照。
+    /// 业务作用：返回当前 Web 请求计数的只读瞬时快照。
     ///
     /// # 参数
     ///
@@ -417,7 +417,7 @@ impl WebHandle {
 }
 
 impl fmt::Debug for WebHandle {
-    /// 写出不包含路由服务对象和业务资源的只读诊断摘要。
+    /// 业务作用：写出不包含路由服务对象和业务资源的只读诊断摘要。
     ///
     /// # 参数
     ///
@@ -444,7 +444,7 @@ pub(crate) struct WebRuntimeState {
 }
 
 impl WebRuntimeState {
-    /// 创建尚未发布配置和监听信息的 Web 运行时状态。
+    /// 业务作用：创建尚未发布配置和监听信息的 Web 运行时状态。
     ///
     /// # 参数
     ///
@@ -457,7 +457,7 @@ impl WebRuntimeState {
         }
     }
 
-    /// 一次性发布已经完成配置校验的上下文前缀。
+    /// 业务作用：一次性发布已经完成配置校验的上下文前缀。
     ///
     /// # 参数
     ///
@@ -466,7 +466,7 @@ impl WebRuntimeState {
         self.context_path.set(context_path)
     }
 
-    /// 一次性发布真实监听地址与已经完成预检的不可变路由清单。
+    /// 业务作用：一次性发布真实监听地址与已经完成预检的不可变路由清单。
     ///
     /// # 参数
     ///
@@ -478,7 +478,7 @@ impl WebRuntimeState {
             .is_ok()
     }
 
-    /// 判断 Web 运行身份是否已经由 Ready 阶段发布。
+    /// 业务作用：判断 Web 运行身份是否已经由 Ready 阶段发布。
     ///
     /// # 参数
     ///
@@ -487,7 +487,7 @@ impl WebRuntimeState {
         self.published.get().is_some()
     }
 
-    /// 在请求进入最外层观测边界时创建计数守卫。
+    /// 业务作用：在请求进入最外层观测边界时创建计数守卫。
     ///
     /// # 参数
     ///
@@ -531,7 +531,7 @@ struct WebMetrics {
 }
 
 impl WebMetrics {
-    /// 读取全部原子计数并组成一个不携带可变能力的值快照。
+    /// 业务作用：读取全部原子计数并组成一个不携带可变能力的值快照。
     ///
     /// # 参数
     ///
@@ -554,7 +554,7 @@ pub(crate) struct WebRequestGuard {
 }
 
 impl WebRequestGuard {
-    /// 记录一次已经形成响应的请求结果。
+    /// 业务作用：记录一次已经形成响应的请求结果。
     ///
     /// # 参数
     ///
@@ -579,7 +579,7 @@ impl WebRequestGuard {
 }
 
 impl Drop for WebRequestGuard {
-    /// 在正常响应和取消路径上统一结束一次在途计数。
+    /// 业务作用：在正常响应和取消路径上统一结束一次在途计数。
     ///
     /// # 参数
     ///

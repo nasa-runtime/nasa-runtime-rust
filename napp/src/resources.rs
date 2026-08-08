@@ -19,7 +19,7 @@ type ErasedShutdown =
 
 /// 需要异步释放的业务资源。`Drop` 必须保持非阻塞；需要等待的清理由此方法完成。
 pub trait ManagedResource: Send + Sync + 'static {
-    /// 在全局剩余预算内完成需要等待的资源清理。
+    /// 业务作用：在全局剩余预算内完成需要等待的资源清理。
     ///
     /// # 参数
     ///
@@ -55,7 +55,7 @@ struct ResourceKey {
 }
 
 impl ResourceKey {
-    /// 为目标类型和 qualifier 创建资源 key。
+    /// 业务作用：为目标类型和 qualifier 创建资源 key。
     ///
     /// # 参数
     ///
@@ -90,7 +90,7 @@ pub struct ResourceRegistry {
 }
 
 impl Default for ResourceRegistry {
-    /// 创建处于 Open 阶段的空资源注册表。
+    /// 业务作用：创建处于 Open 阶段的空资源注册表。
     ///
     /// # 参数
     ///
@@ -101,7 +101,7 @@ impl Default for ResourceRegistry {
 }
 
 impl ResourceRegistry {
-    /// 创建处于 Open 阶段的空资源注册表。
+    /// 业务作用：创建处于 Open 阶段的空资源注册表。
     ///
     /// # 参数
     ///
@@ -116,7 +116,7 @@ impl ResourceRegistry {
         }
     }
 
-    /// 返回当前资源生命周期阶段。
+    /// 业务作用：返回当前资源生命周期阶段。
     ///
     /// # 参数
     ///
@@ -125,7 +125,7 @@ impl ResourceRegistry {
         read_unpoisoned(&self.state).phase
     }
 
-    /// 登记一个无 qualifier 的普通业务资源。
+    /// 业务作用：登记一个无 qualifier 的普通业务资源。
     ///
     /// # 参数
     ///
@@ -137,7 +137,7 @@ impl ResourceRegistry {
         self.register_inner(None, value, ResourceOwner::Business, None)
     }
 
-    /// 登记一个带 qualifier 的普通业务资源。
+    /// 业务作用：登记一个带 qualifier 的普通业务资源。
     ///
     /// # 参数
     ///
@@ -155,7 +155,7 @@ impl ResourceRegistry {
         )
     }
 
-    /// 登记一个无 qualifier 的受管业务资源。
+    /// 业务作用：登记一个无 qualifier 的受管业务资源。
     ///
     /// # 参数
     ///
@@ -172,7 +172,7 @@ impl ResourceRegistry {
         )
     }
 
-    /// 登记一个带 qualifier 的受管业务资源。
+    /// 业务作用：登记一个带 qualifier 的受管业务资源。
     ///
     /// # 参数
     ///
@@ -194,7 +194,7 @@ impl ResourceRegistry {
         )
     }
 
-    /// 借用一个无 qualifier 的资源并返回 owned mapped read guard。
+    /// 业务作用：借用一个无 qualifier 的资源并返回 owned mapped read guard。
     ///
     /// # 参数
     ///
@@ -206,7 +206,7 @@ impl ResourceRegistry {
         self.get_inner(None).await
     }
 
-    /// 借用一个指定 qualifier 的资源。
+    /// 业务作用：借用一个指定 qualifier 的资源。
     ///
     /// # 参数
     ///
@@ -222,7 +222,7 @@ impl ResourceRegistry {
             .await
     }
 
-    /// 由阶段上下文登记一个普通组件资源。
+    /// 业务作用：由阶段上下文登记一个普通组件资源。
     ///
     /// # 参数
     ///
@@ -242,7 +242,7 @@ impl ResourceRegistry {
         self.register_inner(qualifier, value, ResourceOwner::Component(component), None)
     }
 
-    /// 由阶段上下文登记一个受管组件资源。
+    /// 业务作用：由阶段上下文登记一个受管组件资源。
     ///
     /// # 参数
     ///
@@ -267,7 +267,7 @@ impl ResourceRegistry {
         )
     }
 
-    /// 在 UserHook 成功且任务登记关闭后封存资源 key 集合。
+    /// 业务作用：在 UserHook 成功且任务登记关闭后封存资源 key 集合。
     ///
     /// # 参数
     ///
@@ -284,7 +284,7 @@ impl ResourceRegistry {
         Ok(())
     }
 
-    /// 按逆登记顺序清理所有业务资源。
+    /// 业务作用：按逆登记顺序清理所有业务资源。
     ///
     /// # 参数
     ///
@@ -297,7 +297,7 @@ impl ResourceRegistry {
             .await
     }
 
-    /// 按逆登记顺序清理指定组件拥有的资源。
+    /// 业务作用：按逆登记顺序清理指定组件拥有的资源。
     ///
     /// # 参数
     ///
@@ -312,7 +312,7 @@ impl ResourceRegistry {
             .await
     }
 
-    /// 把注册表置为 Closed 并释放尚未移除的容器所有权。
+    /// 业务作用：把注册表置为 Closed 并释放尚未移除的容器所有权。
     ///
     /// # 参数
     ///
@@ -323,7 +323,7 @@ impl ResourceRegistry {
         state.entries.clear();
     }
 
-    /// 在同一写锁临界区完成阶段检查、重复检查和顺序号分配。
+    /// 业务作用：在同一写锁临界区完成阶段检查、重复检查和顺序号分配。
     ///
     /// # 参数
     ///
@@ -372,7 +372,7 @@ impl ResourceRegistry {
         Ok(())
     }
 
-    /// 解析资源 key、克隆内部锁并映射为目标类型只读守卫。
+    /// 业务作用：解析资源 key、克隆内部锁并映射为目标类型只读守卫。
     ///
     /// # 参数
     ///
@@ -415,7 +415,7 @@ impl ResourceRegistry {
         })
     }
 
-    /// 原子移除指定所有者条目，再在锁外按逆序执行显式清理。
+    /// 业务作用：原子移除指定所有者条目，再在锁外按逆序执行显式清理。
     ///
     /// 先从 key 集合移除可以关闭新查找；随后写锁等待保证已有 ResourceRef 先释放。
     ///
@@ -472,7 +472,7 @@ pub struct ResourceRef<'app, T: ?Sized> {
 impl<T: ?Sized> Deref for ResourceRef<'_, T> {
     type Target = T;
 
-    /// 返回 mapped read guard 指向的资源借用。
+    /// 业务作用：返回 mapped read guard 指向的资源借用。
     ///
     /// # 参数
     ///
@@ -482,7 +482,7 @@ impl<T: ?Sized> Deref for ResourceRef<'_, T> {
     }
 }
 
-/// 把擦除类型资源恢复为目标类型并调用其显式 shutdown。
+/// 业务作用：把擦除类型资源恢复为目标类型并调用其显式 shutdown。
 ///
 /// # 参数
 ///
@@ -505,7 +505,7 @@ where
     }
 }
 
-/// trim 并校验资源 qualifier。
+/// 业务作用：trim 并校验资源 qualifier。
 ///
 /// # 参数
 ///
@@ -518,7 +518,7 @@ fn normalize_qualifier(value: &str) -> ApplicationResult<Arc<str>> {
     Ok(Arc::from(value))
 }
 
-/// 创建资源容器的稳定运行期错误。
+/// 业务作用：创建资源容器的稳定运行期错误。
 ///
 /// # 参数
 ///
@@ -527,7 +527,7 @@ fn resource_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Resources, ApplicationPhase::Running, message)
 }
 
-/// 从同步状态锁取得读守卫，并在先前 panic 污染时继续保护内部值。
+/// 业务作用：从同步状态锁取得读守卫，并在先前 panic 污染时继续保护内部值。
 ///
 /// # 参数
 ///
@@ -536,7 +536,7 @@ fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 从同步状态锁取得写守卫，并在先前 panic 污染时继续保护内部值。
+/// 业务作用：从同步状态锁取得写守卫，并在先前 panic 污染时继续保护内部值。
 ///
 /// # 参数
 ///

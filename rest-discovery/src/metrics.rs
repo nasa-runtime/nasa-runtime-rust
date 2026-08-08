@@ -25,7 +25,7 @@ macro_rules! rest_metrics {
                 }
             )*
 
-            /// 取当前各计数的快照。
+            /// 业务作用：取当前各计数的快照。
             pub fn snapshot(&self) -> RestMetricsSnapshot {
                 RestMetricsSnapshot {
                     $( $field: self.$field.load(Ordering::Relaxed), )*

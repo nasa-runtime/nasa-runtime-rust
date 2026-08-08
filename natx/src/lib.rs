@@ -751,5 +751,5 @@ impl Conn {
     }
 }
 
-// ── re-export 过程宏:业务项目 `use natx::transactional;` 即可(像 tokio re-export tokio-macros)──
+// ── re-export 过程宏：业务项目 `use natx::transactional;` 即可。──
 pub use natx_macro::transactional;

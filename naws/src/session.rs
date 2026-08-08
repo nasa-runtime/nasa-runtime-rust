@@ -124,7 +124,7 @@ pub struct Outbox {
 }
 
 impl Clone for Outbox {
-    /// 复制当前句柄；用于共享同一底层资源或配置快照。
+    /// 业务作用：复制当前句柄；用于共享同一底层资源或配置快照。
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Outbox {
@@ -134,7 +134,7 @@ impl Clone for Outbox {
 }
 
 impl Drop for Outbox {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         // 最后一个发送端 drop → 标记关闭并唤醒 writer 让它收尾(对齐 mpsc 语义)。
         if self.shared.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -145,7 +145,7 @@ impl Drop for Outbox {
 }
 
 impl Outbox {
-    /// `cap` = business 条数上限;`byte_cap` = business 字节上限;`policy` = 满时取舍。
+    /// 业务作用：`cap` = business 条数上限;`byte_cap` = business 字节上限;`policy` = 满时取舍。
     ///
     /// # 参数
     /// - `cap`: 业务出站队列允许缓存的帧数量上限。
@@ -179,7 +179,7 @@ impl Outbox {
         )
     }
 
-    /// 业务帧:超 条数/字节 上限则按策略取舍(DropNew 丢新 / DropOldest 淘汰队首业务帧)。
+    /// 业务作用：业务帧:超 条数/字节 上限则按策略取舍(DropNew 丢新 / DropOldest 淘汰队首业务帧)。
     /// **不会**淘汰控制帧(两队列分离)。
     ///
     /// # 参数
@@ -224,7 +224,7 @@ impl Outbox {
         SendOutcome::Queued
     }
 
-    /// 控制帧(AUTH_RESP/PONG/CLOSE):进**优先**队列、writer 先发;有独立(大)上限保证正常
+    /// 业务作用：控制帧(AUTH_RESP/PONG/CLOSE):进**优先**队列、writer 先发;有独立(大)上限保证正常
     /// 情况下不丢,溢出(对端不读)时淘汰队首旧控制帧防 DoS。
     ///
     /// # 参数
@@ -252,12 +252,12 @@ impl Outbox {
         SendOutcome::Queued
     }
 
-    /// 累计因背压丢弃的帧数(业务被丢 + 控制溢出淘汰;可观测)。
+    /// 业务作用：累计因背压丢弃的帧数(业务被丢 + 控制溢出淘汰;可观测)。
     pub fn dropped(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
 
-    /// 主动关闭:置 closed + 唤醒 writer。writer 把已入队帧(含 CLOSE)排空后 recv 返回 None 退出
+    /// 业务作用：主动关闭:置 closed + 唤醒 writer。writer 把已入队帧(含 CLOSE)排空后 recv 返回 None 退出
     /// ——不必等所有发送端 Arc 自然 drop。
     pub fn close(&self) {
         self.shared.closed.store(true, Ordering::Release);
@@ -271,7 +271,7 @@ pub struct OutboxReceiver {
 }
 
 impl OutboxReceiver {
-    /// 取下一帧:**控制帧优先**,其次业务帧;两者皆空则挂起。
+    /// 业务作用：取下一帧:**控制帧优先**,其次业务帧;两者皆空则挂起。
     /// 所有发送端 drop 且队列排空后返回 None。
     pub async fn recv(&mut self) -> Option<Bytes> {
         loop {
@@ -339,7 +339,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// **框架内部构造**(`pub(crate)`):业务不得自行造 Session 并注册,
+    /// 业务作用：**框架内部构造**(`pub(crate)`):业务不得自行造 Session 并注册,
     /// 否则可绕过鉴权/生命周期不变量。
     pub(crate) fn new(
         id: String,
@@ -373,7 +373,7 @@ impl Session {
         })
     }
 
-    /// 尝试为一个 async handler 预留【本连接】的在飞名额:当前在飞 < `cap` 时 +1 并返回 RAII 释放守卫;
+    /// 业务作用：尝试为一个 async handler 预留【本连接】的在飞名额:当前在飞 < `cap` 时 +1 并返回 RAII 释放守卫;
     /// 已达 `cap` 返回 `None`(调用方据此拒绝该事件)。`cap == 0` 视为不限制(返回守卫但不计数)。
     /// 与全局 `handler_sem` 叠加:全局限总量、本方法限单连接占比,防单连接抢占全局池饿死其它连接。
     pub(crate) fn try_reserve_handler(self: &Arc<Self>, cap: usize) -> Option<HandlerReservation> {
@@ -406,7 +406,7 @@ impl Session {
         }
     }
 
-    /// 按**会话协议**编码并发一条业务 EVENT 给本会话(供 `SessionHandle::send_event` 复用,
+    /// 业务作用：按**会话协议**编码并发一条业务 EVENT 给本会话(供 `SessionHandle::send_event` 复用,
     /// 与 fan_out 的单会话编码保持一致：
     /// - NASA → **JSON_BYTES** EVENT 帧(浏览器 SDK 只收 JSON;Rust Client 也接受);
     /// - socket.io → 经 `PayloadBridge` + namespace 生成标准 `42[...]` 文本。
@@ -457,59 +457,59 @@ impl Session {
         self.send_business(frame)
     }
 
-    /// 返回会话 ID；用于调用方定位单个连接。
+    /// 业务作用：返回会话 ID；用于调用方定位单个连接。
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// 读取 transport 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 transport 状态；用于向调用方暴露当前运行信息。
     pub fn transport(&self) -> Transport {
         self.transport
     }
 
-    /// 返回会话协议类型；用于区分连接的编码和行为。
+    /// 业务作用：返回会话协议类型；用于区分连接的编码和行为。
     pub fn protocol(&self) -> Protocol {
         self.protocol
     }
 
-    /// 读取 uid 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 uid 状态；用于向调用方暴露当前运行信息。
     pub fn uid(&self) -> Option<&str> {
         self.uid.get().map(String::as_str)
     }
 
-    /// 读取 endpoint 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 endpoint 状态；用于向调用方暴露当前运行信息。
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint.get().map(String::as_str)
     }
 
-    /// 返回会话认证状态；用于在处理消息前判断是否已通过鉴权。
+    /// 业务作用：返回会话认证状态；用于在处理消息前判断是否已通过鉴权。
     pub fn authenticated(&self) -> bool {
         self.authenticated.load(Ordering::Acquire)
     }
 
-    /// 返回会话已加入的群组；用于外部观测和权限判断。
+    /// 业务作用：返回会话已加入的群组；用于外部观测和权限判断。
     pub fn groups(&self) -> Vec<String> {
         self.groups.lock().unwrap().iter().cloned().collect()
     }
 
-    /// 本会话当前群数(零分配,供上限检查)。
+    /// 业务作用：本会话当前群数(零分配,供上限检查)。
     pub fn group_count(&self) -> usize {
         self.groups.lock().unwrap().len()
     }
 
-    /// 框架内部:鉴权时设一次 uid。**`pub(crate)`**:业务(尤其鉴权回调)不得改 uid——否则
+    /// 业务作用：框架内部:鉴权时设一次 uid。**`pub(crate)`**:业务(尤其鉴权回调)不得改 uid——否则
     /// 回调先 set_uid、框架随后 set 因 OnceLock 已占用而静默失败,注册 uid 与鉴权返回不一致
     ///。
     pub(crate) fn set_uid(&self, uid: String) {
         let _ = self.uid.set(uid);
     }
 
-    /// 框架内部:握手/鉴权时设一次 endpoint。
+    /// 业务作用：框架内部:握手/鉴权时设一次 endpoint。
     pub(crate) fn set_endpoint(&self, ep: String) {
         let _ = self.endpoint.set(ep);
     }
 
-    /// 框架内部:鉴权时绑定 endpoint 快照(generation + Arc)。
+    /// 业务作用：框架内部:鉴权时绑定 endpoint 快照(generation + Arc)。
     pub(crate) fn bind_endpoint(&self, generation: u64, endpoint: Arc<Endpoint>) {
         let _ = self.bound.set(BoundEndpoint {
             generation,
@@ -517,17 +517,17 @@ impl Session {
         });
     }
 
-    /// 鉴权时绑定的 endpoint 快照(hook/分派恒用它,不按 path 重新解析)。
+    /// 业务作用：鉴权时绑定的 endpoint 快照(hook/分派恒用它,不按 path 重新解析)。
     pub(crate) fn bound_endpoint(&self) -> Option<&BoundEndpoint> {
         self.bound.get()
     }
 
-    /// 绑定代际(出站投递兜底校验用)。
+    /// 业务作用：绑定代际(出站投递兜底校验用)。
     pub(crate) fn bound_generation(&self) -> Option<u64> {
         self.bound.get().map(|b| b.generation)
     }
 
-    /// endpoint 下线/替换时向本会话发协议化的"endpoint removed"关闭通知
+    /// 业务作用：endpoint 下线/替换时向本会话发协议化的"endpoint removed"关闭通知
     /// (NASA → CLOSE(ENDPOINT_REMOVED) 帧;socket.io → `41` DISCONNECT)。
     /// 须在 cleanup **之前**调用(cleanup 置 closed 后控制帧不再入队)。
     pub(crate) fn send_endpoint_removed_close(&self) {
@@ -554,34 +554,34 @@ impl Session {
         }
     }
 
-    /// socket.io 会话连接的 namespace(默认 "/")。出站 sio 事件按此成帧。
+    /// 业务作用：socket.io 会话连接的 namespace(默认 "/")。出站 sio 事件按此成帧。
     pub fn sio_namespace(&self) -> &str {
         self.sio_namespace.get().map(String::as_str).unwrap_or("/")
     }
 
-    /// 框架内部:socket.io CONNECT 时设一次 namespace。仅 socketio 路径调用。
+    /// 业务作用：框架内部:socket.io CONNECT 时设一次 namespace。仅 socketio 路径调用。
     #[cfg_attr(not(feature = "socketio"), allow(dead_code))]
     pub(crate) fn set_sio_namespace(&self, ns: String) {
         let _ = self.sio_namespace.set(ns);
     }
 
-    /// 框架内部:鉴权结果落地。业务不得自行改认证态。
+    /// 业务作用：框架内部:鉴权结果落地。业务不得自行改认证态。
     pub(crate) fn set_authenticated(&self, v: bool) {
         self.authenticated.store(v, Ordering::Release);
     }
 
-    /// 是否已进入清理(closed)。closed 后 join_group/send 等被拒。
+    /// 业务作用：是否已进入清理(closed)。closed 后 join_group/send 等被拒。
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// 连接级关闭令牌克隆(level-triggered):读循环 select 之,外部 cleanup 即退
+    /// 业务作用：连接级关闭令牌克隆(level-triggered):读循环 select 之,外部 cleanup 即退
     ///。
     pub(crate) fn closed_token(&self) -> CancellationToken {
         self.closed_token.clone()
     }
 
-    /// 进入 `Connecting`(即将执行 on_connect)。须在 `set_authenticated`
+    /// 业务作用：进入 `Connecting`(即将执行 on_connect)。须在 `set_authenticated`
     /// **之前**调——保证"authenticated=true 而 phase 仍 Pending"的窗口不存在,cleanup 的
     /// 阶段裁决因此完备。返回 false = 会话已被并发下线,调用方跳过 on_connect(也无配对
     /// disconnect 需要触发)。
@@ -594,7 +594,7 @@ impl Session {
         true
     }
 
-    /// on_connect 返回后调
+    /// 业务作用：on_connect 返回后调
     /// - `Connecting → Active`:正常路径,返回 false;
     /// - `ClosingDuringConnect → Closed`:on_connect 期间被外部下线(逻辑注销已完成、
     ///   on_disconnect 被延迟)——返回 **true**,调用方**此刻**触发 exactly-once 的
@@ -615,7 +615,7 @@ impl Session {
         }
     }
 
-    /// 会话是否可作为 **fan-out 目标**:authenticated + 未关闭 + 阶段就绪。
+    /// 业务作用：会话是否可作为 **fan-out 目标**:authenticated + 未关闭 + 阶段就绪。
     /// `Connecting`(on_connect 尚未完成)**不可达**——业务初始化(入群/订阅/上下文)未
     /// 完成前,本地 Sender 与 Redis 跨节点 `send_local` 都不得投递业务消息;
     /// on_connect **自己**经 `SessionHandle::send_event` 发欢迎帧不受此限(不走 resolve_targets,
@@ -632,12 +632,12 @@ impl Session {
         )
     }
 
-    /// 框架内部:cleanup 主动关闭出站队列(writer 排空已入队帧后退出)。
+    /// 业务作用：框架内部:cleanup 主动关闭出站队列(writer 排空已入队帧后退出)。
     pub(crate) fn close_outbox(&self) {
         self.outbox.close();
     }
 
-    /// 发**控制**帧(AUTH_RESP/PONG/CLOSE/握手等):进优先队列,writer 先发。
+    /// 业务作用：发**控制**帧(AUTH_RESP/PONG/CLOSE/握手等):进优先队列,writer 先发。
     /// closed 后一律 `Closed`,防晚到的 handler 往已关连接排队。
     /// **`pub(crate)`**:控制帧只由框架发——否则鉴权回调/业务 handler 拿到 `Arc<Session>` 后
     /// 可伪造 `AUTH_RESP` 等控制帧。业务发消息用 `Sender` / `send_business`。
@@ -655,7 +655,7 @@ impl Session {
         self.outbox.send_control(frame)
     }
 
-    /// 发**业务**帧(整帧)。**`pub(crate)`**:业务只能经 `SessionHandle::send_event`(框架编码、
+    /// 业务作用：发**业务**帧(整帧)。**`pub(crate)`**:业务只能经 `SessionHandle::send_event`(框架编码、
     /// 帧类型恒 EVENT),不能直接塞整帧(否则可把类型设成 CLOSE/AUTH_RESP)。
     ///
     /// 两道统一闸门(所有业务发送入口在此收口):
@@ -679,7 +679,7 @@ impl Session {
         self.outbox.send_business(frame)
     }
 
-    /// 出站单帧上限,**按协议区分口径**(不再用无协议区分的 `+4`)
+    /// 业务作用：出站单帧上限,**按协议区分口径**(不再用无协议区分的 `+4`)
     /// - NASA:`max_frame` 约束**内层 declared 长度**(type+mode+payload,与入站 FrameCodec
     ///   完全同语义);整帧 = declared + 4B 长度头,故上限 = max_frame + 4;
     /// - socket.io:文本无长度头,**文本字节数即口径**(= engine.io OPEN 广告的 maxPayload),
@@ -694,7 +694,7 @@ impl Session {
         }
     }
 
-    /// 超限丢弃:计数 + 限频 warn(1,2,4,8,...,持续超限不刷日志)。
+    /// 业务作用：超限丢弃:计数 + 限频 warn(1,2,4,8,...,持续超限不刷日志)。
     ///
     /// # 参数
     /// - `len`: 本次待发送出站帧的字节数。
@@ -709,12 +709,12 @@ impl Session {
         }
     }
 
-    /// 因超过出站 max_frame 被拦截的帧累计数(业务帧 + 控制帧都计;可观测)。
+    /// 业务作用：因超过出站 max_frame 被拦截的帧累计数(业务帧 + 控制帧都计;可观测)。
     pub fn oversize_dropped(&self) -> u64 {
         self.oversize_dropped.load(Ordering::Relaxed)
     }
 
-    /// 加入群组:同步更新自身集合 + Registry by_group 索引(groups 只经此改)。
+    /// 业务作用：加入群组:同步更新自身集合 + Registry by_group 索引(groups 只经此改)。
     /// 若该群在本节点是 0→1 跃迁(首个成员),触发 group_change(Gained)→ 集群增量 presence。
     ///
     ///
@@ -753,7 +753,7 @@ impl Session {
         }
     }
 
-    /// 让会话离开指定群组；用于停止接收该群组广播。
+    /// 业务作用：让会话离开指定群组；用于停止接收该群组广播。
     ///
     ///
     /// # 参数
@@ -776,7 +776,7 @@ impl Session {
         }
     }
 
-    /// 框架内部:连接清理——在 lifecycle 锁内置 closed + 注销(与 join/leave 互斥)。
+    /// 业务作用：框架内部:连接清理——在 lifecycle 锁内置 closed + 注销(与 join/leave 互斥)。
     /// 返回"调用方是否应**此刻**触发 on_disconnect"。裁决规则
     /// - 仅**首位关闭者**有资格(exactly-once 第一道闸);
     /// - 阶段 `Active` → 返回 true(正常路径,调用方立即触发);
@@ -839,7 +839,7 @@ pub(crate) struct HandlerReservation {
 }
 
 impl Drop for HandlerReservation {
-    /// 归还本连接在飞名额;用于 handler 任务结束(或 panic 展开)时释放配额。
+    /// 业务作用：归还本连接在飞名额;用于 handler 任务结束(或 panic 展开)时释放配额。
     fn drop(&mut self) {
         if self.counted {
             self.session
@@ -858,52 +858,52 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(inner: Arc<Session>) -> SessionHandle {
         SessionHandle { inner }
     }
 
-    /// 返回会话 ID；用于调用方定位单个连接。
+    /// 业务作用：返回会话 ID；用于调用方定位单个连接。
     pub fn id(&self) -> &str {
         self.inner.id()
     }
 
-    /// 读取 uid 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 uid 状态；用于向调用方暴露当前运行信息。
     pub fn uid(&self) -> Option<&str> {
         self.inner.uid()
     }
 
-    /// 读取 endpoint 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 endpoint 状态；用于向调用方暴露当前运行信息。
     pub fn endpoint(&self) -> Option<&str> {
         self.inner.endpoint()
     }
 
-    /// 读取 transport 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 transport 状态；用于向调用方暴露当前运行信息。
     pub fn transport(&self) -> Transport {
         self.inner.transport()
     }
 
-    /// 返回会话协议类型；用于区分连接的编码和行为。
+    /// 业务作用：返回会话协议类型；用于区分连接的编码和行为。
     pub fn protocol(&self) -> Protocol {
         self.inner.protocol()
     }
 
-    /// 返回 Socket.IO 命名空间；用于按命名空间隔离事件。
+    /// 业务作用：返回 Socket.IO 命名空间；用于按命名空间隔离事件。
     pub fn sio_namespace(&self) -> &str {
         self.inner.sio_namespace()
     }
 
-    /// 返回会话已加入的群组；用于外部观测和权限判断。
+    /// 业务作用：返回会话已加入的群组；用于外部观测和权限判断。
     pub fn groups(&self) -> Vec<String> {
         self.inner.groups()
     }
 
-    /// 返回当前对象的 closed 状态。
+    /// 业务作用：返回当前对象的 closed 状态。
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
 
-    /// 让会话加入指定群组；用于接收后续群组广播。
+    /// 业务作用：让会话加入指定群组；用于接收后续群组广播。
     ///
     /// # 参数
     /// - `group`: 要加入的群组名。
@@ -911,7 +911,7 @@ impl SessionHandle {
         self.inner.join_group(group);
     }
 
-    /// 让会话离开指定群组；用于停止接收该群组广播。
+    /// 业务作用：让会话离开指定群组；用于停止接收该群组广播。
     ///
     /// # 参数
     /// - `group`: 要离开的群组名。
@@ -919,12 +919,12 @@ impl SessionHandle {
         self.inner.leave_group(group);
     }
 
-    /// 返回会话群组数量；用于观测连接订阅规模。
+    /// 业务作用：返回会话群组数量；用于观测连接订阅规模。
     pub fn group_count(&self) -> usize {
         self.inner.group_count()
     }
 
-    /// 发**业务事件**给本会话:由**框架按会话协议**编码(NASA→JSON EVENT 帧 / socket.io→`42[...]`
+    /// 业务作用：发**业务事件**给本会话:由**框架按会话协议**编码(NASA→JSON EVENT 帧 / socket.io→`42[...]`
     /// 文本)。**只接 event+payload**,不接整帧——业务无法把帧类型设成 CLOSE/AUTH_RESP
     /// 注入控制帧。
     ///
@@ -935,7 +935,7 @@ impl SessionHandle {
         self.inner.encode_and_send_event(event, payload)
     }
 
-    /// 因超过出站 max_frame 被拦截的帧累计数(计数器须经公开句柄可读,
+    /// 业务作用：因超过出站 max_frame 被拦截的帧累计数(计数器须经公开句柄可读,
     /// 仅 warn 不等于指标可观测)。
     pub fn oversize_dropped(&self) -> u64 {
         self.inner.oversize_dropped()
@@ -978,12 +978,12 @@ struct PresenceState {
 }
 
 impl SessionRegistry {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub fn new() -> Arc<SessionRegistry> {
         Arc::new(SessionRegistry::default())
     }
 
-    /// 注册会话。在 `lifecycle` 锁内 + `by_id` **单 shard 写锁内**完成"检查并插入",形成原子、
+    /// 业务作用：注册会话。在 `lifecycle` 锁内 + `by_id` **单 shard 写锁内**完成"检查并插入",形成原子、
     /// 不变量闭合的协议
     /// - **已 closed** 的 session 拒绝(cleanup 后再 register 不留幽灵条目);
     /// - `by_id` 的 `entry`:`Vacant` 才插入;`Occupied` 仅当 `Arc::ptr_eq` 同一 Session 视为幂等,
@@ -1026,7 +1026,7 @@ impl SessionRegistry {
         true
     }
 
-    /// 统一清理。**仅供 `Session::cleanup`(已持 lifecycle 锁)调用**——不对外暴露,
+    /// 业务作用：统一清理。**仅供 `Session::cleanup`(已持 lifecycle 锁)调用**——不对外暴露,
     /// 杜绝"并发 unregister 绕过生命周期锁制造幽灵桶"。返回需锁外触发的
     /// Lost 跃迁 (group, version);取号在 by_group 桶锁内完成(与 join 串行,版本不逆序)。
     ///
@@ -1063,7 +1063,7 @@ impl SessionRegistry {
         lost
     }
 
-    /// 按 ID 取**受控句柄**(对外只读视图)。不再返回 `Arc<Session>`——否则业务可借此拿到完整
+    /// 业务作用：按 ID 取**受控句柄**(对外只读视图)。不再返回 `Arc<Session>`——否则业务可借此拿到完整
     /// Session 绕过收口。框架内部用 `by_id_arc`。
     ///
     /// # 参数
@@ -1072,12 +1072,12 @@ impl SessionRegistry {
         self.by_id.get(id).map(|r| SessionHandle::new(r.clone()))
     }
 
-    /// 框架内部:取 `Arc<Session>`(fan-out / 生命周期)。
+    /// 业务作用：框架内部:取 `Arc<Session>`(fan-out / 生命周期)。
     pub(crate) fn by_id_arc(&self, id: &str) -> Option<Arc<Session>> {
         self.by_id.get(id).map(|r| r.clone())
     }
 
-    /// 按用户 ID 查询会话 ID；用于向同一用户的多个连接发送消息。
+    /// 业务作用：按用户 ID 查询会话 ID；用于向同一用户的多个连接发送消息。
     ///
     /// # 参数
     /// - `uid`: 业务用户 ID。
@@ -1088,7 +1088,7 @@ impl SessionRegistry {
             .unwrap_or_default()
     }
 
-    /// 按端点查询会话 ID；用于向某个入口下的连接发送消息。
+    /// 业务作用：按端点查询会话 ID；用于向某个入口下的连接发送消息。
     ///
     /// # 参数
     /// - `ep`: endpoint 路径。
@@ -1099,7 +1099,7 @@ impl SessionRegistry {
             .unwrap_or_default()
     }
 
-    /// 按群组查询会话 ID；用于群发前定位目标连接。
+    /// 业务作用：按群组查询会话 ID；用于群发前定位目标连接。
     ///
     /// # 参数
     /// - `g`: 群组名。
@@ -1110,7 +1110,7 @@ impl SessionRegistry {
             .unwrap_or_default()
     }
 
-    /// 本地有成员的 group 列表(集群 presence 广播用,给对端建群目录)。
+    /// 业务作用：本地有成员的 group 列表(集群 presence 广播用,给对端建群目录)。
     pub fn local_groups(&self) -> Vec<String> {
         self.by_group
             .iter()
@@ -1119,7 +1119,7 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// 全量 presence 快照:返回 **(版本, 本地群集合)**,二者天然一致——直接 lock+clone
+    /// 业务作用：全量 presence 快照:返回 **(版本, 本地群集合)**,二者天然一致——直接 lock+clone
     /// `PresenceState`(版本与群集合在群桶锁内一起更新)。一次完成、**有界**,不再 seqlock 重试,
     /// 不会被高 churn 的无关热点群饿死。
     ///
@@ -1128,23 +1128,23 @@ impl SessionRegistry {
         (p.version, p.groups.iter().cloned().collect())
     }
 
-    /// 返回在线会话数量；用于监控和容量判断。
+    /// 业务作用：返回在线会话数量；用于监控和容量判断。
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
 
-    /// 返回当前对象的 empty 状态。
+    /// 业务作用：返回当前对象的 empty 状态。
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
 
-    /// 注入群 0/1 跃迁回调(集群装配时调)。**`pub(crate)`**:业务不得覆盖集群 presence hook
+    /// 业务作用：注入群 0/1 跃迁回调(集群装配时调)。**`pub(crate)`**:业务不得覆盖集群 presence hook
     /// (否则静默切断跨节点 presence)。
     pub(crate) fn set_group_change_hook(&self, hook: GroupChangeHook) {
         *self.group_change.lock().unwrap() = Some(hook);
     }
 
-    /// 仅发 hook(版本已在桶锁内取好)。慢 I/O 不占任何锁。
+    /// 业务作用：仅发 hook(版本已在桶锁内取好)。慢 I/O 不占任何锁。
     ///
     /// # 参数
     /// - `group`: 消费组、服务分组或任务分组名称。
@@ -1157,7 +1157,7 @@ impl SessionRegistry {
         }
     }
 
-    /// 在 PresenceState 锁内原子更新「版本 +1 且增/删群」,返回新版本。**调用方须正持有该
+    /// 业务作用：在 PresenceState 锁内原子更新「版本 +1 且增/删群」,返回新版本。**调用方须正持有该
     /// group 的 by_group 桶写锁**——使同一 group 的跃迁被桶锁串行化,版本顺序 == 真实状态变更
     /// 顺序;且 version 与 groups 一起更新,FULL 一次 clone 即一致。
     ///
@@ -1175,7 +1175,7 @@ impl SessionRegistry {
         p.version
     }
 
-    /// 在 by_group 桶写锁内:插入 id;**0→1 跃迁则取版本号**(无条件,不以是否装 hook 为条件)。
+    /// 业务作用：在 by_group 桶写锁内:插入 id;**0→1 跃迁则取版本号**(无条件,不以是否装 hook 为条件)。
     ///
     /// # 参数
     /// - `group`: 消费组、服务分组或任务分组名称。
@@ -1187,7 +1187,7 @@ impl SessionRegistry {
         was_empty.then(|| self.bump_presence(group, true))
     }
 
-    /// 在 by_group 桶写锁内:移除 id;**1→0 跃迁则在同一临界区取号**,返回 Some(version)。
+    /// 业务作用：在 by_group 桶写锁内:移除 id;**1→0 跃迁则在同一临界区取号**,返回 Some(version)。
     /// 取号后(锁外)尝试删空桶:若放锁窗口内有新 join 插入(它已取更大号),桶非空 → 不删,
     /// 不误发;其 Gained 版本必 > 本 Lost 版本,远端 LWW 最终为在席。
     ///
@@ -1207,7 +1207,7 @@ impl SessionRegistry {
         version
     }
 
-    /// 从某个二级索引桶移除 id,桶空则删桶(避免泄漏空 set)。
+    /// 业务作用：从某个二级索引桶移除 id,桶空则删桶(避免泄漏空 set)。
     ///
     /// # 参数
     /// - `map`: 当前函数读取或更新的键值映射。

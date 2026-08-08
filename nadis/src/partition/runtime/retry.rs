@@ -3,7 +3,7 @@ use crate::config::PoisonPolicy;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// RetryBackoff 到期重投:逐 ID `XPENDING 精确查 + XCLAIM 0` 取回 payload(PEL 路径,
+/// 业务作用：RetryBackoff 到期重投:逐 ID `XPENDING 精确查 + XCLAIM 0` 取回 payload(PEL 路径,
 /// 不变量 5：ExactTargetRetry 的无 marker 简化版；XCLAIM Unknown 通过 retry-op 对账收敛。
 pub(super) async fn retry_redeliver(
     rt: &Arc<GroupRuntime>,
@@ -258,7 +258,7 @@ pub(super) async fn retry_redeliver(
     let _ = attempt; // attempt 已由 slot.retry_attempt 权威维护(此处仅日志可用)
 }
 
-/// 对一组 ID 做 best-effort fenced ACK(墓碑清理用;V2 走 fenced Lua,V1 裸 XACK)。
+/// 业务作用：对一组 ID 做 best-effort fenced ACK(墓碑清理用;V2 走 fenced Lua,V1 裸 XACK)。
 /// ACK 不在 PEL 的 ID 是 no-op,故对"墓碑残留"与"已出 PEL"两种情况都安全。
 ///
 /// # 参数
@@ -295,7 +295,7 @@ async fn fenced_ack_best_effort(rt: &Arc<GroupRuntime>, slot: &ClaimSlot, p: u32
     }
 }
 
-/// 原实现V1(无 fence)裸 XACK 前补 holder 二次校验(与 worker `process_batch`
+/// 业务作用：原实现V1(无 fence)裸 XACK 前补 holder 二次校验(与 worker `process_batch`
 /// 的 XACK-前 holds_status 复核对齐)——`holds_status` 非 `Held`(Lost/Unknown)一律不 ACK,杜绝
 /// "本轮判 not-lost、执行 XACK 时锁恰被新 owner 接管,旧 owner 仍把已被接管的消息清出 PEL"丢消息窗口。
 /// RustV2 走 `fenced_ack` 原子校验(已安全),本路径仅 原实现V1(fence_meta=None,与 原实现 节点互通)。
@@ -342,7 +342,7 @@ enum PoisonOutcome {
     Retry,
 }
 
-/// 处置毒消息**子集**(`poison_ids`):Drop = fenced ACK 清 PEL;Dlq = park 转存 + 发 DLQ;
+/// 业务作用：处置毒消息**子集**(`poison_ids`):Drop = fenced ACK 清 PEL;Dlq = park 转存 + 发 DLQ;
 /// Park = park 转存并冻结分区。不设置 slot.state(调用方按 PoisonOutcome 决定),
 /// 仅读取 slot 的 guard/stamp。
 ///
@@ -512,7 +512,7 @@ async fn handle_poison(
     }
 }
 
-/// 新 owner 接管恢复:`XAUTOCLAIM min_idle=0` 分页收编本组**全部**残留
+/// 业务作用：新 owner 接管恢复:`XAUTOCLAIM min_idle=0` 分页收编本组**全部**残留
 /// PEL 到本 consumer——旧 owner 已被分区锁 + fencing 排除,min_idle=0 立即收编,不像
 /// 运行期孤儿巡检那样制造一段不可消费窗口。收编到的 ID 交 coordinator 转 RetryBackoff,
 /// 走 permit 门控的重投/毒消息路径(payload 在重投路径再取)。
@@ -544,7 +544,7 @@ pub(super) async fn recover_pel(
     }
 }
 
-/// 一次完整的 PEL 收编扫描:`XAUTOCLAIM min_idle=0 ... JUSTID` 游标分页,直到游标归 0。
+/// 业务作用：一次完整的 PEL 收编扫描:`XAUTOCLAIM min_idle=0 ... JUSTID` 游标分页,直到游标归 0。
 /// 返回收编到的 **claimed** ID(进重投);deleted ID(Redis 已自动移出 PEL,实测)
 /// 仅计数告警,**不进 retry-op**。transport/协议/停滞异常一律上抛由外层重试。
 ///
@@ -612,7 +612,7 @@ async fn scan_pel_once(
     }
 }
 
-/// 运行期 orphan sweep 单分区:对已持有分区
+/// 业务作用：运行期 orphan sweep 单分区:对已持有分区
 /// `XAUTOCLAIM min_idle ... JUSTID` **游标分页**收编滞留过久的 PEL——兜住"旧 owner 丢锁后、
 /// 其看门狗尚未判定 Lost 前的迟到 `>` 把消息拉进死 consumer PEL"这种一次性 takeover recovery
 /// 覆盖不到的残留(min_idle 过滤本方刚拉取的新条目,不误抢)。
@@ -671,7 +671,7 @@ pub(super) async fn sweep_partition(
     out
 }
 
-/// 解析 `XAUTOCLAIM ... JUSTID` 响应:`[next-cursor, [id...], [deleted-id...]]`。
+/// 业务作用：解析 `XAUTOCLAIM ... JUSTID` 响应:`[next-cursor, [id...], [deleted-id...]]`。
 /// 响应形态异常即 Err(协议错误,**不猜成空**)。
 ///
 /// # 参数
@@ -714,7 +714,7 @@ fn parse_xautoclaim_justid(v: redis::Value) -> Result<(String, Vec<String>, Vec<
     Ok((next, claimed, deleted))
 }
 
-/// 取回指定 ID 的 entry 原文。改用 **XRANGE**(只读 stream entry,**不需要 PEL
+/// 业务作用：取回指定 ID 的 entry 原文。改用 **XRANGE**(只读 stream entry,**不需要 PEL
 /// 所有权、不带外递增 delivery count**)——此前 `XCLAIM idle=0` 既要求本节点是 PEL owner(与
 /// 锁/fence 所有权不一致窗口下会跨 owner 改 PEL),又会把 delivery count +1(带外污染毒消息判定)。
 /// fail-closed:Redis 错误**上抛**(调用方 → `PoisonOutcome::Retry`);entry 不存在

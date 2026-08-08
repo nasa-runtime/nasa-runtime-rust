@@ -137,7 +137,7 @@ pub struct ReadinessPolicy {
     feature = "web"
 ))]
 impl ReadinessPolicy {
-    /// 关键、立即生效、不检查 stale 的策略。
+    /// 业务作用：关键、立即生效、不检查 stale 的策略。
     ///
     /// 复现旧布尔契约:贡献项初始 `Unknown`(关键 → 未就绪),一次就绪观测即 Ready、一次
     /// 不就绪观测即 NotReady,不因未周期刷新而 stale。兼容入口 `set_ready` 使用此策略。
@@ -238,7 +238,7 @@ struct EntryState {
     feature = "web"
 ))]
 impl EntryState {
-    /// 创建尚无观测的贡献项状态，并冻结组件身份与阈值策略。
+    /// 业务作用：创建尚无观测的贡献项状态，并冻结组件身份与阈值策略。
     fn new(component: Arc<str>, policy: ReadinessPolicy) -> Self {
         Self {
             component,
@@ -251,7 +251,7 @@ impl EntryState {
         }
     }
 
-    /// 按阈值推进已发布状态。`raw` 为本次原始观测,`observed_reason` 为其静态原因码。
+    /// 业务作用：按阈值推进已发布状态。`raw` 为本次原始观测,`observed_reason` 为其静态原因码。
     fn advance(&mut self, raw: DependencyState, observed_reason: &'static str, now: Instant) {
         self.last_observed = Some(now);
         match raw {
@@ -290,7 +290,7 @@ impl EntryState {
         }
     }
 
-    /// 计入 stale 后的有效状态与原因。
+    /// 业务作用：计入 stale 后的有效状态与原因。
     fn effective(&self, now: Instant) -> (DependencyState, &'static str) {
         let stale = matches!(
             (self.policy.stale_after, self.last_observed),
@@ -339,7 +339,7 @@ pub struct ReadinessContributor {
     feature = "web"
 ))]
 impl ReadinessContributor {
-    /// 发布一次原始观测,由策略阈值决定是否改变已发布状态。
+    /// 业务作用：发布一次原始观测,由策略阈值决定是否改变已发布状态。
     ///
     /// # 参数
     ///
@@ -353,7 +353,7 @@ impl ReadinessContributor {
             .advance(state, reason, now);
     }
 
-    /// 发布一次降级/失败裁决，但不把它计作 stale freshness。
+    /// 业务作用：发布一次降级/失败裁决，但不把它计作 stale freshness。
     ///
     /// 仅用于“last-good 仍可服务，但 freshness 必须从最后一次成功刷新起算”的 owner（当前为远程
     /// JWKS）。这样刷新失败可以立刻显示 Degraded，同时 `stale_after` 仍会在最后成功时间到期后升级
@@ -375,7 +375,7 @@ impl ReadinessContributor {
         entry.last_observed = last_observed;
     }
 
-    /// 旧布尔契约兼容入口:`true` → 一次 `Ready` 观测,`false` → 一次 `NotReady` 观测。
+    /// 业务作用：旧布尔契约兼容入口:`true` → 一次 `Ready` 观测,`false` → 一次 `NotReady` 观测。
     ///
     /// 供既有组件(kafka)继续使用;新组件应直接调用 [`observe`](Self::observe)。
     ///
@@ -414,7 +414,7 @@ pub struct ReadinessRegistry {
 }
 
 impl ReadinessRegistry {
-    /// 创建没有动态贡献项的注册表。
+    /// 业务作用：创建没有动态贡献项的注册表。
     ///
     /// # 返回
     ///
@@ -436,7 +436,7 @@ impl ReadinessRegistry {
         }
     }
 
-    /// 注册一个带稳定组件归属的贡献项。
+    /// 业务作用：注册一个带稳定组件归属的贡献项。
     #[cfg(any(
         feature = "kafka",
         feature = "db",
@@ -483,14 +483,14 @@ impl ReadinessRegistry {
         Ok(ReadinessContributor { entry })
     }
 
-    /// 封口注册表:此后 `register` 返回 [`RegisterError::Sealed`]。
+    /// 业务作用：封口注册表:此后 `register` 返回 [`RegisterError::Sealed`]。
     ///
     /// 由 Application 在资源封口(UserHook 结束)时调用,防止运行期无界新增贡献项名称。
     pub fn seal(&self) {
         self.sealed.store(true, Ordering::Release);
     }
 
-    /// 计入 stale 后聚合全体依赖,得出对流量的最终裁决。
+    /// 业务作用：计入 stale 后聚合全体依赖,得出对流量的最终裁决。
     ///
     /// # 参数
     ///
@@ -578,7 +578,7 @@ impl ReadinessRegistry {
         }
     }
 
-    /// 旧布尔契约兼容入口:聚合是否可接收流量(等价 `snapshot(Instant::now()).ready`)。
+    /// 业务作用：旧布尔契约兼容入口:聚合是否可接收流量(等价 `snapshot(Instant::now()).ready`)。
     ///
     /// # 返回
     ///
@@ -589,7 +589,7 @@ impl ReadinessRegistry {
 }
 
 impl Default for ReadinessRegistry {
-    /// 创建尚未封口且不含贡献项的注册表。
+    /// 业务作用：创建尚未封口且不含贡献项的注册表。
     fn default() -> Self {
         Self::new()
     }

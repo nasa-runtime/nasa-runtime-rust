@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-/// Runs the periodic partition rebalance loop.
+/// 业务作用：周期执行分区再平衡，并在单轮失败后等待下一轮重试。
 pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
     let period = Duration::from_millis(rt.cfg.rebalance_ms);
     // 直接使用配置周期(原 period.min(1s) 把生产默认 10s 反写成
@@ -19,7 +19,7 @@ pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
     }
 }
 
-/// 单轮再平衡(也被 wake 触发调用):
+/// 业务作用：单轮再平衡(也被 wake 触发调用):
 /// ①心跳:ZADD nodes score=墙钟 now+3*period(V1 语义,与 原实现 混跑兼容);
 /// ②清过期成员(score < now)→ ZCARD = alive;③fair = ceil(count/alive);
 /// ④欠额:扫描未持有分区 tryLock 抢占(锁互斥保证全集群唯一 owner);

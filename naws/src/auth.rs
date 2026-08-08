@@ -26,7 +26,7 @@ pub enum AuthResult {
 }
 
 impl AuthResult {
-    /// 构造鉴权通过结果。
+    /// 业务作用：构造鉴权通过结果。
     ///
     /// # 参数
     /// - `uid`: 业务用户 ID,通过后会绑定到当前 session,不得为空或空白。
@@ -34,7 +34,7 @@ impl AuthResult {
         AuthResult::Ok { uid: uid.into() }
     }
 
-    /// 构造鉴权失败结果。
+    /// 业务作用：构造鉴权失败结果。
     ///
     /// # 参数
     /// - `reason`: 鉴权失败原因,会写入鉴权响应供客户端和日志排查。
@@ -63,7 +63,7 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
-    /// 从 session 构造结果；用于统一输入适配。
+    /// 业务作用：从 session 构造结果；用于统一输入适配。
     pub(crate) fn from_session(s: &Session) -> AuthContext {
         AuthContext {
             session_id: s.id().to_string(),
@@ -97,27 +97,27 @@ pub struct PolicyContext<'a> {
 }
 
 impl<'a> PolicyContext<'a> {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(sess: &'a Arc<Session>) -> PolicyContext<'a> {
         PolicyContext { sess }
     }
 
-    /// 读取 uid 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 uid 状态；用于向调用方暴露当前运行信息。
     pub fn uid(&self) -> Option<&str> {
         self.sess.uid()
     }
 
-    /// 读取 endpoint 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 endpoint 状态；用于向调用方暴露当前运行信息。
     pub fn endpoint(&self) -> Option<&str> {
         self.sess.endpoint()
     }
 
-    /// 读取 transport 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 transport 状态；用于向调用方暴露当前运行信息。
     pub fn transport(&self) -> Transport {
         self.sess.transport()
     }
 
-    /// 发送者当前是否在群 `g`(供按成员/群授权)。
+    /// 业务作用：发送者当前是否在群 `g`(供按成员/群授权)。
     ///
     /// # 参数
     /// - `g`: 要检查的群组名。
@@ -130,12 +130,12 @@ impl<'a> PolicyContext<'a> {
 /// 只作用于客户端触发的自动 relay;服务端直接 `Sender::send` 不经过它。
 pub type InboundPolicy = Arc<dyn Fn(&PolicyContext, &Message) -> RouteDecision + Send + Sync>;
 
-/// 默认全拒绝:客户端带路由字段默认不自动 relay,业务须显式放行。
+/// 业务作用：默认全拒绝:客户端带路由字段默认不自动 relay,业务须显式放行。
 pub fn deny_all() -> InboundPolicy {
     Arc::new(|_ctx, _m| RouteDecision::Deny)
 }
 
-/// 全放行(对齐 原实现 RoutePolicy.allowAll);仅在确需开放客户端路由时显式用。
+/// 业务作用：全放行(对齐 原实现 RoutePolicy.allowAll);仅在确需开放客户端路由时显式用。
 pub fn allow_all() -> InboundPolicy {
     Arc::new(|_ctx, _m| RouteDecision::RelayAndHandle)
 }

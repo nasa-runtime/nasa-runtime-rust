@@ -40,7 +40,7 @@ pub struct ApplicationExit {
 }
 
 impl ApplicationExit {
-    /// 返回决定本次正常退出的首次事件。
+    /// 业务作用：返回决定本次正常退出的首次事件。
     ///
     /// # 参数
     ///
@@ -49,7 +49,7 @@ impl ApplicationExit {
         self.reason
     }
 
-    /// 返回进程入口应使用的退出码。
+    /// 业务作用：返回进程入口应使用的退出码。
     ///
     /// # 参数
     ///
@@ -58,7 +58,7 @@ impl ApplicationExit {
         self.code
     }
 
-    /// 返回 active stack 清理过程中收集到的次要错误。
+    /// 业务作用：返回 active stack 清理过程中收集到的次要错误。
     ///
     /// # 参数
     ///
@@ -97,7 +97,7 @@ pub struct ApplicationRunner {
 }
 
 impl ApplicationRunner {
-    /// 使用已完成同步预检的应用信息和配置视图创建 Runner。
+    /// 业务作用：使用已完成同步预检的应用信息和配置视图创建 Runner。
     ///
     /// # 参数
     ///
@@ -117,7 +117,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 设置覆盖 Bootstrap、Start、UserHook 和 Ready 的单一启动预算。
+    /// 业务作用：设置覆盖 Bootstrap、Start、UserHook 和 Ready 的单一启动预算。
     ///
     /// # 参数
     ///
@@ -128,7 +128,7 @@ impl ApplicationRunner {
             .expect("application startup timeout must be within (0, 365 days]")
     }
 
-    /// 校验并设置启动预算；低层装配器可用本入口把外部边界错误转成 Bootstrap 失败。
+    /// 业务作用：校验并设置启动预算；低层装配器可用本入口把外部边界错误转成 Bootstrap 失败。
     #[doc(hidden)]
     pub fn try_startup_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         validate_lifecycle_timeout(timeout, ApplicationPhase::Bootstrap, "startup")?;
@@ -136,7 +136,7 @@ impl ApplicationRunner {
         Ok(self)
     }
 
-    /// 设置一次反向清理可以消费的全局预算。
+    /// 业务作用：设置一次反向清理可以消费的全局预算。
     ///
     /// # 参数
     ///
@@ -147,7 +147,7 @@ impl ApplicationRunner {
             .expect("application shutdown timeout must be within (0, 365 days]")
     }
 
-    /// 校验并设置停机预算；低层装配器可用本入口把外部边界错误转成配置失败。
+    /// 业务作用：校验并设置停机预算；低层装配器可用本入口把外部边界错误转成配置失败。
     #[doc(hidden)]
     pub fn try_shutdown_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         validate_lifecycle_timeout(timeout, ApplicationPhase::Stopping, "shutdown")?;
@@ -155,7 +155,7 @@ impl ApplicationRunner {
         Ok(self)
     }
 
-    /// 开启真实进程信号控制面。
+    /// 业务作用：开启真实进程信号控制面。
     ///
     /// # 参数
     ///
@@ -166,7 +166,7 @@ impl ApplicationRunner {
         self
     }
 
-    /// 按声明顺序追加一个生命周期组件。
+    /// 业务作用：按声明顺序追加一个生命周期组件。
     ///
     /// # 参数
     ///
@@ -179,7 +179,7 @@ impl ApplicationRunner {
         self
     }
 
-    /// 原子替换当前配置视图并通知订阅者。
+    /// 业务作用：原子替换当前配置视图并通知订阅者。
     ///
     /// # 参数
     ///
@@ -189,7 +189,7 @@ impl ApplicationRunner {
         self.application.publish_config(next);
     }
 
-    /// 执行完整的组件启动、UserHook、Running 和反向清理生命周期。
+    /// 业务作用：执行完整的组件启动、UserHook、Running 和反向清理生命周期。
     ///
     /// # 参数
     ///
@@ -335,7 +335,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 对最终配置树中“有配置段却没有声明组件”的情况输出一次脱敏告警。
+    /// 业务作用：对最终配置树中“有配置段却没有声明组件”的情况输出一次脱敏告警。
     ///
     /// # 参数
     ///
@@ -345,7 +345,7 @@ impl ApplicationRunner {
         crate::sections::warn_undeclared_sections(&self.declared_components(), snapshot.value());
     }
 
-    /// 对最终配置树中所有已声明组件的配置段做一次无副作用校验。
+    /// 业务作用：对最终配置树中所有已声明组件的配置段做一次无副作用校验。
     ///
     /// # 参数
     ///
@@ -359,7 +359,7 @@ impl ApplicationRunner {
         )
     }
 
-    /// 返回当前组件表按声明顺序展开的组件身份列表。
+    /// 业务作用：返回当前组件表按声明顺序展开的组件身份列表。
     ///
     /// # 参数
     ///
@@ -371,7 +371,7 @@ impl ApplicationRunner {
             .collect()
     }
 
-    /// 校验动态组件对象的唯一性和显式依赖顺序。
+    /// 业务作用：校验动态组件对象的唯一性和显式依赖顺序。
     ///
     /// # 参数
     ///
@@ -400,7 +400,7 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 按声明顺序执行所有组件的 Bootstrap 阶段。
+    /// 业务作用：按声明顺序执行所有组件的 Bootstrap 阶段。
     ///
     /// # 参数
     ///
@@ -430,7 +430,7 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 按声明顺序执行所有组件的 Start 阶段。
+    /// 业务作用：按声明顺序执行所有组件的 Start 阶段。
     ///
     /// # 参数
     ///
@@ -460,7 +460,7 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 按声明顺序执行 Service 组件的 Ready 阶段，同时监督已经登记的关键任务。
+    /// 业务作用：按声明顺序执行 Service 组件的 Ready 阶段，同时监督已经登记的关键任务。
     ///
     /// # 参数
     ///
@@ -515,7 +515,7 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 把 UserHook 放入 Runner 独占的 JoinSet，并处理其任务登记 ACK、panic 和启动中断。
+    /// 业务作用：把 UserHook 放入 Runner 独占的 JoinSet，并处理其任务登记 ACK、panic 和启动中断。
     ///
     /// # 参数
     ///
@@ -578,7 +578,7 @@ impl ApplicationRunner {
         result
     }
 
-    /// 等待 Service 的显式停机请求、进程信号或关键任务退出。
+    /// 业务作用：等待 Service 的显式停机请求、进程信号或关键任务退出。
     ///
     /// # 参数
     ///
@@ -621,7 +621,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 处理启动阶段的主失败或信号中断，并保证两者共享同一反向回滚链。
+    /// 业务作用：处理启动阶段的主失败或信号中断，并保证两者共享同一反向回滚链。
     ///
     /// # 参数
     ///
@@ -704,7 +704,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 在信号控制面自身无法建立时执行最小启动失败收敛。
+    /// 业务作用：在信号控制面自身无法建立时执行最小启动失败收敛。
     ///
     /// # 参数
     ///
@@ -730,7 +730,7 @@ impl ApplicationRunner {
         primary
     }
 
-    /// 发布 Stopping 状态，并保持“先提交终态、后发布状态”的顺序。
+    /// 业务作用：发布 Stopping 状态，并保持“先提交终态、后发布状态”的顺序。
     ///
     /// # 参数
     ///
@@ -751,7 +751,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 完成正常或故障触发的 Running/Batch 反向清理并写入最终公开状态。
+    /// 业务作用：完成正常或故障触发的 Running/Batch 反向清理并写入最终公开状态。
     ///
     /// # 参数
     ///
@@ -779,7 +779,7 @@ impl ApplicationRunner {
         Ok(shutdown_failures)
     }
 
-    /// 严格逆序执行所有 active step，并让每一步只消费全局 deadline 的剩余预算。
+    /// 业务作用：严格逆序执行所有 active step，并让每一步只消费全局 deadline 的剩余预算。
     ///
     /// # 参数
     ///
@@ -903,7 +903,7 @@ impl ApplicationRunner {
     }
 }
 
-/// 在启动组件 future、绝对 deadline 和信号控制面之间进行选择。
+/// 业务作用：在启动组件 future、绝对 deadline 和信号控制面之间进行选择。
 ///
 /// # 参数
 ///
@@ -930,7 +930,7 @@ where
     }
 }
 
-/// 计算当前启动阶段可消费的剩余预算。
+/// 业务作用：计算当前启动阶段可消费的剩余预算。
 ///
 /// # 参数
 ///
@@ -944,7 +944,7 @@ fn startup_remaining(deadline: Instant, phase: ApplicationPhase) -> Result<Durat
     Ok(remaining)
 }
 
-/// 构造统一的全局启动超时错误。
+/// 业务作用：构造统一的全局启动超时错误。
 ///
 /// # 参数
 ///
@@ -953,7 +953,7 @@ fn startup_timeout_error(phase: ApplicationPhase) -> ApplicationError {
     runner_error(phase, "application startup exceeded the global deadline")
 }
 
-/// 校验会与 `Instant` 相加的生命周期预算，阻止零值和跨平台溢出值进入 Runner。
+/// 业务作用：校验会与 `Instant` 相加的生命周期预算，阻止零值和跨平台溢出值进入 Runner。
 fn validate_lifecycle_timeout(
     timeout: Duration,
     phase: ApplicationPhase,
@@ -968,7 +968,7 @@ fn validate_lifecycle_timeout(
     Ok(())
 }
 
-/// 把信号控制面事件转换为启动阶段中断。
+/// 业务作用：把信号控制面事件转换为启动阶段中断。
 ///
 /// # 参数
 ///
@@ -983,7 +983,7 @@ fn signal_to_startup_stop(event: SignalEvent) -> StartupStop {
     }
 }
 
-/// 把信号控制面事件转换为 Service 运行期终止分类。
+/// 业务作用：把信号控制面事件转换为 Service 运行期终止分类。
 ///
 /// # 参数
 ///
@@ -998,7 +998,7 @@ fn signal_to_service_terminal(event: SignalEvent) -> ServiceTerminal {
     }
 }
 
-/// 分类 Ready 阶段观察到的受管任务退出。
+/// 业务作用：分类 Ready 阶段观察到的受管任务退出。
 ///
 /// # 参数
 ///
@@ -1017,7 +1017,7 @@ fn classify_startup_completion(completion: TaskCompletion) -> Result<(), Startup
     }
 }
 
-/// 记录后台任务的提前退出，不把可降级任务提升为应用主失败。
+/// 业务作用：记录后台任务的提前退出，不把可降级任务提升为应用主失败。
 ///
 /// 成功完成同样会移出监督表，但无需产生告警；失败和 panic 使用稳定任务名与统一脱敏管道记录，
 /// 使“继续运行”不等于“静默丢失故障”。
@@ -1046,7 +1046,7 @@ fn report_background_completion(completion: TaskCompletion) {
     }
 }
 
-/// 把 UserHook 的 JoinSet 退出结果转换为启动结果。
+/// 业务作用：把 UserHook 的 JoinSet 退出结果转换为启动结果。
 ///
 /// # 参数
 ///
@@ -1073,7 +1073,7 @@ fn classify_user_hook_completion(completion: TaskCompletion) -> Result<(), Start
     }
 }
 
-/// 构造关键任务提前退出的主错误，不读取 panic payload。
+/// 业务作用：构造关键任务提前退出的主错误，不读取 panic payload。
 ///
 /// # 参数
 ///
@@ -1097,7 +1097,7 @@ fn critical_task_error(completion: TaskCompletion) -> ApplicationError {
     }
 }
 
-/// 创建 Runner 自身的稳定错误形状。
+/// 业务作用：创建 Runner 自身的稳定错误形状。
 ///
 /// # 参数
 ///

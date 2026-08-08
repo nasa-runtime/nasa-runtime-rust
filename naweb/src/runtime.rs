@@ -20,7 +20,7 @@ pub struct MappingBuildError {
 }
 
 impl MappingBuildError {
-    /// 建立不包含敏感配置值的启动错误。
+    /// 业务作用：建立不包含敏感配置值的启动错误。
     ///
     /// # 参数
     ///
@@ -37,7 +37,7 @@ impl MappingBuildError {
 }
 
 impl fmt::Display for MappingBuildError {
-    /// 把安全诊断写入标准格式化器。
+    /// 业务作用：把安全诊断写入标准格式化器。
     ///
     /// # 参数
     ///
@@ -71,7 +71,7 @@ pub struct MappingRuntimeSnapshot {
 }
 
 impl fmt::Debug for MappingRuntimeSnapshot {
-    /// 输出不包含身份缓存、密钥或 provider 内部状态的快照摘要。
+    /// 业务作用：输出不包含身份缓存、密钥或 provider 内部状态的快照摘要。
     ///
     /// # 参数
     ///
@@ -111,7 +111,7 @@ pub struct MappingRuntime {
 }
 
 impl MappingRuntime {
-    /// 构造只允许无安全策略路由的空运行时。
+    /// 业务作用：构造只允许无安全策略路由的空运行时。
     ///
     /// # 返回
     ///
@@ -128,7 +128,7 @@ impl MappingRuntime {
         })
     }
 
-    /// 从已经完整校验的快照创建运行时。
+    /// 业务作用：从已经完整校验的快照创建运行时。
     ///
     /// # 参数
     ///
@@ -154,7 +154,7 @@ impl MappingRuntime {
         }
     }
 
-    /// 获取当前请求应固定持有的完整快照。
+    /// 业务作用：获取当前请求应固定持有的完整快照。
     ///
     /// # 返回
     ///
@@ -163,7 +163,7 @@ impl MappingRuntime {
         self.current.load_full()
     }
 
-    /// 原子发布一个更高代次的完整 last-good 快照。
+    /// 业务作用：原子发布一个更高代次的完整 last-good 快照。
     ///
     /// # 参数
     ///
@@ -234,7 +234,7 @@ impl MappingRuntime {
         Ok(())
     }
 
-    /// 记录一次未发布、已保留 last-good 的热刷新失败。
+    /// 业务作用：记录一次未发布、已保留 last-good 的热刷新失败。
     ///
     /// # 语义
     ///
@@ -247,7 +247,7 @@ impl MappingRuntime {
         self.metrics.record_reload(false);
     }
 
-    /// 清除最近一次热刷新失败标志。
+    /// 业务作用：清除最近一次热刷新失败标志。
     ///
     /// # 语义
     ///
@@ -257,7 +257,7 @@ impl MappingRuntime {
             .store(0, Ordering::Release);
     }
 
-    /// 返回不含路由、密钥和后端详情的健康摘要。
+    /// 业务作用：返回不含路由、密钥和后端详情的健康摘要。
     ///
     /// # 返回
     ///
@@ -275,7 +275,7 @@ impl MappingRuntime {
         }
     }
 
-    /// 返回跨热更新持续存在的安全指标注册表。
+    /// 业务作用：返回跨热更新持续存在的安全指标注册表。
     ///
     /// # 返回
     ///
@@ -285,7 +285,7 @@ impl MappingRuntime {
         self.metrics.clone()
     }
 
-    /// 在端口监听前审计完整路由集合。
+    /// 业务作用：在端口监听前审计完整路由集合。
     ///
     /// # 参数
     ///
@@ -311,7 +311,7 @@ impl MappingRuntime {
         self.audit_route_plans(&plans)
     }
 
-    /// 审计已经合并 effective interceptor plan 的完整路由合同。
+    /// 业务作用：审计已经合并 effective interceptor plan 的完整路由合同。
     ///
     /// auth-stage interceptor 可以替代旧 AuthRuntime provider，但请求期仍必须通过
     /// AuthContext gate。本方法只确认不可变挂载合同，不信任任何请求输入。
@@ -325,7 +325,7 @@ impl MappingRuntime {
         Ok(audit)
     }
 
-    /// 在同一个固定快照上执行路由审计与远程依赖就绪探测。
+    /// 业务作用：在同一个固定快照上执行路由审计与远程依赖就绪探测。
     ///
     /// # 参数
     ///
@@ -355,7 +355,7 @@ impl MappingRuntime {
         Ok(audit)
     }
 
-    /// 使用启动时已冻结的完整路由与 interceptor 合同执行 readiness。
+    /// 业务作用：使用启动时已冻结的完整路由与 interceptor 合同执行 readiness。
     ///
     /// 普通 [`Self::readiness`] 适合尚未引入 interceptor plan 的旧应用；新式应用必须
     /// 保留 `auth_interceptor/auth_runtime` 位，否则管理端会用另一份合同误判健康。
@@ -384,7 +384,7 @@ impl MappingRuntime {
         Ok(audit)
     }
 
-    /// 查询启动期冻结合同中的某条路由是否启用了请求或响应加密。
+    /// 业务作用：查询启动期冻结合同中的某条路由是否启用了请求或响应加密。
     ///
     /// 该入口只暴露静态、非敏感的路由能力位，供外层治理层在**执行 handler 之前**拒绝无法安全
     /// 组合的能力（例如当前 HTTP 幂等中间件尚不能缓存 plaintext 后再逐请求重新加密）。路径必须是
@@ -408,7 +408,7 @@ impl MappingRuntime {
         }))
     }
 
-    /// 冻结首次成功审计的静态路由集合，并拒绝同一运行时随后改用另一份合同。
+    /// 业务作用：冻结首次成功审计的静态路由集合，并拒绝同一运行时随后改用另一份合同。
     fn bind_route_contract(
         &self,
         routes: &[RouteSecurityPlan],
@@ -435,7 +435,7 @@ impl MappingRuntime {
         Ok(())
     }
 
-    /// 对调用方已经固定的快照执行纯内存路由审计。
+    /// 业务作用：对调用方已经固定的快照执行纯内存路由审计。
     ///
     /// # 参数
     ///
@@ -579,7 +579,7 @@ pub struct MappingRuntimeHealth {
 }
 
 impl Default for MappingRuntime {
-    /// 建立兼容无安全路由的默认运行时。
+    /// 业务作用：建立兼容无安全路由的默认运行时。
     ///
     /// # 返回
     ///
@@ -602,7 +602,7 @@ pub struct RouteAudit {
     pub generation: u64,
 }
 
-/// 按稳定字段计算路由集合指纹。
+/// 业务作用：按稳定字段计算路由集合指纹。
 ///
 /// - `routes`: 已完成重复检查的静态路由集合；函数内部排序，不依赖链接器收集顺序。
 ///
@@ -616,7 +616,7 @@ fn compute_route_fingerprint(routes: &[RouteSecurityPlan]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// 返回与链接器收集顺序无关的规范化路由集合。
+/// 业务作用：返回与链接器收集顺序无关的规范化路由集合。
 fn canonical_routes(routes: &[RouteSecurityPlan]) -> Vec<RouteSecurityPlan> {
     let mut sorted = routes.to_vec();
     sorted.sort_by_key(|route| {
@@ -629,7 +629,7 @@ fn canonical_routes(routes: &[RouteSecurityPlan]) -> Vec<RouteSecurityPlan> {
     sorted
 }
 
-/// 返回适合原子健康状态记录的 Unix epoch 毫秒。
+/// 业务作用：返回适合原子健康状态记录的 Unix epoch 毫秒。
 ///
 /// # 返回
 ///

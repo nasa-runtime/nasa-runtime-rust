@@ -1,6 +1,7 @@
 # namapper
 
-`namapper` 是 MyBatis 风格的声明式 Mapper。业务用 `trait + 属性宏` 声明 SQL，宏生成 `*Client`，运行时基于 `sqlx` 执行 MySQL SQL，并接入 `natx` / `nasa::tx` ambient 事务和可选二级缓存。
+`namapper` 是声明式 Mapper。业务用 `trait + 属性宏` 声明 SQL，宏生成 `*Client`，运行时基于
+`sqlx` 执行 MySQL SQL，并接入 `natx` / `nasa::tx` ambient 事务和可选二级缓存。
 
 推荐业务项目通过门面 crate 使用：
 
@@ -16,7 +17,7 @@ use nasa::mapper::{Mapper, Query, Insert, Update, Delete, Execute};
 
 - Repository 层固定 SQL、动态条件 SQL、分页、排序、批量写入。
 - 需要和现有 `#[transactional]` 事务打通的 MySQL/TiDB 访问。
-- 需要 MyBatis namespace 风格二级缓存、缓存失效、Redis Hash 存储的查询。
+- 需要按 namespace 隔离二级缓存、缓存失效和 Redis Hash 存储的查询。
 - 希望 SQL 留在 Rust 代码里，接受编译期宏校验，而不是运行时 XML 扫描。
 
 不适合：
@@ -229,7 +230,8 @@ async fn create_user(mapper: &UserMapperClient) -> anyhow::Result<i64> {
 }
 ```
 
-写操作的返回形态由**返回类型**决定（`()` / `u64` / `MySqlQueryResult`），不需要额外注解。为兼容 MyBatis 写法，`returning` / `result` 参数会被接受但忽略，不改变行为。
+写操作的返回形态由**返回类型**决定（`()` / `u64` / `MySqlQueryResult`），不需要额外注解。
+兼容入口会接受但忽略 `returning` / `result` 参数，不改变行为。
 
 ## 场景 6：Update
 
@@ -360,7 +362,7 @@ async fn find_dynamic(
 `<if test>` 支持：
 
 - Rust bool 表达式：`amount > 0`、`name.is_some()`、`flag && enabled`。
-- MyBatis 风格逻辑词：`flag and enabled`、`a or b`，只会在字符串字面量外转换。
+- 兼容逻辑词：`flag and enabled`、`a or b`，只会在字符串字面量外转换。
 - null 简写：`name != null`、`name == null`、`null != name`、`null == name`。
 
 如果 test 里需要写字符串字面量，建议属性用单引号：
@@ -1262,22 +1264,18 @@ async fn bad_question(&self, name: &str) -> anyhow::Result<Vec<UserRow>>;
 async fn bad_order(&self, order_by: &str) -> anyhow::Result<Vec<UserRow>>;
 ```
 
-## 本地校验
+## 后端接入边界
 
-Mapper trait 的 SQL 解析、bind、动态标签展开都在编译期完成，业务项目接入后建议至少跑：
-
-```bash
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-```
-
-需要对真实 MySQL + Redis 做后端验收时，用业务项目自己的验收入口或脚本装配环境：通过 `MySqlPoolOptions` 建池后调用 `nasa::tx::try_init(pool)`，再用 `set_default_l2_cache(...)` 安装 L2（Redis Hash 用场景 23 的内置适配器），最后调用生成的 `*Client` 验证查询、事务、缓存命中和失效行为。连接串、账号、密码必须来自环境变量或外部配置，不要写进 README、源码或配置样例。
+Mapper trait 的 SQL 解析、bind 和动态标签展开都在编译期完成。MySQL 连接池通过
+`nasa::tx::try_init(pool)` 纳入事务运行时；启用缓存查询时，通过 `set_default_l2_cache(...)` 安装
+Redis Hash L2。连接串、账号和密码必须来自环境变量或外部配置，不得写进 README、源码或配置样例。
 
 ## 常见问题
 
 ### 为什么普通 Query 默认 cache = true？
 
-这是为了对齐 MyBatis namespace 二级缓存语义。新项目如果暂时不用缓存，建议在 trait 上写 `cache = false`。生产项目如果依赖缓存，启动时安装默认 L2 cache，并调用 `assert_l2_cache_installed_for_cached_queries()`。
+这是为了保持 namespace 二级缓存语义。业务暂时不用缓存时可在 trait 上写 `cache = false`；依赖缓存时，
+启动阶段必须安装默认 L2 cache，并调用 `assert_l2_cache_installed_for_cached_queries()`。
 
 ### Row 为什么要实现 Serialize / Deserialize？
 
@@ -1298,15 +1296,6 @@ cargo clippy --all-targets -- -D warnings
 ### 多个 Mapper 想共享同一个缓存 namespace 怎么办？
 
 给它们配置相同的 `#[Mapper(key = "...")]`。`clear_also` / `clear_when` 只表达失效关系，不表达共享 namespace。
-
-## 开源前检查
-
-如果要把包含 `namapper` 的仓库开源，请先确认：
-
-- README、源码、配置和脚本里没有内网 IP、账号、密码、token。
-- 真实后端地址只通过环境变量或外部配置读取，不硬编码。
-- SQL 初始化脚本不包含生产数据。
-- CI 不依赖内网 MySQL、Redis 或私有 Nacos；需要真实后端的验收步骤由受控环境显式触发。
 
 ## YML 配置与使用
 

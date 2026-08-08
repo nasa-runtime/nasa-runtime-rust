@@ -57,7 +57,7 @@ pub enum ComponentLifecycleState {
 }
 
 impl ComponentLifecycleState {
-    /// 返回适合管理端和指标标签使用的稳定名称。
+    /// 业务作用：返回适合管理端和指标标签使用的稳定名称。
     ///
     /// # 参数
     ///
@@ -72,7 +72,7 @@ impl ComponentLifecycleState {
         }
     }
 
-    /// 判断组件是否处于统一应用定义的正常可用阶段。
+    /// 业务作用：判断组件是否处于统一应用定义的正常可用阶段。
     ///
     /// # 参数
     ///
@@ -83,7 +83,7 @@ impl ComponentLifecycleState {
 }
 
 impl From<ApplicationState> for ComponentLifecycleState {
-    /// 把应用状态机读数映射为组件能力生命周期状态。
+    /// 业务作用：把应用状态机读数映射为组件能力生命周期状态。
     ///
     /// # 参数
     ///
@@ -99,7 +99,7 @@ impl From<ApplicationState> for ComponentLifecycleState {
     }
 }
 
-/// 创建能力尚未发布或已经关闭时使用的统一组件错误。
+/// 业务作用：创建能力尚未发布或已经关闭时使用的统一组件错误。
 ///
 /// # 参数
 ///
@@ -156,7 +156,7 @@ pub(crate) struct KafkaClientCapability {
 
 #[cfg(feature = "kafka")]
 impl KafkaClientCapability {
-    /// 创建初始未就绪的 Kafka client 能力根。
+    /// 业务作用：创建初始未就绪的 Kafka client 能力根。
     ///
     /// # 参数
     ///
@@ -187,7 +187,7 @@ impl KafkaClientCapability {
         }
     }
 
-    /// 返回稳定 client name。
+    /// 业务作用：返回稳定 client name。
     ///
     /// # 返回
     ///
@@ -196,7 +196,7 @@ impl KafkaClientCapability {
         &self.client_name
     }
 
-    /// 原子发布 client 最新动态就绪结论和 group 快照。
+    /// 业务作用：原子发布 client 最新动态就绪结论和 group 快照。
     ///
     /// # 参数
     ///
@@ -219,7 +219,7 @@ impl KafkaClientCapability {
         self.contributor.set_ready(ready);
     }
 
-    /// 返回最近一次完整发布的脱敏就绪快照。
+    /// 业务作用：返回最近一次完整发布的脱敏就绪快照。
     ///
     /// # 返回
     ///
@@ -231,7 +231,7 @@ impl KafkaClientCapability {
             .clone()
     }
 
-    /// 尝试在 UserHook 为本 client 安装真实指标 sink。
+    /// 业务作用：尝试在 UserHook 为本 client 安装真实指标 sink。
     ///
     /// # 参数
     ///
@@ -244,7 +244,7 @@ impl KafkaClientCapability {
         self.metrics.install(sink)
     }
 
-    /// 在 Ready 取走全部 UserHook 定制后封口指标安装入口。
+    /// 业务作用：在 Ready 取走全部 UserHook 定制后封口指标安装入口。
     ///
     /// # 返回
     ///
@@ -269,7 +269,7 @@ pub struct KafkaHandle {
 
 #[cfg(feature = "kafka")]
 impl KafkaHandle {
-    /// 从组件私有能力根创建业务句柄。
+    /// 业务作用：从组件私有能力根创建业务句柄。
     ///
     /// # 参数
     ///
@@ -289,7 +289,7 @@ impl KafkaHandle {
         }
     }
 
-    /// 返回本句柄绑定的稳定 client name。
+    /// 业务作用：返回本句柄绑定的稳定 client name。
     ///
     /// # 返回
     ///
@@ -298,7 +298,7 @@ impl KafkaHandle {
         self.capability.client_name()
     }
 
-    /// 返回 Kafka 能力相对于统一 Application 的当前生命周期。
+    /// 业务作用：返回 Kafka 能力相对于统一 Application 的当前生命周期。
     ///
     /// # 返回
     ///
@@ -307,7 +307,7 @@ impl KafkaHandle {
         ComponentLifecycleState::from(self.application_state.load())
     }
 
-    /// 返回最近一次 Ready 门禁或运行期 monitor 发布的健康快照。
+    /// 业务作用：返回最近一次 Ready 门禁或运行期 monitor 发布的健康快照。
     ///
     /// # 返回
     ///
@@ -316,7 +316,7 @@ impl KafkaHandle {
         self.capability.readiness()
     }
 
-    /// 获取一个无关闭权的 producer lane。
+    /// 业务作用：获取一个无关闭权的 producer lane。
     ///
     /// # 参数
     ///
@@ -337,7 +337,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("producer lane access", error))
     }
 
-    /// 获取受管 client 的 admin 句柄(topic metadata 查询、按需建 topic 等)。
+    /// 业务作用：获取受管 client 的 admin 句柄(topic metadata 查询、按需建 topic 等)。
     ///
     /// 只读探测(list/exists/partitions)与显式 `create_if_absent` 都经它;不交出 client 关闭权。业务在
     /// UserHook 取得后即可用,真实 broker 往返(如建 topic)需在 broker 连接后(Ready)执行。
@@ -354,7 +354,7 @@ impl KafkaHandle {
         Ok(self.capability.proxy.admin())
     }
 
-    /// 查询一个 resolved group 的当前健康快照。
+    /// 业务作用：查询一个 resolved group 的当前健康快照。
     ///
     /// # 参数
     ///
@@ -376,7 +376,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group health query", error))
     }
 
-    /// 查询一个 resolved group 的当前 assignment。
+    /// 业务作用：查询一个 resolved group 的当前 assignment。
     ///
     /// # 参数
     ///
@@ -398,7 +398,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group assignment query", error))
     }
 
-    /// 查询指定分区的当前消费位置。
+    /// 业务作用：查询指定分区的当前消费位置。
     ///
     /// # 参数
     ///
@@ -425,7 +425,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group position query", error))
     }
 
-    /// 把一个分区定位到显式非负 offset。
+    /// 业务作用：把一个分区定位到显式非负 offset。
     ///
     /// # 参数
     ///
@@ -454,7 +454,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group seek", error))
     }
 
-    /// 把给定分区定位到最早可用 offset。
+    /// 业务作用：把给定分区定位到最早可用 offset。
     ///
     /// # 参数
     ///
@@ -481,7 +481,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group seek to beginning", error))
     }
 
-    /// 把给定分区定位到当前末尾 offset。
+    /// 业务作用：把给定分区定位到当前末尾 offset。
     ///
     /// # 参数
     ///
@@ -508,7 +508,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group seek to end", error))
     }
 
-    /// 按 Unix epoch 毫秒时间戳重新定位多个分区。
+    /// 业务作用：按 Unix epoch 毫秒时间戳重新定位多个分区。
     ///
     /// # 参数
     ///
@@ -535,7 +535,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group seek to timestamp", error))
     }
 
-    /// 把给定分区恢复到 group 已提交位点。
+    /// 业务作用：把给定分区恢复到 group 已提交位点。
     ///
     /// # 参数
     ///
@@ -562,7 +562,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group seek to committed", error))
     }
 
-    /// 为给定分区增加业务暂停原因。
+    /// 业务作用：为给定分区增加业务暂停原因。
     ///
     /// # 参数
     ///
@@ -585,7 +585,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group pause", error))
     }
 
-    /// 移除给定分区的业务暂停原因。
+    /// 业务作用：移除给定分区的业务暂停原因。
     ///
     /// # 参数
     ///
@@ -608,7 +608,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group resume", error))
     }
 
-    /// 暂停 group 当前 assignment 的全部分区。
+    /// 业务作用：暂停 group 当前 assignment 的全部分区。
     ///
     /// # 参数
     ///
@@ -630,7 +630,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group pause all", error))
     }
 
-    /// 恢复 group 当前 assignment 的全部分区。
+    /// 业务作用：恢复 group 当前 assignment 的全部分区。
     ///
     /// # 参数
     ///
@@ -652,7 +652,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group resume all", error))
     }
 
-    /// 替换 subscribe group 的动态 topic 集合。
+    /// 业务作用：替换 subscribe group 的动态 topic 集合。
     ///
     /// # 参数
     ///
@@ -675,7 +675,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group subscribe", error))
     }
 
-    /// 取消 subscribe group 的当前订阅但保留 owner。
+    /// 业务作用：取消 subscribe group 的当前订阅但保留 owner。
     ///
     /// # 参数
     ///
@@ -697,7 +697,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group unsubscribe", error))
     }
 
-    /// 查询 broker 当前可见的全部 topic 名称。
+    /// 业务作用：查询 broker 当前可见的全部 topic 名称。
     ///
     /// # 返回
     ///
@@ -716,7 +716,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("topic metadata query", error))
     }
 
-    /// 查询指定 topic 的可见分区编号。
+    /// 业务作用：查询指定 topic 的可见分区编号。
     ///
     /// # 参数
     ///
@@ -739,7 +739,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("topic partition metadata query", error))
     }
 
-    /// 显式重建一个允许人工恢复的 consumer group。
+    /// 业务作用：显式重建一个允许人工恢复的 consumer group。
     ///
     /// # 参数
     ///
@@ -761,7 +761,7 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group restart", error))
     }
 
-    /// 校验当前 Application 阶段是否允许创建本次操作。
+    /// 业务作用：校验当前 Application 阶段是否允许创建本次操作。
     ///
     /// # 参数
     ///
@@ -793,7 +793,7 @@ impl KafkaHandle {
         ))
     }
 
-    /// 把 nafka 数据面或控制面错误包装进统一 Application 错误域。
+    /// 业务作用：把 nafka 数据面或控制面错误包装进统一 Application 错误域。
     ///
     /// # 参数
     ///
@@ -837,7 +837,7 @@ pub struct LogHandle {
 
 #[cfg(feature = "log")]
 impl LogHandle {
-    /// 从容器共享状态创建日志能力句柄。
+    /// 业务作用：从容器共享状态创建日志能力句柄。
     ///
     /// # 参数
     ///
@@ -850,7 +850,7 @@ impl LogHandle {
         }
     }
 
-    /// 判断容器管理的日志订阅器是否已经完成早期初始化。
+    /// 业务作用：判断容器管理的日志订阅器是否已经完成早期初始化。
     ///
     /// # 参数
     ///
@@ -859,7 +859,7 @@ impl LogHandle {
         self.runtime.initialized.load(Ordering::Acquire)
     }
 
-    /// 返回与 Application 同源的组件生命周期状态。
+    /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
     ///
@@ -877,7 +877,7 @@ pub(crate) struct LogRuntimeState {
 
 #[cfg(feature = "log")]
 impl LogRuntimeState {
-    /// 创建尚未初始化的日志运行时状态。
+    /// 业务作用：创建尚未初始化的日志运行时状态。
     ///
     /// # 参数
     ///
@@ -888,7 +888,7 @@ impl LogRuntimeState {
         }
     }
 
-    /// 发布日志订阅器已经初始化。
+    /// 业务作用：发布日志订阅器已经初始化。
     ///
     /// # 参数
     ///
@@ -897,7 +897,7 @@ impl LogRuntimeState {
         self.initialized.store(true, Ordering::Release);
     }
 
-    /// 在日志清理动作完成后撤销运行时可用标志。
+    /// 业务作用：在日志清理动作完成后撤销运行时可用标志。
     ///
     /// # 参数
     ///
@@ -919,7 +919,7 @@ pub struct NacosConfigHandle {
 
 #[cfg(feature = "nacos-config")]
 impl NacosConfigHandle {
-    /// 从容器共享状态创建配置中心能力句柄。
+    /// 业务作用：从容器共享状态创建配置中心能力句柄。
     ///
     /// # 参数
     ///
@@ -935,7 +935,7 @@ impl NacosConfigHandle {
         }
     }
 
-    /// 返回配置中心是否已确定启用。
+    /// 业务作用：返回配置中心是否已确定启用。
     ///
     /// # 参数
     ///
@@ -944,7 +944,7 @@ impl NacosConfigHandle {
         self.runtime.client.get().map(|client| client.is_some())
     }
 
-    /// 使用容器已建立的底层连接拉取一份远端配置原文。
+    /// 业务作用：使用容器已建立的底层连接拉取一份远端配置原文。
     ///
     /// # 参数
     ///
@@ -962,7 +962,7 @@ impl NacosConfigHandle {
         })
     }
 
-    /// 使用连接时配置的默认分组拉取一份远端配置原文。
+    /// 业务作用：使用连接时配置的默认分组拉取一份远端配置原文。
     ///
     /// # 参数
     ///
@@ -979,7 +979,7 @@ impl NacosConfigHandle {
         })
     }
 
-    /// 返回与 Application 同源的组件生命周期状态。
+    /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
     ///
@@ -988,7 +988,7 @@ impl NacosConfigHandle {
         self.application_state.load().into()
     }
 
-    /// 升级容器发布的底层客户端弱引用。
+    /// 业务作用：升级容器发布的底层客户端弱引用。
     ///
     /// # 参数
     ///
@@ -1027,7 +1027,7 @@ pub(crate) struct NacosConfigRuntimeState {
 
 #[cfg(feature = "nacos-config")]
 impl NacosConfigRuntimeState {
-    /// 创建尚未读取启用开关的配置中心状态。
+    /// 业务作用：创建尚未读取启用开关的配置中心状态。
     ///
     /// # 参数
     ///
@@ -1038,7 +1038,7 @@ impl NacosConfigRuntimeState {
         }
     }
 
-    /// 发布配置中心已禁用，不创建底层连接。
+    /// 业务作用：发布配置中心已禁用，不创建底层连接。
     ///
     /// # 参数
     ///
@@ -1047,7 +1047,7 @@ impl NacosConfigRuntimeState {
         self.client.set(None).is_ok()
     }
 
-    /// 发布底层配置客户端的弱引用。
+    /// 业务作用：发布底层配置客户端的弱引用。
     ///
     /// # 参数
     ///
@@ -1067,7 +1067,7 @@ pub struct WsHandle {
 
 #[cfg(feature = "ws")]
 impl WsHandle {
-    /// 从容器共享状态创建长连接能力句柄。
+    /// 业务作用：从容器共享状态创建长连接能力句柄。
     ///
     /// # 参数
     ///
@@ -1080,7 +1080,7 @@ impl WsHandle {
         }
     }
 
-    /// 返回实际绑定的 TCP 地址。
+    /// 业务作用：返回实际绑定的 TCP 地址。
     ///
     /// # 参数
     ///
@@ -1089,7 +1089,7 @@ impl WsHandle {
         self.runtime.addrs.get().map(|addrs| addrs.0)
     }
 
-    /// 返回实际绑定的独立 WebSocket 地址。
+    /// 业务作用：返回实际绑定的独立 WebSocket 地址。
     ///
     /// # 参数
     ///
@@ -1098,7 +1098,7 @@ impl WsHandle {
         self.runtime.addrs.get().and_then(|addrs| addrs.1)
     }
 
-    /// 获取底层长连接库的共享广播发送器。
+    /// 业务作用：获取底层长连接库的共享广播发送器。
     ///
     /// # 参数
     ///
@@ -1118,7 +1118,7 @@ impl WsHandle {
             })
     }
 
-    /// 返回与 Application 同源的组件生命周期状态。
+    /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
     ///
@@ -1137,7 +1137,7 @@ pub(crate) struct WsRuntimeState {
 
 #[cfg(feature = "ws")]
 impl WsRuntimeState {
-    /// 创建尚未发布发送器和监听地址的长连接状态。
+    /// 业务作用：创建尚未发布发送器和监听地址的长连接状态。
     ///
     /// # 参数
     ///
@@ -1149,7 +1149,7 @@ impl WsRuntimeState {
         }
     }
 
-    /// 发布底层发送器弱引用，不把服务资源所有权转给 Application。
+    /// 业务作用：发布底层发送器弱引用，不把服务资源所有权转给 Application。
     ///
     /// # 参数
     ///
@@ -1158,7 +1158,7 @@ impl WsRuntimeState {
         self.sender.set(Arc::downgrade(sender)).is_ok()
     }
 
-    /// 发布绑定完成后的真实监听地址。
+    /// 业务作用：发布绑定完成后的真实监听地址。
     ///
     /// # 参数
     ///
@@ -1179,7 +1179,7 @@ pub struct NacosDiscoveryHandle {
 
 #[cfg(feature = "nacos-discovery")]
 impl NacosDiscoveryHandle {
-    /// 从容器共享状态创建服务发现能力句柄。
+    /// 业务作用：从容器共享状态创建服务发现能力句柄。
     ///
     /// # 参数
     ///
@@ -1195,7 +1195,7 @@ impl NacosDiscoveryHandle {
         }
     }
 
-    /// 获取底层带负载均衡能力的共享 HTTP 客户端。
+    /// 业务作用：获取底层带负载均衡能力的共享 HTTP 客户端。
     ///
     /// # 参数
     ///
@@ -1214,7 +1214,7 @@ impl NacosDiscoveryHandle {
         })
     }
 
-    /// 查询当前实例是否已经向注册中心发布。
+    /// 业务作用：查询当前实例是否已经向注册中心发布。
     ///
     /// # 参数
     ///
@@ -1225,7 +1225,7 @@ impl NacosDiscoveryHandle {
         Ok(registered)
     }
 
-    /// 查询当前配置是否要求注册本实例。
+    /// 业务作用：查询当前配置是否要求注册本实例。
     ///
     /// # 参数
     ///
@@ -1236,7 +1236,7 @@ impl NacosDiscoveryHandle {
         Ok(wants_registration)
     }
 
-    /// 返回与 Application 同源的组件生命周期状态。
+    /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
     ///
@@ -1245,7 +1245,7 @@ impl NacosDiscoveryHandle {
         self.application_state.load().into()
     }
 
-    /// 升级组件发布的发现会话弱引用。
+    /// 业务作用：升级组件发布的发现会话弱引用。
     ///
     /// # 参数
     ///
@@ -1275,7 +1275,7 @@ pub(crate) struct NacosDiscoveryRuntimeState {
 
 #[cfg(feature = "nacos-discovery")]
 impl NacosDiscoveryRuntimeState {
-    /// 创建尚未连接发现 provider 的运行时状态。
+    /// 业务作用：创建尚未连接发现 provider 的运行时状态。
     ///
     /// # 参数
     ///
@@ -1286,7 +1286,7 @@ impl NacosDiscoveryRuntimeState {
         }
     }
 
-    /// 发布组件持有的发现会话弱引用。
+    /// 业务作用：发布组件持有的发现会话弱引用。
     ///
     /// # 参数
     ///
@@ -1309,7 +1309,7 @@ pub struct SchedulingHandle {
 
 #[cfg(feature = "scheduling")]
 impl SchedulingHandle {
-    /// 从容器共享状态创建调度能力句柄。
+    /// 业务作用：从容器共享状态创建调度能力句柄。
     ///
     /// # 参数
     ///
@@ -1325,7 +1325,7 @@ impl SchedulingHandle {
         }
     }
 
-    /// 获取底层调度库的只读运行时句柄。
+    /// 业务作用：获取底层调度库的只读运行时句柄。
     ///
     /// # 参数
     ///
@@ -1341,7 +1341,7 @@ impl SchedulingHandle {
         ))
     }
 
-    /// 查询集群调度模式下当前节点是否持有 leader 身份。
+    /// 业务作用：查询集群调度模式下当前节点是否持有 leader 身份。
     ///
     /// # 参数
     ///
@@ -1355,7 +1355,7 @@ impl SchedulingHandle {
             .map(|leader| leader.is_leader())
     }
 
-    /// 返回与 Application 同源的组件生命周期状态。
+    /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
     ///
@@ -1375,7 +1375,7 @@ pub(crate) struct SchedulingRuntimeState {
 
 #[cfg(feature = "scheduling")]
 impl SchedulingRuntimeState {
-    /// 创建尚未启动底层调度器的状态。
+    /// 业务作用：创建尚未启动底层调度器的状态。
     ///
     /// # 参数
     ///
@@ -1388,7 +1388,7 @@ impl SchedulingRuntimeState {
         }
     }
 
-    /// 发布底层调度器已经完整启动。
+    /// 业务作用：发布底层调度器已经完整启动。
     ///
     /// # 参数
     ///
@@ -1397,7 +1397,7 @@ impl SchedulingRuntimeState {
         self.running.store(true, Ordering::Release);
     }
 
-    /// 在调度清理动作完成后撤销运行标志。
+    /// 业务作用：在调度清理动作完成后撤销运行标志。
     ///
     /// # 参数
     ///
@@ -1406,7 +1406,7 @@ impl SchedulingRuntimeState {
         self.running.store(false, Ordering::Release);
     }
 
-    /// 发布集群模式使用的只读选主弱引用。
+    /// 业务作用：发布集群模式使用的只读选主弱引用。
     ///
     /// # 参数
     ///

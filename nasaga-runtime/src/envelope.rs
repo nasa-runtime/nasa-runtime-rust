@@ -1,7 +1,7 @@
 //! Saga command/result envelope：跨服务传输的受保护 header 与身份复验。
 //!
 //! envelope 至少携带 `saga_id`、workflow、definition version/digest、step、phase、
-//! attempt、`effect_id`、`command_id` 与 tenant（§11.5.3）。**身份不可信自报**：
+//! attempt、`effect_id`、`command_id` 与 tenant。**身份不可信自报**：
 //! 消费方必须用 `verified()` 把文本字段解析回封闭类型，并重新派生 effect/command 身份
 //! 与自报值比对——派生是确定性的，比对失败即说明 envelope 被伪造、损坏或派生规则漂移，
 //! 一律拒绝进入业务路径。producer 身份认证（topic-to-owner 映射/端到端签名）发生在
@@ -22,7 +22,7 @@ pub const COMMAND_EVENT_TYPE: &str = "saga.command";
 pub const RESULT_EVENT_TYPE: &str = "saga.result";
 
 /// Saga 事件的聚合类型；`aggregate_id = saga_id` 兼作 Kafka partition key——
-/// 顺序只是优化，正确性只依赖状态机、Inbox 与 CAS（§11.5.8）。
+/// 顺序只是优化，正确性只依赖状态机、Inbox 与 CAS。
 pub const SAGA_AGGREGATE_TYPE: &str = "saga";
 
 /// 稳定原因码的最大字节数；与 `saga_instance.failure_code`、
@@ -81,8 +81,7 @@ pub fn derive_result_event_id(command_id: &str) -> String {
 /// 业务作用：Orchestrator 发往参与方的 execute/cancel/compensate/resolve 命令 envelope。
 ///
 /// 字段说明：`payload` 只在首步 execute 由启动请求携带；其余命令只携带 Saga 与 step
-/// 身份，参与方按 `saga_id + step` 从本地事实解析业务输入（§11.5.5 补偿载荷来源默认
-/// 形态 (a)，天然避免敏感载荷跨服务复制）。
+/// 身份，参与方按 `saga_id + step` 从本地事实解析业务输入，天然避免敏感载荷跨服务复制。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SagaCommandEnvelope {
     /// 实例身份。

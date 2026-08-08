@@ -44,7 +44,7 @@ use crate::error::{NasaRedisError, Result};
 /// 管理命令的 admin consumer group(全节点共用;consumer = 当前 owner 的 node_id)。
 pub const ADMIN_GROUP: &str = "nasa-park-admin";
 
-/// command stream key(定向:每分区一条)。
+/// 业务作用：command stream key(定向:每分区一条)。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -53,7 +53,7 @@ pub fn cmd_stream_key(layout: &KeyLayout, p: u32) -> String {
     format!("{}:park-cmd:{}", layout.prefix, p)
 }
 
-/// result key(per-operation 持久结果)。
+/// 业务作用：result key(per-operation 持久结果)。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -116,7 +116,7 @@ pub enum CmdState {
     Rejected,
 }
 
-/// 取 Redis 服务端时间(**毫秒**)——deadline 的唯一时钟基准。
+/// 业务作用：取 Redis 服务端时间(**毫秒**)——deadline 的唯一时钟基准。
 /// TIME 返回 [秒, 微秒];只取秒位会让同一秒内 elapsed=0,timeout_ms=0/小值的过期判定
 /// 永不触发(实测踩中)→ 毫秒 = 秒*1000 + 微秒/1000。
 pub(crate) async fn redis_now(client: &Arc<RedisClient>) -> Result<u64> {
@@ -135,7 +135,7 @@ pub(crate) async fn redis_now(client: &Arc<RedisClient>) -> Result<u64> {
     Ok(sec * 1000 + usec / 1000)
 }
 
-/// 请求摘要(同 op_id 重复提交的判重依据)。**必须纳入 `timeout_ms`**——
+/// 业务作用：请求摘要(同 op_id 重复提交的判重依据)。**必须纳入 `timeout_ms`**——
 /// 否则同 op_id+action 不同 timeout 的重试 digest 相同,会静默返回旧 result(含已死的 Rejected/
 /// DeadlineExceeded),新 timeout 被吞、该 op_id 永久拿回死结果。纳入后:同 timeout → 幂等返回现状;
 /// 不同 timeout → `OperationIdConflict`(暴露给调用方,强制换 op_id 或识别冲突)。
@@ -152,7 +152,7 @@ fn digest_of(action: CmdAction, p: u32, timeout_ms: u64) -> String {
     )
 }
 
-/// 提交管理命令(任意节点可调)。幂等:同 op_id 同 digest 重复提交 = 返回现有 result;
+/// 业务作用：提交管理命令(任意节点可调)。幂等:同 op_id 同 digest 重复提交 = 返回现有 result;
 /// 同 op_id 不同 digest = OperationIdConflict。
 ///
 /// # 参数
@@ -230,7 +230,7 @@ pub async fn submit(
     Ok(fresh)
 }
 
-/// 查询命令结果(producer 轮询入口)。
+/// 业务作用：查询命令结果(producer 轮询入口)。
 ///
 /// # 参数
 /// - `client`: 读取 result key 的 Redis 客户端。
@@ -252,7 +252,7 @@ pub async fn query(
     }
 }
 
-/// owner 端写 result(覆盖写;单 owner 无并发,Executing→终态单向由调用方保证)。
+/// 业务作用：owner 端写 result(覆盖写;单 owner 无并发,Executing→终态单向由调用方保证)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -297,7 +297,7 @@ pub enum CmdAck {
     Retry,
 }
 
-/// owner 执行一条命令(control loop 调用)。返回 `Finalize` 才允许 XACK+XDEL。
+/// 业务作用：owner 执行一条命令(control loop 调用)。返回 `Finalize` 才允许 XACK+XDEL。
 ///
 /// # 参数
 /// - `rt_client`: owner runtime 使用的 Redis 客户端。

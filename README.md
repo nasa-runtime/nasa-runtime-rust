@@ -168,9 +168,8 @@ use nasa::ws::Server;                // WebSocket 服务端
 #[nasa::web::get_mapping("/x")]   // Axum MVC 风格路由
 ```
 
-同仓内部依赖在源码 manifest 中使用 `path + version`：工作区构建解析本地路径，Cargo 生成公开归档时
-会移除 `path` 并保留 registry 版本约束。下游 crate 只有在该版本已能从 registry 解析后才能发布，
-不得用 `[patch]` 掩盖缺失的前置发布。根级质量工程不进入产品归档。
+同仓实现 crate 之间只使用 registry 版本约束，工作区构建与公开归档保持相同依赖来源。下游 crate
+只有在前置版本已经能从 registry 解析后才能发布，不得用 `[patch]` 掩盖缺失的前置发布。
 
 ### crates.io 依赖
 
@@ -357,19 +356,10 @@ scheduling:             # scheduling 组件
     满/停机/分区死对调用方**可见**(不静默丢),`submit_async` 提供等容量的真背压。
   - `image`:输出像素上限(`MAX_OUTPUT_PIXELS`)防解压炸弹式放大。
 
-## 开发
+## 归档边界
 
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-features -- -D warnings
-cargo deny check          # 需要 cargo-deny，用于供应链检查
-cargo publish --dry-run -p nabase
-```
-
-持续集成（`.github/workflows/ci.yml`）只依赖产品源码入口执行格式、静态检查、构建和依赖审计。
-本地质量工程由不参与产品发布的根级入口统一管理，组件 crate 与 `.crate` 归档只能携带产品
-源码、公开文档和再分发所需文件。
-真实后端连接信息只能由本地环境注入，不要把内网地址、账号或密码写进说明文档或持续集成配置。
+组件 crate 与 `.crate` 归档只携带产品源码、公开文档和再分发所需文件。真实后端连接信息只能由部署
+环境注入，不得把内网地址、账号或密码写进说明文档或配置样例。
 
 ## 开源文档
 

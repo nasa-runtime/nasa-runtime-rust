@@ -44,7 +44,7 @@ pub struct NacosImport {
     pub file_extension: Option<String>,
 }
 
-/// 从合并后的配置树解析 `yml.imports` 列表(对照)。
+/// 业务作用：从合并后的配置树解析 `yml.imports` 列表(对照)。
 ///
 /// # 参数
 /// - `tree`: 已合并并解析占位符后的配置 Value 树。
@@ -77,7 +77,7 @@ pub fn parse_imports_from_tree(tree: &serde_json::Value, base_dir: &Path) -> Vec
     out
 }
 
-/// 解析 `yml.imports` 的一项:字符串(`file:`/`optional:file:`/`nacos:`/`optional:nacos:`)或
+/// 业务作用：解析 `yml.imports` 的一项:字符串(`file:`/`optional:file:`/`nacos:`/`optional:nacos:`)或
 /// map(`{file, optional?}` / `{nacos, group?, optional?}`)。
 ///
 /// # 参数
@@ -94,7 +94,7 @@ fn parse_mixed_entry(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlIm
     }
 }
 
-/// 字符串条目解析。
+/// 业务作用：字符串条目解析。
 ///
 /// ⚠️【optional 默认值:字符串形式与 map 形式【故意不同】】
 ///   - 字符串形式:**无 `optional:` 前缀 = required**(如 `file:common.yml` 是必需)。
@@ -138,7 +138,7 @@ fn parse_import_string(raw: &str, base_dir: &Path) -> Option<YmlImport> {
     file_import(rest, base_dir, optional)
 }
 
-/// map 条目解析:`{file: ..., optional?}` 或 `{nacos: ..., group?, optional?}`。optional 省略默认 true。
+/// 业务作用：map 条目解析:`{file: ..., optional?}` 或 `{nacos: ..., group?, optional?}`。optional 省略默认 true。
 ///
 /// # 参数
 /// - `entry`: `yml.imports` 中的 map 声明。
@@ -166,7 +166,7 @@ fn parse_import_map(entry: &serde_json::Value, base_dir: &Path) -> Option<YmlImp
     None
 }
 
-/// 造 `File` 导入:相对路径 join base_dir;以 `/` 开头按绝对路径(不 join)。
+/// 业务作用：造 `File` 导入:相对路径 join base_dir;以 `/` 开头按绝对路径(不 join)。
 /// 防穿越:拒绝含 `..` 组件的路径——尤其 Nacos 远端下发的 import 列表(不受信),避免 `file:../../secret`
 /// 把配置根外的任意本地文件读进有效配置。绝对路径允许(bootstrap 常用绝对配置路径,是本地可信输入)。
 ///
@@ -193,7 +193,7 @@ fn file_import(path: &str, base_dir: &Path, optional: bool) -> Option<YmlImport>
     })
 }
 
-/// 读 map 的 `group` 字段(缺省 `None`)。
+/// 业务作用：读 map 的 `group` 字段(缺省 `None`)。
 ///
 /// # 参数
 /// - `entry`: `yml.imports` 中的 nacos map 声明。
@@ -205,7 +205,7 @@ fn read_group(entry: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 读 map 的 `optional` 字段,**缺省 `true`**(显式配置 optional 默认 true)。
+/// 业务作用：读 map 的 `optional` 字段,**缺省 `true`**(显式配置 optional 默认 true)。
 ///
 /// # 参数
 /// - `entry`: `yml.imports` 中的 map 声明。
@@ -216,7 +216,7 @@ fn read_optional_default_true(entry: &serde_json::Value) -> bool {
         .unwrap_or(true)
 }
 
-/// 读 map 的 `file_extension` 字段(snake_case;缺省 `None` → 门面层回退全局 `nacos.file_extension`,仍缺默认 yaml)。
+/// 业务作用：读 map 的 `file_extension` 字段(snake_case;缺省 `None` → 门面层回退全局 `nacos.file_extension`,仍缺默认 yaml)。
 ///
 /// # 参数
 /// - `entry`: `yml.imports` 中的 nacos map 声明。
@@ -228,7 +228,7 @@ fn read_file_extension(entry: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 是否形似 `scheme:...`(scheme 为 `[A-Za-z][A-Za-z0-9+.-]*`)。用于把 `file:`/`nacos:` 之外的
+/// 业务作用：是否形似 `scheme:...`(scheme 为 `[A-Za-z][A-Za-z0-9+.-]*`)。用于把 `file:`/`nacos:` 之外的
 /// 已知 scheme(http:/classpath: 等)识别出来 warn+skip,而不把裸文件名误判成 scheme。
 ///
 /// # 参数

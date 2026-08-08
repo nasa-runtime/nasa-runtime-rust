@@ -22,7 +22,7 @@ pub struct StaticDiscovery {
 }
 
 impl StaticDiscovery {
-    /// 从完整静态表构造；服务名、endpoint 或重复地址非法时整体拒绝。
+    /// 业务作用：从完整静态表构造；服务名、endpoint 或重复地址非法时整体拒绝。
     pub fn new(services: BTreeMap<String, Vec<Instance>>) -> anyhow::Result<Self> {
         validate_services(&services)?;
         Ok(Self {
@@ -34,7 +34,7 @@ impl StaticDiscovery {
         })
     }
 
-    /// 原子替换单个服务；候选非法时当前快照与 watch 均不变化。
+    /// 业务作用：原子替换单个服务；候选非法时当前快照与 watch 均不变化。
     pub fn replace(
         &self,
         service: impl Into<String>,
@@ -68,7 +68,7 @@ impl StaticDiscovery {
 
 #[async_trait::async_trait]
 impl DiscoveryClient for StaticDiscovery {
-    /// 返回当前静态表中按字典序保存的全部服务名。
+    /// 业务作用：返回当前静态表中按字典序保存的全部服务名。
     async fn list_services(&self) -> anyhow::Result<Vec<String>> {
         Ok(self
             .inner
@@ -80,12 +80,12 @@ impl DiscoveryClient for StaticDiscovery {
             .collect())
     }
 
-    /// 返回指定服务当前可接流量的实例，过滤 disabled 或不健康节点。
+    /// 业务作用：返回指定服务当前可接流量的实例，过滤 disabled 或不健康节点。
     async fn discover(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         Ok(traffic_instances(&self.discover_all(service).await?))
     }
 
-    /// 返回指定服务的完整静态实例快照，包括暂不接流量的节点。
+    /// 业务作用：返回指定服务的完整静态实例快照，包括暂不接流量的节点。
     async fn discover_all(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         validate_service_name(service)?;
         Ok(self
@@ -98,7 +98,7 @@ impl DiscoveryClient for StaticDiscovery {
             .unwrap_or_default())
     }
 
-    /// 注册一个带初始快照的服务订阅，并用 guard 保证取消时移除 sender。
+    /// 业务作用：注册一个带初始快照的服务订阅，并用 guard 保证取消时移除 sender。
     async fn watch_with_options(
         &self,
         service: &str,
@@ -143,7 +143,7 @@ struct StaticWatchGuard {
 }
 
 impl StaticWatchGuard {
-    /// 从共享订阅表移除当前 watcher，并清理已经为空的服务桶。
+    /// 业务作用：从共享订阅表移除当前 watcher，并清理已经为空的服务桶。
     fn remove(&self) {
         let Some(inner) = self.inner.upgrade() else {
             return;
@@ -162,7 +162,7 @@ impl StaticWatchGuard {
 }
 
 impl Drop for StaticWatchGuard {
-    /// 调用方丢弃 watch 时立即注销，避免 sender 和服务桶泄漏。
+    /// 业务作用：调用方丢弃 watch 时立即注销，避免 sender 和服务桶泄漏。
     fn drop(&mut self) {
         self.remove();
     }
@@ -170,7 +170,7 @@ impl Drop for StaticWatchGuard {
 
 #[async_trait::async_trait]
 impl ServiceWatchGuard for StaticWatchGuard {
-    /// 显式注销当前静态订阅；重复 Drop 由幂等删除安全承接。
+    /// 业务作用：显式注销当前静态订阅；重复 Drop 由幂等删除安全承接。
     async fn unsubscribe(self: Box<Self>) -> anyhow::Result<()> {
         self.remove();
         Ok(())
@@ -193,7 +193,7 @@ pub struct DnsDiscovery {
 }
 
 impl DnsDiscovery {
-    /// 创建不可变 DNS 服务表。
+    /// 业务作用：创建不可变 DNS 服务表。
     pub fn new(services: BTreeMap<String, DnsService>) -> anyhow::Result<Self> {
         anyhow::ensure!(!services.is_empty(), "dns discovery requires services");
         for (service, target) in &services {
@@ -211,7 +211,7 @@ impl DnsDiscovery {
         })
     }
 
-    /// 解析目标的 A/AAAA 地址并生成去重、稳定排序的实例快照。
+    /// 业务作用：解析目标的 A/AAAA 地址并生成去重、稳定排序的实例快照。
     async fn resolve(target: &DnsService) -> anyhow::Result<Vec<Instance>> {
         let addresses = tokio::net::lookup_host((target.host.as_str(), target.port)).await?;
         let mut endpoints = addresses
@@ -229,17 +229,17 @@ impl DnsDiscovery {
 
 #[async_trait::async_trait]
 impl DiscoveryClient for DnsDiscovery {
-    /// 返回配置中声明的全部 DNS 服务名。
+    /// 业务作用：返回配置中声明的全部 DNS 服务名。
     async fn list_services(&self) -> anyhow::Result<Vec<String>> {
         Ok(self.services.keys().cloned().collect())
     }
 
-    /// 解析指定服务的当前 DNS 地址；DNS provider 不区分流量与管理视图。
+    /// 业务作用：解析指定服务的当前 DNS 地址；DNS provider 不区分流量与管理视图。
     async fn discover(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         self.discover_all(service).await
     }
 
-    /// 对指定服务执行一次 DNS 查询并返回完整地址快照。
+    /// 业务作用：对指定服务执行一次 DNS 查询并返回完整地址快照。
     async fn discover_all(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
         let target = self
             .services
@@ -248,7 +248,7 @@ impl DiscoveryClient for DnsDiscovery {
         Self::resolve(target).await
     }
 
-    /// 启动有界周期 DNS 轮询，仅在成功快照变化时向订阅者发布。
+    /// 业务作用：启动有界周期 DNS 轮询，仅在成功快照变化时向订阅者发布。
     async fn watch_with_options(
         &self,
         service: &str,
@@ -293,7 +293,7 @@ struct DnsWatchGuard {
 }
 
 impl Drop for DnsWatchGuard {
-    /// watch 离开作用域时终止 DNS 轮询，避免 detached task。
+    /// 业务作用：watch 离开作用域时终止 DNS 轮询，避免 detached task。
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -301,14 +301,14 @@ impl Drop for DnsWatchGuard {
 
 #[async_trait::async_trait]
 impl ServiceWatchGuard for DnsWatchGuard {
-    /// 显式终止 DNS 轮询任务。
+    /// 业务作用：显式终止 DNS 轮询任务。
     async fn unsubscribe(self: Box<Self>) -> anyhow::Result<()> {
         self.task.abort();
         Ok(())
     }
 }
 
-/// 整体验证静态服务表的名称、实例字段和 endpoint 唯一性。
+/// 业务作用：整体验证静态服务表的名称、实例字段和 endpoint 唯一性。
 fn validate_services(services: &BTreeMap<String, Vec<Instance>>) -> anyhow::Result<()> {
     for (service, instances) in services {
         validate_service_name(service)?;
@@ -317,7 +317,7 @@ fn validate_services(services: &BTreeMap<String, Vec<Instance>>) -> anyhow::Resu
     Ok(())
 }
 
-/// 限制服务名为有界 ASCII 标识，阻止空白、控制字符和无界 key。
+/// 业务作用：限制服务名为有界 ASCII 标识，阻止空白、控制字符和无界 key。
 fn validate_service_name(service: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !service.is_empty()
@@ -330,7 +330,7 @@ fn validate_service_name(service: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 校验实例 endpoint、权重及同服务内地址唯一性。
+/// 业务作用：校验实例 endpoint、权重及同服务内地址唯一性。
 fn validate_instances(instances: &[Instance]) -> anyhow::Result<()> {
     let mut endpoints = std::collections::BTreeSet::new();
     for instance in instances {
@@ -350,7 +350,7 @@ fn validate_instances(instances: &[Instance]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 从完整管理视图投影出当前健康且启用的流量实例。
+/// 业务作用：从完整管理视图投影出当前健康且启用的流量实例。
 fn traffic_instances(instances: &[Instance]) -> Vec<Instance> {
     instances
         .iter()

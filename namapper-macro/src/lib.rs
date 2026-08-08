@@ -122,7 +122,7 @@ fn mapper_enum_impl(item: TokenStream2) -> syn::Result<TokenStream2> {
         impl #root::MapperEnum for #ident {
             /// 业务作用：返回 enum 变体在数据库中保存的稳定序号。
             ///
-            /// 序号按源码声明顺序生成,用于 MyBatis 风格 enum 与整数字段之间的轻量映射。
+            /// 序号按源码声明顺序生成，用于 enum 与整数字段之间的轻量映射。
             fn ordinal(self) -> i32 {
                 match self {
                     #(#ordinal_arms,)*

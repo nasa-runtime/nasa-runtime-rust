@@ -30,7 +30,7 @@ pub(crate) enum RdPollError {
 }
 
 impl std::fmt::Display for RdPollError {
-    /// 输出不暴露底层类型的分类文本。
+    /// 业务作用：输出不暴露底层类型的分类文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Transient(message) => write!(formatter, "transient poll error: {message}"),
@@ -91,7 +91,7 @@ struct PreCommitGuard {
 }
 
 impl Drop for PreCommitGuard {
-    /// 释放当前 consumer 的 revoke commit 单飞门禁。
+    /// 业务作用：释放当前 consumer 的 revoke commit 单飞门禁。
     fn drop(&mut self) {
         self.owner
             .context()
@@ -122,7 +122,7 @@ struct OwnerConsumerContext {
 }
 
 impl OwnerConsumerContext {
-    /// 构造空 mailbox。
+    /// 业务作用：构造空 mailbox。
     ///
     /// # 参数
     ///
@@ -141,7 +141,7 @@ impl OwnerConsumerContext {
         }
     }
 
-    /// 在 consumer 构造完成后回填自身弱引用，且只允许成功一次。
+    /// 业务作用：在 consumer 构造完成后回填自身弱引用，且只允许成功一次。
     ///
     /// # 参数
     ///
@@ -150,7 +150,7 @@ impl OwnerConsumerContext {
         let _ = self.owner_consumer.set(consumer);
     }
 
-    /// 覆盖写入当前 callback 结果。
+    /// 业务作用：覆盖写入当前 callback 结果。
     ///
     /// # 参数
     ///
@@ -177,7 +177,7 @@ impl OwnerConsumerContext {
         });
     }
 
-    /// 取走当前合并事件。
+    /// 业务作用：取走当前合并事件。
     fn take(&self) -> Option<RdRebalanceEvent> {
         self.mailbox
             .lock()
@@ -185,7 +185,7 @@ impl OwnerConsumerContext {
             .take()
     }
 
-    /// 判断 mailbox 是否已有待处理事件但不取走它。
+    /// 业务作用：判断 mailbox 是否已有待处理事件但不取走它。
     fn has_event(&self) -> bool {
         self.mailbox
             .lock()
@@ -193,7 +193,7 @@ impl OwnerConsumerContext {
             .is_some()
     }
 
-    /// 替换 owner 当前可以安全提交的 offsets 快照。
+    /// 业务作用：替换 owner 当前可以安全提交的 offsets 快照。
     ///
     /// # 参数
     ///
@@ -207,7 +207,7 @@ impl OwnerConsumerContext {
 }
 
 impl ClientContext for OwnerConsumerContext {
-    /// 把 librdkafka 后台线程的 broker 级错误写入单槽,供 `GroupHealth.last_error` 读侧合并。
+    /// 业务作用：把 librdkafka 后台线程的 broker 级错误写入单槽,供 `GroupHealth.last_error` 读侧合并。
     ///
     /// 只收 ALL_BROKERS_DOWN 与认证/授权/SSL 类(其余 per-broker transport 抖动过滤——重连期噪声大且
     /// 会被聚合成 ALL_BROKERS_DOWN);覆盖写保留最新一条。文本含 broker host:port(与 安全 endpoint
@@ -231,7 +231,7 @@ impl ClientContext for OwnerConsumerContext {
     }
 }
 
-/// 判定一个错误码是否值得进入 `GroupHealth.last_error` 的 broker 级单槽。
+/// 业务作用：判定一个错误码是否值得进入 `GroupHealth.last_error` 的 broker 级单槽。
 ///
 /// # 参数
 ///
@@ -251,7 +251,7 @@ fn is_global_health_code(code: RDKafkaErrorCode) -> bool {
 }
 
 impl ConsumerContext for OwnerConsumerContext {
-    /// 在 generation 仍有效的 revoke 窗口内同步提交被收回分区的安全前沿。
+    /// 业务作用：在 generation 仍有效的 revoke 窗口内同步提交被收回分区的安全前沿。
     fn pre_rebalance(&self, consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         let Rebalance::Revoke(partitions) = rebalance else {
             return;
@@ -293,7 +293,7 @@ impl ConsumerContext for OwnerConsumerContext {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
     }
 
-    /// 默认 assign/unassign 完成后发布事实，避免用启动前的空 assignment 冒充已 join。
+    /// 业务作用：默认 assign/unassign 完成后发布事实，避免用启动前的空 assignment 冒充已 join。
     fn post_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         match rebalance {
             Rebalance::Assign(partitions) => self.publish(
@@ -345,22 +345,22 @@ pub(crate) struct RdMessage<'a> {
 }
 
 impl RdMessage<'_> {
-    /// 返回 topic。
+    /// 业务作用：返回 topic。
     pub(crate) fn topic(&self) -> &str {
         self.inner.topic()
     }
 
-    /// 返回 partition。
+    /// 业务作用：返回 partition。
     pub(crate) fn partition(&self) -> i32 {
         self.inner.partition()
     }
 
-    /// 返回当前 offset。
+    /// 业务作用：返回当前 offset。
     pub(crate) fn offset(&self) -> i64 {
         self.inner.offset()
     }
 
-    /// 返回消息时间戳毫秒，缺失时为 -1。
+    /// 业务作用：返回消息时间戳毫秒，缺失时为 -1。
     pub(crate) fn timestamp(&self) -> i64 {
         match self.inner.timestamp() {
             Timestamp::NotAvailable => -1,
@@ -368,17 +368,17 @@ impl RdMessage<'_> {
         }
     }
 
-    /// 返回原始 key 借用。
+    /// 业务作用：返回原始 key 借用。
     pub(crate) fn key(&self) -> Option<&[u8]> {
         self.inner.key()
     }
 
-    /// 返回原始 payload 借用。
+    /// 业务作用：返回原始 payload 借用。
     pub(crate) fn payload(&self) -> Option<&[u8]> {
         self.inner.payload()
     }
 
-    /// 物化轻量 header 描述符，header 名和值本身仍借用底层消息。
+    /// 业务作用：物化轻量 header 描述符，header 名和值本身仍借用底层消息。
     ///
     /// rust-rdkafka 0.39 的借用 header 迭代器会对非 UTF-8 名称执行 `unwrap`。Kafka wire
     /// 并不保证外部生产者写入的名称是 UTF-8，因此必须在隔离层截获该 panic，并把它交给
@@ -401,12 +401,12 @@ impl RdMessage<'_> {
         .map_err(|_| NafkaError::MalformedRoute("header 名不是 UTF-8".into()))
     }
 
-    /// 返回复制为拥有型记录前的主要保留字节估算。
+    /// 业务作用：返回复制为拥有型记录前的主要保留字节估算。
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained_bytes_with(self.headers().as_ref().ok())
     }
 
-    /// 用已解析好的 headers 计量保留字节，避免对同一条消息重复解析。
+    /// 业务作用：用已解析好的 headers 计量保留字节，避免对同一条消息重复解析。
     ///
     /// # 参数
     ///
@@ -436,7 +436,7 @@ pub(crate) struct ConsumerClient {
 }
 
 impl ConsumerClient {
-    /// 构造一个禁用自动提交与自动存储的 consumer。
+    /// 业务作用：构造一个禁用自动提交与自动存储的 consumer。
     ///
     /// # 参数
     ///
@@ -474,7 +474,7 @@ impl ConsumerClient {
         })
     }
 
-    /// 发出一个带 group 标签的 consumer counter。
+    /// 业务作用：发出一个带 group 标签的 consumer counter。
     pub(crate) fn counter(&self, name: &'static str, delta: u64) {
         // 用户实现的 panic 必须被隔离：本函数在 owner 线程上调用（commit 路径），
         // 一次 panic 会穿到 run_owner 的 catch_unwind 把 group 打成 Crashed。
@@ -490,7 +490,7 @@ impl ConsumerClient {
         }
     }
 
-    /// 订阅一组 topic。
+    /// 业务作用：订阅一组 topic。
     ///
     /// # 参数
     ///
@@ -504,12 +504,12 @@ impl ConsumerClient {
         self.consumer.subscribe(&refs).map_err(broker_error)
     }
 
-    /// 取消当前 subscribe 订阅。
+    /// 业务作用：取消当前 subscribe 订阅。
     pub(crate) fn unsubscribe(&self) {
         self.consumer.unsubscribe();
     }
 
-    /// 固定 assign 分区并解析起始位点。
+    /// 业务作用：固定 assign 分区并解析起始位点。
     ///
     /// # 参数
     ///
@@ -629,7 +629,7 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 在 fixed assign 启动总 deadline 内把逻辑 Beginning/End 冻结为绝对 offset。
+    /// 业务作用：在 fixed assign 启动总 deadline 内把逻辑 Beginning/End 冻结为绝对 offset。
     ///
     /// # 参数
     ///
@@ -655,7 +655,7 @@ impl ConsumerClient {
         Ok(Offset::Offset(if high { high_value } else { low }))
     }
 
-    /// poll 一条消息或消费错误。
+    /// 业务作用：poll 一条消息或消费错误。
     ///
     /// # 参数
     ///
@@ -676,7 +676,7 @@ impl ConsumerClient {
         }
     }
 
-    /// 同步批量提交每个分区唯一安全的 next-offset。
+    /// 业务作用：同步批量提交每个分区唯一安全的 next-offset。
     ///
     /// # 参数
     ///
@@ -700,17 +700,17 @@ impl ConsumerClient {
             .map_err(broker_error)
     }
 
-    /// 主循环取走最近一次实际 rebalance callback 结果。
+    /// 业务作用：主循环取走最近一次实际 rebalance callback 结果。
     pub(crate) fn take_rebalance(&self) -> Option<RdRebalanceEvent> {
         self.consumer.context().take()
     }
 
-    /// 判断 owner 是否应先退出 commit 重试并处理 rebalance。
+    /// 业务作用：判断 owner 是否应先退出 commit 重试并处理 rebalance。
     pub(crate) fn has_rebalance(&self) -> bool {
         self.consumer.context().has_event()
     }
 
-    /// 更新供 pre-rebalance callback 使用的安全提交快照。
+    /// 业务作用：更新供 pre-rebalance callback 使用的安全提交快照。
     ///
     /// # 参数
     ///
@@ -719,7 +719,7 @@ impl ConsumerClient {
         self.consumer.context().set_pending_offsets(offsets);
     }
 
-    /// 主动清空当前 assignment。
+    /// 业务作用：主动清空当前 assignment。
     ///
     /// # 错误
     ///
@@ -728,7 +728,7 @@ impl ConsumerClient {
         self.consumer.unassign().map_err(broker_error)
     }
 
-    /// 返回当前 assignment 快照。
+    /// 业务作用：返回当前 assignment 快照。
     ///
     /// # 错误
     ///
@@ -738,7 +738,7 @@ impl ConsumerClient {
         Ok(elements_to_tps(&list))
     }
 
-    /// 查询指定分区 position。
+    /// 业务作用：查询指定分区 position。
     ///
     /// # 参数
     ///
@@ -769,7 +769,7 @@ impl ConsumerClient {
             .collect())
     }
 
-    /// 在 assignment 后显式冻结每个分区的初始消费位置。
+    /// 业务作用：在 assignment 后显式冻结每个分区的初始消费位置。
     ///
     /// committed offset 优先；没有提交时按配置使用 logical Beginning/End，并通过一次批量
     /// `seek_partitions` 冻结全部位置。该步骤完成前不能发布 broker ready，否则 latest group 可能
@@ -837,7 +837,7 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 暂停指定分区；空列表表示当前 assignment。
+    /// 业务作用：暂停指定分区；空列表表示当前 assignment。
     ///
     /// # 参数
     ///
@@ -854,7 +854,7 @@ impl ConsumerClient {
         Ok(targets)
     }
 
-    /// 恢复指定分区；空列表表示当前 assignment。
+    /// 业务作用：恢复指定分区；空列表表示当前 assignment。
     ///
     /// # 参数
     ///
@@ -871,7 +871,7 @@ impl ConsumerClient {
         Ok(targets)
     }
 
-    /// seek 一组显式 offsets。
+    /// 业务作用：seek 一组显式 offsets。
     ///
     /// # 参数
     ///
@@ -887,7 +887,7 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 尽力回退每个分区的位置：单个分区失败不影响其余分区。
+    /// 业务作用：尽力回退每个分区的位置：单个分区失败不影响其余分区。
     ///
     /// 批级回退表里**故意**包含预期会失败的分区（刚被 revoke 的、已不在 assignment 里的），
     /// 而 `BTreeMap<Tp, _>` 按 `(topic, partition)` 排序遍历。若沿用 fail-fast 语义，
@@ -918,7 +918,7 @@ impl ConsumerClient {
         failed
     }
 
-    /// seek 一组分区到指定特殊 offset。
+    /// 业务作用：seek 一组分区到指定特殊 offset。
     ///
     /// 只接受 Beginning/End 与绝对 offset。`StartOffset::Committed` 必须走
     /// [`Self::seek_to_committed`]：底层的 `Offset::Stored` 读的是客户端本地 offset store，
@@ -945,7 +945,7 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 把一组分区定位回 broker 已提交位点。
+    /// 业务作用：把一组分区定位回 broker 已提交位点。
     ///
     /// 为什么不能直接 seek 到底层的 `Offset::Stored`：框架把
     /// `enable.auto.offset.store=false` 定为不可覆盖的不变量，
@@ -1002,7 +1002,7 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 按时间戳解析并 seek 一组分区。
+    /// 业务作用：按时间戳解析并 seek 一组分区。
     ///
     /// # 参数
     ///
@@ -1033,12 +1033,12 @@ impl ConsumerClient {
         Ok(())
     }
 
-    /// 返回底层是否判定当前 assignment 已丢失。
+    /// 业务作用：返回底层是否判定当前 assignment 已丢失。
     pub(crate) fn assignment_lost(&self) -> bool {
         self.consumer.assignment_lost()
     }
 
-    /// 将空目标列表替换为当前 assignment。
+    /// 业务作用：将空目标列表替换为当前 assignment。
     ///
     /// # 参数
     ///
@@ -1055,7 +1055,7 @@ impl ConsumerClient {
         }
     }
 
-    /// seek 单分区。
+    /// 业务作用：seek 单分区。
     ///
     /// # 参数
     ///
@@ -1077,7 +1077,7 @@ impl ConsumerClient {
     }
 }
 
-/// 把公开起始策略映射为底层 offset 表达。
+/// 业务作用：把公开起始策略映射为底层 offset 表达。
 ///
 /// `Committed` 不在此映射：它需要一次 broker 查询才能变成绝对 offset，
 /// 由 [`ConsumerClient::seek_to_committed`] 负责；这里返回 Beginning 只是为了让
@@ -1094,7 +1094,7 @@ fn start_offset(offset: StartOffset) -> Offset {
     }
 }
 
-/// 从 owner 安全快照中只选取本次实际被收回的分区。
+/// 业务作用：从 owner 安全快照中只选取本次实际被收回的分区。
 ///
 /// # 参数
 ///
@@ -1115,7 +1115,7 @@ fn select_revoke_offsets(
         .collect()
 }
 
-/// 在独立线程执行可注入工作，并把 callback 等待严格限制在给定时长内。
+/// 业务作用：在独立线程执行可注入工作，并把 callback 等待严格限制在给定时长内。
 ///
 /// # 参数
 ///
@@ -1147,7 +1147,7 @@ where
     }
 }
 
-/// 使用单飞后台任务在硬截止时间内提交 revoke 安全前沿。
+/// 业务作用：使用单飞后台任务在硬截止时间内提交 revoke 安全前沿。
 ///
 /// 高层同步提交在协调器不可用时可能等待完整 session timeout，无法满足 callback 的硬边界；这里让
 /// 后台任务持有 owner consumer 生命周期，而 callback 只等待调用方预算。超时后的晚到成功不再被本地
@@ -1193,7 +1193,7 @@ fn commit_offsets_bounded(
     outcome
 }
 
-/// 把自有分区列表转换为底层列表。
+/// 业务作用：把自有分区列表转换为底层列表。
 ///
 /// # 参数
 ///
@@ -1206,7 +1206,7 @@ fn tps_to_list(tps: &[Tp]) -> TopicPartitionList {
     list
 }
 
-/// 把安全 offset 表转换为底层提交列表。
+/// 业务作用：把安全 offset 表转换为底层提交列表。
 ///
 /// # 参数
 ///
@@ -1224,7 +1224,7 @@ fn offsets_to_list(offsets: &BTreeMap<Tp, i64>) -> Result<TopicPartitionList> {
     Ok(list)
 }
 
-/// 把底层列表转换为稳定排序自有分区列表。
+/// 业务作用：把底层列表转换为稳定排序自有分区列表。
 ///
 /// # 参数
 ///
@@ -1239,7 +1239,7 @@ fn elements_to_tps(list: &TopicPartitionList) -> Vec<Tp> {
     tps
 }
 
-/// 把底层 consumer 错误收敛为公共 broker 错误。
+/// 业务作用：把底层 consumer 错误收敛为公共 broker 错误。
 ///
 /// # 参数
 ///
@@ -1248,7 +1248,7 @@ fn broker_error(error: impl std::fmt::Display) -> NafkaError {
     NafkaError::Broker(error.to_string())
 }
 
-/// 集中把底层 poll 错误分成 fatal 或 transient，禁止调用点自行猜测。
+/// 业务作用：集中把底层 poll 错误分成 fatal 或 transient，禁止调用点自行猜测。
 ///
 /// # 参数
 ///
@@ -1265,7 +1265,7 @@ fn classify_poll_error(error: KafkaError) -> RdPollError {
     }
 }
 
-/// 判断底层错误码是否要求永久停止当前 group。
+/// 业务作用：判断底层错误码是否要求永久停止当前 group。
 ///
 /// # 参数
 ///

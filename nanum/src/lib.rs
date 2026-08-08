@@ -331,7 +331,7 @@ fn compat_double_compare(a: f64, b: f64) -> core::cmp::Ordering {
     }
 
     // 业务作用: 等价或含 NaN/±0:用 原实现 `doubleToLongBits` 语义(NaN 规范化,不区分 payload/符号)。
-    /// 转成兼容 IEEE-754 二进制浮点的规范化位模式。
+    /// 业务作用：转成兼容 IEEE-754 二进制浮点的规范化位模式。
     ///
     /// # 参数
     /// - `v`: 待转换的 f64 值。

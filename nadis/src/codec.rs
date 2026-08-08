@@ -26,14 +26,14 @@ use serde::Serialize;
 pub struct Json<T>(pub T);
 
 impl<T> Json<T> {
-    /// Returns the wrapped value.
+    /// 业务作用：取出包装值并把所有权交还调用方。
     pub fn into_inner(self) -> T {
         self.0
     }
 }
 
 impl<T: Serialize> Json<T> {
-    /// **可失败序列化**:`ToRedisArgs::write_redis_args` 由 trait 约束**无错误
+    /// 业务作用：**可失败序列化**:`ToRedisArgs::write_redis_args` 由 trait 约束**无错误
     /// 通道**,序列化失败只能 panic 或静默丢数据;两者都不可接受。处理**可能含 `NaN`/`Inf`/非字符串
     /// Map key** 等不满足 JSON 模型的不可信数据时,调用方应先用本方法拿到 `Result`,再把 `Vec<u8>`
     /// 喂命令(`client.set(k, Json::to_bytes(&v)?)`),从而把"序列化失败"变成可处理的 `Err` 而非 panic。
@@ -46,7 +46,7 @@ impl<T: Serialize> ToRedisArgs for Json<T> {
     // Serializes the wrapped value into Redis command arguments.
     ///
     /// # 参数
-    /// - `out`: 输出缓冲区,用于收集解析结果。
+    /// 业务作用：- `out`: 输出缓冲区,用于收集解析结果。
     fn write_redis_args<W: ?Sized + RedisWrite>(&self, out: &mut W) {
         // ⚠ 本路径**无错误通道**(trait 约束):序列化失败只能 panic 或静默丢数据。常规 DTO 永不失败;
         // 仅 `NaN`/`Inf`/非字符串 Map key 等非 JSON 模型值会触发。**处理不可信/可能含此类值的数据时,
@@ -62,7 +62,7 @@ impl<T: DeserializeOwned> FromRedisValue for Json<T> {
     // Decodes a Redis value into the wrapper type.
     ///
     /// # 参数
-    /// - `v`: 待转换的值。
+    /// 业务作用：- `v`: 待转换的值。
     fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
         // 第一步:把 Redis 返回值按原始 bytes 取出(GET/HGET 等返回 BulkString)
         let bytes: Vec<u8> = Vec::<u8>::from_redis_value(v)?;

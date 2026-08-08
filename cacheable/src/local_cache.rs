@@ -28,12 +28,12 @@
 // ── 依赖导入(对照 原实现 的 import)──
 use std::any::Any; // 类型擦除/还原:Any 让我们能把不同 K/V 的 SceneState 统一塞进一张表,取出时再 downcast 还原
 use std::collections::BTreeMap; // 有序 Map,用作 Map 池的复合键(对照 原实现 的 Map<String,Object> key);BTreeMap 实现了 Hash/Eq/Ord,可当 key
-use std::future::Future; // 异步返回值的 trait;loader 闭包返回的就是一个 Future(对照 原实现 的 CompletableFuture)
+use std::future::Future; // loader 通过 Future 表达可等待的异步返回值。
 use std::hash::Hash; // key 需要可哈希(放进 moka/DashMap 的哈希表里),约束 K: Hash
 use std::sync::{Arc, OnceLock}; // Arc=原子引用计数共享指针(等价 原实现 对象引用,可跨线程共享);OnceLock=懒初始化一次的全局单例容器
 use std::time::{Duration, Instant}; // Duration=时间长度(如 50ms);Instant=单调时钟时间点,用来记录"写入时刻"并算已过去多久
 
-use dashmap::DashMap; // 并发安全的 HashMap(分段锁),对照 原实现 的 ConcurrentHashMap;免手动加锁
+use dashmap::DashMap; // 分段锁保护的并发 HashMap，供多任务共享 scene 注册表。
 use moka::future::Cache; // moka 异步缓存(Rust 版 Caffeine):提供 TinyLFU 淘汰 + TTL + 单飞加载
 
 /// 可嵌入基础设施组件的有界 L1 缓存。
@@ -51,7 +51,7 @@ where
     K: Hash + Eq + Clone + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// 建立一个由调用方拥有的有界缓存。
+    /// 业务作用：建立一个由调用方拥有的有界缓存。
     ///
     /// # 参数
     /// - `max_entries`: 最大 entry 数；必须大于 0，达到后由 moka TinyLFU 淘汰。
@@ -65,7 +65,7 @@ where
         }
     }
 
-    /// 读取一个值；命中返回共享 `Arc`，不深复制 value。
+    /// 业务作用：读取一个值；命中返回共享 `Arc`，不深复制 value。
     ///
     /// # 参数
     /// - `key`: 待查键的借用。
@@ -73,7 +73,7 @@ where
         self.cache.get(key).await
     }
 
-    /// 覆盖写入一个值并返回同一份共享 `Arc`。
+    /// 业务作用：覆盖写入一个值并返回同一份共享 `Arc`。
     ///
     /// # 参数
     /// - `key`: 调用方构造的稳定缓存键。
@@ -84,7 +84,7 @@ where
         value
     }
 
-    /// 删除一个精确 key。
+    /// 业务作用：删除一个精确 key。
     ///
     /// # 参数
     /// - `key`: 待失效键的借用。
@@ -92,12 +92,12 @@ where
         self.cache.invalidate(key).await;
     }
 
-    /// 标记全部 entry 失效；用于 route 快照或管理面整组 PURGE。
+    /// 业务作用：标记全部 entry 失效；用于 route 快照或管理面整组 PURGE。
     pub fn invalidate_all(&self) {
         self.cache.invalidate_all();
     }
 
-    /// 返回近似 entry 数，只用于低频观测，不作为并发正确性判断。
+    /// 业务作用：返回近似 entry 数，只用于低频观测，不作为并发正确性判断。
     pub fn entry_count(&self) -> u64 {
         self.cache.entry_count()
     }
@@ -124,7 +124,7 @@ struct Slot<V> {
 // 手动实现 Clone:只 clone Arc 指针 + copy Instant,不要求 V: Clone
 // (若用 #[derive(Clone)],编译器会要求 V: Clone;手写则只需 Arc 可 clone,V 本身不必 clone)
 impl<V> Clone for Slot<V> {
-    /// 复制当前句柄；用于共享同一底层资源或配置快照。
+    /// 业务作用：复制当前句柄；用于共享同一底层资源或配置快照。
     fn clone(&self) -> Self {
         Self {
             value: self.value.clone(),
@@ -174,7 +174,7 @@ where
     K: Hash + Eq + Clone + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// 释放当前 key 的刷新权。
+    /// 业务作用：释放当前 key 的刷新权。
     ///
     /// loader 正常完成、返回错误或 panic 展开时都会执行，避免 `refreshing` 表里永久残留该 key。
     fn drop(&mut self) {
@@ -188,7 +188,7 @@ where
 // OnceLock:全局静态变量,首次访问时才初始化一次(线程安全),之后复用;键=scene 名,值=该 scene 的状态(已类型擦除)。
 // dyn Any + Send + Sync:把不同 K/V 的 SceneState<K,V> 抹平成同一种"任意类型"存进同一张表,且保证可跨线程共享。
 static REGISTRY: OnceLock<DashMap<String, Arc<dyn Any + Send + Sync>>> = OnceLock::new();
-/// 取得全局 scene 注册表。
+/// 业务作用：取得全局 scene 注册表。
 ///
 /// `get_or_init` 保证全局只创建一次 DashMap(懒加载单例),返回 `'static` 引用供所有缓存池复用。
 fn registry() -> &'static DashMap<String, Arc<dyn Any + Send + Sync>> {
@@ -201,7 +201,7 @@ fn registry() -> &'static DashMap<String, Arc<dyn Any + Send + Sync>> {
 /// `SceneState<K,V>` 调 invalidate。建池时为每个 scene 登记一个非泛型失效器,由它捕获具体 moka
 /// 缓存并向外暴露字符串 key 失效入口。
 trait SceneOps: Send + Sync {
-    /// 失效本 scene 里该 key。仅对 String-key 的 scene 生效(cacheable 都用 String key);
+    /// 业务作用：失效本 scene 里该 key。仅对 String-key 的 scene 生效(cacheable 都用 String key);
     /// 非 String 的 scene(如 Map 池)做 no-op(下面用 Any downcast 判断 K 是不是 String)。
     ///
     /// # 参数
@@ -214,7 +214,7 @@ where
     K: Hash + Eq + Clone + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// 使指定本地缓存键失效；用于数据变更后清除旧值。
+    /// 业务作用：使指定本地缓存键失效；用于数据变更后清除旧值。
     ///
     /// # 参数
     /// - `key`: 要从当前 scene 中删除的字符串缓存 key。
@@ -236,12 +236,12 @@ where
 // scene 名 → 类型擦除失效器 的全局表(和 REGISTRY 平行)。
 // Arc<dyn SceneOps>:SceneOps 有 Send+Sync 超 trait,故该 Arc 自动 Send+Sync,可跨线程存取。
 static SCENE_OPS: OnceLock<DashMap<String, Arc<dyn SceneOps>>> = OnceLock::new();
-/// 返回缓存场景操作表；用于按场景批量清理本地缓存。
+/// 业务作用：返回缓存场景操作表；用于按场景批量清理本地缓存。
 fn scene_ops() -> &'static DashMap<String, Arc<dyn SceneOps>> {
     SCENE_OPS.get_or_init(DashMap::new)
 }
 
-/// 【非泛型】按 scene+key 失效本节点 L1。供跨节点广播订阅端调用(它只有字符串,没有泛型类型)。
+/// 业务作用：【非泛型】按 scene+key 失效本节点 L1。供跨节点广播订阅端调用(它只有字符串,没有泛型类型)。
 /// 内部走该 scene 登记的 SceneOps;仅 String-key 的 scene 真正生效,其余 no-op。找不到 scene 也安全跳过。
 ///
 /// # 参数
@@ -261,7 +261,7 @@ pub fn remove_any(scene_name: &str, key: &str) {
 // 泛型 K/V:见 SceneState 的约束说明,需在编译期固定该 scene 的键/值类型。
 ///
 /// # 参数
-/// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+/// 业务作用：- `name`: 业务名称、字段名或配置名,用于定位目标对象。
 /// - `refresh_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
 /// - `expire_ms`: 毫秒时间参数,用于控制超时、延迟或调度窗口。
 fn scene<K, V>(name: &str, refresh_ms: u64, expire_ms: u64) -> Arc<SceneState<K, V>>
@@ -310,7 +310,7 @@ where
         .unwrap_or_else(|_| panic!("LocalCache: scene '{name}' 用了不一致的 K/V 类型"))
 }
 
-/// 根据刷新阈值推导默认硬过期时间。
+/// 业务作用：根据刷新阈值推导默认硬过期时间。
 ///
 /// 规则:刷新很快(<1s)时 expire 取 2 倍给后台刷新留缓冲;否则只比刷新多 1s。
 ///
@@ -327,7 +327,7 @@ pub fn defaultExpireMs(refresh_ms: u64) -> u64 {
 // ════════════════════════════════════════════════════════════════════════════
 // expire 模式:过期后阻塞加载(同 key 单飞)
 // ════════════════════════════════════════════════════════════════════════════
-/// 缓存不存在或已过期时,同 key 只有 1 个任务去 loader 加载,其余 await 同一结果(防击穿)。
+/// 业务作用：缓存不存在或已过期时,同 key 只有 1 个任务去 loader 加载,其余 await 同一结果(防击穿)。
 /// loader 返回:
 ///   Ok(Some(v)) → 缓存值;Ok(None) → 缓存空哨兵(防穿透),get 返回 None;
 ///   Err(e)      → 【不缓存】,错误向上抛(对照 Caffeine:loader 抛异常不缓存)。
@@ -386,7 +386,7 @@ where
 // ════════════════════════════════════════════════════════════════════════════
 // refresh 模式:不存在阻塞加载;refresh 窗口内 sync 同步重载/async 后台重载,返旧值
 // ════════════════════════════════════════════════════════════════════════════
-/// refresh 模式取值。
+/// 业务作用：refresh 模式取值。
 /// 参数:
 ///   scene_name —— 场景名(池名)。
 ///   key        —— 缓存键。
@@ -519,7 +519,7 @@ where
 // ════════════════════════════════════════════════════════════════════════════
 // 手动操作:put / refresh / remove / removeAll
 // ════════════════════════════════════════════════════════════════════════════
-/// 手动放入(对照 原实现 expire(scene,key,value,expireMs))。返回放入的 `Arc<V>`。
+/// 业务作用：手动放入(对照 原实现 expire(scene,key,value,expireMs))。返回放入的 `Arc<V>`。
 /// 参数:
 ///   scene_name —— 场景名(池名);若该 scene 还不存在会顺带建池。
 ///   key        —— 要写入的键。
@@ -552,7 +552,7 @@ where
     arc // 返回给调用方
 }
 
-/// 手动重载某 key(用传入的 loader 重新加载并写回)。
+/// 业务作用：手动重载某 key(用传入的 loader 重新加载并写回)。
 /// 注:原实现 版 refresh(scene,key) 用建池时绑定的 loader;Rust 无法存异步闭包,故需显式传 loader。
 /// 参数:
 ///   scene_name —— 场景名;注意:与 get* 不同,这里【不建池】——scene 不存在就直接跳过(什么也不做)。
@@ -595,7 +595,7 @@ where
     }
 }
 
-/// 失效单个 key
+/// 业务作用：失效单个 key
 ///
 /// # 参数
 /// - `scene_name`: 本地缓存池名。
@@ -614,7 +614,7 @@ where
     }
 }
 
-/// 失效整个 scene
+/// 业务作用：失效整个 scene
 ///
 /// # 参数
 /// - `scene_name`: 要整体清空的本地缓存池名。
@@ -635,7 +635,7 @@ where
 // ── Map 池薄封装(对照 原实现 的 *Map 系列;key = BTreeMap<String,String>)──
 // 作用:把 K 固定为 MapKey(BTreeMap<String,String>),调用方无需再写泛型 K,直接传一个 Map 当复合键。
 // 参数同 getExpire,只是 key 的类型从泛型 K 收窄成 MapKey;泛型只剩 V/F/Fut。
-/// MapKey 版本的过期式读取;用于复合键场景,其余行为与 [`getExpire`] 一致。
+/// 业务作用：MapKey 版本的过期式读取;用于复合键场景,其余行为与 [`getExpire`] 一致。
 ///
 /// # 参数
 /// - `scene_name`: 本地缓存池名。
@@ -657,7 +657,7 @@ where
     getExpire::<MapKey, V, F, Fut>(scene_name, key, expireMs, loader).await
 }
 
-/// MapKey 版本的刷新式读取;用于复合键场景,其余行为与 [`getRefresh`] 一致。
+/// 业务作用：MapKey 版本的刷新式读取;用于复合键场景,其余行为与 [`getRefresh`] 一致。
 ///
 /// # 参数
 /// - `scene_name`: 本地缓存池名。

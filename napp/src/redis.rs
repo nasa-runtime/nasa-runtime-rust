@@ -27,7 +27,7 @@ pub(crate) struct RedisComponent {
 }
 
 impl RedisComponent {
-    /// 创建尚未建连的 Redis 组件。
+    /// 业务作用：创建尚未建连的 Redis 组件。
     ///
     /// # 参数
     ///
@@ -39,7 +39,7 @@ impl RedisComponent {
     }
 }
 
-/// Redis 就绪策略:默认**非关键**——Redis 故障使实例 Degraded(仍 200)而非摘流;
+/// 业务作用：Redis 就绪策略:默认**非关键**——Redis 故障使实例 Degraded(仍 200)而非摘流;
 /// 会话/锁强依赖 Redis 的部署可自行改为 critical。连续 3 次 PING 失败才降级,一次成功即恢复。
 fn redis_readiness_policy() -> ReadinessPolicy {
     ReadinessPolicy {
@@ -50,7 +50,7 @@ fn redis_readiness_policy() -> ReadinessPolicy {
     }
 }
 
-/// 运行期 Redis 健康 monitor:进入 Ready 后按固定间隔 PING 判活并发布就绪观测。
+/// 业务作用：运行期 Redis 健康 monitor:进入 Ready 后按固定间隔 PING 判活并发布就绪观测。
 ///
 /// # 参数
 ///
@@ -90,7 +90,7 @@ async fn run_redis_monitor(
 }
 
 impl ApplicationComponent for RedisComponent {
-    /// 返回 Redis 组件稳定身份。
+    /// 业务作用：返回 Redis 组件稳定身份。
     ///
     /// # 参数
     ///
@@ -99,7 +99,7 @@ impl ApplicationComponent for RedisComponent {
         ComponentId::Redis
     }
 
-    /// 读取最终配置的 `redis` 段并建立客户端。
+    /// 业务作用：读取最终配置的 `redis` 段并建立客户端。
     ///
     /// 建连成功后先登记资源再压栈清理动作：这样任何后续启动失败都能沿同一条逆序链显式关闭客户端，
     /// 而不是依赖最后一个 `Arc` 何时释放。
@@ -143,7 +143,7 @@ impl ApplicationComponent for RedisComponent {
         })
     }
 
-    /// 取出 Redis 健康 monitor,交由 Runner 按关键任务监督。
+    /// 业务作用：取出 Redis 健康 monitor,交由 Runner 按关键任务监督。
     ///
     /// # 返回
     ///
@@ -161,7 +161,7 @@ struct RedisShutdown {
 }
 
 impl ShutdownAction for RedisShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -170,7 +170,7 @@ impl ShutdownAction for RedisShutdown {
         "redis-client"
     }
 
-    /// 调用客户端的显式停机，再释放组件侧强引用。
+    /// 业务作用：调用客户端的显式停机，再释放组件侧强引用。
     ///
     /// # 参数
     ///
@@ -185,7 +185,7 @@ impl ShutdownAction for RedisShutdown {
     }
 }
 
-/// 从最终配置读取 `redis` 段。
+/// 业务作用：从最终配置读取 `redis` 段。
 ///
 /// 段缺失是明确错误而不是默认值：`profile` 与 `namespace` 在 nadis 里无默认，静默兜底只会把
 /// 配置缺失推迟成第一条命令的运行期故障。
@@ -204,7 +204,7 @@ fn read_redis_config(application: &Application) -> ApplicationResult<RedisConfig
     snapshot.section::<RedisConfig>("redis")
 }
 
-/// 在不建立连接的前提下校验候选配置树中的 `redis` 段。
+/// 业务作用：在不建立连接的前提下校验候选配置树中的 `redis` 段。
 ///
 /// 供启动期初始校验与配置热刷新使用；`profile` 必填正是在这一步暴露的。
 ///
@@ -241,7 +241,7 @@ pub(crate) fn validate_redis_section(
     Ok(())
 }
 
-/// 按 qualifier 借出一个已注册的 Redis 客户端句柄。
+/// 业务作用：按 qualifier 借出一个已注册的 Redis 客户端句柄。
 ///
 /// 返回 `Arc` clone 是该客户端本身的共享语义，不是把资源移出容器。
 ///
@@ -257,7 +257,7 @@ pub(crate) async fn redis_handle(
     Ok(client.clone())
 }
 
-/// 创建 Redis 组件的稳定生命周期错误。
+/// 业务作用：创建 Redis 组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -267,7 +267,7 @@ fn redis_error(phase: ApplicationPhase, message: impl Into<String>) -> Applicati
     ApplicationError::new(ComponentId::Redis, phase, message)
 }
 
-/// 创建带底层错误链的 Redis 错误。
+/// 业务作用：创建带底层错误链的 Redis 错误。
 ///
 /// # 参数
 ///

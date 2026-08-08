@@ -12,7 +12,7 @@ pub enum ShutdownSignal {
 }
 
 impl ShutdownSignal {
-    /// 返回信号对应的进程退出码。
+    /// 业务作用：返回信号对应的进程退出码。
     ///
     /// # 参数
     ///
@@ -24,7 +24,7 @@ impl ShutdownSignal {
         }
     }
 
-    /// 返回适合固定诊断标记使用的信号名称。
+    /// 业务作用：返回适合固定诊断标记使用的信号名称。
     ///
     /// # 参数
     ///
@@ -63,7 +63,7 @@ pub struct ShutdownContext {
 }
 
 impl ShutdownContext {
-    /// 创建共享同一绝对截止时间的停机上下文。
+    /// 业务作用：创建共享同一绝对截止时间的停机上下文。
     ///
     /// # 参数
     ///
@@ -73,7 +73,7 @@ impl ShutdownContext {
         Self { deadline, reason }
     }
 
-    /// 返回全局停机截止时间。
+    /// 业务作用：返回全局停机截止时间。
     ///
     /// # 参数
     ///
@@ -82,7 +82,7 @@ impl ShutdownContext {
         self.deadline
     }
 
-    /// 返回首次停机原因。
+    /// 业务作用：返回首次停机原因。
     ///
     /// # 参数
     ///
@@ -91,7 +91,7 @@ impl ShutdownContext {
         &self.reason
     }
 
-    /// 计算当前步骤还能消费的剩余预算。
+    /// 业务作用：计算当前步骤还能消费的剩余预算。
     ///
     /// # 参数
     ///
@@ -100,7 +100,7 @@ impl ShutdownContext {
         self.deadline.saturating_duration_since(Instant::now())
     }
 
-    /// 判断全局清理预算是否已经耗尽。
+    /// 业务作用：判断全局清理预算是否已经耗尽。
     ///
     /// # 参数
     ///

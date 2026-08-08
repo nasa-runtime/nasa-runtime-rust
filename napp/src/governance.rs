@@ -21,14 +21,14 @@ use tokio::sync::Semaphore;
 pub struct RequestId(Arc<str>);
 
 impl RequestId {
-    /// 借用 ID 文本。
+    /// 业务作用：借用 ID 文本。
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 impl std::fmt::Display for RequestId {
-    /// 将已校验请求 ID 原样写入日志字段或响应头。
+    /// 业务作用：将已校验请求 ID 原样写入日志字段或响应头。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
     }
@@ -40,7 +40,7 @@ pub(crate) const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-requ
 /// 入站 request id 长度上限;超限或非法字符即视为不可信,改为生成。
 const MAX_REQUEST_ID_LEN: usize = 128;
 
-/// 入站 request id 是否可信:非空、长度有界、仅 ASCII 字母数字与 `-` `_` `.`(避免头注入/高基数)。
+/// 业务作用：入站 request id 是否可信:非空、长度有界、仅 ASCII 字母数字与 `-` `_` `.`(避免头注入/高基数)。
 pub fn is_trusted_request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_REQUEST_ID_LEN
@@ -49,12 +49,12 @@ pub fn is_trusted_request_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// 生成 OS 随机的 128-bit request id；跨实例、跨重启保持低碰撞。
+/// 业务作用：生成 OS 随机的 128-bit request id；跨实例、跨重启保持低碰撞。
 fn generate_request_id() -> String {
     natelemetry::TraceContext::new_root(true).trace_id_hex()
 }
 
-/// 解析或生成本次请求的关联 ID；纯逻辑保证入口与下游使用同一信任边界。
+/// 业务作用：解析或生成本次请求的关联 ID；纯逻辑保证入口与下游使用同一信任边界。
 pub fn resolve_request_id(inbound: Option<&str>) -> String {
     match inbound {
         Some(value) if is_trusted_request_id(value) => value.to_owned(),
@@ -62,7 +62,7 @@ pub fn resolve_request_id(inbound: Option<&str>) -> String {
     }
 }
 
-/// request ID 中间件:校验/生成 → 写入请求扩展 → 响应头回传。
+/// 业务作用：request ID 中间件:校验/生成 → 写入请求扩展 → 响应头回传。
 pub async fn attach_request_id(mut request: Request, next: Next) -> Response {
     let mut values = request.headers().get_all(&REQUEST_ID_HEADER).iter();
     let inbound = match (values.next(), values.next()) {
@@ -93,7 +93,7 @@ pub(crate) struct ConcurrencyLimit {
 }
 
 impl ConcurrencyLimit {
-    /// 创建在途请求准入器；非 fallible 入口把零值和超大值收敛到 Tokio 可表达范围。
+    /// 业务作用：创建在途请求准入器；非 fallible 入口把零值和超大值收敛到 Tokio 可表达范围。
     ///
     /// # 参数
     ///
@@ -109,7 +109,7 @@ impl ConcurrencyLimit {
     }
 }
 
-/// load shed 中间件:抢不到许可即 503 + `Retry-After`;抢到则持许可执行请求,完成后释放。
+/// 业务作用：load shed 中间件:抢不到许可即 503 + `Retry-After`;抢到则持许可执行请求,完成后释放。
 pub async fn load_shed(
     State(limit): State<Arc<ConcurrencyLimit>>,
     request: Request,
@@ -170,7 +170,7 @@ struct TokenBucket {
 }
 
 impl RateLimit {
-    /// 创建每客户端限流器。
+    /// 业务作用：创建每客户端限流器。
     ///
     /// # 参数
     ///
@@ -189,7 +189,7 @@ impl RateLimit {
         }
     }
 
-    /// 为某客户端尝试消费一个令牌。
+    /// 业务作用：为某客户端尝试消费一个令牌。
     ///
     /// # 参数
     ///
@@ -245,7 +245,7 @@ impl RateLimit {
     }
 }
 
-/// 单实例每客户端限流中间件:按 `ClientIp` 令牌桶,桶空即 429 + `Retry-After`。
+/// 业务作用：单实例每客户端限流中间件:按 `ClientIp` 令牌桶,桶空即 429 + `Retry-After`。
 ///
 /// 装在 `resolve_client_ip` 之内(依赖其写入的 `ClientIp` 扩展)、全局并发 load shed 之外(单一来源被
 /// 挡下前不占全局并发额),且在 request-id/安全头之内——被拒的 429 仍带 request-id 与安全响应头。CORS
@@ -275,7 +275,7 @@ pub async fn rate_limit(
     }
 }
 
-/// API 场景安全响应头模板:对 JSON API 合理的一组默认头。
+/// 业务作用：API 场景安全响应头模板:对 JSON API 合理的一组默认头。
 ///
 /// 用 `or_insert` 语义——**不覆盖** handler 已显式设置的同名头,故它是"默认"而非"强制盲塞"(
 /// 明确不能给所有响应塞同一组)。UI/浏览器场景(CSP、HSTS 等)应另配模板,不复用本组。
@@ -297,7 +297,7 @@ pub async fn api_security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// 总 deadline 中间件:建立预算写入扩展,并对整个请求处理施加绝对超时;超时返回固定 504。
+/// 业务作用：总 deadline 中间件:建立预算写入扩展,并对整个请求处理施加绝对超时;超时返回固定 504。
 pub async fn enforce_request_deadline(
     State(total): State<std::time::Duration>,
     mut request: Request,
@@ -318,7 +318,7 @@ pub async fn enforce_request_deadline(
     }
 }
 
-/// panic 边界响应:handler panic 时返回**固定 500**,绝不暴露 payload/stack;
+/// 业务作用：panic 边界响应:handler panic 时返回**固定 500**,绝不暴露 payload/stack;
 /// 同时写一条**脱敏**诊断(只记发生 panic 与 payload 是否字符串,不记内容——payload 可能含业务输入)。
 ///
 /// 作为 `tower_http::catch_panic::CatchPanicLayer::custom` 的处理器使用。
@@ -357,7 +357,7 @@ pub struct CorsPolicy {
 }
 
 impl CorsPolicy {
-    /// 构造并校验策略;`*` origin 与 credentials 同用即拒绝,启用但无 origin 也拒绝。
+    /// 业务作用：构造并校验策略;`*` origin 与 credentials 同用即拒绝,启用但无 origin 也拒绝。
     ///
     /// # 错误
     ///
@@ -428,14 +428,14 @@ impl CorsPolicy {
         })
     }
 
-    /// 给定 origin 是否被允许(精确匹配或 `*`)。
+    /// 业务作用：给定 origin 是否被允许(精确匹配或 `*`)。
     fn origin_allowed(&self, origin: &str) -> bool {
         self.allowed_origins
             .iter()
             .any(|allowed| allowed == "*" || allowed == origin)
     }
 
-    /// 在响应上写入 CORS 头(仅当 origin 允许)。
+    /// 业务作用：在响应上写入 CORS 头(仅当 origin 允许)。
     fn apply_cors_headers(&self, response: &mut Response, origin: &str) {
         let headers = response.headers_mut();
         if let Ok(value) = HeaderValue::from_str(origin) {
@@ -449,7 +449,7 @@ impl CorsPolicy {
         }
     }
 
-    /// 严格解析单值预检 method/header，并确认都落在冻结白名单内。
+    /// 业务作用：严格解析单值预检 method/header，并确认都落在冻结白名单内。
     fn preflight_allowed(&self, request: &Request) -> bool {
         let mut methods = request
             .headers()
@@ -480,7 +480,7 @@ impl CorsPolicy {
     }
 }
 
-/// 附加缓存必须区分的 CORS 请求头，防止共享缓存跨 origin 或预检条件复用响应。
+/// 业务作用：附加缓存必须区分的 CORS 请求头，防止共享缓存跨 origin 或预检条件复用响应。
 fn append_cors_vary(response: &mut Response, preflight: bool) {
     let headers = response.headers_mut();
     headers.append(header::VARY, HeaderValue::from_static("Origin"));
@@ -496,7 +496,7 @@ fn append_cors_vary(response: &mut Response, preflight: bool) {
     }
 }
 
-/// CORS 中间件:预检(OPTIONS + `Access-Control-Request-Method`)在 auth 之外直接 204 答复;
+/// 业务作用：CORS 中间件:预检(OPTIONS + `Access-Control-Request-Method`)在 auth 之外直接 204 答复;
 /// 实际请求在放行后按 origin 白名单加 `Access-Control-Allow-Origin`。
 pub async fn cors(State(policy): State<Arc<CorsPolicy>>, request: Request, next: Next) -> Response {
     let origin_present = request.headers().contains_key(header::ORIGIN);
@@ -557,7 +557,7 @@ pub async fn cors(State(policy): State<Arc<CorsPolicy>>, request: Request, next:
 pub struct ClientIp(pub IpAddr);
 
 impl ClientIp {
-    /// 返回解析出的客户端 IP。
+    /// 业务作用：返回解析出的客户端 IP。
     ///
     /// # 参数
     ///
@@ -568,7 +568,7 @@ impl ClientIp {
 }
 
 impl std::fmt::Display for ClientIp {
-    /// 以标准 IP 文本写出,不含端口。
+    /// 业务作用：以标准 IP 文本写出,不含端口。
     ///
     /// # 参数
     ///
@@ -578,7 +578,7 @@ impl std::fmt::Display for ClientIp {
     }
 }
 
-/// 把配置里的可信代理项(精确 IP 或 CIDR)解析成网段列表;任一非法即报错(启动前拒)。
+/// 业务作用：把配置里的可信代理项(精确 IP 或 CIDR)解析成网段列表;任一非法即报错(启动前拒)。
 ///
 /// # 参数
 ///
@@ -605,7 +605,7 @@ pub fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<ipnet::IpNet>, St
     Ok(nets)
 }
 
-/// 判断某地址是否落在任一可信代理网段内。
+/// 业务作用：判断某地址是否落在任一可信代理网段内。
 ///
 /// # 参数
 ///
@@ -615,7 +615,7 @@ fn is_trusted(trusted: &[ipnet::IpNet], address: IpAddr) -> bool {
     trusted.iter().any(|net| net.contains(&address))
 }
 
-/// 从 `X-Forwarded-For` 值里按「从右往左跳过可信代理、取首个不可信项」解析真实客户端 IP。
+/// 业务作用：从 `X-Forwarded-For` 值里按「从右往左跳过可信代理、取首个不可信项」解析真实客户端 IP。
 ///
 /// # 参数
 ///
@@ -645,7 +645,7 @@ fn client_from_forwarded(header_value: &str, trusted: &[ipnet::IpNet]) -> Option
         .or_else(|| hops.first().copied())
 }
 
-/// 解析真实客户端 IP 中间件:对端可信才采信 XFF,否则客户端即对端;结果写入 `ClientIp` 扩展。
+/// 业务作用：解析真实客户端 IP 中间件:对端可信才采信 XFF,否则客户端即对端;结果写入 `ClientIp` 扩展。
 ///
 /// 始终启用(与 request-id 同):可信列表为空时退化为「客户端 = 直连对端、永不信 XFF」的安全默认。
 /// 依赖监听器以 `ConnectInfo<SocketAddr>` 提供对端地址;缺失(理论不应发生)时按 unspecified 记录,
@@ -687,7 +687,7 @@ pub async fn resolve_client_ip(
     next.run(request).await
 }
 
-/// 判断响应 `Content-Type` 是否属于可安全压缩的文本类白名单。
+/// 业务作用：判断响应 `Content-Type` 是否属于可安全压缩的文本类白名单。
 ///
 /// 只压缩已知文本/结构化文本类型;二进制、图片(SVG 除外)、以及所有非白名单类型
 /// (含 modern-v2 密文的自定义媒体类型)一律不压。base 只取分号前的主类型再小写比较,
@@ -716,7 +716,7 @@ pub fn is_compressible_content_type(content_type: &str) -> bool {
         )
 }
 
-/// 压缩谓词:与 `SizeAbove` 组合后决定某响应是否可被 gzip。
+/// 业务作用：压缩谓词:与 `SizeAbove` 组合后决定某响应是否可被 gzip。
 ///
 /// 作为 tower-http `Predicate` 使用(自由 fn 满足
 /// `Fn(StatusCode, Version, &HeaderMap, &Extensions) -> bool + Clone`)。三重拦截:

@@ -49,7 +49,7 @@ pub(crate) struct EffectiveProducerLane {
     pub(crate) properties: BTreeMap<String, String>,
 }
 
-/// 合并 default producer 与命名 lane 覆盖项。
+/// 业务作用：合并 default producer 与命名 lane 覆盖项。
 ///
 /// # 参数
 ///
@@ -164,7 +164,7 @@ pub(crate) fn effective_producer_lane(
     Ok(effective)
 }
 
-/// 构建并原生校验指定 producer lane 配置。
+/// 业务作用：构建并原生校验指定 producer lane 配置。
 ///
 /// # 参数
 ///
@@ -217,7 +217,7 @@ pub(crate) fn producer_config(config: &KafkaConfig, lane: &str) -> Result<Client
     Ok(native)
 }
 
-/// 构建并原生校验 subscribe consumer 配置。
+/// 业务作用：构建并原生校验 subscribe consumer 配置。
 ///
 /// # 参数
 ///
@@ -263,7 +263,7 @@ pub(crate) fn consumer_config(config: &KafkaConfig, group: &str) -> Result<Clien
     Ok(native)
 }
 
-/// 构建并原生校验管理端配置。
+/// 业务作用：构建并原生校验管理端配置。
 ///
 /// # 参数
 ///
@@ -283,7 +283,7 @@ pub(crate) fn admin_config(config: &KafkaConfig) -> Result<ClientConfig> {
     Ok(native)
 }
 
-/// 由 resolved group 派生 consumer 的 client.id 角色后缀。
+/// 业务作用：由 resolved group 派生 consumer 的 client.id 角色后缀。
 ///
 /// 为什么要带上 group：同一进程可以同时跑多个 group（socket-center 的 control/data 就是如此），
 /// 若所有 consumer 共用一个 client.id，broker 指标与 `kafka-consumer-groups --members`
@@ -313,7 +313,7 @@ fn consumer_role(group: &str) -> String {
     format!("consumer-{sanitized}")
 }
 
-/// 构建共同连接、安全和 client.id 配置。
+/// 业务作用：构建共同连接、安全和 client.id 配置。
 ///
 /// # 参数
 ///
@@ -325,7 +325,7 @@ fn common_config(config: &KafkaConfig, _role: &str) -> ClientConfig {
     native
 }
 
-/// 写入身份与安全字段；必须在**全部** raw 透传层之后调用。
+/// 业务作用：写入身份与安全字段；必须在**全部** raw 透传层之后调用。
 ///
 /// 配置优先级是 `common raw → scoped raw → 强类型 → 框架不变量`。
 /// 若身份/安全在 scoped raw 之前写，`producer.properties` 里的
@@ -359,7 +359,7 @@ fn apply_identity_and_security(native: &mut ClientConfig, config: &KafkaConfig, 
     set_optional(native, "ssl.key.password", &security.ssl_key_password);
 }
 
-/// 按稳定顺序应用一组原生透传属性。
+/// 业务作用：按稳定顺序应用一组原生透传属性。
 ///
 /// # 参数
 ///
@@ -371,7 +371,7 @@ fn apply_properties(native: &mut ClientConfig, properties: &BTreeMap<String, Str
     }
 }
 
-/// 可选字符串存在时写入原生配置。
+/// 业务作用：可选字符串存在时写入原生配置。
 ///
 /// # 参数
 ///
@@ -384,7 +384,7 @@ fn set_optional(native: &mut ClientConfig, key: &str, value: &Option<String>) {
     }
 }
 
-/// 让底层配置解析器在启动期检查键名和值。
+/// 业务作用：让底层配置解析器在启动期检查键名和值。
 ///
 /// # 参数
 ///
@@ -401,7 +401,7 @@ fn validate_native(native: &ClientConfig, scope: &str) -> Result<()> {
         .map_err(|error| NafkaError::Config(format!("{scope} 原生配置非法: {}", redact(&error))))
 }
 
-/// 把底层配置错误压成"只含错误类别与属性名"的稳定文本。
+/// 业务作用：把底层配置错误压成"只含错误类别与属性名"的稳定文本。
 ///
 /// 必须按 [`KafkaError`] 的结构化 variant 判定，**不能对错误文本做字符串截断**：
 /// librdkafka 的 desc 形如 `Invalid value "<VALUE>" for configuration property "<KEY>"`，

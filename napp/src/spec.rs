@@ -55,7 +55,7 @@ pub struct WebBuildContext {
 
 #[cfg(feature = "web")]
 impl WebBuildContext {
-    /// 建立同源 Application、MappingRuntime 和已封口 MappingPlan 的构建上下文。
+    /// 业务作用：建立同源 Application、MappingRuntime 和已封口 MappingPlan 的构建上下文。
     pub(crate) fn new(
         application: Application,
         mapping_runtime: Arc<naweb::MappingRuntime>,
@@ -68,7 +68,7 @@ impl WebBuildContext {
         }
     }
 
-    /// 调用业务 crate 中单态化的 `try_register_all`，并把 mapping 构建错误收敛为 Web Ready 错误。
+    /// 业务作用：调用业务 crate 中单态化的 `try_register_all`，并把 mapping 构建错误收敛为 Web Ready 错误。
     pub fn build<F>(self, factory: F) -> ApplicationResult<axum::Router<Application>>
     where
         F: FnOnce(
@@ -114,7 +114,7 @@ pub struct ApplicationSpec {
 }
 
 impl ApplicationSpec {
-    /// 创建只包含静态组件声明的应用描述。
+    /// 业务作用：创建只包含静态组件声明的应用描述。
     ///
     /// # 参数
     ///
@@ -130,7 +130,7 @@ impl ApplicationSpec {
         }
     }
 
-    /// 设置配置未声明名称时使用的编译期缺省名。
+    /// 业务作用：设置配置未声明名称时使用的编译期缺省名。
     ///
     /// # 参数
     ///
@@ -140,7 +140,7 @@ impl ApplicationSpec {
         self
     }
 
-    /// 设置由业务二进制生成的自动路由元数据投影函数。
+    /// 业务作用：设置由业务二进制生成的自动路由元数据投影函数。
     ///
     /// # 参数
     ///
@@ -151,7 +151,7 @@ impl ApplicationSpec {
         self
     }
 
-    /// 设置由业务二进制生成的 Web 路由构造函数。
+    /// 业务作用：设置由业务二进制生成的 Web 路由构造函数。
     ///
     /// # 参数
     ///
@@ -162,7 +162,7 @@ impl ApplicationSpec {
         self
     }
 
-    /// 返回保持源码声明顺序的组件切片。
+    /// 业务作用：返回保持源码声明顺序的组件切片。
     ///
     /// # 参数
     ///
@@ -171,7 +171,7 @@ impl ApplicationSpec {
         self.components
     }
 
-    /// 返回同步 preflight 使用的编译期缺省应用名。
+    /// 业务作用：返回同步 preflight 使用的编译期缺省应用名。
     ///
     /// # 参数
     ///
@@ -180,7 +180,7 @@ impl ApplicationSpec {
         self.default_name
     }
 
-    /// 校验重复声明和内置组件的静态顺序约束。
+    /// 业务作用：校验重复声明和内置组件的静态顺序约束。
     ///
     /// # 参数
     ///
@@ -193,7 +193,7 @@ impl ApplicationSpec {
         validate_component_order(self.components)
     }
 
-    /// 校验声明组件所需的业务二进制工厂是否已经同时提供。
+    /// 业务作用：校验声明组件所需的业务二进制工厂是否已经同时提供。
     ///
     /// # 参数
     ///
@@ -227,7 +227,7 @@ impl ApplicationSpec {
         }
     }
 
-    /// 返回 Web 组件使用的路由元数据投影函数。
+    /// 业务作用：返回 Web 组件使用的路由元数据投影函数。
     ///
     /// # 参数
     ///
@@ -237,7 +237,7 @@ impl ApplicationSpec {
         self.web_route_meta
     }
 
-    /// 返回 Web 组件使用的业务路由构造函数。
+    /// 业务作用：返回 Web 组件使用的业务路由构造函数。
     ///
     /// # 参数
     ///
@@ -406,7 +406,7 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     Ok(())
 }
 
-/// 当两个组件同时声明时校验前者必须先出现。
+/// 业务作用：当两个组件同时声明时校验前者必须先出现。
 ///
 /// # 参数
 ///
@@ -430,7 +430,7 @@ fn ensure_before_if_both(
     Ok(())
 }
 
-/// 创建静态应用描述的 Bootstrap 错误。
+/// 业务作用：创建静态应用描述的 Bootstrap 错误。
 ///
 /// # 参数
 ///

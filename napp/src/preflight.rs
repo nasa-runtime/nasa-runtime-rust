@@ -32,7 +32,7 @@ struct ApplicationSettings {
 }
 
 impl Default for ApplicationSettings {
-    /// 返回空 YAML 文档对应的固定设置。
+    /// 业务作用：返回空 YAML 文档对应的固定设置。
     ///
     /// # 参数
     ///
@@ -63,7 +63,7 @@ pub(crate) struct Preflight {
 }
 
 impl Preflight {
-    /// 使用标准必需路径和 profile 环境语义执行同步 preflight。
+    /// 业务作用：使用标准必需路径和 profile 环境语义执行同步 preflight。
     ///
     /// # 参数
     ///
@@ -72,7 +72,7 @@ impl Preflight {
         Self::load(spec, &YmlLoader::standard(), standard_profile())
     }
 
-    /// 使用指定加载器执行可重复验证的同步 preflight。
+    /// 业务作用：使用指定加载器执行可重复验证的同步 preflight。
     ///
     /// # 参数
     ///
@@ -157,7 +157,7 @@ impl Preflight {
     }
 }
 
-/// 校验会影响线程数和 deadline 的本地设置。
+/// 业务作用：校验会影响线程数和 deadline 的本地设置。
 ///
 /// # 参数
 ///
@@ -198,7 +198,7 @@ fn validate_settings(settings: &ApplicationSettings) -> ApplicationResult<()> {
     Ok(())
 }
 
-/// 创建本地 ApplicationSettings 的 Bootstrap 错误。
+/// 业务作用：创建本地 ApplicationSettings 的 Bootstrap 错误。
 ///
 /// # 参数
 ///
@@ -207,7 +207,7 @@ fn settings_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Config, ApplicationPhase::Bootstrap, message)
 }
 
-/// 按标准加载器语义读取显式非空 profile。
+/// 业务作用：按标准加载器语义读取显式非空 profile。
 ///
 /// # 参数
 ///

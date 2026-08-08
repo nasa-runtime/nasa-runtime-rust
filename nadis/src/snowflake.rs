@@ -38,7 +38,7 @@ redis.call('ZREMRANGEBYRANK', KEYS[1], 0, 0)
 return tonumber(v[1])
 "#;
 
-/// 从 Redis ZSET 池**原子**分配一个 workerId(对照 原实现 `worker()`,池空自动初始化 `[0, 2^bits-1]`)。
+/// 业务作用：从 Redis ZSET 池**原子**分配一个 workerId(对照 原实现 `worker()`,池空自动初始化 `[0, 2^bits-1]`)。
 ///
 /// 比 原实现 的 pipeline 更稳:Lua 单次执行,杜绝双节点取同号。仍 1 RTT。
 ///
@@ -72,12 +72,12 @@ pub struct WorkerIdLease {
 }
 
 impl WorkerIdLease {
-    /// 当前持有的 workerId。
+    /// 业务作用：当前持有的 workerId。
     pub fn worker_id(&self) -> i64 {
         self.worker_id
     }
 
-    /// 归还 workerId 到池(对照 原实现 `Graceful` 的 `zAdd(key, worker, worker)`)。
+    /// 业务作用：归还 workerId 到池(对照 原实现 `Graceful` 的 `zAdd(key, worker, worker)`)。
     /// **调用方在优雅停机序列里 `.await`**(`Drop` 不能 async,不在 Drop 自动归还)。
     pub async fn release(&self) -> Result<(), SnowflakeError> {
         self.client
@@ -107,7 +107,7 @@ pub struct SnowflakeConfig {
 }
 
 impl Default for SnowflakeConfig {
-    /// 返回 Redis workerId 分配的默认配置。
+    /// 业务作用：返回 Redis workerId 分配的默认配置。
     fn default() -> Self {
         Self {
             qualifier: String::new(),
@@ -120,12 +120,12 @@ impl Default for SnowflakeConfig {
 }
 
 impl SnowflakeConfig {
-    /// 单节点 / 无 redis:workerId = 1(对照 原实现 `Objects.isNull(redisProxy) ? 1 : worker(...)`)。
+    /// 业务作用：单节点 / 无 redis:workerId = 1(对照 原实现 `Objects.isNull(redisProxy) ? 1 : worker(...)`)。
     pub fn build_local(&self) -> Result<Snowflake, SnowflakeError> {
         Snowflake::new(1, self.base_time, self.worker_id_bits, self.seq_bits)
     }
 
-    /// 分布式:从 redis 池原子分配 workerId,返回(生成器, 归还租约)。
+    /// 业务作用：分布式:从 redis 池原子分配 workerId,返回(生成器, 归还租约)。
     /// 调用方:启动时拿 `(sf, lease)`,停机时 `lease.release().await`。
     ///
     /// # 参数

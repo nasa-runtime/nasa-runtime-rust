@@ -30,7 +30,7 @@ pub enum SpanKind {
 }
 
 impl SpanKind {
-    /// OTLP proto `SpanKind` 枚举值(INTERNAL=1,SERVER=2,CLIENT=3;两种 wire 编码共用)。
+    /// 业务作用：OTLP proto `SpanKind` 枚举值(INTERNAL=1,SERVER=2,CLIENT=3;两种 wire 编码共用)。
     pub fn otlp_value(self) -> u8 {
         match self {
             SpanKind::Internal => 1,
@@ -81,7 +81,7 @@ pub enum ExportOutcome {
 pub struct InvalidSampleRatio;
 
 impl std::fmt::Display for InvalidSampleRatio {
-    /// 返回不包含配置原值的稳定校验说明。
+    /// 业务作用：返回不包含配置原值的稳定校验说明。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("root sample ratio must be finite and between 0.0 and 1.0")
     }
@@ -126,12 +126,12 @@ pub struct SpanRecorder {
 }
 
 impl SpanRecorder {
-    /// 从 Application 拥有的 exporter 创建只写记录器。
+    /// 业务作用：从 Application 拥有的 exporter 创建只写记录器。
     pub fn new(exporter: Arc<BoundedSpanExporter>) -> Self {
         Self { exporter }
     }
 
-    /// 开始一个以 `parent` 为父的 span，并返回用于传播的子上下文与完成 guard。
+    /// 业务作用：开始一个以 `parent` 为父的 span，并返回用于传播的子上下文与完成 guard。
     pub fn start(
         &self,
         name: impl Into<String>,
@@ -150,7 +150,7 @@ impl SpanRecorder {
 }
 
 impl std::fmt::Debug for SpanRecorder {
-    /// 仅输出 exporter 健康摘要，不展示 span 名、属性或下游 endpoint。
+    /// 业务作用：仅输出 exporter 健康摘要，不展示 span 名、属性或下游 endpoint。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SpanRecorder")
@@ -170,17 +170,17 @@ pub struct SpanGuard {
 }
 
 impl SpanGuard {
-    /// 返回应向下游传播的子上下文。
+    /// 业务作用：返回应向下游传播的子上下文。
     pub fn context(&self) -> TraceContext {
         self.context
     }
 
-    /// 完成 span；HTTP client/server 可附加稳定状态码，其他协议传 `None`。
+    /// 业务作用：完成 span；HTTP client/server 可附加稳定状态码，其他协议传 `None`。
     pub fn finish(mut self, http_status_code: Option<u16>) -> ExportOutcome {
         self.export(http_status_code)
     }
 
-    /// 取走 span 名并只提交一次完整记录；重复完成按 closed 丢弃处理。
+    /// 业务作用：取走 span 名并只提交一次完整记录；重复完成按 closed 丢弃处理。
     fn export(&mut self, http_status_code: Option<u16>) -> ExportOutcome {
         let Some(name) = self.name.take() else {
             return ExportOutcome::DroppedClosed;
@@ -202,13 +202,13 @@ impl SpanGuard {
 }
 
 impl Drop for SpanGuard {
-    /// 调用方未显式 finish 时仍提交无 HTTP 状态的 span，覆盖提前返回与取消路径。
+    /// 业务作用：调用方未显式 finish 时仍提交无 HTTP 状态的 span，覆盖提前返回与取消路径。
     fn drop(&mut self) {
         let _ = self.export(None);
     }
 }
 
-/// 读取当前 UNIX 纳秒并饱和到 u64，系统时间早于 epoch 时回退为零。
+/// 业务作用：读取当前 UNIX 纳秒并饱和到 u64，系统时间早于 epoch 时回退为零。
 fn unix_nanos_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -217,7 +217,7 @@ fn unix_nanos_now() -> u64 {
 }
 
 impl BoundedSpanExporter {
-    /// 创建导出器与接收端；非 fallible 入口把容量收敛到 Tokio 有界队列可表达范围。
+    /// 业务作用：创建导出器与接收端；非 fallible 入口把容量收敛到 Tokio 有界队列可表达范围。
     pub fn channel(capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<SpanRecord>) {
         let capacity = capacity.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
@@ -232,7 +232,7 @@ impl BoundedSpanExporter {
         )
     }
 
-    /// 在 exporter 发布给生产者之前冻结新根链路采样率。
+    /// 业务作用：在 exporter 发布给生产者之前冻结新根链路采样率。
     ///
     /// `0.0` 表示只传播不记录新根，`1.0` 表示全部记录；上游已有 traceparent 时始终沿用其 sampled 位。
     pub fn set_root_sample_ratio(&mut self, ratio: f64) -> Result<(), InvalidSampleRatio> {
@@ -249,7 +249,7 @@ impl BoundedSpanExporter {
         Ok(())
     }
 
-    /// 按冻结的采样率裁决一条没有上游上下文的新根链路。
+    /// 业务作用：按冻结的采样率裁决一条没有上游上下文的新根链路。
     pub fn should_sample_root(&self) -> bool {
         match self.root_sample_threshold {
             0 => false,
@@ -258,7 +258,7 @@ impl BoundedSpanExporter {
         }
     }
 
-    /// 非阻塞入队一条 span;满或已停即丢弃并计数(绝不阻塞、不 panic)。
+    /// 业务作用：非阻塞入队一条 span;满或已停即丢弃并计数(绝不阻塞、不 panic)。
     pub fn export(&self, span: SpanRecord) -> ExportOutcome {
         // 必须先计 pending 再发送；否则 receiver 可能在 send 成功与计数之间完成导出，留下幽灵 pending。
         self.pending.fetch_add(1, Ordering::Relaxed);
@@ -277,35 +277,35 @@ impl BoundedSpanExporter {
         }
     }
 
-    /// 累计丢弃的 span 数(停机诊断用:"超时记录丢弃数后继续退出")。
+    /// 业务作用：累计丢弃的 span 数(停机诊断用:"超时记录丢弃数后继续退出")。
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// 当前已经入队、但尚未由 sink 成功确认或记为丢弃的 span 数。
+    /// 业务作用：当前已经入队、但尚未由 sink 成功确认或记为丢弃的 span 数。
     pub fn pending(&self) -> u64 {
         self.pending.load(Ordering::Relaxed)
     }
 
-    /// sink 成功导出一批 span。
+    /// 业务作用：sink 成功导出一批 span。
     pub fn record_exported(&self, count: u64) {
         subtract_saturating(&self.pending, count);
     }
 
-    /// sink/flush 在入队之后丢弃 span 时同时减少 pending 并累计 dropped。
+    /// 业务作用：sink/flush 在入队之后丢弃 span 时同时减少 pending 并累计 dropped。
     pub fn record_dropped(&self, count: u64) {
         subtract_saturating(&self.pending, count);
         self.dropped.fetch_add(count, Ordering::Relaxed);
     }
 
-    /// 停机预算耗尽并终止 drainer 后，把全部未决 span 原子记为丢弃。
+    /// 业务作用：停机预算耗尽并终止 drainer 后，把全部未决 span 原子记为丢弃。
     pub fn drop_all_pending(&self) -> u64 {
         let pending = self.pending.swap(0, Ordering::AcqRel);
         self.dropped.fetch_add(pending, Ordering::Relaxed);
         pending
     }
 
-    /// 返回不包含 endpoint、span 名或业务属性的只读健康摘要。
+    /// 业务作用：返回不包含 endpoint、span 名或业务属性的只读健康摘要。
     pub fn snapshot(&self) -> ExporterSnapshot {
         ExporterSnapshot {
             pending: self.pending(),
@@ -314,14 +314,14 @@ impl BoundedSpanExporter {
     }
 }
 
-/// 对原子 pending 计数做饱和扣减，容忍并发 drain/drop 的交错。
+/// 业务作用：对原子 pending 计数做饱和扣减，容忍并发 drain/drop 的交错。
 fn subtract_saturating(counter: &AtomicU64, count: u64) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some(current.saturating_sub(count))
     });
 }
 
-/// 停机 flush:在 `deadline` 内排空**已缓冲**的 span,对每条 `await export_one`(真实用途里是发往
+/// 业务作用：停机 flush:在 `deadline` 内排空**已缓冲**的 span,对每条 `await export_one`(真实用途里是发往
 /// OTLP 的 I/O);每条导出前检查 deadline,超时即停,把仍缓冲的计为 dropped 返回。
 ///
 /// 调用前应先释放所有 [`BoundedSpanExporter`](停止接收新 span)。只 flush 停机时刻已缓冲的,不等待

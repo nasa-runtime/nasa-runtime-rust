@@ -5,7 +5,7 @@ use crate::{Application, ApplicationError, ApplicationPhase, ApplicationResult, 
 
 static GLOBAL_APPLICATION: OnceLock<RwLock<Weak<ApplicationInner>>> = OnceLock::new();
 
-/// 发布当前 Service 的迁移期全局 Weak 句柄。
+/// 业务作用：发布当前 Service 的迁移期全局 Weak 句柄。
 ///
 /// # 参数
 ///
@@ -27,7 +27,7 @@ pub(crate) fn install(application: &Application) -> ApplicationResult<()> {
     Ok(())
 }
 
-/// 尝试升级当前全局 Weak 句柄。
+/// 业务作用：尝试升级当前全局 Weak 句柄。
 ///
 /// # 参数
 ///
@@ -41,7 +41,7 @@ pub(crate) fn get() -> Option<Application> {
     Some(Application { inner })
 }
 
-/// 仅在全局槽仍指向目标 Application 时清除它。
+/// 业务作用：仅在全局槽仍指向目标 Application 时清除它。
 ///
 /// # 参数
 ///

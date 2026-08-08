@@ -44,7 +44,7 @@ pub(crate) struct NacosDiscoveryComponent {
 }
 
 impl NacosDiscoveryComponent {
-    /// 创建尚未连接注册中心的服务发现组件。
+    /// 业务作用：创建尚未连接注册中心的服务发现组件。
     ///
     /// # 参数
     ///
@@ -57,13 +57,13 @@ impl NacosDiscoveryComponent {
     }
 }
 
-/// 服务发现就绪策略:入站服务是关键依赖——注册中心未注册成功则不接收流量。
+/// 业务作用：服务发现就绪策略:入站服务是关键依赖——注册中心未注册成功则不接收流量。
 fn discovery_readiness_policy() -> ReadinessPolicy {
     ReadinessPolicy::critical_immediate()
 }
 
 impl ApplicationComponent for NacosDiscoveryComponent {
-    /// 返回服务发现组件稳定身份。
+    /// 业务作用：返回服务发现组件稳定身份。
     ///
     /// # 参数
     ///
@@ -72,7 +72,7 @@ impl ApplicationComponent for NacosDiscoveryComponent {
         ComponentId::NacosDiscovery
     }
 
-    /// 连接 provider 并安装出站 RestDiscovery runtime，不注册本实例。
+    /// 业务作用：连接 provider 并安装出站 RestDiscovery runtime，不注册本实例。
     ///
     /// # 参数
     ///
@@ -122,7 +122,7 @@ impl ApplicationComponent for NacosDiscoveryComponent {
         })
     }
 
-    /// 用真实监听端口注册本实例，并把摘流动作压入清理栈。
+    /// 业务作用：用真实监听端口注册本实例，并把摘流动作压入清理栈。
     ///
     /// # 参数
     ///
@@ -193,7 +193,7 @@ struct NacosDiscoveryRegistrationShutdown {
 }
 
 impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -202,7 +202,7 @@ impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
         "nacos-discovery-registration"
     }
 
-    /// 在自身上限与全局剩余预算的较小值内完成摘流。
+    /// 业务作用：在自身上限与全局剩余预算的较小值内完成摘流。
     ///
     /// # 参数
     ///
@@ -237,7 +237,7 @@ struct NacosDiscoveryRuntimeShutdown {
 }
 
 impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -246,7 +246,7 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
         "nacos-discovery-runtime"
     }
 
-    /// 从进程级槽取下并关闭出站客户端后台任务。
+    /// 业务作用：从进程级槽取下并关闭出站客户端后台任务。
     ///
     /// # 参数
     ///
@@ -272,7 +272,7 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
     }
 }
 
-/// 自注册就绪 monitor:周期回查本实例是否仍在自己服务的健康实例集里,把注册健康反映进 `/readyz`。
+/// 业务作用：自注册就绪 monitor:周期回查本实例是否仍在自己服务的健康实例集里,把注册健康反映进 `/readyz`。
 ///
 /// 调用 [`DiscoverySession::self_registration_healthy`](rest_discovery_nacos::DiscoverySession::self_registration_healthy)
 /// 向注册中心查询本服务的可用实例集(已过滤健康/启用/正权重),按注册身份 `(ip, port)` 定位本实例:
@@ -351,7 +351,7 @@ struct NacosDiscoveryMonitorShutdown {
 }
 
 impl ShutdownAction for NacosDiscoveryMonitorShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -360,7 +360,7 @@ impl ShutdownAction for NacosDiscoveryMonitorShutdown {
         "nacos-discovery-monitor"
     }
 
-    /// 取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
+    /// 业务作用：取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
     ///
     /// # 参数
     ///
@@ -390,7 +390,7 @@ impl ShutdownAction for NacosDiscoveryMonitorShutdown {
 }
 
 impl Drop for NacosDiscoveryMonitorShutdown {
-    /// 停机 future 被取消或句柄提前释放时终止 monitor，避免后台注册任务脱离生命周期。
+    /// 业务作用：停机 future 被取消或句柄提前释放时终止 monitor，避免后台注册任务脱离生命周期。
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(monitor) = self.monitor.take() {
@@ -399,7 +399,7 @@ impl Drop for NacosDiscoveryMonitorShutdown {
     }
 }
 
-/// 解析注册使用的端口。
+/// 业务作用：解析注册使用的端口。
 ///
 /// 有 Web 时必须用 `web_addr()` 的真实端口——`server.port=0` 场景下配置里的 0 不是可拨号端口；
 /// 无 Web 时只能由配置显式给出非 0 端口，否则给定向错误而不是注册一个不可达实例。
@@ -425,7 +425,7 @@ fn registration_port(
     ))
 }
 
-/// 从最终配置读取 `rest_discovery` 段；段缺失时使用禁用的缺省配置。
+/// 业务作用：从最终配置读取 `rest_discovery` 段；段缺失时使用禁用的缺省配置。
 ///
 /// # 参数
 ///
@@ -443,7 +443,7 @@ fn read_discovery_config(application: &Application) -> ApplicationResult<Discove
     Ok(root.rest_discovery)
 }
 
-/// 在不连接注册中心的前提下校验候选配置树中的 `rest_discovery` 段。
+/// 业务作用：在不连接注册中心的前提下校验候选配置树中的 `rest_discovery` 段。
 ///
 /// # 参数
 ///
@@ -467,7 +467,7 @@ pub(crate) fn validate_discovery_section(
         })
 }
 
-/// 创建服务发现组件的稳定生命周期错误。
+/// 业务作用：创建服务发现组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -477,7 +477,7 @@ fn discovery_error(phase: ApplicationPhase, message: impl Into<String>) -> Appli
     ApplicationError::new(ComponentId::NacosDiscovery, phase, message)
 }
 
-/// 创建带底层错误链的服务发现错误。
+/// 业务作用：创建带底层错误链的服务发现错误。
 ///
 /// # 参数
 ///

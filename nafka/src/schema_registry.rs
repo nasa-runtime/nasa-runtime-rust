@@ -34,7 +34,7 @@ pub enum RegistrySchemaType {
 }
 
 impl RegistrySchemaType {
-    /// 返回 Confluent HTTP 合同要求的标准大写 schema 类型名。
+    /// 业务作用：返回 Confluent HTTP 合同要求的标准大写 schema 类型名。
     fn confluent_name(self) -> &'static str {
         match self {
             Self::Avro => "AVRO",
@@ -49,7 +49,7 @@ impl RegistrySchemaType {
 pub struct SchemaId(i32);
 
 impl SchemaId {
-    /// 构造正 schema ID。
+    /// 业务作用：构造正 schema ID。
     pub fn new(value: i32) -> Result<Self, SchemaRegistryError> {
         if value <= 0 {
             return Err(SchemaRegistryError::InvalidSchemaId(value));
@@ -57,7 +57,7 @@ impl SchemaId {
         Ok(Self(value))
     }
 
-    /// 返回 wire 上的 i32 ID。
+    /// 业务作用：返回 wire 上的 i32 ID。
     pub fn get(self) -> i32 {
         self.0
     }
@@ -81,17 +81,17 @@ pub struct ApprovedSchemaIds {
 }
 
 impl ApprovedSchemaIds {
-    /// 创建空白名单。
+    /// 业务作用：创建空白名单。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 加入一个已批准 ID。
+    /// 业务作用：加入一个已批准 ID。
     pub fn insert(&mut self, id: SchemaId) -> bool {
         self.ids.insert(id)
     }
 
-    /// 判断 ID 是否已批准。
+    /// 业务作用：判断 ID 是否已批准。
     pub fn contains(&self, id: SchemaId) -> bool {
         self.ids.contains(&id)
     }
@@ -107,7 +107,7 @@ pub struct ConfluentEnvelope<'a> {
 }
 
 impl<'a> ConfluentEnvelope<'a> {
-    /// 解码并执行 payload 上限与 schema ID 白名单。
+    /// 业务作用：解码并执行 payload 上限与 schema ID 白名单。
     pub fn decode(
         wire: &'a [u8],
         max_payload_bytes: usize,
@@ -138,7 +138,7 @@ impl<'a> ConfluentEnvelope<'a> {
     }
 }
 
-/// 编码 Confluent wire envelope。
+/// 业务作用：编码 Confluent wire envelope。
 pub fn encode_confluent(
     schema_id: SchemaId,
     payload: &[u8],
@@ -171,7 +171,7 @@ pub enum SchemaRegistryAuth {
 }
 
 impl fmt::Debug for SchemaRegistryAuth {
-    /// 输出认证方式与非敏感用户名，同时固定隐藏 token 和密码。
+    /// 业务作用：输出认证方式与非敏感用户名，同时固定隐藏 token 和密码。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bearer(_) => formatter.write_str("Bearer(<redacted>)"),
@@ -206,7 +206,7 @@ pub struct ConfluentRegistryOptions {
 }
 
 impl ConfluentRegistryOptions {
-    /// 创建生产保守缺省。
+    /// 业务作用：创建生产保守缺省。
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
@@ -224,13 +224,13 @@ impl ConfluentRegistryOptions {
 /// Registry client 的 provider-neutral 合同。
 #[async_trait::async_trait]
 pub trait SchemaRegistryClient: Send + Sync {
-    /// 按全局 ID 获取 schema。
+    /// 业务作用：按全局 ID 获取 schema。
     async fn schema_by_id(
         &self,
         id: SchemaId,
     ) -> Result<Arc<RegisteredSchema>, SchemaRegistryError>;
 
-    /// 检查候选对 subject/version 的兼容性。
+    /// 业务作用：检查候选对 subject/version 的兼容性。
     async fn is_compatible(
         &self,
         subject: &str,
@@ -239,7 +239,7 @@ pub trait SchemaRegistryClient: Send + Sync {
         schema: &str,
     ) -> Result<bool, SchemaRegistryError>;
 
-    /// 注册新的 schema 修订；adapter 必须显式启用 `auto_register`。
+    /// 业务作用：注册新的 schema 修订；adapter 必须显式启用 `auto_register`。
     async fn register(
         &self,
         subject: &str,
@@ -292,7 +292,7 @@ pub enum SchemaRegistryError {
 }
 
 impl fmt::Display for SchemaRegistryError {
-    /// 输出稳定错误分类，不附带 endpoint、认证信息或 schema 正文。
+    /// 业务作用：输出稳定错误分类，不附带 endpoint、认证信息或 schema 正文。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "schema registry error: {self:?}")
     }
@@ -320,7 +320,7 @@ struct SchemaCache {
 }
 
 impl SchemaCache {
-    /// 创建空缓存；容量已由 adapter 构造器校验为正。
+    /// 业务作用：创建空缓存；容量已由 adapter 构造器校验为正。
     fn new(capacity: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -329,7 +329,7 @@ impl SchemaCache {
         }
     }
 
-    /// 读取未过期条目并刷新 LRU；外层 `Option` 表示未命中，内层表示正/负结果。
+    /// 业务作用：读取未过期条目并刷新 LRU；外层 `Option` 表示未命中，内层表示正/负结果。
     fn get(&mut self, id: SchemaId, now: Instant) -> Option<Option<Arc<RegisteredSchema>>> {
         let expired = self
             .entries
@@ -347,7 +347,7 @@ impl SchemaCache {
         Some(value)
     }
 
-    /// 覆盖写入正或负结果，并按 LRU 淘汰到冻结容量以内。
+    /// 业务作用：覆盖写入正或负结果，并按 LRU 淘汰到冻结容量以内。
     fn insert(&mut self, id: SchemaId, value: CachedSchema, expires_at: Instant) {
         self.remove(id);
         self.entries.insert(id, CacheEntry { value, expires_at });
@@ -359,7 +359,7 @@ impl SchemaCache {
         }
     }
 
-    /// 将已命中的 ID 移到 LRU 队尾。
+    /// 业务作用：将已命中的 ID 移到 LRU 队尾。
     fn touch(&mut self, id: SchemaId) {
         if let Some(position) = self.lru.iter().position(|value| *value == id) {
             self.lru.remove(position);
@@ -367,7 +367,7 @@ impl SchemaCache {
         self.lru.push_back(id);
     }
 
-    /// 同时删除条目与 LRU 索引，保持两份结构一致。
+    /// 业务作用：同时删除条目与 LRU 索引，保持两份结构一致。
     fn remove(&mut self, id: SchemaId) {
         self.entries.remove(&id);
         if let Some(position) = self.lru.iter().position(|value| *value == id) {
@@ -385,7 +385,7 @@ pub struct ConfluentSchemaRegistry {
 }
 
 impl ConfluentSchemaRegistry {
-    /// 校验配置并构造 adapter。
+    /// 业务作用：校验配置并构造 adapter。
     pub fn new(options: ConfluentRegistryOptions) -> Result<Self, SchemaRegistryError> {
         if options.cache_capacity == 0
             || options.max_response_bytes == 0
@@ -437,7 +437,7 @@ impl ConfluentSchemaRegistry {
         })
     }
 
-    /// 在保留 endpoint 基础路径的前提下安全追加已校验的 Registry 路径段。
+    /// 业务作用：在保留 endpoint 基础路径的前提下安全追加已校验的 Registry 路径段。
     fn url(&self, segments: &[&str]) -> Result<reqwest::Url, SchemaRegistryError> {
         let mut url = self.endpoint.clone();
         let mut path = url
@@ -449,7 +449,7 @@ impl ConfluentSchemaRegistry {
         Ok(url)
     }
 
-    /// 按冻结认证配置附加 Authorization header，敏感中间字符串由 `Zeroizing` 承载。
+    /// 业务作用：按冻结认证配置附加 Authorization header，敏感中间字符串由 `Zeroizing` 承载。
     fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.options.auth {
             None => request,
@@ -474,7 +474,7 @@ impl ConfluentSchemaRegistry {
         }
     }
 
-    /// 在 Content-Length 与流式累计两层限制下读取并反序列化 JSON 响应。
+    /// 业务作用：在 Content-Length 与流式累计两层限制下读取并反序列化 JSON 响应。
     async fn bounded_json<T: for<'de> Deserialize<'de>>(
         &self,
         mut response: reqwest::Response,
@@ -535,7 +535,7 @@ struct SchemaRequest<'a> {
 
 #[async_trait::async_trait]
 impl SchemaRegistryClient for ConfluentSchemaRegistry {
-    /// 优先读取正/负缓存，未命中时按全局 ID 拉取并缓存 Registry schema。
+    /// 业务作用：优先读取正/负缓存，未命中时按全局 ID 拉取并缓存 Registry schema。
     async fn schema_by_id(
         &self,
         id: SchemaId,
@@ -598,7 +598,7 @@ impl SchemaRegistryClient for ConfluentSchemaRegistry {
         Ok(schema)
     }
 
-    /// 向 Registry 查询候选 schema 对指定 subject/version 的兼容性。
+    /// 业务作用：向 Registry 查询候选 schema 对指定 subject/version 的兼容性。
     async fn is_compatible(
         &self,
         subject: &str,
@@ -627,7 +627,7 @@ impl SchemaRegistryClient for ConfluentSchemaRegistry {
         Ok(body.is_compatible)
     }
 
-    /// 在显式开启自动注册后提交候选 schema，并校验返回的正 ID。
+    /// 业务作用：在显式开启自动注册后提交候选 schema，并校验返回的正 ID。
     async fn register(
         &self,
         subject: &str,
@@ -660,7 +660,7 @@ impl SchemaRegistryClient for ConfluentSchemaRegistry {
 }
 
 impl ConfluentSchemaRegistry {
-    /// 复用响应体上限约束待提交 schema 文本，避免构造无界 JSON 请求。
+    /// 业务作用：复用响应体上限约束待提交 schema 文本，避免构造无界 JSON 请求。
     fn validate_schema_size(&self, schema: &str) -> Result<(), SchemaRegistryError> {
         if schema.len() > self.options.max_response_bytes {
             return Err(SchemaRegistryError::SchemaTooLarge {
@@ -672,7 +672,7 @@ impl ConfluentSchemaRegistry {
     }
 }
 
-/// 校验 subject 路径安全性、version 规范形式以及非空 schema。
+/// 业务作用：校验 subject 路径安全性、version 规范形式以及非空 schema。
 fn validate_subject(subject: &str, version: &str, schema: &str) -> Result<(), SchemaRegistryError> {
     let subject_is_safe = !subject.is_empty()
         && subject.len() <= 255
@@ -689,7 +689,7 @@ fn validate_subject(subject: &str, version: &str, schema: &str) -> Result<(), Sc
     Ok(())
 }
 
-/// 限制认证材料长度与字符集，确保后续 header 构造不会接收控制字符或无界输入。
+/// 业务作用：限制认证材料长度与字符集，确保后续 header 构造不会接收控制字符或无界输入。
 fn validate_auth(auth: &SchemaRegistryAuth) -> Result<(), SchemaRegistryError> {
     let valid = |value: &[u8]| {
         !value.is_empty() && value.len() <= 4096 && value.iter().all(|byte| byte.is_ascii_graphic())

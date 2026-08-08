@@ -10,14 +10,14 @@ use crate::{
 
 /// 一个已成功产生副作用的可逆步骤。实现者的 `Drop` 必须非阻塞。
 pub trait ShutdownAction: Send {
-    /// 返回用于清理报告的稳定 action 名称。
+    /// 业务作用：返回用于清理报告的稳定 action 名称。
     ///
     /// # 参数
     ///
     /// 本方法无参数；名称不得包含配置值或业务秘密。
     fn label(&self) -> &'static str;
 
-    /// 在共享全局 deadline 内撤销该 action 已成功产生的副作用。
+    /// 业务作用：在共享全局 deadline 内撤销该 action 已成功产生的副作用。
     ///
     /// # 参数
     ///
@@ -27,14 +27,14 @@ pub trait ShutdownAction: Send {
 
 /// 内置组件的三阶段生命周期协议；boxed future 保持 trait object-safe。
 pub trait ApplicationComponent: Send {
-    /// 返回组件的稳定身份。
+    /// 业务作用：返回组件的稳定身份。
     ///
     /// # 参数
     ///
     /// 本方法无参数；Runner 使用结果校验唯一性和依赖顺序。
     fn id(&self) -> ComponentId;
 
-    /// 返回必须在当前组件之前声明的静态依赖。
+    /// 业务作用：返回必须在当前组件之前声明的静态依赖。
     ///
     /// # 参数
     ///
@@ -43,7 +43,7 @@ pub trait ApplicationComponent: Send {
         &[]
     }
 
-    /// 执行只依赖本地引导配置的早期初始化。
+    /// 业务作用：执行只依赖本地引导配置的早期初始化。
     ///
     /// # 参数
     ///
@@ -55,7 +55,7 @@ pub trait ApplicationComponent: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// 使用最终初始配置创建组件运行资源。
+    /// 业务作用：使用最终初始配置创建组件运行资源。
     ///
     /// # 参数
     ///
@@ -64,7 +64,7 @@ pub trait ApplicationComponent: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// 在 UserHook 成功后激活对外服务或调度终端。
+    /// 业务作用：在 UserHook 成功后激活对外服务或调度终端。
     ///
     /// # 参数
     ///
@@ -73,7 +73,7 @@ pub trait ApplicationComponent: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// 取出 Ready 成功后必须由 Runner 监督的关键任务。
+    /// 业务作用：取出 Ready 成功后必须由 Runner 监督的关键任务。
     ///
     /// 每个组件至多返回一次；任务在 active action 已压栈后加入监督集合，提前退出会触发失败停机。
     ///
@@ -103,7 +103,7 @@ pub(crate) struct ActiveStack {
 }
 
 impl ActiveStack {
-    /// 创建尚未激活任何副作用的空栈。
+    /// 业务作用：创建尚未激活任何副作用的空栈。
     ///
     /// # 参数
     ///
@@ -115,7 +115,7 @@ impl ActiveStack {
         }
     }
 
-    /// 在 poll UserHook 前压入动态业务资源清理步骤。
+    /// 业务作用：在 poll UserHook 前压入动态业务资源清理步骤。
     ///
     /// # 参数
     ///
@@ -124,7 +124,7 @@ impl ActiveStack {
         self.steps.push(ActiveStep::BusinessResources);
     }
 
-    /// 在 poll UserHook 前压入动态用户任务清理步骤。
+    /// 业务作用：在 poll UserHook 前压入动态用户任务清理步骤。
     ///
     /// # 参数
     ///
@@ -133,7 +133,7 @@ impl ActiveStack {
         self.steps.push(ActiveStep::UserTasks);
     }
 
-    /// 弹出最后成功激活的步骤。
+    /// 业务作用：弹出最后成功激活的步骤。
     ///
     /// # 参数
     ///
@@ -142,7 +142,7 @@ impl ActiveStack {
         self.steps.pop()
     }
 
-    /// 把组件已经成功形成的可逆副作用压栈。
+    /// 业务作用：把组件已经成功形成的可逆副作用压栈。
     ///
     /// # 参数
     ///
@@ -152,7 +152,7 @@ impl ActiveStack {
         self.steps.push(ActiveStep::Action { component, action });
     }
 
-    /// 为组件首次资源登记建立唯一清理步骤。
+    /// 业务作用：为组件首次资源登记建立唯一清理步骤。
     ///
     /// # 参数
     ///
@@ -175,7 +175,7 @@ macro_rules! lifecycle_context {
         }
 
         impl<'a> $name<'a> {
-            /// 创建只在当前组件阶段 future 内有效的上下文。
+            /// 业务作用：创建只在当前组件阶段 future 内有效的上下文。
             ///
             /// # 参数
             ///
@@ -197,7 +197,7 @@ macro_rules! lifecycle_context {
                 }
             }
 
-            /// 返回当前阶段共享的 Application。
+            /// 业务作用：返回当前阶段共享的 Application。
             ///
             /// # 参数
             ///
@@ -206,7 +206,7 @@ macro_rules! lifecycle_context {
                 self.application
             }
 
-            /// 返回完整启动流程共享的绝对截止时刻。
+            /// 业务作用：返回完整启动流程共享的绝对截止时刻。
             ///
             /// # 参数
             ///
@@ -215,7 +215,7 @@ macro_rules! lifecycle_context {
                 self.deadline
             }
 
-            /// 返回共享启动截止时刻的当前剩余预算。
+            /// 业务作用：返回共享启动截止时刻的当前剩余预算。
             ///
             /// # 参数
             ///
@@ -224,7 +224,7 @@ macro_rules! lifecycle_context {
                 self.deadline.saturating_duration_since(Instant::now())
             }
 
-            /// 在对应副作用完整成功后把 action 压入清理栈。
+            /// 业务作用：在对应副作用完整成功后把 action 压入清理栈。
             ///
             /// # 参数
             ///
@@ -233,7 +233,7 @@ macro_rules! lifecycle_context {
                 self.active.activate(self.component, action);
             }
 
-            /// 登记一个由当前组件拥有的普通资源。
+            /// 业务作用：登记一个由当前组件拥有的普通资源。
             ///
             /// # 参数
             ///
@@ -253,7 +253,7 @@ macro_rules! lifecycle_context {
                     .register_component(self.component, qualifier, value)
             }
 
-            /// 登记一个由当前组件拥有并需要显式异步 shutdown 的资源。
+            /// 业务作用：登记一个由当前组件拥有并需要显式异步 shutdown 的资源。
             ///
             /// # 参数
             ///

@@ -25,7 +25,7 @@ pub struct ReplayError {
 }
 
 impl ReplayError {
-    /// 建立可安全传给统一错误层的重放存储错误。
+    /// 业务作用：建立可安全传给统一错误层的重放存储错误。
     ///
     /// # 参数
     ///
@@ -40,7 +40,7 @@ impl ReplayError {
 }
 
 impl std::fmt::Display for ReplayError {
-    /// 输出固定错误说明，不泄露后端细节。
+    /// 业务作用：输出固定错误说明，不泄露后端细节。
     ///
     /// # 参数
     ///
@@ -83,14 +83,14 @@ pub struct ReplayKey {
 
 /// 可替换的原子重放占位存储。
 pub trait ReplayGuard: Send + Sync + 'static {
-    /// 返回注册表使用的稳定 guard ID。
+    /// 业务作用：返回注册表使用的稳定 guard ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识，不得包含实例地址。
     fn id(&self) -> &'static str;
 
-    /// 原子创建带 TTL 的 rid 占位。
+    /// 业务作用：原子创建带 TTL 的 rid 占位。
     ///
     /// # 参数
     ///
@@ -102,7 +102,7 @@ pub trait ReplayGuard: Send + Sync + 'static {
     /// 仅 [`ReplayDecision::Fresh`] 允许继续；后端故障由 required 路由 fail closed。
     fn reserve<'a>(&'a self, key: ReplayKey, ttl: Duration) -> ReplayFuture<'a>;
 
-    /// 探测 required 路由依赖的重放后端是否可用。
+    /// 业务作用：探测 required 路由依赖的重放后端是否可用。
     ///
     /// # 返回
     ///
@@ -121,7 +121,7 @@ pub struct InMemoryReplayGuard {
 }
 
 impl InMemoryReplayGuard {
-    /// 建立单进程有界重放存储。
+    /// 业务作用：建立单进程有界重放存储。
     ///
     /// # 参数
     ///
@@ -144,7 +144,7 @@ impl InMemoryReplayGuard {
 }
 
 impl ReplayGuard for InMemoryReplayGuard {
-    /// 返回构造时声明的稳定 ID。
+    /// 业务作用：返回构造时声明的稳定 ID。
     ///
     /// # 返回
     ///
@@ -153,7 +153,7 @@ impl ReplayGuard for InMemoryReplayGuard {
         self.id
     }
 
-    /// 在单进程互斥表中执行原子检查与占位。
+    /// 业务作用：在单进程互斥表中执行原子检查与占位。
     ///
     /// # 参数
     ///

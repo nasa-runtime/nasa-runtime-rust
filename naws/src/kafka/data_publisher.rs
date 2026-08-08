@@ -24,7 +24,7 @@ pub struct KafkaClusterDataPublisher {
 }
 
 impl KafkaClusterDataPublisher {
-    /// 构造 cluster relay 专用 data publisher。
+    /// 业务作用：构造 cluster relay 专用 data publisher。
     ///
     /// # 参数
     ///
@@ -56,7 +56,7 @@ impl KafkaClusterDataPublisher {
         })
     }
 
-    /// 构造受 runtime readiness 控制的 cluster data publisher。
+    /// 业务作用：构造受 runtime readiness 控制的 cluster data publisher。
     pub(crate) fn new_gated(
         lane: ProducerLane,
         topic: impl Into<String>,
@@ -70,7 +70,7 @@ impl KafkaClusterDataPublisher {
         Ok(publisher)
     }
 
-    /// 把拥有型可空字符串列表追加到 builder，空元素确定拒绝。
+    /// 业务作用：把拥有型可空字符串列表追加到 builder，空元素确定拒绝。
     fn append_values<'a>(
         mut builder: WsKafkaPublishBuilder<'a>,
         values: Option<&[Option<String>]>,
@@ -85,7 +85,7 @@ impl KafkaClusterDataPublisher {
         Ok(builder)
     }
 
-    /// 把 nafka fire 失败压缩成 Cluster data 稳定结果域。
+    /// 业务作用：把 nafka fire 失败压缩成 Cluster data 稳定结果域。
     fn map_error(error: NafkaError) -> DataPublishOutcome {
         match error {
             NafkaError::Lifecycle(_) => DataPublishOutcome::Closed,
@@ -96,7 +96,7 @@ impl KafkaClusterDataPublisher {
 }
 
 impl KafkaClusterDataPublisher {
-    /// 一次性校验「egress 使用的来源身份」与「ingress 用来判回环的本节点 ID」是否一致。
+    /// 业务作用：一次性校验「egress 使用的来源身份」与「ingress 用来判回环的本节点 ID」是否一致。
     ///
     /// 二者来自两个独立配置：egress 的 `Source-Node` 由 Cluster 提供，
     /// ingress 的回环判定用 `WsKafkaRuntimeConfig.local_node`。不一致时 Loopback 永不命中，
@@ -130,7 +130,7 @@ impl KafkaClusterDataPublisher {
 }
 
 impl ClusterDataPublisher for KafkaClusterDataPublisher {
-    /// 不构造 ClusterEvent，直接借用 payload 并同步进入 data producer。
+    /// 业务作用：不构造 ClusterEvent，直接借用 payload 并同步进入 data producer。
     fn publish(
         &self,
         source: ClusterSourceRef<'_>,

@@ -64,7 +64,7 @@ pub struct AuthContext {
 }
 
 impl std::fmt::Debug for AuthContext {
-    /// 输出不含主体值和业务对象的认证摘要。
+    /// 业务作用：输出不含主体值和业务对象的认证摘要。
     ///
     /// # 参数
     ///
@@ -82,7 +82,7 @@ impl std::fmt::Debug for AuthContext {
 }
 
 impl AuthContext {
-    /// 按应用 DTO 类型读取认证主体。
+    /// 业务作用：按应用 DTO 类型读取认证主体。
     ///
     /// # 类型参数
     ///
@@ -161,7 +161,7 @@ pub struct AuthError {
 }
 
 impl AuthError {
-    /// 建立一个不包含敏感输入的认证错误。
+    /// 业务作用：建立一个不包含敏感输入的认证错误。
     ///
     /// # 参数
     ///
@@ -178,7 +178,7 @@ impl AuthError {
         }
     }
 
-    /// 返回标准 HTTP profile 对应的状态码。
+    /// 业务作用：返回标准 HTTP profile 对应的状态码。
     ///
     /// # 返回
     ///
@@ -193,7 +193,7 @@ impl AuthError {
 }
 
 impl std::fmt::Display for AuthError {
-    /// 输出不含凭证与后端细节的内部类别。
+    /// 业务作用：输出不含凭证与后端细节的内部类别。
     ///
     /// # 参数
     ///
@@ -211,14 +211,14 @@ impl std::error::Error for AuthError {}
 
 /// 应用实现的身份认证扩展点。
 pub trait AuthProvider: Send + Sync + 'static {
-    /// 返回注册表使用的稳定 provider ID。
+    /// 业务作用：返回注册表使用的稳定 provider ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识，不得包含实例地址或凭证信息。
     fn id(&self) -> &'static str;
 
-    /// 在监听端口前检查 provider 对当前路由的应用侧依赖。
+    /// 业务作用：在监听端口前检查 provider 对当前路由的应用侧依赖。
     ///
     /// # 参数
     ///
@@ -231,7 +231,7 @@ pub trait AuthProvider: Send + Sync + 'static {
         Ok(())
     }
 
-    /// 根据受限请求视图认证一次请求。
+    /// 业务作用：根据受限请求视图认证一次请求。
     ///
     /// # 参数
     ///
@@ -248,14 +248,14 @@ pub trait AuthProvider: Send + Sync + 'static {
 
 /// 应用实现的身份要求条件扩展点。
 pub trait AuthCondition: Send + Sync + 'static {
-    /// 返回注册表使用的稳定 condition ID。
+    /// 业务作用：返回注册表使用的稳定 condition ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识。
     fn id(&self) -> &'static str;
 
-    /// 依据可信元数据收窄静态身份要求。
+    /// 业务作用：依据可信元数据收窄静态身份要求。
     ///
     /// # 参数
     ///
@@ -280,7 +280,7 @@ pub struct AuthRuntime {
 }
 
 impl std::fmt::Debug for AuthRuntime {
-    /// 输出注册数量，避免泄露适配器内部缓存与连接状态。
+    /// 业务作用：输出注册数量，避免泄露适配器内部缓存与连接状态。
     ///
     /// # 参数
     ///
@@ -299,7 +299,7 @@ impl std::fmt::Debug for AuthRuntime {
 }
 
 impl AuthRuntime {
-    /// 从完整注册表建立不可变身份运行时。
+    /// 业务作用：从完整注册表建立不可变身份运行时。
     ///
     /// # 参数
     ///
@@ -343,7 +343,7 @@ impl AuthRuntime {
         })
     }
 
-    /// 在监听端口前检查一条路由的身份依赖。
+    /// 业务作用：在监听端口前检查一条路由的身份依赖。
     ///
     /// # 参数
     ///
@@ -377,7 +377,7 @@ impl AuthRuntime {
         Ok(())
     }
 
-    /// 按固定顺序执行身份 condition 与 provider。
+    /// 业务作用：按固定顺序执行身份 condition 与 provider。
     ///
     /// # 参数
     ///
@@ -448,7 +448,7 @@ impl AuthRuntime {
     }
 }
 
-/// 校验应用 provider 返回的身份上下文不会把空值、控制字符或无界文本带入密钥域和业务层。
+/// 业务作用：校验应用 provider 返回的身份上下文不会把空值、控制字符或无界文本带入密钥域和业务层。
 ///
 /// # 参数
 ///
@@ -477,7 +477,7 @@ pub(crate) fn validate_auth_context(context: &AuthContext) -> Result<(), AuthErr
     }
 }
 
-/// 判断 condition 返回值是否仍在路由静态声明允许的范围内。
+/// 业务作用：判断 condition 返回值是否仍在路由静态声明允许的范围内。
 ///
 /// # 参数
 ///
@@ -501,7 +501,7 @@ fn requirement_within_declared(declared: AuthRequirement, effective: AuthRequire
     }
 }
 
-/// 校验启动配置中的有限 ASCII 组件标识。
+/// 业务作用：校验启动配置中的有限 ASCII 组件标识。
 ///
 /// # 参数
 ///

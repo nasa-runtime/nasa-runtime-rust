@@ -40,7 +40,7 @@ pub(crate) struct ServiceNameIndex {
 }
 
 impl ServiceNameIndex {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(match_mode: ServiceMatchMode, grace: Duration) -> Self {
         Self {
             names: ArcSwap::from_pointee(HashMap::new()),
@@ -49,7 +49,7 @@ impl ServiceNameIndex {
         }
     }
 
-    /// 按 match_mode 归一化 host(CaseInsensitive → ASCII lowercase)。
+    /// 业务作用：按 match_mode 归一化 host(CaseInsensitive → ASCII lowercase)。
     ///
     /// # 参数
     /// - `host`: 实例注册或请求路由使用的主机名。
@@ -60,7 +60,7 @@ impl ServiceNameIndex {
         }
     }
 
-    /// host 命中 → 返回注册中心 canonical 服务名;未命中 → `None`。
+    /// 业务作用：host 命中 → 返回注册中心 canonical 服务名;未命中 → `None`。
     pub(crate) fn lookup(&self, host: &str) -> Option<String> {
         let key = self.normalize(host);
         self.names
@@ -69,7 +69,7 @@ impl ServiceNameIndex {
             .map(|e| e.canonical_name.clone())
     }
 
-    /// 用一份新服务名列表刷新索引(仅 list_services 成功时调用)。`now` 由调用方传入(便于确定性验证)。
+    /// 业务作用：用一份新服务名列表刷新索引(仅 list_services 成功时调用)。`now` 由调用方传入(便于确定性验证)。
     /// 返回本轮【需回收 watch】的旧 canonical 名(超 grace 缺席 + canonical 单值替换;冲突不计,见 [`IndexRefreshOutcome`]),
     /// 供调用方 `mark_removed`。
     pub(crate) fn refresh(&self, names: Vec<String>, now: Instant) -> IndexRefreshOutcome {

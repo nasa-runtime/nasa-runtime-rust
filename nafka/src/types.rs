@@ -16,7 +16,7 @@ pub struct Tp {
 }
 
 impl Tp {
-    /// 构造分区定位。
+    /// 业务作用：构造分区定位。
     ///
     /// # 参数
     /// - `topic`: Kafka topic 名,调用方保证非空(空值在使用处的 validate 拦截,此处不重复校验)。
@@ -49,7 +49,7 @@ pub struct KafkaHeader {
 pub struct KafkaHeaders(Vec<KafkaHeader>);
 
 impl KafkaHeaders {
-    /// 从有序 header 列表构造;保留输入顺序与重复项。
+    /// 业务作用：从有序 header 列表构造;保留输入顺序与重复项。
     ///
     /// # 参数
     /// - `headers`: 按 wire 出现顺序排列的 header 列表。
@@ -57,12 +57,12 @@ impl KafkaHeaders {
         Self(headers)
     }
 
-    /// 按 wire 顺序遍历全部 header(含重复名)。
+    /// 业务作用：按 wire 顺序遍历全部 header(含重复名)。
     pub fn iter(&self) -> impl Iterator<Item = &KafkaHeader> {
         self.0.iter()
     }
 
-    /// 取指定名字的最后一个 header。
+    /// 业务作用：取指定名字的最后一个 header。
     ///
     /// 框架保留 header(X-Nasa-Event 等)按 Kafka 惯例采用 last-header 语义读取。
     ///
@@ -72,7 +72,7 @@ impl KafkaHeaders {
         self.0.iter().rev().find(|h| h.name == name)
     }
 
-    /// 按 wire 顺序遍历指定名字的全部 header。
+    /// 业务作用：按 wire 顺序遍历指定名字的全部 header。
     ///
     /// 多值路由 header(如 X-Nasa-WS-Uid)必须用本方法读全量；[`Self::last`] 会丢目标。
     ///
@@ -82,12 +82,12 @@ impl KafkaHeaders {
         self.0.iter().filter(move |h| h.name == name)
     }
 
-    /// header 总条数(含重复名),用于路由数量上限校验。
+    /// 业务作用：header 总条数(含重复名),用于路由数量上限校验。
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// 是否没有任何 header。
+    /// 业务作用：是否没有任何 header。
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -158,7 +158,7 @@ pub struct AssignmentHandle {
 }
 
 impl AssignmentHandle {
-    /// 构造固定分区任务句柄。
+    /// 业务作用：构造固定分区任务句柄。
     ///
     /// # 参数
     ///
@@ -168,17 +168,17 @@ impl AssignmentHandle {
         Self { group, proxy }
     }
 
-    /// 本 assign 任务占用的 group.id(与 subscribe group 共用命名空间,冲突在 assign 时拒绝)。
+    /// 业务作用：本 assign 任务占用的 group.id(与 subscribe group 共用命名空间,冲突在 assign 时拒绝)。
     pub fn group(&self) -> &str {
         &self.group
     }
 
-    /// 当前固定分区集合快照。
+    /// 业务作用：当前固定分区集合快照。
     pub async fn partitions(&self) -> Result<Vec<Tp>> {
         self.proxy.assignment(&self.group).await
     }
 
-    /// 查询本 assign group 的健康快照。
+    /// 业务作用：查询本 assign group 的健康快照。
     ///
     /// # 错误
     ///
@@ -187,7 +187,7 @@ impl AssignmentHandle {
         self.proxy.group_health(&self.group).await
     }
 
-    /// 停止本 assign 消费并注销 group;幂等,重复调用直接返回 Ok。
+    /// 业务作用：停止本 assign 消费并注销 group;幂等,重复调用直接返回 Ok。
     pub async fn stop(&self) -> Result<()> {
         let handle = match self.proxy.group_handle(&self.group) {
             Ok(handle) => handle,

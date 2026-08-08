@@ -40,7 +40,7 @@ struct SchedulingConfig {
 }
 
 impl Default for SchedulingConfig {
-    /// 返回不依赖任何外部组件的本地调度缺省配置。
+    /// 业务作用：返回不依赖任何外部组件的本地调度缺省配置。
     ///
     /// # 参数
     ///
@@ -56,7 +56,7 @@ impl Default for SchedulingConfig {
 }
 
 impl SchedulingConfig {
-    /// 校验会影响选主时序与启动指纹的取值。
+    /// 业务作用：校验会影响选主时序与启动指纹的取值。
     ///
     /// # 参数
     ///
@@ -93,7 +93,7 @@ pub(crate) struct SchedulingComponent {
 }
 
 impl SchedulingComponent {
-    /// 创建尚未启动调度器的组件。
+    /// 业务作用：创建尚未启动调度器的组件。
     ///
     /// # 参数
     ///
@@ -107,7 +107,7 @@ impl SchedulingComponent {
 }
 
 impl ApplicationComponent for SchedulingComponent {
-    /// 返回调度组件稳定身份。
+    /// 业务作用：返回调度组件稳定身份。
     ///
     /// # 参数
     ///
@@ -116,7 +116,7 @@ impl ApplicationComponent for SchedulingComponent {
         ComponentId::Scheduling
     }
 
-    /// 按配置启动调度器，并把关闭动作压入逆序清理栈。
+    /// 业务作用：按配置启动调度器，并把关闭动作压入逆序清理栈。
     ///
     /// # 参数
     ///
@@ -172,7 +172,7 @@ impl ApplicationComponent for SchedulingComponent {
 }
 
 impl SchedulingComponent {
-    /// 把配置翻译成调度器启动选项，必要时先建立 Redis leader gate。
+    /// 业务作用：把配置翻译成调度器启动选项，必要时先建立 Redis leader gate。
     ///
     /// # 参数
     ///
@@ -192,7 +192,7 @@ impl SchedulingComponent {
         Ok(options)
     }
 
-    /// 构造依赖 Redis 选主的集群调度选项。
+    /// 业务作用：构造依赖 Redis 选主的集群调度选项。
     ///
     /// # 参数
     ///
@@ -235,7 +235,7 @@ impl SchedulingComponent {
         ))
     }
 
-    /// 在未编入集群适配层时拒绝 `cluster=leader`。
+    /// 业务作用：在未编入集群适配层时拒绝 `cluster=leader`。
     ///
     /// # 参数
     ///
@@ -265,7 +265,7 @@ struct SchedulingShutdown {
 }
 
 impl ShutdownAction for SchedulingShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -274,7 +274,7 @@ impl ShutdownAction for SchedulingShutdown {
         "scheduling"
     }
 
-    /// 先停调度触发，再退出选举，避免退位后仍有任务在跑。
+    /// 业务作用：先停调度触发，再退出选举，避免退位后仍有任务在跑。
     ///
     /// # 参数
     ///
@@ -299,7 +299,7 @@ impl ShutdownAction for SchedulingShutdown {
     }
 }
 
-/// 从最终配置读取 `scheduling` 段；段缺失时使用 local 缺省配置。
+/// 业务作用：从最终配置读取 `scheduling` 段；段缺失时使用 local 缺省配置。
 ///
 /// # 参数
 ///
@@ -317,7 +317,7 @@ fn read_scheduling_config(application: &Application) -> ApplicationResult<Schedu
     Ok(root.scheduling)
 }
 
-/// 在不启动调度器的前提下校验候选配置树中的 `scheduling` 段。
+/// 业务作用：在不启动调度器的前提下校验候选配置树中的 `scheduling` 段。
 ///
 /// # 参数
 ///
@@ -336,7 +336,7 @@ pub(crate) fn validate_scheduling_section(
     config.validate(phase)
 }
 
-/// 创建调度组件的稳定生命周期错误。
+/// 业务作用：创建调度组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -346,7 +346,7 @@ fn scheduling_error(phase: ApplicationPhase, message: impl Into<String>) -> Appl
     ApplicationError::new(ComponentId::Scheduling, phase, message)
 }
 
-/// 创建带底层错误链的调度错误。
+/// 业务作用：创建带底层错误链的调度错误。
 ///
 /// # 参数
 ///

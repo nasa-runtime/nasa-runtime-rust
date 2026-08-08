@@ -34,7 +34,7 @@ pub struct Leader {
 }
 
 impl Leader {
-    /// 启动后台选举循环。`key` 是业务 key(`DistributedLock` 会加锁前缀);`period` = 竞选/检测周期
+    /// 业务作用：启动后台选举循环。`key` 是业务 key(`DistributedLock` 会加锁前缀);`period` = 竞选/检测周期
     /// (对照 原实现 `clusterMePeriod` 1s,应 < lock.lease_ms 以便及时改选)。返回即开始竞选。
     ///
     /// # 参数
@@ -77,12 +77,12 @@ impl Leader {
         })
     }
 
-    /// 当前是否为 leader(无 Redis 往返,读本地标志)。
+    /// 业务作用：当前是否为 leader(无 Redis 往返,读本地标志)。
     pub fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::Acquire)
     }
 
-    /// 内层 election 任务的 AbortHandle(供宿主把它纳入统一 abort 集——否则宿主
+    /// 业务作用：内层 election 任务的 AbortHandle(供宿主把它纳入统一 abort 集——否则宿主
     /// (如 autotrim)被 abort 时 `shutdown()` 不执行、election_loop 成孤儿、leader 锁看门狗继续续租,
     /// 阻塞新 leader 接任至 lease 过期)。`None` = 已 shutdown(handle 被 take)。
     pub fn abort_handle(&self) -> Option<tokio::task::AbortHandle> {
@@ -93,7 +93,7 @@ impl Leader {
             .map(|h| h.abort_handle())
     }
 
-    /// leader 才执行 `f`(否则跳过)。leader-local-once:换主后新 leader 仍可能重跑,`f` 须幂等。
+    /// 业务作用：leader 才执行 `f`(否则跳过)。leader-local-once:换主后新 leader 仍可能重跑,`f` 须幂等。
     /// ⚠ **不中断**:进入后 `f` 一跑到底,即便中途失主也不打断(长任务请用 `run_if_leader_cancellable`)。
     ///
     /// # 参数
@@ -110,7 +110,7 @@ impl Leader {
         }
     }
 
-    /// leader 才执行 `f`,且**失主即中断**。`f` 收到本任期的 `CancellationToken`
+    /// 业务作用：leader 才执行 `f`,且**失主即中断**。`f` 收到本任期的 `CancellationToken`
     /// (失主/退位时触发),可据此协作退出;同时本方法在 `f` 与失主信号间 `select`——一旦失主,
     /// 不等 `f` 完成直接返回 `None`,把"双主并发跑长任务"窗口从整个 `f` 时长压回 ≤1 tick。
     /// 返回 `None` = 非 leader 或执行中失主;`Some(T)` = 任内跑完。`f` 仍应幂等(换主后新 leader 会重跑)。
@@ -137,7 +137,7 @@ impl Leader {
         }
     }
 
-    /// 显式退位 + 停后台循环:cancel → 等循环退出(退出时 unlock leader 锁,别的节点可立即接任)。
+    /// 业务作用：显式退位 + 停后台循环:cancel → 等循环退出(退出时 unlock leader 锁,别的节点可立即接任)。
     pub async fn shutdown(&self) {
         self.cancel.cancel();
         let h = self.handle.lock().expect("leader handle").take();
@@ -148,7 +148,7 @@ impl Leader {
 }
 
 impl Drop for Leader {
-    /// 最后一个 owner 未显式 shutdown 时立即停止竞选任务，避免锁看门狗继续续租。
+    /// 业务作用：最后一个 owner 未显式 shutdown 时立即停止竞选任务，避免锁看门狗继续续租。
     fn drop(&mut self) {
         self.cancel.cancel();
         self.term_lost.lock().expect("leader term_lost").cancel();
@@ -177,7 +177,7 @@ impl Drop for Leader {
 // Runs periodic leader election until cancellation.
 ///
 /// # 参数
-/// - `lock`: Redis 分布式锁的持有状态。
+/// 业务作用：- `lock`: Redis 分布式锁的持有状态。
 /// - `key`: leader 选举使用的 Redis lock key。
 /// - `period`: 任务调度周期。
 /// - `is_leader`: 当前实例是否仍拥有 leader 身份。

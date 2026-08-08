@@ -37,7 +37,7 @@ use super::KeyLayout;
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// retry-op marker key(**按 operation_id 键控**):`{prefix}:retryop:{p}:{op_id}`。
+/// 业务作用：retry-op marker key(**按 operation_id 键控**):`{prefix}:retryop:{p}:{op_id}`。
 /// op_id = 确定性摘要(同 operation 重试稳定、不同 operation 不同)→ 从根上消除"per-partition
 /// 单 marker 被不同 operation 覆盖/串扰"。
 ///
@@ -49,7 +49,7 @@ pub fn marker_key(layout: &KeyLayout, p: u32, op_id: &str) -> String {
     format!("{}:retryop:{}:{}", layout.prefix, p, op_id)
 }
 
-/// 计算 operation_id:对(排序后的 target ids + group + consumer + claim_term)做 FNV-1a64。
+/// 业务作用：计算 operation_id:对(排序后的 target ids + group + consumer + claim_term)做 FNV-1a64。
 /// **同一批重试稳定**(ids/term 不变)→ 重放找回同 marker;**跨 dispatch 周期**(claim_term
 /// 即 slot.generation 变)→ 新 operation 新 marker。
 ///
@@ -176,7 +176,7 @@ if pl == nil then return {'RESOLVED'} end
 return {'CLAIMED', pl}
 "#;
 
-/// 确保 Pending 意图已持久化(**按 op_id 键控**):marker 不存在 → 按当前 PEL 算
+/// 业务作用：确保 Pending 意图已持久化(**按 op_id 键控**):marker 不存在 → 按当前 PEL 算
 /// desired 写新 Pending + TTL;已 Pending(同 op_id = 同 operation,op_id 由 ids 派生)→
 /// 读回沿用已落盘 desired(重放幂等,不重算)。
 /// op_id 键控后**不再有“per-partition 单 marker 被不同 operation 覆盖或串扰”的问题**，
@@ -257,7 +257,7 @@ redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
 "#;
 
-/// 逐 ID 执行 CAS 归约(可重放:Pending 期间任意次调用结果一致)。**owner-fenced**
+/// 业务作用：逐 ID 执行 CAS 归约(可重放:Pending 期间任意次调用结果一致)。**owner-fenced**
 /// ——CAS 改 PEL 前在同一 Lua 校验持锁 + fence 任期,失锁/旧任期 → `OwnershipChanged`(交新 owner)。
 ///
 /// # 参数
@@ -305,7 +305,7 @@ pub async fn execute(
     Ok(out)
 }
 
-/// 读单 ID 当前在本组 PEL 的真实 delivery count(poison 判断必须以**实际
+/// 业务作用：读单 ID 当前在本组 PEL 的真实 delivery count(poison 判断必须以**实际
 /// delivery count** 为准,不能直接信 marker desired——损坏 desired 会绕过 CAS 直接 Drop)。
 /// 返回 None = 已不在 PEL(Resolved)。
 ///
@@ -358,7 +358,7 @@ pub async fn actual_count(
     }
 }
 
-/// 收宗:本 operation 全部 ID 已归约 → **删除该 op_id 的 marker**(:op_id 键控后每
+/// 业务作用：收宗:本 operation 全部 ID 已归约 → **删除该 op_id 的 marker**(:op_id 键控后每
 /// operation 独立 marker,直接删除即可,无需 Done 态;删除失败由 TTL 兜底清孤儿)。
 ///
 /// # 参数
@@ -376,7 +376,7 @@ pub async fn finish(
     Ok(())
 }
 
-/// 解析 Lua 返回:["TAG"(, payload)]。
+/// 业务作用：解析 Lua 返回:["TAG"(, payload)]。
 ///
 /// # 参数
 /// - `v`: 待转换的值。

@@ -131,65 +131,65 @@ struct ActionContext<'a> {
 
 /// 可被 DLT 构造器读取的原始消息视图。
 trait DeadLetterSource {
-    /// 返回来源 topic。
+    /// 业务作用：返回来源 topic。
     fn source_topic(&self) -> &str;
 
-    /// 返回来源分区。
+    /// 业务作用：返回来源分区。
     fn source_partition(&self) -> i32;
 
-    /// 返回来源 offset。
+    /// 业务作用：返回来源 offset。
     fn source_offset(&self) -> i64;
 
-    /// 返回来源时间戳。
+    /// 业务作用：返回来源时间戳。
     fn source_timestamp(&self) -> i64;
 
-    /// 返回原始 key。
+    /// 业务作用：返回原始 key。
     fn source_key(&self) -> Option<&[u8]>;
 
-    /// 返回原始 payload。
+    /// 业务作用：返回原始 payload。
     fn source_payload(&self) -> Option<&[u8]>;
 
-    /// 复制原始有序 headers。
+    /// 业务作用：复制原始有序 headers。
     fn source_headers(&self) -> KafkaHeaders;
 
-    /// 返回进入 DLT 前已经发生的可信业务投递次数。
+    /// 业务作用：返回进入 DLT 前已经发生的可信业务投递次数。
     fn delivery_attempts(&self) -> u32 {
         1
     }
 }
 
 impl DeadLetterSource for RdMessage<'_> {
-    /// 返回底层借用消息 topic。
+    /// 业务作用：返回底层借用消息 topic。
     fn source_topic(&self) -> &str {
         self.topic()
     }
 
-    /// 返回底层借用消息分区。
+    /// 业务作用：返回底层借用消息分区。
     fn source_partition(&self) -> i32 {
         self.partition()
     }
 
-    /// 返回底层借用消息 offset。
+    /// 业务作用：返回底层借用消息 offset。
     fn source_offset(&self) -> i64 {
         self.offset()
     }
 
-    /// 返回底层借用消息时间戳。
+    /// 业务作用：返回底层借用消息时间戳。
     fn source_timestamp(&self) -> i64 {
         self.timestamp()
     }
 
-    /// 返回底层借用消息 key。
+    /// 业务作用：返回底层借用消息 key。
     fn source_key(&self) -> Option<&[u8]> {
         self.key()
     }
 
-    /// 返回底层借用消息 payload。
+    /// 业务作用：返回底层借用消息 payload。
     fn source_payload(&self) -> Option<&[u8]> {
         self.payload()
     }
 
-    /// 仅在 DLT 路径复制底层 headers。
+    /// 业务作用：仅在 DLT 路径复制底层 headers。
     fn source_headers(&self) -> KafkaHeaders {
         self.headers()
             .map(|headers| owned_headers(&headers))
@@ -218,7 +218,7 @@ struct OwnedTypedMessage {
 }
 
 impl OwnedTypedMessage {
-    /// 在底层借用消息仍有效时立即物化有界 typed 记录。
+    /// 业务作用：在底层借用消息仍有效时立即物化有界 typed 记录。
     ///
     /// # 参数
     ///
@@ -243,86 +243,86 @@ impl OwnedTypedMessage {
         }
     }
 
-    /// 返回当前消息的 topic-partition。
+    /// 业务作用：返回当前消息的 topic-partition。
     fn tp(&self) -> Tp {
         Tp::new(self.topic.clone(), self.partition)
     }
 }
 
 impl DeadLetterSource for OwnedTypedMessage {
-    /// 返回拥有型来源 topic。
+    /// 业务作用：返回拥有型来源 topic。
     fn source_topic(&self) -> &str {
         &self.topic
     }
 
-    /// 返回拥有型来源分区。
+    /// 业务作用：返回拥有型来源分区。
     fn source_partition(&self) -> i32 {
         self.partition
     }
 
-    /// 返回拥有型来源 offset。
+    /// 业务作用：返回拥有型来源 offset。
     fn source_offset(&self) -> i64 {
         self.offset
     }
 
-    /// 返回拥有型来源时间戳。
+    /// 业务作用：返回拥有型来源时间戳。
     fn source_timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// 返回拥有型来源 key。
+    /// 业务作用：返回拥有型来源 key。
     fn source_key(&self) -> Option<&[u8]> {
         self.key.as_deref()
     }
 
-    /// 返回拥有型来源 payload。
+    /// 业务作用：返回拥有型来源 payload。
     fn source_payload(&self) -> Option<&[u8]> {
         self.payload.as_deref()
     }
 
-    /// 克隆拥有型来源 headers 供 DLT 独立持有。
+    /// 业务作用：克隆拥有型来源 headers 供 DLT 独立持有。
     fn source_headers(&self) -> KafkaHeaders {
         self.headers.clone()
     }
 }
 
 impl DeadLetterSource for RawRecord {
-    /// 返回已解析 typed 原始记录的 topic。
+    /// 业务作用：返回已解析 typed 原始记录的 topic。
     fn source_topic(&self) -> &str {
         &self.ctx.topic
     }
 
-    /// 返回已解析 typed 原始记录的分区。
+    /// 业务作用：返回已解析 typed 原始记录的分区。
     fn source_partition(&self) -> i32 {
         self.ctx.partition
     }
 
-    /// 返回已解析 typed 原始记录的 offset。
+    /// 业务作用：返回已解析 typed 原始记录的 offset。
     fn source_offset(&self) -> i64 {
         self.ctx.offset
     }
 
-    /// 返回已解析 typed 原始记录的时间戳。
+    /// 业务作用：返回已解析 typed 原始记录的时间戳。
     fn source_timestamp(&self) -> i64 {
         self.ctx.timestamp
     }
 
-    /// 返回已解析 typed 原始记录的 UTF-8 key 字节。
+    /// 业务作用：返回已解析 typed 原始记录的 UTF-8 key 字节。
     fn source_key(&self) -> Option<&[u8]> {
         self.ctx.key.as_deref().map(str::as_bytes)
     }
 
-    /// 返回已解析 typed 原始记录的 payload。
+    /// 业务作用：返回已解析 typed 原始记录的 payload。
     fn source_payload(&self) -> Option<&[u8]> {
         self.payload.as_deref()
     }
 
-    /// 克隆已解析 typed 原始记录的 headers 供 DLT 独立持有。
+    /// 业务作用：克隆已解析 typed 原始记录的 headers 供 DLT 独立持有。
     fn source_headers(&self) -> KafkaHeaders {
         self.ctx.headers.clone()
     }
 
-    /// 返回 owner 在本次 handler 调用前写入的可信投递序号。
+    /// 业务作用：返回 owner 在本次 handler 调用前写入的可信投递序号。
     fn delivery_attempts(&self) -> u32 {
         self.ctx.delivery_attempt
     }
@@ -344,7 +344,7 @@ enum TypedBatchItem {
 }
 
 impl TypedBatchItem {
-    /// 返回当前项的 topic-partition。
+    /// 业务作用：返回当前项的 topic-partition。
     fn tp(&self) -> Tp {
         match self {
             Self::Owned(message) => message.tp(),
@@ -352,7 +352,7 @@ impl TypedBatchItem {
         }
     }
 
-    /// 返回当前项的真实 offset。
+    /// 业务作用：返回当前项的真实 offset。
     fn offset(&self) -> i64 {
         match self {
             Self::Owned(message) => message.offset,
@@ -450,7 +450,7 @@ enum PreparedTypedItem {
 }
 
 impl PreparedTypedItem {
-    /// 返回尚未派发项的 topic-partition 与真实 offset，用于批次提前退出时回退 fetch position。
+    /// 业务作用：返回尚未派发项的 topic-partition 与真实 offset，用于批次提前退出时回退 fetch position。
     fn location(&self) -> (Tp, i64) {
         match self {
             Self::ImmediateOwned { source, .. } => (source.tp(), source.offset),
@@ -482,7 +482,7 @@ enum RestartBackoffOutcome {
     Stopped,
 }
 
-/// 计算带确定性抖动的 consumer 指数重建退避。
+/// 业务作用：计算带确定性抖动的 consumer 指数重建退避。
 ///
 /// # 参数
 ///
@@ -498,7 +498,7 @@ fn restart_delay(runtime: &Arc<KafkaProxyInner>, attempt: u32, seed: u64) -> Dur
     )
 }
 
-/// 用显式数值计算 consumer 指数退避，使边界计算不依赖 broker 状态。
+/// 业务作用：用显式数值计算 consumer 指数退避，使边界计算不依赖 broker 状态。
 ///
 /// # 参数
 ///
@@ -521,7 +521,7 @@ fn restart_delay_values(base: u64, max: u64, attempt: u32, seed: u64) -> Duratio
     )
 }
 
-/// 计算不会因左移丢高位而回绕为零的指数退避基值。
+/// 业务作用：计算不会因左移丢高位而回绕为零的指数退避基值。
 ///
 /// `checked_shl` 只校验 shift 位数，不校验有效位被移出；必须先构造 2^shift，再用 `saturating_mul` 吸收数值溢出。
 ///
@@ -536,7 +536,7 @@ fn capped_exponential_delay(base: u64, max: u64, attempt: u32) -> u64 {
     base.saturating_mul(factor).min(max)
 }
 
-/// 在滑动窗口内登记一次自动重建；先淘汰过期样本，再原子判定预算。
+/// 业务作用：在滑动窗口内登记一次自动重建；先淘汰过期样本，再原子判定预算。
 ///
 /// # 参数
 ///
@@ -564,7 +564,7 @@ fn register_restart(
     }
 }
 
-/// 从非敏感稳定文本生成 FNV-1a 种子。
+/// 业务作用：从非敏感稳定文本生成 FNV-1a 种子。
 ///
 /// # 参数
 ///
@@ -578,7 +578,7 @@ fn stable_text_seed(value: &str) -> u64 {
         })
 }
 
-/// 自动重建退避期间维持 Stop/Restart 控制响应，不持有底层 consumer。
+/// 业务作用：自动重建退避期间维持 Stop/Restart 控制响应，不持有底层 consumer。
 ///
 /// # 参数
 ///
@@ -630,7 +630,7 @@ fn wait_restart_backoff(
     }
 }
 
-/// owner 线程主循环。
+/// 业务作用：owner 线程主循环。
 ///
 /// # 参数
 ///
@@ -803,7 +803,7 @@ pub(crate) fn run_owner(
     }
 }
 
-/// 在 registry/assign 原子登记 owner 前等待统一放行，并保持 Stop 命令可响应。
+/// 业务作用：在 registry/assign 原子登记 owner 前等待统一放行，并保持 Stop 命令可响应。
 ///
 /// # 参数
 ///
@@ -853,7 +853,7 @@ fn wait_startup_gate(
     }
 }
 
-/// 构造并运行一次底层 consumer 会话，退出后不消费 owner 控制邮箱的所有权。
+/// 业务作用：构造并运行一次底层 consumer 会话，退出后把 owner 控制邮箱留给后续会话。
 ///
 /// # 参数
 ///
@@ -862,6 +862,12 @@ fn wait_startup_gate(
 /// - `commands`: 跨会话保留的有界控制命令接收端。
 /// - `health`: 跨会话保留的健康快照。
 /// - `initial_consumer`: 首次会话由 startup handshake 预先构造的 consumer；后续重建为 None。
+/// - `epoch_base`: 跨会话递增的消费世代基线。
+/// - `global_error`: 跨会话共享的最近错误单槽。
+///
+/// # 返回
+///
+/// 返回本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
 #[allow(clippy::too_many_arguments)] // owner 会话参数本就逐项显式;第 8 个是 共享错误单槽,合并会造隐式上下文
 fn run_owner_session(
     runtime_ref: &Arc<KafkaProxyInner>,
@@ -1444,7 +1450,7 @@ fn run_owner_session(
     }
 }
 
-/// 在 Crashed 状态只接受 Restart 或 Stop，避免其他控制操作获得虚假成功。
+/// 业务作用：在 Crashed 状态只接受 Restart 或 Stop，避免其他控制操作获得虚假成功。
 ///
 /// # 参数
 ///
@@ -1487,7 +1493,7 @@ fn wait_for_crashed_command(
     }
 }
 
-/// 初始化 subscribe 或固定 assign。
+/// 业务作用：初始化 subscribe 或固定 assign。
 ///
 /// # 参数
 ///
@@ -1518,7 +1524,7 @@ fn initialize_owner(
     }
 }
 
-/// 把 consumer 构造/初始化错误集中映射为会话退出分类。
+/// 业务作用：把 consumer 构造/初始化错误集中映射为会话退出分类。
 ///
 /// # 参数
 ///
@@ -1547,7 +1553,7 @@ fn classify_session_error(
     }
 }
 
-/// 启动延迟期间维持命令响应和 consumer 心跳。
+/// 业务作用：启动延迟期间维持命令响应和 consumer 心跳。
 ///
 /// # 参数
 ///
@@ -1594,7 +1600,7 @@ fn delay_with_commands(
     true
 }
 
-/// 拉取一次有界 typed 逻辑批：首条等待，后续使用零等待 drain。
+/// 业务作用：拉取一次有界 typed 逻辑批：首条等待，后续使用零等待 drain。
 ///
 /// 达到字节上限时，已经被底层返回但尚未复制的边界记录会立即 seek 回原 offset，留给下一批；
 /// 因而 owner 不需要持有一个额外的超上限 lookahead。
@@ -1672,7 +1678,7 @@ fn collect_typed_batch(
     Ok(batch)
 }
 
-/// 执行一个通过 fencing 的 owner 控制命令。
+/// 业务作用：执行一个通过 fencing 的 owner 控制命令。
 ///
 /// # 参数
 ///
@@ -1797,7 +1803,7 @@ fn execute_command(
     stop
 }
 
-/// 在产生任何副作用之前裁决一条控制命令能否执行。
+/// 业务作用：在产生任何副作用之前裁决一条控制命令能否执行。
 ///
 /// 全部拒绝理由必须集中在这里： 的契约是"返回错误即未执行"，因此裁决必须早于
 /// commit、cancel_retry_states、cancel_dlt_states 和 progress.clear() 这些破坏性动作。
@@ -1848,7 +1854,7 @@ fn command_admission_error(
     }
 }
 
-/// 判断 seek 是否会覆盖尚未得到 durability-first 终态的 DLT 分区。
+/// 业务作用：判断 seek 是否会覆盖尚未得到 durability-first 终态的 DLT 分区。
 ///
 /// - `kind`: 待执行控制命令；只检查五种 seek。
 /// - `pending`: 已准入并由 worker 投递的 DLT。
@@ -1874,7 +1880,7 @@ fn seek_conflicts_with_dlt(
             .is_some_and(|item| all || targets.contains(&item.tp))
 }
 
-/// 清理指定分区的本地失败尝试状态。
+/// 业务作用：清理指定分区的本地失败尝试状态。
 ///
 /// # 参数
 ///
@@ -1888,7 +1894,7 @@ fn clear_attempts<'a>(
     attempts.retain(|(tp, _), _| !targets.contains(tp));
 }
 
-/// operator seek 后移除框架安全暂停，并在没有 User 原因时恢复底层分区。
+/// 业务作用：operator seek 后移除框架安全暂停，并在没有 User 原因时恢复底层分区。
 ///
 /// # 参数
 ///
@@ -1917,7 +1923,7 @@ fn clear_operator_pauses<'a>(
     let _ = consumer.resume(&resumable);
 }
 
-/// 只返回移除 User 原因后没有任何框架暂停原因的分区。
+/// 业务作用：只返回移除 User 原因后没有任何框架暂停原因的分区。
 ///
 /// # 参数
 ///
@@ -1948,7 +1954,7 @@ fn resumable_user_targets(
         .collect()
 }
 
-/// 把会话内 epoch 换算成跨会话单调的对外 epoch。
+/// 业务作用：把会话内 epoch 换算成跨会话单调的对外 epoch。
 ///
 /// 内部 epoch 只用于同一底层会话内的 fencing，随 consumer 重建从 0 起；
 /// 对外快照必须单调，否则调用方无法区分"同一 assignment"与"重建后的新 generation"。
@@ -1970,7 +1976,7 @@ fn external_epoch(base: &std::sync::atomic::AtomicU64, session_epoch: u64) -> u6
 /// group 仪表重采样间隔；下限由用户 MetricsSink 的实现成本决定，不按 poll 频率打。
 const GAUGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// 发布一次真实 assign 后的健康与 ready 快照。
+/// 业务作用：发布一次真实 assign 后的健康与 ready 快照。
 ///
 /// # 参数
 ///
@@ -2003,7 +2009,7 @@ fn publish_assignment_health(
     publish_health_gauges(runtime, group, health);
 }
 
-/// 从 health 快照采样一次并发布 group 级仪表。
+/// 业务作用：从 health 快照采样一次并发布 group 级仪表。
 ///
 /// **所有** ready 租约与暂停行的观测都必须走这里，原因是各写各的必然漂移：
 /// 此前 4 个改 ready 租约的点只有 2 个碰 gauge（`Revoked` 分支清了租约却不发 0，
@@ -2055,7 +2061,7 @@ fn publish_health_gauges(
     );
 }
 
-/// 撤销旧底层会话发布的 ready 快照。
+/// 业务作用：撤销旧底层会话发布的 ready 快照。
 ///
 /// - `health`: 跨会话共享的 group 健康状态。
 fn invalidate_ready_snapshot(
@@ -2074,7 +2080,7 @@ fn invalidate_ready_snapshot(
     publish_health_gauges(runtime, group, health);
 }
 
-/// 把跨 rebalance/会话保留的 User/Halt 事实重新下发到底层 consumer。
+/// 业务作用：把跨 rebalance/会话保留的 User/Halt 事实重新下发到底层 consumer。
 ///
 /// - `consumer`: 当前新建或刚完成 assignment 的 owner consumer。
 /// - `health`: 保存 operator 暂停事实的共享快照。
@@ -2102,7 +2108,7 @@ fn reapply_persistent_pauses(
     }
 }
 
-/// 应用 owner mailbox 中的一次实际 rebalance 结果。
+/// 业务作用：应用 owner mailbox 中的一次实际 rebalance 结果。
 ///
 /// # 参数
 ///
@@ -2358,7 +2364,7 @@ fn apply_rebalance(
     }
 }
 
-/// 判断控制命令是否会让当前本地 progress 失效。
+/// 业务作用：判断控制命令是否会让当前本地 progress 失效。
 ///
 /// # 参数
 ///
@@ -2378,7 +2384,7 @@ fn command_invalidates_progress(kind: &OwnerCommandKind) -> bool {
     )
 }
 
-/// 控制命令改变 position/assignment 前清理其覆盖范围内的退避状态。
+/// 业务作用：控制命令改变 position/assignment 前清理其覆盖范围内的退避状态。
 ///
 /// # 参数
 ///
@@ -2437,7 +2443,7 @@ fn cancel_retry_states(
     }
 }
 
-/// position/assignment 控制命令覆盖旧处理事实前取消对应 DLT worker 与 local pending。
+/// 业务作用：position/assignment 控制命令覆盖旧处理事实前取消对应 DLT worker 与 local pending。
 ///
 /// # 参数
 ///
@@ -2516,7 +2522,7 @@ fn cancel_dlt_states(
     }
 }
 
-/// 记录一次业务安全处理完成，但不声称 broker 已提交。
+/// 业务作用：记录一次业务安全处理完成，但不声称 broker 已提交。
 ///
 /// # 参数
 ///
@@ -2530,7 +2536,7 @@ fn note_success(health: &Arc<RwLock<GroupHealth>>) {
     snapshot.last_error = None;
 }
 
-/// 累计一次底层 consumer 会话创建；首次之后的尝试同时计入重建次数。
+/// 业务作用：累计一次底层 consumer 会话创建；首次之后的尝试同时计入重建次数。
 ///
 /// # 参数
 ///
@@ -2545,7 +2551,7 @@ fn note_owner_session_start(health: &Arc<RwLock<GroupHealth>>) {
     }
 }
 
-/// 累计一次真实 broker commit 结果，供长稳与吞吐门禁计算 commits/record。
+/// 业务作用：累计一次真实 broker commit 结果，供长稳与吞吐门禁计算 commits/record。
 ///
 /// # 参数
 ///
@@ -2563,7 +2569,7 @@ fn note_commit_result(health: &Arc<RwLock<GroupHealth>>, succeeded: bool) {
     }
 }
 
-/// 把 owner 当前安全前沿发布给 pre-rebalance callback。
+/// 业务作用：把 owner 当前安全前沿发布给 pre-rebalance callback。
 ///
 /// # 参数
 ///
@@ -2575,7 +2581,7 @@ fn publish_commit_snapshot(consumer: &ConsumerClient, progress: &GroupOffsetStat
     }
 }
 
-/// 记录维护性 poll 的会话级错误，并保留自动重建或显式恢复所需分类。
+/// 业务作用：记录维护性 poll 的会话级错误，并保留自动重建或显式恢复所需分类。
 ///
 /// # 参数
 ///
@@ -2598,7 +2604,7 @@ fn record_maintenance_poll_error(
     }
 }
 
-/// 同步提交当前全部安全前沿；失败期间停止业务派发并维护心跳。
+/// 业务作用：同步提交当前全部安全前沿；失败期间停止业务派发并维护心跳。
 ///
 /// # 参数
 ///
@@ -2653,7 +2659,7 @@ fn commit_until_resolved(
     stopping
 }
 
-/// [`commit_until_resolved`] 的实际循环体；维护性 poll 取出的记录记入 `discarded`。
+/// 业务作用：[`commit_until_resolved`] 的实际循环体；维护性 poll 取出的记录记入 `discarded`。
 #[allow(clippy::too_many_arguments)]
 fn commit_until_resolved_inner(
     consumer: &ConsumerClient,
@@ -2814,7 +2820,7 @@ fn commit_until_resolved_inner(
     }
 }
 
-/// 接纳单条 outcome；容量不足时先提交安全前沿，仍不足则进入可自动恢复的 group 门禁。
+/// 业务作用：接纳单条 outcome；容量不足时先提交安全前沿，仍不足则进入可自动恢复的 group 门禁。
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: 记录分区。
@@ -2883,7 +2889,7 @@ fn observe_one_with_recovery(
     }
 }
 
-/// 原子接纳同分区 run，并复用单条路径的 commit-first 容量恢复语义。
+/// 业务作用：原子接纳同分区 run，并复用单条路径的 commit-first 容量恢复语义。
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `tp`: run 所属分区。
@@ -2951,7 +2957,7 @@ fn observe_run_with_recovery(
     }
 }
 
-/// 处理批级回退失败：仍被本 owner 持有的分区位置已不可信，必须显式 Halt。
+/// 业务作用：处理批级回退失败：仍被本 owner 持有的分区位置已不可信，必须显式 Halt。
 ///
 /// 这是把「回退没生效」从**静默丢失**变成**可见停摆**的通用防线：
 /// 回退表里既有已 revoke（失败无害）也有仍持有的分区，后者一旦回退失败，
@@ -3004,7 +3010,7 @@ fn halt_failed_rewinds(
     }
 }
 
-/// 判断 progress 反压门禁是否仍然竖着。
+/// 业务作用：判断 progress 反压门禁是否仍然竖着。
 ///
 /// 判据是 health 里的 `ProgressBackpressure` 暂停行——它与底层 pause 一一对应，
 /// 且不会被 `note_success`/`update_state` 这类状态写入覆盖。
@@ -3019,7 +3025,7 @@ fn progress_gate_engaged(health: &Arc<RwLock<GroupHealth>>) -> bool {
         .any(|(_, reason)| *reason == PauseReason::ProgressBackpressure)
 }
 
-/// 暂停当前 assignment 并进入容量门禁，等待 commit/DLT 收尾释放 permit。
+/// 业务作用：暂停当前 assignment 并进入容量门禁，等待 commit/DLT 收尾释放 permit。
 ///
 /// - `consumer`: owner consumer。
 /// - `health`: group 健康快照。
@@ -3041,7 +3047,7 @@ fn enter_progress_backpressure(
     );
 }
 
-/// 将单条框架动作接入连续水位、重试、DLT 与健康状态机。
+/// 业务作用：将单条框架动作接入连续水位、重试、DLT 与健康状态机。
 ///
 /// # 参数
 ///
@@ -3216,7 +3222,7 @@ fn apply_retry_action<S: DeadLetterSource + ?Sized>(
     schedule_retry_flow(context, tp, offset)
 }
 
-/// 应用确定坏消息的直接 DLT 动作，不消耗 handler 尝试次数。
+/// 业务作用：应用确定坏消息的直接 DLT 动作，不消耗 handler 尝试次数。
 ///
 /// # 参数
 ///
@@ -3306,7 +3312,7 @@ fn apply_direct_dlt_action<S: DeadLetterSource + ?Sized>(
     }
 }
 
-/// 在显式 availability-first 模式下记录安全跳过并提交该边界。
+/// 业务作用：在显式 availability-first 模式下记录安全跳过并提交该边界。
 ///
 /// # 参数
 ///
@@ -3342,7 +3348,7 @@ fn apply_availability_skip(context: &mut ActionContext<'_>, tp: &Tp, offset: i64
     }
 }
 
-/// 原子记录一个成功 handler run 的安全前缀。
+/// 业务作用：原子记录一个成功 handler run 的安全前缀。
 ///
 /// # 参数
 ///
@@ -3673,7 +3679,7 @@ fn apply_retry_run(
     schedule_retry_flow(context, &tp, first_offset)
 }
 
-/// 把单条消息构造成 DLT job 并接入非阻塞准入/worker 流程。
+/// 业务作用：把单条消息构造成 DLT job 并接入非阻塞准入/worker 流程。
 ///
 /// # 参数
 ///
@@ -3705,7 +3711,7 @@ fn schedule_single_dlt<S: DeadLetterSource + ?Sized>(
     )
 }
 
-/// 把一个 typed 连续失败 run 构造成单个 DLT job 并非阻塞调度。
+/// 业务作用：把一个 typed 连续失败 run 构造成单个 DLT job 并非阻塞调度。
 ///
 /// # 参数
 ///
@@ -3747,7 +3753,7 @@ fn schedule_dlt_run(
     )
 }
 
-/// 对已构造 job 执行无等待全局准入；容量不足时只留下一个 owner-local pending。
+/// 业务作用：对已构造 job 执行无等待全局准入；容量不足时只留下一个 owner-local pending。
 ///
 /// # 参数
 ///
@@ -3823,7 +3829,7 @@ fn schedule_dlt_job(
     Ok(())
 }
 
-/// 启动一个已经取得全局 permit 的 DLT worker，并登记分区取消身份。
+/// 业务作用：启动一个已经取得全局 permit 的 DLT worker，并登记分区取消身份。
 ///
 /// # 参数
 ///
@@ -3903,7 +3909,7 @@ fn spawn_dlt_worker(
     );
 }
 
-/// 发布全运行时 DLT 有界队列的瞬时占用。
+/// 业务作用：发布全运行时 DLT 有界队列的瞬时占用。
 fn emit_dlt_queue_usage(runtime: &KafkaProxyInner, dispatcher: &DltDispatcher) {
     let (jobs, bytes) = dispatcher.queue_usage();
     runtime.gauge(
@@ -3918,7 +3924,7 @@ fn emit_dlt_queue_usage(runtime: &KafkaProxyInner, dispatcher: &DltDispatcher) {
     );
 }
 
-/// 在异步 worker 内执行 DLT delivery；durability-first 模式使用同一信封无限外层重试。
+/// 业务作用：在异步 worker 内执行 DLT delivery；durability-first 模式使用同一信封无限外层重试。
 ///
 /// # 参数
 ///
@@ -3965,7 +3971,7 @@ async fn deliver_dlt_envelope(
     }
 }
 
-/// 优先收割异步 DLT completion，并在 delivery 成功后生成终态 outcome 与同步提交。
+/// 业务作用：优先收割异步 DLT completion，并在 delivery 成功后生成终态 outcome 与同步提交。
 ///
 /// # 参数
 ///
@@ -4125,7 +4131,7 @@ fn drain_dlt_completions(
     false
 }
 
-/// 推进 owner 唯一的 DLT local pending 准入；未取得 permit 时只做一次短维护 poll。
+/// 业务作用：推进 owner 唯一的 DLT local pending 准入；未取得 permit 时只做一次短维护 poll。
 ///
 /// # 参数
 ///
@@ -4202,7 +4208,7 @@ fn service_dlt_admission(context: &mut ActionContext<'_>) -> MaintenanceFlow {
     }
 }
 
-/// 清理 group 级 DLT 准入门禁，同时恢复维护性 poll 取出的记录位置。
+/// 业务作用：清理 group 级 DLT 准入门禁，同时恢复维护性 poll 取出的记录位置。
 ///
 /// # 参数
 ///
@@ -4218,7 +4224,7 @@ fn finish_dlt_admission_gate(context: &mut ActionContext<'_>, discarded: &BTreeM
     let _ = context.consumer.resume(&resumable);
 }
 
-/// availability-first 地把整个失败 run 标为安全跳过并提交末尾边界。
+/// 业务作用：availability-first 地把整个失败 run 标为安全跳过并提交末尾边界。
 ///
 /// # 参数
 ///
@@ -4267,7 +4273,7 @@ fn apply_availability_skip_run(
     }
 }
 
-/// 为目标分区添加一个不重复的框架暂停原因。
+/// 业务作用：为目标分区添加一个不重复的框架暂停原因。
 ///
 /// # 参数
 ///
@@ -4289,7 +4295,7 @@ fn add_pause_reason(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], reason: P
     }
 }
 
-/// 移除 CommitBlocked 原因并恢复没有其他暂停原因的分区。
+/// 业务作用：移除 CommitBlocked 原因并恢复没有其他暂停原因的分区。
 ///
 /// # 参数
 ///
@@ -4313,7 +4319,7 @@ fn clear_commit_blocked(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHeal
     let _ = consumer.resume(&resumable);
 }
 
-/// 对一条拥有型 typed 消息完成 event 路由、codec 校验、上下文构造与逐条解码。
+/// 业务作用：对一条拥有型 typed 消息完成 event 路由、codec 校验、上下文构造与逐条解码。
 ///
 /// # 参数
 ///
@@ -4494,7 +4500,7 @@ fn prepare_typed_message(
     }
 }
 
-/// 从透传上下文提取低基数 trace id；缺失或非字符串时返回空串。
+/// 业务作用：从透传上下文提取低基数 trace id；缺失或非字符串时返回空串。
 fn consume_trace_id(ctx: &ConsumeCtx) -> &str {
     ctx.passthrough
         .get("traceId")
@@ -4540,7 +4546,7 @@ fn annotate_delivery_attempt(
     }
 }
 
-/// 驱动一次类型擦除 single/batch handler future，并应用统一超时边界。
+/// 业务作用：驱动一次类型擦除 single/batch handler future，并应用统一超时边界。
 ///
 /// # 参数
 ///
@@ -4853,7 +4859,7 @@ fn process_logical_typed_batch(
     false
 }
 
-/// 把当前逻辑批尚未派发的全部分区记录并入 DLT group 级门禁回退表。
+/// 业务作用：把当前逻辑批尚未派发的全部分区记录并入 DLT group 级门禁回退表。
 ///
 /// - `admission`: 当前唯一 local pending DLT；存在时持有门禁回退表。
 /// - `prepared`: 当前分区尚未派发的记录。
@@ -4875,7 +4881,7 @@ fn record_unprocessed_for_dlt_gate(
     }
 }
 
-/// 汇总逻辑批中尚未派发的每分区最小 offset。
+/// 业务作用：汇总逻辑批中尚未派发的每分区最小 offset。
 ///
 /// - `prepared`: 当前分区剩余记录。
 /// - `partitions`: 尚未轮转到的分区记录。
@@ -4900,7 +4906,7 @@ fn unprocessed_offsets(
     offsets
 }
 
-/// 路由并处理单条借用消息。
+/// 业务作用：路由并处理单条借用消息。
 ///
 /// # 参数
 ///
@@ -4982,7 +4988,7 @@ fn process_message(
     }
 }
 
-/// 在 owner callback 栈内执行同步少拷贝 route。
+/// 业务作用：在 owner callback 栈内执行同步少拷贝 route。
 ///
 /// # 参数
 ///
@@ -5080,7 +5086,7 @@ fn process_passthrough(
     }
 }
 
-/// 把 passthrough 成功返回值与 route 确认模式合并成唯一 owner 动作。
+/// 业务作用：把 passthrough 成功返回值与 route 确认模式合并成唯一 owner 动作。
 ///
 /// # 参数
 ///
@@ -5114,7 +5120,7 @@ fn finish_passthrough_success(
     }
 }
 
-/// 校验拥有型 typed 消息的 codec headers 与 route 声明一致。
+/// 业务作用：校验拥有型 typed 消息的 codec headers 与 route 声明一致。
 ///
 /// # 参数
 ///
@@ -5155,7 +5161,7 @@ fn validate_owned_codec(codec: PayloadCodec, headers: &KafkaHeaders) -> Result<(
     }
 }
 
-/// 按配置把确定无效记录映射为 DLT/重试或 Halt。
+/// 业务作用：按配置把确定无效记录映射为 DLT/重试或 Halt。
 ///
 /// # 参数
 ///
@@ -5172,7 +5178,7 @@ fn invalid_or_dlt(runtime: &Arc<KafkaProxyInner>, reason: String) -> ProcessActi
     }
 }
 
-/// 解码失败的处置：先过**本分区**连续失败熔断，再落到 `invalid_record_policy`。
+/// 业务作用：解码失败的处置：先过**本分区**连续失败熔断，再落到 `invalid_record_policy`。
 ///
 /// 单条畸形 payload 走 DeadLetter 是对的；但"解码器整体坏了"在这条路径上长得一模一样，
 /// 而后者会让整个 topic 满速排进 DLT、offset 一路前进、group 仍报 Running。
@@ -5208,7 +5214,7 @@ fn decode_failure_action(
     invalid_or_dlt(runtime, reason)
 }
 
-/// 记录本分区一次解码失败并返回累计的连续失败次数。
+/// 业务作用：记录本分区一次解码失败并返回累计的连续失败次数。
 ///
 /// 纯函数（不触碰 runtime），集中维护"分区之间互不影响"这条关键隔离语义。
 ///
@@ -5220,7 +5226,7 @@ fn record_decode_failure(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) -> u64 {
     *entry
 }
 
-/// 记录本分区一次解码成功，清零该分区的连续失败计数。
+/// 业务作用：记录本分区一次解码成功，清零该分区的连续失败计数。
 ///
 /// 工作正常的分区解码成功后立即从表中移除，因此该表只保留"正在连续失败"的分区，
 /// 规模受当前 assignment 约束（远小于分区总数）。
@@ -5231,7 +5237,7 @@ fn note_decode_success(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) {
     streaks.remove(tp);
 }
 
-/// 构造不依赖消息所有权的无效路由动作。
+/// 业务作用：构造不依赖消息所有权的无效路由动作。
 ///
 /// # 参数
 ///
@@ -5250,7 +5256,7 @@ fn invalid_action(
     }
 }
 
-/// 从原始消息构造保留来源身份的单条死信记录。
+/// 业务作用：从原始消息构造保留来源身份的单条死信记录。
 ///
 /// # 参数
 ///
@@ -5314,7 +5320,7 @@ fn source_delivery_attempts<S: DeadLetterSource + ?Sized>(source: &S) -> u32 {
     source.delivery_attempts().max(1)
 }
 
-/// 用显式数值计算 DLT 指数退避，使边界计算不依赖运行时状态。
+/// 业务作用：用显式数值计算 DLT 指数退避，使边界计算不依赖运行时状态。
 ///
 /// # 参数
 ///
@@ -5337,7 +5343,7 @@ fn dlt_retry_delay_values(base: u64, max: u64, attempt: u32, seed: i64) -> Durat
     )
 }
 
-/// 安排失败分区的非阻塞退避，并把错误映射成 owner 控制流。
+/// 业务作用：安排失败分区的非阻塞退避，并把错误映射成 owner 控制流。
 ///
 /// # 参数
 ///
@@ -5367,7 +5373,7 @@ fn schedule_retry_flow(context: &mut ActionContext<'_>, tp: &Tp, offset: i64) ->
     }
 }
 
-/// 暂停单个失败分区、回到失败 offset，并登记单调时钟恢复时刻。
+/// 业务作用：暂停单个失败分区、回到失败 offset，并登记单调时钟恢复时刻。
 ///
 /// # 参数
 ///
@@ -5406,7 +5412,7 @@ fn schedule_partition_retry(
     Ok(())
 }
 
-/// 恢复所有退避到期分区；每个分区恢复前再次 seek，消除底层预取位置漂移。
+/// 业务作用：恢复所有退避到期分区；每个分区恢复前再次 seek，消除底层预取位置漂移。
 ///
 /// # 参数
 ///
@@ -5458,7 +5464,7 @@ fn activate_due_retries(
     }
 }
 
-/// 移除一组目标上的指定框架暂停原因，并返回已经没有任何暂停原因的分区。
+/// 业务作用：移除一组目标上的指定框架暂停原因，并返回已经没有任何暂停原因的分区。
 ///
 /// # 参数
 ///
@@ -5483,7 +5489,7 @@ fn clear_pause_reason(
         .collect()
 }
 
-/// 暂停单个分区并写入 Halt 原因。
+/// 业务作用：暂停单个分区并写入 Halt 原因。
 ///
 /// # 参数
 ///
@@ -5516,7 +5522,7 @@ fn halt_partition(
         .push((tp.clone(), PauseReason::Halt(reason)));
 }
 
-/// 增加或移除一组分区的 User 暂停原因。
+/// 业务作用：增加或移除一组分区的 User 暂停原因。
 ///
 /// # 参数
 ///
@@ -5538,7 +5544,7 @@ fn set_user_paused(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], paused: bo
     }
 }
 
-/// 读取指定名字的最后一个底层 header。
+/// 业务作用：读取指定名字的最后一个底层 header。
 ///
 /// # 参数
 ///
@@ -5555,7 +5561,7 @@ fn last_header<'a>(
         .map(|header| header.value)
 }
 
-/// 复制底层 headers 为公共有序拥有型集合。
+/// 业务作用：复制底层 headers 为公共有序拥有型集合。
 ///
 /// # 参数
 ///

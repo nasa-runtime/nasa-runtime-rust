@@ -67,7 +67,7 @@ pub struct KafkaConfig {
     pub properties: BTreeMap<String, String>,
 }
 
-/// 为反序列化缺省项提供稳定客户端名。
+/// 业务作用：为反序列化缺省项提供稳定客户端名。
 fn default_client_name() -> String {
     "default".to_string()
 }
@@ -121,7 +121,7 @@ pub struct ProducerConfig {
 }
 
 impl Default for ProducerConfig {
-    /// 返回兼容基线且受框架上限约束的 default lane 配置。
+    /// 业务作用：返回兼容基线且受框架上限约束的 default lane 配置。
     fn default() -> Self {
         Self {
             acks: "1".into(),
@@ -213,7 +213,7 @@ pub struct ConsumerConfig {
 }
 
 impl Default for ConsumerConfig {
-    /// 返回兼容基线的 group 会话、拉取与 assignment 上限配置。
+    /// 业务作用：返回兼容基线的 group 会话、拉取与 assignment 上限配置。
     fn default() -> Self {
         Self {
             session_timeout_ms: 30_000,
@@ -245,7 +245,7 @@ pub struct AdminConfig {
 struct MaskedProperties<'a>(&'a BTreeMap<String, String>);
 
 impl fmt::Debug for MaskedProperties<'_> {
-    /// 只输出属性键和固定掩码。
+    /// 业务作用：只输出属性键和固定掩码。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = formatter.debug_map();
         for key in self.0.keys() {
@@ -256,7 +256,7 @@ impl fmt::Debug for MaskedProperties<'_> {
 }
 
 impl fmt::Debug for KafkaConfig {
-    /// 输出可排障的顶层配置，同时让每层原生透传值都经过打码。
+    /// 业务作用：输出可排障的顶层配置，同时让每层原生透传值都经过打码。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("KafkaConfig")
@@ -275,7 +275,7 @@ impl fmt::Debug for KafkaConfig {
 }
 
 impl fmt::Debug for ProducerConfig {
-    /// 输出 producer 强类型参数并遮蔽透传值。
+    /// 业务作用：输出 producer 强类型参数并遮蔽透传值。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProducerConfig")
@@ -318,7 +318,7 @@ impl fmt::Debug for ProducerConfig {
 }
 
 impl fmt::Debug for ProducerLaneOverride {
-    /// 输出 lane 覆盖参数并遮蔽透传值。
+    /// 业务作用：输出 lane 覆盖参数并遮蔽透传值。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProducerLaneOverride")
@@ -358,7 +358,7 @@ impl fmt::Debug for ProducerLaneOverride {
 }
 
 impl fmt::Debug for ConsumerConfig {
-    /// 输出 consumer 强类型参数并遮蔽透传值。
+    /// 业务作用：输出 consumer 强类型参数并遮蔽透传值。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ConsumerConfig")
@@ -376,7 +376,7 @@ impl fmt::Debug for ConsumerConfig {
 }
 
 impl fmt::Debug for AdminConfig {
-    /// 输出 admin 超时参数并遮蔽透传值。
+    /// 业务作用：输出 admin 超时参数并遮蔽透传值。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AdminConfig")
@@ -493,7 +493,7 @@ pub struct BehaviorConfig {
 }
 
 impl Default for BehaviorConfig {
-    /// 返回批量、提交、重试、DLT 与关闭行为的安全基线。
+    /// 业务作用：返回批量、提交、重试、DLT 与关闭行为的安全基线。
     fn default() -> Self {
         Self {
             max_batch_records: 500,
@@ -558,12 +558,12 @@ pub struct SecurityConfig {
 }
 
 impl fmt::Debug for SecurityConfig {
-    /// 输出可排障但不包含凭据值的配置快照。
+    /// 业务作用：输出可排障但不包含凭据值的配置快照。
     ///
     /// - `f`: 调用方提供的格式化缓冲区。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 打码原则:存在性可见(便于排障"配没配"),值不可见(凭据不进任何日志/panic 消息)。
-        /// 把可选凭据压缩为“存在/不存在”的安全文本。
+        /// 业务作用：把可选凭据压缩为“存在/不存在”的安全文本。
         ///
         /// - `v`: 配置中的可选凭据，只读取存在性。
         fn mask(v: &Option<String>) -> &'static str {
@@ -604,7 +604,7 @@ const FORBIDDEN_PRODUCER_RAW_KEYS: [&[&str]; 4] = [
 ];
 
 impl KafkaConfig {
-    /// 启动期全量校验:任何一条不满足立即返回 [`NafkaError::Config`],绝不带病启动。
+    /// 业务作用：启动期全量校验:任何一条不满足立即返回 [`NafkaError::Config`],绝不带病启动。
     ///
     /// 校验清单与协议合同一一对应;与运行环境相关的少数项(幂等参数与底层库约束的
     /// 交叉校验)在构建 producer 时补齐；缺席只会放宽本应拒绝的配置，不产生隐式副作用。
@@ -994,14 +994,14 @@ impl KafkaConfig {
     }
 }
 
-/// 构造配置错误的简写;集中一处保证报错前缀风格一致。
+/// 业务作用：构造配置错误的简写;集中一处保证报错前缀风格一致。
 ///
 /// - `msg`: 已脱敏且能定位字段的配置错误说明。
 fn cfg_err(msg: &str) -> NafkaError {
     NafkaError::Config(msg.to_string())
 }
 
-/// Kafka 原生配置使用有符号 32 位毫秒值；同一批参数也会进入内部 `Instant` deadline。
+/// 业务作用：Kafka 原生配置使用有符号 32 位毫秒值；同一批参数也会进入内部 `Instant` deadline。
 /// 在统一配置边界拒绝更大值，避免底层隐式拒绝或 Rust 运行时加法溢出。
 fn validate_millis_upper_bound(field: &str, millis: u64) -> Result<()> {
     if millis > i32::MAX as u64 {
@@ -1012,7 +1012,7 @@ fn validate_millis_upper_bound(field: &str, millis: u64) -> Result<()> {
     Ok(())
 }
 
-/// 校验名字类字段的字符集:仅 ASCII 字母/数字/./_/-,且非空(client_name、lane 名共用规则)。
+/// 业务作用：校验名字类字段的字符集:仅 ASCII 字母/数字/./_/-,且非空(client_name、lane 名共用规则)。
 ///
 /// # 参数
 /// - `field`: 字段名,用于报错定位。
@@ -1035,7 +1035,7 @@ fn validate_name_charset(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// 拒绝透传 map 中的框架不变量键:出现即报错,而非静默剔除——
+/// 业务作用：拒绝透传 map 中的框架不变量键:出现即报错,而非静默剔除——
 /// 静默剔除会让运维以为覆盖生效,埋下"以为开了自动提交"的认知事故。
 ///
 /// # 参数
@@ -1048,7 +1048,7 @@ fn forbid_reserved_raw(props: &BTreeMap<String, String>, where_: &str) -> Result
     forbid_keys(props, where_, &FORBIDDEN_RAW_KEYS)
 }
 
-/// 校验 producer 侧透传 map：在通用保留键之外，再拦下会推翻 producer 不变量的键与别名。
+/// 业务作用：校验 producer 侧透传 map：在通用保留键之外，再拦下会推翻 producer 不变量的键与别名。
 ///
 /// # 参数
 ///
@@ -1063,7 +1063,7 @@ fn forbid_reserved_producer_raw(props: &BTreeMap<String, String>, where_: &str) 
     forbid_keys(props, where_, &FORBIDDEN_PRODUCER_RAW_KEYS)
 }
 
-/// 按"canonical 名 + 全部别名"逐组校验透传表。
+/// 业务作用：按"canonical 名 + 全部别名"逐组校验透传表。
 ///
 /// # 参数
 ///

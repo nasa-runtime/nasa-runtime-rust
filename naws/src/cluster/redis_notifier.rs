@@ -40,7 +40,7 @@ pub struct RedisNotifierConfig {
 }
 
 impl Default for RedisNotifierConfig {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             uri: "redis://127.0.0.1:6379".into(),
@@ -75,7 +75,7 @@ pub struct RedisNotifier {
 }
 
 impl RedisNotifier {
-    /// 构造 Redis Stream 集群通知器并校验运行参数。
+    /// 业务作用：构造 Redis Stream 集群通知器并校验运行参数。
     ///
     /// # 参数
     /// - `config`: Redis Stream transport 配置,包含连接 URI、stream key、XREAD/XADD 限制和裁剪策略。
@@ -105,18 +105,18 @@ impl RedisNotifier {
         }))
     }
 
-    /// 累计发布丢弃数(入队前:队列满 / 已关闭),供 health/metrics 上报。
+    /// 业务作用：累计发布丢弃数(入队前:队列满 / 已关闭),供 health/metrics 上报。
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// 累计 XADD 实际写失败丢弃数(入队后写 Redis 失败),供 health/metrics 上报。
+    /// 业务作用：累计 XADD 实际写失败丢弃数(入队后写 Redis 失败),供 health/metrics 上报。
     pub fn xadd_failed(&self) -> u64 {
         self.xadd_failed.load(Ordering::Relaxed)
     }
 }
 
-/// 构造集群通知配置错误；用于在缺失参数时提前失败。
+/// 业务作用：构造集群通知配置错误；用于在缺失参数时提前失败。
 ///
 /// # 参数
 /// - `msg`: 业务消息体或事件载荷。
@@ -128,7 +128,7 @@ fn cfg_err(msg: &str) -> redis::RedisError {
     ))
 }
 
-/// reader 起始游标:解析一次为**具体 stream id**(流末尾的 id),之后只读更新的消息。
+/// 业务作用：reader 起始游标:解析一次为**具体 stream id**(流末尾的 id),之后只读更新的消息。
 /// 不每轮用 `$`——`$` 在两次 XREAD 间会重新以"当时最新"为起点,留漏消息窗口。
 /// 流为空(查询成功但无记录)→ "0-0"(从头;此时无历史,等价于只读新)。
 /// **查询出错**(认证/ACL/超时/断连)→ 返回 Err,由调用方重连重试,**绝不**退化成 0-0
@@ -149,7 +149,7 @@ async fn resolve_start_id(
 }
 
 impl Notifier for RedisNotifier {
-    /// 启动 start 流程；用于初始化后台任务或运行时。
+    /// 业务作用：启动 start 流程；用于初始化后台任务或运行时。
     ///
     /// # 参数
     /// - `on_message`: Redis notifier 收到跨节点消息时调用的回调。
@@ -324,7 +324,7 @@ impl Notifier for RedisNotifier {
         })
     }
 
-    /// 发布集群通知消息；用于把本节点事件广播到其他节点。
+    /// 业务作用：发布集群通知消息；用于把本节点事件广播到其他节点。
     ///
     /// # 参数
     /// - `payload`: 已编码完成的集群通知消息字节。
@@ -349,14 +349,14 @@ impl Notifier for RedisNotifier {
         }
     }
 
-    /// 关闭集群通知任务；用于停止订阅和后台资源。
+    /// 业务作用：关闭集群通知任务；用于停止订阅和后台资源。
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.cancel.cancel(); // 立即打断 reader 的 XREAD BLOCK / sleep / connect
         *self.pub_tx.lock().unwrap() = None; // drop 发送端 → publisher recv 返回 None 退出
     }
 
-    /// 返回任务跟踪器；用于服务关闭时等待后台任务退出。
+    /// 业务作用：返回任务跟踪器；用于服务关闭时等待后台任务退出。
     fn task_tracker(&self) -> Option<&TaskTracker> {
         Some(&self.tasks)
     }

@@ -50,7 +50,7 @@ pub enum CompatibilityProfile {
 }
 
 impl CompatibilityProfile {
-    /// **持久化标识名**(protocol marker / naming_config canonical 用),与 Rust 枚举名解耦。
+    /// 业务作用：**持久化标识名**(protocol marker / naming_config canonical 用),与 Rust 枚举名解耦。
     /// `LegacyV1` 的 wire 名固定为历史值 **`"LegacyV1"`**:marker 是落盘的持久 wire,改 Rust 枚举名
     /// (去品牌化)**不能**改已写入的 marker 标识,否则既有 namespace 升级后 profile 名不符会
     /// fail-closed 拒启动。marker 比对/生成一律用本方法而非 `format!("{self:?}")`。(RustV2 wire 名不变。)
@@ -91,7 +91,7 @@ pub struct RedisConfig {
     pub partition: PartitionCfg,
 }
 
-/// 去掉 redis 连接串里的 userinfo(`scheme://[user][:password]@` → `scheme://***@`),用于脱敏日志。
+/// 业务作用：去掉 redis 连接串里的 userinfo(`scheme://[user][:password]@` → `scheme://***@`),用于脱敏日志。
 /// 无 userinfo(如 `redis://host:port`)则原样返回。
 pub(crate) fn redact_url(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
@@ -105,7 +105,7 @@ pub(crate) fn redact_url(url: &str) -> String {
 }
 
 impl std::fmt::Debug for RedisConfig {
-    /// 输出 Redis 配置的调试视图;url 会移除 userinfo,避免日志泄露凭据。
+    /// 业务作用：输出 Redis 配置的调试视图;url 会移除 userinfo,避免日志泄露凭据。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -124,7 +124,7 @@ impl std::fmt::Debug for RedisConfig {
 }
 
 impl RedisConfig {
-    /// 代码内构造(替代配置文件;profile 仍强制显式)。
+    /// 业务作用：代码内构造(替代配置文件;profile 仍强制显式)。
     ///
     /// # 参数
     /// - `url`: Redis 连接串。
@@ -147,7 +147,7 @@ impl RedisConfig {
         }
     }
 
-    /// 返回可安全写入日志与错误的定位信息:`scheme://host:port[/db]`,移除 userinfo(用户名/密码)与
+    /// 业务作用：返回可安全写入日志与错误的定位信息:`scheme://host:port[/db]`,移除 userinfo(用户名/密码)与
     /// query/fragment(可能含 TLS 私钥路径等)。
     ///
     /// 供启动连接诊断复用:错误摘要凭它定位是哪个 host/port/db 失败,而不泄漏连接串凭据。无法解析(无
@@ -179,7 +179,7 @@ impl RedisConfig {
         format!("{scheme}://{host_and_path}")
     }
 
-    /// 启动期校验(connect 内调用)。
+    /// 业务作用：启动期校验(connect 内调用)。
     ///
     pub fn validate(&self) -> crate::error::Result<()> {
         let semaphore_max = tokio::sync::Semaphore::MAX_PERMITS;
@@ -558,7 +558,7 @@ pub struct CommandCfg {
 }
 
 impl Default for CommandCfg {
-    /// 构造命令层默认配置。
+    /// 业务作用：构造命令层默认配置。
     ///
     /// 默认不限制单命令业务超时,但给连接级响应超时 30s 兜底,避免 Redis 可达但不响应时 future 永久挂起。
     fn default() -> Self {
@@ -585,7 +585,7 @@ pub struct PipelineCfg {
     pub dedicated_conn: bool,
 }
 impl Default for PipelineCfg {
-    /// 构造 pipeline 默认配置。
+    /// 业务作用：构造 pipeline 默认配置。
     ///
     /// 默认 1000 条或 4MiB 触发自动滚动 flush,并启用独立 pipeline 连接 lane,避免大批量响应阻塞普通命令。
     fn default() -> Self {
@@ -607,7 +607,7 @@ pub struct LockCfg {
     pub lease_ms: u64,
 }
 impl Default for LockCfg {
-    /// 构造分布式锁默认配置。
+    /// 业务作用：构造分布式锁默认配置。
     ///
     /// 默认前缀兼容原实现,lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
     fn default() -> Self {
@@ -640,7 +640,7 @@ pub struct StreamCfg {
     pub inflight_max: usize,
 }
 impl Default for StreamCfg {
-    /// 构造 stream 消费默认配置。
+    /// 业务作用：构造 stream 消费默认配置。
     ///
     /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行,并设置全局在飞批次预算。
     fn default() -> Self {
@@ -707,7 +707,7 @@ pub struct PartitionCfg {
     pub groups: std::collections::HashMap<String, PartitionGroupCfg>,
 }
 impl Default for PartitionCfg {
-    /// 构造 partition 模式默认配置。
+    /// 业务作用：构造 partition 模式默认配置。
     ///
     /// 默认关闭 partition,但保留原实现的默认组名、64 分区、10s 再平衡和 Park 毒消息策略。
     fn default() -> Self {
@@ -718,8 +718,8 @@ impl Default for PartitionCfg {
             rebalance_ms: 10_000,
             min_idle_ms: 30_000,
             holds_check_interval_ms: 5_000,
-            // Must outlive the default 30s per-bucket handler timeout; otherwise every default
-            // shutdown with an in-flight slow handler degenerates into a hard interruption.
+            // 停机预算必须长于默认的单桶处理超时，否则默认配置下每个仍在处理慢任务的实例都会被
+            // 强制中断，无法兑现先排空再退出的生命周期语义。
             drain_timeout_ms: 35_000,
             max_redeliver: 5,
             handler_timeout_ms: 30_000,
@@ -765,7 +765,7 @@ pub struct PartitionGroupCfg {
 }
 
 impl PartitionGroupCfg {
-    /// resolve 本组的 `PartitionCfg`(per-group 覆盖 → 父级;`count` 由调用方传 resolved 值)。
+    /// 业务作用：resolve 本组的 `PartitionCfg`(per-group 覆盖 → 父级;`count` 由调用方传 resolved 值)。
     /// 用于 `GroupRuntime`:`cfg.groups` 清空(per-group 无嵌套组),`enabled/default_group` 沿父级(runtime 不读)。
     pub(crate) fn resolved_partition(&self, parent: &PartitionCfg, count: u32) -> PartitionCfg {
         PartitionCfg {
@@ -785,7 +785,7 @@ impl PartitionGroupCfg {
         }
     }
 
-    /// resolve 本组的 `StreamCfg`(per-group 覆盖 → 全局 stream)。
+    /// 业务作用：resolve 本组的 `StreamCfg`(per-group 覆盖 → 全局 stream)。
     pub(crate) fn resolved_stream(&self, global: &StreamCfg) -> StreamCfg {
         StreamCfg {
             poll_timeout_ms: self.poll_timeout_ms.unwrap_or(global.poll_timeout_ms),

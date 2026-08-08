@@ -15,7 +15,7 @@ pub struct MappingHandle {
 }
 
 impl MappingHandle {
-    /// 建立共享 MappingRuntime 的只读能力句柄。
+    /// 业务作用：建立共享 MappingRuntime 的只读能力句柄。
     pub(crate) fn new(
         runtime: Arc<naweb::MappingRuntime>,
         application_state: Arc<StateCell>,
@@ -26,12 +26,12 @@ impl MappingHandle {
         }
     }
 
-    /// 返回不含路由、Token、密钥和后端地址的运行时健康摘要。
+    /// 业务作用：返回不含路由、Token、密钥和后端地址的运行时健康摘要。
     pub fn health(&self) -> naweb::MappingRuntimeHealth {
         self.runtime.health()
     }
 
-    /// 返回与 Application 统一状态机一致的只读生命周期状态。
+    /// 业务作用：返回与 Application 统一状态机一致的只读生命周期状态。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         self.application_state.load().into()
     }

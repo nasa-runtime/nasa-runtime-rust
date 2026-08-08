@@ -35,7 +35,7 @@ pub(crate) enum Classified {
     },
 }
 
-/// 解析并归类一个字符串 URL。
+/// 业务作用：解析并归类一个字符串 URL。
 ///
 /// 只做语法归类:`http(s)` 一律返回 `Classified::Http`;是否命中服务名索引并走内部 LB,
 /// 由 `client.resolve_plan` 按 `heuristic_http` 与 `ServiceNameIndex` 决定(本函数不查索引)。
@@ -83,7 +83,7 @@ pub(crate) fn classify(raw: &str) -> Result<Classified> {
     }
 }
 
-/// 从已解析 URL 取 `/path?query`(无 query 则仅 `/path`;空 path 归一为 `/`)。fragment 不带进 HTTP 请求。
+/// 业务作用：从已解析 URL 取 `/path?query`(无 query 则仅 `/path`;空 path 归一为 `/`)。fragment 不带进 HTTP 请求。
 ///
 /// # 参数
 /// - `u`: 需要分类的请求 URL。
@@ -96,7 +96,7 @@ fn path_and_query(u: &Url) -> String {
     }
 }
 
-/// 校验注册中心服务名:非空、不含 `/ ? #` 或空白。返回 `Err(reason)`。
+/// 业务作用：校验注册中心服务名:非空、不含 `/ ? #` 或空白。返回 `Err(reason)`。
 pub(crate) fn validate_service(service: &str) -> std::result::Result<(), String> {
     if service.is_empty() {
         return Err("service 不能为空".to_string());
@@ -110,7 +110,7 @@ pub(crate) fn validate_service(service: &str) -> std::result::Result<(), String>
     Ok(())
 }
 
-/// 校验 `service_request` 的逻辑 path:必须以 `/` 开头,且不是完整 URL。返回 `Err(reason)`。
+/// 业务作用：校验 `service_request` 的逻辑 path:必须以 `/` 开头,且不是完整 URL。返回 `Err(reason)`。
 pub(crate) fn validate_logical_path(path: &str) -> std::result::Result<(), String> {
     if !path.starts_with('/') {
         return Err(format!("path 必须以 `/` 开头,当前 {path:?}"));

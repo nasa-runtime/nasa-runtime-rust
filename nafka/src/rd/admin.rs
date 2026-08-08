@@ -42,7 +42,7 @@ pub(crate) struct AdminHandle {
 }
 
 impl AdminHandle {
-    /// 构造管理客户端。
+    /// 业务作用：构造管理客户端。
     ///
     /// # 参数
     ///
@@ -74,7 +74,7 @@ impl AdminHandle {
         }))
     }
 
-    /// 查询全部可见 topic 及其分区。
+    /// 业务作用：查询全部可见 topic 及其分区。
     ///
     /// # 错误
     ///
@@ -109,7 +109,7 @@ impl AdminHandle {
         .map_err(join_error)?
     }
 
-    /// 查询单个 topic 的分区、副本和可选配置。
+    /// 业务作用：查询单个 topic 的分区、副本和可选配置。
     ///
     /// # 参数
     ///
@@ -203,7 +203,7 @@ impl AdminHandle {
         })
     }
 
-    /// 创建一个 topic。
+    /// 业务作用：创建一个 topic。
     ///
     /// # 参数
     ///
@@ -216,7 +216,7 @@ impl AdminHandle {
         self.create_topic_inner(spec, false).await
     }
 
-    /// 幂等创建一个 topic，已存在视为成功。
+    /// 业务作用：幂等创建一个 topic，已存在视为成功。
     ///
     /// # 参数
     ///
@@ -229,7 +229,7 @@ impl AdminHandle {
         self.create_topic_inner(spec, true).await
     }
 
-    /// 执行 topic 创建并按调用语义处理已存在错误。
+    /// 业务作用：执行 topic 创建并按调用语义处理已存在错误。
     ///
     /// # 参数
     ///
@@ -276,7 +276,7 @@ impl AdminHandle {
         Ok(())
     }
 
-    /// 向 broker 提交 topic 创建请求，并按调用语义决定是否容忍“已存在”。
+    /// 业务作用：向 broker 提交 topic 创建请求，并按调用语义决定是否容忍“已存在”。
     async fn create_topic_inner(&self, spec: &TopicSpec, allow_existing: bool) -> Result<()> {
         let mut topic = NewTopic::new(
             &spec.name,
@@ -299,7 +299,7 @@ impl AdminHandle {
         check_topic_result(results, allow_existing)
     }
 
-    /// 删除一个 topic。
+    /// 业务作用：删除一个 topic。
     ///
     /// # 参数
     ///
@@ -322,7 +322,7 @@ impl AdminHandle {
         check_topic_result(results, false)
     }
 
-    /// 把 topic 总分区数增加到指定值。
+    /// 业务作用：把 topic 总分区数增加到指定值。
     ///
     /// # 参数
     ///
@@ -347,7 +347,7 @@ impl AdminHandle {
         check_topic_result(results, false)
     }
 
-    /// 查询一组分区的低、高水位。
+    /// 业务作用：查询一组分区的低、高水位。
     ///
     /// # 参数
     ///
@@ -374,7 +374,7 @@ impl AdminHandle {
         .map_err(join_error)?
     }
 
-    /// 使用不订阅 topic 的短命 consumer 查询 group committed offsets。
+    /// 业务作用：使用不订阅 topic 的短命 consumer 查询 group committed offsets。
     ///
     /// # 参数
     ///
@@ -443,7 +443,7 @@ impl AdminHandle {
     }
 }
 
-/// 判断 offset 查询中的 coordinator 发现错误是否适合在同一 admin deadline 内重试。
+/// 业务作用：判断 offset 查询中的 coordinator 发现错误是否适合在同一 admin deadline 内重试。
 ///
 /// 短命 `BaseConsumer` 首次查询一个从未提交过的 group 时，broker 可能刚完成
 /// FindCoordinator / offset metadata 初始化，Kafka 4.1 单机上实测会返回
@@ -470,7 +470,7 @@ fn is_coordinator_lookup_transient(error: &KafkaError) -> bool {
     )
 }
 
-/// 检查单 topic 管理操作的逐项结果。
+/// 业务作用：检查单 topic 管理操作的逐项结果。
 ///
 /// # 参数
 ///
@@ -493,7 +493,7 @@ fn check_topic_result(
     }
 }
 
-/// 把底层错误收敛为公共 broker 错误。
+/// 业务作用：把底层错误收敛为公共 broker 错误。
 ///
 /// # 参数
 ///
@@ -502,7 +502,7 @@ fn broker_error(error: impl std::fmt::Display) -> NafkaError {
     NafkaError::Broker(error.to_string())
 }
 
-/// 把阻塞任务 join 失败收敛为公共 broker 错误。
+/// 业务作用：把阻塞任务 join 失败收敛为公共 broker 错误。
 ///
 /// # 参数
 ///

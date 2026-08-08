@@ -44,7 +44,7 @@ pub struct ApiProblem {
 }
 
 impl ApiProblem {
-    /// 用类型、标题、状态与错误码创建一个最小 problem(无 detail/instance/violations)。
+    /// 业务作用：用类型、标题、状态与错误码创建一个最小 problem(无 detail/instance/violations)。
     pub fn new(
         type_uri: &'static str,
         title: &'static str,
@@ -62,25 +62,25 @@ impl ApiProblem {
         }
     }
 
-    /// 设置面向客户端的 `detail`(构造方保证不含秘密)。
+    /// 业务作用：设置面向客户端的 `detail`(构造方保证不含秘密)。
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// 设置 `instance`(通常是 request id)。
+    /// 业务作用：设置 `instance`(通常是 request id)。
     pub fn with_instance(mut self, instance: impl Into<String>) -> Self {
         self.instance = Some(instance.into());
         self
     }
 
-    /// 追加字段级校验违规。
+    /// 业务作用：追加字段级校验违规。
     pub fn with_violations(mut self, violations: Vec<FieldViolation>) -> Self {
         self.violations = violations;
         self
     }
 
-    /// 渲染为 RFC 9457 JSON 对象(`status` 为数字;空的 detail/instance/violations 省略)。
+    /// 业务作用：渲染为 RFC 9457 JSON 对象(`status` 为数字;空的 detail/instance/violations 省略)。
     pub fn to_problem_json(&self) -> Value {
         let mut object = Map::new();
         object.insert("type".to_owned(), Value::from(self.type_uri));
@@ -104,7 +104,7 @@ impl ApiProblem {
 }
 
 impl IntoResponse for ApiProblem {
-    /// 以 `application/problem+json` 与对应状态码序列化响应。
+    /// 业务作用：以 `application/problem+json` 与对应状态码序列化响应。
     fn into_response(self) -> Response {
         let body = self.to_problem_json().to_string();
         (

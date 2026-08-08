@@ -53,7 +53,7 @@ pub struct HandlerWrapper {
     pub call_inner: TokenStream,
 }
 
-/// 构造 [`HandlerWrapper`];签名不适合内层包装时返回 `None`,由调用方退回旧展开形态。
+/// 业务作用：构造 [`HandlerWrapper`];签名不适合内层包装时返回 `None`,由调用方退回旧展开形态。
 ///
 /// 返回 `None` 的情形:带 `self` 接收者、带泛型或 where 子句、可变参数、参数上有属性
 /// (这些形态无法把参数列表机械拆成"外层透传 + 内层原模式")。
@@ -100,7 +100,7 @@ pub fn wrap_handler(
     })
 }
 
-/// 兼容性包装：查询调用方是否依赖指定运行时包。
+/// 业务作用：兼容性包装：查询调用方是否依赖指定运行时包。
 ///
 /// # 参数
 /// - `package`: Cargo 包名，例如 `hystrix`、`cacheable`、`natx` 或 `naweb`。
@@ -108,7 +108,7 @@ fn crate_name_compat(package: &str) -> Option<proc_macro_crate::FoundCrate> {
     proc_macro_crate::crate_name(package).ok()
 }
 
-/// 解析某个宏的**运行时根路径**(旧直接依赖优先,门面回退;见文件头)。
+/// 业务作用：解析某个宏的**运行时根路径**(旧直接依赖优先,门面回退;见文件头)。
 ///
 /// - `module`:门面下的模块名(`hystrix`/`cache`/`tx`/`scheduling`);
 /// - `legacy`:直接依赖的包名(`hystrix`/`cacheable`/`natx`/`nasched`);
@@ -129,13 +129,13 @@ pub fn runtime_root(module: &str, legacy: &str) -> Result<TokenStream, String> {
         // 非 lib target 是【独立编译单元】,它们的 `crate` 是自己 → 必须用外部路径
         // `::<lib>`(Cargo 已自动把本 package 的 lib 以 lib 名提供给这些 target)。否则 `crate::__private`
         // 找不到时用 `CARGO_CRATE_NAME` 区分，并且只在它确定不等于 lib 名时才改走外部路径；
-        // 缺失或相等都保持原 `crate`——即只修正已坏的非 lib 场景,绝不动 lib 主路径(零回归)。
+        // 缺失或相等都保持原 `crate`，只修正已坏的非 lib 场景并保持 lib 主路径语义。
         Some(FoundCrate::Itself) => {
             let lib = legacy.replace('-', "_");
             // `crate` 只在编译 **lib 目标**(含库目标内部校验场景)时正确:CARGO_CRATE_NAME==lib 且【非 bin】。
             // 非 lib target 是独立编译单元(其 `crate` 指自己),含「bin 名 == lib 名」的边界
             // ——此时 CARGO_CRATE_NAME==lib 但 CARGO_BIN_NAME 置位→ 仍须走外部路径 `::<lib>`。
-            // 只在【确定不是 lib 目标】时改路径;env 缺失时保守回退 `crate`,对 lib 主路径零回归。
+            // 只在【确定不是 lib 目标】时改路径；env 缺失时保守回退 `crate`，保持 lib 主路径语义。
             let compiling = std::env::var("CARGO_CRATE_NAME").unwrap_or_default();
             let is_bin = std::env::var_os("CARGO_BIN_NAME").is_some();
             let not_lib = is_bin || (!compiling.is_empty() && compiling != lib);
@@ -180,7 +180,7 @@ pub enum WebRoot {
     DirectMacro,
 }
 
-/// 解析 Web mapping 宏的运行时根：仅直接依赖 naweb-macro → 直接 naweb → nasa::web。
+/// 业务作用：解析 Web mapping 宏的运行时根：仅直接依赖 naweb-macro → 直接 naweb → nasa::web。
 pub fn web_root() -> WebRoot {
     use proc_macro_crate::{crate_name, FoundCrate};
     // ① 调用方仅直接依赖 naweb-macro(宏经传递 re-export 到达时不会命中)。

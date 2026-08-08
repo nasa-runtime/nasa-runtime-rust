@@ -39,7 +39,7 @@ pub const HEADER_DLT_ORIGIN_GROUP: &str = "X-Nasa-Dlt-Origin-Group";
 /// [`HEADER_PAYLOAD_CODEC`] 的唯一合法值。
 pub const PAYLOAD_CODEC_PROTOCOL_BYTES: &str = "protocol-bytes";
 
-/// 判断 header 名是否为框架保留:业务发布接口写保留 header 直接报错,不静默覆盖。
+/// 业务作用：判断 header 名是否为框架保留:业务发布接口写保留 header 直接报错,不静默覆盖。
 ///
 /// # 参数
 /// - `name`: 待检查的 header 名,大小写敏感(保留 header 一律精确大小写)。
@@ -161,7 +161,7 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
 
 // ==================== Mode 名映射(跨语言) ====================
 
-/// 把 ProtocolBytes Mode 映射为跨语言 wire 名(上游对标实现的枚举名)。
+/// 业务作用：把 ProtocolBytes Mode 映射为跨语言 wire 名(上游对标实现的枚举名)。
 ///
 /// 为什么单列函数:mode 名进 [`HEADER_PAYLOAD_MODE`],两端必须逐字节一致;
 /// 集中一处 + golden 向量锁死,避免散落的字符串常量各写各的。
@@ -177,7 +177,7 @@ pub fn mode_wire_name(mode: naws_proto::Mode) -> &'static str {
     }
 }
 
-/// 从 wire 名解析 Mode;大小写不敏感(参照实现消费端即忽略大小写比较)。
+/// 业务作用：从 wire 名解析 Mode;大小写不敏感(参照实现消费端即忽略大小写比较)。
 ///
 /// # 参数
 /// - `name`: header 携带的 mode 名。
@@ -217,7 +217,7 @@ pub trait EncodePayload: Sync + 'static {
     /// 本类型的编码方式;producer 据此决定是否打 codec/mode header。
     const CODEC: PayloadCodec;
 
-    /// 把业务对象编码为 Kafka value 字节。
+    /// 业务作用：把业务对象编码为 Kafka value 字节。
     ///
     /// # 错误
     /// 编码失败返回 [`NafkaError::Codec`];发布路径把它归为确定失败(可安全重试构造)。
@@ -229,7 +229,7 @@ pub trait DecodePayload: Sized + Send + 'static {
     /// 本类型声明的编码方式;消费端用它对 codec/mode header 做一致性校验。
     const CODEC: PayloadCodec;
 
-    /// 从 Kafka value 字节还原业务对象。
+    /// 业务作用：从 Kafka value 字节还原业务对象。
     ///
     /// # 参数
     /// - `bytes`: 消息 value 原始字节(非空;tombstone 在路由前处理,不会进到这里)。
@@ -245,7 +245,7 @@ pub trait DecodePayload: Sized + Send + 'static {
 impl<T: Serialize + Sync + 'static> EncodePayload for T {
     const CODEC: PayloadCodec = PayloadCodec::Json;
 
-    /// 将 serde 业务值编码为 UTF-8 JSON 字节。
+    /// 业务作用：将 serde 业务值编码为 UTF-8 JSON 字节。
     ///
     /// # 错误
     /// JSON 序列化失败时返回 codec 错误。
@@ -257,7 +257,7 @@ impl<T: Serialize + Sync + 'static> EncodePayload for T {
 impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
     const CODEC: PayloadCodec = PayloadCodec::Json;
 
-    /// 从 UTF-8 JSON 字节恢复业务值。
+    /// 业务作用：从 UTF-8 JSON 字节恢复业务值。
     ///
     /// - `bytes`: Kafka value 原始字节。
     ///
@@ -299,7 +299,7 @@ pub trait ProtoMode {
 pub struct Proto<T>(pub T);
 
 impl<T> Proto<T> {
-    /// 取出内部业务值,零成本。
+    /// 业务作用：取出内部业务值,零成本。
     pub fn into_inner(self) -> T {
         self.0
     }
@@ -308,7 +308,7 @@ impl<T> Proto<T> {
 impl<T> std::ops::Deref for Proto<T> {
     type Target = T;
 
-    /// 借用透明包装中的业务值。
+    /// 业务作用：借用透明包装中的业务值。
     fn deref(&self) -> &T {
         &self.0
     }
@@ -320,7 +320,7 @@ where
 {
     const CODEC: PayloadCodec = PayloadCodec::Proto(T::MODE);
 
-    /// 按类型声明的固定 Mode 编码业务值。
+    /// 业务作用：按类型声明的固定 Mode 编码业务值。
     ///
     /// # 错误
     /// 线协议编码失败时返回 codec 错误。
@@ -337,7 +337,7 @@ where
 {
     const CODEC: PayloadCodec = PayloadCodec::Proto(T::MODE);
 
-    /// 按类型声明的固定 Mode 解码业务值。
+    /// 业务作用：按类型声明的固定 Mode 解码业务值。
     ///
     /// - `bytes`: Kafka value 原始字节。
     ///

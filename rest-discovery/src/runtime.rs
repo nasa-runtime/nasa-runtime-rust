@@ -16,7 +16,7 @@ pub struct RemoteRuntime {
 }
 
 impl RemoteRuntime {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(
         rest: Arc<RestDiscoveryClient>,
         discovery: Option<Arc<dyn DiscoveryClient>>,
@@ -27,14 +27,14 @@ impl RemoteRuntime {
         }
     }
 
-    /// 取共享的 HTTP LB client。
+    /// 业务作用：取共享的 HTTP LB client。
     pub fn rest(&self) -> Arc<RestDiscoveryClient> {
         self.rest.clone()
     }
 }
 
 impl std::fmt::Debug for RemoteRuntime {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -46,7 +46,7 @@ impl std::fmt::Debug for RemoteRuntime {
 }
 
 impl Drop for RemoteRuntime {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         // 停掉所有后台 watch pump(reset/热重启不泄漏任务)。
         self.rest.shutdown_background();

@@ -28,7 +28,7 @@ pub struct Authenticator {
 }
 
 impl Authenticator {
-    /// 用 JWKS 注册表与校验策略构造。
+    /// 业务作用：用 JWKS 注册表与校验策略构造。
     pub fn new(jwks: Arc<JwksRegistry>, policy: TokenPolicy) -> Self {
         Self { jwks, policy }
     }
@@ -37,7 +37,7 @@ impl Authenticator {
 /// 业务注入 Web 装配用的认证器句柄。
 pub type SharedAuthenticator = Arc<Authenticator>;
 
-/// 从 `Authorization` 头取 Bearer token。没有 header 返回 `Ok(None)`；header 已出现但重复、
+/// 业务作用：从 `Authorization` 头取 Bearer token。没有 header 返回 `Ok(None)`；header 已出现但重复、
 /// 非 UTF-8、scheme 错或 token 为空都返回 `Err`，不能降级成匿名请求。
 fn bearer_token(request: &Request) -> Result<Option<&str>, ()> {
     let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
@@ -62,7 +62,7 @@ fn bearer_token(request: &Request) -> Result<Option<&str>, ()> {
     }
 }
 
-/// 从**已经验证**的 claims 构造 Principal，保留授权 scope 与幂等命名空间所需身份。
+/// 业务作用：从**已经验证**的 claims 构造 Principal，保留授权 scope 与幂等命名空间所需身份。
 fn principal_from_claims(claims: &nauth_oauth::AccessTokenClaims) -> Principal {
     let mut principal = match claims.scope.as_deref() {
         Some(scope) => Principal::with_scopes(scope.split_whitespace()),
@@ -74,7 +74,7 @@ fn principal_from_claims(claims: &nauth_oauth::AccessTokenClaims) -> Principal {
     principal
 }
 
-/// 构造统一 401 Problem Details，并附加 RFC 6750 Bearer challenge。
+/// 业务作用：构造统一 401 Problem Details，并附加 RFC 6750 Bearer challenge。
 fn invalid_token_response() -> Response {
     let mut response = ApiProblem::new(
         "about:blank",
@@ -93,7 +93,7 @@ fn invalid_token_response() -> Response {
     response
 }
 
-/// authentication 中间件。见模块文档。
+/// 业务作用：authentication 中间件。见模块文档。
 pub async fn authenticate(
     State(authenticator): State<SharedAuthenticator>,
     mut request: Request,

@@ -37,7 +37,7 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// 创建 endpoint builder。
+    /// 业务作用：创建 endpoint builder。
     ///
     /// # 参数
     /// - `path`: 连接入口路径,用于鉴权后绑定会话和分发入站事件。
@@ -50,12 +50,12 @@ impl Endpoint {
         }
     }
 
-    /// 返回端点路径；用于按连接入口查找事件处理器。
+    /// 业务作用：返回端点路径；用于按连接入口查找事件处理器。
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// 查找端点事件处理器；用于把入站事件分派到业务回调。
+    /// 业务作用：查找端点事件处理器；用于把入站事件分派到业务回调。
     ///
     /// # 参数
     /// - `name`: 业务事件名。
@@ -63,12 +63,12 @@ impl Endpoint {
         self.events.get(name)
     }
 
-    /// 返回连接建立回调；用于新会话创建后执行业务初始化。
+    /// 业务作用：返回连接建立回调；用于新会话创建后执行业务初始化。
     pub fn on_connect(&self) -> Option<&LifecycleHandler> {
         self.on_connect.as_ref()
     }
 
-    /// 返回连接断开回调；用于会话释放时执行业务清理。
+    /// 业务作用：返回连接断开回调；用于会话释放时执行业务清理。
     pub fn on_disconnect(&self) -> Option<&LifecycleHandler> {
         self.on_disconnect.as_ref()
     }
@@ -83,7 +83,7 @@ pub struct EndpointBuilder {
 }
 
 impl EndpointBuilder {
-    /// 返回连接建立回调；用于新会话创建后执行业务初始化。
+    /// 业务作用：返回连接建立回调；用于新会话创建后执行业务初始化。
     ///
     /// # 参数
     /// - `f`: 会话建立后执行的业务回调,入参是新建的会话句柄。
@@ -95,7 +95,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 返回连接断开回调；用于会话释放时执行业务清理。
+    /// 业务作用：返回连接断开回调；用于会话释放时执行业务清理。
     ///
     /// # 参数
     /// - `f`: 会话断开后执行的业务回调,入参是断开的会话句柄。
@@ -107,7 +107,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 同步事件(对齐 原实现 sync=true)。事件名重复 / 空 → panic(配置期编程错误,快速失败)。
+    /// 业务作用：同步事件(对齐 原实现 sync=true)。事件名重复 / 空 → panic(配置期编程错误,快速失败)。
     ///
     /// # 参数
     /// - `event`: endpoint 内注册的业务事件名,用于匹配入站 `Message.events`。
@@ -120,7 +120,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 异步事件(对齐 原实现 sync=false)。`f` 返回一个 future。事件名重复 / 空 → panic。
+    /// 业务作用：异步事件(对齐 原实现 sync=false)。`f` 返回一个 future。事件名重复 / 空 → panic。
     ///
     ///
     /// # 参数
@@ -137,7 +137,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 插入事件 handler:空名或重名 → panic(不静默覆盖)。
+    /// 业务作用：插入事件 handler:空名或重名 → panic(不静默覆盖)。
     ///
     /// # 参数
     /// - `event`: endpoint 内唯一的业务事件名。
@@ -156,7 +156,7 @@ impl EndpointBuilder {
         self.events.insert(event, handler);
     }
 
-    /// 完成 builder 装配并返回可运行对象。
+    /// 业务作用：完成 builder 装配并返回可运行对象。
     pub fn build(self) -> Endpoint {
         Endpoint {
             path: self.path,
@@ -173,7 +173,7 @@ impl EndpointBuilder {
 /// 杜绝"已注册 endpoint 的成功控制帧必超限 → 永远连不上且只见静默断开"的半可用配置。
 pub const MAX_ENDPOINT_LEN: usize = 256;
 
-/// endpoint path 不变量由 `register` 与 `replace` **共用**，任何写入口都不得绕过：
+/// 业务作用：endpoint path 不变量由 `register` 与 `replace` **共用**，任何写入口都不得绕过：
 /// 非空且不超过 `MAX_ENDPOINT_LEN`（path 即 socket.io namespace，
 /// 过长会让 CONNECT ok 超 max_frame)。
 ///
@@ -219,24 +219,24 @@ pub struct EndpointRegistry {
 }
 
 impl EndpointRegistry {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub fn new() -> Arc<EndpointRegistry> {
         Arc::new(EndpointRegistry::default())
     }
 
-    /// 生成端点注册版本号；用于通知监听方配置已变化。
+    /// 业务作用：生成端点注册版本号；用于通知监听方配置已变化。
     fn next_gen(&self) -> u64 {
         self.gen_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
     }
 
-    /// 框架内部:注入变更回调(Server 装配,关闭旧代际会话)。
+    /// 业务作用：框架内部:注入变更回调(Server 装配,关闭旧代际会话)。
     pub(crate) fn set_mutation_hook(&self, hook: EndpointMutationHook) {
         *self.mutation_hook.lock().unwrap() = Some(hook);
     }
 
-    /// 发布端点变更事件；用于唤醒等待路由表更新的任务。
+    /// 业务作用：发布端点变更事件；用于唤醒等待路由表更新的任务。
     ///
     /// # 参数
     /// - `path`: 发生注册、替换或注销的 endpoint path。
@@ -247,7 +247,7 @@ impl EndpointRegistry {
         }
     }
 
-    /// 注册;path 空或已存在则返回 Err(不静默覆盖)。用 DashMap entry **原子**判重+插入,
+    /// 业务作用：注册;path 空或已存在则返回 Err(不静默覆盖)。用 DashMap entry **原子**判重+插入,
     /// 避免 contains_key→insert 的竞态。分配**全新 generation**
     /// (unregister 后重 register 不复用旧代际)。
     ///
@@ -269,7 +269,7 @@ impl EndpointRegistry {
         }
     }
 
-    /// 显式热替换。**与 `register` 同一套 path 校验**;校验失败返回 `Err`
+    /// 业务作用：显式热替换。**与 `register` 同一套 path 校验**;校验失败返回 `Err`
     /// 且**不动**旧 endpoint。成功后分配新 generation 并触发 mutation hook
     /// ——Server 装配的 hook 会向该 path 的**旧代际**会话发 CLOSE 并注销。
     ///
@@ -292,7 +292,7 @@ impl EndpointRegistry {
         Ok(old)
     }
 
-    /// 注销。成功后触发 mutation hook——Server 装配的 hook 会主动关闭该 path 的**所有**
+    /// 业务作用：注销。成功后触发 mutation hook——Server 装配的 hook 会主动关闭该 path 的**所有**
     /// 会话(不再是"只挡新连接"的假下线)。
     ///
     /// # 参数
@@ -305,7 +305,7 @@ impl EndpointRegistry {
         old
     }
 
-    /// 读取已注册 endpoint。
+    /// 业务作用：读取已注册 endpoint。
     ///
     /// # 参数
     /// - `path`: 要查询的 endpoint 路径。
@@ -313,19 +313,19 @@ impl EndpointRegistry {
         self.endpoints.get(path).map(|r| r.endpoint.clone())
     }
 
-    /// 当前槽位快照 (generation, endpoint):鉴权时绑定到 Session 用。
+    /// 业务作用：当前槽位快照 (generation, endpoint):鉴权时绑定到 Session 用。
     pub(crate) fn slot(&self, path: &str) -> Option<(u64, Arc<Endpoint>)> {
         self.endpoints
             .get(path)
             .map(|r| (r.generation, r.endpoint.clone()))
     }
 
-    /// 当前代际(注册后复核 / EVENT 分派兜底用);未注册返回 None。
+    /// 业务作用：当前代际(注册后复核 / EVENT 分派兜底用);未注册返回 None。
     pub(crate) fn current_generation(&self, path: &str) -> Option<u64> {
         self.endpoints.get(path).map(|r| r.generation)
     }
 
-    /// 判断路径是否已注册；用于启动或热更新时避免重复端点。
+    /// 业务作用：判断路径是否已注册；用于启动或热更新时避免重复端点。
     ///
     /// # 参数
     /// - `path`: 要检查的 endpoint 路径。

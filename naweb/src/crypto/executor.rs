@@ -24,7 +24,7 @@ pub struct CryptoCpuConfig {
 }
 
 impl Default for CryptoCpuConfig {
-    /// 建立适合普通服务进程的保守默认配置。
+    /// 业务作用：建立适合普通服务进程的保守默认配置。
     ///
     /// # 返回
     ///
@@ -48,7 +48,7 @@ pub struct CryptoCpuExecutor {
 }
 
 impl std::fmt::Debug for CryptoCpuExecutor {
-    /// 输出容量和剩余 permit，不输出任务输入或结果。
+    /// 业务作用：输出容量和剩余 permit，不输出任务输入或结果。
     ///
     /// # 参数
     ///
@@ -68,7 +68,7 @@ impl std::fmt::Debug for CryptoCpuExecutor {
 }
 
 impl CryptoCpuExecutor {
-    /// 建立有界阻塞执行器。
+    /// 业务作用：建立有界阻塞执行器。
     ///
     /// # 参数
     ///
@@ -103,7 +103,7 @@ impl CryptoCpuExecutor {
         })
     }
 
-    /// 在有界 blocking 任务中执行一个拥有全部输入的同步闭包。
+    /// 业务作用：在有界 blocking 任务中执行一个拥有全部输入的同步闭包。
     ///
     /// # 类型参数
     ///

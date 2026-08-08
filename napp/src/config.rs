@@ -34,7 +34,7 @@ pub struct ConfigSource {
 }
 
 impl ConfigSource {
-    /// 创建一条 Nacos 配置文档来源。
+    /// 业务作用：创建一条 Nacos 配置文档来源。
     ///
     /// # 参数
     ///
@@ -58,7 +58,7 @@ pub struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    /// 创建一个拥有完整配置树和来源清单的快照。
+    /// 业务作用：创建一个拥有完整配置树和来源清单的快照。
     ///
     /// # 参数
     ///
@@ -73,7 +73,7 @@ impl ConfigSnapshot {
         }
     }
 
-    /// 返回快照版本。
+    /// 业务作用：返回快照版本。
     ///
     /// # 参数
     ///
@@ -82,7 +82,7 @@ impl ConfigSnapshot {
         self.version
     }
 
-    /// 返回完整只读配置树。
+    /// 业务作用：返回完整只读配置树。
     ///
     /// # 参数
     ///
@@ -91,7 +91,7 @@ impl ConfigSnapshot {
         &self.value
     }
 
-    /// 返回形成本版本的来源摘要。
+    /// 业务作用：返回形成本版本的来源摘要。
     ///
     /// # 参数
     ///
@@ -100,7 +100,7 @@ impl ConfigSnapshot {
         &self.reloaded_sources
     }
 
-    /// 从整个快照反序列化拥有所有字段的目标类型。
+    /// 业务作用：从整个快照反序列化拥有所有字段的目标类型。
     ///
     /// # 参数
     ///
@@ -116,7 +116,7 @@ impl ConfigSnapshot {
         })
     }
 
-    /// 读取配置路径，并在同一个不可变快照上完成反序列化。
+    /// 业务作用：读取配置路径，并在同一个不可变快照上完成反序列化。
     ///
     /// # 参数
     ///
@@ -190,7 +190,7 @@ pub struct ReloadStatus {
 }
 
 impl ReloadStatus {
-    /// 构造“运行态已跟上该版本”的状态。
+    /// 业务作用：构造“运行态已跟上该版本”的状态。
     ///
     /// # 参数
     ///
@@ -202,7 +202,7 @@ impl ReloadStatus {
         }
     }
 
-    /// 构造“配置已变但只能重启生效”的状态。
+    /// 业务作用：构造“配置已变但只能重启生效”的状态。
     ///
     /// # 参数
     ///
@@ -217,7 +217,7 @@ impl ReloadStatus {
         }
     }
 
-    /// 构造“本次 apply 失败、运行态保留 last-known-good”的状态。
+    /// 业务作用：构造“本次 apply 失败、运行态保留 last-known-good”的状态。
     ///
     /// # 参数
     ///
@@ -251,7 +251,7 @@ pub struct ConfigView {
 }
 
 impl ConfigView {
-    /// 创建不含 secret 的配置视图(空 secret 快照)。
+    /// 业务作用：创建不含 secret 的配置视图(空 secret 快照)。
     ///
     /// # 参数
     ///
@@ -270,7 +270,7 @@ impl ConfigView {
         }
     }
 
-    /// 创建携带同 generation secret 快照的配置视图(secret 已在脱敏前解析)。
+    /// 业务作用：创建携带同 generation secret 快照的配置视图(secret 已在脱敏前解析)。
     ///
     /// # 参数
     ///
@@ -292,7 +292,7 @@ impl ConfigView {
         }
     }
 
-    /// 返回与本代 config 同 generation 的 secret 快照。
+    /// 业务作用：返回与本代 config 同 generation 的 secret 快照。
     ///
     /// # 参数
     ///
@@ -301,13 +301,13 @@ impl ConfigView {
         &self.secrets
     }
 
-    /// 返回原始候选树的私有 fingerprint,供 reload 无变化判断。
+    /// 业务作用：返回原始候选树的私有 fingerprint,供 reload 无变化判断。
     #[cfg(feature = "nacos-config")]
     pub(crate) fn candidate_fingerprint(&self) -> [u8; 32] {
         self.candidate_fingerprint
     }
 
-    /// 返回当前期望快照。
+    /// 业务作用：返回当前期望快照。
     ///
     /// # 参数
     ///
@@ -316,7 +316,7 @@ impl ConfigView {
         &self.snapshot
     }
 
-    /// 返回所有配置应用目标的同版本状态。
+    /// 业务作用：返回所有配置应用目标的同版本状态。
     ///
     /// # 参数
     ///
@@ -335,7 +335,7 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// 使用版本 1 视图初始化配置存储和 watch 通道。
+    /// 业务作用：使用版本 1 视图初始化配置存储和 watch 通道。
     ///
     /// # 参数
     ///
@@ -349,7 +349,7 @@ impl ConfigStore {
         }
     }
 
-    /// 原子加载当前完整视图。
+    /// 业务作用：原子加载当前完整视图。
     ///
     /// # 参数
     ///
@@ -358,7 +358,7 @@ impl ConfigStore {
         self.current.load_full()
     }
 
-    /// 创建一个从当前视图开始的配置更新订阅。
+    /// 业务作用：创建一个从当前视图开始的配置更新订阅。
     ///
     /// # 参数
     ///
@@ -371,7 +371,7 @@ impl ConfigStore {
         self.updates.subscribe()
     }
 
-    /// 先原子替换读取视图，再通知 watch 订阅者。
+    /// 业务作用：先原子替换读取视图，再通知 watch 订阅者。
     ///
     /// # 参数
     ///
@@ -387,7 +387,7 @@ impl ConfigStore {
     }
 }
 
-/// 从**原始**候选树解析 secret、脱敏,构造携带同 generation secret 快照的 [`ConfigView`]。
+/// 业务作用：从**原始**候选树解析 secret、脱敏,构造携带同 generation secret 快照的 [`ConfigView`]。
 ///
 /// secret resolver 在脱敏前工作:返回视图的 `snapshot().value()` 里 fragment 已替换为 `<redacted>`,
 /// 真实 material 只进 `secrets()`;候选 fingerprint 记入视图供 reload 无变化判断。

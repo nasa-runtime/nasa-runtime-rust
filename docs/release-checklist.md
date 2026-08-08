@@ -8,17 +8,11 @@
 - [ ] 根 README 能索引全部组件，组件 README 均包含用途、接入、初始化、yml 和主要边界。
 - [ ] `SECURITY.md`、`CONTRIBUTING.md` 与当前实现一致。
 - [ ] 公开文档、rustdoc、源码注释和 manifest 注释只描述当前业务能力、配置、边界和失败后果。
-- [ ] 根级质量工程、fixture、故障注入工具、凭据和证书不进入产品归档。
+- [ ] 凭据、证书、临时脚本和内部路径不进入产品归档。
 - [ ] 文档与示例不包含真实密钥、私有地址、内部主机名或业务数据。
 
-## 代码质量
+## 归档与依赖
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps`
-- [ ] `cargo check -p nasa --features full --all-targets`
-- [ ] `cargo deny check`
 - [ ] 每个公开 crate 的离线归档构建成功，归档内容仅包含产品源码、公开文档和再分发所需文件。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。

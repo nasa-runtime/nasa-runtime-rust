@@ -26,7 +26,7 @@ pub struct KafkaHeadersRef<'a> {
 }
 
 impl<'a> KafkaHeadersRef<'a> {
-    /// 从调用方持有的有序 header slice 构造只读视图。
+    /// 业务作用：从调用方持有的有序 header slice 构造只读视图。
     ///
     /// 该方法用于协议适配器和自定义同步组合；构造不会复制 header 名和值。
     ///
@@ -37,7 +37,7 @@ impl<'a> KafkaHeadersRef<'a> {
         Self { inner }
     }
 
-    /// 从内部借用 header 描述符构造视图。
+    /// 业务作用：从内部借用 header 描述符构造视图。
     ///
     /// # 参数
     ///
@@ -47,12 +47,12 @@ impl<'a> KafkaHeadersRef<'a> {
         Self::from_slice(inner)
     }
 
-    /// 按 wire 顺序遍历全部 header。
+    /// 业务作用：按 wire 顺序遍历全部 header。
     pub fn iter(&self) -> impl Iterator<Item = KafkaHeaderRef<'a>> + '_ {
         self.inner.iter().copied()
     }
 
-    /// 返回指定名字最后一个 header。
+    /// 业务作用：返回指定名字最后一个 header。
     ///
     /// # 参数
     ///
@@ -65,7 +65,7 @@ impl<'a> KafkaHeadersRef<'a> {
             .copied()
     }
 
-    /// 按 wire 顺序遍历指定名字的全部 header。
+    /// 业务作用：按 wire 顺序遍历指定名字的全部 header。
     ///
     /// # 参数
     ///
@@ -77,12 +77,12 @@ impl<'a> KafkaHeadersRef<'a> {
             .copied()
     }
 
-    /// 返回 header 总条数，包含同名重复项。
+    /// 业务作用：返回 header 总条数，包含同名重复项。
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// 判断消息是否没有 header。
+    /// 业务作用：判断消息是否没有 header。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -121,7 +121,7 @@ pub struct BorrowedKafkaRecord<'a> {
 }
 
 impl<'a> BorrowedKafkaRecord<'a> {
-    /// 由 owner callback 构造借用消息。
+    /// 业务作用：由 owner callback 构造借用消息。
     ///
     /// # 参数
     ///
@@ -158,7 +158,7 @@ impl<'a> BorrowedKafkaRecord<'a> {
         }
     }
 
-    /// 在手动模式下同步记录本地确认。
+    /// 业务作用：在手动模式下同步记录本地确认。
     ///
     /// # 错误
     ///
@@ -288,7 +288,7 @@ pub struct PassthroughFailure {
 }
 
 impl PassthroughFailure {
-    /// 构造临时可重试失败。
+    /// 业务作用：构造临时可重试失败。
     ///
     /// # 参数
     ///
@@ -298,7 +298,7 @@ impl PassthroughFailure {
         Self::new(PassthroughFailureReason::Retryable(reason), detail)
     }
 
-    /// 构造确定无效记录失败。
+    /// 业务作用：构造确定无效记录失败。
     ///
     /// # 参数
     ///
@@ -308,7 +308,7 @@ impl PassthroughFailure {
         Self::new(PassthroughFailureReason::Invalid(reason), detail)
     }
 
-    /// 构造显式 DLT 失败。
+    /// 业务作用：构造显式 DLT 失败。
     ///
     /// # 参数
     ///
@@ -318,7 +318,7 @@ impl PassthroughFailure {
         Self::new(PassthroughFailureReason::ExplicitDeadLetter(reason), detail)
     }
 
-    /// 构造硬暂停失败。
+    /// 业务作用：构造硬暂停失败。
     ///
     /// # 参数
     ///
@@ -328,7 +328,7 @@ impl PassthroughFailure {
         Self::new(PassthroughFailureReason::Halt(reason), detail)
     }
 
-    /// 构造框架致命失败。
+    /// 业务作用：构造框架致命失败。
     ///
     /// # 参数
     ///
@@ -338,12 +338,12 @@ impl PassthroughFailure {
         Self::new(PassthroughFailureReason::Fatal(reason), detail)
     }
 
-    /// 返回强类型失败原因。
+    /// 业务作用：返回强类型失败原因。
     pub fn reason(&self) -> PassthroughFailureReason {
         self.reason
     }
 
-    /// 从强类型原因唯一推导框架动作。
+    /// 业务作用：从强类型原因唯一推导框架动作。
     pub fn action(&self) -> PassthroughFailureAction {
         match self.reason {
             PassthroughFailureReason::Retryable(_) => PassthroughFailureAction::Retry,
@@ -356,12 +356,12 @@ impl PassthroughFailure {
         }
     }
 
-    /// 返回清洗后的可选诊断文本。
+    /// 业务作用：返回清洗后的可选诊断文本。
     pub fn safe_detail(&self) -> Option<&str> {
         self.safe_detail.as_deref()
     }
 
-    /// 统一构造失败并清洗诊断文本。
+    /// 业务作用：统一构造失败并清洗诊断文本。
     ///
     /// # 参数
     ///
@@ -384,28 +384,28 @@ impl PassthroughFailure {
 
 /// 同步借用式消费者契约。
 pub trait PassthroughConsumer: Send + Sync + 'static {
-    /// 返回订阅 topic 列表；注册时读取一次并冻结。
+    /// 业务作用：返回订阅 topic 列表；注册时读取一次并冻结。
     fn topics(&self) -> Vec<String>;
 
-    /// 返回路由事件名；注册时读取一次并冻结。
+    /// 业务作用：返回路由事件名；注册时读取一次并冻结。
     fn event(&self) -> String;
 
-    /// 返回 group 解析规则。
+    /// 业务作用：返回 group 解析规则。
     fn group(&self) -> GroupSpec {
         GroupSpec::Default
     }
 
-    /// 返回稳定 handler id。
+    /// 业务作用：返回稳定 handler id。
     fn id(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
-    /// 返回 route 级确认模式。
+    /// 业务作用：返回 route 级确认模式。
     fn ack_mode(&self) -> AckMode {
         AckMode::Auto
     }
 
-    /// 在 owner callback 栈内同步处理借用消息。
+    /// 业务作用：在 owner callback 栈内同步处理借用消息。
     ///
     /// # 参数
     ///

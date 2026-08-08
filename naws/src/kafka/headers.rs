@@ -105,7 +105,7 @@ pub struct PassthroughConfig {
 }
 
 impl Default for PassthroughConfig {
-    /// 返回二进制少拷贝路径的安全默认值。
+    /// 业务作用：返回二进制少拷贝路径的安全默认值。
     fn default() -> Self {
         Self {
             max_route_headers: 256,
@@ -125,7 +125,7 @@ impl Default for PassthroughConfig {
 }
 
 impl PassthroughConfig {
-    /// 校验所有安全和容量不变量。
+    /// 业务作用：校验所有安全和容量不变量。
     ///
     /// # 错误
     ///
@@ -188,7 +188,7 @@ pub struct BorrowedWsRoute<'a> {
     pub message_mode: Mode,
 }
 
-/// 严格解析一条借用 header 视图。
+/// 业务作用：严格解析一条借用 header 视图。
 ///
 /// # 参数
 ///
@@ -313,7 +313,7 @@ pub fn parse_route<'a>(
     Ok(route)
 }
 
-/// 校验 header 值为非空、无控制字符的 UTF-8。
+/// 业务作用：校验 header 值为非空、无控制字符的 UTF-8。
 ///
 /// # 参数
 ///
@@ -327,7 +327,7 @@ fn valid_text(value: &[u8]) -> Result<&str, String> {
     }
 }
 
-/// 写入一个严格 singleton 字段。
+/// 业务作用：写入一个严格 singleton 字段。
 ///
 /// # 参数
 ///

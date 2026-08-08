@@ -41,14 +41,14 @@ pub(crate) struct StartupGate {
 }
 
 impl StartupGate {
-    /// 创建尚未放行的启动门。
+    /// 业务作用：创建尚未放行的启动门。
     pub(crate) fn new() -> Self {
         Self {
             state: AtomicU8::new(STARTUP_PENDING),
         }
     }
 
-    /// 全部 owner 已登记后统一放行。
+    /// 业务作用：全部 owner 已登记后统一放行。
     pub(crate) fn open(&self) {
         let _ = self.state.compare_exchange(
             STARTUP_PENDING,
@@ -58,7 +58,7 @@ impl StartupGate {
         );
     }
 
-    /// 启动批次失败时阻止所有尚未运行的 owner 继续。
+    /// 业务作用：启动批次失败时阻止所有尚未运行的 owner 继续。
     pub(crate) fn abort(&self) {
         let _ = self.state.compare_exchange(
             STARTUP_PENDING,
@@ -68,12 +68,12 @@ impl StartupGate {
         );
     }
 
-    /// 启动门是否已经放行。
+    /// 业务作用：启动门是否已经放行。
     pub(crate) fn is_open(&self) -> bool {
         self.state.load(Ordering::Acquire) == STARTUP_OPEN
     }
 
-    /// 启动门是否已经取消。
+    /// 业务作用：启动门是否已经取消。
     pub(crate) fn is_aborted(&self) -> bool {
         self.state.load(Ordering::Acquire) == STARTUP_ABORTED
     }
@@ -210,7 +210,7 @@ pub(crate) struct GroupHandle {
 }
 
 impl GroupHandle {
-    /// 启动一个 group owner 线程。
+    /// 业务作用：启动一个 group owner 线程。
     ///
     /// # 参数
     ///
@@ -307,7 +307,7 @@ impl GroupHandle {
         Ok((handle, startup_result))
     }
 
-    /// 返回当前健康快照。
+    /// 业务作用：返回当前健康快照。
     ///
     /// 读侧合并:owner 状态机没写过 `last_error` 时,用 librdkafka 后台 callback 捕获的
     /// broker 级错误(ALL_BROKERS_DOWN/认证/SSL)兜底填充——join 迟迟不成时快照能给出真实根因,
@@ -328,7 +328,7 @@ impl GroupHandle {
         snapshot
     }
 
-    /// 提交一条有界命令并按 fencing 状态等待结果。
+    /// 业务作用：提交一条有界命令并按 fencing 状态等待结果。
     ///
     /// # 参数
     ///
@@ -341,7 +341,7 @@ impl GroupHandle {
         self.command_for(kind, self.control_timeout).await
     }
 
-    /// Drop 路径使用的非阻塞停止通知。
+    /// 业务作用：Drop 路径使用的非阻塞停止通知。
     ///
     /// 本方法只尝试把 fenced Stop 放入有界邮箱，不等待执行结果；队列已满时返回 false，
     /// 由调用方记录告警。显式关闭仍必须走 [`Self::stop_until`]。
@@ -362,7 +362,7 @@ impl GroupHandle {
             .is_ok()
     }
 
-    /// 在调用方给定的等待预算内提交一条 fenced 命令。
+    /// 业务作用：在调用方给定的等待预算内提交一条 fenced 命令。
     ///
     /// # 参数
     ///
@@ -423,7 +423,7 @@ impl GroupHandle {
         }
     }
 
-    /// 在全局 deadline 前停止并 join owner 线程。
+    /// 业务作用：在全局 deadline 前停止并 join owner 线程。
     ///
     /// # 参数
     ///
@@ -501,7 +501,7 @@ impl GroupHandle {
         Ok(())
     }
 
-    /// owner 取命令时执行 queued→executing fencing。
+    /// 业务作用：owner 取命令时执行 queued→executing fencing。
     ///
     /// # 参数
     ///
@@ -522,7 +522,7 @@ impl GroupHandle {
             .is_ok()
     }
 
-    /// owner 完成命令并发送结果。
+    /// 业务作用：owner 完成命令并发送结果。
     ///
     /// # 参数
     ///
@@ -537,7 +537,7 @@ impl GroupHandle {
     }
 }
 
-/// 更新健康快照中的状态和可选错误。
+/// 业务作用：更新健康快照中的状态和可选错误。
 ///
 /// # 参数
 ///
@@ -556,7 +556,7 @@ pub(crate) fn update_state(
     snapshot.last_error = error;
 }
 
-/// oneshot 关闭时按 fenced command 状态区分确定未执行与结果未知。
+/// 业务作用：oneshot 关闭时按 fenced command 状态区分确定未执行与结果未知。
 ///
 /// - `id`: 稳定命令编号。
 /// - `state`: 与 owner 共享的单状态 CAS。

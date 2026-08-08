@@ -26,7 +26,7 @@ pub struct RawRecord {
 }
 
 impl RawRecord {
-    /// 返回本记录保留的主要字节数，供容量 permit 计量。
+    /// 业务作用：返回本记录保留的主要字节数，供容量 permit 计量。
     pub fn retained_bytes(&self) -> usize {
         self.payload.as_ref().map_or(0, Vec::len)
             + self.ctx.key.as_ref().map_or(0, String::len)
@@ -107,13 +107,13 @@ pub struct ConsumerMeta {
 /// 运行时内部的类型擦除消费者。
 #[doc(hidden)]
 pub trait ErasedConsumer: Send + Sync {
-    /// 返回注册时冻结的元数据。
+    /// 业务作用：返回注册时冻结的元数据。
     fn meta(&self) -> &ConsumerMeta;
 
-    /// 返回消息类型固定 codec。
+    /// 业务作用：返回消息类型固定 codec。
     fn codec(&self) -> PayloadCodec;
 
-    /// 逐条解码原始记录，以便精确归属失败 offset。
+    /// 业务作用：逐条解码原始记录，以便精确归属失败 offset。
     ///
     /// # 参数
     ///
@@ -124,7 +124,7 @@ pub trait ErasedConsumer: Send + Sync {
     /// tombstone、codec 不匹配或 payload 解码失败时返回错误。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord>;
 
-    /// 恢复具体业务类型并调用 handler。
+    /// 业务作用：恢复具体业务类型并调用 handler。
     ///
     /// # 参数
     ///
@@ -165,7 +165,7 @@ struct BatchAdapter<C> {
     next_invocation: AtomicU64,
 }
 
-/// 将公开单条消费者实例擦除为内部 trait object。
+/// 业务作用：将公开单条消费者实例擦除为内部 trait object。
 ///
 /// # 参数
 ///
@@ -184,7 +184,7 @@ pub fn erase_single<C: SingleConsumer>(consumer: C) -> Result<Arc<dyn ErasedCons
     }))
 }
 
-/// 将公开批消费者实例擦除为内部 trait object。
+/// 业务作用：将公开批消费者实例擦除为内部 trait object。
 ///
 /// # 参数
 ///
@@ -203,7 +203,7 @@ pub fn erase_batch<C: BatchConsumer>(consumer: C) -> Result<Arc<dyn ErasedConsum
     }))
 }
 
-/// 冻结单条消费者元数据。
+/// 业务作用：冻结单条消费者元数据。
 ///
 /// # 参数
 ///
@@ -225,7 +225,7 @@ fn single_meta<C: SingleConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     )
 }
 
-/// 冻结批消费者元数据。
+/// 业务作用：冻结批消费者元数据。
 ///
 /// # 参数
 ///
@@ -247,7 +247,7 @@ fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     )
 }
 
-/// 拒绝带首尾空白的元数据值。
+/// 业务作用：拒绝带首尾空白的元数据值。
 ///
 /// 校验点必须在 `build_meta`：宏面的 `deny_padded` 只覆盖 `#[kafka_consumer]`，
 /// 而 `ConsumerRegistry::register` / `register_batch` 与手写 `impl SingleConsumer`
@@ -276,7 +276,7 @@ fn deny_padded(id: &str, value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-/// 校验并构造通用消费者元数据。
+/// 业务作用：校验并构造通用消费者元数据。
 ///
 /// # 参数
 ///
@@ -351,24 +351,24 @@ fn build_meta(
 }
 
 impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
-    /// 返回单条消费者冻结元数据。
+    /// 业务作用：返回单条消费者冻结元数据。
     fn meta(&self) -> &ConsumerMeta {
         &self.meta
     }
 
-    /// 返回单条消息类型固定 codec。
+    /// 业务作用：返回单条消息类型固定 codec。
     fn codec(&self) -> PayloadCodec {
         self.meta.codec
     }
 
-    /// 解码一条拥有型原始记录。
+    /// 业务作用：解码一条拥有型原始记录。
     ///
     /// - `raw`: 已受字节 permit 约束的记录。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord> {
         decode_record::<C::Message>(raw)
     }
 
-    /// 调用一次且只含一条记录的单条 handler run。
+    /// 业务作用：调用一次且只含一条记录的单条 handler run。
     ///
     /// - `records`: dispatcher 提供的单记录向量。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
@@ -408,24 +408,24 @@ impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
 }
 
 impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
-    /// 返回批消费者冻结元数据。
+    /// 业务作用：返回批消费者冻结元数据。
     fn meta(&self) -> &ConsumerMeta {
         &self.meta
     }
 
-    /// 返回批消息类型固定 codec。
+    /// 业务作用：返回批消息类型固定 codec。
     fn codec(&self) -> PayloadCodec {
         self.meta.codec
     }
 
-    /// 逐条解码拥有型原始记录。
+    /// 业务作用：逐条解码拥有型原始记录。
     ///
     /// - `raw`: 已受字节 permit 约束的记录。
     fn decode(&self, raw: &RawRecord) -> Result<ErasedRecord> {
         decode_record::<C::Message>(raw)
     }
 
-    /// 恢复连续 run 的业务类型并调用一次批 handler。
+    /// 业务作用：恢复连续 run 的业务类型并调用一次批 handler。
     ///
     /// - `records`: 同 route、同分区且 offset 连续的记录。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
@@ -464,7 +464,7 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
     }
 }
 
-/// 将原始 payload 解码为具体消息类型。
+/// 业务作用：将原始 payload 解码为具体消息类型。
 ///
 /// # 参数
 ///
@@ -502,7 +502,7 @@ fn decode_record<T: DecodePayload>(raw: &RawRecord) -> Result<ErasedRecord> {
     })
 }
 
-/// 按确认模式创建本次 run 的手动确认槽。
+/// 业务作用：按确认模式创建本次 run 的手动确认槽。
 ///
 /// # 参数
 ///
@@ -530,7 +530,7 @@ fn manual_ack_set<'a>(
     })
 }
 
-/// 为指定记录生成确认能力。
+/// 业务作用：为指定记录生成确认能力。
 ///
 /// # 参数
 ///
@@ -544,7 +544,7 @@ fn record_ack(mode: AckMode, set: Option<&ManualAckSet>, index: usize) -> Record
     }
 }
 
-/// 失败路径封存全部 token。
+/// 业务作用：失败路径封存全部 token。
 ///
 /// # 参数
 ///
@@ -555,7 +555,7 @@ fn seal_failed(set: Option<&ManualAckSet>) {
     }
 }
 
-/// 把 handler future 结果转换为严格确认矩阵。
+/// 业务作用：把 handler future 结果转换为严格确认矩阵。
 ///
 /// # 参数
 ///
@@ -595,7 +595,7 @@ fn finish_invocation(
     }
 }
 
-/// 将 panic payload 转为不暴露业务数据的简短文本。
+/// 业务作用：将 panic payload 转为不暴露业务数据的简短文本。
 ///
 /// # 参数
 ///

@@ -31,7 +31,7 @@ pub(crate) struct DltRecord {
 }
 
 impl DltJob {
-    /// 构造单记录任务并计算保留字节。
+    /// 业务作用：构造单记录任务并计算保留字节。
     ///
     /// # 参数
     ///
@@ -61,7 +61,7 @@ impl DltJob {
         }])
     }
 
-    /// 构造连续失败 run 的单个有界任务。
+    /// 业务作用：构造连续失败 run 的单个有界任务。
     ///
     /// # 参数
     ///
@@ -137,7 +137,7 @@ pub(crate) enum DltAdmission {
 }
 
 impl DltDispatcher {
-    /// 用冻结配置与 lane 构造 dispatcher。
+    /// 业务作用：用冻结配置与 lane 构造 dispatcher。
     ///
     /// # 参数
     ///
@@ -168,7 +168,7 @@ impl DltDispatcher {
         })
     }
 
-    /// 返回全局 DLT pipeline 当前占用的 job 与 retained bytes。
+    /// 业务作用：返回全局 DLT pipeline 当前占用的 job 与 retained bytes。
     pub(crate) fn queue_usage(&self) -> (usize, usize) {
         (
             self.job_capacity
@@ -177,7 +177,7 @@ impl DltDispatcher {
         )
     }
 
-    /// 无等待地尝试取得 job/byte 双 permit。
+    /// 业务作用：无等待地尝试取得 job/byte 双 permit。
     ///
     /// # 参数
     ///
@@ -219,7 +219,7 @@ impl DltDispatcher {
         }))
     }
 
-    /// 在并行上限内执行信封的一次 broker delivery。
+    /// 业务作用：在并行上限内执行信封的一次 broker delivery。
     ///
     /// # 参数
     ///

@@ -71,7 +71,7 @@ end
 return 0
 "#;
 
-/// 进程级实例标识(对照 原实现 INSTANCE_ID;Rust 端每次启动唯一,不落盘)。
+/// 业务作用：进程级实例标识(对照 原实现 INSTANCE_ID;Rust 端每次启动唯一,不落盘)。
 fn instance_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
@@ -115,7 +115,7 @@ struct GuardInner {
 }
 
 impl GuardInner {
-    /// 服务端 UNLOCK + pub 唤醒(unlock 与 Drop 共用)。
+    /// 业务作用：服务端 UNLOCK + pub 唤醒(unlock 与 Drop 共用)。
     ///
     ///先 UNLOCK 再 **无条件** cancel 看门狗,而非"先 cancel 再
     /// UNLOCK"。理由:
@@ -169,7 +169,7 @@ pub struct LockGuard {
 }
 
 impl DistributedLock {
-    /// 创建分布式锁组件,读取客户端里的锁前缀和 lease 配置。
+    /// 业务作用：创建分布式锁组件,读取客户端里的锁前缀和 lease 配置。
     ///
     /// # 参数
     /// - `client`: Redis 客户端共享句柄。
@@ -183,7 +183,7 @@ impl DistributedLock {
         }
     }
 
-    /// 业务 key → 完整锁 key。**幂等**:若 `key` 已以
+    /// 业务作用：业务 key → 完整锁 key。**幂等**:若 `key` 已以
     /// `self.prefix`(`DISTRIBUTED-LOCK:` 等,distinctive)开头,原样返回不再叠前缀——这样误把
     /// `guard.lock_key()`(已含前缀的完整 key)传给 `holds_status`/`lock`/`try_lock` 不再双前缀
     /// 恒判 Lost / 抢错锁,所有锁 API 对"已含前缀的 key"行为一致。业务 key 不会以锁前缀开头,故无误伤。
@@ -198,7 +198,7 @@ impl DistributedLock {
         }
     }
 
-    /// 生成一次抢锁使用的唯一 holder token。
+    /// 业务作用：生成一次抢锁使用的唯一 holder token。
     ///
     /// holder 由进程实例标识和本进程递增序号组成,用于 Lua 续租/释放时确认“锁仍由自己持有”。
     fn new_holder() -> String {
@@ -209,7 +209,7 @@ impl DistributedLock {
         )
     }
 
-    /// 非阻塞抢锁。Ok(Some(guard)) = 成功(看门狗已启动);Ok(None) = 他人持有。
+    /// 业务作用：非阻塞抢锁。Ok(Some(guard)) = 成功(看门狗已启动);Ok(None) = 他人持有。
     ///
     /// # 参数
     /// - `key`: 业务锁 key;可传未加前缀的业务 key 或已完整加前缀的锁 key。
@@ -221,7 +221,7 @@ impl DistributedLock {
     // Attempts to acquire the lock with the prepared holder token.
     ///
     /// # 参数
-    /// - `lock_key`: 业务 key 或 Redis key,用于定位数据。
+    /// 业务作用：- `lock_key`: 业务 key 或 Redis key,用于定位数据。
     /// - `holder`: 当前分布式锁持有者 token。
     async fn try_lock_inner(&self, lock_key: String, holder: String) -> Result<Option<LockGuard>> {
         let r: Option<i64> = redis::Script::new(LOCK_LUA)
@@ -239,7 +239,7 @@ impl DistributedLock {
     // Builds a guard and starts lease maintenance.
     ///
     /// # 参数
-    /// - `lock_key`: 业务 key 或 Redis key,用于定位数据。
+    /// 业务作用：- `lock_key`: 业务 key 或 Redis key,用于定位数据。
     /// - `holder`: 当前分布式锁持有者 token。
     fn spawn_guard(&self, lock_key: String, holder: String) -> LockGuard {
         let (lost_tx, _) = watch::channel(false);
@@ -270,7 +270,7 @@ impl DistributedLock {
             /// 第二个字段为是否 armed；干净释放锁时会解除 armed,异常退出或 panic 展开时会通知业务锁已丢失。
             struct LostOnExit(watch::Sender<bool>, bool);
             impl Drop for LostOnExit {
-                /// 在 watchdog 异常退出时发布锁丢失信号。
+                /// 业务作用：在 watchdog 异常退出时发布锁丢失信号。
                 ///
                 /// 如果守卫仍处于 armed 状态,说明不是正常 unlock/cancel 路径,必须让业务侧看到 `lost()`。
                 fn drop(&mut self) {
@@ -328,7 +328,7 @@ impl DistributedLock {
         LockGuard { inner: Some(inner) }
     }
 
-    /// 阻塞式加锁。TOCTOU 防御:订阅就绪后立即再抢,再 select!(通知, PTTL 兜底)。
+    /// 业务作用：阻塞式加锁。TOCTOU 防御:订阅就绪后立即再抢,再 select!(通知, PTTL 兜底)。
     ///
     ///`timeout` 是**绝对 deadline**,覆盖整个获取过程——try_lock(SET NX)、
     /// `get_async_pubsub`、`subscribe`、`PTTL`、等待**全部**纳入。此前 deadline 只在等待 select!
@@ -407,7 +407,7 @@ impl DistributedLock {
         }
     }
 
-    /// 加锁重试循环。`deadline`:`Some` 时争用场景内层**自感知 deadline**(napping/重试**之间**到点即返
+    /// 业务作用：加锁重试循环。`deadline`:`Some` 时争用场景内层**自感知 deadline**(napping/重试**之间**到点即返
     /// `LockTimeout`,使 `lock(k, Some(t))` 在 ~t 返回——不再被外层 grace 走满);`None` 时无限阻塞。
     /// **关键(防幽灵)**:deadline 只在 try_lock await **之间**检查、并把 nap 夹到剩余预算,**绝不取消在途
     /// 的一次 LOCK(SET NX)** → 不会留幽灵锁。真正卡在某次 redis await(连接挂死)时由 `lock` 外层
@@ -481,7 +481,7 @@ impl DistributedLock {
         }
     }
 
-    /// 模板:加锁 → 执行 → 显式解锁(推荐入口)。
+    /// 业务作用：模板:加锁 → 执行 → 显式解锁(推荐入口)。
     ///
     /// # 参数
     /// - `key`: 要保护的业务锁 key。
@@ -503,7 +503,7 @@ impl DistributedLock {
         Ok(out)
     }
 
-    /// 三态持有检测(HOLDS_LUA + 异常→Unknown;对照 原实现 holdsStatus)。
+    /// 业务作用：三态持有检测(HOLDS_LUA + 异常→Unknown;对照 原实现 holdsStatus)。
     /// `full_key` 保持幂等；即使误传已含前缀的 `guard.lock_key()`，也不会因双前缀而恒判
     /// Lost;持有自己锁的便捷查询仍推荐 `guard.still_held()`(零前缀风险)。
     ///
@@ -525,7 +525,7 @@ impl DistributedLock {
 }
 
 impl LockGuard {
-    /// 取内部共享态。`inner` 只在 `unlock`/`Drop` 消费 self 时被 `take()`,而那两处消费后不再访问
+    /// 业务作用：取内部共享态。`inner` 只在 `unlock`/`Drop` 消费 self 时被 `take()`,而那两处消费后不再访问
     /// self,故常规方法调用期间恒为 `Some`;`expect` 是不可达的编程错误兜底。
     #[inline]
     fn arc(&self) -> &Arc<GuardInner> {
@@ -534,17 +534,17 @@ impl LockGuard {
             .expect("LockGuard inner accessed after unlock/drop")
     }
 
-    /// Returns the lock holder token.
+    /// 业务作用：返回当前锁持有者 token，供续租和解锁脚本复验所有权。
     pub fn holder(&self) -> &str {
         &self.arc().holder
     }
 
-    /// Returns the Redis key protected by this guard.
+    /// 业务作用：返回当前 guard 保护的 Redis key。
     pub fn lock_key(&self) -> &str {
         &self.arc().lock_key
     }
 
-    /// 本 guard 当前是否仍由本持有者持有(消除双前缀 footgun)。
+    /// 业务作用：本 guard 当前是否仍由本持有者持有(消除双前缀 footgun)。
     /// **直接用本 guard 的完整 lock_key + holder**,不经 `DistributedLock::holds_status`(后者对
     /// 传入 key 再做一次 `full_key` → 若误传 `guard.lock_key()`(已含前缀)会双前缀恒判 Lost)。
     /// 业务"我还持有这把锁吗"应优先用本方法,而非 `holds_status(guard.lock_key(), ...)`。
@@ -561,12 +561,12 @@ impl LockGuard {
         }
     }
 
-    /// 锁丢失通知(看门狗 RENEW 明确返 0 → true)。
+    /// 业务作用：锁丢失通知(看门狗 RENEW 明确返 0 → true)。
     pub fn lost(&self) -> watch::Receiver<bool> {
         self.arc().lost_tx.subscribe()
     }
 
-    /// 显式重入:共享同一 GuardInner,本地深度 +1,**不发服务端 LOCK**。
+    /// 业务作用：显式重入:共享同一 GuardInner,本地深度 +1,**不发服务端 LOCK**。
     /// ⚠ 契约:不得对**已最终释放**的 guard 重入(否则 fetch_add 产生幽灵 guard,其后续 unlock 返
     /// LockNotHeld)。debug 构建断言捕获此误用(release 构建不付出运行时开销)。
     pub fn reenter(&self) -> LockGuard {
@@ -580,7 +580,7 @@ impl LockGuard {
         }
     }
 
-    /// 显式解锁(正确性入口)。仍有其他重入 permit → Err(StillReentered)(本 permit 已消费,
+    /// 业务作用：显式解锁(正确性入口)。仍有其他重入 permit → Err(StillReentered)(本 permit 已消费,
     /// 服务端锁未动);最后一个 permit → 停看门狗 + 服务端 UNLOCK + pub 唤醒等锁者。
     pub async fn unlock(mut self) -> Result<()> {
         // 把 Arc move 出(self.inner 置 None):本方法负责这一份 permit 的 depth 递减,
@@ -604,7 +604,7 @@ impl LockGuard {
 }
 
 impl Drop for LockGuard {
-    /// best-effort:最后一个 permit 被 Drop(未显式 unlock)→ 取消看门狗 + spawn UNLOCK。
+    /// 业务作用：best-effort:最后一个 permit 被 Drop(未显式 unlock)→ 取消看门狗 + spawn UNLOCK。
     /// 不承诺确定释放(runtime 关闭时 spawn 可能不执行),兜底 = lease 过期。
     fn drop(&mut self) {
         // unlock 已 take 过则 inner 为 None(depth 由 unlock 递减完毕),此处不再重复递减。

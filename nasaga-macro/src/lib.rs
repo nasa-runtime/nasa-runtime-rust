@@ -1,6 +1,6 @@
 //! `#[saga]` 参与方步骤属性宏：编译期合同检查、descriptor 收集与 adapter 生成。
 //!
-//! 宏**不拥有全局正确性**（§11.5.1）：它只做本地参与节点接入——校验属性与签名形态、
+//! 宏**不拥有全局正确性**：它只做本地参与节点接入——校验属性与签名形态、
 //! 生成静态 descriptor（linkme 收集，启动预检与 definition 对齐）和调用
 //! `nasaga-runtime` 完整事务 wrapper 的 adapter 方法。状态推进、补偿决策、超时与
 //! 崩溃恢复全部属于 Orchestrator/Runtime/Store，不在宏内。
@@ -191,6 +191,7 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
         }
 
         impl #root::SagaCommandService for #service_type {
+            /// 业务作用：把已认证命令交给宏生成的精确步骤门禁与参与方事务 wrapper。
             async fn handle_saga_command<'a>(
                 &'a self,
                 runtime: &'a #root::ParticipantRuntime,
@@ -233,7 +234,7 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
             .get_ident()
             .map(ToString::to_string)
             .unwrap_or_default();
-        // 重复属性不能采用“最后一个覆盖前一个”：代码审查者与编译器可能看到不同合同，
+        // 重复属性不能采用“最后一个覆盖前一个”：声明文本与生成合同可能产生歧义，
         // 尤其会把 compensable=false 的 pivot 静默改成可补偿步骤。
         if !seen.insert(name.clone()) {
             return Err(syn::Error::new(

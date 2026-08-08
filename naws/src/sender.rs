@@ -42,7 +42,7 @@ pub enum BorrowedSendResult {
 }
 
 impl SendReport {
-    /// 记录 record 事件；用于保存运行过程中的观测数据。
+    /// 业务作用：记录 record 事件；用于保存运行过程中的观测数据。
     ///
     /// # 参数
     /// - `outcome`: 命令、发送或任务执行结果。
@@ -70,7 +70,7 @@ pub struct Sender {
 }
 
 impl Sender {
-    /// 构造发送器。
+    /// 业务作用：构造发送器。
     ///
     /// # 参数
     /// - `registry`: 本节点会话注册表,用于本地 fan-out 到 uid/group/endpoint/session。
@@ -79,7 +79,7 @@ impl Sender {
         Self::new_with_max_frame(registry, bridge, DEFAULT_MAX_FRAME)
     }
 
-    /// 返回本 Sender 允许的单帧 body 上限。
+    /// 业务作用：返回本 Sender 允许的单帧 body 上限。
     ///
     /// 供 kafka 装配层做启动期交叉校验：Kafka 记录经 TLV 信封编码后才成为 frame，
     /// 若 topic 允许的最大消息不小于本值，一条**合法**的大记录就会在编码期
@@ -89,7 +89,7 @@ impl Sender {
         self.max_frame
     }
 
-    /// 按服务端生效配置构造发送器。
+    /// 业务作用：按服务端生效配置构造发送器。
     ///
     /// # 参数
     ///
@@ -110,17 +110,17 @@ impl Sender {
         })
     }
 
-    /// 框架内部:集群启动后注入跨节点发布钩子。
+    /// 业务作用：框架内部:集群启动后注入跨节点发布钩子。
     pub(crate) fn set_cluster_publish(&self, f: ClusterPublish) {
         *self.cluster_publish.lock().unwrap() = Some(f);
     }
 
-    /// 框架内部:注入 endpoint 代际解析器(出站投递兜底)。
+    /// 业务作用：框架内部:注入 endpoint 代际解析器(出站投递兜底)。
     pub(crate) fn set_endpoint_gen_resolver(&self, f: EndpointGenResolver) {
         *self.endpoint_gen.lock().unwrap() = Some(f);
     }
 
-    /// 客户端入站消息触发的自动转发(本地 + 跨节点)。返回**本地** fan-out 报告。
+    /// 业务作用：客户端入站消息触发的自动转发(本地 + 跨节点)。返回**本地** fan-out 报告。
     ///
     /// # 参数
     /// - `msg`: 客户端入站的业务消息信封。
@@ -131,7 +131,7 @@ impl Sender {
         report
     }
 
-    /// 服务端主动推送(本地 + 跨节点;不经 InboundPolicy)。返回**本地** fan-out 报告。
+    /// 业务作用：服务端主动推送(本地 + 跨节点;不经 InboundPolicy)。返回**本地** fan-out 报告。
     ///
     /// # 参数
     /// - `msg`: 服务端要投递的业务消息信封。
@@ -142,7 +142,7 @@ impl Sender {
         report
     }
 
-    /// **仅本地** fan-out,不再跨节点 publish。集群收到对端事件后调,防 ping-pong 回环。
+    /// 业务作用：**仅本地** fan-out,不再跨节点 publish。集群收到对端事件后调,防 ping-pong 回环。
     ///
     /// # 参数
     /// - `msg`: 要在本节点本地投递的业务消息信封。
@@ -151,7 +151,7 @@ impl Sender {
         self.fan_out(msg, mode)
     }
 
-    /// 把借用业务信封仅投递到本节点，不构造拥有型中间消息。
+    /// 业务作用：把借用业务信封仅投递到本节点，不构造拥有型中间消息。
     ///
     /// 原生协议目标共享同一个最终 [`Bytes`]；文本协议目标按 namespace 转码，二者都不会
     /// 把借用数据带出本次同步调用。该边界适合消息队列消费回调直接转发底层 payload。
@@ -174,7 +174,7 @@ impl Sender {
         self.send_borrowed_to_targets(msg, mode, targets)
     }
 
-    /// 在单次有界目标解析后完成借用消息的本地投递。
+    /// 业务作用：在单次有界目标解析后完成借用消息的本地投递。
     ///
     /// 该入口把 fan-out 上限检查放在最终 frame 编码和 outbox 写入之前，并避免先计数再重新解析。
     ///
@@ -202,7 +202,7 @@ impl Sender {
             .map(BorrowedSendResult::Sent)
     }
 
-    /// 对已经解析且有界的 session 集合编码一次并完成本地投递。
+    /// 业务作用：对已经解析且有界的 session 集合编码一次并完成本地投递。
     ///
     /// # 参数
     ///
@@ -245,7 +245,7 @@ impl Sender {
         Ok(report)
     }
 
-    /// 只解析借用路由并返回本地唯一目标数，不编码 frame 或写 outbox。
+    /// 业务作用：只解析借用路由并返回本地唯一目标数，不编码 frame 或写 outbox。
     ///
     /// 消息队列适配器用它在 payload 物化前执行 fan-out 硬上限门禁。返回值是当前瞬时快照，
     /// 随后的实际投递仍可能因连接关闭而减少。
@@ -257,7 +257,7 @@ impl Sender {
         self.resolve_targets_ref(msg).len()
     }
 
-    /// 发布跨节点发送请求；用于把非本地目标交给集群广播。
+    /// 业务作用：发布跨节点发送请求；用于把非本地目标交给集群广播。
     ///
     /// # 参数
     /// - `msg`: 业务消息体或事件载荷。
@@ -269,7 +269,7 @@ impl Sender {
         }
     }
 
-    /// 向匹配会话扇出消息；用于统计本地和集群发送结果。
+    /// 业务作用：向匹配会话扇出消息；用于统计本地和集群发送结果。
     ///
     /// # 参数
     /// - `msg`: 业务消息体或事件载荷。
@@ -315,7 +315,7 @@ impl Sender {
         report
     }
 
-    /// 用 PayloadBridge 把 msg.payload 翻成 socket.io EVENT 的 arg(JSON 文本)。
+    /// 业务作用：用 PayloadBridge 把 msg.payload 翻成 socket.io EVENT 的 arg(JSON 文本)。
     ///
     /// # 参数
     /// - `msg`: 业务消息体或事件载荷。
@@ -325,7 +325,7 @@ impl Sender {
         self.bridge.outbound(event, payload)
     }
 
-    /// 用借用消息直接生成文本协议参数，避免先复制成拥有型消息。
+    /// 业务作用：用借用消息直接生成文本协议参数，避免先复制成拥有型消息。
     ///
     /// # 参数
     ///
@@ -336,7 +336,7 @@ impl Sender {
         self.bridge.outbound(event, payload)
     }
 
-    /// 路由解析:group 优先 → routers 过滤 → excludes(按 uid)→ fromClient(按 session id),按 SessionId 去重。
+    /// 业务作用：路由解析:group 优先 → routers 过滤 → excludes(按 uid)→ fromClient(按 session id),按 SessionId 去重。
     ///
     /// # 参数
     /// - `msg`: 业务消息体或事件载荷。
@@ -419,7 +419,7 @@ impl Sender {
         out
     }
 
-    /// 按借用路由字段解析本地目标，规则与拥有型路径完全一致。
+    /// 业务作用：按借用路由字段解析本地目标，规则与拥有型路径完全一致。
     ///
     /// # 参数
     ///
@@ -431,7 +431,7 @@ impl Sender {
         }
     }
 
-    /// 按借用路由解析本地目标，并在收集第 `max_targets + 1` 个目标前立即停止。
+    /// 业务作用：按借用路由解析本地目标，并在收集第 `max_targets + 1` 个目标前立即停止。
     ///
     /// # 参数
     ///
@@ -518,7 +518,7 @@ impl Sender {
     }
 }
 
-/// socket.io 事件名 = events[0](首个非空);缺省 "message"。
+/// 业务作用：socket.io 事件名 = events[0](首个非空);缺省 "message"。
 pub(crate) fn sio_event_name(msg: &Message) -> &str {
     msg.events
         .as_ref()
@@ -527,7 +527,7 @@ pub(crate) fn sio_event_name(msg: &Message) -> &str {
         .unwrap_or("message")
 }
 
-/// 借用消息的文本协议事件名；缺省为 `message`。
+/// 业务作用：借用消息的文本协议事件名；缺省为 `message`。
 ///
 /// # 参数
 ///
@@ -538,7 +538,7 @@ fn sio_event_name_ref<'a>(msg: &'a MessageRef<'a>) -> &'a str {
         .unwrap_or("message")
 }
 
-/// 拼 socket.io EVENT 文本帧:`42[/ns,]["<event>",<arg>]`。
+/// 业务作用：拼 socket.io EVENT 文本帧:`42[/ns,]["<event>",<arg>]`。
 /// 默认 namespace "/" 不加前缀;非默认形如 `42/ws/chat,["tick",<arg>]`
 /// (客户端按 namespace 分发,namespaced 会话必须带前缀)。
 pub(crate) fn build_sio_event(msg: &Message, namespace: &str, arg: &str) -> String {
@@ -550,7 +550,7 @@ pub(crate) fn build_sio_event(msg: &Message, namespace: &str, arg: &str) -> Stri
     }
 }
 
-/// 用借用信封拼接文本协议 EVENT 帧。
+/// 业务作用：用借用信封拼接文本协议 EVENT 帧。
 ///
 /// # 参数
 ///
@@ -566,7 +566,7 @@ pub fn build_sio_event_ref(msg: &MessageRef<'_>, namespace: &str, arg: &str) -> 
     }
 }
 
-/// 取数组里"非 null 非空"的元素;整个字段缺失/空数组 → None。
+/// 业务作用：取数组里"非 null 非空"的元素;整个字段缺失/空数组 → None。
 ///
 /// # 参数
 /// - `v`: 待转换的值。
@@ -584,7 +584,7 @@ fn present(v: &Option<Vec<Option<String>>>) -> Option<Vec<&str>> {
     }
 }
 
-/// 过滤借用字符串数组中的空元素。
+/// 业务作用：过滤借用字符串数组中的空元素。
 ///
 /// # 参数
 ///

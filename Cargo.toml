@@ -1,10 +1,10 @@
 # ============================================================================
-# nasa-runtime-rust —— NASA Rust 共享库(像 Maven 多模块仓库)
+# nasa-runtime-rust —— NASA Rust 共享组件工作区
 #
-# ★ 业务唯一入口 = `nasa` 门面 crate(对标 tokio:单一公共入口 + 模块分区 + feature 按需):
+# ★ 业务唯一入口 = `nasa` 门面 crate(单一公共入口 + 模块分区 + feature 按需):
 #     nasa = { ..., features = ["hystrix", "cache", "tx", "scheduling", "web", "ws-redis"] }
 #     use nasa::hystrix::hystrix;  use nasa::ws::Server;  #[nasa::web::get_mapping("/x")]
-#   其余成员都是【实现细节】,业务项目不得直接依赖(CI 可扫 Cargo.toml 拦截);
+#   其余成员都是【实现细节】,业务项目不得直接依赖;
 #   旧式直接依赖(hystrix/cacheable/...)仍兼容(宏按"旧直接依赖优先"解析),仅供渐进迁移。
 #
 # 成员:

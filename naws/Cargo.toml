@@ -16,7 +16,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-# 打包边界(维护约束 合并方案 §二.4):JS demo 依赖由 npm ci 恢复,绝不打进 crate;
+# 打包边界：JS demo 依赖由 npm ci 恢复，绝不打进 crate；
 exclude = ["examples/node_modules/**"]
 
 [lib]

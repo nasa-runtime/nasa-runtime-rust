@@ -157,7 +157,7 @@ struct ProducerClientContext {
 }
 
 impl ClientContext for ProducerClientContext {
-    /// 把后台连接错误中的永久类别写入单槽，避免 60 秒无进展策略无限重建错误凭据。
+    /// 业务作用：把后台连接错误中的永久类别写入单槽，避免 60 秒无进展策略无限重建错误凭据。
     fn error(&self, error: KafkaError, reason: &str) {
         if let Some(code) = error
             .rdkafka_error_code()
@@ -173,7 +173,7 @@ impl ClientContext for ProducerClientContext {
 }
 
 impl ProducerClient {
-    /// 构造并让底层解析指定 lane 的完整配置。
+    /// 业务作用：构造并让底层解析指定 lane 的完整配置。
     ///
     /// # 参数
     ///
@@ -242,7 +242,7 @@ impl ProducerClient {
         }))
     }
 
-    /// 返回该物理 lane 的只读容量与累计结果快照。
+    /// 业务作用：返回该物理 lane 的只读容量与累计结果快照。
     /// 无锁读取队列压力：`(in_use, capacity)`。
     ///
     /// 专供每条消息都会走的指标上报使用。`stats()` 会取 native generation 的读锁，
@@ -258,7 +258,7 @@ impl ProducerClient {
         }
     }
 
-    /// 汇总当前 generation、准入阶段与累计结果计数，生成管理面 lane 快照。
+    /// 业务作用：汇总当前 generation、准入阶段与累计结果计数，生成管理面 lane 快照。
     pub(crate) fn stats(&self) -> ProducerLaneStats {
         let observer_available = self.fire_slots.available_permits();
         let native_generation = self
@@ -288,7 +288,7 @@ impl ProducerClient {
         }
     }
 
-    /// 等待一条消息同步入队并取得最终 delivery report。
+    /// 业务作用：等待一条消息同步入队并取得最终 delivery report。
     ///
     /// # 参数
     ///
@@ -380,7 +380,7 @@ impl ProducerClient {
         }
     }
 
-    /// 同步入队并登记有界异步 delivery 观察。
+    /// 业务作用：同步入队并登记有界异步 delivery 观察。
     ///
     /// # 参数
     ///
@@ -428,7 +428,7 @@ impl ProducerClient {
         Ok(())
     }
 
-    /// 拒绝新的业务发布，保留框架内部收尾入口。
+    /// 业务作用：拒绝新的业务发布，保留框架内部收尾入口。
     pub(crate) fn begin_draining(&self) {
         let _ = self.phase.compare_exchange(
             LanePhase::Open as u8,
@@ -438,7 +438,7 @@ impl ProducerClient {
         );
     }
 
-    /// 进入仅允许框架内部发布的收尾阶段。
+    /// 业务作用：进入仅允许框架内部发布的收尾阶段。
     pub(crate) fn enter_internal_only(&self) {
         // 必须原子取最大值：并发 shutdown 下 load-then-store 可能被另一路的 close() 插入，
         // 把相位从 Closed 退回 InternalOnly，等于在已声明关闭之后重新放开内部准入。
@@ -446,7 +446,7 @@ impl ProducerClient {
             .fetch_max(LanePhase::InternalOnly as u8, Ordering::AcqRel);
     }
 
-    /// 在绝对截止时刻前等待观察任务并排空底层队列。
+    /// 业务作用：在绝对截止时刻前等待观察任务并排空底层队列。
     ///
     /// # 参数
     ///
@@ -504,12 +504,12 @@ impl ProducerClient {
         }
     }
 
-    /// 在底层队列已排空后永久关闭全部发布入口。
+    /// 业务作用：在底层队列已排空后永久关闭全部发布入口。
     pub(crate) fn close(&self) {
         self.phase.store(LanePhase::Closed as u8, Ordering::Release);
     }
 
-    /// 获取一次发布准入资格并用 RAII 跟踪 active。
+    /// 业务作用：获取一次发布准入资格并用 RAII 跟踪 active。
     ///
     /// # 参数
     ///
@@ -546,7 +546,7 @@ impl ProducerClient {
         })
     }
 
-    /// 释放一个 active 计数并唤醒排空等待者。
+    /// 业务作用：释放一个 active 计数并唤醒排空等待者。
     fn release_active(&self) {
         let previous = self.active.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "producer active 计数不得下溢");
@@ -555,7 +555,7 @@ impl ProducerClient {
         }
     }
 
-    /// 构造带 lane/topic 归因的确定性发布错误。
+    /// 业务作用：构造带 lane/topic 归因的确定性发布错误。
     ///
     /// # 参数
     ///
@@ -569,7 +569,7 @@ impl ProducerClient {
         }
     }
 
-    /// 返回当前可用的底层 generation；当前实例已经 fatal 时先原子切换到新实例。
+    /// 业务作用：返回当前可用的底层 generation；当前实例已经 fatal 时先原子切换到新实例。
     fn current_native(&self) -> Result<NativeProducerSnapshot> {
         if let Some((code, detail)) = self
             .terminal_fatal
@@ -593,7 +593,7 @@ impl ProducerClient {
         }
     }
 
-    /// 仅当观察到的 generation 仍是当前 fatal generation 时构造并替换底层实例。
+    /// 业务作用：仅当观察到的 generation 仍是当前 fatal generation 时构造并替换底层实例。
     fn replace_fatal_native(
         &self,
         observed: &NativeProducerSnapshot,
@@ -651,7 +651,7 @@ impl ProducerClient {
         Ok(current.clone())
     }
 
-    /// 在返回当前发布错误前尝试收敛 fatal generation，并追加不含凭据的诊断。
+    /// 业务作用：在返回当前发布错误前尝试收敛 fatal generation，并追加不含凭据的诊断。
     fn native_error_detail(&self, message: String, observed: &NativeProducerSnapshot) -> String {
         let Some((code, detail)) = native_fatal_error(observed) else {
             return message;
@@ -668,7 +668,7 @@ impl ProducerClient {
         }
     }
 
-    /// 把底层错误与 fatal generation 诊断合并为稳定公共错误。
+    /// 业务作用：把底层错误与 fatal generation 诊断合并为稳定公共错误。
     fn publish_native_error(
         &self,
         topic: &str,
@@ -678,7 +678,7 @@ impl ProducerClient {
         self.publish_error(topic, self.native_error_detail(message, observed))
     }
 
-    /// 记录当前 generation 的成功 delivery，并清零连续失败窗口。
+    /// 业务作用：记录当前 generation 的成功 delivery，并清零连续失败窗口。
     fn note_delivery_success(&self, observed: &NativeProducerSnapshot) {
         let mut recovery = self
             .native_recovery
@@ -690,7 +690,7 @@ impl ProducerClient {
         }
     }
 
-    /// 记录非 fatal 终态 delivery failure，并判断是否达到无进展切换阈值。
+    /// 业务作用：记录非 fatal 终态 delivery failure，并判断是否达到无进展切换阈值。
     fn note_stalled_failure(&self, observed: &NativeProducerSnapshot) -> bool {
         let now = Instant::now();
         let mut recovery = self
@@ -706,7 +706,7 @@ impl ProducerClient {
             && now.duration_since(recovery.last_rebuild_at) >= self.stalled_rebuild_cooldown
     }
 
-    /// 在写锁内再次确认非 fatal 无进展窗口并单飞切换 generation。
+    /// 业务作用：在写锁内再次确认非 fatal 无进展窗口并单飞切换 generation。
     fn replace_stalled_native(
         &self,
         observed: &NativeProducerSnapshot,
@@ -774,7 +774,7 @@ impl ProducerClient {
         Ok(Some(current.clone()))
     }
 
-    /// 合并终态 delivery failure、fatal 与非 fatal 无进展切换诊断。
+    /// 业务作用：合并终态 delivery failure、fatal 与非 fatal 无进展切换诊断。
     fn delivery_error_detail(&self, message: String, observed: &NativeProducerSnapshot) -> String {
         if native_fatal_error(observed).is_some() {
             return self.native_error_detail(message, observed);
@@ -795,7 +795,7 @@ impl ProducerClient {
         }
     }
 
-    /// 把 delivery 错误和两级 generation 恢复诊断合并为稳定公共错误。
+    /// 业务作用：把 delivery 错误和两级 generation 恢复诊断合并为稳定公共错误。
     fn publish_delivery_error(
         &self,
         topic: &str,
@@ -805,7 +805,7 @@ impl ProducerClient {
         self.publish_error(topic, self.delivery_error_detail(message, observed))
     }
 
-    /// 记录认证、授权、fencing 等永久 producer 错误，禁止随后按无进展策略循环重建。
+    /// 业务作用：记录认证、授权、fencing 等永久 producer 错误，禁止随后按无进展策略循环重建。
     ///
     /// - `topic`: 当前发布目标，用于公共错误归因。
     /// - `error`: delivery 或同步入队返回的底层稳定错误。
@@ -832,7 +832,7 @@ impl ProducerClient {
         Some(self.publish_error(topic, format!("producer 永久错误 {code}: {detail}")))
     }
 
-    /// 决定本次 fire delivery 失败是否打印详细日志，并返回上一窗口聚合数。
+    /// 业务作用：决定本次 fire delivery 失败是否打印详细日志，并返回上一窗口聚合数。
     fn fire_failure_log_decision(&self) -> (bool, u64) {
         const WINDOW: Duration = Duration::from_secs(10);
         let now = Instant::now();
@@ -853,7 +853,7 @@ impl ProducerClient {
         }
     }
 
-    /// 输出并清零当前窗口累计的被抑制失败条数。
+    /// 业务作用：输出并清零当前窗口累计的被抑制失败条数。
     ///
     /// 由排空/关停调用：失败风暴停止后不会再有新的 delivery 失败把尾段带出来。
     fn flush_failure_log_tail(&self) {
@@ -873,7 +873,7 @@ impl ProducerClient {
         }
     }
 
-    /// 构造确定未入队的容量错误，供上层只按 variant 映射背压。
+    /// 业务作用：构造确定未入队的容量错误，供上层只按 variant 映射背压。
     fn queue_full(&self, topic: &str, queue: ProducerQueue) -> NafkaError {
         NafkaError::ProducerQueueFull {
             lane: self.lane.to_string(),
@@ -890,13 +890,13 @@ struct AdmissionGuard {
 }
 
 impl Drop for AdmissionGuard {
-    /// 释放发布资格并通知关闭排空逻辑。
+    /// 业务作用：释放发布资格并通知关闭排空逻辑。
     fn drop(&mut self) {
         self.owner.release_active();
     }
 }
 
-/// 把公共自有 headers 转换为底层拥有型 headers。
+/// 业务作用：把公共自有 headers 转换为底层拥有型 headers。
 ///
 /// # 参数
 ///
@@ -913,7 +913,7 @@ fn to_owned_headers(headers: &KafkaHeaders) -> OwnedHeaders {
     )
 }
 
-/// 构造借用数据的底层发布记录；底层同步入队时完成必要复制。
+/// 业务作用：构造借用数据的底层发布记录；底层同步入队时完成必要复制。
 ///
 /// # 参数
 ///
@@ -936,7 +936,7 @@ fn to_future_record<'a>(record: OutboundRecord<'a>) -> FutureRecord<'a, [u8], [u
     native
 }
 
-/// 返回指定底层 generation 的 fatal 诊断。
+/// 业务作用：返回指定底层 generation 的 fatal 诊断。
 ///
 /// # 参数
 ///
@@ -951,7 +951,7 @@ fn native_fatal_error(native: &NativeProducerSnapshot) -> Option<(RDKafkaErrorCo
 /// 太大则口令配错时无限重建、运维看不到确定信号。一次成功投递即清零。
 const AUTH_FAILURE_LATCH: u64 = 5;
 
-/// 判断错误码是否属于"可能可恢复、也可能是永久拒绝"的认证类。
+/// 业务作用：判断错误码是否属于"可能可恢复、也可能是永久拒绝"的认证类。
 ///
 /// librdkafka 把 broker 明确拒绝(code 58)与 token 刷新失败、auth 阶段 POLLHUP、
 /// SASL 重认证失败全部映射成同一个 `_AUTHENTICATION`(rdkafka_request.c:3388)，
@@ -964,7 +964,7 @@ fn is_recoverable_auth_code(code: RDKafkaErrorCode) -> bool {
     matches!(code, RDKafkaErrorCode::Authentication)
 }
 
-/// 判断 producer 错误码是否永久不可恢复；与 consumer 分类保持同一安全边界。
+/// 业务作用：判断 producer 错误码是否永久不可恢复；与 consumer 分类保持同一安全边界。
 ///
 /// 本函数只收「码值唯一、语义确定」的永久错误。`Authentication` 不在其中：
 /// 它由 `is_recoverable_auth_code` 走有界 latch，避免一次抖动永久打死 lane。
@@ -990,7 +990,7 @@ fn is_fatal_producer_code(code: RDKafkaErrorCode) -> bool {
     )
 }
 
-/// 判断同步入队错误是否为可退避的本地队列满。
+/// 业务作用：判断同步入队错误是否为可退避的本地队列满。
 ///
 /// # 参数
 ///
@@ -1002,7 +1002,7 @@ fn is_queue_full(error: &KafkaError) -> bool {
     )
 }
 
-/// 等待 fire 的 delivery report 并用结构化日志保留失败可观测性。
+/// 业务作用：等待 fire 的 delivery report 并用结构化日志保留失败可观测性。
 ///
 /// # 参数
 ///

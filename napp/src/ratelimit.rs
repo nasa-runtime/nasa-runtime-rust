@@ -26,7 +26,7 @@ pub struct RateLimitOutcome {
 }
 
 impl RateLimitOutcome {
-    /// 放行结果(无重试建议)。
+    /// 业务作用：放行结果(无重试建议)。
     pub fn allow() -> Self {
         Self {
             allowed: true,
@@ -34,7 +34,7 @@ impl RateLimitOutcome {
         }
     }
 
-    /// 拒绝结果 + 建议重试等待(补足窗口所需时长)。
+    /// 业务作用：拒绝结果 + 建议重试等待(补足窗口所需时长)。
     ///
     /// # 参数
     ///
@@ -54,7 +54,7 @@ impl RateLimitOutcome {
 /// 拒绝策略由实现决定并应在其文档中写明。
 #[async_trait]
 pub trait RateLimitProvider: Send + Sync + 'static {
-    /// 记一次命中并判定 `key` 是否在 `window` 内超过 `limit`。
+    /// 业务作用：记一次命中并判定 `key` 是否在 `window` 内超过 `limit`。
     ///
     /// # 参数
     ///
@@ -90,7 +90,7 @@ pub const MAX_DISTRIBUTED_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(365 
 const MAX_LEGACY_NAMESPACE_BYTES: usize = 128;
 const MAX_LEGACY_SUBJECT_BYTES: usize = 512;
 
-/// 将窗口转换为 Redis 正 i64 毫秒范围，拒绝零值和截断。
+/// 业务作用：将窗口转换为 Redis 正 i64 毫秒范围，拒绝零值和截断。
 fn redis_window_millis(window: Duration) -> Option<u64> {
     let millis = window.as_millis();
     if millis == 0 || millis > MAX_REDIS_WINDOW_MILLIS {
@@ -100,12 +100,12 @@ fn redis_window_millis(window: Duration) -> Option<u64> {
     }
 }
 
-/// 判断输入是否可安全沿用不含分隔符的历史明文 key 片段。
+/// 业务作用：判断输入是否可安全沿用不含分隔符的历史明文 key 片段。
 fn legacy_key_segment(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && !value.contains(':')
 }
 
-/// 历史简单 key 保持兼容；含分隔符或超长主体使用长度前缀摘要，既消除跨 namespace 拼接碰撞，也给
+/// 业务作用：历史简单 key 保持兼容；含分隔符或超长主体使用长度前缀摘要，既消除跨 namespace 拼接碰撞，也给
 /// Redis key 长度设置常数上界。摘要不用于认证，只用于无损域分隔。
 fn redis_rate_limit_key(namespace: &str, subject: &str) -> String {
     if legacy_key_segment(namespace, MAX_LEGACY_NAMESPACE_BYTES)
@@ -141,7 +141,7 @@ pub struct RedisRateLimitProvider {
 }
 
 impl RedisRateLimitProvider {
-    /// 用受管 Redis 客户端与命名空间构造分布式配额后端。
+    /// 业务作用：用受管 Redis 客户端与命名空间构造分布式配额后端。
     ///
     /// # 参数
     ///
@@ -157,7 +157,7 @@ impl RedisRateLimitProvider {
 
 #[async_trait]
 impl RateLimitProvider for RedisRateLimitProvider {
-    /// 对 `{namespace}:{key}` 原子自增计数并按 TTL 判定,Redis 故障时 fail-open。
+    /// 业务作用：对 `{namespace}:{key}` 原子自增计数并按 TTL 判定,Redis 故障时 fail-open。
     ///
     /// # 参数
     ///
@@ -234,7 +234,7 @@ pub struct DistributedRateLimit {
 
 #[cfg(feature = "web")]
 impl DistributedRateLimit {
-    /// 绑定提供方与配额参数,供 [`distributed_rate_limit`] 中间件按 `State` 注入。
+    /// 业务作用：绑定提供方与配额参数,供 [`distributed_rate_limit`] 中间件按 `State` 注入。
     ///
     /// # 参数
     ///
@@ -246,7 +246,7 @@ impl DistributedRateLimit {
             .expect("distributed rate limit configuration must be valid")
     }
 
-    /// 校验并绑定提供方与配额参数；适合把外部配置错误转换为启动失败，而不是等第一条请求才暴露。
+    /// 业务作用：校验并绑定提供方与配额参数；适合把外部配置错误转换为启动失败，而不是等第一条请求才暴露。
     pub fn try_new(
         provider: SharedRateLimitProvider,
         limit: u32,
@@ -269,7 +269,7 @@ impl DistributedRateLimit {
     }
 }
 
-/// 跨副本分布式限流中间件:按真实客户端 IP 作配额主体,经共享后端在**所有副本间合并计量**,
+/// 业务作用：跨副本分布式限流中间件:按真实客户端 IP 作配额主体,经共享后端在**所有副本间合并计量**,
 /// 超额即 429 + `Retry-After`。
 ///
 /// 与单实例每客户端 `governance::rate_limit` 分工:那层护本进程、各副本独立;本层把同一 IP 的总量

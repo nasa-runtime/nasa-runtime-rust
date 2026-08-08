@@ -75,7 +75,7 @@ struct TelemetryConfig {
 }
 
 impl Default for TelemetryConfig {
-    /// 使用启用状态、空服务名、2048 队列和 JSON OTLP 的保守缺省。
+    /// 业务作用：使用启用状态、空服务名、2048 队列和 JSON OTLP 的保守缺省。
     fn default() -> Self {
         Self {
             enabled: true,
@@ -89,7 +89,7 @@ impl Default for TelemetryConfig {
 }
 
 impl TelemetryConfig {
-    /// 无副作用校验:队列容量必须 ≥ 1(0 容量的 mpsc 会阻塞每次入队);`otlp_endpoint` 必须是合法 http(s) URL。
+    /// 业务作用：无副作用校验:队列容量必须 ≥ 1(0 容量的 mpsc 会阻塞每次入队);`otlp_endpoint` 必须是合法 http(s) URL。
     ///
     /// # 参数
     ///
@@ -147,7 +147,7 @@ pub(crate) struct TelemetryComponent {
 }
 
 impl TelemetryComponent {
-    /// 创建尚未读取配置的遥测组件。
+    /// 业务作用：创建尚未读取配置的遥测组件。
     ///
     /// # 参数
     ///
@@ -158,7 +158,7 @@ impl TelemetryComponent {
 }
 
 impl ApplicationComponent for TelemetryComponent {
-    /// 返回遥测组件稳定身份。
+    /// 业务作用：返回遥测组件稳定身份。
     ///
     /// # 参数
     ///
@@ -167,7 +167,7 @@ impl ApplicationComponent for TelemetryComponent {
         ComponentId::Telemetry
     }
 
-    /// 读取并冻结配置,创建有界导出管道、发布 exporter、spawn drainer 并压入停机 flush action。
+    /// 业务作用：读取并冻结配置,创建有界导出管道、发布 exporter、spawn drainer 并压入停机 flush action。
     ///
     /// 管道在 Start(而非 Ready)建立:Batch 模式不执行 Ready,但 Start 与停机都会执行,因此两种模式
     /// 都能建立管道并在退出前 flush。exporter 在流量入口 Ready 之前发布,生产者一旦运行即可入队。
@@ -258,7 +258,7 @@ enum SpanSink {
 }
 
 impl SpanSink {
-    /// 导出一批 span。日志 sink 逐条打日志;OTLP sink 批量 POST,失败只 warn 降级(不背压、不 panic)。
+    /// 业务作用：导出一批 span。日志 sink 逐条打日志;OTLP sink 批量 POST,失败只 warn 降级(不背压、不 panic)。
     ///
     /// # 参数
     ///
@@ -322,7 +322,7 @@ impl SpanSink {
     }
 }
 
-/// 按配置构造 span sink:配了 `otlp_endpoint` 则 OTLP JSON 导出,否则日志 sink。
+/// 业务作用：按配置构造 span sink:配了 `otlp_endpoint` 则 OTLP JSON 导出,否则日志 sink。
 ///
 /// # 参数
 ///
@@ -356,7 +356,7 @@ fn build_span_sink(config: &TelemetryConfig) -> ApplicationResult<SpanSink> {
     }
 }
 
-/// 把一批 span 编码成 OTLP/HTTP JSON `ExportTraceServiceRequest`(proto3 JSON 映射)。
+/// 业务作用：把一批 span 编码成 OTLP/HTTP JSON `ExportTraceServiceRequest`(proto3 JSON 映射)。
 ///
 /// trace/span id 用十六进制字符串(OTLP JSON 对 id 的约定)；时间戳使用生产者记录的真实开始/结束
 /// Unix 纳秒。kind 取自记录(SERVER=2/INTERNAL=1/CLIENT=3)。只含低基数 name 与 id，不含
@@ -404,7 +404,7 @@ fn otlp_traces_json(batch: &[SpanRecord], service_name: &str) -> String {
     .to_string()
 }
 
-/// 追加 protobuf varint 编码的 `u64`。
+/// 业务作用：追加 protobuf varint 编码的 `u64`。
 ///
 /// # 参数
 ///
@@ -422,7 +422,7 @@ fn put_varint(buffer: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-/// 写 protobuf tag = `(field << 3) | wire_type`。
+/// 业务作用：写 protobuf tag = `(field << 3) | wire_type`。
 ///
 /// # 参数
 ///
@@ -433,7 +433,7 @@ fn put_tag(buffer: &mut Vec<u8>, field: u32, wire: u32) {
     put_varint(buffer, u64::from((field << 3) | wire));
 }
 
-/// 写一个 varint 字段(wire type 0),用于枚举/整数。
+/// 业务作用：写一个 varint 字段(wire type 0),用于枚举/整数。
 ///
 /// # 参数
 ///
@@ -445,7 +445,7 @@ fn put_varint_field(buffer: &mut Vec<u8>, field: u32, value: u64) {
     put_varint(buffer, value);
 }
 
-/// 写一个 fixed64 字段(wire type 1,小端),用于 `*_time_unix_nano`。
+/// 业务作用：写一个 fixed64 字段(wire type 1,小端),用于 `*_time_unix_nano`。
 ///
 /// # 参数
 ///
@@ -457,7 +457,7 @@ fn put_fixed64_field(buffer: &mut Vec<u8>, field: u32, value: u64) {
     buffer.extend_from_slice(&value.to_le_bytes());
 }
 
-/// 写一个长度分隔字段(wire type 2):`bytes` / `string` / 嵌套消息。
+/// 业务作用：写一个长度分隔字段(wire type 2):`bytes` / `string` / 嵌套消息。
 ///
 /// # 参数
 ///
@@ -470,7 +470,7 @@ fn put_len_field(buffer: &mut Vec<u8>, field: u32, bytes: &[u8]) {
     buffer.extend_from_slice(bytes);
 }
 
-/// 把定长十六进制字符串(trace/span id)解成字节;非法字符处截断(id 由 `natelemetry` 生成,恒合法)。
+/// 业务作用：把定长十六进制字符串(trace/span id)解成字节;非法字符处截断(id 由 `natelemetry` 生成,恒合法)。
 ///
 /// # 参数
 ///
@@ -491,7 +491,7 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
     out
 }
 
-/// 把一批 span 编码成 OTLP/HTTP protobuf `ExportTraceServiceRequest`(二进制 wire 格式)。
+/// 业务作用：把一批 span 编码成 OTLP/HTTP protobuf `ExportTraceServiceRequest`(二进制 wire 格式)。
 ///
 /// 手写最小编码器,只覆盖本管道实际发出的字段(字段号取自 opentelemetry-proto v1 trace.proto):
 /// `Span{trace_id=1,span_id=2,name=5,kind=6,start_time_unix_nano=7,end_time_unix_nano=8}`、
@@ -553,7 +553,7 @@ fn otlp_traces_protobuf(batch: &[SpanRecord], service_name: &str) -> Vec<u8> {
     request
 }
 
-/// 受管 drainer:批量把 span 送到 sink,直到被取消或所有生产者释放。
+/// 业务作用：受管 drainer:批量把 span 送到 sink,直到被取消或所有生产者释放。
 ///
 /// 批策略:攒满 `BATCH_SIZE` 或距上条 span `FLUSH_INTERVAL` 未再入队即 flush;取消后排空缓冲的
 /// 最后一批(超出全局停机预算由上层 action 的 timeout 兜底)。
@@ -657,7 +657,7 @@ struct TelemetryFlush {
 }
 
 impl ShutdownAction for TelemetryFlush {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -666,7 +666,7 @@ impl ShutdownAction for TelemetryFlush {
         "telemetry-flush"
     }
 
-    /// 取消 drainer 并在全局剩余停机预算内 join;超时把未导出计为丢弃后如实报告。
+    /// 业务作用：取消 drainer 并在全局剩余停机预算内 join;超时把未导出计为丢弃后如实报告。
     ///
     /// # 参数
     ///
@@ -714,7 +714,7 @@ impl ShutdownAction for TelemetryFlush {
 }
 
 impl Drop for TelemetryFlush {
-    /// flush 被外层取消时停止 drainer，防止导出任务越过应用停机边界。
+    /// 业务作用：flush 被外层取消时停止 drainer，防止导出任务越过应用停机边界。
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(drainer) = self.drainer.take() {
@@ -723,7 +723,7 @@ impl Drop for TelemetryFlush {
     }
 }
 
-/// 从最终配置读取 `telemetry` 段;缺失该段时使用安全缺省(enabled=true、空 service、2048 队列)。
+/// 业务作用：从最终配置读取 `telemetry` 段;缺失该段时使用安全缺省(enabled=true、空 service、2048 队列)。
 ///
 /// # 参数
 ///
@@ -745,7 +745,7 @@ fn read_telemetry_config(application: &Application) -> ApplicationResult<Telemet
     Ok(config)
 }
 
-/// 在不创建任何管道的前提下校验候选配置树中的 `telemetry` 段。
+/// 业务作用：在不创建任何管道的前提下校验候选配置树中的 `telemetry` 段。
 ///
 /// # 参数
 ///
@@ -764,7 +764,7 @@ pub(crate) fn validate_telemetry_section(
     config.validate(phase)
 }
 
-/// 创建遥测组件的稳定生命周期错误。
+/// 业务作用：创建遥测组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -774,7 +774,7 @@ fn telemetry_error(phase: ApplicationPhase, message: impl Into<String>) -> Appli
     ApplicationError::new(ComponentId::Telemetry, phase, message)
 }
 
-/// 创建带底层错误链的遥测组件错误(输出前统一脱敏)。
+/// 业务作用：创建带底层错误链的遥测组件错误(输出前统一脱敏)。
 ///
 /// # 参数
 ///

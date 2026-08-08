@@ -1,5 +1,4 @@
-# nasa —— nasa-runtime-rust 的【唯一对外门面】(维护约束 门面方案;对标 tokio 的
-# 单一公共入口 + 模块分区 + feature 按需启用)。
+# nasa —— nasa-runtime-rust 的唯一对外门面，采用单一公共入口、模块分区与 feature 按需启用。
 # 业务只依赖本 crate:`use nasa::hystrix::...` / `nasa::cache` / `nasa::tx` /
 # `nasa::scheduling` / `nasa::web` / `nasa::ws`。对内仍是多实现 crate
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
@@ -16,7 +15,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# 默认必须为空(维护约束 §五.1):只用 web 的 HTTP 服务不应编译 SQLx/Redis/WebSocket。
+# 默认必须为空：只用 web 的 HTTP 服务不应编译 SQLx/Redis/WebSocket。
 default = []
 
 # 应用运行时核心：生命周期、配置快照、资源容器与受管任务监督。
@@ -77,7 +76,7 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 同 key 串行消费执行器(对照 原实现 TimingWheel.partition)。无重依赖, 仅 tokio 运行时原语。
+# 同 key 串行消费执行器。无重依赖，仅使用 tokio 运行时原语。
 partition = ["dep:partition_impl"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
@@ -115,15 +114,14 @@ crypto-legacy-rsa = ["crypto", "crypto_impl/legacy-rsa-private"]
 # 定点精确算术由 nanum 提供，对齐既有数值语义并使用 i128 扩展安全范围。
 numeric = ["dep:numeric_impl"]
 
-# 日期时间工具(对照 原实现 原工具包 DateUtils;crate = nadate,基于 chrono,i64 epoch ms + GMT+8 默认)。
+# 日期时间工具(crate = nadate，基于 chrono，使用 i64 epoch ms 与 GMT+8 默认时区)。
 date = ["dep:date_impl"]
 
-# 日志(对照 原实现 原工具包 logback-原框架.xml;crate = nalog,tracing + 原实现 风格 formatter +
-# 按天/按大小滚动 + maxHistory/totalSizeCap 保留 + 独立 error.log + 级别热切)。
+# 日志(crate = nalog，提供 formatter、按天/按大小滚动、保留策略、独立 error.log 与级别热切)。
 # 弱依赖桥：同时启用 application 时把 napp 的 log 组件编入，使 #[application("log", ...)] 生效。
 log = ["dep:log_impl", "application_impl?/log"]
 
-# 通用响应壳 BaseResponse(对照 原实现 原工具包 com.nasa.common.base.BaseResponse;crate = nabase)。
+# 通用响应壳 BaseResponse(crate = nabase)。
 # base 只暴露轻量公共 API 和纯工具;date/numeric/crypto/image 继续走 nasa 顶层 feature。
 base = ["dep:base_impl"]
 
@@ -154,7 +152,7 @@ nacos = ["discovery", "dep:nacos_impl"]
 # 配置中心组件与门面复用同一 nanacos 包，Cargo 会统一真实后端能力；无需再用一个含混的 napp 组件开关。
 nacos-sdk = ["nacos", "nacos_impl/nacos", "rest_discovery_nacos_impl?/nacos-sdk"]
 
-# 带服务发现的 HTTP client(crate = rest-discovery;门面 nasa::discovery::RestDiscovery,对标 @LoadBalanced RestTemplate)。
+# 带服务发现的 HTTP client(crate = rest-discovery；门面 nasa::discovery::RestDiscovery)。
 # 只面向 discovery::DiscoveryClient 抽象,不绑定具体后端。两层(同 ws/ws-redis 透传纪律):
 #   rest-discovery       = 引入 REST LB:显式内部调用(service_request / lb://)+ 普通外部 http(s)。
 #   rest-discovery-nacos = 便利:一键装配门面 nasa::discovery::init_from_config(读 DiscoveryConfig → 连 Nacos +
@@ -169,16 +167,16 @@ nacos-discovery = ["rest-discovery-nacos"]
 # 弱依赖桥：同时启用 application 时编入独立的注册发现组件。
 rest-discovery-nacos = ["rest-discovery", "nacos", "dep:rest_discovery_nacos_impl", "application_impl?/nacos-discovery"]
 
-# OpenFeign 风格声明式客户端宏(crate = rest-client-macro)。在 rest-discovery 之上叠加 #[rest_client] 宏。
+# 声明式 REST 客户端宏(crate = rest-client-macro)。在 rest-discovery 之上叠加 #[rest_client] 宏。
 #   rest-client       = REST LB + 声明式客户端宏(#[rest_client] + #[GetMapping/...])。
 #   rest-client-nacos = 便利:再把 nacos-sdk 一起打开(同 rest-discovery-nacos 纪律)。
 rest-client = ["rest-discovery", "dep:rest_client_macro"]
 rest-client-nacos = ["rest-client", "nacos-sdk"]
 
-# 图片压缩/缩放(对照 原实现 原工具包 ImageUtils;crate = nimage,基于 image crate)。
+# 图片压缩/缩放(crate = naimg，基于 image crate)。
 image = ["dep:image_impl"]
 
-# 仅用于 CI、示例或确实需要所有能力的服务;不要设为默认(维护约束 §五.3)。
+# 仅用于完整能力构建、示例或确实需要所有能力的服务；不要设为默认。
 full = [
     "application",
     "hystrix",
@@ -219,7 +217,7 @@ full = [
 ]
 
 [dependencies]
-# 依赖 key 用 *_impl,避免与门面公共模块同名(维护约束 §四)。
+# 依赖 key 使用 *_impl，避免与门面公共模块同名。
 application_impl = { package = "napp", version = "1.0.1", optional = true }
 application_macro = { package = "napp-macro", version = "1.0.1", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", optional = true }

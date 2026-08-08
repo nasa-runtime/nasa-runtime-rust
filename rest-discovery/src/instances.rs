@@ -53,7 +53,7 @@ struct WatchEntry {
 }
 
 impl WatchEntry {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     fn new() -> Arc<Self> {
         Arc::new(Self {
             removed: AtomicBool::new(false),
@@ -62,7 +62,7 @@ impl WatchEntry {
     }
 }
 
-/// 传输错误短期降级窗口是否仍在生效(`now < until`)。锁只在此瞬间持有,不跨 await。
+/// 业务作用：传输错误短期降级窗口是否仍在生效(`now < until`)。锁只在此瞬间持有,不跨 await。
 ///
 /// # 参数
 /// - `state`: 实例索引当前持有的快照状态。
@@ -98,7 +98,7 @@ pub(crate) struct InstanceSource {
 }
 
 impl InstanceSource {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(
         discovery: Arc<dyn DiscoveryClient>,
         watch: RestWatchOptions,
@@ -115,7 +115,7 @@ impl InstanceSource {
         }
     }
 
-    /// 取某服务当前实例快照(可能为空 = 权威无实例;由 client 决定是否 `NoAvailableInstance`)。
+    /// 业务作用：取某服务当前实例快照(可能为空 = 权威无实例;由 client 决定是否 `NoAvailableInstance`)。
     ///
     /// 循环是为支持「churn 回收后复活」:若取到的 entry 已被 [`mark_removed`](Self::mark_removed) 标记,
     /// 就换一个全新 entry 重来。init 完成后复查 `removed`,杜绝 init-in-flight 的 orphan task。
@@ -171,7 +171,7 @@ impl InstanceSource {
         }
     }
 
-    /// 把被标记 `removed` 的 entry 换成全新 entry —— 仅当 map 里【还是它】(Arc 身份 CAS),避免覆盖别人刚装的新 entry。
+    /// 业务作用：把被标记 `removed` 的 entry 换成全新 entry —— 仅当 map 里【还是它】(Arc 身份 CAS),避免覆盖别人刚装的新 entry。
     /// 旧 entry 的 task 在调用本函数前已被 abort(mark_removed 或 instances 的复查)。
     ///
     /// # 参数
@@ -187,7 +187,7 @@ impl InstanceSource {
         }
     }
 
-    /// 启动一次 watch:成功则播种快照 + spawn 自带退避重建的 pump,返回 `WatchState`;失败返回 `Err`(不写 cell)。
+    /// 业务作用：启动一次 watch:成功则播种快照 + spawn 自带退避重建的 pump,返回 `WatchState`;失败返回 `Err`(不写 cell)。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -224,7 +224,7 @@ impl InstanceSource {
         })
     }
 
-    /// 降级路径:discover + 短 TTL cache(+ stale-if-error)。
+    /// 业务作用：降级路径:discover + 短 TTL cache(+ stale-if-error)。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -274,7 +274,7 @@ impl InstanceSource {
         }
     }
 
-    /// 服务名超 grace 移出启发式索引时回收其 watch(,由 client 的 index 刷新循环驱动):
+    /// 业务作用：服务名超 grace 移出启发式索引时回收其 watch(,由 client 的 index 刷新循环驱动):
     /// 标记 `removed` + abort 已 init 的 pump(其 `task` 被 cancel → `ServiceWatchGuard` 随之 drop,释放后端订阅);
     /// **in-flight init**(cell 尚空)的 task 由该 init 完成后 [`instances`](Self::instances) 的 removed 复查自行 abort。
     /// 同时清掉降级 TTL 缓存。**不删 map entry**(删了会和正在 init 的 get 抢、漏 task);被请求时 `instances()` 会复活。
@@ -288,7 +288,7 @@ impl InstanceSource {
         self.ttl_cache.remove(service);
     }
 
-    /// 二阶段安全 prune(墓碑回收):删除「已标记 `removed` **且非本轮刚标记**」的 entry —— 给一轮
+    /// 业务作用：二阶段安全 prune(墓碑回收):删除「已标记 `removed` **且非本轮刚标记**」的 entry —— 给一轮
     /// refresh 的 grace,避开本轮刚 mark、可能正被显式调用复活的 entry。`retain` 在 shard 锁下与 `revive` 串行,
     /// 配合 `instances()` 的「持 Arc 复查 removed 自 abort」杜绝 init-in-flight orphan(与「立即 remove」的老路不同)。
     pub(crate) fn prune_removed_except(&self, just_marked: &std::collections::HashSet<&str>) {
@@ -296,7 +296,7 @@ impl InstanceSource {
             .retain(|k, e| !e.removed.load(Ordering::Acquire) || just_marked.contains(k.as_str()));
     }
 
-    /// 内部调用对该 service 发生【传输错误】(连接/超时)时调用(传输错误应触发该 service 快速刷新/恢复,
+    /// 业务作用：内部调用对该 service 发生【传输错误】(连接/超时)时调用(传输错误应触发该 service 快速刷新/恢复,
     /// 而非等下一轮 poll)。开一个【短期降级窗口】(长度 = `ttl_fallback`):窗口内后续请求走 discover+TTL 拿新数据,
     /// **过窗自动回 watch 快照热路径** —— 不动 pump 自己的 `degraded`,避免一次瞬时抖动把 service 永久降级。
     /// 同时清 TTL 缓存避免继续用旧数据。空实例列表不是错误,不在此触发(由调用方过滤)。
@@ -311,7 +311,7 @@ impl InstanceSource {
         self.metrics.transport_error_refresh();
     }
 
-    /// abort 所有 watch pump(`RemoteRuntime` drop / 运行时 reset 调用),避免后台任务泄漏。
+    /// 业务作用：abort 所有 watch pump(`RemoteRuntime` drop / 运行时 reset 调用),避免后台任务泄漏。
     /// 同时把每个 entry 标记 `removed`:让此刻正在 init(cell 尚空)的 get 完成后自 abort,收掉 init-in-flight 的 task。
     pub(crate) fn abort_all(&self) {
         for entry in self.watch_states.iter() {
@@ -323,7 +323,7 @@ impl InstanceSource {
     }
 }
 
-/// watch pump:消费一条订阅直到中断,然后按退避重建。期间持有 `ServiceWatchGuard`(只要求 Send)保订阅存活。
+/// 业务作用：watch pump:消费一条订阅直到中断,然后按退避重建。期间持有 `ServiceWatchGuard`(只要求 Send)保订阅存活。
 ///
 /// `degraded` 在「订阅中断、等待重建」时置 true,让 `instances()` 暂走 discover+TTL;重建成功置回 false。
 ///

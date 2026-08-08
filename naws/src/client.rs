@@ -26,7 +26,7 @@ use crate::wire::{encode_frame, frame_type, ping, wire_mode, FrameCodec};
 /// 客户端 builder 保持非 fallible；所有进入 Tokio timer 的外部时长在 build 时收敛到该上限。
 const MAX_CLIENT_RUNTIME_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-/// 保证计时器既不会因零间隔忙循环，也不会因极端时长溢出。
+/// 业务作用：保证计时器既不会因零间隔忙循环，也不会因极端时长溢出。
 fn bounded_client_duration(duration: Duration) -> Duration {
     duration.clamp(Duration::from_millis(1), MAX_CLIENT_RUNTIME_DURATION)
 }
@@ -87,7 +87,7 @@ struct Inner {
 }
 
 impl Inner {
-    /// 释放运行门禁并**唤醒** `wait_closed` 等待者。所有 `running→false` 的出口(首连失败、
+    /// 业务作用：释放运行门禁并**唤醒** `wait_closed` 等待者。所有 `running→false` 的出口(首连失败、
     /// 握手期被 close、supervisor 退出)都必须走它,否则 `close_and_wait` 会丢唤醒永久挂起
     ///。
     fn release_running(&self) {
@@ -95,7 +95,7 @@ impl Inner {
         self.running_done.notify_waiters();
     }
 
-    /// 当前连接的取消令牌克隆(level-triggered;读循环/握手/退避据此即时退出)。
+    /// 业务作用：当前连接的取消令牌克隆(level-triggered;读循环/握手/退避据此即时退出)。
     fn cancel_token(&self) -> CancellationToken {
         self.cancel.lock().unwrap().clone()
     }
@@ -113,7 +113,7 @@ pub struct ClientBuilder {
 }
 
 impl Client {
-    /// 创建客户端 builder。
+    /// 业务作用：创建客户端 builder。
     ///
     /// # 参数
     /// - `addr`: TCP 服务端地址,例如 `127.0.0.1:19091`。
@@ -144,17 +144,17 @@ impl Client {
         }
     }
 
-    /// 返回当前对象的 connected 状态。
+    /// 业务作用：返回当前对象的 connected 状态。
     pub fn is_connected(&self) -> bool {
         self.inner.connected.load(Ordering::Acquire)
     }
 
-    /// 读取 session id 状态；用于向调用方暴露当前运行信息。
+    /// 业务作用：读取 session id 状态；用于向调用方暴露当前运行信息。
     pub fn session_id(&self) -> Option<String> {
         self.inner.session_id.lock().unwrap().clone()
     }
 
-    /// 连接 + AUTH 握手。成功后后台 reader + heartbeat task 已启动。
+    /// 业务作用：连接 + AUTH 握手。成功后后台 reader + heartbeat task 已启动。
     /// auto_reconnect 开启时:**首连成功后**若断开会自动重连(首连失败仍返回 Err,由调用方决定)。
     pub async fn connect(&self) -> Result<AuthResponse, ClientError> {
         // 运行门禁:已在运行 → 拒绝(防多 supervisor 同时跑、互相覆盖 outbox)。
@@ -190,7 +190,7 @@ impl Client {
         Ok(resp)
     }
 
-    /// 注册某事件的接收回调(可在 connect 前或后调)。
+    /// 业务作用：注册某事件的接收回调(可在 connect 前或后调)。
     ///
     /// # 参数
     /// - `event`: 客户端需要监听的业务事件名,匹配服务端下发的 `Message.events`。
@@ -206,7 +206,7 @@ impl Client {
             .insert(event.into(), Arc::new(f));
     }
 
-    /// 注册断开连接回调；用于连接关闭后通知调用方清理状态。
+    /// 业务作用：注册断开连接回调；用于连接关闭后通知调用方清理状态。
     ///
     /// # 参数
     /// - `f`: 客户端连接断开后执行的业务回调。
@@ -219,7 +219,7 @@ impl Client {
 
     /* ============================== 发送 ============================== */
 
-    /// 发完整 Message(BITPACK)。返回是否成功入队。
+    /// 业务作用：发完整 Message(BITPACK)。返回是否成功入队。
     ///
     /// # 参数
     /// - `msg`: 已组装好的业务消息信封,会按 BITPACK_TLV 编码成 EVENT frame。
@@ -235,7 +235,7 @@ impl Client {
         }
     }
 
-    /// 业务事件(无路由,仅触发服务端 handler)。
+    /// 业务作用：业务事件(无路由,仅触发服务端 handler)。
     ///
     /// # 参数
     /// - `event`: 业务事件名。
@@ -244,7 +244,7 @@ impl Client {
         self.send_message(&base(event, payload))
     }
 
-    /// 私聊:发给指定 uid 的所有 session。
+    /// 业务作用：私聊:发给指定 uid 的所有 session。
     ///
     /// # 参数
     /// - `event`: 业务事件名。
@@ -256,7 +256,7 @@ impl Client {
         self.send_message(&m)
     }
 
-    /// 群聊:发给群成员。
+    /// 业务作用：群聊:发给群成员。
     ///
     /// # 参数
     /// - `event`: 业务事件名。
@@ -268,7 +268,7 @@ impl Client {
         self.send_message(&m)
     }
 
-    /// 端点级广播。
+    /// 业务作用：端点级广播。
     ///
     /// # 参数
     /// - `event`: 业务事件名。
@@ -280,7 +280,7 @@ impl Client {
         self.send_message(&m)
     }
 
-    /// 主动关闭(**异步触发**,不阻塞):停自动重连 + 丢 outbox(writer 退出)+ 唤醒读循环/退避。
+    /// 业务作用：主动关闭(**异步触发**,不阻塞):停自动重连 + 丢 outbox(writer 退出)+ 唤醒读循环/退避。
     /// 注意:运行门禁(`running`)由 supervisor 退出时的 RAII guard 复位,**不是**本函数同步清——
     /// 否则旧 supervisor 与新 connect 会互相覆盖状态。因此 close() 后**立刻** connect()
     /// 可能短暂返回 "already connected",直到旧 supervisor 收尾。`is_connected()` **不是** join 屏障
@@ -293,7 +293,7 @@ impl Client {
         self.inner.cancel.lock().unwrap().cancel(); // level-triggered:即便 read_loop 尚未 select 也不丢
     }
 
-    /// 等 supervisor 真正退出(运行门禁 `running` 释放)。此后 `connect()` 不会再返回
+    /// 业务作用：等 supervisor 真正退出(运行门禁 `running` 释放)。此后 `connect()` 不会再返回
     /// "already connected"。未在运行则立即返回。
     pub async fn wait_closed(&self) {
         loop {
@@ -306,7 +306,7 @@ impl Client {
         }
     }
 
-    /// 关闭并等待 supervisor 收尾——确定性重连屏障:`close_and_wait().await` 后即可安全 `connect()`。
+    /// 业务作用：关闭并等待 supervisor 收尾——确定性重连屏障:`close_and_wait().await` 后即可安全 `connect()`。
     pub async fn close_and_wait(&self) {
         self.close();
         self.wait_closed().await;
@@ -314,7 +314,7 @@ impl Client {
 }
 
 impl ClientBuilder {
-    /// 设置客户端连接的 endpoint。
+    /// 业务作用：设置客户端连接的 endpoint。
     ///
     /// # 参数
     /// - `ep`: 鉴权请求携带的 endpoint,默认 `/ws`。
@@ -323,7 +323,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置客户端鉴权令牌；用于握手阶段携带身份信息。
+    /// 业务作用：设置客户端鉴权令牌；用于握手阶段携带身份信息。
     ///
     /// # 参数
     /// - `t`: 业务鉴权 token,会写入 AuthRequest。
@@ -332,7 +332,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置客户端设备标识；用于服务端区分同一用户的不同终端。
+    /// 业务作用：设置客户端设备标识；用于服务端区分同一用户的不同终端。
     ///
     /// # 参数
     /// - `d`: 设备 ID,会写入 AuthRequest。
@@ -341,7 +341,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置客户端版本号；用于握手和兼容性判断。
+    /// 业务作用：设置客户端版本号；用于握手和兼容性判断。
     ///
     /// # 参数
     /// - `v`: 客户端版本号,会写入 AuthRequest。
@@ -350,7 +350,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置是否自动发送心跳；用于保持长连接活跃。
+    /// 业务作用：设置是否自动发送心跳；用于保持长连接活跃。
     ///
     /// # 参数
     /// - `on`: `true` 表示握手成功后由客户端定时发送 PING。
@@ -359,7 +359,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置连接超时时间；用于限制建立连接的等待窗口。
+    /// 业务作用：设置连接超时时间；用于限制建立连接的等待窗口。
     ///
     /// # 参数
     /// - `d`: TCP 连接和 AUTH 首次握手的超时时间。
@@ -368,7 +368,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 开启断线自动重连(指数退避 min..max)。
+    /// 业务作用：开启断线自动重连(指数退避 min..max)。
     ///
     /// # 参数
     /// - `on`: `true` 表示首连成功后的断线由 supervisor 自动重连。
@@ -377,7 +377,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置重连退避区间；用于控制断线重连频率。
+    /// 业务作用：设置重连退避区间；用于控制断线重连频率。
     ///
     /// # 参数
     /// - `min`: 首次或最小重连退避时间。
@@ -388,7 +388,7 @@ impl ClientBuilder {
         self
     }
 
-    /// 完成 builder 装配并返回可运行对象。
+    /// 业务作用：完成 builder 装配并返回可运行对象。
     pub fn build(mut self) -> Client {
         self.inner.connect_timeout = bounded_client_duration(self.inner.connect_timeout);
         self.inner.reconnect_min = bounded_client_duration(self.inner.reconnect_min);
@@ -402,7 +402,7 @@ impl ClientBuilder {
 
 /* ============================== 后台 task ============================== */
 
-/// 写入 writer task 内容；用于输出数据或持久化状态。
+/// 业务作用：写入 writer task 内容；用于输出数据或持久化状态。
 ///
 /// # 参数
 /// - `wh`: TCP 写半边。
@@ -418,7 +418,7 @@ async fn writer_task(mut wh: OwnedWriteHalf, mut rx: mpsc::Receiver<Bytes>) {
 
 type ClientFramed = FramedRead<tokio::net::tcp::OwnedReadHalf, FrameCodec>;
 
-/// 连接 + AUTH 握手 + 启动 writer/heartbeat。返回握手结果 + 读半边(由 supervisor 跑读循环)。
+/// 业务作用：连接 + AUTH 握手 + 启动 writer/heartbeat。返回握手结果 + 读半边(由 supervisor 跑读循环)。
 /// **不** spawn 读任务(避免 async 递归),供 connect() 与 supervisor 重连共用。
 ///
 /// # 参数
@@ -490,7 +490,7 @@ async fn establish_once(inner: Arc<Inner>) -> Result<(AuthResponse, ClientFramed
     Ok((resp, framed))
 }
 
-/// 读循环:解帧分派;连接结束(EOF/CLOSE/错误)或 close() 唤醒即返回。
+/// 业务作用：读循环:解帧分派;连接结束(EOF/CLOSE/错误)或 close() 唤醒即返回。
 ///
 /// # 参数
 /// - `framed`: 已建立连接的 frame 读取器。
@@ -543,7 +543,7 @@ struct SupervisorGuard {
     inner: Arc<Inner>,
 }
 impl Drop for SupervisorGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         self.inner.connected.store(false, Ordering::Release);
         *self.inner.outbox.lock().unwrap() = None;
@@ -551,7 +551,7 @@ impl Drop for SupervisorGuard {
     }
 }
 
-/// 连接 supervisor(每客户端一个,无递归):跑读循环;断开后按需退避重连。
+/// 业务作用：连接 supervisor(每客户端一个,无递归):跑读循环;断开后按需退避重连。
 ///
 /// # 参数
 /// - `inner`: 已解析的内部值或被包装对象。
@@ -589,7 +589,7 @@ async fn supervisor(inner: Arc<Inner>, framed: ClientFramed) {
     // _guard drop:复位 connected/outbox/running(任何路径,含 panic)。
 }
 
-/// 执行断连清理；用于关闭会话状态并触发回调。
+/// 业务作用：执行断连清理；用于关闭会话状态并触发回调。
 ///
 /// # 参数
 /// - `inner`: 已解析的内部值或被包装对象。
@@ -606,7 +606,7 @@ fn on_disconnect_cleanup(inner: &Arc<Inner>) {
     }
 }
 
-/// 分发收到的消息；用于按事件名调用注册的处理器。
+/// 业务作用：分发收到的消息；用于按事件名调用注册的处理器。
 ///
 /// # 参数
 /// - `inner`: 已解析的内部值或被包装对象。
@@ -631,7 +631,7 @@ fn dispatch(inner: &Arc<Inner>, msg: Message) {
     }
 }
 
-/// 运行客户端心跳任务；用于定期发送 ping 保持连接。
+/// 业务作用：运行客户端心跳任务；用于定期发送 ping 保持连接。
 ///
 /// # 参数
 /// - `tx`: 后台任务发送消息的通道或事务句柄。
@@ -653,7 +653,7 @@ async fn heartbeat_task(tx: mpsc::Sender<Bytes>, period: Duration, inner: Arc<In
 
 /* ============================== helpers ============================== */
 
-/// 构造基础消息帧；用于统一客户端外发事件格式。
+/// 业务作用：构造基础消息帧；用于统一客户端外发事件格式。
 ///
 /// # 参数
 /// - `event`: 客户端要发送到 endpoint 的业务事件名。
@@ -666,7 +666,7 @@ fn base(event: &str, payload: &[u8]) -> Message {
     }
 }
 
-/// 把空字符串转换为空选项；用于清理握手参数。
+/// 业务作用：把空字符串转换为空选项；用于清理握手参数。
 ///
 /// # 参数
 /// - `s`: 要解析的输入字符串。
@@ -678,7 +678,7 @@ fn opt(s: &str) -> Option<String> {
     }
 }
 
-/// 心跳周期 = 服务端 timeout 的一半(至少 1s,缺省 30s)。
+/// 业务作用：心跳周期 = 服务端 timeout 的一半(至少 1s,缺省 30s)。
 ///
 /// # 参数
 /// - `timeout_ms`: 超时时间毫秒数。

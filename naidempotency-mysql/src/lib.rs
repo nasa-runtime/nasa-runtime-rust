@@ -44,12 +44,12 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS idempotency_record_v2
 pub struct MySqlIdempotencyStore;
 
 impl MySqlIdempotencyStore {
-    /// 创建 store(不建连;连接在每次操作时经 natx 获取)。
+    /// 业务作用：创建 store(不建连;连接在每次操作时经 natx 获取)。
     pub fn new() -> Self {
         Self
     }
 
-    /// 确保幂等表存在。部署由迁移拥有 schema;此方法供演示环境自举。
+    /// 业务作用：确保幂等表存在。部署由迁移拥有 schema;此方法供演示环境自举。
     ///
     /// 需先 `natx::init` 注册默认 datasource。
     pub async fn ensure_schema() -> Result<(), IdempotencyError> {
@@ -64,7 +64,7 @@ impl MySqlIdempotencyStore {
 
 #[async_trait]
 impl IdempotencyStore for MySqlIdempotencyStore {
-    /// 以唯一键 INSERT 竞争首次执行，并对冲突记录执行租约接管或已有状态裁决。
+    /// 业务作用：以唯一键 INSERT 竞争首次执行，并对冲突记录执行租约接管或已有状态裁决。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -124,7 +124,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
         }
     }
 
-    /// 在 fingerprint 与 lease 同时匹配时把记录原子转换为可重放完成态。
+    /// 业务作用：在 fingerprint 与 lease 同时匹配时把记录原子转换为可重放完成态。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -156,7 +156,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
         .map_err(map_err)
     }
 
-    /// 删除仍属于当前 owner 的在途记录，已完成或已换 owner 时返回 false。
+    /// 业务作用：删除仍属于当前 owner 的在途记录，已完成或已换 owner 时返回 false。
     async fn abort(
         &self,
         key: &IdempotencyKey,
@@ -184,7 +184,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
 }
 
 impl MySqlIdempotencyStore {
-    /// 主键已存在时读现有行裁决:指纹不符→冲突;已完成→重放;仍进行中→并发冲突。
+    /// 业务作用：主键已存在时读现有行裁决:指纹不符→冲突;已完成→重放;仍进行中→并发冲突。
     async fn decide_existing(
         &self,
         key: &IdempotencyKey,
@@ -240,12 +240,12 @@ impl MySqlIdempotencyStore {
     }
 }
 
-/// 把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显 SQL/凭据/请求体)。
+/// 业务作用：把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显 SQL/凭据/请求体)。
 fn map_err<E>(_error: E) -> IdempotencyError {
     IdempotencyError::new("database error")
 }
 
-/// 是否为唯一键冲突(主键已存在)。
+/// 业务作用：是否为唯一键冲突(主键已存在)。
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     error
         .as_database_error()

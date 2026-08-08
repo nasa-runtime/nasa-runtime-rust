@@ -28,7 +28,7 @@ pub struct AuthorizationLayerState {
 }
 
 impl AuthorizationLayerState {
-    /// 构造 route + object 授权统一边界。
+    /// 业务作用：构造 route + object 授权统一边界。
     pub fn new(
         registry: Option<SharedPolicyRegistry>,
         object_authorizer: Option<SharedObjectAuthorizer>,
@@ -43,7 +43,7 @@ impl AuthorizationLayerState {
     }
 }
 
-/// 授权中间件。route 无策略或主体满足要求则放行;否则 403。
+/// 业务作用：授权中间件。route 无策略或主体满足要求则放行;否则 403。
 ///
 /// 主体来自请求扩展 `Principal`——未认证/无主体时视为空 scope 集,受保护 route 将被拒。
 ///

@@ -62,7 +62,7 @@ pub struct WsKafkaRuntimeConfig {
 }
 
 impl WsKafkaRuntimeConfig {
-    /// 返回适合生产继续细化的安全基线。
+    /// 业务作用：返回适合生产继续细化的安全基线。
     pub fn new(local_node: impl Into<String>) -> Self {
         let local_node = local_node.into();
         Self {
@@ -176,7 +176,7 @@ pub struct WsKafkaRuntime {
 }
 
 impl WsKafkaRuntime {
-    /// 校验通用配置、构造 KafkaProxy 并冻结 socket runtime。
+    /// 业务作用：校验通用配置、构造 KafkaProxy 并冻结 socket runtime。
     ///
     /// # 参数
     ///
@@ -196,7 +196,7 @@ impl WsKafkaRuntime {
         Self::new(kafka, config, contract)
     }
 
-    /// 以已经构造的 KafkaProxy 装配 socket runtime。
+    /// 业务作用：以已经构造的 KafkaProxy 装配 socket runtime。
     ///
     /// # 参数
     ///
@@ -257,19 +257,19 @@ impl WsKafkaRuntime {
         })
     }
 
-    /// 返回实现 control plane Notifier 的轻量句柄。
+    /// 业务作用：返回实现 control plane Notifier 的轻量句柄。
     pub fn notifier(&self) -> KafkaNotifier {
         KafkaNotifier {
             runtime: self.clone(),
         }
     }
 
-    /// 返回固定 data lane/topic 的 cluster data publisher。
+    /// 业务作用：返回固定 data lane/topic 的 cluster data publisher。
     pub fn cluster_data_publisher(&self) -> Arc<KafkaClusterDataPublisher> {
         Arc::clone(&self.inner.cluster_data_publisher)
     }
 
-    /// runtime ready 后返回固定 data lane 的业务 raw publisher。
+    /// 业务作用：runtime ready 后返回固定 data lane 的业务 raw publisher。
     ///
     /// # 错误
     ///
@@ -283,7 +283,7 @@ impl WsKafkaRuntime {
         Ok(self.inner.data_publisher.clone())
     }
 
-    /// 返回 control consumer group 的健康快照。
+    /// 业务作用：返回 control consumer group 的健康快照。
     ///
     /// # 错误
     ///
@@ -295,7 +295,7 @@ impl WsKafkaRuntime {
             .await
     }
 
-    /// 返回 data consumer group 的健康快照。
+    /// 业务作用：返回 data consumer group 的健康快照。
     ///
     /// # 错误
     ///
@@ -315,7 +315,7 @@ impl WsKafkaRuntime {
         self.inner.kafka.group_health(group).await
     }
 
-    /// 返回 control/data/DLT 三平面的物理 producer 容量与累计结果。
+    /// 业务作用：返回 control/data/DLT 三平面的物理 producer 容量与累计结果。
     pub fn plane_stats(&self) -> WsKafkaPlaneStats {
         WsKafkaPlaneStats {
             control: self.inner.control_lane.stats(),
@@ -324,7 +324,7 @@ impl WsKafkaRuntime {
         }
     }
 
-    /// 在 Server build 后、listener bind 前一次性注入本地 Sender 与来源围栏。
+    /// 业务作用：在 Server build 后、listener bind 前一次性注入本地 Sender 与来源围栏。
     ///
     /// # 参数
     ///
@@ -364,7 +364,7 @@ impl WsKafkaRuntime {
         Ok(())
     }
 
-    /// 显式启动 data-only 模式，不伪造 control Notifier。
+    /// 业务作用：显式启动 data-only 模式，不伪造 control Notifier。
     ///
     /// # 错误
     ///
@@ -373,7 +373,7 @@ impl WsKafkaRuntime {
         self.start(false).await
     }
 
-    /// 关闭 ingress、停止 consumer、排空 producer，并等待后台检查任务退出。
+    /// 业务作用：关闭 ingress、停止 consumer、排空 producer，并等待后台检查任务退出。
     ///
     /// # 错误
     ///
@@ -418,7 +418,7 @@ impl WsKafkaRuntime {
         result
     }
 
-    /// 返回稳定 runtime 健康快照。
+    /// 业务作用：返回稳定 runtime 健康快照。
     pub fn health(&self) -> WsKafkaRuntimeHealth {
         WsKafkaRuntimeHealth {
             state: state_name(self.state()),
@@ -431,7 +431,7 @@ impl WsKafkaRuntime {
         }
     }
 
-    /// 安装 control 回调并启动完整 runtime。
+    /// 业务作用：安装 control 回调并启动完整 runtime。
     async fn start_control(&self, on_message: OnMessage) -> nafka::Result<()> {
         self.inner
             .on_control
@@ -440,7 +440,7 @@ impl WsKafkaRuntime {
         self.start(true).await
     }
 
-    /// 核验 topic、冻结 registry 并等待精确 topic assignment。
+    /// 业务作用：核验 topic、冻结 registry 并等待精确 topic assignment。
     async fn start(&self, include_control: bool) -> nafka::Result<()> {
         let _guard = self.inner.start_lock.lock().await;
         match self.state() {
@@ -487,7 +487,7 @@ impl WsKafkaRuntime {
         }
     }
 
-    /// 执行一次启动事务。
+    /// 业务作用：执行一次启动事务。
     async fn start_inner(&self, include_control: bool) -> nafka::Result<()> {
         let senders = self
             .inner
@@ -577,7 +577,7 @@ impl WsKafkaRuntime {
         Ok(())
     }
 
-    /// 启动运行期 topic 漂移复核；发现漂移立即关闭 Kafka ingress。
+    /// 业务作用：启动运行期 topic 漂移复核；发现漂移立即关闭 Kafka ingress。
     fn spawn_contract_monitor(&self) {
         let interval_ms = self.inner.config.contract_check_interval_ms;
         if interval_ms == 0 {
@@ -632,7 +632,7 @@ impl WsKafkaRuntime {
         });
     }
 
-    /// 由同步 Notifier.shutdown 发起受跟踪的异步关闭任务。
+    /// 业务作用：由同步 Notifier.shutdown 发起受跟踪的异步关闭任务。
     fn spawn_shutdown(&self) {
         if matches!(
             self.state(),
@@ -656,7 +656,7 @@ impl WsKafkaRuntime {
         });
     }
 
-    /// 读取内部生命周期。
+    /// 业务作用：读取内部生命周期。
     fn state(&self) -> RuntimeState {
         match self.inner.state.load(Ordering::Acquire) {
             0 => RuntimeState::Created,
@@ -669,7 +669,7 @@ impl WsKafkaRuntime {
     }
 }
 
-/// 判断一次运行期契约复核失败是否必须立即停 ingress。
+/// 业务作用：判断一次运行期契约复核失败是否必须立即停 ingress。
 ///
 /// 已成功观测到的确定契约不一致使用 `TopicContract`，立即失败；broker/网络/权限等
 /// 观测错误允许少量连续重试，避免一次短时 AllBrokersDown 被误判成永久分区漂移。
@@ -690,9 +690,9 @@ pub struct KafkaNotifier {
 }
 
 impl KafkaNotifier {
-    /// 发布 control payload 并等待 broker delivery report。
+    /// 业务作用：发布 control payload 并等待 broker delivery report。
     ///
-    /// 该入口用于需要明确 broker 确认的启动控制消息和验收；常规 presence 仍使用 Notifier::publish 的
+    /// 该入口用于需要明确 broker 确认的启动控制消息和部署连通性检查；常规 presence 仍使用 Notifier::publish 的
     /// 有界 fire 语义。
     ///
     /// # 参数
@@ -720,7 +720,7 @@ impl KafkaNotifier {
 }
 
 impl Notifier for KafkaNotifier {
-    /// 安装 Cluster control callback，启动两组 consumer 并等待 broker assignment。
+    /// 业务作用：安装 Cluster control callback，启动两组 consumer 并等待 broker assignment。
     fn start(&self, on_message: OnMessage) -> ReadyFuture {
         if self
             .runtime
@@ -748,7 +748,7 @@ impl Notifier for KafkaNotifier {
         })
     }
 
-    /// 把 ClusterEvent bytes 发布到固定 control topic/lane，并以 source node 作 key。
+    /// 业务作用：把 ClusterEvent bytes 发布到固定 control topic/lane，并以 source node 作 key。
     fn publish(&self, payload: Bytes) -> PublishOutcome {
         if self.runtime.state() != RuntimeState::Running {
             return PublishOutcome::Closed;
@@ -768,12 +768,12 @@ impl Notifier for KafkaNotifier {
         }
     }
 
-    /// 发起异步 runtime shutdown；真正 join 由 task tracker 完成。
+    /// 业务作用：发起异步 runtime shutdown；真正 join 由 task tracker 完成。
     fn shutdown(&self) {
         self.runtime.spawn_shutdown();
     }
 
-    /// 返回 runtime 后台任务跟踪器。
+    /// 业务作用：返回 runtime 后台任务跟踪器。
     fn task_tracker(&self) -> Option<&TaskTracker> {
         Some(&self.runtime.inner.tasks)
     }
@@ -790,22 +790,22 @@ struct ControlConsumer {
 }
 
 impl PassthroughConsumer for ControlConsumer {
-    /// 返回固定 control topic。
+    /// 业务作用：返回固定 control topic。
     fn topics(&self) -> Vec<String> {
         vec![self.topic.clone()]
     }
 
-    /// 返回固定 control 事件。
+    /// 业务作用：返回固定 control 事件。
     fn event(&self) -> String {
         NAWS_CONTROL_EVENT.into()
     }
 
-    /// 返回当前节点独占 control group。
+    /// 业务作用：返回当前节点独占 control group。
     fn group(&self) -> GroupSpec {
         GroupSpec::Named(self.group.clone())
     }
 
-    /// 复制一次 control payload 后同步交给 Cluster。
+    /// 业务作用：复制一次 control payload 后同步交给 Cluster。
     fn consume_borrowed(
         &self,
         record: BorrowedKafkaRecord<'_>,
@@ -834,7 +834,7 @@ impl PassthroughConsumer for ControlConsumer {
 /// （Kafka 记录 = payload + key + headers），再加一次即重复计入。
 const FRAME_ENVELOPE_BUDGET: usize = 4 * 1024;
 
-/// 检查"能装进单帧的最大记录"这一跨侧约束，不一致时**告警**（不拒绝启动）。
+/// 业务作用：检查"能装进单帧的最大记录"这一跨侧约束，不一致时**告警**（不拒绝启动）。
 ///
 /// 记录经 `Message` TLV 信封编码后才成为 frame，帧长 ≈ payload + 信封 + 定长头。
 /// 若允许的最大记录加信封超过 `max_frame`，一条**合法**的大记录会在编码期
@@ -867,7 +867,7 @@ fn warn_frame_budget(kafka: &KafkaProxy, min_max_frame: usize) {
     }
 }
 
-/// 交叉校验 socket Kafka topic、lane、group、DLT 与 wire frame 预算的不变量。
+/// 业务作用：交叉校验 socket Kafka topic、lane、group、DLT 与 wire frame 预算的不变量。
 fn validate_runtime_config(
     kafka: &KafkaProxy,
     config: &WsKafkaRuntimeConfig,
@@ -982,7 +982,7 @@ fn validate_runtime_config(
     Ok(())
 }
 
-/// 要求 TopicContract 覆盖 control/data 实际可能产生的 DLT topic。
+/// 业务作用：要求 TopicContract 覆盖 control/data 实际可能产生的 DLT topic。
 fn validate_dead_letter_topics(
     kafka: &KafkaProxy,
     config: &WsKafkaRuntimeConfig,
@@ -1008,7 +1008,7 @@ fn validate_dead_letter_topics(
     Ok(())
 }
 
-/// 核算各物理 native queue 与 DLT backlog 的显式内存上限。
+/// 业务作用：核算各物理 native queue 与 DLT backlog 的显式内存上限。
 fn validate_memory_budget(kafka: &KafkaProxy, config: &WsKafkaRuntimeConfig) -> nafka::Result<()> {
     let mut names = std::collections::BTreeSet::new();
     names.insert(config.control_lane.as_str());
@@ -1032,7 +1032,7 @@ fn validate_memory_budget(kafka: &KafkaProxy, config: &WsKafkaRuntimeConfig) -> 
     Ok(())
 }
 
-/// 返回一个 lane 生效的 native queue KiB 上限。
+/// 业务作用：返回一个 lane 生效的 native queue KiB 上限。
 fn effective_queue_kbytes(config: &KafkaConfig, lane: &str) -> usize {
     if lane == "default" {
         return config.producer.queue_buffering_max_kbytes;
@@ -1045,7 +1045,7 @@ fn effective_queue_kbytes(config: &KafkaConfig, lane: &str) -> usize {
         .unwrap_or(config.producer.queue_buffering_max_kbytes)
 }
 
-/// 校验生产 lane 的 durability 与显式容量覆盖。
+/// 业务作用：校验生产 lane 的 durability 与显式容量覆盖。
 fn validate_production_lane(
     config: &KafkaConfig,
     lane: &str,
@@ -1102,7 +1102,7 @@ fn validate_production_lane(
     Ok(())
 }
 
-/// 按 common→producer→lane 覆盖顺序读取一个 producer 原生属性。
+/// 业务作用：按 common→producer→lane 覆盖顺序读取一个 producer 原生属性。
 fn effective_native_property<'a>(
     config: &'a KafkaConfig,
     lane: &str,
@@ -1118,7 +1118,7 @@ fn effective_native_property<'a>(
         .map(String::as_str)
 }
 
-/// 从 nafka 与 socket 配置生成 topic 容量核验上下文。
+/// 业务作用：从 nafka 与 socket 配置生成 topic 容量核验上下文。
 fn contract_limits(kafka: &KafkaProxy, config: &WsKafkaRuntimeConfig) -> TopicContractLimits {
     TopicContractLimits {
         full_presence_interval_ms: config.full_presence_interval_ms,
@@ -1129,7 +1129,7 @@ fn contract_limits(kafka: &KafkaProxy, config: &WsKafkaRuntimeConfig) -> TopicCo
     }
 }
 
-/// 返回稳定生命周期名称。
+/// 业务作用：返回稳定生命周期名称。
 fn state_name(state: RuntimeState) -> &'static str {
     match state {
         RuntimeState::Created => "Created",

@@ -18,7 +18,7 @@ categories.workspace = true
 name = "nadis"
 [features]
 # search：RediSearch/RedisJSON 封装，包括 SearchActuator、JsonArrayOps 与查询 AST。
-# 默认关——只用 lock/pipeline/partition 的服务不应编译 search(门面 §五.1 同款纪律;
+# 默认关闭：只用 lock/pipeline/partition 的服务不应编译 search；
 # 门面侧经 "redis-search" 透传)。
 search = []
 # derive：重新导出 nadis-derive 的 #[derive(RedisDocument)]。

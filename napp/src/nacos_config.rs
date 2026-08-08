@@ -52,26 +52,26 @@ struct AbortOnDropTask<T> {
 }
 
 impl<T> AbortOnDropTask<T> {
-    /// 包装一个必须由当前生命周期阶段负责 join 或 abort 的任务。
+    /// 业务作用：包装一个必须由当前生命周期阶段负责 join 或 abort 的任务。
     fn new(handle: JoinHandle<T>) -> Self {
         Self { handle }
     }
 
-    /// 等待任务完成；消费 guard 后不会再触发 Drop abort。
+    /// 业务作用：等待任务完成；消费 guard 后不会再触发 Drop abort。
     async fn join(mut self) -> Result<T, tokio::task::JoinError> {
         (&mut self.handle).await
     }
 }
 
 impl<T> Drop for AbortOnDropTask<T> {
-    /// 阶段 future 取消时立即 abort，禁止 JoinHandle 默认 detach。
+    /// 业务作用：阶段 future 取消时立即 abort，禁止 JoinHandle 默认 detach。
     fn drop(&mut self) {
         self.handle.abort();
     }
 }
 
 impl NacosConfigComponent {
-    /// 创建尚未连接配置中心的组件。
+    /// 业务作用：创建尚未连接配置中心的组件。
     ///
     /// # 参数
     ///
@@ -89,7 +89,7 @@ impl NacosConfigComponent {
 }
 
 impl ApplicationComponent for NacosConfigComponent {
-    /// 返回配置中心组件稳定身份。
+    /// 业务作用：返回配置中心组件稳定身份。
     ///
     /// # 参数
     ///
@@ -98,7 +98,7 @@ impl ApplicationComponent for NacosConfigComponent {
         ComponentId::NacosConfig
     }
 
-    /// 读取本地 `nacos` 段；enabled=true 时连接、合并并重发布最终配置树。
+    /// 业务作用：读取本地 `nacos` 段；enabled=true 时连接、合并并重发布最终配置树。
     ///
     /// # 参数
     ///
@@ -216,7 +216,7 @@ impl ApplicationComponent for NacosConfigComponent {
         })
     }
 
-    /// enabled+connected(Bootstrap 已成功首拉)时登记配置中心就绪 contributor。
+    /// 业务作用：enabled+connected(Bootstrap 已成功首拉)时登记配置中心就绪 contributor。
     ///
     /// 必须在 UserHook 封口前(Start)登记;首拉失败已在 Bootstrap fail-closed,故走到这里即首拉成功。
     /// Ready 启动 watch 后再 observe Ready。`enabled=false`(本地树)无远端可监控,不登记。
@@ -244,7 +244,7 @@ impl ApplicationComponent for NacosConfigComponent {
         })
     }
 
-    /// enabled 时启动 watch driver 作为受监督关键任务，并登记 guard 关闭动作。
+    /// 业务作用：enabled 时启动 watch driver 作为受监督关键任务，并登记 guard 关闭动作。
     ///
     /// # 参数
     ///
@@ -337,7 +337,7 @@ impl ApplicationComponent for NacosConfigComponent {
         })
     }
 
-    /// 把 watch driver 交给 Runner 关键任务监督集合。
+    /// 业务作用：把 watch driver 交给 Runner 关键任务监督集合。
     ///
     /// # 参数
     ///
@@ -357,7 +357,7 @@ struct NacosWatchShutdown {
 }
 
 impl ShutdownAction for NacosWatchShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -366,7 +366,7 @@ impl ShutdownAction for NacosWatchShutdown {
         "nacos-config-watch"
     }
 
-    /// 先取消 driver，再显式关闭 MultiWatchGuard（Drop 只 abort，不算优雅关闭）。
+    /// 业务作用：先取消 driver，再显式关闭 MultiWatchGuard（Drop 只 abort，不算优雅关闭）。
     ///
     /// # 参数
     ///
@@ -410,7 +410,7 @@ struct WatchDriver {
 }
 
 impl WatchDriver {
-    /// 循环消费最新 bundle：合并失败保留旧快照，成功则发布新版本。
+    /// 业务作用：循环消费最新 bundle：合并失败保留旧快照，成功则发布新版本。
     ///
     /// 作为关键任务：取消时正常返回（停机阶段 reap 归类为预期）；receiver 意外关闭时返回
     /// 让 Runner 在 Running 阶段 reap 归类为故障。
@@ -512,7 +512,7 @@ impl WatchDriver {
         }
     }
 
-    /// 对一帧 bundle 执行合并、校验并按需发布新配置版本。
+    /// 业务作用：对一帧 bundle 执行合并、校验并按需发布新配置版本。
     ///
     /// 返回 `None` 表示合并结果与当前快照逐字节相同、本帧未发布：注册 watch 时 SDK 会先投一次
     /// 初始通知，重连和无关文档变更也会触发全量重拉，若照单发布就会出现"版本号涨了但配置没变"的
@@ -579,7 +579,7 @@ impl WatchDriver {
         Ok(Some(version))
     }
 
-    /// 对可热刷组件执行重应用，并构造与本次发布严格同版本的目标状态表。
+    /// 业务作用：对可热刷组件执行重应用，并构造与本次发布严格同版本的目标状态表。
     ///
     /// 判定规则：
     /// - `application.*`：bootstrap-only，与预读 pin 一致则推进 applied_version，被远端改写则记
@@ -648,7 +648,7 @@ impl WatchDriver {
     }
 }
 
-/// 读取某个目标在当前视图中最后一次成功 apply 的版本。
+/// 业务作用：读取某个目标在当前视图中最后一次成功 apply 的版本。
 ///
 /// 未出现在当前状态表中的目标按初始版本 1 处理，保证 `RestartRequired` 一定携带可比较的版本号。
 ///
@@ -664,7 +664,7 @@ fn applied_version_of(current: &ConfigView, target: &ReloadTarget) -> u64 {
         .unwrap_or(1)
 }
 
-/// 读取本地 `nacos` 段；段缺失时返回 `enabled=false` 的默认引导配置。
+/// 业务作用：读取本地 `nacos` 段；段缺失时返回 `enabled=false` 的默认引导配置。
 ///
 /// # 参数
 ///
@@ -683,7 +683,7 @@ fn read_nacos_bootstrap(application: &Application) -> ApplicationResult<NacosBoo
     snapshot.section::<NacosBootstrap>("nacos")
 }
 
-/// 从 import 列表派生本轮**远端全量重拉**所含文档的来源摘要。
+/// 业务作用：从 import 列表派生本轮**远端全量重拉**所含文档的来源摘要。
 ///
 /// 只包含 Nacos 文档：本地 base 文件不是可重拉来源，混进去会让订阅者误判本轮变更范围。
 /// nanacos 的 bundle 也不提供“究竟哪个 dataId 触发”的信息，因此这里如实列出本轮包含的全部文档。
@@ -706,7 +706,7 @@ fn nacos_sources(imports: &[YmlImport], boot: &NacosBootstrap) -> Vec<ConfigSour
         .collect()
 }
 
-/// 在不建立任何连接的前提下校验候选配置树中的 `nacos` 段。
+/// 业务作用：在不建立任何连接的前提下校验候选配置树中的 `nacos` 段。
 ///
 /// 供配置热刷新在发布候选前使用；段缺失等价于 `enabled=false`，只有非法结构才拒绝整帧。
 ///
@@ -726,7 +726,7 @@ pub(crate) fn validate_nacos_section(
         .map_err(|error| nacos_error_src(phase, "invalid `nacos` configuration section", error))
 }
 
-/// 创建不携带底层错误链的配置中心生命周期错误。
+/// 业务作用：创建不携带底层错误链的配置中心生命周期错误。
 ///
 /// # 参数
 ///
@@ -736,7 +736,7 @@ fn nacos_error(phase: ApplicationPhase, message: impl Into<String>) -> Applicati
     ApplicationError::new(ComponentId::NacosConfig, phase, message)
 }
 
-/// 创建带底层错误链的配置中心错误。
+/// 业务作用：创建带底层错误链的配置中心错误。
 ///
 /// # 参数
 ///

@@ -40,7 +40,7 @@ pub struct DataSourceConfig {
     pub probe_on_start: bool,
 }
 
-/// 返回连接池上限的缺省值。
+/// 业务作用：返回连接池上限的缺省值。
 ///
 /// # 参数
 ///
@@ -49,7 +49,7 @@ fn default_max_connections() -> u32 {
     10
 }
 
-/// 返回获取连接等待上限的缺省毫秒数。
+/// 业务作用：返回获取连接等待上限的缺省毫秒数。
 ///
 /// # 参数
 ///
@@ -58,7 +58,7 @@ fn default_acquire_timeout_ms() -> u64 {
     2_000
 }
 
-/// 返回建连上限的缺省毫秒数。
+/// 业务作用：返回建连上限的缺省毫秒数。
 ///
 /// # 参数
 ///
@@ -67,7 +67,7 @@ fn default_connect_timeout_ms() -> u64 {
     5_000
 }
 
-/// 返回是否默认执行启动探测。
+/// 业务作用：返回是否默认执行启动探测。
 ///
 /// # 参数
 ///
@@ -77,7 +77,7 @@ fn default_probe_on_start() -> bool {
 }
 
 impl std::fmt::Debug for DataSourceConfig {
-    /// 输出不含连接串凭据的调试视图。
+    /// 业务作用：输出不含连接串凭据的调试视图。
     ///
     /// # 参数
     ///
@@ -95,7 +95,7 @@ impl std::fmt::Debug for DataSourceConfig {
 }
 
 impl DataSourceConfig {
-    /// 校验会影响连通性与池行为的取值。
+    /// 业务作用：校验会影响连通性与池行为的取值。
     ///
     /// 调用时机是建池之前；失败表示配置本身不可用，不会留下任何连接副作用。
     ///
@@ -127,7 +127,7 @@ impl DataSourceConfig {
         Ok(())
     }
 
-    /// 返回可安全写入日志和错误消息的定位信息（host:port/database）。
+    /// 业务作用：返回可安全写入日志和错误消息的定位信息（host:port/database）。
     ///
     /// 只保留 authority 中 `@` 之后的部分与路径，因此不会带出用户名或口令。
     ///
@@ -154,7 +154,7 @@ impl DataSourceConfig {
     }
 }
 
-/// 用单条连接探测数据源真实可用性。
+/// 业务作用：用单条连接探测数据源真实可用性。
 ///
 /// 这里刻意不复用连接池：池的获取超时会把 `Connection refused` / `Access denied` /
 /// `Unknown database` 统一压成一个模糊的 acquire timeout，启动期因此看不到真正的失败原因。
@@ -181,7 +181,7 @@ pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 按配置创建惰性连接池。
+/// 业务作用：按配置创建惰性连接池。
 ///
 /// 返回的池尚未建立任何连接（`min_connections > 0` 时由 SQLx 后台补足）；连通性应先由
 /// [`probe`] 确认。池的所有权交给调用方，停机时必须显式 `close().await`。
@@ -198,7 +198,7 @@ pub fn build_pool(config: &DataSourceConfig) -> anyhow::Result<MySqlPool> {
     Ok(pool)
 }
 
-/// 去掉连接串中的 userinfo，用于脱敏展示。
+/// 业务作用：去掉连接串中的 userinfo，用于脱敏展示。
 ///
 /// # 参数
 ///

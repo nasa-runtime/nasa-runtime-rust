@@ -29,7 +29,7 @@ pub enum InterceptorStage {
 }
 
 impl InterceptorStage {
-    /// 返回排序使用的固定阶段序号。
+    /// 业务作用：返回排序使用的固定阶段序号。
     const fn rank(self) -> u8 {
         match self {
             Self::Edge => 0,
@@ -96,54 +96,54 @@ pub struct InterceptorContext {
 }
 
 impl InterceptorContext {
-    /// 返回编译期稳定路由 ID。
+    /// 业务作用：返回编译期稳定路由 ID。
     pub fn route_id(&self) -> &'static str {
         self.policy.route_id
     }
 
-    /// 返回编译期 HTTP 方法。
+    /// 业务作用：返回编译期 HTTP 方法。
     pub fn method(&self) -> &'static str {
         self.policy.method
     }
 
-    /// 返回不含动态参数值的路径模板。
+    /// 业务作用：返回不含动态参数值的路径模板。
     pub fn path_template(&self) -> &'static str {
         self.policy.path_template
     }
 
-    /// 返回当前调用对应的拦截器 ID。
+    /// 业务作用：返回当前调用对应的拦截器 ID。
     pub fn interceptor_id(&self) -> &'static str {
         self.interceptor.id
     }
 
-    /// 返回当前调用的固定阶段。
+    /// 业务作用：返回当前调用的固定阶段。
     pub fn stage(&self) -> InterceptorStage {
         self.interceptor.stage
     }
 
-    /// 返回当前路由完整的只读静态安全合同。
+    /// 业务作用：返回当前路由完整的只读静态安全合同。
     ///
     /// 这里不包含密钥、Token 或运行期配置值，可安全用于分支选择和低基数审计。
     pub fn route_policy(&self) -> RoutePolicy {
         self.policy
     }
 
-    /// 返回当前 binding 的有效声明范围。
+    /// 业务作用：返回当前 binding 的有效声明范围。
     pub fn scope(&self) -> &InterceptorScope {
         &self.scope
     }
 
-    /// 返回当前 stage 内、按入站方向计算的零基有效顺序。
+    /// 业务作用：返回当前 stage 内、按入站方向计算的零基有效顺序。
     pub fn effective_order(&self) -> usize {
         self.effective_order
     }
 
-    /// 返回本次读取时的 MappingRuntime 代次。
+    /// 业务作用：返回本次读取时的 MappingRuntime 代次。
     pub fn runtime_generation(&self) -> u64 {
         self.runtime.snapshot().generation
     }
 
-    /// 在 auth 阶段执行当前快照的 provider/condition 并把结果交给 endpoint gate。
+    /// 业务作用：在 auth 阶段执行当前快照的 provider/condition 并把结果交给 endpoint gate。
     ///
     /// 这是公共的“运行时认证胶水”：应用仍自己实现 Token Header、Redis 会话、
     /// 禁用位和 address-read provider，mapping 只负责 auth-before-decrypt 顺序、错误
@@ -235,7 +235,7 @@ pub(crate) struct AuthRuntimeRequestSnapshot(Arc<crate::MappingRuntimeSnapshot>)
 
 #[cfg(feature = "auth")]
 impl AuthRuntimeRequestSnapshot {
-    /// 返回本请求已固定的不可变快照。
+    /// 业务作用：返回本请求已固定的不可变快照。
     pub(crate) fn snapshot(&self) -> Arc<crate::MappingRuntimeSnapshot> {
         self.0.clone()
     }
@@ -251,7 +251,7 @@ pub(crate) struct AuthRuntimeAnonymous {
 
 #[cfg(feature = "auth")]
 impl AuthRuntimeAnonymous {
-    /// 标记只能用于生成它的路由和运行时代次。
+    /// 业务作用：标记只能用于生成它的路由和运行时代次。
     pub(crate) fn matches(self, route_id: &str, generation: u64) -> bool {
         self.route_id == route_id && self.generation == generation
     }
@@ -263,7 +263,7 @@ where
 {
     type Rejection = (StatusCode, &'static str);
 
-    /// 从请求扩展读取框架预先写入的上下文；缺失表示层序或装配错误并返回 500。
+    /// 业务作用：从请求扩展读取框架预先写入的上下文；缺失表示层序或装配错误并返回 500。
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         parts.extensions.get::<Self>().cloned().ok_or((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -291,7 +291,7 @@ struct RouteSelector {
 }
 
 impl RouteSelector {
-    /// 对静态路由最多求值一次，并把 panic 收敛成监听前构建错误。
+    /// 业务作用：对静态路由最多求值一次，并把 panic 收敛成监听前构建错误。
     fn matches(&self, policy: RoutePolicy) -> Result<bool, MappingBuildError> {
         let mut decisions = self
             .decisions
@@ -318,7 +318,7 @@ impl RouteSelector {
 }
 
 impl<S> Clone for InterceptorBinding<S> {
-    /// 克隆只读 descriptor、挂载闭包与 selector 缓存，共享同一静态求值结果。
+    /// 业务作用：克隆只读 descriptor、挂载闭包与 selector 缓存，共享同一静态求值结果。
     fn clone(&self) -> Self {
         Self {
             descriptor: self.descriptor,
@@ -332,7 +332,7 @@ impl<S> InterceptorBinding<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    /// 从 definition 和 Axum layer 单态化函数建立高级 binding。
+    /// 业务作用：从 definition 和 Axum layer 单态化函数建立高级 binding。
     ///
     /// `#[interceptor]` 生成的 `binding`/`binding_with` 最终也走这里；需要自定义 Tower
     /// Layer、流式 Body 或专用 backpressure 的开源使用者可以手写 mount，但仍必须提供静态
@@ -348,7 +348,7 @@ where
         }
     }
 
-    /// 添加只读取静态 [`RoutePolicy`] 的启动期 selector。
+    /// 业务作用：添加只读取静态 [`RoutePolicy`] 的启动期 selector。
     ///
     /// selector 对每条静态路由最多执行一次，决定会被审计与挂载阶段共享；它不能读取请求数据，
     /// 也不能用于让 public 路由执行 auth-stage binding。需要按 Header 等请求数据判断时，应在
@@ -364,19 +364,19 @@ where
         self
     }
 
-    /// 返回不可变描述符。
+    /// 业务作用：返回不可变描述符。
     pub fn descriptor(&self) -> InterceptorDescriptor {
         self.descriptor
     }
 
-    /// 判断当前 binding 是否参与指定路由的 effective plan。
+    /// 业务作用：判断当前 binding 是否参与指定路由的 effective plan。
     fn matches_route(&self, policy: RoutePolicy) -> Result<bool, MappingBuildError> {
         self.route_selector
             .as_ref()
             .map_or(Ok(true), |selector| selector.matches(policy))
     }
 
-    /// 把业务 layer 和其调用上下文一起挂到当前 MethodRouter。
+    /// 业务作用：把业务 layer 和其调用上下文一起挂到当前 MethodRouter。
     pub(crate) fn apply(
         &self,
         route: MethodRouter<S>,
@@ -413,7 +413,7 @@ where
     }
 }
 
-/// 把当前调用的类型化上下文写入 request extensions 后进入业务拦截器。
+/// 业务作用：把当前调用的类型化上下文写入 request extensions 后进入业务拦截器。
 async fn publish_interceptor_context(
     State(context): State<InterceptorContext>,
     mut request: Request,
@@ -471,7 +471,7 @@ pub(crate) struct AuthInterceptorMetricMarker {
 
 #[cfg(feature = "auth")]
 impl AuthInterceptorMetricMarker {
-    /// 使用当前静态路由和共享运行时建立正式标记。
+    /// 业务作用：使用当前静态路由和共享运行时建立正式标记。
     fn for_route(runtime: Arc<MappingRuntime>, policy: RoutePolicy) -> Self {
         Self {
             reached_gate: Arc::new(AtomicBool::new(false)),
@@ -480,22 +480,22 @@ impl AuthInterceptorMetricMarker {
         }
     }
 
-    /// endpoint composer 进入 AuthContext gate 时调用，阻止外层重复记录。
+    /// 业务作用：endpoint composer 进入 AuthContext gate 时调用，阻止外层重复记录。
     pub(crate) fn mark_reached_gate(&self) {
         self.reached_gate.store(true, Ordering::Release);
     }
 
-    /// 判断 endpoint 是否已经接管后续身份和总请求指标。
+    /// 业务作用：判断 endpoint 是否已经接管后续身份和总请求指标。
     fn reached_gate(&self) -> bool {
         self.reached_gate.load(Ordering::Acquire)
     }
 
-    /// 返回只读共享运行时。
+    /// 业务作用：返回只读共享运行时。
     fn runtime(&self) -> &Arc<MappingRuntime> {
         &self.runtime
     }
 
-    /// 返回编译期静态路由合同。
+    /// 业务作用：返回编译期静态路由合同。
     fn policy(&self) -> RoutePolicy {
         self.policy
     }
@@ -524,7 +524,7 @@ pub struct MappingPlan<S> {
 }
 
 impl<S> Default for MappingPlan<S> {
-    /// 创建不含 binding 且尚未绑定运行时的开放计划。
+    /// 业务作用：创建不含 binding 且尚未绑定运行时的开放计划。
     fn default() -> Self {
         Self {
             bindings: Vec::new(),
@@ -537,18 +537,18 @@ impl<S> MappingPlan<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    /// 创建空计划；未显式指定运行时时使用 `MappingRuntime::empty()`。
+    /// 业务作用：创建空计划；未显式指定运行时时使用 `MappingRuntime::empty()`。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 指定应用已经完成构建的共享 MappingRuntime。
+    /// 业务作用：指定应用已经完成构建的共享 MappingRuntime。
     pub fn with_runtime(mut self, runtime: Arc<MappingRuntime>) -> Self {
         self.runtime = Some(runtime);
         self
     }
 
-    /// 注册覆盖全部 mapping 业务端点的 binding。
+    /// 业务作用：注册覆盖全部 mapping 业务端点的 binding。
     pub fn global(mut self, binding: InterceptorBinding<S>) -> Self {
         let insertion = self.bindings.len();
         self.bindings.push(PlannedBinding {
@@ -560,7 +560,7 @@ where
         self
     }
 
-    /// 注册仅覆盖指定路径边界的 Router-scope binding。
+    /// 业务作用：注册仅覆盖指定路径边界的 Router-scope binding。
     pub fn scope(
         mut self,
         path_prefix: impl Into<Arc<str>>,
@@ -582,14 +582,14 @@ where
         Ok(self)
     }
 
-    /// 返回计划指定的运行时；没有时建立空运行时。
+    /// 业务作用：返回计划指定的运行时；没有时建立空运行时。
     pub fn runtime_or_default(&self) -> Arc<MappingRuntime> {
         self.runtime
             .clone()
             .unwrap_or_else(|| Arc::new(MappingRuntime::empty()))
     }
 
-    /// 校验显式注入的 runtime 与装配调用使用的是同一个共享实例。
+    /// 业务作用：校验显式注入的 runtime 与装配调用使用的是同一个共享实例。
     ///
     /// napp 会从本计划取得 runtime 再交给业务 crate 的单态化工厂；非 napp 应用若同时传入
     /// 两个不同实例会在监听前失败，避免审计、InterceptorContext 与 endpoint 使用不同快照。
@@ -607,7 +607,7 @@ where
         Ok(())
     }
 
-    /// 为单条路由合并应用 binding 与端点 definition，并完成拓扑排序。
+    /// 业务作用：为单条路由合并应用 binding 与端点 definition，并完成拓扑排序。
     #[doc(hidden)]
     pub fn effective(
         &self,
@@ -637,7 +637,7 @@ where
         effective_from_candidates(policy, candidates)
     }
 
-    /// 只用静态描述符计算审计摘要，必须与 `effective` 得到同一身份阶段结论。
+    /// 业务作用：只用静态描述符计算审计摘要，必须与 `effective` 得到同一身份阶段结论。
     #[doc(hidden)]
     pub fn audit_route(
         &self,
@@ -716,12 +716,12 @@ pub struct InterceptorRouteAudit {
 }
 
 impl InterceptorRouteAudit {
-    /// 返回当前 effective plan 是否包含 auth-stage 拦截器。
+    /// 业务作用：返回当前 effective plan 是否包含 auth-stage 拦截器。
     pub fn has_auth(self) -> bool {
         self.has_auth
     }
 
-    /// 返回 effective auth plan 是否依赖快照中的 AuthRuntime。
+    /// 业务作用：返回 effective auth plan 是否依赖快照中的 AuthRuntime。
     pub fn requires_auth_runtime(self) -> bool {
         self.requires_auth_runtime
     }
@@ -746,12 +746,12 @@ impl<S> EffectiveInterceptors<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    /// 是否存在会在 AuthContext gate 前执行的认证拦截器。
+    /// 业务作用：是否存在会在 AuthContext gate 前执行的认证拦截器。
     pub fn has_auth(&self) -> bool {
         !self.auth.is_empty()
     }
 
-    /// 按 Tower 套层需要的逆序挂载某一阶段。
+    /// 业务作用：按 Tower 套层需要的逆序挂载某一阶段。
     fn apply_group(
         bindings: &[EffectiveBinding<S>],
         mut route: MethodRouter<S>,
@@ -772,7 +772,7 @@ where
         Ok(route)
     }
 
-    /// 挂载位于 request decrypt 之后、response encrypt 之前的明文阶段。
+    /// 业务作用：挂载位于 request decrypt 之后、response encrypt 之前的明文阶段。
     pub fn apply_plaintext(
         &self,
         route: MethodRouter<S>,
@@ -783,7 +783,7 @@ where
         Self::apply_group(&self.plaintext, route, state, policy, runtime)
     }
 
-    /// 挂载位于 AuthContext gate 与 request decrypt 之前的身份阶段。
+    /// 业务作用：挂载位于 AuthContext gate 与 request decrypt 之前的身份阶段。
     pub fn apply_auth(
         &self,
         route: MethodRouter<S>,
@@ -794,7 +794,7 @@ where
         Self::apply_group(&self.auth, route, state, policy, runtime)
     }
 
-    /// 挂载能观察原始请求和最终响应的最外层 edge 阶段。
+    /// 业务作用：挂载能观察原始请求和最终响应的最外层 edge 阶段。
     pub fn apply_edge(
         &self,
         route: MethodRouter<S>,
@@ -806,7 +806,7 @@ where
     }
 }
 
-/// 审计候选 descriptor、稳定排序并按安全 stage 生成最终拦截器执行计划。
+/// 业务作用：审计候选 descriptor、稳定排序并按安全 stage 生成最终拦截器执行计划。
 fn effective_from_candidates<S>(
     policy: RoutePolicy,
     candidates: Vec<PlannedBinding<S>>,
@@ -864,7 +864,7 @@ struct DescriptorCandidate {
     insertion: usize,
 }
 
-/// 校验重复、stage/scope 依赖并执行稳定拓扑排序，循环依赖在监听前失败。
+/// 业务作用：校验重复、stage/scope 依赖并执行稳定拓扑排序，循环依赖在监听前失败。
 fn sort_descriptors(
     policy: RoutePolicy,
     mut candidates: Vec<DescriptorCandidate>,
@@ -954,7 +954,7 @@ fn sort_descriptors(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// 为 before/after 约束加入同 stage、同 scope 的有向边，并维护目标入度。
+/// 业务作用：为 before/after 约束加入同 stage、同 scope 的有向边，并维护目标入度。
 fn add_dependency(
     policy: RoutePolicy,
     candidates: &[DescriptorCandidate],
@@ -994,7 +994,7 @@ fn add_dependency(
     Ok(())
 }
 
-/// 把内部计划来源转换为业务只读上下文，不暴露排序实现细节。
+/// 业务作用：把内部计划来源转换为业务只读上下文，不暴露排序实现细节。
 fn scope_from_planned<S>(
     planned: &PlannedBinding<S>,
 ) -> Result<InterceptorScope, MappingBuildError> {
@@ -1009,7 +1009,7 @@ fn scope_from_planned<S>(
     }
 }
 
-/// 返回作用域层级排序键：global → 外层 scope → 内层 scope → endpoint。
+/// 业务作用：返回作用域层级排序键：global → 外层 scope → 内层 scope → endpoint。
 fn scope_sort_key(candidate: &DescriptorCandidate) -> (u8, usize, &str) {
     match candidate.origin {
         BindingOrigin::Global => (0, 0, ""),
@@ -1025,7 +1025,7 @@ fn scope_sort_key(candidate: &DescriptorCandidate) -> (u8, usize, &str) {
     }
 }
 
-/// 稳定排序先保护固定安全 stage，再保护声明范围，最后才允许业务 order 调整同范围顺序。
+/// 业务作用：稳定排序先保护固定安全 stage，再保护声明范围，最后才允许业务 order 调整同范围顺序。
 fn candidate_sort_key(candidate: &DescriptorCandidate) -> (u8, u8, usize, &str, i32, usize) {
     let (scope_rank, depth, prefix) = scope_sort_key(candidate);
     (
@@ -1038,7 +1038,7 @@ fn candidate_sort_key(candidate: &DescriptorCandidate) -> (u8, u8, usize, &str, 
     )
 }
 
-/// 校验 scope 前缀为无通配符、无参数、无重复分隔符的绝对静态路径。
+/// 业务作用：校验 scope 前缀为无通配符、无参数、无重复分隔符的绝对静态路径。
 fn valid_scope_prefix(prefix: &str) -> bool {
     prefix.starts_with('/')
         && (prefix == "/" || !prefix.ends_with('/'))
@@ -1048,7 +1048,7 @@ fn valid_scope_prefix(prefix: &str) -> bool {
         })
 }
 
-/// 按完整路径段边界判断路由是否落在 scope 内，避免 `/api` 误匹配 `/api2`。
+/// 业务作用：按完整路径段边界判断路由是否落在 scope 内，避免 `/api` 误匹配 `/api2`。
 fn scope_matches(prefix: Option<&str>, path: &str) -> bool {
     match prefix {
         None | Some("/") => true,

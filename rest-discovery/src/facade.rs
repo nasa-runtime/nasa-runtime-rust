@@ -23,7 +23,7 @@ static RUNTIME: RwLock<Option<Arc<RemoteRuntime>>> = RwLock::new(None);
 pub struct RestDiscovery;
 
 impl RestDiscovery {
-    /// discovery 启用:用已连接好的 provider(`Arc<dyn DiscoveryClient>`)装配内部模式。
+    /// 业务作用：discovery 启用:用已连接好的 provider(`Arc<dyn DiscoveryClient>`)装配内部模式。
     /// `service_request`/`lb://` 走服务发现 + LB。
     ///
     /// # 参数
@@ -40,7 +40,7 @@ impl RestDiscovery {
         install(runtime)
     }
 
-    /// 同 [`init_with_discovery`](Self::init_with_discovery),但**注入自定义 [`LoadBalancer`]**:
+    /// 业务作用：同 [`init_with_discovery`](Self::init_with_discovery),但**注入自定义 [`LoadBalancer`]**:
     /// `options.lb_strategy` 被忽略,三类内部调用(`service_request`/`lb://`/启发式命中)共享传入算法。
     ///
     /// # 参数
@@ -65,7 +65,7 @@ impl RestDiscovery {
         install(runtime)
     }
 
-    /// discovery 禁用(`rest_discovery.enabled=false`):发布 external-only client。
+    /// 业务作用：discovery 禁用(`rest_discovery.enabled=false`):发布 external-only client。
     /// 普通 http(s) 可用;显式内部调用返回 `DiscoveryDisabledForInternalCall`,**不退化成 DNS**。
     ///
     /// # 参数
@@ -78,14 +78,14 @@ impl RestDiscovery {
         install(runtime)
     }
 
-    /// 业务便利入口:未初始化直接 panic 并提示先 init。库代码建议用 [`try_get`](Self::try_get)。
+    /// 业务作用：业务便利入口:未初始化直接 panic 并提示先 init。库代码建议用 [`try_get`](Self::try_get)。
     pub fn get() -> Arc<RestDiscoveryClient> {
         Self::try_get().expect(
             "RestDiscovery 未初始化:请先在 main 调用 RestDiscovery::init_with_discovery 或 init_external_only",
         )
     }
 
-    /// 取共享 client;未初始化返回 `Err(NotInitialized)`。
+    /// 业务作用：取共享 client;未初始化返回 `Err(NotInitialized)`。
     pub fn try_get() -> Result<Arc<RestDiscoveryClient>> {
         RUNTIME
             .read()
@@ -95,7 +95,7 @@ impl RestDiscovery {
             .ok_or(RestDiscoveryError::NotInitialized)
     }
 
-    /// 幂等取下并显式关闭当前进程级运行时。
+    /// 业务作用：幂等取下并显式关闭当前进程级运行时。
     ///
     /// 只 drop 手上的 `Arc` 是不够的:全局槽自身持有一份强引用,不取下就永远不会触发 `RemoteRuntime::drop`,
     /// 索引刷新与 watch pump 会活到进程退出。应用停机必须能显式收回这条生命周期。
@@ -117,7 +117,7 @@ impl RestDiscovery {
         }
     }
 
-    /// 仅当全局槽仍指向给定运行时时才取下并关闭它。
+    /// 业务作用：仅当全局槽仍指向给定运行时时才取下并关闭它。
     ///
     /// 用指针相等做 clear-if-current:迁移期若已经装上了另一个实例,旧持有者不能把它误关。
     ///
@@ -140,7 +140,7 @@ impl RestDiscovery {
         true
     }
 
-    /// 取底层运行时(高级用途);未初始化返回 `Err(NotInitialized)`。
+    /// 业务作用：取底层运行时(高级用途);未初始化返回 `Err(NotInitialized)`。
     pub fn runtime() -> Result<Arc<RemoteRuntime>> {
         RUNTIME
             .read()
@@ -150,7 +150,7 @@ impl RestDiscovery {
     }
 }
 
-/// 主动终止运行时的后台任务,不等待最后一个 `Arc` 释放。
+/// 业务作用：主动终止运行时的后台任务,不等待最后一个 `Arc` 释放。
 ///
 /// 业务可能仍持有 `RestDiscovery::get()` 返回的 client 句柄;abort 是幂等的,
 /// 因此这里显式停一次不会与随后的 `RemoteRuntime::drop` 冲突。
@@ -161,7 +161,7 @@ fn stop_background(runtime: &Arc<RemoteRuntime>) {
     runtime.rest().shutdown_background();
 }
 
-/// 把运行时写入全局:已存在 → `AlreadyInitialized`(不覆盖)。
+/// 业务作用：把运行时写入全局:已存在 → `AlreadyInitialized`(不覆盖)。
 ///
 /// # 参数
 /// - `runtime`: REST 发现客户端共享的运行时状态。

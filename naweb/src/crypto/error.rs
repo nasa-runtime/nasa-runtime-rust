@@ -41,7 +41,7 @@ pub struct CryptoError {
 }
 
 impl CryptoError {
-    /// 建立可在安全边界内传播的内部错误。
+    /// 业务作用：建立可在安全边界内传播的内部错误。
     ///
     /// # 参数
     ///
@@ -58,7 +58,7 @@ impl CryptoError {
         }
     }
 
-    /// 返回公开协议错误码。
+    /// 业务作用：返回公开协议错误码。
     ///
     /// # 返回
     ///
@@ -80,7 +80,7 @@ impl CryptoError {
         }
     }
 
-    /// 返回公开 HTTP 状态码。
+    /// 业务作用：返回公开 HTTP 状态码。
     ///
     /// # 返回
     ///
@@ -103,7 +103,7 @@ impl CryptoError {
 }
 
 impl std::fmt::Display for CryptoError {
-    /// 输出不含底层密码详情的错误类别。
+    /// 业务作用：输出不含底层密码详情的错误类别。
     ///
     /// # 参数
     ///

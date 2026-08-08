@@ -1,6 +1,6 @@
 //! 字符串清洗工具。
 
-/// 判断字符串在去除首尾空白后是否为空。
+/// 业务作用：判断字符串在去除首尾空白后是否为空。
 ///
 /// # 参数
 ///
@@ -9,7 +9,7 @@ pub fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
 }
 
-/// 判断字符串在去除首尾空白后是否仍有内容。
+/// 业务作用：判断字符串在去除首尾空白后是否仍有内容。
 ///
 /// # 参数
 ///
@@ -18,7 +18,7 @@ pub fn is_not_blank(value: &str) -> bool {
     !is_blank(value)
 }
 
-/// 非空白字符串转为 `Some`；空白字符串转为 `None`。
+/// 业务作用：非空白字符串转为 `Some`；空白字符串转为 `None`。
 ///
 /// # 参数
 ///
@@ -32,7 +32,7 @@ pub fn non_blank(value: impl Into<String>) -> Option<String> {
     }
 }
 
-/// 可选字符串中非空白值保持为 `Some`；空白或缺失转为 `None`。
+/// 业务作用：可选字符串中非空白值保持为 `Some`；空白或缺失转为 `None`。
 ///
 /// # 参数
 ///
@@ -41,7 +41,7 @@ pub fn option_non_blank(value: Option<String>) -> Option<String> {
     value.and_then(non_blank)
 }
 
-/// 非空白字符串引用转为 `Some`；空白字符串转为 `None`。
+/// 业务作用：非空白字符串引用转为 `Some`；空白字符串转为 `None`。
 ///
 /// # 参数
 ///
@@ -54,7 +54,7 @@ pub fn non_blank_ref(value: &str) -> Option<&str> {
     }
 }
 
-/// 去除首尾空白并返回新的字符串。
+/// 业务作用：去除首尾空白并返回新的字符串。
 ///
 /// # 参数
 ///
@@ -63,7 +63,7 @@ pub fn trim_to_string(value: impl AsRef<str>) -> String {
     value.as_ref().trim().to_string()
 }
 
-/// 空字符串转为 `None`；非空字符串保持原样。
+/// 业务作用：空字符串转为 `None`；非空字符串保持原样。
 ///
 /// # 参数
 ///
@@ -77,7 +77,7 @@ pub fn empty_to_none(value: impl Into<String>) -> Option<String> {
     }
 }
 
-/// 清洗可选字符串:去除首尾空白,清洗后为空则返回 `None`。
+/// 业务作用：清洗可选字符串:去除首尾空白,清洗后为空则返回 `None`。
 ///
 /// # 参数
 ///

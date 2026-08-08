@@ -19,7 +19,7 @@ const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// 把单个值编码成安全的 path 段(`/` 等会被转义,不会穿透成路径层级)。
+/// 业务作用：把单个值编码成安全的 path 段(`/` 等会被转义,不会穿透成路径层级)。
 ///
 /// # 参数
 ///
@@ -28,7 +28,7 @@ pub fn encode_path_segment(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, PATH_SEGMENT).to_string()
 }
 
-/// 替换 path 模板里的 `{name}` 为 percent-encoded 值。缺失占位 / 未闭合 `{` → `RequestBuildFailed`。
+/// 业务作用：替换 path 模板里的 `{name}` 为 percent-encoded 值。缺失占位 / 未闭合 `{` → `RequestBuildFailed`。
 ///
 /// # 参数
 ///
@@ -60,7 +60,7 @@ pub fn replace_path_variables(template: &str, vars: &[(&str, String)]) -> Result
     Ok(out)
 }
 
-/// 拼 `context_path` + `path`,保证只有一个 `/`。`context_path` 为空时直接用 `path`(已保证以 `/` 开头)。
+/// 业务作用：拼 `context_path` + `path`,保证只有一个 `/`。`context_path` 为空时直接用 `path`(已保证以 `/` 开头)。
 ///
 /// # 参数
 ///

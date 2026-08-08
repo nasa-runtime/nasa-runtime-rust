@@ -21,11 +21,11 @@ use crate::problem::{ApiProblem, FieldViolation};
 
 /// provider-neutral 请求校验:返回字段级违规列表,空表示通过。
 pub trait ValidateRequest {
-    /// 校验自身,返回**对外安全**的字段违规(不含内部细节)。
+    /// 业务作用：校验自身,返回**对外安全**的字段违规(不含内部细节)。
     fn validate(&self) -> Vec<FieldViolation>;
 }
 
-/// 解析失败(400):不回显底层 serde 错误,只给稳定 code + 可修复提示。
+/// 业务作用：解析失败(400):不回显底层 serde 错误,只给稳定 code + 可修复提示。
 fn parse_problem(kind: &'static str) -> Response {
     ApiProblem::new(
         "about:blank",
@@ -37,7 +37,7 @@ fn parse_problem(kind: &'static str) -> Response {
     .into_response()
 }
 
-/// 校验失败(422):带字段级违规。
+/// 业务作用：校验失败(422):带字段级违规。
 fn validation_problem(violations: Vec<FieldViolation>) -> Response {
     ApiProblem::new(
         "about:blank",
@@ -50,7 +50,7 @@ fn validation_problem(violations: Vec<FieldViolation>) -> Response {
     .into_response()
 }
 
-/// 执行业务 DTO 校验；无违规时保留原值，有违规则统一转换为 422。
+/// 业务作用：执行业务 DTO 校验；无违规时保留原值，有违规则统一转换为 422。
 fn finish<T: ValidateRequest>(value: T) -> Result<T, Response> {
     let violations = value.validate();
     if violations.is_empty() {
@@ -70,7 +70,7 @@ where
 {
     type Rejection = Response;
 
-    /// 先按 JSON DTO 提取，再执行业务字段校验并统一映射解析/校验错误。
+    /// 业务作用：先按 JSON DTO 提取，再执行业务字段校验并统一映射解析/校验错误。
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let Json(value) = Json::<T>::from_request(request, state)
             .await
@@ -89,7 +89,7 @@ where
 {
     type Rejection = Response;
 
-    /// 从 query string 反序列化 DTO 后执行业务字段校验。
+    /// 业务作用：从 query string 反序列化 DTO 后执行业务字段校验。
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let Query(value) = Query::<T>::from_request_parts(parts, state)
             .await
@@ -108,7 +108,7 @@ where
 {
     type Rejection = Response;
 
-    /// 从路由 path 参数反序列化 DTO 后执行业务字段校验。
+    /// 业务作用：从路由 path 参数反序列化 DTO 后执行业务字段校验。
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let Path(value) = Path::<T>::from_request_parts(parts, state)
             .await
