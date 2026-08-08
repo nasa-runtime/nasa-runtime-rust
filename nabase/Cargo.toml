@@ -4,7 +4,7 @@
 # 由 nasa 顶层 feature 暴露,不在 base 内做重复聚合。
 [package]
 name = "nabase"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 公共 API 与轻量工具库:BaseResponse/strings/env/ByteSize/Snowflake"

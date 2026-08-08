@@ -4,7 +4,7 @@
 # 不向业务公开;宏 crate 发布后需要它,故也须先发布到 crates.io(发布顺序最先)。
 [package]
 name = "macro-support"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 过程宏的运行时路径发现(proc-macro-crate 封装,内部 crate)"
