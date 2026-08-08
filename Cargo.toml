@@ -90,8 +90,3 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
-
-[patch.crates-io]
-# Outbox 写侧与 Application dispatcher 必须装载同一份进程内提交代际；工作区统一指向当前实现，
-# 避免门面、Saga runtime 与 napp 各自解析出互不通信的同名依赖实例。
-naoutbox-mysql = { path = "naoutbox-mysql" }

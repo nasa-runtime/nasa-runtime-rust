@@ -14,13 +14,13 @@ categories.workspace = true
 anyhow = "1"
 # linkme 作为收集点宿主，#[saga] 的 descriptor 静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
-# 核心合同固定使用公开坐标；尚未公开的 MySQL store 在当前阶段保留同仓来源。
+# Saga 核心合同与 MySQL store 均固定使用公开坐标，避免运行时装载来源分裂的状态合同。
 nasaga-core = { version = "1.0.0" }
-nasaga-mysql = { version = "1.0.0", path = "../nasaga-mysql" }
+nasaga-mysql = { version = "1.0.0" }
 nainbox-core = { version = "1.0.0" }
-nainbox-mysql = { version = "1.0.1", path = "../nainbox-mysql" }
+nainbox-mysql = { version = "1.0.1" }
 naoutbox-core = { version = "1.0.0" }
-naoutbox-mysql = { version = "1.0.1", path = "../naoutbox-mysql" }
+naoutbox-mysql = { version = "1.0.1" }
 # `TxDecision` 是提交结果不确定处理的必要合同。
 natx = { version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
