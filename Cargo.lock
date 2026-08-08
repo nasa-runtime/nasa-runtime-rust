@@ -2929,7 +2929,7 @@ dependencies = [
  "naopenapi 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
+ "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3015,7 +3015,7 @@ dependencies = [
  "napp-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
+ "nasaga-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3099,6 +3099,30 @@ dependencies = [
 [[package]]
 name = "nasaga-runtime"
 version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "hmac 0.12.1",
+ "linkme",
+ "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-mysql 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nasaga-runtime"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5416d7f4336cb257a83b9616f48344a14f2d887fbb84e34d7eb55d4b7dd580bd"
 dependencies = [
  "anyhow",
  "hmac 0.12.1",

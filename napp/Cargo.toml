@@ -84,7 +84,7 @@ nalog = { version = "1.0.0", optional = true }
 nafka = { version = "1.0.1", optional = true, default-features = false }
 naoutbox-core = { version = "1.0.0", optional = true }
 naoutbox-mysql = { version = "1.0.1", optional = true }
-nasaga-runtime = { version = "1.0.0", path = "../nasaga-runtime", optional = true }
+nasaga-runtime = { version = "1.0.0", optional = true }
 nanacos = { version = "1.0.0", optional = true, default-features = false }
 nasched = { version = "1.0.0", optional = true }
 naws = { version = "1.0.0", optional = true, default-features = false }

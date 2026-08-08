@@ -366,6 +366,7 @@ impl Application {
         self.inner.state.load()
     }
 
+    #[cfg(feature = "outbox")]
     /// 业务作用：订阅进程生命周期转换，供受管组件在 Ready 与停机边界被精确唤醒。
     ///
     /// 参数说明: 无。
