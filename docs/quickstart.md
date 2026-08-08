@@ -130,7 +130,6 @@ async fn health() -> &'static str {
 
 | 需求 | 文档 |
 | --- | --- |
-| 架构与生命周期边界 | [架构说明](../) |
 | 全组件索引和 feature 列表 | [根 README](../README.md) |
 | Application 组件字符串与扩展点 | [napp README](../napp/README.md) |
 | Saga 生产接线 | [Saga 生产运行指南](saga-production.md) |
