@@ -234,6 +234,12 @@ pub(crate) struct ApplicationInner {
     /// Kafka client 能力、UserHook consumer 定制和指标桥的受控发布状态。
     #[cfg(feature = "kafka")]
     kafka_runtime: Arc<crate::kafka::KafkaRuntimeState>,
+    /// UserHook 注入、Saga Ready 门禁和运行期只读访问共用的受管状态。
+    #[cfg(feature = "saga")]
+    saga_runtime: Arc<crate::saga::SagaRuntimeState>,
+    /// UserHook 注入、Outbox Ready 发布和 dispatcher 监督共用的受管状态。
+    #[cfg(feature = "outbox")]
+    outbox_runtime: Arc<crate::outbox::OutboxRuntimeState>,
     /// 进程级统一指标注册表:各领域按 descriptor 记录到同一 hub。
     ///
     /// nafka 域为原生记录(fan-out 到本 hub,取代业务手工 sink);naweb 域经
@@ -267,12 +273,13 @@ pub struct Application {
 }
 
 impl Application {
-    /// 创建 Application 与其唯一 TaskSupervisor 所有者。
+    /// 业务作用：创建 Application、全部受管组件共享状态与唯一 TaskSupervisor 所有者。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `info`：同步 preflight 已固定的应用元数据。
-    /// - `initial_config`：版本为 1 的不可变配置视图。
+    /// - `initial_config`：初始不可变配置视图。
+    ///
+    /// 返回：共享应用句柄与必须由 Runner 独占消费的任务监督端。
     pub(crate) fn create(
         info: ApplicationInfo,
         initial_config: Arc<ConfigView>,
@@ -322,6 +329,10 @@ impl Application {
                 scheduling_runtime: Arc::new(crate::capabilities::SchedulingRuntimeState::new()),
                 #[cfg(feature = "kafka")]
                 kafka_runtime: Arc::new(crate::kafka::KafkaRuntimeState::new()),
+                #[cfg(feature = "saga")]
+                saga_runtime: Arc::new(crate::saga::SagaRuntimeState::new()),
+                #[cfg(feature = "outbox")]
+                outbox_runtime: Arc::new(crate::outbox::OutboxRuntimeState::new()),
                 #[cfg(any(feature = "kafka", feature = "web"))]
                 metrics_hub: Arc::new(nametrics_core::MetricHub::new()),
                 #[cfg(feature = "web")]
@@ -353,6 +364,15 @@ impl Application {
     /// 本方法无参数；读取到 Stopping 后即可安全观察已先提交的首次终态。
     pub fn state(&self) -> ApplicationState {
         self.inner.state.load()
+    }
+
+    /// 业务作用：订阅进程生命周期转换，供受管组件在 Ready 与停机边界被精确唤醒。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：初值为当前状态的内部接收端；只授予观察权，不允许组件推进生命周期。
+    pub(crate) fn subscribe_state(&self) -> watch::Receiver<ApplicationState> {
+        self.inner.state.subscribe()
     }
 
     /// 判断应用是否已经完成所有 Ready action且全部动态运行依赖当前可用。
@@ -1143,6 +1163,108 @@ impl Application {
         ))
     }
 
+    /// 业务作用：在 UserHook 内提交本进程唯一的 Saga 运行计划，交由组件执行 Ready 门禁和托管。
+    ///
+    /// 计划提交不等于能力已发布。组件会在 UserHook 结束后先校验本地步骤合同与历史非终态实例，
+    /// 只有全部通过才开放 [`Application::saga`] 并启动 durable timer。
+    ///
+    /// 参数说明：
+    /// - `plan`：包含 Orchestrator、命名参与方或两者的完整运行计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `saga` 且首次提交时成功；重复、晚到或空计划返回阶段错误。
+    #[cfg(feature = "saga")]
+    pub fn configure_saga(
+        &self,
+        mut plan: crate::saga::SagaApplicationPlan,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("saga runtime configuration")?;
+        self.ensure_component_declared(
+            ComponentId::Saga,
+            ApplicationPhase::UserHook,
+            "saga runtime configuration",
+        )?;
+        self.ensure_component_declared(
+            ComponentId::Outbox,
+            ApplicationPhase::UserHook,
+            "saga managed outbox configuration",
+        )?;
+        // 先验证角色拓扑，再把 publisher 移交给 Outbox；否则空计划失败会留下无法由调用方重试
+        // 覆盖的半配置 Outbox，破坏 UserHook 内一次纠错的原子性。
+        plan.validate()?;
+        let outbox = plan.take_outbox_plan()?;
+        self.inner.outbox_runtime.configure(outbox)?;
+        self.inner.saga_runtime.configure(plan)
+    }
+
+    /// 业务作用：为脱离 Saga 使用的事务型 Outbox 提交唯一受管发布计划。
+    ///
+    /// Saga 调用方不使用本入口；`configure_saga` 会自动把 Saga 计划内的 publisher 移交给同一
+    /// 生命周期。独立领域事件、审计或缓存失效发布可声明 `outbox` 后在 UserHook 调用本方法。
+    ///
+    /// 参数说明：
+    /// - `plan`：包含 publisher 与明确毒丸策略的完整计划。
+    ///
+    /// 返回：UserHook 开放、组件已声明且首次提交时成功；重复或晚到配置返回阶段错误。
+    #[cfg(feature = "outbox")]
+    pub fn configure_outbox(
+        &self,
+        plan: crate::outbox::OutboxApplicationPlan,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("outbox configuration")?;
+        self.ensure_component_declared(
+            ComponentId::Outbox,
+            ApplicationPhase::UserHook,
+            "outbox configuration",
+        )?;
+        self.inner.outbox_runtime.configure(plan)
+    }
+
+    /// 业务作用：取得 Outbox Ready 后发布的只读积压与投递观测入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：组件已声明且通过 Ready 时返回句柄；未声明、未就绪或停机后返回错误。
+    #[cfg(feature = "outbox")]
+    pub fn outbox(&self) -> ApplicationResult<crate::outbox::OutboxHandle> {
+        self.ensure_component_declared(
+            ComponentId::Outbox,
+            ApplicationPhase::Running,
+            "outbox capability access",
+        )?;
+        self.inner.outbox_runtime.ensure_ready()?;
+        Ok(crate::outbox::OutboxHandle {
+            state: Arc::clone(&self.inner.outbox_runtime),
+        })
+    }
+
+    /// 业务作用：取得 Saga Ready 后发布的只读能力入口，不授予关闭或替换运行拓扑的权限。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：应用声明 `saga` 且已通过 Ready 门禁时返回句柄；未声明、未就绪或停机后返回错误。
+    #[cfg(feature = "saga")]
+    pub fn saga(&self) -> ApplicationResult<crate::saga::SagaHandle> {
+        self.ensure_component_declared(
+            ComponentId::Saga,
+            ApplicationPhase::Running,
+            "saga capability access",
+        )?;
+        self.inner.saga_runtime.ensure_ready()?;
+        Ok(crate::saga::SagaHandle {
+            state: Arc::clone(&self.inner.saga_runtime),
+        })
+    }
+
     /// 在 UserHook 阶段为指定 Kafka client 登记一次有状态 consumer 装配。
     ///
     /// 自动收集的属性 consumer 会先进入 builder，本闭包随后按登记顺序执行；闭包只能
@@ -1614,6 +1736,8 @@ impl Application {
         feature = "db",
         feature = "redis",
         feature = "cache",
+        feature = "saga",
+        feature = "outbox",
         feature = "kafka",
         feature = "web",
         feature = "ws",
@@ -1751,6 +1875,26 @@ impl Application {
     #[cfg(feature = "kafka")]
     pub(crate) fn kafka_runtime(&self) -> Arc<crate::kafka::KafkaRuntimeState> {
         Arc::clone(&self.inner.kafka_runtime)
+    }
+
+    /// 业务作用：返回 Saga 组件持有的共享状态，供生命周期阶段线性化计划与能力发布。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只增加共享所有权、不复制 Orchestrator 或参与方运行时的状态句柄。
+    #[cfg(feature = "saga")]
+    pub(crate) fn saga_runtime(&self) -> Arc<crate::saga::SagaRuntimeState> {
+        Arc::clone(&self.inner.saga_runtime)
+    }
+
+    /// 业务作用：取得 Outbox 生命周期共享状态，供组件与公开能力使用同一权限源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享状态句柄；克隆不复制 publisher 或计数。
+    #[cfg(feature = "outbox")]
+    pub(crate) fn outbox_runtime(&self) -> Arc<crate::outbox::OutboxRuntimeState> {
+        Arc::clone(&self.inner.outbox_runtime)
     }
 
     /// 返回进程级统一指标 hub:各领域按 descriptor 记录到此。
@@ -2414,11 +2558,12 @@ impl Application {
     }
 }
 
-/// 把稳定组件身份映射为声明位集合中的唯一 bit。
+/// 业务作用：把稳定组件身份映射为声明位集合中的唯一 bit，用于常数时间校验能力声明。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `component`：需要编码到 Runner 声明集合中的组件身份。
+///
+/// 返回：只包含该组件声明位的掩码。
 const fn component_mask(component: ComponentId) -> u32 {
     // 位集合升到 u32:14 个现有 offset(0..=13)之外仍余 18 位,容纳后续 Cache、Telemetry、
     // Auth 等组件。显式 match 而非 `component as u32` 位移：新增内部身份时不会悄悄改变
@@ -2427,9 +2572,14 @@ const fn component_mask(component: ComponentId) -> u32 {
     1_u32 << offset
 }
 
-/// 每个 `ComponentId` 到声明位集合中唯一 bit 偏移的显式映射。
+/// 业务作用：维护每个 `ComponentId` 到声明位集合中唯一 bit 偏移的稳定映射。
 ///
 /// 新增组件时必须在此追加一个此前未用、且小于 32 的偏移;唯一性与上界由发布门禁校验。
+///
+/// 参数说明：
+/// - `component`：需要取得固定位序的组件身份。
+///
+/// 返回：小于 32 且与其它组件不重复的固定位序。
 const fn component_bit_offset(component: ComponentId) -> u32 {
     match component {
         ComponentId::Application => 0,
@@ -2449,6 +2599,8 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::Auth => 14,
         ComponentId::Telemetry => 15,
         ComponentId::Cache => 16,
+        ComponentId::Saga => 17,
+        ComponentId::Outbox => 18,
     }
 }
 
@@ -2457,7 +2609,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 17] = [
+    const ALL: [ComponentId; 19] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
@@ -2475,6 +2627,8 @@ const _: () = {
         ComponentId::Auth,
         ComponentId::Telemetry,
         ComponentId::Cache,
+        ComponentId::Saga,
+        ComponentId::Outbox,
     ];
     let mut i = 0;
     while i < ALL.len() {

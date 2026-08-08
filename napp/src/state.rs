@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use tokio::sync::watch;
+
 use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 
 /// 供健康检查和外部观察者读取的公开应用生命周期状态。
@@ -47,17 +49,20 @@ pub enum ApplicationMode {
 /// 使用原子值发布公开生命周期状态的共享单元。
 pub(crate) struct StateCell {
     value: AtomicU8,
+    changes: watch::Sender<ApplicationState>,
 }
 
 impl StateCell {
-    /// 创建初始为 Starting 的状态单元。
+    /// 业务作用：创建初始为 Starting 的状态单元，并建立不会丢失最新状态的进程内通知通道。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；状态只允许由 Runner 推进。
+    /// 返回：状态只允许由 Runner 推进、观察者只能订阅的共享单元。
     pub(crate) fn new() -> Self {
+        let (changes, _receiver) = watch::channel(ApplicationState::Starting);
         Self {
             value: AtomicU8::new(ApplicationState::Starting as u8),
+            changes,
         }
     }
 
@@ -70,12 +75,13 @@ impl StateCell {
         ApplicationState::from_u8(self.value.load(Ordering::Acquire))
     }
 
-    /// 以 CAS 执行一个明确的合法状态转换。
+    /// 业务作用：以 CAS 执行唯一合法状态转换，并在成功后唤醒等待开放或停机边界的受管任务。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `expected`：调用方要求的唯一前置状态。
     /// - `next`：转换成功后发布的新状态。
+    ///
+    /// 返回：CAS 成功且最新状态已经发布时完成；前置状态不匹配返回统一生命周期错误。
     pub(crate) fn transition(
         &self,
         expected: ApplicationState,
@@ -88,7 +94,6 @@ impl StateCell {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map(|_| ())
             .map_err(|actual| {
                 ApplicationError::new(
                     ComponentId::Application,
@@ -98,7 +103,18 @@ impl StateCell {
                         ApplicationState::from_u8(actual)
                     ),
                 )
-            })
+            })?;
+        self.changes.send_replace(next);
+        Ok(())
+    }
+
+    /// 业务作用：订阅应用状态转换，供受管任务等待 Ready 或立即响应停机，而不是按固定周期猜测。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：初值等于调用时最新状态的接收端，后续转换以 watch 代际通知。
+    pub(crate) fn subscribe(&self) -> watch::Receiver<ApplicationState> {
+        self.changes.subscribe()
     }
 }
 

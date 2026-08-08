@@ -1,7 +1,7 @@
 //! nasa-runtime-rust 的统一业务门面。
 //!
-//! 业务项目优先依赖本 crate，并通过 feature 选择需要的缓存、事务、路由、调度、Redis、
-//! 长连接、配置、发现和工具模块。
+//! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、事务、Inbox、Outbox、
+//! Saga、消息传输、缓存、路由、调度、配置、发现和工具模块。
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //
@@ -22,6 +22,10 @@
 #![forbid(unsafe_code)]
 
 /// 应用运行时：生命周期、配置快照、类型资源容器和受管任务。
+///
+/// `#[nasa::application("saga")]` 会隐式纳入 DB 与 Outbox；独立
+/// `#[nasa::application("outbox")]` 会隐式纳入 DB。Inbox 是事务内原语，不声明为生命周期组件；
+/// Kafka、Redis Streams 或 HTTP 等消息传输由业务按实际实现显式选择。
 #[cfg(feature = "application")]
 pub mod application {
     pub use application_impl::*;
@@ -224,7 +228,7 @@ pub mod tx {
 #[cfg(feature = "inbox")]
 pub mod inbox {
     pub use inbox_core_impl::InboxClaim;
-    pub use inbox_mysql_impl::{InboxStoreError, MySqlInbox};
+    pub use inbox_mysql_impl::{InboxProcess, InboxStoreError, InboxTransactionError, MySqlInbox};
 }
 
 /// 事务型 Outbox：事件、顺序投递合同与 MySQL 持久化实现。
@@ -286,7 +290,9 @@ pub mod object {
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
 /// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
 ///
-/// 该能力要求业务显式提供流程定义、参与方信任关系和持久化资源，因此不由 `full` 自动启用。
+/// `full` 会编入运行时与 Kafka adapter；业务仍须显式声明 Application 的 `"saga"` 组件并提交
+/// 流程定义、参与方信任关系和发布端。DB 与 Outbox 由 Saga 声明隐式纳入，未装配计划时启动会
+/// fail-closed。
 #[cfg(feature = "saga")]
 pub mod saga {
     #[cfg(feature = "saga-runtime")]

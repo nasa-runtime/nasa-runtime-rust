@@ -16,20 +16,29 @@ use syn::{
 ///
 /// # 支持的组件字符串
 ///
-/// `attr` 可以为空；非空时只接受下面 12 个区分大小写的精确字符串，不支持别名：
+/// `attr` 可以为空；非空时只接受下面 14 个区分大小写的精确字符串，不支持别名：
 ///
 /// - `"log"`：启用两阶段日志。Bootstrap 先建立早期控制台日志，最终配置就绪后再安装文件日志，
 ///   并支持运行期日志级别热更新；需要 `nasa` 的 `log` feature。
 /// - `"nacos-config"`：启用 Nacos 配置中心。启动时拉取远端配置 overlay，运行期监听配置变化并按
 ///   last-known-good 规则热刷新；需要 `nacos-config` feature，真实连接 Nacos 还需要 `nacos-sdk`。
+/// - `"telemetry"`：启用有界 OpenTelemetry span 管道与受管停机 flush；需要 `telemetry` feature。
 /// - `"db"`：启用 MySQL 数据源。启动时校验并探测地址、鉴权和数据库，创建连接池、注册应用资源，
 ///   同时注入 `#[transactional]` 和 Mapper 使用的事务运行时；需要 `tx` feature。
 /// - `"redis"`：启用 Redis 客户端。启动时校验配置、探测 standalone/cluster 拓扑并建立受管客户端，
 ///   停机时由容器显式关闭；需要 `redis` feature。
-/// - `"telemetry"`：启用有界 OpenTelemetry span 管道与受管停机 flush；需要 `telemetry` feature。
 /// - `"cache"`：启用由容器拥有的两级缓存运行时与可选跨节点失效广播；需要 `cache` feature。
+/// - `"saga"`：启用 Saga Ready 门禁、只读能力发布与 durable timer 监督，并隐式加入 DB 与
+///   Outbox。业务在 UserHook 通过 `configure_saga` 提交 Orchestrator 或参与方计划；需要
+///   `saga-runtime` feature。
 /// - `"kafka"`：启用受管 Kafka producer/consumer。负责 broker 探测、consumer 收集与启动、动态
 ///   readiness、运行期健康监控、停止消费和 producer flush；需要 `kafka` feature。
+/// - `"outbox"`：启用事务型 Outbox dispatcher。业务在 UserHook 提交发布计划，组件负责持续投递、
+///   readiness、退避与停机；需要 `outbox` feature。该组件隐式加入 DB；声明 `"saga"` 时也会自动
+///   纳入 Outbox，无需重复书写。
+///
+/// 隐式加入只负责补齐缺失依赖，不构成互斥约束。`("saga")`、`("saga", "db")` 与
+/// `("saga", "db", "outbox")` 会生成相同的组件图；只有同一个字符串在属性中重复出现才会拒绝。
 /// - `"auth"`：启用 OAuth Resource Server/JWKS warmup、刷新和 readiness；必须同时声明 `"web"`，
 ///   需要 Web/OAuth 能力。
 /// - `"web"`：启用 HTTP MVC 服务。自动收集 mapping 端点，安装 `/healthz`、`/readyz` 和请求观测，
@@ -48,7 +57,7 @@ use syn::{
 ///
 /// **业务侧不需要按启动顺序书写组件字符串**：宏接受任意顺序,内部按唯一的规范启动顺序
 /// （`CANONICAL_COMPONENT_ORDER`：log → nacos-config → telemetry → db → redis → cache →
-/// kafka → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
+/// saga → kafka → outbox → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
 /// `#[application("web", "log", "kafka")]` 与 `#[application("log", "kafka", "web")]` 完全等价,
 /// 都按 log → kafka → web 启动、严格反序停机。宏仍会拒绝未知组件名和重复声明。
 ///
@@ -59,9 +68,9 @@ use syn::{
 ///     "log",
 ///     "nacos-config",
 ///     "telemetry",
-///     "db",
 ///     "redis",
 ///     "cache",
+///     "saga",
 ///     "kafka",
 ///     "auth",
 ///     "web",
@@ -70,15 +79,17 @@ use syn::{
 ///     "scheduling"
 /// )]
 /// async fn main(app: nasa::Application) -> anyhow::Result<()> {
-///     // 在这里登记业务资源以及 Web、WS、Kafka 等定制。
+///     // 声明 Saga 后 DB 与 Outbox 已纳入生命周期，这里只提交业务计划和其它组件定制。
 ///     Ok(())
 /// }
 /// ```
 ///
-/// # 参数
-///
-/// - `attr`：按上述启动顺序声明的零个或多个受支持组件字符串。
+/// 参数说明：
+/// - `attr`：按任意书写顺序声明的零个或多个受支持组件字符串。
 /// - `item`：零参数或接收一个 `Application` 的异步主函数。
+///
+/// 返回：入口合法时生成同步进程入口、规范组件描述和业务启动 Hook；合同非法时生成定位到调用处的
+/// 编译错误。
 #[proc_macro_attribute]
 pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
     let components =
@@ -92,10 +103,11 @@ pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// 业务作用：校验入口契约并生成静态描述、业务 Hook 包装和同步主函数。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `components`：属性中按源码顺序出现的组件字面量。
 /// - `function`：已经解析的业务异步主函数。
+///
+/// 返回：入口合同与组件声明合法时返回完整展开；路径、签名或组件非法时返回定位明确的宏错误。
 fn expand_application(
     components: Vec<LitStr>,
     mut function: ItemFn,
@@ -128,9 +140,9 @@ fn expand_application(
 
             /// 业务作用：把业务 crate 内收集的 nominal 路由项投影成稳定诊断元数据。
             ///
-            /// # 参数
+            /// 参数说明: 无。
             ///
-            /// 本函数无参数；返回值仅包含静态方法、路径和处理函数身份。
+            /// 返回：只包含静态方法、路径和处理函数身份的路由元数据。
             fn __nasa_route_meta() -> ::std::vec::Vec<#runtime::RouteMeta> {
                 crate::__mvc::ROUTES
                     .iter()
@@ -160,9 +172,10 @@ fn expand_application(
             /// 状态刻意不在这里补：`configure_router` 的定制与框架探针都必须先作用在
             /// `Router<Application>` 上，`with_state` 由运行时在装配顺序末尾统一执行。
             ///
-            /// # 参数
+            /// 参数说明：
+            /// - `context`：由 napp Ready 构造，保证 interceptor 与 handler 使用同一个 Application clone。
             ///
-            /// `context` 由 napp Ready 构造，保证 interceptor 与 handler 使用同一个 Application clone。
+            /// 返回：路由和安全流水线装配成功时返回统一状态 Router；冲突或合同错误时拒绝监听。
             fn __nasa_build_router(
                 context: #runtime::WebBuildContext,
             ) -> #runtime::ApplicationResult<
@@ -205,9 +218,10 @@ fn expand_application(
         ///
         /// 该薄包装不执行 Hook；它把类型错误定位到业务入口，而不是延后到任务监督器内部。
         ///
-        /// # 参数
-        ///
+        /// 参数说明：
         /// - `hook`：拥有业务主函数调用的闭包，接收统一 Application 并返回受监督 future。
+        ///
+        /// 返回：类型合同成立时原样返回 Hook，供同步入口唯一消费。
         fn __nasa_require_user_hook<F, Fut, E>(hook: F) -> F
         where
             F: ::std::ops::FnOnce(#runtime::Application) -> Fut + ::std::marker::Send + 'static,
@@ -221,9 +235,9 @@ fn expand_application(
 
         /// 业务作用：创建运行时静态描述并把业务 Hook 交给统一同步入口。
         ///
-        /// # 参数
+        /// 参数说明: 无。
         ///
-        /// 本函数无参数；配置路径和进程信号均由运行时按固定契约接管。
+        /// 返回：业务正常完成或优雅停机时返回成功退出码；启动、运行或停机失败返回对应非零退出码。
         fn main() -> ::std::process::ExitCode {
             #runtime::run(
                 #runtime::ApplicationSpec::new(&[
@@ -239,9 +253,10 @@ fn expand_application(
 
 /// 业务作用：校验业务主函数的名称、异步形态、参数和返回结果形状。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `function`：属性直接标注的业务函数语法树。
+///
+/// 返回：名称、异步形态、参数、返回类型和 runtime 所有权均合法时成功，否则返回编译错误。
 fn validate_function(function: &ItemFn) -> syn::Result<()> {
     if function.sig.ident != "main" {
         return Err(syn::Error::new_spanned(
@@ -301,9 +316,10 @@ fn validate_function(function: &ItemFn) -> syn::Result<()> {
 
 /// 业务作用：校验唯一可选参数的类型为统一 Application。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `argument`：业务主函数声明的唯一函数参数。
+///
+/// 返回：参数为统一 `Application` 类型时成功；receiver 或其它类型返回编译错误。
 fn validate_application_parameter(argument: &FnArg) -> syn::Result<()> {
     let FnArg::Typed(argument) = argument else {
         return Err(syn::Error::new_spanned(
@@ -333,9 +349,10 @@ fn validate_application_parameter(argument: &FnArg) -> syn::Result<()> {
 
 /// 业务作用：校验业务主函数返回单元成功值的 `Result`。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `output`：业务主函数声明的返回类型。
+///
+/// 返回：返回类型为单元成功值的 `Result` 时成功，其它形态返回编译错误。
 fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
     let ReturnType::Type(_, output_type) = output else {
         return Err(syn::Error::new_spanned(
@@ -374,19 +391,20 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
     Ok(())
 }
 
-/// 规范启动顺序:业务侧可以按任意顺序书写组件字符串,napp 由此秩统一规范化。
+/// 规范启动顺序：业务侧可以按任意顺序书写组件字符串，napp 由此秩统一规范化。
 ///
-/// 该数组既是合法组件白名单,也是唯一的规范启动顺序(其偏序满足历史声明规则:log 最先;
-/// nacos-config 先于其余;db/redis 先于 kafka;kafka 先于 web/ws/discovery/scheduling;
-/// web 先于 nacos-discovery)。新增组件时在此按正确位置插入。
-const CANONICAL_COMPONENT_ORDER: [&str; 12] = [
+/// 该数组既是合法组件白名单，也是唯一的规范启动顺序：配置先于资源，DB 先于 Saga/Outbox，
+/// transport 先于业务入口。新增组件时必须按依赖与反向停机关系插入。
+const CANONICAL_COMPONENT_ORDER: [&str; 14] = [
     "log",
     "nacos-config",
     "telemetry",
     "db",
     "redis",
     "cache",
+    "saga",
     "kafka",
+    "outbox",
     "auth",
     "web",
     "ws",
@@ -394,14 +412,15 @@ const CANONICAL_COMPONENT_ORDER: [&str; 12] = [
     "scheduling",
 ];
 
-/// 业务作用：校验组件名称与重复项,并按规范启动顺序排序返回(业务书写顺序不影响启动顺序)。
+/// 业务作用：校验组件名称与重复项，并按规范启动顺序排序返回，确保书写顺序不改变生命周期。
 ///
 /// 业务侧无需按启动顺序书写 `#[application(...)]`:本函数接受任意顺序,拒绝未知名称和重复项,
 /// 然后按 [`CANONICAL_COMPONENT_ORDER`] 排序。运行时因此始终收到规范顺序的组件列表。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `components`：属性中以任意顺序提供的字符串字面量。
+///
+/// 返回：名称全部合法且唯一时返回规范顺序；未知名称或重复声明返回定位到属性项的错误。
 fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
     let mut seen = HashSet::new();
     let mut names = Vec::with_capacity(components.len());
@@ -421,6 +440,15 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
         }
         names.push(name);
     }
+    // Saga 的当前持久层固定使用 MySQL，并且消息闭环必然包含 Inbox 与 Outbox；Inbox 没有独立
+    // 生命周期，DB 与 Outbox 只在缺失时补入。业务显式写出依赖仍收敛为同一组件图，不应误判重复。
+    // Kafka/Redis 等 transport 不在这里推断。
+    if seen.contains("saga") && seen.insert("outbox".to_string()) {
+        names.push("outbox".to_string());
+    }
+    if seen.contains("outbox") && seen.insert("db".to_string()) {
+        names.push("db".to_string());
+    }
     // 顺序无关:按规范秩排序,业务书写顺序不再影响启动/停机顺序。
     names.sort_by_key(|name| {
         CANONICAL_COMPONENT_ORDER
@@ -433,9 +461,10 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
 
 /// 业务作用：把规范化组件名称转换为运行时枚举变体。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `name`：已经通过白名单校验的组件名称。
+///
+/// 返回：名称可映射时返回对应枚举标识；内部传入未校验名称时返回宏展开错误。
 fn component_variant(name: &str) -> syn::Result<syn::Ident> {
     let variant = match name {
         "log" => "Log",
@@ -444,7 +473,9 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
         "redis" => "Redis",
         "telemetry" => "Telemetry",
         "cache" => "Cache",
+        "saga" => "Saga",
         "kafka" => "Kafka",
+        "outbox" => "Outbox",
         "auth" => "Auth",
         "web" => "Web",
         "ws" => "Ws",
@@ -462,13 +493,14 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
 
 /// 业务作用：把已校验组件名称转换为编译期能力探测模块。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `name`：已经通过组件白名单和顺序校验的规范名称。
+///
+/// 返回：返回供展开代码引用的能力模块标识；内部传入未校验名称时返回宏展开错误。
 fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
     match name {
-        "log" | "db" | "redis" | "telemetry" | "cache" | "kafka" | "auth" | "web" | "ws"
-        | "scheduling" => Ok(format_ident!("{name}")),
+        "log" | "db" | "redis" | "telemetry" | "cache" | "saga" | "kafka" | "outbox" | "auth"
+        | "web" | "ws" | "scheduling" => Ok(format_ident!("{name}")),
         "nacos-config" => Ok(format_ident!("nacos_config")),
         "nacos-discovery" => Ok(format_ident!("nacos_discovery")),
         _ => Err(syn::Error::new(

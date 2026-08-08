@@ -5,7 +5,7 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Rust shared runtime facade"
@@ -31,8 +31,8 @@ cache = ["dep:cache_impl", "dep:nacache_macro", "application_impl?/cache"]
 tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
 # Inbox 去重标记与业务副作用共享 tx ambient MySQL 事务。
 inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl"]
-# Outbox 事件与业务写共享 tx ambient MySQL 事务，dispatcher 只在 broker 确认后标记已投递。
-outbox = ["tx", "dep:outbox_core_impl", "dep:outbox_mysql_impl"]
+# Outbox 事件与业务写共享 tx ambient MySQL 事务；同时启用 application 时编入受管 dispatcher。
+outbox = ["tx", "dep:outbox_core_impl", "dep:outbox_mysql_impl", "application_impl?/outbox"]
 # Provider-neutral 幂等状态机；持久化后端按业务一致性要求单独选择。
 idempotency = ["dep:idempotency_impl"]
 idempotency-mysql = ["idempotency", "tx", "dep:idempotency_mysql_impl"]
@@ -51,7 +51,7 @@ object-store-experimental = ["dep:object_impl"]
 saga = ["dep:saga_core_impl"]
 # Saga 运行时（Orchestrator/参与方 adapter/#[saga] 宏；MySQL store + Outbox/Inbox 通道）。
 # 单独一层开关：只用纯逻辑合同的调用方不必编入 SQLx 依赖面。
-saga-runtime = ["saga", "dep:saga_runtime_impl", "dep:nasaga_macro"]
+saga-runtime = ["saga", "inbox", "outbox", "dep:saga_runtime_impl", "dep:nasaga_macro", "application_impl?/saga"]
 # Saga 真实 Kafka hosted transport；要求同时启用 nasa Kafka 门面并向下打开 runtime adapter。
 saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
 # 实验性 gRPC listener 生命周期；不进入 full，稳定组件合同待真实项目收敛。
@@ -187,6 +187,8 @@ full = [
     "tx",
     "inbox",
     "outbox",
+    "saga-runtime",
+    "saga-kafka",
     "idempotency-mysql",
     "idempotency-redis",
     "openapi",
@@ -218,20 +220,20 @@ full = [
 
 [dependencies]
 # 依赖 key 用 *_impl,避免与门面公共模块同名(维护约束 §四)。
-application_impl = { package = "napp", version = "1.0.0", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.0", optional = true }
+application_impl = { package = "napp", version = "1.0.1", path = "../napp", optional = true }
+application_macro = { package = "napp-macro", version = "1.0.1", path = "../napp-macro", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
 grafana_impl = { package = "nafana", version = "1.0.0", optional = true }
 grafana_macro = { package = "nafana-macro", version = "1.0.1", optional = true }
 cache_impl = { package = "cacheable", version = "1.0.0", optional = true }
 nacache_macro = { package = "nacache-macro", version = "1.0.0", optional = true }
-tx_impl = { package = "natx", version = "1.0.0", optional = true }
+tx_impl = { package = "natx", version = "1.0.1", path = "../natx", optional = true }
 natx_macro = { package = "natx-macro", version = "1.0.0", optional = true }
 inbox_core_impl = { package = "nainbox-core", version = "1.0.0", optional = true }
-inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.0", optional = true }
+inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.1", path = "../nainbox-mysql", optional = true }
 outbox_core_impl = { package = "naoutbox-core", version = "1.0.0", optional = true }
-outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.0", optional = true }
+outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.1", path = "../naoutbox-mysql", optional = true }
 idempotency_impl = { package = "naidempotency", version = "1.0.0", optional = true }
 idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.0", optional = true }
 idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.0", optional = true }
@@ -256,7 +258,8 @@ mapper_impl = { package = "namapper", version = "1.0.0", optional = true }
 namapper_macro = { package = "namapper-macro", version = "1.0.0", optional = true }
 partition_impl = { package = "napart", version = "1.0.0", optional = true }
 ws_impl = { package = "naws", version = "1.0.0", optional = true, default-features = false }
-kafka_impl = { package = "nafka", version = "1.0.0", optional = true, default-features = false }
+# 同仓 path 保证门面启用的传输安全能力来自当前 nafka 实现。
+kafka_impl = { package = "nafka", version = "1.0.1", path = "../nafka", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.0", optional = true, default-features = false }
 crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "1.0.0", optional = true }

@@ -130,6 +130,8 @@ pub use trace::trace_context;
 
 #[cfg(feature = "nacos-config")]
 mod nacos_config;
+#[cfg(feature = "outbox")]
+mod outbox;
 mod panic_hook;
 mod preflight;
 mod process;
@@ -146,6 +148,8 @@ mod reload;
 mod report;
 mod resources;
 mod runner;
+#[cfg(feature = "saga")]
+mod saga;
 #[cfg(feature = "scheduling")]
 mod scheduling;
 mod sections;
@@ -190,9 +194,13 @@ pub use error::{ApplicationError, ApplicationPhase, ApplicationResult, Component
 pub use future::ApplicationFuture;
 #[cfg(feature = "web")]
 pub use mapping_handle::MappingHandle;
+#[cfg(feature = "outbox")]
+pub use outbox::{OutboxApplicationPlan, OutboxHandle, OutboxPoisonPolicy, OutboxSnapshot};
 pub use process::run;
 pub use resources::{ManagedResource, ResourcePhase, ResourceRef, ResourceRegistry};
 pub use runner::{ApplicationExit, ApplicationExitReason, ApplicationRunner};
+#[cfg(feature = "saga")]
+pub use saga::{SagaApplicationPlan, SagaHandle};
 pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal};
 pub use spec::ApplicationSpec;
 #[cfg(feature = "web")]
@@ -268,6 +276,20 @@ pub mod components {
     /// Kafka 组件的编译期能力探测点。
     #[cfg(feature = "kafka")]
     pub mod kafka {
+        /// 组件能力已编入时可被属性展开代码引用的零大小标记。
+        pub const FEATURE_CHECK: () = ();
+    }
+
+    /// Outbox dispatcher 组件的编译期能力探测点。
+    #[cfg(feature = "outbox")]
+    pub mod outbox {
+        /// 组件能力已编入时可被属性展开代码引用的零大小标记。
+        pub const FEATURE_CHECK: () = ();
+    }
+
+    /// Saga 生命周期组件的编译期能力探测点。
+    #[cfg(feature = "saga")]
+    pub mod saga {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();
     }

@@ -18,9 +18,9 @@ linkme = "0.3"
 nasaga-core = { version = "1.0.0", path = "../nasaga-core" }
 nasaga-mysql = { version = "1.0.0", path = "../nasaga-mysql" }
 nainbox-core = { version = "1.0.0" }
-nainbox-mysql = { version = "1.0.0" }
+nainbox-mysql = { version = "1.0.1", path = "../nainbox-mysql" }
 naoutbox-core = { version = "1.0.0" }
-naoutbox-mysql = { version = "1.0.0" }
+naoutbox-mysql = { version = "1.0.1", path = "../naoutbox-mysql" }
 # `TxDecision` 是提交结果不确定处理的必要合同。
 natx = { version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
@@ -28,7 +28,7 @@ serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v5"] }
-nafka = { version = "1.0.0", path = "../nafka", optional = true, default-features = false }
+nafka = { version = "1.0.1", path = "../nafka", optional = true, default-features = false }
 tracing = "0.1"
 
 [features]

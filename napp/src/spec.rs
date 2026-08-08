@@ -247,16 +247,18 @@ impl ApplicationSpec {
         self.web_factory
     }
 
-    /// 根据长生命周期组件把 auto 固定为 Service 或 Batch。
+    /// 业务作用：根据长生命周期组件把 auto 固定为 Service 或 Batch，避免守护任务被批模式提前结束。
     ///
-    /// # 参数
+    /// 参数说明: 无。
     ///
-    /// 本方法无参数；Kafka、Web、长连接、注册发现或调度组件会得到 Service。
+    /// 返回：声明 Saga、Kafka、Outbox、Web、长连接、注册发现或调度时返回 Service，否则返回 Batch。
     pub(crate) fn resolve_auto_mode(&self) -> ApplicationMode {
         if self.components.iter().any(|component| {
             matches!(
                 component,
-                ComponentId::Kafka
+                ComponentId::Saga
+                    | ComponentId::Kafka
+                    | ComponentId::Outbox
                     | ComponentId::Web
                     | ComponentId::Ws
                     | ComponentId::NacosDiscovery
@@ -269,17 +271,20 @@ impl ApplicationSpec {
         }
     }
 
-    /// 校验显式模式与组件生命周期是否相容。
+    /// 业务作用：校验显式模式与组件生命周期是否相容，阻止长驻组件进入会主动结束的批模式。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `mode`：ApplicationSettings 已解析的最终 Service 或 Batch 模式。
+    ///
+    /// 返回：模式与组件相容时成功；Batch 包含任一长生命周期组件时返回配置错误。
     pub(crate) fn validate_mode(&self, mode: ApplicationMode) -> ApplicationResult<()> {
         if mode == ApplicationMode::Batch {
             if let Some(component) = self.components.iter().find(|component| {
                 matches!(
                     component,
-                    ComponentId::Kafka
+                    ComponentId::Saga
+                        | ComponentId::Kafka
+                        | ComponentId::Outbox
                         | ComponentId::Web
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
@@ -295,14 +300,15 @@ impl ApplicationSpec {
     }
 }
 
-/// 校验组件身份唯一性以及全部内置条件顺序约束。
+/// 业务作用：校验组件身份唯一性以及全部内置顺序约束，保证依赖先启动且后停机。
 ///
 /// 属性生成的静态描述与低层 Runner 共用该函数，防止手写组件表绕过编译期检查后获得不同的
 /// 启动语义。约束只在两端组件同时存在时生效，不会强制纯本地应用声明配置中心。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `components`：保持业务声明顺序的组件身份切片。
+///
+/// 返回：身份唯一且依赖顺序安全时成功；重复或逆序时返回启动前配置错误。
 pub(crate) fn validate_component_order(components: &[ComponentId]) -> ApplicationResult<()> {
     let mut seen = HashSet::new();
     for (index, component) in components.iter().copied().enumerate() {
@@ -318,7 +324,21 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
         }
     }
 
+    if components.contains(&ComponentId::Saga)
+        && (!components.contains(&ComponentId::Db) || !components.contains(&ComponentId::Outbox))
+    {
+        return Err(spec_error(
+            "component `saga` requires managed `db` and `outbox` components",
+        ));
+    }
+    if components.contains(&ComponentId::Outbox) && !components.contains(&ComponentId::Db) {
+        return Err(spec_error(
+            "component `outbox` requires managed `db` to be declared",
+        ));
+    }
+
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Redis)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Web)?;
@@ -335,8 +355,19 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     )?;
     ensure_before_if_both(components, ComponentId::Web, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Kafka)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::Saga)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::Outbox)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Kafka)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Outbox)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Redis, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Outbox)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Ws)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::NacosDiscovery)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Scheduling)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Scheduling)?;
@@ -344,8 +375,10 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     // (Start 发布 exporter 早于它们的 Start/Ready)。telemetry 不强制 Service、可用于 Batch。
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Telemetry)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Redis)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Kafka)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Web)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Ws)?;
     ensure_before_if_both(
