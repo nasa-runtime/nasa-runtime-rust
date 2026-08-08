@@ -65,7 +65,7 @@ let v = nanum::float::divide(1.0, 3.0, 8)?;
 
 f64 路径是便捷入口，内部仍走定点化以减少普通浮点误差；涉及 NaN 比较时使用 `eq_f64` / `gt_f64` 等兼容比较函数。
 
-## 行为边界(实测)
+## 行为边界
 
 - `to_fixed_str` 字符串先经 f64(逐值对齐原实现 parseDouble+round):有效数字 **≥16 位**开始失真;超过 `scale` 位的小数被**静默舍入**(`to_fixed_str("0.000000001", 8) = Ok(0)`)。需要任意精度的精确字符串解析请用 `decimal` 模块。
 - `to_plain_string_display` / `to_plain_string_raw_display` 负值舍到 0 时输出 `"-0"`(逐值对齐原实现);两参 `to_plain_string` 则有 `-0` 守卫。展示层不接受 `-0` 时请自行归一。

@@ -36,8 +36,8 @@ async fn save_order() -> anyhow::Result<()> {
 
 ## 应用入口
 
-`application` feature 提供声明式入口。组件字符串可以任意书写；宏会去重校验后按唯一规范顺序
-`log -> nacos-config -> telemetry -> db -> redis -> cache -> kafka -> auth -> web -> ws ->
+`application` feature 提供声明式入口。组件字符串可以任意书写；宏会拒绝未知项与重复项，再按唯一规范顺序
+`log -> nacos-config -> telemetry -> db -> redis -> cache -> saga -> kafka -> outbox -> auth -> web -> ws ->
 nacos-discovery -> scheduling` 启动，并严格反序停机。
 
 ```rust
@@ -51,6 +51,11 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 声明组件时必须启用对应 feature。`auth` 必须与 `web` 同时声明；`hystrix`、`grafana`、`mapper`、
 `openapi` 等是函数级或门面能力，不是组件字符串。完整生命周期合同见
 [napp README](../napp/README.md)。
+
+`#[nasa::application("saga")]` 隐式纳入 DB 与 Outbox，业务无需再声明 `"db"` 或 `"outbox"`；
+`#[nasa::application("outbox")]` 可脱离 Saga 独立运行，并隐式纳入 DB。Inbox 是事务内原语，没有独立
+组件字符串。Kafka、Redis Streams 或 HTTP 等 transport 不由 Saga 猜测，业务必须按发布端和消费端的
+真实实现显式选择。显式同时写出 `"saga"`、`"db"` 与 `"outbox"` 也合法，并与只声明 `"saga"` 等价。
 
 ## Feature 总表
 
@@ -75,6 +80,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |
 | `kafka-tls` / `kafka-gssapi` / `kafka-zstd` | `nasa::kafka` | Kafka 传输安全与压缩子能力 |
 | `kafka-schema-registry` | `nasa::kafka` | 实验性 schema adapter，不进入 `full` |
+| `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
+| `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
+| `saga-kafka` | `nasa::saga` | 受管 command/result Kafka transport |
 | `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |
@@ -105,6 +113,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `crypto-legacy-rsa` | `nasa::crypto` | 受控迁移的 RSA 私钥兼容入口，不进入 `full` |
 | `full` | 上述稳定能力的组合 | 非默认；不包含实验能力 |
 
+`kafka-gssapi` 使用目标系统的 Cyrus SASL。macOS 无需额外安装；Linux 构建环境需提供
+`libsasl2-dev` 或 `cyrus-sasl-devel`，具体包名由发行版决定。
+
 `nacos` 和 `rest-discovery-nacos` 只保证 API 可编译；真正连接后端必须同时启用 `nacos-sdk`。
 实验能力已有资源上限和显式生命周期，但在两个真实业务项目形成共同合同之前不承诺稳定 API。
 
@@ -122,6 +133,20 @@ application:
 database:
   url: ${APP_MYSQL_URL}
   max_connections: 16
+
+saga:
+  database_bootstrap: application
+  timer_poll_interval_ms: 500
+  timer_error_backoff_ms: 1000
+  timer_operation_timeout_ms: 5000
+  timer_failure_threshold: 3
+
+outbox:
+  poll_interval_ms: 500
+  error_backoff_ms: 1000
+  operation_timeout_ms: 5000
+  batch_size: 100
+  failure_threshold: 3
 
 redis:
   url: ${APP_REDIS_URL}
@@ -144,6 +169,8 @@ server:
 | `database` / `datasources` | `natx` / `namigrate` / `namapper` |
 | `redis` | `nadis` |
 | `cache` | `cacheable` 受管组件 |
+| `saga` | Application Saga 组件 |
+| `outbox` | Application Outbox 组件；也由 Saga 隐式纳入 |
 | `kafka` / `kafkas` | `nafka` 受管组件 |
 | `auth` | OAuth/JWKS 认证组件 |
 | `server` | Web 组件 |

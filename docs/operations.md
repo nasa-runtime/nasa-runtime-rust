@@ -81,13 +81,16 @@ NotReady / 摘流
 ## Saga 值班
 
 先查看 `nasaga_manual_intervention`、`nasaga_waiting_resolution`、`nasaga_due_timer`、
-`nasaga_conflict_total`、`nasaga_kafka_command_*` 和 `nasaga_kafka_result_*`，再关联 `nafka` 的
-retry、DLT 与 commit 指标。
+`nasaga_conflict_total`、`napp_outbox_pending`、`napp_outbox_dead`、`napp_outbox_published_total`、
+`napp_outbox_failed_rounds_total`、`nasaga_kafka_command_*` 和 `nasaga_kafka_result_*`，再关联所选
+transport 的 retry、DLT 与 commit 指标。
 
 - `authentication_failed_total` 上升：核对凭据、时钟和报文完整性；
 - `replay_rejected_total` 上升：追踪重复来源，不清空仍有效 nonce；
 - `capacity_rejected_total` 上升：隔离异常 producer/path，并核对该信任边的容量预算；
 - `nasaga_http_command_dlt_total` 上升：核对原 envelope、冻结定义摘要和部署快照；
+- `napp_outbox_pending` 非零且发布量不增长：核对首个未确认事件、唯一 publisher 路由和下游确认；
+- `napp_outbox_dead` 非零：按已批准的毒丸策略处理，不得直接删除事件绕过顺序；
 - Unknown 积压：检查 typed resolver、外部事实和 resolution budget，不能手改状态；
 - timer fencing 丢失：旧 worker 已失权，停止推进，由新 owner 重新领取。
 

@@ -41,6 +41,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `kafka-zstd` | Zstandard 压缩 |
 | `ws-kafka` | `nasa::ws` 与 Kafka control/data plane 集成 |
 
+启用 `kafka-gssapi` 时，Cyrus SASL 由目标系统提供。macOS 使用系统自带的动态库；
+Linux 构建环境需要安装发行版提供的 Cyrus SASL 开发包，例如 Debian 系的
+`libsasl2-dev` 或 Fedora 系的 `cyrus-sasl-devel`。该边界让 GSS/Kerberos 符号由
+目标系统的认证栈统一解析，避免静态 SASL 插件与系统认证框架失配。
+
 ## 快速开始
 
 下面示例使用属性宏收集消费者。`client` 必须与 `KafkaConfig.client_name` 一致；

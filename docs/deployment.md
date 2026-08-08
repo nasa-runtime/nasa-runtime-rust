@@ -32,7 +32,8 @@ application:
 
 - `mode: service` 用于常驻进程；无 Web 的后台服务必须显式设置。
 - `mode: batch` 用于任务完成后正常退出的批处理。
-- `mode: auto` 只适合声明了 Web、长连接、服务发现或调度组件的应用。
+- `mode: auto` 在声明 Saga、Kafka、Outbox、Web、长连接、服务发现或调度组件时解析为常驻服务；
+  其它组合解析为批处理。
 - `startup_timeout_ms` 约束组件与业务 Hook 启动。
 - `shutdown_timeout_ms` 是全部反向清理共享的总预算。
 
@@ -76,7 +77,10 @@ readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中
 
 ## Saga 部署
 
-Saga 采用 expand-first：先按迁移清单扩展结构并核对历史行，再滚动启动新 binary。只有旧 binary 已
+`#[nasa::application("saga")]` 会隐式纳入 DB 与受管 Outbox；业务只提交 Saga 运行计划和发布端。
+Kafka 仅在选用内置托管消息适配器时显式声明，不是 Saga 的强制依赖。
+
+Saga 采用 expand-first：先按 Saga 与 Outbox 迁移清单扩展结构并核对历史行，再滚动启动新 binary。只有旧 binary 已
 完全退出、审计已导出且 replay horizon 允许时，才执行结构回退。
 
 Saga binary collation 脚本没有通用 down。执行前记录原 collation，并单独评估大表重建、metadata
