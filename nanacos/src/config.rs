@@ -137,10 +137,11 @@ impl NacosConfigClient {
         }
     }
 
-    /// 拉取配置及服务端 md5；dataId 尚不存在时返回 `Ok(None)`。
+    /// 业务作用：拉取配置及服务端 md5，并把明确的配置未初始化协议事实与依赖故障分离。
     ///
-    /// 该接口只把 Nacos 的 `ConfigNotFound` 降级为“未初始化”，鉴权、网络和服务端错误仍然上抛，
-    /// 避免调用方把故障误判成首次发布。
+    /// 参数说明：`data_id`/`group` 唯一定位 Nacos 配置。
+    ///
+    /// 返回：配置存在时返回正文与 md5，不存在返回 `Ok(None)`；鉴权、网络和其它服务端错误上抛。
     pub async fn fetch_optional_with_md5(
         &self,
         data_id: &str,
@@ -161,6 +162,15 @@ impl NacosConfigClient {
             {
                 Ok(resp) => Ok(Some((resp.content().to_string(), resp.md5().to_string()))),
                 Err(nacos_sdk::api::error::Error::ConfigNotFound(_)) => Ok(None),
+                // nacos-sdk 0.8.0 对部分 Nacos 3.x gRPC 响应没有保留 ConfigNotFound
+                // variant，而是把同一个协议 error_code=300 包进 ErrResponse/ErrResult。只按精确
+                // not-found 错误码降级，鉴权、网络与其它 500 仍保持失败闭合。
+                Err(nacos_sdk::api::error::Error::ErrResponse(_, _, 300, _)) => Ok(None),
+                Err(nacos_sdk::api::error::Error::ErrResult(message))
+                    if is_config_not_found_result(&message) =>
+                {
+                    Ok(None)
+                }
                 Err(e) => Err(anyhow::anyhow!(
                     "nacos: get_config({data_id},{group}) failed: {e}"
                 )),
@@ -168,10 +178,15 @@ impl NacosConfigClient {
         }
     }
 
-    /// 首次发布尚不存在的配置。
+    /// 业务作用：首次发布尚不存在的配置，避免普通创建入口覆盖已经建立的远端事实。
     ///
     /// 发布前先读取一次，已存在时返回 `Ok(false)`，避免常规调用覆盖现有配置。并发首发最终以
     /// Nacos 服务端返回值为准；调用方应在失败后重新读取并比较内容。
+    ///
+    /// 参数说明：`data_id`/`group` 唯一定位配置；`content` 是非空正文；`content_type` 是非空文件类型。
+    ///
+    /// 返回：远端原先不存在且发布成功时返回 true；已存在或并发首发失配时返回 false；输入、鉴权、
+    /// 网络或其它服务端错误返回失败。
     pub async fn publish_initial(
         &self,
         data_id: &str,
@@ -192,6 +207,8 @@ impl NacosConfigClient {
                 !content_type.trim().is_empty(),
                 "nacos: content_type 不能为空"
             );
+            // Nacos 没有暴露原子 create-only 入口；先读只负责阻止覆盖已经可见的配置。并发首发仍须由
+            // 调用方使用唯一发布身份并在返回后复读内容，不能把这次预读当作跨进程互斥。
             if self
                 .fetch_optional_with_md5(data_id, group)
                 .await?
@@ -215,7 +232,11 @@ impl NacosConfigClient {
         }
     }
 
-    /// 删除配置；主要用于隔离 live 测试创建的唯一 dataId。
+    /// 业务作用：删除已退役的 Nacos 配置，使配置生命周期收口时不再向订阅方暴露过期内容。
+    ///
+    /// 参数说明：`data_id`/`group` 唯一定位需要退役的配置。
+    ///
+    /// 返回：服务端确认删除时返回 true，目标不存在时返回 false；输入、鉴权、网络或其它服务端错误返回失败。
     pub async fn remove(&self, data_id: &str, group: &str) -> anyhow::Result<bool> {
         #[cfg(not(feature = "nacos"))]
         {
@@ -232,22 +253,15 @@ impl NacosConfigClient {
         }
     }
 
-    /// 业务作用：CAS(compare-and-set)发布配置:仅当 Nacos 端【当前内容 md5】等于 `cas_md5` 时才写入。
+    /// 业务作用：以 YAML content type 执行兼容 CAS 发布，仅当远端当前 md5 等于 `cas_md5` 时写入。
     ///
     /// 用于「并发编辑安全」场景:调用方先 [`fetch_with_md5`](Self::fetch_with_md5) 拿到基线 md5,写入时带上它;
     /// 若在读-改-写窗口内有人抢先改了该 dataId,服务端 md5 已变,本次写被服务端拒绝(返回 `Ok(false)`),
     /// 调用方据此让前端 rebase 后重试,避免相互覆盖。feature 关 → `Err`。
     ///
-    /// # 参数
-    /// - `data_id`: Nacos 配置 dataId。
-    /// - `group`: Nacos 配置 group,不能为空。
-    /// - `content`: 期望写入的新配置原文(不能为空)。
-    /// - `cas_md5`: compare-and-set 基线,应为【写入前远端当前内容】的 md5。
+    /// 参数说明：`data_id`/`group` 定位配置；`content` 是非空 YAML 原文；`cas_md5` 是读取时远端 md5。
     ///
-    /// # 返回
-    /// - `Ok(true)`:CAS 命中,已发布。
-    /// - `Ok(false)`:CAS 失配(远端已被他人改动),未写入——调用方应让前端 rebase。
-    /// - `Err(_)`:网络或服务端错误。
+    /// 返回：CAS 命中返回 true；并发失配返回 false；输入、网络或其它服务端错误返回失败。
     pub async fn publish_cas(
         &self,
         data_id: &str,
@@ -255,29 +269,67 @@ impl NacosConfigClient {
         content: &str,
         cas_md5: &str,
     ) -> anyhow::Result<bool> {
+        self.publish_cas_typed(data_id, group, content, "yaml", cas_md5)
+            .await
+    }
+
+    /// 业务作用：以调用方声明的 Nacos content type 执行 CAS，避免 JSON 等文档在更新后被错误标为 YAML。
+    ///
+    /// 参数说明：`data_id`/`group` 定位配置；`content` 是非空原文；`content_type` 是非空 Nacos
+    /// 文件类型；`cas_md5` 是读取时远端 md5。
+    ///
+    /// 返回：CAS 命中返回 true；明确的 md5 并发失配返回 false；输入、网络或其它服务端错误返回失败。
+    pub async fn publish_cas_typed(
+        &self,
+        data_id: &str,
+        group: &str,
+        content: &str,
+        content_type: &str,
+        cas_md5: &str,
+    ) -> anyhow::Result<bool> {
         #[cfg(not(feature = "nacos"))]
         {
-            let _ = (data_id, group, content, cas_md5);
+            let _ = (data_id, group, content, content_type, cas_md5);
             anyhow::bail!(client::DISABLED_MSG);
         }
         #[cfg(feature = "nacos")]
         {
             validate_cfg(data_id, group)?;
             anyhow::ensure!(!content.trim().is_empty(), "nacos: content 不能为空");
+            anyhow::ensure!(
+                !content_type.trim().is_empty(),
+                "nacos: content_type 不能为空"
+            );
             anyhow::ensure!(!cas_md5.trim().is_empty(), "nacos: cas_md5 不能为空");
-            // WHY:content_type 固定 yaml,与 watch 侧 `with_file_extension("yaml")` 一致,避免 Nacos 端配置类型漂移。
-            self.config
+            // 写入判定交给 Nacos 服务端原子比较 md5；本地不得在预读后退化为普通 publish，否则会在
+            // 并发编辑窗口覆盖后来者。只有明确的 CAS 失配收敛为 false，其它依赖故障保持失败闭合。
+            match self
+                .config
                 .publish_config_cas(
                     data_id.to_string(),
                     group.to_string(),
                     content.to_string(),
-                    Some("yaml".to_string()),
+                    Some(content_type.to_string()),
                     cas_md5.to_string(),
                 )
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("nacos: publish_config_cas({data_id},{group}) failed: {e}")
-                })
+            {
+                Ok(published) => Ok(published),
+                Err(nacos_sdk::api::error::Error::ConfigQueryConflict(_)) => Ok(false),
+                Err(nacos_sdk::api::error::Error::ErrResponse(_, _, 500, Some(message)))
+                    if is_config_cas_conflict_result(&message) =>
+                {
+                    Ok(false)
+                }
+                Err(nacos_sdk::api::error::Error::ErrResult(message))
+                    if is_config_cas_conflict_result(&message) =>
+                {
+                    Ok(false)
+                }
+                Err(e) => Err(anyhow::anyhow!(
+                    "nacos: publish_config_cas({data_id},{group}) failed: {e}"
+                )),
+            }
         }
     }
 
@@ -405,6 +457,27 @@ impl NacosConfigClient {
             Ok((guard, rx))
         }
     }
+}
+
+/// 业务作用：识别 SDK 丢失强类型 variant 后仍保留在 ErrResult 文本中的 Nacos 配置缺失协议码。
+///
+/// 参数说明：`message` 是 nacos-sdk 生成的错误正文，不包含调用方输入以外的本地状态。
+///
+/// 返回：同时出现 `error_code=300` 与配置不存在语义时返回 true；其它服务端/鉴权/网络错误一律 false。
+#[cfg(feature = "nacos")]
+fn is_config_not_found_result(message: &str) -> bool {
+    message.contains("error_code=300")
+        && (message.contains("config data not exist") || message.contains("config not found"))
+}
+
+/// 业务作用：识别 SDK 未保留 ConfigQueryConflict variant 时的 Nacos CAS 失配响应。
+///
+/// 参数说明：`message` 是 Nacos 服务端错误正文。
+///
+/// 返回：只对明确的 CAS publish/md5 changed 语义返回 true；普通 publish 500 继续作为远端错误上抛。
+#[cfg(feature = "nacos")]
+fn is_config_cas_conflict_result(message: &str) -> bool {
+    message.contains("Cas publish fail") && message.contains("md5 may have changed")
 }
 
 /// 业务作用：`watch_channel` 初值播种:**仅当 listener 还没推过更新时**才用 fetch 初值播种。
