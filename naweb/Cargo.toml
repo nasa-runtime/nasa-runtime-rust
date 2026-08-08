@@ -2,7 +2,7 @@
 # 业务通常通过 nasa(feature = "web") 使用；本包同时保留可独立依赖的底层入口。
 [package]
 name = "naweb"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Web routing, interceptor and endpoint security runtime"
