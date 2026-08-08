@@ -12,8 +12,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow = "1"
-# 同仓 path 保证当前工作区使用一致的 Saga 核心合同。
-nasaga-core = { version = "1.0.0", path = "../nasaga-core" }
+nasaga-core = { version = "1.0.0" }
 # Saga store、Inbox 与 Outbox 必须共享 natx 的同一 ambient transaction。
 natx = { version = "1.0.1" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
