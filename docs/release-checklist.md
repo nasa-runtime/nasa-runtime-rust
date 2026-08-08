@@ -20,6 +20,8 @@
 - [ ] `cargo check -p nasa --features full --all-targets`
 - [ ] `cargo deny check`
 - [ ] 每个公开 crate 的离线归档构建成功，归档内容仅包含产品源码、公开文档和再分发所需文件。
+- [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
+      依赖重新生成。
 
 ## 组件边界
 

@@ -36,8 +36,20 @@ license = "MIT OR Apache-2.0"
 5. `nasa` 门面。
 
 同一阶段只有在前置 crate 已能从 registry 正常解析后才能继续。同仓内部依赖在源码 manifest 中使用
-`path + version`，保证工作区解析本地源码；Cargo 生成公开归档时会移除 `path` 并保留 registry 版本
-约束。必须检查归档内规范化后的 manifest，并确认对应版本已经公开，不能用工作区路径掩盖缺失依赖。
+`path + version` 只用于目标版本尚未公开时的同仓联调。前置 crate 进入 registry 后，推进下一阶段前必须删除
+所有指向该版本的 `path`，只保留线上版本约束并重新生成锁文件；发布目标自身的 manifest 不得含本地依赖。
+必须检查归档内规范化后的 manifest，并确认对应版本已经公开，不能用工作区路径掩盖缺失依赖。
+
+Saga 能力按以下阶段逐层公开：
+
+1. `natx 1.0.1`、`nafka 1.0.1`、`nasaga-core 1.0.0`、`nasaga-macro 1.0.0`、`napp-macro 1.0.1`；
+2. `nainbox-mysql 1.0.1`、`naoutbox-mysql 1.0.1`、`nasaga-mysql 1.0.0`；
+3. `nasaga-runtime 1.0.0`；
+4. `napp 1.0.1`；
+5. `nasa 1.0.1`。
+
+每完成一层，都要先确认 registry 已可解析并移除下游 manifest 中指向该层的 `path`，提交新的依赖基线后
+才能启动下一层。
 
 `natx` 的事务上下文以及 `naoutbox-mysql` 的提交唤醒都绑定到具体 package 实例。最终可执行制品若同时
 装入 registry 与本地路径副本，两份实例会各自持有互不可见的进程状态，表现为事务归属、消息收集或
