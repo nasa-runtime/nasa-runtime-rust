@@ -3,7 +3,7 @@
 # 业务经门面 `use nasa::yml::nacos::{...};` 使用(crate 真名 config-boot,业务无感知)。
 [package]
 name = "config-boot"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "yml × nacos 配置引导胶水:按 import 拉取远端配置、拼装有序 overlay(nasa::yml::nacos)"
@@ -17,10 +17,10 @@ categories.workspace = true
 [lib]
 name = "config_boot"
 [dependencies]
-naml = { package = "naml", version = "1.0.0" }
+naml = { package = "naml", version = "1.0.1" }
 # 只用 nacos 的类型(ConfigRef/ConfigBundle)与 client 方法(fetch_many);default-features=false 不自带 SDK,
 # 真实后端由上层 app 经 nasa/nacos-sdk 打开(cargo 特性统一后本 crate 也拿到真后端)。
-nanacos = { package = "nanacos", version = "1.0.0", default-features = false }
+nanacos = { package = "nanacos", version = "1.0.1", default-features = false }
 serde_json = "1"
 # 为 NacosBootstrap 与 NacosImportSpec 提供 serde derive。
 serde = { version = "1", features = ["derive"] }

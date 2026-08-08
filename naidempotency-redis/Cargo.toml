@@ -1,6 +1,6 @@
 [package]
 name = "naidempotency-redis"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 幂等 store 的 Redis 后端(nadis;SET NX PX 原子占位 + EVAL 原子完成;非资金 response-cache 语义)"
@@ -11,8 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-naidempotency = { version = "1.0.0" }
-nadis = { version = "1.0.0" }
+naidempotency = { version = "1.0.1" }
+nadis = { version = "1.0.1" }
 redis = { version = "1", default-features = false }
 async-trait = "0.1"
 serde_json = "1"

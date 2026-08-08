@@ -9,7 +9,7 @@
 #   档3 http(s)://host/path  → 默认普通外部 HTTP;`heuristic_http=Enabled` 时命中服务名索引(ServiceNameIndex)才走 LB(已实现)
 [package]
 name = "rest-discovery"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "带服务发现与客户端负载均衡的 HTTP client，面向 discovery::DiscoveryClient 抽象"
@@ -29,9 +29,9 @@ live-nacos = ["dep:nanacos", "nanacos/nacos"]
 
 [dependencies]
 # 只依赖 provider-neutral 抽象(Instance / DiscoveryClient / is_traffic_instance / WatchOptions / ServiceWatch)。
-nadisc = { package = "nadisc", version = "1.0.0" }
-nabudget = { version = "1.0.0" }
-natelemetry = { version = "1.0.0" }
+nadisc = { package = "nadisc", version = "1.0.1" }
+nabudget = { version = "1.0.1" }
+natelemetry = { version = "1.0.1" }
 # 已核实:workspace 树里 reqwest 0.12 走 rustls(从不 native-tls/openssl)。关 default-tls,只挂 rustls。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
@@ -51,4 +51,4 @@ bytes = "1"
 percent-encoding = "2"
 httpdate = "1"
 # live-nacos 才编入:真 Nacos 后端(可选,不进默认依赖图)。
-nanacos = { package = "nanacos", version = "1.0.0", optional = true, default-features = false }
+nanacos = { package = "nanacos", version = "1.0.1", optional = true, default-features = false }
