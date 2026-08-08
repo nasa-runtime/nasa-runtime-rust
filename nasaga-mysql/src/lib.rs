@@ -1,7 +1,7 @@
 //! NASA Saga 的 MySQL store：instance/step/attempt/transition/timer 持久化与数据库 CAS。
 //!
-//! 本 crate 是 `` §11.5.5 持久化模型的落地：`nasaga-core` 负责封闭状态机与
-//! 身份派生等纯裁决，这里负责把裁决结果以正确的事务边界与唯一键落库。Orchestrator
+//! `nasaga-core` 负责封闭状态机与身份派生等纯裁决，本 crate 负责把裁决结果以正确的
+//! 事务边界与唯一键落库。Orchestrator
 //! 的推进事务以"单一本地事务"为前提——Saga 表必须与 Orchestrator 自身的 Inbox/Outbox
 //! **同库**，本 crate 不提供跨库变体。
 //!
