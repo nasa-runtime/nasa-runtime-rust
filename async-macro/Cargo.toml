@@ -9,7 +9,7 @@
 # ============================================================================
 [package]
 name = "async-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[Async]/#[scheduled]/#[EnableScheduling] 属性宏(异步/定时)"
@@ -24,7 +24,7 @@ proc-macro = true
 
 name = "async_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0" }
+nasa-macro-support = { package = "macro-support", version = "1.0.1" }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

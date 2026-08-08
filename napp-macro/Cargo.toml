@@ -14,7 +14,7 @@ categories.workspace = true
 proc-macro = true
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.0" }
+nasa-macro-support = { package = "macro-support", version = "1.0.1" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
