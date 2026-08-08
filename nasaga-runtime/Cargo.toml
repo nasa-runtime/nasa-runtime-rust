@@ -14,8 +14,8 @@ categories.workspace = true
 anyhow = "1"
 # linkme 作为收集点宿主，#[saga] 的 descriptor 静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
-# 同仓 path 保证运行时、核心合同和 MySQL store 来自同一工作区状态。
-nasaga-core = { version = "1.0.0", path = "../nasaga-core" }
+# 核心合同固定使用公开坐标；尚未公开的 MySQL store 在当前阶段保留同仓来源。
+nasaga-core = { version = "1.0.0" }
 nasaga-mysql = { version = "1.0.0", path = "../nasaga-mysql" }
 nainbox-core = { version = "1.0.0" }
 nainbox-mysql = { version = "1.0.1", path = "../nainbox-mysql" }
@@ -28,7 +28,7 @@ serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v5"] }
-nafka = { version = "1.0.1", path = "../nafka", optional = true, default-features = false }
+nafka = { version = "1.0.1", optional = true, default-features = false }
 tracing = "0.1"
 
 [features]

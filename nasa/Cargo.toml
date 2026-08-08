@@ -221,14 +221,14 @@ full = [
 [dependencies]
 # 依赖 key 用 *_impl,避免与门面公共模块同名(维护约束 §四)。
 application_impl = { package = "napp", version = "1.0.1", path = "../napp", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.1", path = "../napp-macro", optional = true }
+application_macro = { package = "napp-macro", version = "1.0.1", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
 grafana_impl = { package = "nafana", version = "1.0.0", optional = true }
 grafana_macro = { package = "nafana-macro", version = "1.0.1", optional = true }
 cache_impl = { package = "cacheable", version = "1.0.0", optional = true }
 nacache_macro = { package = "nacache-macro", version = "1.0.0", optional = true }
-tx_impl = { package = "natx", version = "1.0.1", path = "../natx", optional = true }
+tx_impl = { package = "natx", version = "1.0.1", optional = true }
 natx_macro = { package = "natx-macro", version = "1.0.0", optional = true }
 inbox_core_impl = { package = "nainbox-core", version = "1.0.0", optional = true }
 inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.1", path = "../nainbox-mysql", optional = true }
@@ -244,10 +244,9 @@ secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
 object_impl = { package = "naobject", version = "1.0.0", optional = true }
-# 同仓 path 保证门面与 Saga 组件使用同一工作区状态。
-saga_core_impl = { package = "nasaga-core", version = "1.0.0", path = "../nasaga-core", optional = true }
+saga_core_impl = { package = "nasaga-core", version = "1.0.0", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.0", path = "../nasaga-runtime", optional = true }
-nasaga_macro = { package = "nasaga-macro", version = "1.0.0", path = "../nasaga-macro", optional = true }
+nasaga_macro = { package = "nasaga-macro", version = "1.0.0", optional = true }
 grpc_impl = { package = "nagrpc", version = "1.0.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.0", optional = true }
@@ -258,8 +257,7 @@ mapper_impl = { package = "namapper", version = "1.0.0", optional = true }
 namapper_macro = { package = "namapper-macro", version = "1.0.0", optional = true }
 partition_impl = { package = "napart", version = "1.0.0", optional = true }
 ws_impl = { package = "naws", version = "1.0.0", optional = true, default-features = false }
-# 同仓 path 保证门面启用的传输安全能力来自当前 nafka 实现。
-kafka_impl = { package = "nafka", version = "1.0.1", path = "../nafka", optional = true, default-features = false }
+kafka_impl = { package = "nafka", version = "1.0.1", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.0", optional = true, default-features = false }
 crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "1.0.0", optional = true }
