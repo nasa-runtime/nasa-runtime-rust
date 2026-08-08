@@ -1,6 +1,6 @@
 [package]
 name = "nagrpc"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Experimental bounded tonic gRPC server lifecycle for NASA"

@@ -1,6 +1,6 @@
 [package]
 name = "naopenapi"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA OpenAPI 3.1 deterministic contract generator"
