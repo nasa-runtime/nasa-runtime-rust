@@ -7,7 +7,7 @@
 #   import 解析只产出中性 YmlImport(File/Nacos 描述),真正的 Nacos 拉取由门面层胶水完成。
 [package]
 name = "naml"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "通用分层 YAML 配置加载器(本地+profile+overlay+env+${}占位符 → 强类型 T);不认识业务 AppConfig"
@@ -21,7 +21,7 @@ categories.workspace = true
 [lib]
 name = "naml"
 [dependencies]
-nabase = { package = "nabase", version = "1.0.0" }
+nabase = { package = "nabase", version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 分层配置合并器：本地文件、profile、内存 overlay 与环境变量按叶子级深合并。

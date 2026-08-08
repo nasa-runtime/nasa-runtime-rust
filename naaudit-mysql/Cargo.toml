@@ -1,6 +1,6 @@
 [package]
 name = "naaudit-mysql"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA transactional audit sink backed by the MySQL outbox"
@@ -13,4 +13,4 @@ categories.workspace = true
 [dependencies]
 async-trait = "0.1"
 naaudit = { version = "1.0.0" }
-naoutbox-mysql = { version = "1.0.0" }
+naoutbox-mysql = { version = "1.0.1" }
