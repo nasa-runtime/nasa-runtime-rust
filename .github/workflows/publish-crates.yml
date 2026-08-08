@@ -8,22 +8,16 @@ on:
         required: true
         type: choice
         options:
-          - 1a
-          - 1b
+          - 1
           - 2
           - 3
-          - 3p
           - 4
           - 5
           - 6
           - 7
-          - saga-foundation
-          - saga-storage
-          - saga-runtime
-          - saga-application
-          - saga-facade
+          - 8
       confirm:
-        description: "既有发布输入 publish-1.0.0；3p 输入 publish-1.0.1；Saga 发布输入 publish-saga"
+        description: "输入 publish-1.0.2 确认本轮补丁发布"
         required: true
         type: string
 
@@ -47,18 +41,11 @@ jobs:
           RELEASE_CONFIRM: ${{ inputs.confirm }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" != "refs/heads/release/1.0.0" ]]; then
-            echo "仅允许从 release/1.0.0 发布，当前 ref: $GITHUB_REF" >&2
+          if [[ "$GITHUB_REF" != "refs/heads/release/1.0.2" ]]; then
+            echo "仅允许从 release/1.0.2 发布，当前 ref: $GITHUB_REF" >&2
             exit 1
           fi
-          expected_confirm="publish-1.0.0"
-          if [[ "${{ inputs.batch }}" == "3p" ]]; then
-            expected_confirm="publish-1.0.1"
-          fi
-          if [[ "${{ inputs.batch }}" == saga-* ]]; then
-            expected_confirm="publish-saga"
-          fi
-          if [[ "$RELEASE_CONFIRM" != "$expected_confirm" ]]; then
+          if [[ "$RELEASE_CONFIRM" != "publish-1.0.2" ]]; then
             echo "确认文本不匹配，拒绝发布" >&2
             exit 1
           fi
@@ -81,116 +68,45 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            1a)
-              echo "RELEASE_CRATES=nabase macro-support nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry" >> "$GITHUB_ENV"
-              ;;
-            1b)
-              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+            1)
+              echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
               ;;
             2)
-              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=naidempotency nainbox-core naoutbox-core nametrics-core natelemetry" >> "$GITHUB_ENV"
               ;;
             3)
-              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
-              ;;
-            3p)
-              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=async-macro nacache-macro namapper-macro rest-client-macro nanum" >> "$GITHUB_ENV"
               ;;
             4)
-              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=natx nanacos nadis nafka naweb" >> "$GITHUB_ENV"
               ;;
             5)
-              echo "RELEASE_CRATES=naidempotency-mysql naidempotency-redis nainbox-mysql namapper naoutbox-mysql nasched naws rest-discovery-nacos" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=cacheable hystrix nafana nagrpc naopenapi" >> "$GITHUB_ENV"
               ;;
             6)
-              echo "RELEASE_CRATES=naaudit-mysql napp" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=naml naaudit-mysql nasaga-macro naidempotency-mysql nasaga-mysql" >> "$GITHUB_ENV"
               ;;
             7)
-              echo "RELEASE_CRATES=nasa" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
               ;;
-            saga-foundation)
-              echo "RELEASE_CRATES=natx nafka nasaga-core nasaga-macro napp-macro" >> "$GITHUB_ENV"
-              ;;
-            saga-storage)
-              echo "RELEASE_CRATES=nainbox-mysql naoutbox-mysql nasaga-mysql" >> "$GITHUB_ENV"
-              ;;
-            saga-runtime)
-              echo "RELEASE_CRATES=nasaga-runtime" >> "$GITHUB_ENV"
-              ;;
-            saga-application)
-              echo "RELEASE_CRATES=napp" >> "$GITHUB_ENV"
-              ;;
-            saga-facade)
-              echo "RELEASE_CRATES=nasa" >> "$GITHUB_ENV"
+            8)
+              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
               ;;
           esac
-      - name: verify nabase registry precondition
-        if: inputs.batch == '1b'
-        shell: bash
-        run: |
-          curl --fail --silent --show-error \
-            --user-agent "nasa-runtime-release/1.0" \
-            "https://crates.io/api/v1/crates/nabase/1.0.0" >/dev/null
       - name: verify registry dependency policy
-        env:
-          RELEASE_BATCH: ${{ inputs.batch }}
         shell: bash
         run: |
-          case "$RELEASE_BATCH" in
-            saga-foundation)
-              published_crates=""
-              ;;
-            saga-storage)
-              published_crates="natx nafka nasaga-core nasaga-macro napp-macro"
-              ;;
-            saga-runtime)
-              published_crates="natx nafka nasaga-core nasaga-macro napp-macro nainbox-mysql naoutbox-mysql nasaga-mysql"
-              ;;
-            saga-application)
-              published_crates="natx nafka nasaga-core nasaga-macro napp-macro nainbox-mysql naoutbox-mysql nasaga-mysql nasaga-runtime"
-              ;;
-            saga-facade)
-              published_crates="natx nafka nasaga-core nasaga-macro napp-macro nainbox-mysql naoutbox-mysql nasaga-mysql nasaga-runtime napp"
-              ;;
-            *)
-              published_crates="macro-support nabase nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry naml nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery naidempotency-mysql naidempotency-redis nainbox-mysql namapper naoutbox-mysql nasched naws rest-discovery-nacos naaudit-mysql napp"
-              ;;
-          esac
-          failed=false
           while IFS=$'\t' read -r owner dependency dependency_path; do
-            case " $published_crates " in
-              *" $dependency "*)
-                if [[ "$RELEASE_BATCH" == "3p" && ( "$dependency" == "hystrix-macro" || "$dependency" == "nafana-macro" ) ]]; then
-                  echo "$owner 临时通过 path 验证尚未发布的 $dependency 1.0.1；3p 发布后第四批必须移除"
-                  continue
-                fi
-                echo "$owner 仍通过 path 引用已发布 crate $dependency: $dependency_path" >&2
-                failed=true
-                ;;
-            esac
+            echo "$owner 仍通过 path 引用 $dependency: $dependency_path" >&2
+            exit 1
           done < <(
             cargo metadata --locked --no-deps --format-version 1 |
               jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
           )
-          if [[ "$failed" == "true" ]]; then
-            exit 1
-          fi
-
-          for crate_name in $RELEASE_CRATES; do
-            local_dependencies="$(
-              cargo metadata --locked --no-deps --format-version 1 |
-                jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .dependencies[] | select(.path != null) | "\(.name)=\(.path)"'
-            )"
-            if [[ -n "$local_dependencies" ]]; then
-              echo "$crate_name 发布 manifest 仍含本地依赖:" >&2
-              echo "$local_dependencies" >&2
-              exit 1
-            fi
-          done
       - name: verify formatting
         run: cargo fmt --all -- --check
       - name: verify clippy
@@ -214,12 +130,12 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            case "${{ inputs.batch }}:$crate_name" in
-              3p:*|saga-foundation:natx|saga-foundation:nafka|saga-foundation:napp-macro|saga-storage:nainbox-mysql|saga-storage:naoutbox-mysql|saga-application:napp|saga-facade:nasa)
-                expected_version="1.0.1"
+            case "$crate_name" in
+              natx|nafka|napp|nasa)
+                expected_version="1.0.2"
                 ;;
               *)
-                expected_version="1.0.0"
+                expected_version="1.0.1"
                 ;;
             esac
             if [[ "$version" != "$expected_version" ]]; then
@@ -246,7 +162,7 @@ jobs:
             crate_scan_dir="$scan_root/$crate_name"
             mkdir -p "$crate_scan_dir"
             tar -xzf "$archive" -C "$crate_scan_dir"
-            if grep -REni --binary-files=without-match '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|(^|[^[:alnum:]_])trybuild([^[:alnum:]_]|$)|(^|[^[:alnum:]_])fixture([^[:alnum:]_]|$)|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
+            if grep -REni --binary-files=without-match '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])trybuild([^[:alnum:]_]|$)|(^|[^[:alnum:]_])fixture([^[:alnum:]_]|$)|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
               echo "$crate_name 归档包含验证性内容" >&2
               exit 1
             fi
@@ -266,47 +182,29 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            1a)
-              echo "RELEASE_CRATES=nabase macro-support nabudget nadisc naauthz naidempotency nainbox-core nametrics-core naopenapi naoutbox-core natelemetry" >> "$GITHUB_ENV"
-              ;;
-            1b)
-              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+            1)
+              echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
               ;;
             2)
-              echo "RELEASE_CRATES=nadate nagrpc naimg namigrate nanum napart nasecret naws-proto-derive ncrypto rest-client-macro" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=naidempotency nainbox-core naoutbox-core nametrics-core natelemetry" >> "$GITHUB_ENV"
               ;;
             3)
-              echo "RELEASE_CRATES=async-macro hystrix-macro naaudit nacache-macro nadis-derive nafana-macro nafka-macro nalog namapper-macro nanacos naobject napp-macro nasecret-http nasecret-vault natx-macro nauth-oauth naweb-macro naws-proto" >> "$GITHUB_ENV"
-              ;;
-            3p)
-              echo "RELEASE_CRATES=hystrix-macro nafana-macro" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=async-macro nacache-macro namapper-macro rest-client-macro nanum" >> "$GITHUB_ENV"
               ;;
             4)
-              echo "RELEASE_CRATES=cacheable config-boot hystrix nadis nafana nafka natx naweb rest-discovery" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=natx nanacos nadis nafka naweb" >> "$GITHUB_ENV"
               ;;
             5)
-              echo "RELEASE_CRATES=naidempotency-mysql naidempotency-redis nainbox-mysql namapper naoutbox-mysql nasched naws rest-discovery-nacos" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=cacheable hystrix nafana nagrpc naopenapi" >> "$GITHUB_ENV"
               ;;
             6)
-              echo "RELEASE_CRATES=naaudit-mysql napp" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=naml naaudit-mysql nasaga-macro naidempotency-mysql nasaga-mysql" >> "$GITHUB_ENV"
               ;;
             7)
-              echo "RELEASE_CRATES=nasa" >> "$GITHUB_ENV"
+              echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
               ;;
-            saga-foundation)
-              echo "RELEASE_CRATES=natx nafka nasaga-core nasaga-macro napp-macro" >> "$GITHUB_ENV"
-              ;;
-            saga-storage)
-              echo "RELEASE_CRATES=nainbox-mysql naoutbox-mysql nasaga-mysql" >> "$GITHUB_ENV"
-              ;;
-            saga-runtime)
-              echo "RELEASE_CRATES=nasaga-runtime" >> "$GITHUB_ENV"
-              ;;
-            saga-application)
-              echo "RELEASE_CRATES=napp" >> "$GITHUB_ENV"
-              ;;
-            saga-facade)
-              echo "RELEASE_CRATES=nasa" >> "$GITHUB_ENV"
+            8)
+              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -323,9 +221,9 @@ jobs:
             exit 1
           fi
 
-          # 业务作用: 在归档 checksum 因发布工作流提交变化而不同时，验证 crates.io 已有版本与当前候选的实际发布内容等价。
-          # 参数说明: 依次接收 crate 名、版本、本地归档路径和 crates.io API 返回的远端 checksum。
-          # 返回: 远端归档完整且除 VCS 提交号外逐文件一致时成功；任何业务内容或元数据差异均失败。
+          # 业务作用：在归档 checksum 因发布工作流提交变化而不同时，验证 crates.io 已有版本与当前候选的实际发布内容等价。
+          # 参数说明：依次接收 crate 名、版本、本地归档路径和 crates.io API 返回的远端 checksum。
+          # 返回：远端归档完整且除 VCS 提交号外逐文件一致时成功；任何业务内容或元数据差异均失败。
           verify_existing_archive() {
             local crate_name="$1"
             local version="$2"
@@ -381,12 +279,12 @@ jobs:
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            case "${{ inputs.batch }}:$crate_name" in
-              3p:*|saga-foundation:natx|saga-foundation:nafka|saga-foundation:napp-macro|saga-storage:nainbox-mysql|saga-storage:naoutbox-mysql|saga-application:napp|saga-facade:nasa)
-                expected_version="1.0.1"
+            case "$crate_name" in
+              natx|nafka|napp|nasa)
+                expected_version="1.0.2"
                 ;;
               *)
-                expected_version="1.0.0"
+                expected_version="1.0.1"
                 ;;
             esac
             if [[ "$version" != "$expected_version" ]]; then

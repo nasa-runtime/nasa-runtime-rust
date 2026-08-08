@@ -97,13 +97,18 @@ jobs:
       # 全 feature 下运行 clippy(-D warnings 由 RUSTFLAGS 生效),覆盖所有可选模块。
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo build --workspace --all-features
-      # 产品工作区只做编译与 doctest 校验；完整测试资产按规范统一位于仓库根 tests/。
+      # 产品工作区只执行随源码发布的目标与文档示例。
       - run: cargo test --workspace --all-features
-      # 公开 API 文档也是 1.0.0 合同的一部分,缺失项和失效链接均阻止发布。
+      # 公开 API 文档是当前合同的一部分，缺失项和失效链接均阻止发布。
       - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
       # 每个 .crate 归档都必须携带两份许可证正文和名称声明。
-      - run: test "$(cargo package --workspace --list | grep -Ec '^LICENSE-(MIT|APACHE)$')" -eq 120
-      - run: test "$(cargo package --workspace --list | grep -c '^NOTICE$')" -eq 60
+      - name: verify archive notices
+        shell: bash
+        run: |
+          package_count="$(cargo metadata --no-deps --format-version 1 | jq '.packages | length')"
+          archive_list="$(cargo package --workspace --list)"
+          test "$(grep -Ec '^LICENSE-(MIT|APACHE)$' <<< "$archive_list")" -eq "$((package_count * 2))"
+          test "$(grep -c '^NOTICE$' <<< "$archive_list")" -eq "$package_count"
       # 发布路径不得携带验证资产，组件源码、manifest 和随包文档也不得描述本地验证实现。
       - name: audit crate release boundary
         shell: bash
@@ -111,8 +116,8 @@ jobs:
           if cargo package --workspace --list | rg -ni '(^|/)[^/]*(test|fixture)[^/]*($|/)'; then
             exit 1
           fi
-          if rg -ni '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])tests?/|\btrybuild\b|\bfixture\b|测试|单测|测例|test target|compile test)' \
-            --glob '!tests/**' --glob '!target/**' --glob '*/Cargo.toml' --glob '*/src/**' \
+          if rg -ni '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|\btrybuild\b|\bfixture\b|测试|单测|测例|test target|compile test)' \
+            --glob '!target/**' --glob '*/Cargo.toml' --glob '*/src/**' \
             --glob '*/README.md' --glob '*/*/README.md' .; then
             exit 1
           fi
