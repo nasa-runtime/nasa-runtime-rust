@@ -1,6 +1,6 @@
 [package]
 name = "nabudget"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA provider-neutral absolute request budget and cancellation contract"

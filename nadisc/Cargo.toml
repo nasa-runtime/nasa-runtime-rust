@@ -4,7 +4,7 @@
 # 不绑定具体后端(NacosDiscoveryClient)。各后端 crate 彼此不互相依赖。
 [package]
 name = "nadisc"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "服务发现 provider-neutral 中性类型 + 接口(Instance/DiscoveryClient;nacos/eureka 等后端实现)"

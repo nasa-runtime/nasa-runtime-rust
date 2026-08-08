@@ -1,6 +1,6 @@
 [package]
 name = "naauthz"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA route 级授权核心:scope 策略决策 + 校验后原子发布/last-good 的 policy registry,不依赖 napp"

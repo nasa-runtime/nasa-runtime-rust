@@ -134,7 +134,7 @@ dependencies = [
 name = "async-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -146,7 +146,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de8a9f50e7a25768f1f20cd6cfdcf8fa9f5a4ace9575ad2d517b01c82dc61303"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -1576,7 +1576,7 @@ dependencies = [
 name = "hystrix-macro"
 version = "1.0.1"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -1589,7 +1589,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "263609c4b0ca702044e0eb34908954773b7fe861ea45044aa2805186fede47ae"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -1954,6 +1954,8 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "macro-support"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b615480cd4a07360833c1756fe35e8f079cb7fbe1a0fb4e5521ced85adb286c1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1963,9 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "macro-support"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b615480cd4a07360833c1756fe35e8f079cb7fbe1a0fb4e5521ced85adb286c1"
+version = "1.0.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2122,15 +2122,6 @@ dependencies = [
 [[package]]
 name = "naauthz"
 version = "1.0.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "tokio",
-]
-
-[[package]]
-name = "naauthz"
-version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "678891040288777ef1bef9c0923ed9d8908e5f539ae6db9e6d29dd890dab1281"
 dependencies = [
@@ -2140,10 +2131,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "nabase"
-version = "1.0.0"
+name = "naauthz"
+version = "1.0.1"
 dependencies = [
- "serde",
+ "arc-swap",
+ "async-trait",
+ "tokio",
 ]
 
 [[package]]
@@ -2156,11 +2149,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "nabudget"
-version = "1.0.0"
+name = "nabase"
+version = "1.0.1"
 dependencies = [
- "tokio",
- "tokio-util",
+ "serde",
 ]
 
 [[package]]
@@ -2174,10 +2166,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nabudget"
+version = "1.0.1"
+dependencies = [
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "nacache-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2189,7 +2189,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fcdefd414c8de788b2f29a4cc564d4ff2fd466c0061042883ebff4a7118f181a"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2259,7 +2259,7 @@ name = "nadis"
 version = "1.0.0"
 dependencies = [
  "futures",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "nadis-derive 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde",
@@ -2278,7 +2278,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e643c92bf911eab6bfa94626dc49f4f82ae9fc1fa97eac9b5f4e2ffcdfd2cac4"
 dependencies = [
  "futures",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "nadis-derive 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde",
@@ -2294,7 +2294,7 @@ dependencies = [
 name = "nadis-derive"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2306,7 +2306,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ecca5b0ab27e25485e5a51527e16629b20f19c02aa4c80e2bcb4ca44e1fe9a7"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2315,6 +2315,8 @@ dependencies = [
 [[package]]
 name = "nadisc"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b30b1f769003a788ea57dd35a9abea9945014990f50a75805c7974d371e2b80"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2323,9 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b30b1f769003a788ea57dd35a9abea9945014990f50a75805c7974d371e2b80"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2368,7 +2368,7 @@ dependencies = [
 name = "nafana-macro"
 version = "1.0.1"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -2381,7 +2381,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5fb19b86be8c1c0f9bacab4a240ebde62bbce1b850a6f5ae6c2ca72f8a65cc"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -2438,7 +2438,7 @@ dependencies = [
 name = "nafka-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2450,7 +2450,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9debc9b8aca9426f0f0d4e63896ce169ebd95746884ed9f4b58ca277fec377a"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2604,7 +2604,7 @@ version = "1.0.0"
 dependencies = [
  "arc-swap",
  "chrono",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "serde",
  "tracing",
  "tracing-appender",
@@ -2619,7 +2619,7 @@ checksum = "2c545c717afdf0e955ba13ba6afa32741b0396b981512ca7f5d2f46b0f471f22"
 dependencies = [
  "arc-swap",
  "chrono",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "serde",
  "tracing",
  "tracing-appender",
@@ -2678,7 +2678,7 @@ dependencies = [
 name = "namapper-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2690,7 +2690,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c85d73dc7a8fe3aeb957c3eff47e11a5af442269d0df5971f2cd7cf845c475e6"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2732,7 +2732,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "serde",
  "serde_json",
  "tracing",
@@ -2746,7 +2746,7 @@ checksum = "5f90b879e1aa5ce3d75ce28192b4dce8d843d0e680b66d227d0531cbdf01665d"
 dependencies = [
  "anyhow",
  "config",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "serde",
  "serde_json",
  "tracing",
@@ -2759,7 +2759,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "nacos-sdk",
- "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 1.0.0",
  "tokio",
  "tracing",
 ]
@@ -2773,7 +2773,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "nacos-sdk",
- "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 1.0.0",
  "tokio",
  "tracing",
 ]
@@ -2915,8 +2915,8 @@ dependencies = [
  "futures",
  "ipnet",
  "matchit",
- "naauthz 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nabudget 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naauthz 1.0.0",
+ "nabudget 1.0.0",
  "nadis 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2967,8 +2967,8 @@ dependencies = [
  "futures",
  "ipnet",
  "matchit",
- "naauthz 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nabudget 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naauthz 1.0.0",
+ "nabudget 1.0.0",
  "nadis 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3008,7 +3008,7 @@ dependencies = [
 name = "napp-macro"
 version = "1.0.1"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3020,7 +3020,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd62f54b3fc797953ceb2b61b90a1a33686cb2727efebe124723c83392029d8c"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3037,11 +3037,11 @@ dependencies = [
  "hystrix-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit-mysql 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nabase 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabase 1.0.0",
  "nacache-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadate 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadisc 1.0.0",
  "nafana 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafka 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3106,7 +3106,7 @@ dependencies = [
 name = "nasaga-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3118,7 +3118,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "565320459be4cedb93a90cc4391a9c92fa22357d2dc1fa3695bb3d8074d5b692"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3356,7 +3356,7 @@ dependencies = [
 name = "natx-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3368,7 +3368,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "033fe66c1c08c44f9e95600c8821f20f47c2b334dca2bb81d22bd871490a8327"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3446,7 +3446,7 @@ dependencies = [
 name = "naweb-macro"
 version = "1.0.0"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3458,7 +3458,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f8d9a5a7f4993ea970025288c770407f613ae85a1ec42542b1ae598b46f3880"
 dependencies = [
- "macro-support 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "macro-support 1.0.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -4367,8 +4367,8 @@ dependencies = [
  "bytes",
  "dashmap",
  "httpdate",
- "nabudget 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabudget 1.0.0",
+ "nadisc 1.0.0",
  "nanacos 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "percent-encoding",
@@ -4394,8 +4394,8 @@ dependencies = [
  "bytes",
  "dashmap",
  "httpdate",
- "nabudget 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nadisc 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nabudget 1.0.0",
+ "nadisc 1.0.0",
  "natelemetry 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "percent-encoding",
  "reqwest",
