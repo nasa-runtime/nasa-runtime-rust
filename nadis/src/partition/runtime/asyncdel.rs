@@ -20,7 +20,7 @@ const XDEL_BATCH_SIZE: usize = 1_000;
 /// owner 本地积压软上限；达到后暂停收 channel，让背压传回消费端。
 const MAX_PENDING_IDS: usize = 100_000;
 
-/// 运行一个分区组的异步删除 owner。
+/// 业务作用：运行一个分区组的异步删除 owner。
 ///
 /// # 参数
 /// - `rt`: 当前分区组运行时。
@@ -75,7 +75,7 @@ pub(super) async fn async_delete_loop(
     }
 }
 
-/// 把一个已确认批次并入 owner 本地缓冲。
+/// 业务作用：把一个已确认批次并入 owner 本地缓冲。
 ///
 /// 达到软上限后 select 不再读取 channel；单个批次可能让计数略超过上限，但批次大小已由
 /// `stream.batch_size` 控制，不会因循环继续读取而无界增长。
@@ -91,7 +91,7 @@ fn append_batch(
         .extend(batch.ids);
 }
 
-/// 尝试删除当前所有积压；失败的分区 ID 留到下一周期。
+/// 业务作用：尝试删除当前所有积压；失败的分区 ID 留到下一周期。
 ///
 /// 每条命令只访问一个 stream key，因此单点和 Cluster 同样成立，不需要跨 slot pipeline。
 async fn flush_pending(
@@ -142,7 +142,7 @@ async fn flush_pending(
     *pending_count = pending.values().map(Vec::len).sum();
 }
 
-/// 从端到端待删 gauge 扣除已成功删除或已去重的 ID 数，防御性避免计数下溢。
+/// 业务作用：从端到端待删 gauge 扣除已成功删除或已去重的 ID 数，防御性避免计数下溢。
 fn decrement_gauge(rt: &GroupRuntime, count: usize) {
     if count == 0 {
         return;

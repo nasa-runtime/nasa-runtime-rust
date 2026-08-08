@@ -40,7 +40,7 @@ use crate::lock::DistributedLock;
 // 它不等价于 CompatibilityProfile::LegacyV1,后者是整套 wire/锁/ACK/marker 运行模式。
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 原实现 `String.hashCode()` 逐位复刻:
+/// 业务作用：原实现 `String.hashCode()` 逐位复刻:
 /// h = `s[0]*31^(n-1) + ... + s[n-1]`,按 **UTF-16 code unit** 计算(不是字节、不是 char)。
 /// wrapping 运算对齐 原实现 int 溢出语义。权威向量:"abc" → 96354。
 ///
@@ -51,7 +51,7 @@ pub fn compat_string_hash(s: &str) -> i32 {
         .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
 }
 
-/// 原实现 `Long.hashCode()`:`(int)(value ^ (value >>> 32))`(>>> 是无符号右移)。
+/// 业务作用：原实现 `Long.hashCode()`:`(int)(value ^ (value >>> 32))`(>>> 是无符号右移)。
 ///
 /// # 参数
 /// - `v`: 要按历史长整型哈希规则处理的整数。
@@ -59,7 +59,7 @@ pub fn compat_long_hash(v: i64) -> i32 {
     (v ^ ((v as u64) >> 32) as i64) as i32
 }
 
-/// 路由:`(hash & Integer.MAX_VALUE) % count`(屏蔽符号位,原实现 RedisPartition 同款)。
+/// 业务作用：路由:`(hash & Integer.MAX_VALUE) % count`(屏蔽符号位,原实现 RedisPartition 同款)。
 ///
 /// # 参数
 /// - `key`: 业务路由键文本。
@@ -68,7 +68,7 @@ pub fn route_str(key: &str, count: u32) -> u32 {
     ((compat_string_hash(key) & 0x7FFF_FFFF) as u32) % count
 }
 
-/// 按历史整数哈希规则把 i64 key 路由到分区。
+/// 业务作用：按历史整数哈希规则把 i64 key 路由到分区。
 ///
 /// # 参数
 /// - `key`: 业务路由整数键。
@@ -77,7 +77,7 @@ pub fn route_i64(key: i64, count: u32) -> u32 {
     ((compat_long_hash(key) & 0x7FFF_FFFF) as u32) % count
 }
 
-/// 把管理命令的相对等待窗口转成协议毫秒值。
+/// 业务作用：把管理命令的相对等待窗口转成协议毫秒值。
 ///
 /// `Duration::as_millis()` 返回 `u128`；直接 `as u64` 会让极端输入回绕。管理命令还会把该值写入
 /// Redis 持久记录，因此在发出任何副作用前按统一运行时上限拒绝。
@@ -92,7 +92,7 @@ fn command_timeout_millis(timeout: std::time::Duration) -> Result<u64> {
         .map_err(|_| NasaRedisError::Config("partition command timeout 毫秒值溢出".into()))
 }
 
-/// **逐位复刻既有系统的 `Double.toString`，保证浮点值跨语言格式一致**。
+/// 业务作用：**逐位复刻既有系统的 `Double.toString`，保证浮点值跨语言格式一致**。
 /// Rust `f64::to_string()` 与 原实现 系统性分叉:整数值无 `.0`(`1.0`→"1" vs 原实现 "1.0")、科学计数法阈值
 /// 与写法不同(`1e10`→"10000000000" vs 原实现 "1.0E10")。浮点作 @JsonArrayKey/id/bucket subId 或 HASH 字段
 /// 存储时,格式不一致 = 跨语言 key/值字节分叉、数据不通。本函数对齐 原实现 规则:
@@ -160,7 +160,7 @@ pub struct KeyLayout {
 }
 
 impl KeyLayout {
-    /// 分区 stream:`{prefix}:{p}`(如 SINGLE-CONSUME:0..63)。**不含 profile**(跨 profile 单 owner 信任根)。
+    /// 业务作用：分区 stream:`{prefix}:{p}`(如 SINGLE-CONSUME:0..63)。**不含 profile**(跨 profile 单 owner 信任根)。
     ///
     /// # 参数
     /// - `p`: 分区编号。
@@ -168,7 +168,7 @@ impl KeyLayout {
         format!("{}:{}", self.prefix, p)
     }
 
-    /// 分区锁的【业务 key】:`{prefix}:lock:{p}`。**不含 profile**(锁是分区归属最终仲裁,两 profile 抢同一把锁)。
+    /// 业务作用：分区锁的【业务 key】:`{prefix}:lock:{p}`。**不含 profile**(锁是分区归属最终仲裁,两 profile 抢同一把锁)。
     /// 注意:传给 DistributedLock 后会再叠锁前缀,最终 Redis key =
     /// `DISTRIBUTED-LOCK:{prefix}:lock:{p}` —— 原实现 双前缀逐字节一致。
     ///
@@ -178,7 +178,7 @@ impl KeyLayout {
         format!("{}:lock:{}", self.prefix, p)
     }
 
-    /// 活节点 ZSET。
+    /// 业务作用：活节点 ZSET。
     ///   · RustV2 → `{prefix}:nodes:v2`(Redis TIME 时基,独立心跳域);
     ///   · 原实现V1 → `{prefix}:nodes`(墙钟时基,**与 原实现 节点互通**,不能加后缀)。
     /// 这样 RustV2 与墙钟节点(原实现V1/真 原实现)**物理隔离**,跨时基误驱逐(score 时基不一致驱逐存活异
@@ -192,18 +192,18 @@ impl KeyLayout {
         }
     }
 
-    /// 再平衡唤醒 Pub/Sub 通道:`{prefix}:wake`。
+    /// 业务作用：再平衡唤醒 Pub/Sub 通道:`{prefix}:wake`。
     pub fn wake(&self) -> String {
         format!("{}:wake", self.prefix)
     }
 
-    /// consumer group 名 = prefix(原实现:组名与 stream 前缀同名,全节点共用)。
+    /// 业务作用：consumer group 名 = prefix(原实现:组名与 stream 前缀同名,全节点共用)。
     pub fn group(&self) -> &str {
         &self.prefix
     }
 }
 
-///cluster 启动期纯本地同槽自检。对每个分区,断言所有参与多键 Lua 的 key
+///业务作用：cluster 启动期纯本地同槽自检。对每个分区,断言所有参与多键 Lua 的 key
 /// (stream/lock/fence/disposition marker/quarantine/retryop marker/cmd-stream/dlq/nodes/wake)
 /// 与本分区 stream 落**同一 CRC16 slot**;不一致即 fail-closed(防 KeyLayout 命名漂移静默破裂同槽不变量)。
 ///
@@ -251,7 +251,7 @@ fn assert_same_slot_cluster(layout: &KeyLayout, lock_prefix: &str, count: u32) -
     Ok(())
 }
 
-/// 为一个组(默认或隔离)准备 KeyLayout + 建 stream/consumer group。`base` = 未包裹的前缀基名
+/// 业务作用：为一个组(默认或隔离)准备 KeyLayout + 建 stream/consumer group。`base` = 未包裹的前缀基名
 /// (默认组 = `default_group`;隔离组 = `default_group:逻辑名`)。cluster 下包成 `{base}` hash-tag,
 /// 使本组全部 key 同 slot(避多键 Lua CROSSSLOT);不同组 → 不同 slot(天然分散到不同 master)。
 ///
@@ -328,7 +328,7 @@ async fn build_group_layout(
 // 对 原实现 不可见)。
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 反序列化:**显式 `null` 或字段缺省 → `T::default()`**(
+/// 业务作用：反序列化:**显式 `null` 或字段缺省 → `T::default()`**(
 /// "任意语言标准 JSON 互通 + 忽略 null 的反序列化")。配 `#[serde(default)]` 一起用——`#[serde(default)]`
 /// **只覆盖字段缺省**(missing),本函数额外把**显式 `null`** 当默认值(很多语言/库对空字段默认写 `null`,
 /// 若不容忍则消费端 `from_slice::<Envelope>` 解码失败 → 消息进毒,无法消费)。
@@ -438,7 +438,7 @@ pub struct RunningPartition {
 }
 
 impl PreparedPartition {
-    /// prepare:为每个分区建 stream + consumer group(MKSTREAM;BUSYGROUP 容忍=幂等),
+    /// 业务作用：prepare:为每个分区建 stream + consumer group(MKSTREAM;BUSYGROUP 容忍=幂等),
     /// 不 tryLock、不启动任何消费(三阶段第一步)。
     ///
     /// # 参数
@@ -567,7 +567,7 @@ impl PreparedPartition {
         })
     }
 
-    /// 注册 handler(仅 Prepared 阶段;Running 后路由表只读——typestate 保证)。
+    /// 业务作用：注册 handler(仅 Prepared 阶段;Running 后路由表只读——typestate 保证)。
     /// T = 业务消息类型,注册时单态化反序列化(运行期无反射)。
     ///
     /// # 参数
@@ -629,7 +629,7 @@ impl PreparedPartition {
         self
     }
 
-    /// start:消费 self(typestate),为**每个组**启动 coordinator + 心跳/再平衡 + wake 订阅。
+    /// 业务作用：start:消费 self(typestate),为**每个组**启动 coordinator + 心跳/再平衡 + wake 订阅。
     pub async fn start(self) -> Result<RunningPartition> {
         let PreparedPartition {
             client,
@@ -683,7 +683,7 @@ impl PreparedPartition {
 }
 
 impl RunningPartition {
-    /// topic → 目标组 runtime(对照 原实现 `resolveStream`:topicToGroupName 命中走隔离组,否则默认组)。
+    /// 业务作用：topic → 目标组 runtime(对照 原实现 `resolveStream`:topicToGroupName 命中走隔离组,否则默认组)。
     /// 路由仅按 **topic**,与 event 无关(同 原实现)。
     ///
     /// # 参数
@@ -695,7 +695,7 @@ impl RunningPartition {
             .unwrap_or(&self.inner)
     }
 
-    /// 按**逻辑组 ID** 取 runtime(默认组用 `""` / [`DEFAULT_GROUP_ID`];group-scoped 管理 API 用)。
+    /// 业务作用：按**逻辑组 ID** 取 runtime(默认组用 `""` / [`DEFAULT_GROUP_ID`];group-scoped 管理 API 用)。
     /// 不存在 → `Config` 错误(防 operator 拼错组名静默作用到错组)。
     ///
     /// # 参数
@@ -708,7 +708,7 @@ impl RunningPartition {
         })
     }
 
-    /// 返回全部逻辑组当前仍待异步 XDEL 的 entry 总数。
+    /// 业务作用：返回全部逻辑组当前仍待异步 XDEL 的 entry 总数。
     ///
     /// 该值是运行时观测 gauge，不参与 ACK、重试或消费终态判断。持续大于零表示 Redis 删除
     /// 未收敛；达到内部有界积压后，消费会被反压，避免已 ACK 的待删 ID 被静默丢弃。
@@ -718,7 +718,7 @@ impl RunningPartition {
         })
     }
 
-    /// 发布(严格守门):空 topic/event → Err(InvalidPublish 语义,用 Config 错误域)。
+    /// 业务作用：发布(严格守门):空 topic/event → Err(InvalidPublish 语义,用 Config 错误域)。
     /// 返回写入的 stream entry ID。**按 topic 路由到所属组**(隔离组或默认组),分区数用该组的 `count`。
     ///
     /// # 参数
@@ -738,7 +738,7 @@ impl RunningPartition {
             .await
     }
 
-    /// **round-robin 发布**：无路由 key 时全局轮转均摊到各分区，对齐既有 `publish(partition==null)`。
+    /// 业务作用：**round-robin 发布**：无路由 key 时全局轮转均摊到各分区，对齐既有 `publish(partition==null)`。
     /// 适合无需同 key 顺序保证、只要均摊吞吐的场景;需同 key 顺序请用 `publish`/`publish_i64`。
     ///
     /// # 参数
@@ -756,7 +756,7 @@ impl RunningPartition {
             .await
     }
 
-    /// 发布(i64 路由 key:uid/orderId 等数字标识,免 to_string)。按 topic 路由到所属组。
+    /// 业务作用：发布(i64 路由 key:uid/orderId 等数字标识,免 to_string)。按 topic 路由到所属组。
     ///
     /// # 参数
     /// - `topic`: 业务 topic,同时决定进入默认组还是隔离组。
@@ -775,7 +775,7 @@ impl RunningPartition {
             .await
     }
 
-    /// 兼容入口:入参无效返回 Ok(None) + 计数,**名字明示可能不发布**——
+    /// 业务作用：兼容入口:入参无效返回 Ok(None) + 计数,**名字明示可能不发布**——
     /// 给依赖 原实现 静默语义的迁移业务;新代码一律用 publish()。
     ///
     /// # 参数
@@ -797,14 +797,14 @@ impl RunningPartition {
         Ok(Some(self.publish(topic, event, key, data).await?))
     }
 
-    /// 本节点当前持有的分区(诊断;对照 原实现 claimedPartitions)。
+    /// 业务作用：本节点当前持有的分区(诊断;对照 原实现 claimedPartitions)。
     pub async fn claimed_partitions(&self) -> Vec<u32> {
         self.inner.claimed_partitions().await
     }
 
     // ── 毒消息管理 API（单 owner 进程内直调，跨节点通过 command outbox 路由）──
 
-    /// 查询分区是否 Parked(返回 park_id;诊断/运维入口)。
+    /// 业务作用：查询分区是否 Parked(返回 park_id;诊断/运维入口)。
     ///
     /// # 参数
     /// - `p`: 默认组内的分区编号。
@@ -812,7 +812,7 @@ impl RunningPartition {
         self.inner.parked_id(p).await
     }
 
-    /// resume:把 Park 的消息重投回源 stream(以新 ID;顺序位置不可恢复—— 如实声明),
+    /// 业务作用：resume:把 Park 的消息重投回源 stream(以新 ID;顺序位置不可恢复—— 如实声明),
     /// 分区恢复消费。返回新 entry IDs。
     ///
     /// # 参数
@@ -821,7 +821,7 @@ impl RunningPartition {
         self.inner.resume_parked(p).await
     }
 
-    /// drop:放弃 Park 的消息(quarantine 删除,marker 终态 Dropped 留审计),分区恢复消费。
+    /// 业务作用：drop:放弃 Park 的消息(quarantine 删除,marker 终态 Dropped 留审计),分区恢复消费。
     ///
     /// # 参数
     /// - `p`: 默认组内的分区编号。
@@ -829,7 +829,7 @@ impl RunningPartition {
         self.inner.drop_parked(p).await
     }
 
-    /// dlq:把 Parked 消息按 planned-ID 协议发布到 DLQ stream({prefix}:dlq),
+    /// 业务作用：dlq:把 Parked 消息按 planned-ID 协议发布到 DLQ stream({prefix}:dlq),
     /// marker 终态 Dlqed,分区恢复消费。
     ///
     /// # 参数
@@ -839,7 +839,7 @@ impl RunningPartition {
         self.inner.dlq_parked(p).await
     }
 
-    /// force:resume 进入 ResumeIndeterminate 后的唯一推进入口——
+    /// 业务作用：force:resume 进入 ResumeIndeterminate 后的唯一推进入口——
     /// 为不确定的 reservation 分配全新 planned ID 重发,**显式接受可能重复/变序**,
     /// 审计链(新旧 planned 对照)写入 marker。成功后分区恢复消费。
     ///
@@ -849,7 +849,7 @@ impl RunningPartition {
         self.inner.force_republish(p).await
     }
 
-    /// **通用 liveness-takeover**：operator 确认原 op 已死后，强制接管某分区卡死的在途
+    /// 业务作用：**通用 liveness-takeover**：operator 确认原 op 已死后，强制接管某分区卡死的在途
     /// `*Publishing`/`Dropping`(原 op 永久丢失、无法自行重提 → 普通续作 `OperationConflict` 推不动)。
     /// 覆写 transition op 为本节点稳定 op 后续作到终态,分区恢复消费。⚠ **显式接受"可能与原 op 重复推进"
     /// 风险**(取向同 `force_republish`);仅在确认原 op 进程已死时使用。返回续作产出的新 entry IDs。
@@ -862,7 +862,7 @@ impl RunningPartition {
 
     // ── 管理命令 outbox(跨节点管理路由;任意节点可提交,owner 执行)──
 
-    /// 提交管理命令(at-least-once:Unknown 后可同 op_id 重复提交,owner 按 result 去重)。
+    /// 业务作用：提交管理命令(at-least-once:Unknown 后可同 op_id 重复提交,owner 按 result 去重)。
     /// deadline 以 Redis TIME 为基准(producer 传相对 timeout_ms,防节点时钟漂移)。
     ///
     /// # 参数
@@ -889,7 +889,7 @@ impl RunningPartition {
         .await
     }
 
-    /// 查询命令结果(producer 轮询;None = 尚无记录)。
+    /// 业务作用：查询命令结果(producer 轮询;None = 尚无记录)。
     ///
     /// # 参数
     /// - `p`: 默认组内的分区编号。
@@ -906,7 +906,7 @@ impl RunningPartition {
     // 上面无 group 参数的 API = 默认组(向后兼容单组);**隔离组**用下列 `*_in(group, ...)`,group = 逻辑组 ID
     // (默认组用 `""`=`DEFAULT_GROUP_ID`,隔离组用其逻辑名)。
 
-    /// 各组本节点持有的分区(对照 原实现 `claimedPartitions(): Map<groupName, List<Integer>>`)。key=逻辑组 ID
+    /// 业务作用：各组本节点持有的分区(对照 原实现 `claimedPartitions(): Map<groupName, List<Integer>>`)。key=逻辑组 ID
     /// (默认组 = `""`=`DEFAULT_GROUP_ID`,隔离组 = 逻辑名)。group-scoped 管理 API 的 `group` 参数用此 key。
     pub async fn claimed_partitions_by_group(&self) -> HashMap<String, Vec<u32>> {
         let mut out = HashMap::new();
@@ -916,7 +916,7 @@ impl RunningPartition {
         out
     }
 
-    /// 同上,但默认组 key 显示为 `<default>`(对照 原实现 诊断输出; 运维可读性)。
+    /// 业务作用：同上,但默认组 key 显示为 `<default>`(对照 原实现 诊断输出; 运维可读性)。
     /// **仅诊断/日志/actuator 用**;管理 API 入参仍用 `DEFAULT_GROUP_ID`(`""`),不要把 `<default>` 回传 `*_in`。
     pub async fn claimed_partitions_display(&self) -> HashMap<String, Vec<u32>> {
         self.claimed_partitions_by_group()
@@ -933,7 +933,7 @@ impl RunningPartition {
             .collect()
     }
 
-    /// 指定组某分区是否 Parked(返回 park_id)。
+    /// 业务作用：指定组某分区是否 Parked(返回 park_id)。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -942,7 +942,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.parked_id(p).await
     }
 
-    /// 指定组 resume:Park 消息重投回源 stream,分区恢复消费。
+    /// 业务作用：指定组 resume:Park 消息重投回源 stream,分区恢复消费。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -951,7 +951,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.resume_parked(p).await
     }
 
-    /// 指定组 drop:放弃 Park 消息,分区恢复消费。
+    /// 业务作用：指定组 drop:放弃 Park 消息,分区恢复消费。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -960,7 +960,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.drop_parked(p).await
     }
 
-    /// 指定组 dlq:Park 消息发布到 DLQ,分区恢复消费。
+    /// 业务作用：指定组 dlq:Park 消息发布到 DLQ,分区恢复消费。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -969,7 +969,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.dlq_parked(p).await
     }
 
-    /// 指定组 force_republish(ResumeIndeterminate 推进)。
+    /// 业务作用：指定组 force_republish(ResumeIndeterminate 推进)。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -978,7 +978,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.force_republish(p).await
     }
 
-    /// 指定组 force_takeover(liveness-takeover)。
+    /// 业务作用：指定组 force_takeover(liveness-takeover)。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -987,7 +987,7 @@ impl RunningPartition {
         self.rt_by_group(group)?.force_takeover(p).await
     }
 
-    /// 指定组提交管理命令(跨节点 outbox)。
+    /// 业务作用：指定组提交管理命令(跨节点 outbox)。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -1008,7 +1008,7 @@ impl RunningPartition {
         command::submit(&rt.client, &rt.layout, p, operation_id, action, timeout_ms).await
     }
 
-    /// 指定组查询管理命令结果。
+    /// 业务作用：指定组查询管理命令结果。
     ///
     /// # 参数
     /// - `group`: 逻辑组 ID;默认组使用 [`DEFAULT_GROUP_ID`]。
@@ -1024,7 +1024,7 @@ impl RunningPartition {
         command::query(&rt.client, &rt.layout, p, operation_id).await
     }
 
-    /// 便利:按 topic 路由查其所属组的 Parked(operator 只知 topic 不知组时用)。
+    /// 业务作用：便利:按 topic 路由查其所属组的 Parked(operator 只知 topic 不知组时用)。
     ///
     /// # 参数
     /// - `topic`: 用于解析目标逻辑组的业务 topic。
@@ -1033,7 +1033,7 @@ impl RunningPartition {
         self.rt_for_topic(topic).parked_id(p).await
     }
 
-    /// 优雅停机:**所有组并发停机**(关 admission → 等 in-flight → 逐分区
+    /// 业务作用：优雅停机:**所有组并发停机**(关 admission → 等 in-flight → 逐分区
     /// 释锁 → 摘心跳 → pub wake)。`inner` 即 `groups[默认组]`(同一 Arc),由 `groups` 统一停一次。
     pub async fn shutdown(&self) {
         futures::future::join_all(self.groups.values().map(|rt| rt.shutdown())).await;
@@ -1041,7 +1041,7 @@ impl RunningPartition {
 }
 
 impl Drop for RunningPartition {
-    /// 未显式 shutdown 时停止所有后台 owner，禁止 coordinator、worker 或 Redis 锁看门狗泄漏。
+    /// 业务作用：未显式 shutdown 时停止所有后台 owner，禁止 coordinator、worker 或 Redis 锁看门狗泄漏。
     fn drop(&mut self) {
         // Drop 无法在当前栈上等待 Redis unlock 或业务 drain；正常路径仍必须调用 shutdown。
         // 异常路径先关闭 admission，再由当前 runtime 复用完整 drain/unlock；无 runtime 时才 abort。

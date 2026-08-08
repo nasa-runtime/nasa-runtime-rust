@@ -50,7 +50,7 @@ enum ReadyRule {
 }
 
 impl ReadyRule {
-    /// 校验规则不会形成永远无法满足的 Ready 条件。
+    /// 业务作用：校验规则不会形成永远无法满足的 Ready 条件。
     ///
     /// # 返回
     ///
@@ -80,7 +80,7 @@ impl ReadyRule {
         }
     }
 
-    /// 投影为 nafka 启动期 broker Ready 要求。
+    /// 业务作用：投影为 nafka 启动期 broker Ready 要求。
     ///
     /// # 返回
     ///
@@ -97,7 +97,7 @@ impl ReadyRule {
         }
     }
 
-    /// 判断运行期健康快照当前是否仍满足本规则。
+    /// 业务作用：判断运行期健康快照当前是否仍满足本规则。
     ///
     /// # 参数
     ///
@@ -152,7 +152,7 @@ struct KafkaContainerOptions {
 }
 
 impl Default for KafkaContainerOptions {
-    /// 返回 consumer 自动收集、500ms 健康轮询和 Joined Ready 的安全默认值。
+    /// 业务作用：返回 consumer 自动收集、500ms 健康轮询和 Joined Ready 的安全默认值。
     ///
     /// # 返回
     ///
@@ -167,7 +167,7 @@ impl Default for KafkaContainerOptions {
 }
 
 impl KafkaContainerOptions {
-    /// 校验容器专属字段及其交叉约束。
+    /// 业务作用：校验容器专属字段及其交叉约束。
     ///
     /// # 返回
     ///
@@ -243,7 +243,7 @@ pub(crate) struct KafkaMetricsBridge {
 }
 
 impl KafkaMetricsBridge {
-    /// 创建以 `default_sink` 为框架默认出口的桥。
+    /// 业务作用：创建以 `default_sink` 为框架默认出口的桥。
     ///
     /// # 参数
     ///
@@ -262,7 +262,7 @@ impl KafkaMetricsBridge {
         }
     }
 
-    /// 尝试安装本 client 唯一的真实指标 sink。
+    /// 业务作用：尝试安装本 client 唯一的真实指标 sink。
     ///
     /// # 参数
     ///
@@ -283,7 +283,7 @@ impl KafkaMetricsBridge {
         true
     }
 
-    /// 永久关闭指标安装入口，保留已安装 sink 继续接收运行期指标。
+    /// 业务作用：永久关闭指标安装入口，保留已安装 sink 继续接收运行期指标。
     ///
     /// # 返回
     ///
@@ -295,7 +295,7 @@ impl KafkaMetricsBridge {
             .sealed = true;
     }
 
-    /// 克隆当前 sink，使业务回调不在 bridge 锁内执行。
+    /// 业务作用：克隆当前 sink，使业务回调不在 bridge 锁内执行。
     ///
     /// # 返回
     ///
@@ -310,7 +310,7 @@ impl KafkaMetricsBridge {
 }
 
 impl nafka::MetricsSink for KafkaMetricsBridge {
-    /// 把 counter 转发给 UserHook 安装的 sink；未安装时安全丢弃。
+    /// 业务作用：把 counter 转发给 UserHook 安装的 sink；未安装时安全丢弃。
     ///
     /// # 参数
     ///
@@ -324,7 +324,7 @@ impl nafka::MetricsSink for KafkaMetricsBridge {
         }
     }
 
-    /// 把 gauge 转发给 UserHook 安装的 sink；未安装时安全丢弃。
+    /// 业务作用：把 gauge 转发给 UserHook 安装的 sink；未安装时安全丢弃。
     ///
     /// # 参数
     ///
@@ -348,7 +348,7 @@ pub(crate) struct KafkaRuntimeState {
 }
 
 impl KafkaRuntimeState {
-    /// 创建尚未发布 client 且定制入口开放的运行时状态。
+    /// 业务作用：创建尚未发布 client 且定制入口开放的运行时状态。
     ///
     /// # 返回
     ///
@@ -360,7 +360,7 @@ impl KafkaRuntimeState {
         }
     }
 
-    /// 一次性发布完整有序 client 能力表。
+    /// 业务作用：一次性发布完整有序 client 能力表。
     ///
     /// # 参数
     ///
@@ -388,7 +388,7 @@ impl KafkaRuntimeState {
             .map_err(|_| kafka_error(ApplicationPhase::Start, "kafka clients already published"))
     }
 
-    /// 按稳定名称克隆一个私有能力根。
+    /// 业务作用：按稳定名称克隆一个私有能力根。
     ///
     /// # 参数
     ///
@@ -404,7 +404,7 @@ impl KafkaRuntimeState {
             .cloned()
     }
 
-    /// 在 UserHook 为目标 client 追加一次 consumer builder 定制。
+    /// 业务作用：在 UserHook 为目标 client 追加一次 consumer builder 定制。
     ///
     /// # 参数
     ///
@@ -446,7 +446,7 @@ impl KafkaRuntimeState {
         Ok(())
     }
 
-    /// 为目标 client 安装一次真实指标 sink。
+    /// 业务作用：为目标 client 安装一次真实指标 sink。
     ///
     /// # 参数
     ///
@@ -481,7 +481,7 @@ impl KafkaRuntimeState {
         }
     }
 
-    /// 取走全部 consumer 定制并永久关闭 UserHook 配置入口。
+    /// 业务作用：取走全部 consumer 定制并永久关闭 UserHook 配置入口。
     ///
     /// # 返回
     ///
@@ -504,7 +504,7 @@ pub(crate) struct KafkaComponent {
 }
 
 impl KafkaComponent {
-    /// 创建尚未产生任何 Kafka 副作用的组件。
+    /// 业务作用：创建尚未产生任何 Kafka 副作用的组件。
     ///
     /// # 返回
     ///
@@ -518,7 +518,7 @@ impl KafkaComponent {
 }
 
 impl ApplicationComponent for KafkaComponent {
-    /// 返回稳定 Kafka 组件身份。
+    /// 业务作用：返回稳定 Kafka 组件身份。
     ///
     /// # 返回
     ///
@@ -527,7 +527,7 @@ impl ApplicationComponent for KafkaComponent {
         ComponentId::Kafka
     }
 
-    /// 使用最终初始配置构造全部本地 client，并为每个成功 client 立即激活 final action。
+    /// 业务作用：使用最终初始配置构造全部本地 client，并为每个成功 client 立即激活 final action。
     ///
     /// # 参数
     ///
@@ -614,7 +614,7 @@ impl ApplicationComponent for KafkaComponent {
         })
     }
 
-    /// 在 UserHook 封口后启动 consumer、等待真实 broker Ready 并创建运行期健康 monitor。
+    /// 业务作用：在 UserHook 封口后启动 consumer、等待真实 broker Ready 并创建运行期健康 monitor。
     ///
     /// # 参数
     ///
@@ -777,7 +777,7 @@ impl ApplicationComponent for KafkaComponent {
         })
     }
 
-    /// 取出唯一 Kafka 健康 monitor，交由 Runner 按关键任务监督。
+    /// 业务作用：取出唯一 Kafka 健康 monitor，交由 Runner 按关键任务监督。
     ///
     /// # 返回
     ///
@@ -800,7 +800,7 @@ struct KafkaConsumersShutdown {
 }
 
 impl ShutdownAction for KafkaConsumersShutdown {
-    /// 返回稳定 action 名称。
+    /// 业务作用：返回稳定 action 名称。
     ///
     /// # 返回
     ///
@@ -809,7 +809,7 @@ impl ShutdownAction for KafkaConsumersShutdown {
         "kafka-consumers"
     }
 
-    /// 在共享全局 deadline 内并发排空全部已启动 consumer。
+    /// 业务作用：在共享全局 deadline 内并发排空全部已启动 consumer。
     ///
     /// # 参数
     ///
@@ -860,7 +860,7 @@ struct KafkaFinalShutdown {
 }
 
 impl ShutdownAction for KafkaFinalShutdown {
-    /// 返回稳定 action 名称。
+    /// 业务作用：返回稳定 action 名称。
     ///
     /// # 返回
     ///
@@ -869,7 +869,7 @@ impl ShutdownAction for KafkaFinalShutdown {
         "kafka-final"
     }
 
-    /// 在全局剩余预算内完成本 client 的 lane/admin 最终关闭。
+    /// 业务作用：在全局剩余预算内完成本 client 的 lane/admin 最终关闭。
     ///
     /// # 参数
     ///
@@ -906,7 +906,7 @@ struct KafkaMonitorClient {
     groups: Vec<(String, ReadyRule)>,
 }
 
-/// 按全部 client 的最小周期刷新动态 readiness，并把硬故障升级为关键任务失败。
+/// 业务作用：按全部 client 的最小周期刷新动态 readiness，并把硬故障升级为关键任务失败。
 ///
 /// # 参数
 ///
@@ -1022,7 +1022,7 @@ async fn run_kafka_monitor(
     }
 }
 
-/// 在产生连接副作用前校验声明中的 `kafka`/`kafkas` 配置。
+/// 业务作用：在产生连接副作用前校验声明中的 `kafka`/`kafkas` 配置。
 ///
 /// # 参数
 ///
@@ -1043,7 +1043,7 @@ pub(crate) fn validate_kafka_sections(
     parse_kafka_clients(tree, phase).map(|_| ())
 }
 
-/// 把单/多 client 配置根归一成唯一有序内部表征。
+/// 业务作用：把单/多 client 配置根归一成唯一有序内部表征。
 ///
 /// # 参数
 ///
@@ -1099,7 +1099,7 @@ fn parse_kafka_clients(
     }
 }
 
-/// 解析一个严格受管 client 节点并剥离 container 字段。
+/// 业务作用：解析一个严格受管 client 节点并剥离 container 字段。
 ///
 /// # 参数
 ///
@@ -1172,7 +1172,7 @@ fn parse_kafka_client(
     Ok(KafkaClientConfig { config, container })
 }
 
-/// 校验所有静态属性 consumer 都指向已配置且允许消费的 client。
+/// 业务作用：校验所有静态属性 consumer 都指向已配置且允许消费的 client。
 ///
 /// # 参数
 ///
@@ -1211,7 +1211,7 @@ fn validate_collected_targets(
     Ok(())
 }
 
-/// 为实际启动的 resolved group 冻结运行期 ReadyRule 列表。
+/// 业务作用：为实际启动的 resolved group 冻结运行期 ReadyRule 列表。
 ///
 /// # 参数
 ///
@@ -1259,7 +1259,7 @@ fn resolve_group_rules(
         .collect())
 }
 
-/// 计算严格早于 Application 全局时刻的 Kafka Ready 子 deadline。
+/// 业务作用：计算严格早于 Application 全局时刻的 Kafka Ready 子 deadline。
 ///
 /// # 参数
 ///
@@ -1284,7 +1284,7 @@ fn kafka_ready_deadline(application_deadline: Instant) -> ApplicationResult<Inst
     Ok(application_deadline - READY_DIAGNOSTIC_RESERVE)
 }
 
-/// 在共享子 deadline 内验证 producer-only client 的 broker metadata。
+/// 业务作用：在共享子 deadline 内验证 producer-only client 的 broker metadata。
 ///
 /// # 参数
 ///
@@ -1320,7 +1320,7 @@ fn safe_bootstrap_endpoint(bootstrap: &str) -> String {
     }
 }
 
-/// 对单个 client 执行**只读** broker metadata 探针:配了 `producer_probe_topic` 则验证该 topic
+/// 业务作用：对单个 client 执行**只读** broker metadata 探针:配了 `producer_probe_topic` 则验证该 topic
 /// 可见且至少一个分区,否则请求 cluster metadata。只读——不建 topic、不改配置、不提交 offset。
 /// 失败错误带 client 名、安全 bootstrap endpoint、`metadata` 阶段与底层 broker 根因。
 ///
@@ -1383,7 +1383,7 @@ async fn probe_client_metadata(
     })
 }
 
-/// 在启动任何 consumer 之前,对**所有** client 并发执行只读 metadata 探针。
+/// 业务作用：在启动任何 consumer 之前,对**所有** client 并发执行只读 metadata 探针。
 ///
 /// 探针只读、无 owner 副作用,失败时无需回滚(尚未启动任何 consumer)。全部失败按 client 名**稳定排序**,
 /// 主错误只输出第一个(名序最小)以避免多源覆盖首因,其余以 `warn` 记录(仍稳定有序)。
@@ -1430,7 +1430,7 @@ async fn probe_all_clients_metadata(
     Err(failures.into_iter().next().expect("failures non-empty").1)
 }
 
-/// 把 group ready 等待错误转成富诊断。
+/// 业务作用：把 group ready 等待错误转成富诊断。
 ///
 /// `GroupReadyTimeout` 展开每个未就绪 group 的紧凑快照:要求的 `ReadyRequirement`、等待预算、`GroupState`、
 /// assignment 分区数、`ready_assignment_epoch` 是否存在、脱敏 `last_error`——无需 librdkafka 旁路日志即可定位。
@@ -1494,7 +1494,7 @@ fn group_ready_error(
     )
 }
 
-/// 把 `ReadyRequirement` 转成诊断用短名。
+/// 业务作用：把 `ReadyRequirement` 转成诊断用短名。
 ///
 /// # 参数
 ///
@@ -1509,7 +1509,7 @@ fn describe_requirement(requirement: &nafka::ReadyRequirement) -> String {
     }
 }
 
-/// 创建没有底层 source 的 Kafka 组件错误。
+/// 业务作用：创建没有底层 source 的 Kafka 组件错误。
 ///
 /// # 参数
 ///
@@ -1523,7 +1523,7 @@ fn kafka_error(phase: ApplicationPhase, message: impl Into<String>) -> Applicati
     ApplicationError::new(ComponentId::Kafka, phase, message)
 }
 
-/// 创建保留类型化底层 source 的 Kafka 组件错误。
+/// 业务作用：创建保留类型化底层 source 的 Kafka 组件错误。
 ///
 /// # 参数
 ///

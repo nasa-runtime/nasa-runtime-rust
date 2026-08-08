@@ -1,6 +1,6 @@
 //! 带不可变版本的 definition 注册表与启动预检。
 //!
-//! definition 一经发布内容不可变（§11.5.4）：同 `(workflow, version)` 注册不同摘要的
+//! definition 一经发布内容不可变：同 `(workflow, version)` 注册不同摘要的
 //! 内容会被拒绝。启动预检校验全部非终态实例引用的 `(workflow, version, digest)`
 //! 可用且一致——缺失或漂移时拒绝 Ready，绝不用新内容驱动旧实例。
 

@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const TRACEPARENT_HEADER: &str = "traceparent";
 const TRACE_ID_HEADER: &str = "trace-id";
 
-/// 只接受唯一且语法有效的 `traceparent`，重复 header 按不可信输入处理。
+/// 业务作用：只接受唯一且语法有效的 `traceparent`，重复 header 按不可信输入处理。
 fn inbound_trace_context(request: &Request) -> Option<TraceContext> {
     let mut values = request.headers().get_all(TRACEPARENT_HEADER).iter();
     match (values.next(), values.next()) {
@@ -31,7 +31,7 @@ fn inbound_trace_context(request: &Request) -> Option<TraceContext> {
 }
 
 #[cfg(feature = "telemetry")]
-/// 返回当前 UNIX 纳秒并饱和到 u64，供服务端 span 记录开始/结束时刻。
+/// 业务作用：返回当前 UNIX 纳秒并饱和到 u64，供服务端 span 记录开始/结束时刻。
 fn unix_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -39,7 +39,7 @@ fn unix_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// Trace 传播中间件。入站有效 `traceparent` → 派生子 span;否则开启新链路。当前上下文入请求扩展。
+/// 业务作用：Trace 传播中间件。入站有效 `traceparent` → 派生子 span;否则开启新链路。当前上下文入请求扩展。
 pub async fn trace_context(mut request: Request, next: Next) -> Response {
     let inbound = inbound_trace_context(&request);
     let current = match inbound {
@@ -55,7 +55,7 @@ pub async fn trace_context(mut request: Request, next: Next) -> Response {
     response
 }
 
-/// Trace 传播中间件(遥测激活变体):在 [`trace_context`] 的传播之外,对每个请求向遥测组件的有界导出器
+/// 业务作用：Trace 传播中间件(遥测激活变体):在 [`trace_context`] 的传播之外,对每个请求向遥测组件的有界导出器
 /// 产一个**服务端 span**。
 ///
 /// 只在声明并激活 `telemetry` 组件时由 Web 装配启用(exporter 由 `State` 注入)。span 名取

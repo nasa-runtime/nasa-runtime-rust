@@ -25,7 +25,7 @@ pub enum ParameterLocation {
 }
 
 impl ParameterLocation {
-    /// OpenAPI `in` 字段的稳定值。
+    /// 业务作用：OpenAPI `in` 字段的稳定值。
     const fn as_str(self) -> &'static str {
         match self {
             Self::Query => "query",
@@ -125,7 +125,7 @@ pub enum OpenApiError {
 }
 
 impl std::fmt::Display for OpenApiError {
-    /// 输出稳定合同错误分类，不包含完整 schema 文本。
+    /// 业务作用：输出稳定合同错误分类，不包含完整 schema 文本。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "OpenAPI contract error: {self:?}")
     }
@@ -133,7 +133,7 @@ impl std::fmt::Display for OpenApiError {
 
 impl std::error::Error for OpenApiError {}
 
-/// 生成排序稳定的 OpenAPI 3.1 JSON 文档。
+/// 业务作用：生成排序稳定的 OpenAPI 3.1 JSON 文档。
 pub fn generate(
     title: &str,
     version: &str,
@@ -341,7 +341,7 @@ pub fn generate(
     Ok(document)
 }
 
-/// 校验 query/header 参数名；header 使用 RFC token，query 在此基础上允许方括号。
+/// 业务作用：校验 query/header 参数名；header 使用 RFC token，query 在此基础上允许方括号。
 fn validate_parameter_name(parameter: &ParameterContract) -> Result<(), OpenApiError> {
     if parameter.name.is_empty() || parameter.name.len() > 128 {
         return Err(OpenApiError::InvalidParameter(parameter.name.clone()));
@@ -373,7 +373,7 @@ fn validate_parameter_name(parameter: &ParameterContract) -> Result<(), OpenApiE
     Ok(())
 }
 
-/// 构造 RFC 9457 Problem Details 的共享 OpenAPI schema。
+/// 业务作用：构造 RFC 9457 Problem Details 的共享 OpenAPI schema。
 fn problem_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -389,7 +389,7 @@ fn problem_schema() -> serde_json::Value {
     })
 }
 
-/// 校验并登记命名 schema；同名同结构复用，不同结构明确报冲突。
+/// 业务作用：校验并登记命名 schema；同名同结构复用，不同结构明确报冲突。
 fn register_schema(
     schemas: &mut BTreeMap<String, serde_json::Value>,
     contract: &SchemaContract,
@@ -428,7 +428,7 @@ fn register_schema(
     }))
 }
 
-/// 构造引用共享 Problem schema 的标准错误响应组件。
+/// 业务作用：构造引用共享 Problem schema 的标准错误响应组件。
 fn problem_response(description: &str) -> serde_json::Value {
     serde_json::json!({
         "description": description,
@@ -440,7 +440,7 @@ fn problem_response(description: &str) -> serde_json::Value {
     })
 }
 
-/// 将 handler 标识中的非字母数字字符稳定归一为下划线。
+/// 业务作用：将 handler 标识中的非字母数字字符稳定归一为下划线。
 fn stable_operation_id(handler: &str) -> String {
     handler
         .chars()
@@ -454,7 +454,7 @@ fn stable_operation_id(handler: &str) -> String {
         .collect()
 }
 
-/// 提取并验证不带参数的 HTTP media type，拒绝超长或非法 token。
+/// 业务作用：提取并验证不带参数的 HTTP media type，拒绝超长或非法 token。
 fn media_type(value: &str) -> Result<&str, OpenApiError> {
     if value.len() > 255 {
         return Err(OpenApiError::InvalidMediaType(value.to_owned()));
@@ -479,7 +479,7 @@ fn media_type(value: &str) -> Result<&str, OpenApiError> {
     Ok(media)
 }
 
-/// 从路由模板提取唯一 `{name}` 段并生成必填 path parameter 合同。
+/// 业务作用：从路由模板提取唯一 `{name}` 段并生成必填 path parameter 合同。
 fn path_parameters(path: &str) -> Result<Vec<serde_json::Value>, OpenApiError> {
     let mut names = BTreeSet::new();
     let mut parameters = Vec::new();

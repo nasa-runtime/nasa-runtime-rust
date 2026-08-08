@@ -23,12 +23,12 @@ use naws_proto::{ClusterEvent, Message, Mode, WireCodec};
 /// 集群公开的非 fallible timer API 统一使用的安全上限。
 const MAX_CLUSTER_RUNTIME_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-/// 周期任务不能接受零间隔；极端时长也必须在进入 Tokio timer 前收敛。
+/// 业务作用：周期任务不能接受零间隔；极端时长也必须在进入 Tokio timer 前收敛。
 fn bounded_period(duration: Duration) -> Duration {
     duration.clamp(Duration::from_millis(1), MAX_CLUSTER_RUNTIME_DURATION)
 }
 
-/// 墙钟参数来自公开观测 API；饱和差值避免极端或回拨时间戳触发整数溢出。
+/// 业务作用：墙钟参数来自公开观测 API；饱和差值避免极端或回拨时间戳触发整数溢出。
 fn within_ttl(now_local: i64, last_seen_local: i64, ttl_millis: i64) -> bool {
     now_local.saturating_sub(last_seen_local) <= ttl_millis
 }
@@ -92,7 +92,7 @@ pub struct ClusterSourceRef<'a> {
 
 /// 跨节点 data plane 的可替换少拷贝发布接缝。
 pub trait ClusterDataPublisher: Send + Sync {
-    /// 直接发布借用业务信封，不先编码中间 ClusterEvent。
+    /// 业务作用：直接发布借用业务信封，不先编码中间 ClusterEvent。
     ///
     /// # 参数
     ///
@@ -111,21 +111,21 @@ pub trait ClusterDataPublisher: Send + Sync {
 
 /// 跨节点 transport 抽象(单一 transport,不混用)。换 Redis/Kafka/Peer-TCP 只换它。
 pub trait Notifier: Send + Sync {
-    /// 启动收发;返回 ready future,await 它直到就绪。
+    /// 业务作用：启动收发;返回 ready future,await 它直到就绪。
     ///
     /// # 参数
     /// - `on_message`: transport 收到跨节点 payload 后调用的回调。
     fn start(&self, on_message: OnMessage) -> ReadyFuture;
 
-    /// 发布一条 payload(ClusterEvent 编码后的字节),返回入队结果。
+    /// 业务作用：发布一条 payload(ClusterEvent 编码后的字节),返回入队结果。
     ///
     /// # 参数
     /// - `payload`: 已编码的 ClusterEvent 字节。
     fn publish(&self, payload: Bytes) -> PublishOutcome;
 
-    /// 关闭集群通知器；用于释放节点广播相关资源。
+    /// 业务作用：关闭集群通知器；用于释放节点广播相关资源。
     fn shutdown(&self) {}
-    /// transport 的后台任务跟踪器(供 graceful shutdown join);无后台任务返回 None。
+    /// 业务作用：transport 的后台任务跟踪器(供 graceful shutdown join);无后台任务返回 None。
     fn task_tracker(&self) -> Option<&TaskTracker> {
         None
     }
@@ -206,7 +206,7 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// 用**注入的、已校验的** `Incarnation` 构造。`Incarnation` 保证非空 + 纯 ASCII 十进制 + 正整数
+    /// 业务作用：用**注入的、已校验的** `Incarnation` 构造。`Incarnation` 保证非空 + 纯 ASCII 十进制 + 正整数
     /// (空串/非正会破坏 fencing,已在类型层挡住)。同 node_id 须用**同一定宽方案**
     /// (`Incarnation::from_epoch` 恒 20 位)使字典序 == 数值序。
     ///
@@ -240,7 +240,7 @@ impl Cluster {
         })
     }
 
-    /// 在启动前一次性注入 data plane publisher。
+    /// 业务作用：在启动前一次性注入 data plane publisher。
     ///
     /// # 参数
     ///
@@ -256,7 +256,7 @@ impl Cluster {
         self.data_publisher.set(publisher)
     }
 
-    /// 注入全量 presence 快照提供者(框架装配时从 SessionRegistry::presence_snapshot 取)。
+    /// 业务作用：注入全量 presence 快照提供者(框架装配时从 SessionRegistry::presence_snapshot 取)。
     ///
     /// # 参数
     /// - `f`: 返回 `(版本, 本地群集合)` 的快照闭包,两者必须来自同一时刻。
@@ -264,17 +264,17 @@ impl Cluster {
         *self.presence.lock().unwrap() = Some(f);
     }
 
-    /// 返回本节点标识；用于过滤或标记集群消息来源。
+    /// 业务作用：返回本节点标识；用于过滤或标记集群消息来源。
     pub fn local_node(&self) -> &str {
         &self.local_node
     }
 
-    /// 对端节点存活表(可观测 / 精确路由前置)。
+    /// 业务作用：对端节点存活表(可观测 / 精确路由前置)。
     pub fn nodes(&self) -> &Arc<NodeRegistry> {
         &self.nodes
     }
 
-    /// 集群规模快照(只读 DTO)。`tombstone_count` 的持续增长说明 node_id 不稳定,见
+    /// 业务作用：集群规模快照(只读 DTO)。`tombstone_count` 的持续增长说明 node_id 不稳定,见
     /// [`NodeRegistry::tombstone_count`](经标准 ServerBuilder 集成路径可达)。
     /// 三个节点计数在 NodeRegistry **单锁内一次**算出,不再三次取锁拼出跨时刻 DTO。
     pub fn stats(&self) -> ClusterStats {
@@ -291,14 +291,14 @@ impl Cluster {
         }
     }
 
-    /// 启动接收循环;**等就绪后返回**(reader 连上并定好起始游标),消除节点启动丢消息窗口。
+    /// 业务作用：启动接收循环;**等就绪后返回**(reader 连上并定好起始游标),消除节点启动丢消息窗口。
     /// 返回 Result:就绪 Ok;失败/超时 Err(由调用方按 FailFast/Degraded 处置)。
     ///
     pub async fn start(self: &Arc<Self>) -> Result<(), StartError> {
         self.start_with_timeout(Duration::from_secs(5)).await
     }
 
-    /// 启动接收循环并使用调用方提供的就绪超时。
+    /// 业务作用：启动接收循环并使用调用方提供的就绪超时。
     ///
     /// # 参数
     ///
@@ -321,14 +321,14 @@ impl Cluster {
         }
     }
 
-    /// 关闭集群通知器；用于释放节点广播相关资源。
+    /// 业务作用：关闭集群通知器；用于释放节点广播相关资源。
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed); // 停周期 presence(标志兜底)
         self.cancel.cancel(); // presence 任务立即退出(不必等满一个 tick)
         self.notifier.shutdown(); // 停 notifier 收发(RedisNotifier 等)
     }
 
-    /// graceful:cancel 后在**绝对截止点 `end`** 之前 join 集群自有任务(presence)+ notifier
+    /// 业务作用：graceful:cancel 后在**绝对截止点 `end`** 之前 join 集群自有任务(presence)+ notifier
     /// 后台任务(Redis reader/publisher)。各阶段共用同一截止点(不是各给一份完整 deadline),
     /// 故总耗时受 `end` 约束。返回是否在 `end` 前全部退出。
     ///
@@ -347,7 +347,7 @@ impl Cluster {
         ok
     }
 
-    /// 本地 Sender.send/relay 调:把一条 Message 跨节点投递——**一律广播**,
+    /// 业务作用：本地 Sender.send/relay 调:把一条 Message 跨节点投递——**一律广播**,
     /// 由接收端按本地 by_group/uid 过滤(send_local)。
     /// 不做"查群目录→只发匹配节点"的精确群播:presence 是 at-most-once,某节点 presence 丢失时
     /// 目录非空但不完整,精确路由会漏投该节点直到下次 FULL——IM 不可漏。
@@ -361,7 +361,7 @@ impl Cluster {
         self.publish_inner(msg, mode, None);
     }
 
-    /// **精确路由**:只投给指定节点(接收端按 target_nodes 过滤,其余节点丢弃)。
+    /// 业务作用：**精确路由**:只投给指定节点(接收端按 target_nodes 过滤,其余节点丢弃)。
     ///
     /// # 参数
     /// - `nodes`: 目标节点 ID 列表,接收端只在本节点命中时投递。
@@ -372,7 +372,7 @@ impl Cluster {
         self.publish_inner(msg, mode, Some(targets));
     }
 
-    /// 发布内部集群消息；用于按广播模式选择目标节点。
+    /// 业务作用：发布内部集群消息；用于按广播模式选择目标节点。
     ///
     /// # 参数
     /// - `msg`: 业务消息体或事件载荷。
@@ -440,7 +440,7 @@ impl Cluster {
         }
     }
 
-    /// 全量 presence(周期对账):广播本节点**当前全部**本地群 + 该快照的一致版本。
+    /// 业务作用：全量 presence(周期对账):广播本节点**当前全部**本地群 + 该快照的一致版本。
     /// 接收端按 (node,group) LWW 整体对齐——比本群已知版本更新才覆盖,绝不回退更新的 delta;
     /// 缺席群在 ≤version 时下沉为 tombstone 并被水位回收。丢一条不致命,下个周期全量自愈。
     pub fn publish_presence(&self) {
@@ -453,7 +453,7 @@ impl Cluster {
         self.publish_presence_event(PRESENCE_FULL, &groups, version);
     }
 
-    /// 增量 presence(群 0↔1 跃迁即时广播):present=true 发 ADD、false 发 DEL,**单群单版本**
+    /// 业务作用：增量 presence(群 0↔1 跃迁即时广播):present=true 发 ADD、false 发 DEL,**单群单版本**
     /// (一条事件一个 timestamp,故一次只携带一个群)。version 为跃迁处取的号。
     /// 让对端目录在网络延迟级内更新,避免"刚加入群却收不到跨节点消息"的窗口。
     ///
@@ -470,7 +470,7 @@ impl Cluster {
         );
     }
 
-    /// 组装并广播一条 presence(message_bytes=None;message_mode=kind;target_nodes=群名)。
+    /// 业务作用：组装并广播一条 presence(message_bytes=None;message_mode=kind;target_nodes=群名)。
     /// timestamp 复用为**该事件版本**(FULL=快照版本,delta=跃迁号):接收端据此做 LWW 去旧。
     ///
     /// # 参数
@@ -504,7 +504,7 @@ impl Cluster {
         }
     }
 
-    /// 启动周期全量 presence 对账 + 过期节点清理(需在 tokio 运行时内)。
+    /// 业务作用：启动周期全量 presence 对账 + 过期节点清理(需在 tokio 运行时内)。
     ///
     ///
     /// # 参数
@@ -529,7 +529,7 @@ impl Cluster {
         });
     }
 
-    /// Notifier 收到对端 payload(也会收到自己发的)→ 防回环 + 目标过滤 + 本地分发。
+    /// 业务作用：Notifier 收到对端 payload(也会收到自己发的)→ 防回环 + 目标过滤 + 本地分发。
     ///
     /// # 参数
     /// - `bytes`: 原始字节切片。
@@ -635,7 +635,7 @@ impl Cluster {
     }
 }
 
-/// 读取当前毫秒时间；用于节点心跳和过期判断。
+/// 业务作用：读取当前毫秒时间；用于节点心跳和过期判断。
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -653,7 +653,7 @@ pub enum IncarnationError {
 }
 
 impl std::fmt::Display for IncarnationError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -675,7 +675,7 @@ impl std::error::Error for IncarnationError {}
 pub struct Incarnation(String);
 
 impl Incarnation {
-    /// 从持久单调 epoch(如 Redis `INCR`)构造定宽(20 位零填充)token。epoch 须 > 0。
+    /// 业务作用：从持久单调 epoch(如 Redis `INCR`)构造定宽(20 位零填充)token。epoch 须 > 0。
     ///
     /// # 参数
     /// - `epoch`: 外部持久单调递增序号,必须大于 0。
@@ -686,7 +686,7 @@ impl Incarnation {
         Ok(Incarnation(format!("{epoch:020}")))
     }
 
-    /// 从已有字符串解析(再水合):必须非空、全 ASCII 数字、表示正整数(去前导零后非空)、且 ≤ u128。
+    /// 业务作用：从已有字符串解析(再水合):必须非空、全 ASCII 数字、表示正整数(去前导零后非空)、且 ≤ u128。
     ///
     /// # 参数
     /// - `s`: 持久化或配置中读取到的 incarnation token 字符串。
@@ -702,7 +702,7 @@ impl Incarnation {
         }
     }
 
-    /// 解析 incarnation 字符串为**数值**(供 fence **按数值比较**,避免变长字典序错序)。
+    /// 业务作用：解析 incarnation 字符串为**数值**(供 fence **按数值比较**,避免变长字典序错序)。
     /// 要求:非空、全 ASCII 十进制、数值 > 0、且不溢出 u128。否则返回 None(接收端据此拒绝)。
     ///
     /// # 参数
@@ -727,12 +727,12 @@ impl Incarnation {
         }
     }
 
-    /// 返回节点标识字符串；用于构造消息和日志输出。
+    /// 业务作用：返回节点标识字符串；用于构造消息和日志输出。
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// 消费节点标识并返回字符串；用于把强类型节点 ID 交给存储层。
+    /// 业务作用：消费节点标识并返回字符串；用于把强类型节点 ID 交给存储层。
     pub(crate) fn into_string(self) -> String {
         self.0
     }
@@ -770,7 +770,7 @@ struct NodeInfo {
 }
 
 impl NodeInfo {
-    /// 创建新的节点心跳记录；用于节点首次出现或刷新时初始化时间。
+    /// 业务作用：创建新的节点心跳记录；用于节点首次出现或刷新时初始化时间。
     ///
     /// # 参数
     /// - `now_local`: 用于时间窗口判断的当前本地时间。
@@ -784,7 +784,7 @@ impl NodeInfo {
         }
     }
 
-    /// incarnation 围栏(有序 fencing token):
+    /// 业务作用：incarnation 围栏(有序 fencing token):
     /// - **更新**(更大)→ 对端重启了新实例:重置目录与水位,纳入新实例,返回 true;
     /// - **相同** → 同实例,放行(版本去旧交给 per-group / 水位);
     /// - **更旧**(更小)→ 迟到的旧实例消息,拒绝(不让目录回切)。
@@ -808,7 +808,7 @@ impl NodeInfo {
         }
     }
 
-    /// 切到新 incarnation:清空群槽,水位归 MIN(新实例的 presence_seq 从 0 起,
+    /// 业务作用：切到新 incarnation:清空群槽,水位归 MIN(新实例的 presence_seq 从 0 起,
     /// 不能被旧实例的高水位拒掉)。
     ///
     /// # 参数
@@ -819,7 +819,7 @@ impl NodeInfo {
         self.groups.clear();
     }
 
-    /// 应用一条全量快照 @version:在 snapshot 内的群置 present、缺席群下沉 tombstone
+    /// 业务作用：应用一条全量快照 @version:在 snapshot 内的群置 present、缺席群下沉 tombstone
     /// (均不回退更新的 delta:仅当 version ≥ 槽版本才动),推进水位并回收 ≤水位 的 tombstone。
     ///
     /// # 参数
@@ -854,7 +854,7 @@ impl NodeInfo {
         self.groups.retain(|_, s| s.present || s.version > wm);
     }
 
-    /// 应用一条单群 delta @version:水位门控(陈旧增量拒) + per-group LWW(仅更新才覆盖)。
+    /// 业务作用：应用一条单群 delta @version:水位门控(陈旧增量拒) + per-group LWW(仅更新才覆盖)。
     ///
     /// # 参数
     /// - `group`: 消费组、服务分组或任务分组名称。
@@ -874,7 +874,7 @@ impl NodeInfo {
         }
     }
 
-    /// 该节点当前是否拥有 group 的本地成员(present 槽)。
+    /// 业务作用：该节点当前是否拥有 group 的本地成员(present 槽)。
     ///
     /// # 参数
     /// - `group`: 消费组、服务分组或任务分组名称。
@@ -890,7 +890,7 @@ pub struct NodeRegistry {
 }
 
 impl NodeRegistry {
-    /// 构造节点注册表。
+    /// 业务作用：构造节点注册表。
     ///
     /// # 参数
     /// - `ttl`: 节点存活 TTL,超过该时间未收到事件或 presence 即视为过期。
@@ -906,7 +906,7 @@ impl NodeRegistry {
         })
     }
 
-    /// 数据事件:**先 incarnation 围栏再刷新存活**(用本机时间 `now_local`),不动 groups。
+    /// 业务作用：数据事件:**先 incarnation 围栏再刷新存活**(用本机时间 `now_local`),不动 groups。
     /// 数据事件:**先 incarnation 围栏再刷新存活**。`incarnation` 必须**非空**(调用方 on_received
     /// 已强制,缺失/空一律在更上层拒绝;不 fail-open)。返回是否接受(被拒=旧实例
     /// 迟到数据,调用方应丢弃、不分发)。
@@ -929,7 +929,7 @@ impl NodeRegistry {
         }
     }
 
-    /// 全量 presence:刷新存活;incarnation 围栏通过后按 (node,group) LWW 对齐快照。
+    /// 业务作用：全量 presence:刷新存活;incarnation 围栏通过后按 (node,group) LWW 对齐快照。
     ///
     /// # 参数
     /// - `node`: 发送 FULL presence 的对端节点 ID。
@@ -958,7 +958,7 @@ impl NodeRegistry {
         }
     }
 
-    /// 增量 presence(单群):刷新存活;incarnation 围栏通过后按水位门控 + per-group LWW 应用。
+    /// 业务作用：增量 presence(单群):刷新存活;incarnation 围栏通过后按水位门控 + per-group LWW 应用。
     ///
     /// # 参数
     /// - `node`: 发送 delta presence 的对端节点 ID。
@@ -988,7 +988,7 @@ impl NodeRegistry {
         }
     }
 
-    /// now_local 时刻仍存活的节点列表(按本机时钟判 TTL)。
+    /// 业务作用：now_local 时刻仍存活的节点列表(按本机时钟判 TTL)。
     ///
     /// # 参数
     /// - `now_local`: 本机当前毫秒时间,用于和节点 last_seen 比较 TTL。
@@ -1000,7 +1000,7 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// 返回当前对象的 alive 状态。
+    /// 业务作用：返回当前对象的 alive 状态。
     ///
     /// # 参数
     /// - `node`: 要检查的节点 ID。
@@ -1013,7 +1013,7 @@ impl NodeRegistry {
             .is_some_and(|i| within_ttl(now_local, i.last_seen_local, self.ttl_millis))
     }
 
-    /// 统计指定时间点仍活跃的节点；用于观测集群可用规模。
+    /// 业务作用：统计指定时间点仍活跃的节点；用于观测集群可用规模。
     ///
     /// # 参数
     /// - `at`: 本机毫秒时间,用于判断每个节点是否仍在 TTL 内。
@@ -1021,12 +1021,12 @@ impl NodeRegistry {
         self.alive_nodes(at).len()
     }
 
-    /// 节点条目总数(含已过期的 incarnation tombstone)。可观测/容量监控用。
+    /// 业务作用：节点条目总数(含已过期的 incarnation tombstone)。可观测/容量监控用。
     pub fn node_count(&self) -> usize {
         self.nodes.lock().unwrap().len()
     }
 
-    /// 当前 **tombstone 数**(已过期但为 fencing 保留 incarnation 的节点)。**部署须监控其增长**:
+    /// 业务作用：当前 **tombstone 数**(已过期但为 fencing 保留 incarnation 的节点)。**部署须监控其增长**:
     /// 永久 tombstone 是 fencing 正确性的取舍,要求 node_id 稳定且有界(StatefulSet ordinal 等);
     /// 若该值随时间无界上升,说明用了每次启动都变的随机 node_id,需改用稳定 ID 或外部持久 epoch
     ///。
@@ -1040,7 +1040,7 @@ impl NodeRegistry {
             .count()
     }
 
-    /// (节点总数, 存活数, tombstone 数) **单锁内一次**算出——三值同一时刻、口径一致,
+    /// 业务作用：(节点总数, 存活数, tombstone 数) **单锁内一次**算出——三值同一时刻、口径一致,
     /// 不再让调用方三次取锁拼出跨时刻快照。
     ///
     /// # 参数
@@ -1055,7 +1055,7 @@ impl NodeRegistry {
         (node_count, alive_count, node_count - alive_count)
     }
 
-    /// now_local 时刻"拥有该 group 本地成员"的存活节点(精确群播的目标集)。
+    /// 业务作用：now_local 时刻"拥有该 group 本地成员"的存活节点(精确群播的目标集)。
     ///
     /// # 参数
     /// - `group`: 要查询的群组名。
@@ -1070,7 +1070,7 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// 处理 now_local 时刻已过期的节点;返回**本次新过期**的节点数(已是 tombstone 的不重复计)。
+    /// 业务作用：处理 now_local 时刻已过期的节点;返回**本次新过期**的节点数(已是 tombstone 的不重复计)。
     /// 过期节点**降级为永久 tombstone**:首次过期才计数 + 清出群目录,且 `full_watermark` 抬到
     /// `max(watermark, 所有 GroupSlot.version)`——既挡更旧 incarnation 回切,也挡**同一 incarnation**
     /// 的旧 FULL(<水位)/旧 delta(≤水位)复活目录。同存活进程后续发当前版本

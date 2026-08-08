@@ -15,7 +15,7 @@ pub const DEFAULT_WORKER_ID: i64 = 1;
 
 /// ID 生成器抽象。
 pub trait IdGenerate {
-    /// 生成下一个 ID。
+    /// 业务作用：生成下一个 ID。
     fn next_id(&self) -> i64;
 }
 
@@ -31,7 +31,7 @@ pub enum SnowflakeError {
 }
 
 impl core::fmt::Display for SnowflakeError {
-    /// 格式化错误信息。
+    /// 业务作用：格式化错误信息。
     ///
     /// # 参数
     ///
@@ -47,7 +47,7 @@ impl core::fmt::Display for SnowflakeError {
 
 impl std::error::Error for SnowflakeError {}
 
-/// 校验雪花 ID 位长组合。
+/// 业务作用：校验雪花 ID 位长组合。
 ///
 /// # 参数
 ///
@@ -73,7 +73,7 @@ pub fn validate_bits(worker_id_bits: u32, seq_bits: u32) -> Result<(), Snowflake
     Ok(())
 }
 
-/// 当前 epoch 毫秒。
+/// 业务作用：当前 epoch 毫秒。
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -97,7 +97,7 @@ pub struct Snowflake {
 }
 
 impl Snowflake {
-    /// 按完整参数构造雪花 ID 生成器。
+    /// 业务作用：按完整参数构造雪花 ID 生成器。
     ///
     /// # 参数
     ///
@@ -127,7 +127,7 @@ impl Snowflake {
         })
     }
 
-    /// 按默认位长和基础时间戳构造雪花 ID 生成器。
+    /// 业务作用：按默认位长和基础时间戳构造雪花 ID 生成器。
     ///
     /// # 参数
     ///
@@ -141,13 +141,13 @@ impl Snowflake {
         )
     }
 
-    /// 生成一个 ID。
+    /// 业务作用：生成一个 ID。
     pub fn generate(&self) -> i64 {
         let mut st = self.state.lock().expect("snowflake mutex poisoned");
         self.next_id_locked(&mut st)
     }
 
-    /// 批量生成 `count` 个 ID,只加一次锁。
+    /// 业务作用：批量生成 `count` 个 ID,只加一次锁。
     ///
     /// # 参数
     ///
@@ -157,7 +157,7 @@ impl Snowflake {
         (0..count).map(|_| self.next_id_locked(&mut st)).collect()
     }
 
-    /// 在已持锁状态下生成下一个 ID。
+    /// 业务作用：在已持锁状态下生成下一个 ID。
     ///
     /// # 参数
     ///
@@ -179,7 +179,7 @@ impl Snowflake {
 }
 
 impl IdGenerate for Snowflake {
-    /// 生成下一个 ID。
+    /// 业务作用：生成下一个 ID。
     fn next_id(&self) -> i64 {
         self.generate()
     }
@@ -200,7 +200,7 @@ pub struct SnowflakeConfig {
 }
 
 impl Default for SnowflakeConfig {
-    /// 返回单节点默认配置。
+    /// 业务作用：返回单节点默认配置。
     fn default() -> Self {
         Self {
             worker_id: DEFAULT_WORKER_ID,
@@ -212,7 +212,7 @@ impl Default for SnowflakeConfig {
 }
 
 impl SnowflakeConfig {
-    /// 按当前配置构造本地雪花 ID 生成器。
+    /// 业务作用：按当前配置构造本地雪花 ID 生成器。
     pub fn build(&self) -> Result<Snowflake, SnowflakeError> {
         Snowflake::new(
             self.worker_id,
@@ -222,7 +222,7 @@ impl SnowflakeConfig {
         )
     }
 
-    /// [`build`](Self::build) 的别名；“local”强调只做本地构造，
+    /// 业务作用：[`build`](Self::build) 的别名；“local”强调只做本地构造，
     /// (位长校验 + 纯算法,无副作用),不含 Redis workerId 分配;分布式分配走
     /// `nadis::SnowflakeConfig::build_with_redis`。
     pub fn build_local(&self) -> Result<Snowflake, SnowflakeError> {

@@ -17,7 +17,7 @@ pub enum AuthRequirement {
 }
 
 impl AuthRequirement {
-    /// 把宏参数中的稳定小写文本解析为身份要求。
+    /// 业务作用：把宏参数中的稳定小写文本解析为身份要求。
     ///
     /// # 参数
     ///
@@ -64,7 +64,7 @@ pub struct CryptoDirections {
 }
 
 impl CryptoDirections {
-    /// 从路由静态合同建立初始方向。
+    /// 业务作用：从路由静态合同建立初始方向。
     ///
     /// # 参数
     ///
@@ -80,7 +80,7 @@ impl CryptoDirections {
         }
     }
 
-    /// 判断两个方向是否都被关闭。
+    /// 业务作用：判断两个方向是否都被关闭。
     ///
     /// # 返回
     ///
@@ -147,7 +147,7 @@ pub struct RouteSecurityPlan {
 }
 
 impl RoutePolicy {
-    /// 构造不带身份和加密策略的兼容路由。
+    /// 业务作用：构造不带身份和加密策略的兼容路由。
     ///
     /// # 参数
     ///
@@ -186,7 +186,7 @@ impl RoutePolicy {
         }
     }
 
-    /// 判断路由是否声明了需要安全运行时参与的能力。
+    /// 业务作用：判断路由是否声明了需要安全运行时参与的能力。
     ///
     /// # 返回
     ///
@@ -205,7 +205,7 @@ impl RoutePolicy {
             || self.response_contract.is_some()
     }
 
-    /// 判断路由是否启用了任一加解密方向。
+    /// 业务作用：判断路由是否启用了任一加解密方向。
     ///
     /// # 返回
     ///

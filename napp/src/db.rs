@@ -458,7 +458,7 @@ impl ShutdownAction for DeferredDbShutdown {
 }
 
 impl ShutdownAction for DbShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -467,7 +467,7 @@ impl ShutdownAction for DbShutdown {
         "db-pool"
     }
 
-    /// 关闭连接池并等待已借出的连接归还。
+    /// 业务作用：关闭连接池并等待已借出的连接归还。
     ///
     /// # 参数
     ///
@@ -483,7 +483,7 @@ impl ShutdownAction for DbShutdown {
     }
 }
 
-/// 从最终配置解析出本进程要创建的全部数据源。
+/// 业务作用：从最终配置解析出本进程要创建的全部数据源。
 ///
 /// 返回值按名称排序，保证多库启动顺序、错误顺序和停机逆序在同一份配置下完全确定。
 ///
@@ -541,7 +541,7 @@ fn read_datasources(
     }
 }
 
-/// 从单个数据源配置对象里剥离 napp 编排字段 `migrations`,返回 (纯数据源配置, 可选门禁设置)。
+/// 业务作用：从单个数据源配置对象里剥离 napp 编排字段 `migrations`,返回 (纯数据源配置, 可选门禁设置)。
 ///
 /// `DataSourceConfig` 是 `deny_unknown_fields`,内嵌的 `migrations` 会让它整体解析失败,因此必须在
 /// 反序列化前把该键摘出。摘出后的剩余对象仍按 `deny_unknown_fields` 严格校验,数据源字段本身的拼写
@@ -602,7 +602,7 @@ fn split_datasource(
     Ok((config, migrations))
 }
 
-/// 在不建立任何连接的前提下校验候选配置树中的数据源段。
+/// 业务作用：在不建立任何连接的前提下校验候选配置树中的数据源段。
 ///
 /// 供启动期初始校验与配置热刷新使用：只做结构反序列化与取值校验，冲突（同时写 `database` 和
 /// `datasources`）在这里就会被拒绝，不会等到建池时才发现。
@@ -696,7 +696,7 @@ pub(crate) async fn datasource_handle(
     }
 }
 
-/// 创建数据源组件的稳定生命周期错误。
+/// 业务作用：创建数据源组件的稳定生命周期错误。
 ///
 /// # 参数
 ///
@@ -706,7 +706,7 @@ fn db_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationE
     ApplicationError::new(ComponentId::Db, phase, message)
 }
 
-/// 创建带底层错误链的数据源错误。
+/// 业务作用：创建带底层错误链的数据源错误。
 ///
 /// # 参数
 ///

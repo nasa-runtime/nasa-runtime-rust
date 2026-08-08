@@ -13,7 +13,7 @@
 
 use std::sync::OnceLock;
 
-/// FNV-1a 64-bit 稳定摘要(跨进程/跨版本一致;**绝不用随机 seed 的 HashMap hasher**——
+/// 业务作用：FNV-1a 64-bit 稳定摘要(跨进程/跨版本一致;**绝不用随机 seed 的 HashMap hasher**——
 /// 那会让持久化 key 成分每进程不同)。用于 operation_id 等需要稳定确定性摘要的场景。
 /// 返回 16 位十六进制字符串。
 ///
@@ -30,7 +30,7 @@ pub fn fnv1a64_hex(data: &[u8]) -> String {
     format!("{h:016x}")
 }
 
-/// CRC16-XMODEM(Redis CLUSTER KEYSLOT 同款,多项式 0x1021,初值 0)。
+/// 业务作用：CRC16-XMODEM(Redis CLUSTER KEYSLOT 同款,多项式 0x1021,初值 0)。
 ///
 /// # 参数
 /// - `data`: 要计算 Redis slot CRC 的原始字节。
@@ -49,7 +49,7 @@ pub fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// Redis 有效 hash tag 提取:第一个 '{' 与其后第一个 '}' 之间**非空**才生效。
+/// 业务作用：Redis 有效 hash tag 提取:第一个 '{' 与其后第一个 '}' 之间**非空**才生效。
 /// 返回 None = 无生效 tag(整 key 参与哈希)。全程按 bytes,不假设 UTF-8。
 ///
 /// # 参数
@@ -63,7 +63,7 @@ pub fn effective_tag(key: &[u8]) -> Option<&[u8]> {
     Some(&key[start + 1..start + 1 + end_rel])
 }
 
-/// 计算 key 的 Cluster slot(0..16384),与 `CLUSTER KEYSLOT` 一致。
+/// 业务作用：计算 key 的 Cluster slot(0..16384),与 `CLUSTER KEYSLOT` 一致。
 ///
 /// # 参数
 /// - `key`: Redis key 的原始字节。
@@ -72,7 +72,7 @@ pub fn redis_slot(key: &[u8]) -> u16 {
     crc16(hashed) % 16384
 }
 
-/// synthetic tag 表:slot → 一个保证落在该 slot 的短 tag(不含 '{' '}' ':')。
+/// 业务作用：synthetic tag 表:slot → 一个保证落在该 slot 的短 tag(不含 '{' '}' ':')。
 /// 固定生成算法 v1:从 0 起遍历计数器,十六进制小写编码为 "t{hex}",首个命中该 slot 的胜出。
 /// 表内容由算法唯一决定,跨进程/跨版本稳定(算法变更 = key layout 升版)。
 fn synthetic_table() -> &'static Vec<String> {
@@ -97,7 +97,7 @@ fn synthetic_table() -> &'static Vec<String> {
     })
 }
 
-/// 取目标 slot 的 synthetic tag(构造期已保证 CRC16(tag)%16384 == slot)。
+/// 业务作用：取目标 slot 的 synthetic tag(构造期已保证 CRC16(tag)%16384 == slot)。
 ///
 /// 当前 partition cluster 同槽使用 group 级 `{group}` relayout（整组位于同一 slot），
 /// 不经此函数**。`synthetic_tag`/`derive_same_slot_key` 是 **per-key 细粒度同槽派生**的预留能力,
@@ -110,7 +110,7 @@ pub fn synthetic_tag(slot: u16) -> &'static str {
     &synthetic_table()[(slot % 16384) as usize]
 }
 
-/// 为 source key 派生同 slot 的辅助 key:`{<tag>}:<suffix>`(per-key 同槽派生;预留,见 `synthetic_tag` 注)。
+/// 业务作用：为 source key 派生同 slot 的辅助 key:`{<tag>}:<suffix>`(per-key 同槽派生;预留,见 `synthetic_tag` 注)。
 /// source 有生效 tag → 复用;无 → 按 redis_slot(source) 取 synthetic tag。
 ///
 /// # 参数

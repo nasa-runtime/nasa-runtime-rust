@@ -2,7 +2,7 @@ use super::*;
 use futures::StreamExt;
 use std::time::Duration;
 
-/// 周期消费本节点持有分区的 command stream:
+/// 业务作用：周期消费本节点持有分区的 command stream:
 /// · admin group(nasa-park-admin)与业务 group 分离,consumer = node_id;
 /// · **不经业务 ClaimState**:Parked 分区的 Resume 命令照常被读取(修自锁);
 /// · 旧 owner 未 ACK 的命令经 XAUTOCLAIM 接管(Partition 持锁语义下 admin group
@@ -155,7 +155,7 @@ pub(super) async fn control_loop(rt: Arc<GroupRuntime>) {
     }
 }
 
-/// 解析 command stream 的 XREADGROUP/XAUTOCLAIM 响应,抽取 (entry_id, op 字段)。
+/// 业务作用：解析 command stream 的 XREADGROUP/XAUTOCLAIM 响应,抽取 (entry_id, op 字段)。
 /// **RESP2/RESP3 双形态**(RESP3 下命令通道半适配——本函数是第三个
 /// XREADGROUP 解析器,第 25 轮只修了 poll.rs/proxy.rs 两处,漏了这里):
 /// - XREADGROUP `>` 顶层:RESP2 `[[stream,[entries]],...]`(部分形态 Set)/ RESP3 `{stream:[entries]}`(Map);
@@ -188,7 +188,7 @@ pub(super) fn collect_cmd_entries(v: redis::Value, out: &mut Vec<(String, String
     }
 }
 
-/// 从单个 stream 的 entries 段抽取 (entry_id, op 字段)。entries/entry/fields 段两协议均为 Array。
+/// 业务作用：从单个 stream 的 entries 段抽取 (entry_id, op 字段)。entries/entry/fields 段两协议均为 Array。
 ///
 /// # 参数
 /// - `entries_v`: 从 Redis 读取到的 stream 条目集合。
@@ -219,7 +219,7 @@ fn collect_cmd_stream_entries(entries_v: redis::Value, out: &mut Vec<(String, St
     }
 }
 
-/// owner 执行一条命令(动作映射 + 成功后唤醒 coordinator)。
+/// 业务作用：owner 执行一条命令(动作映射 + 成功后唤醒 coordinator)。
 /// 返回 `true` = 可终结(ACK+XDEL command);`false` = 基础设施错误,保留 PEL 重试。
 pub(super) async fn run_command(rt: &Arc<GroupRuntime>, p: u32, op_id: &str) -> bool {
     use super::command::{execute_one, query, CmdAck, CmdAction};
@@ -287,7 +287,7 @@ pub(super) async fn run_command(rt: &Arc<GroupRuntime>, p: u32, op_id: &str) -> 
     }
 }
 
-/// 后台 orphan sweep actor:周期对本节点持有分区做
+/// 业务作用：后台 orphan sweep actor:周期对本节点持有分区做
 /// `XAUTOCLAIM min_idle` 收编滞留 PEL,经 `Event::OrphansClaimed` 回灌 coordinator——
 /// **Redis I/O 不在 coordinator 主循环上**,不阻塞 shutdown/lost/事件处理。
 /// 串行扫描(每分区一次,backlog 多页);独立 cancel 跟随 rt.cancel。
@@ -332,7 +332,7 @@ pub(super) async fn sweep_loop(rt: Arc<GroupRuntime>) {
     }
 }
 
-/// wake 订阅:收到信号立即补一轮再平衡(加速通道;正确性靠周期兜底)。
+/// 业务作用：wake 订阅:收到信号立即补一轮再平衡(加速通道;正确性靠周期兜底)。
 pub(super) async fn wake_loop(rt: Arc<GroupRuntime>) {
     loop {
         if rt.bg_cancel.is_cancelled() {

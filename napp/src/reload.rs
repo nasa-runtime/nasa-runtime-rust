@@ -19,14 +19,14 @@ use crate::{ApplicationResult, ComponentId};
 // 驱动侧（nacos-config）单独关闭时，本协议只有登记方在编译，消费入口空置属于预期形态。
 #[cfg_attr(not(feature = "nacos-config"), allow(dead_code))]
 pub(crate) trait ConfigApplier: Send + Sync {
-    /// 返回该句柄负责的组件身份。
+    /// 业务作用：返回该句柄负责的组件身份。
     ///
     /// # 参数
     ///
     /// 本方法无参数；驱动用它把重应用结果记到正确的 `ReloadTarget::Component` 上。
     fn component(&self) -> ComponentId;
 
-    /// 对尚未发布的候选配置树执行一次重应用。
+    /// 业务作用：对尚未发布的候选配置树执行一次重应用。
     ///
     /// # 参数
     ///

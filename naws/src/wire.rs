@@ -49,7 +49,7 @@ pub struct Frame {
     pub payload: Bytes,
 }
 
-/// 出站统一入口:把一帧编码成完整 `Bytes`(头+payload 一次成形)。
+/// 业务作用：出站统一入口:把一帧编码成完整 `Bytes`(头+payload 一次成形)。
 /// fan-out 时编一次、`Bytes::clone()` 给 N 个 outbox(零拷贝,= 原实现 retainedDuplicate)。
 ///
 /// # 参数
@@ -69,7 +69,7 @@ pub fn encode_frame(typ: u8, mode: u8, payload: &[u8]) -> Bytes {
     b.freeze()
 }
 
-/// 把借用业务信封直接编码进最终 NASA EVENT frame。
+/// 业务作用：把借用业务信封直接编码进最终 NASA EVENT frame。
 ///
 /// 二进制模式只分配最终 `BytesMut`；payload 从借用 slice 写入最终 frame 一次，不先构造消息中间 `Vec`。
 ///
@@ -106,12 +106,12 @@ pub fn encode_event_frame_ref(
     Ok(output.freeze())
 }
 
-/// 控制帧便捷构造(空 payload,VARINT mode)。
+/// 业务作用：控制帧便捷构造(空 payload,VARINT mode)。
 pub fn ping() -> Bytes {
     encode_frame(frame_type::PING, wire_mode::VARINT, &[])
 }
 
-/// 构造 pong 控制帧；用于响应心跳并保持连接活跃。
+/// 业务作用：构造 pong 控制帧；用于响应心跳并保持连接活跃。
 pub fn pong() -> Bytes {
     encode_frame(frame_type::PONG, wire_mode::VARINT, &[])
 }
@@ -122,7 +122,7 @@ pub struct FrameCodec {
 }
 
 impl FrameCodec {
-    /// 构造入站 frame 解码器。
+    /// 业务作用：构造入站 frame 解码器。
     ///
     /// # 参数
     /// - `max_frame`: 单条 frame 声明长度上限,超过即拒绝解码。
@@ -135,7 +135,7 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = std::io::Error;
 
-    /// 从 TCP/WS 字节流中尝试切出一条完整 frame。
+    /// 业务作用：从 TCP/WS 字节流中尝试切出一条完整 frame。
     ///
     /// # 参数
     /// - `src`: tokio codec 提供的入站累计缓冲区;函数会在成功解帧后消费对应字节。
@@ -164,7 +164,7 @@ impl Decoder for FrameCodec {
     }
 }
 
-/// 构造协议解析错误；用于把非法帧转换为统一 IO 错误。
+/// 业务作用：构造协议解析错误；用于把非法帧转换为统一 IO 错误。
 ///
 /// # 参数
 /// - `msg`: 业务消息体或事件载荷。

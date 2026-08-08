@@ -6,7 +6,7 @@ use std::time::Duration;
 /// RecycleLinkedMap, 顺序模型)。用 Vec 而非 HashMap 以保序。
 type OrderedBuckets = Vec<((String, String), Vec<(String, serde_json::Value)>)>;
 
-/// Runs a partition worker until shutdown.
+/// 业务作用：运行单分区 worker，直到收到取消信号或工作通道关闭。
 pub(super) async fn worker_loop(
     rt: Arc<GroupRuntime>,
     p: u32,
@@ -65,7 +65,7 @@ pub(super) async fn worker_loop(
     }
 }
 
-/// 单批处理全流程(permit 在 batch 内,函数返回即随 drop 归还预算)。
+/// 业务作用：单批处理全流程(permit 在 batch 内,函数返回即随 drop 归还预算)。
 pub(super) async fn process_batch(
     rt: &Arc<GroupRuntime>,
     p: u32,
@@ -191,7 +191,7 @@ enum AckResult {
     Failed,
 }
 
-/// 对一组 ID 做 ACK(按 profile 分流;XACK 幂等可重试)。
+/// 业务作用：对一组 ID 做 ACK(按 profile 分流;XACK 幂等可重试)。
 /// V2(有 stamp):单 Lua 原子校验 holder+fence 三元组+任期 counter 后 XACK;
 /// V1(无 stamp):holds 双检查已在调用链上方,此处裸 XACK(与 原实现 同协议)。
 ///

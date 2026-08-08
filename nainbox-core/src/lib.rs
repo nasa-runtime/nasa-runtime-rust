@@ -12,7 +12,7 @@ pub enum InboxClaim {
 }
 
 impl InboxClaim {
-    /// 是否允许当前事务执行一次业务副作用。
+    /// 业务作用：是否允许当前事务执行一次业务副作用。
     pub fn should_process(self) -> bool {
         matches!(self, Self::Claimed)
     }

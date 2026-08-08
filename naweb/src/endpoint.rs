@@ -82,7 +82,7 @@ type EndpointDeadline = tokio::time::Instant;
 type EndpointDeadline = ();
 
 impl EndpointLayerState {
-    /// 建立一条 route layer 独占的安全状态。
+    /// 业务作用：建立一条 route layer 独占的安全状态。
     ///
     /// # 参数
     ///
@@ -104,7 +104,7 @@ impl EndpointLayerState {
     }
 }
 
-/// 执行固定安全顺序的 Axum route middleware。
+/// 业务作用：执行固定安全顺序的 Axum route middleware。
 ///
 /// # 参数
 ///
@@ -181,7 +181,7 @@ pub async fn endpoint_middleware(
     response
 }
 
-/// 在一次固定 snapshot 上执行完整端点组合。
+/// 业务作用：在一次固定 snapshot 上执行完整端点安全流水线，防止请求处理中途观察到配置换代。
 ///
 /// # 参数
 ///
@@ -643,7 +643,7 @@ struct CryptoStageMetricGuard {
 
 #[cfg(feature = "crypto")]
 impl CryptoStageMetricGuard {
-    /// 建立带方向安全默认值的密码阶段守卫。
+    /// 业务作用：建立带方向安全默认值的密码阶段守卫。
     ///
     /// # 参数
     ///
@@ -667,7 +667,7 @@ impl CryptoStageMetricGuard {
         }
     }
 
-    /// 在成功、后端故障或超时已知时替换默认结果。
+    /// 业务作用：在成功、后端故障或超时已知时替换默认结果。
     ///
     /// # 参数
     ///
@@ -679,14 +679,14 @@ impl CryptoStageMetricGuard {
 
 #[cfg(feature = "crypto")]
 impl Drop for CryptoStageMetricGuard {
-    /// 在任意提前返回或正常结束时记录且只记录一次密码阶段观测。
+    /// 业务作用：在任意提前返回或正常结束时记录且只记录一次密码阶段观测。
     fn drop(&mut self) {
         self.metrics
             .record_crypto(self.request_direction, self.outcome, self.started.elapsed());
     }
 }
 
-/// 把内部密码错误映射为不暴露细节的有限指标结果。
+/// 业务作用：把内部密码错误映射为不暴露细节的有限指标结果。
 ///
 /// # 参数
 ///
@@ -714,7 +714,7 @@ fn metric_outcome_for_crypto_error(error: &CryptoError) -> SecurityMetricOutcome
     }
 }
 
-/// 读取安全短路写入的内部指标结果，普通业务响应再按 HTTP 状态收敛。
+/// 业务作用：读取安全短路写入的内部指标结果，普通业务响应再按 HTTP 状态收敛。
 ///
 /// # 参数
 ///
@@ -731,7 +731,7 @@ fn response_metric_outcome(response: &Response) -> SecurityMetricOutcome {
         .unwrap_or_else(|| SecurityMetricOutcome::from_status(response.status()))
 }
 
-/// 把内部指标结果写入不会发送到网络的响应扩展。
+/// 业务作用：把内部指标结果写入不会发送到网络的响应扩展。
 ///
 /// # 参数
 ///
@@ -746,7 +746,7 @@ fn mark_metric_outcome(mut response: Response, outcome: SecurityMetricOutcome) -
     response
 }
 
-/// 在独立异步任务中执行 extractor 与业务 handler，并收敛 panic 和总 deadline。
+/// 业务作用：在独立异步任务中执行 extractor 与业务 handler，并收敛 panic 和总 deadline。
 ///
 /// # 参数
 ///
@@ -795,13 +795,13 @@ struct HandlerAbortGuard(tokio::task::AbortHandle);
 
 #[cfg(feature = "crypto")]
 impl Drop for HandlerAbortGuard {
-    /// 中止尚未完成的业务任务，使 request 和明文预算最终随任务销毁。
+    /// 业务作用：中止尚未完成的业务任务，使 request 和明文预算最终随任务销毁。
     fn drop(&mut self) {
         self.0.abort();
     }
 }
 
-/// 在总 deadline 后尽力使用请求固定上下文加密稳定 503。
+/// 业务作用：在总 deadline 后尽力使用请求固定上下文加密稳定 503。
 ///
 /// # 参数
 ///
@@ -855,7 +855,7 @@ async fn encrypted_timeout_response(timeout_state: EndpointTimeoutState) -> Resp
     }
 }
 
-/// 建立业务 panic 或总 deadline 使用的稳定、禁缓存响应。
+/// 业务作用：建立业务 panic 或总 deadline 使用的稳定禁缓存响应，避免泄露处理细节。
 ///
 /// # 返回
 ///
@@ -878,7 +878,7 @@ fn handler_failure_response() -> Response {
     )
 }
 
-/// 判断请求 Content-Encoding 是否为空或 identity。
+/// 业务作用：判断请求 Content-Encoding 是否为空或 identity。
 ///
 /// # 参数
 ///
@@ -896,7 +896,7 @@ fn valid_content_encoding(request: &Request) -> bool {
         .unwrap_or(true)
 }
 
-/// 精确检查路由协议要求的外层 Content-Type。
+/// 业务作用：精确检查路由协议要求的外层 Content-Type。
 ///
 /// # 参数
 ///
@@ -925,7 +925,7 @@ fn content_type_matches(request: &Request, expected: &str) -> bool {
     }
 }
 
-/// 在读取 body 前利用公开 Content-Length 快速拒绝明显超限请求。
+/// 业务作用：在读取 body 前利用公开 Content-Length 快速拒绝明显超限请求。
 ///
 /// # 参数
 ///
@@ -945,7 +945,7 @@ fn content_length_exceeds(request: &Request, maximum: usize) -> bool {
         .is_some_and(|value| value > maximum)
 }
 
-/// 移除基于旧明文实体计算或会触发压缩的响应头。
+/// 业务作用：移除基于旧明文实体计算或会触发压缩的响应头。
 ///
 /// # 参数
 ///
@@ -960,7 +960,7 @@ fn clear_entity_headers(headers: &mut axum::http::HeaderMap) {
     }
 }
 
-/// 为安全边界错误生成固定结构和禁缓存响应。
+/// 业务作用：为安全边界错误生成固定结构和禁缓存响应。
 ///
 /// # 参数
 ///
@@ -981,7 +981,7 @@ fn crypto_error_response(error: &CryptoError) -> Response {
     )
 }
 
-/// 为标准或 Fore 兼容 profile 生成结构化身份错误。
+/// 业务作用：为标准或 Fore 兼容 profile 生成结构化身份错误。
 ///
 /// # 参数
 ///
@@ -1023,7 +1023,7 @@ pub(crate) fn auth_error_response(error: &AuthError, profile: &str) -> Response 
     mark_metric_outcome(ensure_no_store((status, body).into_response()), outcome)
 }
 
-/// 为所有安全响应强制添加 `Cache-Control: no-store`。
+/// 业务作用：为所有安全响应强制添加 `Cache-Control: no-store`。
 ///
 /// # 参数
 ///
@@ -1039,7 +1039,7 @@ pub(crate) fn ensure_no_store(mut response: Response) -> Response {
     response
 }
 
-/// 返回不支持加密实体压缩的稳定 415 响应。
+/// 业务作用：返回不支持加密实体压缩的稳定 415 响应。
 ///
 /// # 返回
 ///
@@ -1058,7 +1058,7 @@ fn unsupported_encoding_response() -> Response {
     )
 }
 
-/// 返回协议 Content-Type 不匹配的稳定 415 响应。
+/// 业务作用：返回协议 Content-Type 不匹配的稳定 415 响应。
 ///
 /// # 参数
 ///

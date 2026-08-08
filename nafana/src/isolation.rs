@@ -51,7 +51,7 @@ struct IsolationTable {
 // 全局隔离表,启动时 init 一次;没配 grafana.isolation 则保持空(dispatch 全放行)。
 static ISOLATION: std::sync::OnceLock<IsolationTable> = std::sync::OnceLock::new();
 
-/// 启动时调用一次:把 yml 的 `grafana.isolation` 建成 Trie。
+/// 业务作用：启动时调用一次:把 yml 的 `grafana.isolation` 建成 Trie。
 /// 规则为空则不初始化 → [`dispatch`] 全部放行(= 配置驱动隔离未启用)。
 ///
 /// # 参数
@@ -108,7 +108,7 @@ pub fn init_isolation(
     }
 }
 
-/// 把 "/download/*" 风格通配归一成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
+/// 业务作用：把 "/download/*" 风格通配归一成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
 /// 非 "/*" 结尾的具体路由原样返回。
 ///
 /// # 参数
@@ -121,7 +121,7 @@ fn normalize_pattern(pattern: &str) -> String {
     }
 }
 
-/// 仅在完整路径段边界上剥离 context-path，避免 `/app` 错误匹配 `/application`。
+/// 业务作用：仅在完整路径段边界上剥离 context-path，避免 `/app` 错误匹配 `/application`。
 fn strip_context_path<'a>(path: &'a str, context_path: &str) -> &'a str {
     if context_path.is_empty() {
         return path;
@@ -135,7 +135,7 @@ fn strip_context_path<'a>(path: &'a str, context_path: &str) -> &'a str {
     }
 }
 
-/// 全局中间件:拿请求 path 在 Trie 上匹配,命中 → 按真实路由懒建/复用命令并套
+/// 业务作用：全局中间件:拿请求 path 在 Trie 上匹配,命中 → 按真实路由懒建/复用命令并套
 /// bulkhead + 超时 + 双轨指标;未命中/未初始化 → 直接放行。
 ///
 /// 用法:整个 app 套一层 `.layer(axum::middleware::from_fn(nasa::grafana::dispatch))`。

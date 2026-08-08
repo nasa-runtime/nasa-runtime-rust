@@ -23,13 +23,13 @@ struct ActivationLease {
 }
 
 impl ActivationLease {
-    /// 放弃释放：owner 线程去向不明时，宁可永久占住该 client 也不放行第二个运行时。
+    /// 业务作用：放弃释放：owner 线程去向不明时，宁可永久占住该 client 也不放行第二个运行时。
     fn leak_on_uncertain_stop(&mut self) {
         std::mem::forget(self.client.take());
     }
 }
 
-/// 回滚已启动的 owner，并在任一 owner 未能在 deadline 内退出时保留激活租约。
+/// 业务作用：回滚已启动的 owner，并在任一 owner 未能在 deadline 内退出时保留激活租约。
 ///
 /// 直接丢弃 `stop_until` 的结果会让租约随 `Drop` 释放，而线程可能仍然存活——
 /// 此时第二个同名 client 就能并发启动，违反「同 client 单激活」。
@@ -57,7 +57,7 @@ async fn rollback_started(
 }
 
 impl ActivationLease {
-    /// 原子占用指定 client 的激活租约。
+    /// 业务作用：原子占用指定 client 的激活租约。
     ///
     /// # 参数
     ///
@@ -83,14 +83,14 @@ impl ActivationLease {
         }
     }
 
-    /// 启动成功后把租约交给运行时，由 shutdown 负责释放。
+    /// 业务作用：启动成功后把租约交给运行时，由 shutdown 负责释放。
     fn into_owner(mut self) -> String {
         self.client.take().expect("租约只能转交一次")
     }
 }
 
 impl Drop for ActivationLease {
-    /// 启动未走到成功分支时归还租约，避免失败的一次 start 永久占住 client 名。
+    /// 业务作用：启动未走到成功分支时归还租约，避免失败的一次 start 永久占住 client 名。
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             release_activation(&client);
@@ -98,7 +98,7 @@ impl Drop for ActivationLease {
     }
 }
 
-/// 释放一个静态收集激活租约。
+/// 业务作用：释放一个静态收集激活租约。
 ///
 /// 由 `KafkaProxy::shutdown` 在所有 owner 线程退出、运行时进入 Stopped 后调用
 ///。不释放会让同一进程再也无法用相同 collected client
@@ -160,7 +160,7 @@ pub struct ConsumerRegistryBuilder {
 }
 
 impl ConsumerRegistryBuilder {
-    /// 创建空注册 builder。
+    /// 业务作用：创建空注册 builder。
     ///
     /// # 参数
     ///
@@ -174,7 +174,7 @@ impl ConsumerRegistryBuilder {
         }
     }
 
-    /// 注册有状态单条消费者实例。
+    /// 业务作用：注册有状态单条消费者实例。
     ///
     /// # 参数
     ///
@@ -189,7 +189,7 @@ impl ConsumerRegistryBuilder {
         Ok(self)
     }
 
-    /// 注册有状态批消费者实例。
+    /// 业务作用：注册有状态批消费者实例。
     ///
     /// # 参数
     ///
@@ -204,7 +204,7 @@ impl ConsumerRegistryBuilder {
         Ok(self)
     }
 
-    /// 注册同步借用式少拷贝消费者。
+    /// 业务作用：注册同步借用式少拷贝消费者。
     ///
     /// # 参数
     ///
@@ -223,7 +223,7 @@ impl ConsumerRegistryBuilder {
         Ok(self)
     }
 
-    /// 激活与当前配置 `client_name` 匹配的静态属性宏消费者。
+    /// 业务作用：激活与当前配置 `client_name` 匹配的静态属性宏消费者。
     ///
     /// # 错误
     ///
@@ -233,7 +233,7 @@ impl ConsumerRegistryBuilder {
         self.with_collected_for(&client)
     }
 
-    /// 激活与指定客户端名匹配的静态属性宏消费者。
+    /// 业务作用：激活与指定客户端名匹配的静态属性宏消费者。
     ///
     /// # 参数
     ///
@@ -281,7 +281,7 @@ impl ConsumerRegistryBuilder {
         Ok(self)
     }
 
-    /// 冻结 registry 并启动每个 resolved group 的 owner 线程。
+    /// 业务作用：冻结 registry 并启动每个 resolved group 的 owner 线程。
     ///
     /// 成功仅表示本地 consumer 已构造并通过 startup gate，不表示 broker join 或 assignment 就绪。
     ///
@@ -489,7 +489,7 @@ impl ConsumerRegistryBuilder {
         Ok(ConsumerRuntime::new(self.proxy, groups))
     }
 
-    /// 加入一个擦除类型化消费者并检查 id 唯一性。
+    /// 业务作用：加入一个擦除类型化消费者并检查 id 唯一性。
     ///
     /// # 参数
     ///
@@ -504,7 +504,7 @@ impl ConsumerRegistryBuilder {
         Ok(())
     }
 
-    /// 检查 typed 与 passthrough 两类 handler id 的全局唯一性。
+    /// 业务作用：检查 typed 与 passthrough 两类 handler id 的全局唯一性。
     ///
     /// # 参数
     ///
@@ -529,7 +529,7 @@ impl ConsumerRegistryBuilder {
     }
 }
 
-/// 保证同一个 resolved group 只采用一种消息所有权模型。
+/// 业务作用：保证同一个 resolved group 只采用一种消息所有权模型。
 ///
 /// typed route 会把记录物化后进入异步回调，passthrough route 则只能在 poll 栈内借用；二者混合会让
 /// owner 无法在不复制或重排的前提下维持 broker 交付顺序，因此启动时必须拒绝。
@@ -552,7 +552,7 @@ fn ensure_group_route_kind(plan: &GroupPlan) -> Result<()> {
     }
 }
 
-/// 解析 route 的最终 group.id。
+/// 业务作用：解析 route 的最终 group.id。
 ///
 /// # 参数
 ///
@@ -606,7 +606,7 @@ fn resolve_group(
     Ok(group)
 }
 
-/// 生成或读取本进程广播实例标识。
+/// 业务作用：生成或读取本进程广播实例标识。
 ///
 /// # 参数
 ///
@@ -640,7 +640,7 @@ fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
         .collect()
 }
 
-/// 固定 FNV-1a 64 位哈希，保证广播 group 派生在协议演进期间可复现。
+/// 业务作用：固定 FNV-1a 64 位哈希，保证广播 group 派生在协议演进期间可复现。
 ///
 /// # 参数
 ///
@@ -651,7 +651,7 @@ fn stable_hash(bytes: &[u8]) -> u64 {
     })
 }
 
-/// 向 subscribe plan 合并 topic。
+/// 业务作用：向 subscribe plan 合并 topic。
 ///
 /// # 参数
 ///
@@ -664,7 +664,7 @@ fn add_topics(mode: &mut OwnerMode, topics: &[String]) {
     }
 }
 
-/// 检查 `(group,topic,event)` 路由唯一性。
+/// 业务作用：检查 `(group,topic,event)` 路由唯一性。
 ///
 /// # 参数
 ///
@@ -707,7 +707,7 @@ pub(crate) fn publish_registry_gauges(
     );
 }
 
-/// 将 `(group, topic, event)` 写入全局路由集合，并对重复注册返回可定位的稳定错误。
+/// 业务作用：将 `(group, topic, event)` 写入全局路由集合，并对重复注册返回可定位的稳定错误。
 fn ensure_route_unique(
     routes: &mut BTreeSet<(String, String, String)>,
     group: &str,
@@ -738,7 +738,7 @@ pub struct ConsumerRuntime {
 }
 
 impl std::fmt::Debug for ConsumerRuntime {
-    /// 输出已启动 group 与所属运行时状态；不含配置凭据。
+    /// 业务作用：输出已启动 group 与所属运行时状态；不含配置凭据。
     ///
     /// `start()` 返回 `Result<ConsumerRuntime>`，缺少 `Debug` 会让调用方无法使用
     /// `unwrap_err` / `expect_err` 之类的标准写法。
@@ -753,7 +753,7 @@ impl std::fmt::Debug for ConsumerRuntime {
 }
 
 impl ConsumerRuntime {
-    /// 由启动器构造生命周期句柄。
+    /// 业务作用：由启动器构造生命周期句柄。
     ///
     /// # 参数
     ///
@@ -767,18 +767,18 @@ impl ConsumerRuntime {
         }
     }
 
-    /// 返回稳定排序的 resolved group 列表。
+    /// 业务作用：返回稳定排序的 resolved group 列表。
     pub fn groups(&self) -> &[String] {
         &self.groups
     }
 
-    /// 返回所属运行时句柄。
+    /// 业务作用：返回所属运行时句柄。
     pub fn kafka(&self) -> &KafkaProxy {
         &self.proxy
     }
 }
 
-/// 读取并校验 passthrough 消费者元数据。
+/// 业务作用：读取并校验 passthrough 消费者元数据。
 ///
 /// # 参数
 ///
@@ -818,7 +818,7 @@ fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughM
     })
 }
 
-/// 返回类型化注册项的稳定 route 描述，供注册冲突校验复用。
+/// 业务作用：返回类型化注册项的稳定 route 描述，供注册冲突校验复用。
 ///
 /// # 参数
 ///

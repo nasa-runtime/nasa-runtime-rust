@@ -19,7 +19,7 @@ pub(crate) struct LogComponent {
 }
 
 impl LogComponent {
-    /// 创建尚未启动早期控制台的日志组件。
+    /// 业务作用：创建尚未启动早期控制台的日志组件。
     ///
     /// # 参数
     ///
@@ -30,7 +30,7 @@ impl LogComponent {
 }
 
 impl ApplicationComponent for LogComponent {
-    /// 返回日志组件稳定身份。
+    /// 业务作用：返回日志组件稳定身份。
     ///
     /// # 参数
     ///
@@ -39,7 +39,7 @@ impl ApplicationComponent for LogComponent {
         ComponentId::Log
     }
 
-    /// 读取本地 `log` 段并启动早期控制台日志。
+    /// 业务作用：读取本地 `log` 段并启动早期控制台日志。
     ///
     /// # 参数
     ///
@@ -70,7 +70,7 @@ impl ApplicationComponent for LogComponent {
         })
     }
 
-    /// 用最终配置接入文件日志与最终级别，并登记热重应用句柄。
+    /// 业务作用：用最终配置接入文件日志与最终级别，并登记热重应用句柄。
     ///
     /// 句柄在**首次成功 apply 之后**登记：这样热刷新驱动可见的运行态一定已经初始化，
     /// 不存在"重应用先于首次应用"的乱序窗口。
@@ -111,7 +111,7 @@ struct LogShutdown {
 }
 
 impl ShutdownAction for LogShutdown {
-    /// 返回不含日志目录等配置值的稳定动作名称。
+    /// 业务作用：返回不含日志目录等配置值的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -120,7 +120,7 @@ impl ShutdownAction for LogShutdown {
         "log-runtime"
     }
 
-    /// 关闭文件输出并等待后台刷盘线程退出。
+    /// 业务作用：关闭文件输出并等待后台刷盘线程退出。
     ///
     /// # 参数
     ///
@@ -162,7 +162,7 @@ struct LogReloadApplier {
 }
 
 impl ConfigApplier for LogReloadApplier {
-    /// 返回句柄负责的组件身份。
+    /// 业务作用：返回句柄负责的组件身份。
     ///
     /// # 参数
     ///
@@ -171,7 +171,7 @@ impl ConfigApplier for LogReloadApplier {
         ComponentId::Log
     }
 
-    /// 对候选配置树中的 `log` 段执行一次重应用。
+    /// 业务作用：对候选配置树中的 `log` 段执行一次重应用。
     ///
     /// # 参数
     ///
@@ -187,7 +187,7 @@ impl ConfigApplier for LogReloadApplier {
     }
 }
 
-/// 在互斥锁内执行一次日志配置应用。
+/// 业务作用：在互斥锁内执行一次日志配置应用。
 ///
 /// # 参数
 ///
@@ -217,7 +217,7 @@ fn apply_log_config(
         })
 }
 
-/// 在不改变任何 appender 的前提下校验候选配置树中的 `log` 段。
+/// 业务作用：在不改变任何 appender 的前提下校验候选配置树中的 `log` 段。
 ///
 /// 供配置热刷新在发布候选前使用；段缺失是合法的（等价默认控制台配置），只有非法结构才拒绝整帧。
 ///
@@ -241,7 +241,7 @@ pub(crate) fn validate_log_section(tree: &Value, phase: ApplicationPhase) -> App
         })
 }
 
-/// 从配置树读取可选的 `log` 段；段缺失时返回 `None`。
+/// 业务作用：从配置树读取可选的 `log` 段；段缺失时返回 `None`。
 ///
 /// # 参数
 ///
@@ -266,7 +266,7 @@ fn optional_log_config(
         })
 }
 
-/// 从配置树读取 `log` 段，缺失时回退到 nalog 的 `serde(default)` 缺省配置。
+/// 业务作用：从配置树读取 `log` 段，缺失时回退到 nalog 的 `serde(default)` 缺省配置。
 ///
 /// # 参数
 ///

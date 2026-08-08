@@ -12,7 +12,7 @@ pub struct MySqlOutboxAuditSink {
 }
 
 impl MySqlOutboxAuditSink {
-    /// 创建适配器；连接与事务由 `natx` ambient context 拥有。
+    /// 业务作用：创建适配器；连接与事务由 `natx` ambient context 拥有。
     pub fn new() -> Self {
         Self {
             outbox: MySqlOutbox::new(),
@@ -22,7 +22,7 @@ impl MySqlOutboxAuditSink {
 
 #[async_trait::async_trait]
 impl TransactionalAuditSink for MySqlOutboxAuditSink {
-    /// 使用 ambient MySQL 事务写入审计 outbox，避免业务事实与审计事实发生双写分叉。
+    /// 业务作用：使用 ambient MySQL 事务写入审计 outbox，避免业务事实与审计事实发生双写分叉。
     async fn record_transactional(&self, event: AuditEvent) -> Result<(), AuditWriteError> {
         self.outbox
             .append_transactional(&event.into_outbox_event())

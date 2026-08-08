@@ -41,7 +41,7 @@ use crate::wire::{encode_frame, frame_type, pong, wire_mode, Frame, FrameCodec};
 
 static SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// 会话 ID:`s{seq}-{uuid v4 simple}`。后缀用 **UUID v4(getrandom/OS CSPRNG)**——明确承诺的
+/// 业务作用：会话 ID:`s{seq}-{uuid v4 simple}`。后缀用 **UUID v4(getrandom/OS CSPRNG)**——明确承诺的
 /// 随机源,不再依赖 std hasher 的未承诺安全属性;该 ID 作为 AUTH_RESP
 /// sessionId / engine.io sid 下发,不可预测。序号前缀仅用于排障(日志按时间可排序)。
 fn new_session_id() -> String {
@@ -61,7 +61,7 @@ struct ConnGuard {
     tracker: Arc<ConnTracker>,
 }
 impl ConnGuard {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     ///
     /// # 参数
     /// - `tracker`: 连接计数或生命周期追踪器。
@@ -71,7 +71,7 @@ impl ConnGuard {
     }
 }
 impl Drop for ConnGuard {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         self.tracker.count.fetch_sub(1, Ordering::Relaxed);
         self.tracker.notify.notify_waiters();
@@ -84,7 +84,7 @@ struct UnauthGuard {
 }
 
 impl UnauthGuard {
-    /// 尝试预留一个未认证连接名额;已达上限时返回 `None`。
+    /// 业务作用：尝试预留一个未认证连接名额;已达上限时返回 `None`。
     ///
     /// # 参数
     /// - `tracker`: 连接计数或生命周期追踪器。
@@ -107,14 +107,14 @@ impl UnauthGuard {
 }
 
 impl Drop for UnauthGuard {
-    /// 释放未认证连接名额。
+    /// 业务作用：释放未认证连接名额。
     fn drop(&mut self) {
         self.tracker.count.fetch_sub(1, Ordering::AcqRel);
         self.tracker.notify.notify_waiters();
     }
 }
 
-/// 调用用户同步闭包并隔离 panic —— 防止用户回调 panic 让连接 task unwind、跳过清理。
+/// 业务作用：调用用户同步闭包并隔离 panic —— 防止用户回调 panic 让连接 task unwind、跳过清理。
 fn isolate<F: FnOnce()>(what: &str, f: F) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
         tracing::error!("user callback panicked, isolated: {what}");
@@ -128,7 +128,7 @@ struct ConnCleanup<'a> {
     done: bool,
 }
 impl<'a> ConnCleanup<'a> {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     ///
     /// # 参数
     /// - `session`: 当前连接会话或会话句柄。
@@ -140,7 +140,7 @@ impl<'a> ConnCleanup<'a> {
     }
 }
 impl Drop for ConnCleanup<'_> {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         if self.done {
             return;
@@ -207,7 +207,7 @@ pub struct ServerConfig {
 }
 
 impl Default for ServerConfig {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:9090".into(),
@@ -234,7 +234,7 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// WS 外层 message 上限的**生效值**:显式配置或自动 `4 × (max_frame + 4)`
+    /// 业务作用：WS 外层 message 上限的**生效值**:显式配置或自动 `4 × (max_frame + 4)`
     /// (容多条最大帧聚合)。**饱和运算兜底**:字段公开,
     /// 调用方可绕过 builder 直接构造——极端 max_frame 在此绝不 panic/回绕,溢出语义
     /// 校验由 `build()` 用 checked 运算在启动期完成。
@@ -319,7 +319,7 @@ pub const MAX_SERVER_RUNTIME_DURATION: Duration = Duration::from_secs(365 * 24 *
 /// 失败响应。
 pub const MAX_REASON_LEN: usize = 100;
 
-/// 按 UTF-8 字符边界截断 reason(超限取前缀;控制帧体积可控的前提)。
+/// 业务作用：按 UTF-8 字符边界截断 reason(超限取前缀;控制帧体积可控的前提)。
 ///
 /// # 参数
 /// - `s`: 要解析的输入字符串。
@@ -335,7 +335,7 @@ fn truncate_reason(s: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl std::fmt::Display for BuildError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -391,7 +391,7 @@ pub struct ServerBuilder {
 }
 
 impl ServerBuilder {
-    /// 设置 TCP 监听地址。
+    /// 业务作用：设置 TCP 监听地址。
     ///
     /// # 参数
     /// - `addr`: TCP 服务监听地址,例如 `0.0.0.0:19091`。
@@ -400,7 +400,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 启用 WebSocket 接入(独立端口);不设则只跑 TCP。
+    /// 业务作用：启用 WebSocket 接入(独立端口);不设则只跑 TCP。
     ///
     /// # 参数
     /// - `addr`: WebSocket 服务监听地址。
@@ -409,7 +409,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置鉴权超时时间；用于限制连接建立后的认证等待。
+    /// 业务作用：设置鉴权超时时间；用于限制连接建立后的认证等待。
     ///
     /// # 参数
     /// - `d`: 从连接建立到 AUTH 完成允许等待的最长时间。
@@ -418,7 +418,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置心跳超时时间；用于及时关闭失活连接。
+    /// 业务作用：设置心跳超时时间；用于及时关闭失活连接。
     ///
     /// # 参数
     /// - `d`: 会话未收到心跳或业务数据后允许存活的最长时间。
@@ -427,7 +427,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置**全局** async handler 并发上限;用于控制全服务的事件处理压力(过载保护)。
+    /// 业务作用：设置**全局** async handler 并发上限;用于控制全服务的事件处理压力(过载保护)。
     ///
     /// # 参数
     /// - `n`: 全服务允许同时运行的异步 handler 数量上限。
@@ -436,7 +436,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置**单连接** async handler 并发上限(与全局叠加);防单连接抢占全局池饿死其它连接。
+    /// 业务作用：设置**单连接** async handler 并发上限(与全局叠加);防单连接抢占全局池饿死其它连接。
     ///
     /// # 参数
     /// - `n`: 单个连接允许同时运行的异步 handler 数量上限;`0` = 不限制(仅受全局约束)。
@@ -445,7 +445,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置**同时活跃连接总数上限**(accept 处背压);达到后新连接被立即关闭。
+    /// 业务作用：设置**同时活跃连接总数上限**(accept 处背压);达到后新连接被立即关闭。
     ///
     /// # 参数
     /// - `n`: 允许同时活跃的连接总数;`0` = 不限制。
@@ -454,7 +454,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置**未认证连接数上限**(accept 处精确预留);达到后新连接被立即关闭。
+    /// 业务作用：设置**未认证连接数上限**(accept 处精确预留);达到后新连接被立即关闭。
     ///
     /// # 参数
     /// - `n`: 允许同时处于握手/AUTH 阶段的连接数;`0` = 不限制。
@@ -463,7 +463,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 出站背压策略(默认 DropNew;行情快照类可用 DropOldest)。
+    /// 业务作用：出站背压策略(默认 DropNew;行情快照类可用 DropOldest)。
     ///
     /// # 参数
     /// - `p`: 业务帧队列满时的取舍策略。
@@ -472,7 +472,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 单条 NASA frame 内层 declared 上限(默认 16MiB)。WS 外层另由
+    /// 业务作用：单条 NASA frame 内层 declared 上限(默认 16MiB)。WS 外层另由
     /// `max_ws_message_bytes` 约束(一条 message 可聚合多条 frame)。
     ///
     /// # 参数
@@ -482,7 +482,7 @@ impl ServerBuilder {
         self
     }
 
-    /// WS 单条 message 外层聚合上限(默认自动 `4 × (max_frame + 4)`);
+    /// 业务作用：WS 单条 message 外层聚合上限(默认自动 `4 × (max_frame + 4)`);
     /// build 校验 ≥ max_frame + 4。
     ///
     /// # 参数
@@ -492,7 +492,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 业务出站队列条数上限(默认 256)。
+    /// 业务作用：业务出站队列条数上限(默认 256)。
     ///
     /// # 参数
     /// - `n`: 每个 session 业务出站队列允许缓存的帧数量。
@@ -501,7 +501,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 业务出站队列字节上限(默认 64MiB)。
+    /// 业务作用：业务出站队列字节上限(默认 64MiB)。
     ///
     /// # 参数
     /// - `n`: 每个 session 业务出站队列允许缓存的总字节数。
@@ -510,7 +510,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 集群降级模式:true=集群未就绪也继续 bind(打 warning);默认 false=FailFast(bind 失败)。
+    /// 业务作用：集群降级模式:true=集群未就绪也继续 bind(打 warning);默认 false=FailFast(bind 失败)。
     ///
     /// # 参数
     /// - `on`: 是否允许集群 transport 未就绪时继续启动本地服务。
@@ -519,7 +519,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置 cluster transport 的初始就绪总超时。
+    /// 业务作用：设置 cluster transport 的初始就绪总超时。
     ///
     /// Kafka 模式应覆盖 TopicContract、group join 与 assignment 的最坏启动时长。
     ///
@@ -531,7 +531,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置鉴权回调；用于握手阶段验证连接身份。
+    /// 业务作用：设置鉴权回调；用于握手阶段验证连接身份。
     ///
     /// # 参数
     /// - `f`: 握手阶段执行的鉴权回调,入参为认证请求和连接上下文。
@@ -544,7 +544,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 设置入站策略；用于控制客户端触发的自动 relay。
+    /// 业务作用：设置入站策略；用于控制客户端触发的自动 relay。
     ///
     /// # 参数
     /// - `p`: 入站路由授权策略,默认 deny all。
@@ -553,7 +553,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 注入 socket.io payload 桥接(默认 JSON 透传)。
+    /// 业务作用：注入 socket.io payload 桥接(默认 JSON 透传)。
     ///
     /// # 参数
     /// - `b`: payload bridge,用于 socket.io JSON 参数与内部 payload 字节互转。
@@ -562,7 +562,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 注册 endpoint。
+    /// 业务作用：注册 endpoint。
     ///
     /// # 参数
     /// - `ep`: 要注册到服务端路由表的 endpoint 快照。
@@ -571,7 +571,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 启用集群:本节点 ID + 跨节点 transport。
+    /// 业务作用：启用集群:本节点 ID + 跨节点 transport。
     ///
     /// # 参数
     /// - `node_id`: 本节点稳定 ID,用于防回环、presence 和 fencing。
@@ -582,7 +582,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 注入独立 data plane publisher；control/presence 仍由 `cluster` 的 notifier 承载。
+    /// 业务作用：注入独立 data plane publisher；control/presence 仍由 `cluster` 的 notifier 承载。
     ///
     /// # 参数
     ///
@@ -592,7 +592,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 注入已校验的集群 incarnation fencing token(业务用 `Incarnation::from_epoch(Redis INCR)` 构造)。
+    /// 业务作用：注入已校验的集群 incarnation fencing token(业务用 `Incarnation::from_epoch(Redis INCR)` 构造)。
     /// 不设则用墙钟默认(单机可用,生产必须注入)。
     ///
     /// # 参数
@@ -602,7 +602,7 @@ impl ServerBuilder {
         self
     }
 
-    /// 装配服务端。**配置校验**:缺鉴权 / 空 node_id / incarnation 与 cluster
+    /// 业务作用：装配服务端。**配置校验**:缺鉴权 / 空 node_id / incarnation 与 cluster
     /// 不匹配 / 集群缺 incarnation → 返回 `Err`,不静默用错误默认。
     pub fn build(self) -> Result<Server, BuildError> {
         let Some(authorize) = self.authorize else {
@@ -805,7 +805,7 @@ pub struct RunningServer {
 /// 直接 drop handle(不显式 shutdown)也必须停 accept/连接/集群任务、释放 listener 端口
 ///。cancel 令所有循环 select 退出;cluster.shutdown 停集群任务。
 impl Drop for RunningServer {
-    /// 释放关联资源；用于对象离开作用域时执行兜底清理。
+    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
     fn drop(&mut self) {
         if let Some(c) = &self.shared.cluster {
             c.shutdown();
@@ -815,13 +815,13 @@ impl Drop for RunningServer {
 }
 
 impl RunningServer {
-    /// 集群规模只读快照;单机(未启用集群)返回 `None`。`tombstone_count` 的无界增长说明
+    /// 业务作用：集群规模只读快照;单机(未启用集群)返回 `None`。`tombstone_count` 的无界增长说明
     /// `node_id` 不稳定,部署应据此告警(标准 ServerBuilder 集成路径现可监控该指标)。
     pub fn cluster_stats(&self) -> Option<crate::cluster::ClusterStats> {
         self.shared.cluster.as_ref().map(|c| c.stats())
     }
 
-    /// 立即触发关闭(各连接收到 CLOSE(SHUTDOWN);停 accept + 集群后台任务);不等待 join。
+    /// 业务作用：立即触发关闭(各连接收到 CLOSE(SHUTDOWN);停 accept + 集群后台任务);不等待 join。
     pub fn shutdown(&self) {
         if let Some(c) = &self.shared.cluster {
             c.shutdown(); // 停 presence + notifier(Redis)任务,否则永久存活
@@ -829,7 +829,7 @@ impl RunningServer {
         self.shared.cancel.cancel();
     }
 
-    /// 优雅关闭:cancel 所有任务 → 在 deadline 内**真正 join**(TaskTracker.wait),
+    /// 业务作用：优雅关闭:cancel 所有任务 → 在 deadline 内**真正 join**(TaskTracker.wait),
     /// 不再靠固定 sleep 猜 flush。返回 `true`=已全部退出;`false`=到 deadline 仍有未退
     /// (剩余任务已被 cancel,会尽快退出)——不静默吞掉超时。
     ///
@@ -858,34 +858,34 @@ impl RunningServer {
         ok
     }
 
-    /// 当前活跃连接数。
+    /// 业务作用：当前活跃连接数。
     pub fn active_conns(&self) -> usize {
         self.shared.active.count.load(Ordering::Relaxed)
     }
 
-    /// 当前处于握手/AUTH 阶段的未认证连接数。
+    /// 业务作用：当前处于握手/AUTH 阶段的未认证连接数。
     pub fn unauthenticated_conns(&self) -> usize {
         self.shared.unauthenticated.count.load(Ordering::Relaxed)
     }
 
-    /// 返回会话注册表；用于查询和管理在线连接。
+    /// 业务作用：返回会话注册表；用于查询和管理在线连接。
     pub fn registry(&self) -> &Arc<SessionRegistry> {
         &self.shared.registry
     }
 
-    /// 返回消息发送器；用于向会话、群组或全体连接发送消息。
+    /// 业务作用：返回消息发送器；用于向会话、群组或全体连接发送消息。
     pub fn sender(&self) -> &Arc<Sender> {
         &self.shared.sender
     }
 
-    /// 返回端点注册表；用于动态查看或更新事件入口。
+    /// 业务作用：返回端点注册表；用于动态查看或更新事件入口。
     pub fn endpoints(&self) -> &Arc<EndpointRegistry> {
         &self.shared.endpoints
     }
 }
 
 impl Server {
-    /// 构建 builder 结果；用于把配置和上下文组装成可执行对象。
+    /// 业务作用：构建 builder 结果；用于把配置和上下文组装成可执行对象。
     pub fn builder() -> ServerBuilder {
         ServerBuilder {
             config: ServerConfig::default(),
@@ -900,13 +900,13 @@ impl Server {
         }
     }
 
-    /// 取 Sender（**bind 前**即可），消除“listener 已 accept 但 Sender 尚未注入”的丢消息窗口。
+    /// 业务作用：取 Sender（**bind 前**即可），消除“listener 已 accept 但 Sender 尚未注入”的丢消息窗口。
     /// 业务可在 `build()` 后、`bind()` 前注入到自己的 handler 上下文。
     pub fn sender(&self) -> &Arc<Sender> {
         &self.shared.sender
     }
 
-    /// 返回只暴露 incarnation 判定能力的 Kafka 来源围栏。
+    /// 业务作用：返回只暴露 incarnation 判定能力的 Kafka 来源围栏。
     ///
     /// Server build 后、bind 前可把该句柄注入 WsKafkaRuntime；不会暴露节点目录写接口。
     #[cfg(feature = "kafka")]
@@ -917,7 +917,7 @@ impl Server {
         })
     }
 
-    /// 绑定监听地址并启动服务；用于接受 TCP 或 WebSocket 连接。
+    /// 业务作用：绑定监听地址并启动服务；用于接受 TCP 或 WebSocket 连接。
     pub async fn bind(self) -> std::io::Result<RunningServer> {
         // **先**把所有 listener bind 成功(可失败步骤前置),再启动 cluster / spawn accept——
         // 否则 bind 失败时已 start 的 cluster 不回滚、已 spawn 的 accept 泄漏。
@@ -971,13 +971,18 @@ impl Server {
     }
 }
 
-/// socket.io / engine.io v4 WebSocket 连接的**精确**判定:按 query 参数
-/// 逐对解析,要求 `EIO=4` **且** `transport=websocket`。不再用子串 `contains("EIO")`——
+/// 业务作用：精确判定 socket.io / engine.io v4 WebSocket 连接，避免普通连接绕过自身升级门禁。
+///
+/// 按 query 参数逐对解析,要求 `EIO=4` **且** `transport=websocket`。不再用子串 `contains("EIO")`——
 /// 那会把 `?NOT_EIO=1`、`?device_EIO=x` 等 NASA 连接误分流到 socket.io(首帧错发 engine.io
 /// OPEN 文本,且跳过 NASA upgrade path 校验);`transport=polling` 也不属于本 WS-only 实现。
 ///
 /// # 参数
 /// - `query`: 查询对象或 query 参数集合。
+///
+/// # 返回
+///
+/// 同时满足 `EIO=4` 与 `transport=websocket` 时返回 true，否则返回 false。
 #[cfg(feature = "socketio")] // 未编译 socketio 时不参与判定(is_sio 恒 false)
 fn is_socketio_query(query: &str) -> bool {
     let mut eio_v4 = false;
@@ -995,7 +1000,7 @@ fn is_socketio_query(query: &str) -> bool {
     eio_v4 && ws_transport
 }
 
-/// 带 SO_REUSEADDR 的监听(便于重启快速重绑端口)。
+/// 业务作用：带 SO_REUSEADDR 的监听(便于重启快速重绑端口)。
 ///
 /// # 参数
 /// - `addr`: 监听地址或远端地址。
@@ -1016,7 +1021,7 @@ fn listen_reuseaddr(addr: &str) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
-/// 持续接受新连接；用于把监听器上的连接交给会话处理流程。
+/// 业务作用：持续接受新连接；用于把监听器上的连接交给会话处理流程。
 ///
 /// # 参数
 /// - `listener`: TCP 或 WS listener。
@@ -1077,7 +1082,7 @@ enum Inbound {
 }
 
 impl Inbound {
-    /// 读取下一帧消息；用于统一 TCP 和 WebSocket 的入站循环。
+    /// 业务作用：读取下一帧消息；用于统一 TCP 和 WebSocket 的入站循环。
     async fn next_frame(&mut self) -> Option<std::io::Result<Frame>> {
         match self {
             Inbound::Tcp(f) => f.next().await,
@@ -1094,7 +1099,7 @@ struct WsInbound {
 }
 
 impl WsInbound {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     ///
     /// # 参数
     /// - `ws`: WebSocket 连接对象。
@@ -1107,7 +1112,7 @@ impl WsInbound {
         }
     }
 
-    /// 读取下一帧消息；用于统一 TCP 和 WebSocket 的入站循环。
+    /// 业务作用：读取下一帧消息；用于统一 TCP 和 WebSocket 的入站循环。
     async fn next_frame(&mut self) -> Option<std::io::Result<Frame>> {
         loop {
             match self.codec.decode(&mut self.buf) {
@@ -1134,7 +1139,7 @@ impl WsInbound {
 
 /* ============================== TCP 接入 ============================== */
 
-/// 处理单个 TCP 连接；用于建立会话并进入消息分发循环。
+/// 业务作用：处理单个 TCP 连接；用于建立会话并进入消息分发循环。
 ///
 /// # 参数
 /// - `stream`: 已 accept 的 TCP socket,后续会拆成读写半边。
@@ -1160,7 +1165,7 @@ async fn handle_tcp(stream: TcpStream, shared: Arc<Shared>, unauth_guard: Option
     serve(&mut inbound, &session, &shared, auth_deadline, unauth_guard).await;
 }
 
-/// 运行 TCP 写出任务；用于把出站消息顺序写回客户端。
+/// 业务作用：运行 TCP 写出任务；用于把出站消息顺序写回客户端。
 ///
 /// # 参数
 /// - `wh`: TCP 写半边。
@@ -1179,7 +1184,7 @@ async fn tcp_writer_task(mut wh: OwnedWriteHalf, mut rx: OutboxReceiver) {
 // upgrade 回调的 Err 变体类型(http::Response)由 tungstenite 的 accept_hdr_async 签名固定,无法缩小。
 ///
 /// # 参数
-/// - `stream`: 已完成 TCP accept、等待 WebSocket upgrade 的 socket。
+/// 业务作用：- `stream`: 已完成 TCP accept、等待 WebSocket upgrade 的 socket。
 /// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `unauth_guard`: 未认证连接名额的 RAII 占位守卫。
 #[allow(clippy::result_large_err)]
@@ -1282,7 +1287,7 @@ async fn handle_ws(stream: TcpStream, shared: Arc<Shared>, unauth_guard: Option<
     serve(&mut inbound, &session, &shared, auth_deadline, unauth_guard).await;
 }
 
-/// 运行 WebSocket 写出任务；用于把出站消息转换为协议帧。
+/// 业务作用：运行 WebSocket 写出任务；用于把出站消息转换为协议帧。
 ///
 /// # 参数
 /// - `sink`: WebSocket 写入 sink。
@@ -1299,7 +1304,7 @@ async fn ws_writer_task(mut sink: WsSink, mut rx: OutboxReceiver) {
 
 /* ============================== socket.io 接入(feature=socketio)============================== */
 
-/// socket.io / engine.io v4 连接生命周期。与 NASA `serve` 平行:
+/// 业务作用：socket.io / engine.io v4 连接生命周期。与 NASA `serve` 平行:
 /// engine.io OPEN → sio CONNECT(auth)→ EVENT/PING/PONG 循环。出站经 outbox 走 WS **Text** 帧。
 /// payload 翻译由 `Shared.bridge`(默认 JSON 透传)负责。
 ///
@@ -1399,7 +1404,7 @@ async fn handle_socketio(
     drop(cleanup); // 显式:若已认证 → unregister + on_disconnect(exactly once)
 }
 
-/// 处理一条 socket.io 入站文本帧。返回 false 表示连接应关闭。
+/// 业务作用：处理一条 socket.io 入站文本帧，并在鉴权、协议或连接状态失效时要求关闭连接。
 ///
 /// # 参数
 /// - `text`: socket.io 文本包内容。
@@ -1409,6 +1414,10 @@ async fn handle_socketio(
 /// - `authed`: 当前连接是否已经完成认证。
 /// - `last_seen`: 最近一次心跳或连接活动时间。
 /// - `auth_deadline`: 连接完成鉴权前的截止时间。
+///
+/// # 返回
+///
+/// 连接可以继续处理后续帧时返回 true；需要立即关闭时返回 false。
 #[cfg(feature = "socketio")]
 #[allow(clippy::too_many_arguments)] // 连接级状态较多;拆 struct 反而更绕,内部 helper 可接受
 async fn handle_sio_text(
@@ -1629,7 +1638,7 @@ async fn handle_sio_text(
     }
 }
 
-/// socket.io 出站:每个 outbox 帧(UTF-8 文本字节)→ 一个 WS Text 消息。
+/// 业务作用：socket.io 出站:每个 outbox 帧(UTF-8 文本字节)→ 一个 WS Text 消息。
 ///
 /// # 参数
 /// - `sink`: WebSocket 写入 sink。
@@ -1647,7 +1656,7 @@ async fn ws_text_writer_task(mut sink: WsSink, mut rx: OutboxReceiver) {
 
 /* ============================== 公共连接生命周期 ============================== */
 
-/// 创建服务端会话对象；用于绑定连接身份、端点和出站队列。
+/// 业务作用：创建服务端会话对象；用于绑定连接身份、端点和出站队列。
 ///
 /// # 参数
 /// - `transport`: 当前连接使用的传输类型。
@@ -1671,7 +1680,7 @@ fn new_session(
     )
 }
 
-/// transport 无关:鉴权 → 分派循环。清理交给 ConnCleanup(Drop 时执行,panic 也保证跑)。
+/// 业务作用：transport 无关:鉴权 → 分派循环。清理交给 ConnCleanup(Drop 时执行,panic 也保证跑)。
 /// `auth_deadline` 为**连接级**绝对截止点：TCP 从接入时刻起算，WS 从 Upgrade 前起算，
 /// 并与握手共用同一份预算。
 ///
@@ -1696,7 +1705,7 @@ async fn serve(
     // _cleanup drop:若已认证 → unregister + on_disconnect(exactly once)
 }
 
-/// 鉴权状态机。外层 timeout 覆盖"等 AUTH 帧 + authorize 执行",用**连接级绝对
+/// 业务作用：鉴权状态机。外层 timeout 覆盖"等 AUTH 帧 + authorize 执行",用**连接级绝对
 /// deadline**（WS 与 Upgrade 握手共用，总窗口恒为 auth_timeout）；
 /// 同时可被 shutdown 取消——否则 authorize 慢/挂会让摘流延迟受 auth_timeout 控制。
 ///
@@ -1817,7 +1826,7 @@ async fn run_auth(
     true
 }
 
-/// 处理认证失败结果；用于发送错误控制帧并关闭会话。
+/// 业务作用：处理认证失败结果；用于发送错误控制帧并关闭会话。
 ///
 /// # 参数
 /// - `session`: 当前连接会话或会话句柄。
@@ -1849,7 +1858,7 @@ fn auth_fail(session: &Arc<Session>, reason: &str) -> bool {
     false
 }
 
-/// 运行入站消息分发循环；用于持续读取帧并交给事件处理。
+/// 业务作用：运行入站消息分发循环；用于持续读取帧并交给事件处理。
 ///
 /// # 参数
 /// - `inbound`: 已建立连接的入站读半边抽象。
@@ -1897,7 +1906,7 @@ async fn dispatch_loop(inbound: &mut Inbound, session: &Arc<Session>, shared: &A
     }
 }
 
-/// 处理单个入站帧；用于区分控制帧、心跳和业务事件。
+/// 业务作用：处理单个入站帧；用于区分控制帧、心跳和业务事件。
 ///
 /// # 参数
 /// - `frame`: 当前正在解码、编码或路由的网络帧。
@@ -1953,7 +1962,7 @@ async fn handle_frame(
     }
 }
 
-/// 处理业务事件帧；用于查找端点回调并决定连接是否继续。
+/// 业务作用：处理业务事件帧；用于查找端点回调并决定连接是否继续。
 ///
 /// # 参数
 /// - `frame`: 当前正在解码、编码或路由的网络帧。
@@ -2012,7 +2021,7 @@ async fn handle_event(frame: Frame, session: &Arc<Session>, shared: &Arc<Shared>
     true
 }
 
-/// 分发业务处理器任务；用于按并发策略执行事件回调。
+/// 业务作用：分发业务处理器任务；用于按并发策略执行事件回调。
 ///
 /// # 参数
 /// - `endpoint`: 当前消息所属的连接端点。
@@ -2084,7 +2093,7 @@ fn dispatch_handlers(
     }
 }
 
-/// 判断是否存在 routing；用于快速决定后续处理路径。
+/// 业务作用：判断是否存在 routing；用于快速决定后续处理路径。
 ///
 /// # 参数
 /// - `msg`: 待检查的 NASA 业务消息。
@@ -2098,7 +2107,7 @@ fn has_routing(msg: &Message) -> bool {
     group || nonempty(&msg.uids) || nonempty(&msg.routers)
 }
 
-/// 关闭 close protocol 流程；用于释放资源并停止后台任务。
+/// 业务作用：关闭 close protocol 流程；用于释放资源并停止后台任务。
 ///
 /// # 参数
 /// - `session`: 当前连接会话或会话句柄。
@@ -2117,7 +2126,7 @@ fn close_protocol(session: &Arc<Session>, reason: &str) -> bool {
     false
 }
 
-/// 发送控制帧；用于返回鉴权、错误或协议级响应。
+/// 业务作用：发送控制帧；用于返回鉴权、错误或协议级响应。
 ///
 /// # 参数
 /// - `session`: 当前连接会话或会话句柄。
@@ -2127,7 +2136,7 @@ fn send_control(session: &Arc<Session>, typ: u8, payload: &[u8]) {
     let _ = session.send_control(encode_frame(typ, wire_mode::VARINT, payload));
 }
 
-/// connect/disconnect hook **恒用会话绑定的 endpoint 快照**
+/// 业务作用：connect/disconnect hook **恒用会话绑定的 endpoint 快照**
 /// 绝不在触发时按 path 重新解析当前 endpoint——replace 后旧会话的 on_disconnect 仍回到
 /// 旧 endpoint(hook 成对),新 endpoint 不会被"从未 on_connect 过的会话"调 on_disconnect。
 ///
@@ -2142,7 +2151,7 @@ fn fire_connect(session: &Arc<Session>) {
     }
 }
 
-/// 触发断开连接回调；用于通知端点释放业务资源。
+/// 业务作用：触发断开连接回调；用于通知端点释放业务资源。
 ///
 /// # 参数
 /// - `session`: 当前连接会话或会话句柄。

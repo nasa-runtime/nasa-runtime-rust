@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-/// Coordinates ownership events and worker wakeups.
+/// 业务作用：Coordinates ownership events and worker wakeups.
 pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::Receiver<Event>) {
     let mut slots: HashMap<u32, ClaimSlot> = HashMap::new();
     // 全局批次预算 = max_inflight_batches(接线 stream.inflight_max,
@@ -237,7 +237,7 @@ pub(super) async fn coordinator_loop(rt: Arc<GroupRuntime>, mut event_rx: mpsc::
     }
 }
 
-/// 事件归约(coordinator 独占写 slots;WorkFinished 按 generation 幂等, CAS 语义)。
+/// 业务作用：事件归约(coordinator 独占写 slots;WorkFinished 按 generation 幂等, CAS 语义)。
 pub(super) async fn handle_event(
     rt: &Arc<GroupRuntime>,
     slots: &mut HashMap<u32, ClaimSlot>,

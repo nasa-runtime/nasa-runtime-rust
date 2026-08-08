@@ -23,14 +23,14 @@ pub struct Message {
 }
 
 impl Message {
-    /// 按类型解码 payload(String / `Json<T>` / 整数等,经 redis `FromRedisValue`)。
+    /// 业务作用：按类型解码 payload(String / `Json<T>` / 整数等,经 redis `FromRedisValue`)。
     pub fn parse<T: FromRedisValue>(&self) -> Result<T> {
         Ok(T::from_redis_value(redis::Value::BulkString(
             self.payload.clone(),
         ))?)
     }
 
-    /// payload 当 UTF-8 字符串(lossy)。
+    /// 业务作用：payload 当 UTF-8 字符串(lossy)。
     pub fn as_str(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.payload)
     }
@@ -53,7 +53,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// 追加订阅一个频道。
+    /// 业务作用：追加订阅一个频道。
     ///
     /// # 参数
     /// - `channel`: 要追加订阅的 classic Pub/Sub 频道名。
@@ -65,7 +65,7 @@ impl Subscription {
         Ok(())
     }
 
-    /// 退订一个频道。
+    /// 业务作用：退订一个频道。
     ///
     /// # 参数
     /// - `channel`: 要退订的 classic Pub/Sub 频道名。
@@ -75,7 +75,7 @@ impl Subscription {
         Ok(())
     }
 
-    /// 追加**模式订阅**(glob:`news.*` / `user.?` 等;消息的 `channel` 是实际命中的频道名)。
+    /// 业务作用：追加**模式订阅**(glob:`news.*` / `user.?` 等;消息的 `channel` 是实际命中的频道名)。
     ///
     /// # 参数
     /// - `pattern`: 要追加订阅的 Redis glob 模式。
@@ -87,7 +87,7 @@ impl Subscription {
         Ok(())
     }
 
-    /// 退订模式。
+    /// 业务作用：退订模式。
     ///
     /// # 参数
     /// - `pattern`: 要退订的 Redis glob 模式。
@@ -97,17 +97,17 @@ impl Subscription {
         Ok(())
     }
 
-    /// 当前已订阅频道(对照 原实现 getSubscribedTopics)。
+    /// 业务作用：当前已订阅频道(对照 原实现 getSubscribedTopics)。
     pub fn subscribed_channels(&self) -> &[String] {
         &self.channels
     }
 
-    /// 当前已订阅模式。
+    /// 业务作用：当前已订阅模式。
     pub fn subscribed_patterns(&self) -> &[String] {
         &self.patterns
     }
 
-    /// **重建专用 Pub/Sub 连接并重放全部订阅**(断线恢复)。默认 5s 超时(见
+    /// 业务作用：**重建专用 Pub/Sub 连接并重放全部订阅**(断线恢复)。默认 5s 超时(见
     /// `reconnect_timeout`)。典型用法:`while let Some(m) = sub.next_message().await {...}` 退出后疑似断线 →
     /// `sub.reconnect().await?` → 继续循环。重连失败/超时上抛 Err(调用方退避重试)。
     pub async fn reconnect(&mut self) -> Result<()> {
@@ -115,7 +115,7 @@ impl Subscription {
             .await
     }
 
-    /// 同 `reconnect`,但显式超时(专用连接无 ConnectionManager 兜底,网络真断时
+    /// 业务作用：同 `reconnect`,但显式超时(专用连接无 ConnectionManager 兜底,网络真断时
     /// `get_async_pubsub`/`subscribe` 会长 pending → 必须套 timeout,否则调用方循环卡死;对齐 lock 路径纪律)。
     ///
     /// # 参数
@@ -151,7 +151,7 @@ impl Subscription {
         }
     }
 
-    /// 下一条消息(等待;**连接关闭/断线 → None**——调用方据此 `reconnect()` 重订后继续)。
+    /// 业务作用：下一条消息(等待;**连接关闭/断线 → None**——调用方据此 `reconnect()` 重订后继续)。
     pub async fn next_message(&mut self) -> Option<Message> {
         let msg = self.ps.on_message().next().await?;
         Some(Message {
@@ -162,7 +162,7 @@ impl Subscription {
 }
 
 impl RedisClient {
-    /// PUBLISH:发布到频道,返回 `PUBLISH` 的 integer reply。
+    /// 业务作用：PUBLISH:发布到频道,返回 `PUBLISH` 的 integer reply。
     ///
     /// 命名:classic Pub/Sub 发布叫 **`r#pub`**;
     /// `pub` 是 Rust 关键字,用 raw 标识符),把 `publish` 让给 Redis Stream 发布(见 `stream.rs`)。
@@ -184,7 +184,7 @@ impl RedisClient {
         self.timed(c.publish(channel, msg)).await
     }
 
-    /// SUBSCRIBE:订阅一组频道,返回 `Subscription`(派生专用连接)。空切片亦合法(随后 subscribe)。
+    /// 业务作用：SUBSCRIBE:订阅一组频道,返回 `Subscription`(派生专用连接)。空切片亦合法(随后 subscribe)。
     ///
     /// 命名:classic Pub/Sub 订阅叫 **`sub`**,把 `subscribe` 让给 Redis Stream 订阅(见 `stream.rs`)。
     ///
@@ -203,7 +203,7 @@ impl RedisClient {
         })
     }
 
-    /// PSUBSCRIBE:**模式订阅**一组 glob 模式,返回 `Subscription`。
+    /// 业务作用：PSUBSCRIBE:**模式订阅**一组 glob 模式,返回 `Subscription`。
     ///
     /// # 参数
     /// - `patterns`: 初始订阅的 Redis glob 模式列表。

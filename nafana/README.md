@@ -1006,7 +1006,7 @@ curl --fail-with-body \
 `current-dashboard.json` 和 `dashboard-update.json` 是临时文件，不应提交到 Git。若线上有手工修改，替换整个
 `spec` 会覆盖这些修改，应先 review diff。
 
-## 13. 验收
+## 部署接入核对
 
 先验证业务入口：
 

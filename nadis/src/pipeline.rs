@@ -61,7 +61,7 @@ pub struct Ticket<T> {
 }
 
 impl<T: FromRedisValue> Ticket<T> {
-    /// **预置已完成 ticket**(空集合短路)。空输入(`h_del([])`/`mget([])`…)
+    /// 业务作用：**预置已完成 ticket**(空集合短路)。空输入(`h_del([])`/`mget([])`…)
     /// 不构造非法命令、不发 Redis——直接给定结果,对照 原实现 Actuator 空集合 early-return。`await_result`
     /// 立即返回该值;不占 session 配额、不入 dispatch。
     ///
@@ -76,7 +76,7 @@ impl<T: FromRedisValue> Ticket<T> {
         }
     }
 
-    /// 取本命令的结果(必须在 `execute()` 之后调用,否则 Err)。
+    /// 业务作用：取本命令的结果(必须在 `execute()` 之后调用,否则 Err)。
     pub fn await_result(mut self) -> Result<T> {
         match self.rx.try_recv() {
             // 命令成功:Value 按值移交 FromRedisValue(redis 1.2 形态),类型化失败 = Parsing
@@ -133,7 +133,7 @@ pub struct PipelineSession {
 }
 
 impl RedisClient {
-    /// 创建显式批会话(self: &Arc 形态由调用方 clone 传入)。
+    /// 业务作用：创建显式批会话(self: &Arc 形态由调用方 clone 传入)。
     ///
     pub fn pipeline(self: &Arc<Self>) -> PipelineSession {
         PipelineSession {
@@ -148,7 +148,7 @@ impl RedisClient {
 }
 
 impl PipelineSession {
-    /// 入队任意命令(类型化 helper 的底座;也是 raw 逃生舱)。
+    /// 业务作用：入队任意命令(类型化 helper 的底座;也是 raw 逃生舱)。
     ///
     /// ⚠ cluster 分桶:本会话在 cluster 下按命令 key 的 slot 分桶并行发。typed helper 与
     /// EVAL/EVALSHA/FCALL 系(key 在 numkeys 之后)均已正确取 key;**其它 key 不在 `arg[1]`、又非 EVAL 系的
@@ -186,7 +186,7 @@ impl PipelineSession {
         })
     }
 
-    /// seal 当前批 → 后台 dispatch(滚动 auto-flush 的核心)。把当前 `cmds` 取走丢进一个 spawn 任务,**先
+    /// 业务作用：seal 当前批 → 后台 dispatch(滚动 auto-flush 的核心)。把当前 `cmds` 取走丢进一个 spawn 任务,**先
     /// await 前一段的 flush 句柄**再发本段,从而跨段严格按 seal 顺序落库(避免 的乱序——这里是段级链式
     /// 串行,不是逐命令 spawn)。本段各 ticket 在该任务内由 `dispatch_jobs` 回填;传输错误广播给本段 ticket。
     /// 空批直接返回。
@@ -217,7 +217,7 @@ impl PipelineSession {
 
     // ── 常用类型化 helper(按需渐进扩充, 第 1 条同款纪律)──
 
-    /// Queues the Redis GET command and returns its ticket.
+    /// 业务作用：Queues the Redis GET command and returns its ticket.
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -225,7 +225,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("GET").arg(key).to_owned())
     }
 
-    /// Queues the Redis SET command and returns its ticket.
+    /// 业务作用：Queues the Redis SET command and returns its ticket.
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -234,7 +234,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SET").arg(key).arg(val).to_owned())
     }
 
-    /// Queues the Redis HSET command and returns its ticket.
+    /// 业务作用：Queues the Redis HSET command and returns its ticket.
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -249,7 +249,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HSET").arg(key).arg(field).arg(val).to_owned())
     }
 
-    /// Queues the Redis HGET command and returns its ticket.
+    /// 业务作用：Queues the Redis HGET command and returns its ticket.
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -262,7 +262,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HGET").arg(key).arg(field).to_owned())
     }
 
-    /// Queues the Redis DEL command and returns its ticket.
+    /// 业务作用：Queues the Redis DEL command and returns its ticket.
     ///
     /// # 参数
     ///
@@ -271,7 +271,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("DEL").arg(key).to_owned())
     }
 
-    /// Queues the Redis INCRBY command and returns its ticket.
+    /// 业务作用：Queues the Redis INCRBY command and returns its ticket.
     ///
     /// # 参数
     ///
@@ -281,7 +281,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("INCRBY").arg(key).arg(delta).to_owned())
     }
 
-    /// Queues the Redis ZADD command and returns its ticket.
+    /// 业务作用：Queues the Redis ZADD command and returns its ticket.
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -302,7 +302,7 @@ impl PipelineSession {
         )
     }
 
-    /// Queues the Redis XADD command and returns its ticket.
+    /// 业务作用：Queues the Redis XADD command and returns its ticket.
     ///
     /// # 参数
     ///
@@ -321,7 +321,7 @@ impl PipelineSession {
     //    底座仍是 enqueue;cluster 多 key 命令的跨 slot 由 Redis loud CROSSSLOT 兜底)──
 
     // key / string
-    /// 相对过期 → `PEXPIRE`(毫秒)。对照 原实现 `LettucePipeline.expire(key, millis)`(= `OP_EXPIRE`→pexpire)
+    /// 业务作用：相对过期 → `PEXPIRE`(毫秒)。对照 原实现 `LettucePipeline.expire(key, millis)`(= `OP_EXPIRE`→pexpire)
     /// **与 direct `commands.rs::expire(Duration)` 同源**(此前误用 `EXPIRE` 秒,
     /// 比 原实现 放大 1000×)。入参取 `Duration` 消除单位歧义;非零下界 1ms(亚毫秒不塌成 `PEXPIRE 0` 删 key)。
     ///
@@ -334,7 +334,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PEXPIRE").arg(key).arg(ms).to_owned())
     }
 
-    /// 绝对过期(epoch **秒**)→ `EXPIREAT`。对照 direct `commands.rs::expire_at_secs`。
+    /// 业务作用：绝对过期(epoch **秒**)→ `EXPIREAT`。对照 direct `commands.rs::expire_at_secs`。
     ///
     /// # 参数
     ///
@@ -344,7 +344,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("EXPIREAT").arg(key).arg(unix_secs).to_owned())
     }
 
-    /// 绝对过期(epoch **毫秒**)→ `PEXPIREAT`。对照 原实现 `LettucePipeline.expireAt(key, millis)`
+    /// 业务作用：绝对过期(epoch **毫秒**)→ `PEXPIREAT`。对照 原实现 `LettucePipeline.expireAt(key, millis)`
     /// (= `OP_EXPIRE_AT`→pexpireat)与 direct `commands.rs::expire_at_millis`。
     ///
     /// # 参数
@@ -355,7 +355,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PEXPIREAT").arg(key).arg(unix_ms).to_owned())
     }
 
-    /// PERSIST(去掉 TTL)。
+    /// 业务作用：PERSIST(去掉 TTL)。
     ///
     /// # 参数
     ///
@@ -364,7 +364,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PERSIST").arg(key).to_owned())
     }
 
-    /// EXISTS(单 key)。
+    /// 业务作用：EXISTS(单 key)。
     ///
     /// # 参数
     ///
@@ -373,7 +373,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("EXISTS").arg(key).to_owned())
     }
 
-    /// PTTL(ms;-1 无 TTL,-2 不存在)。
+    /// 业务作用：PTTL(ms;-1 无 TTL,-2 不存在)。
     ///
     /// # 参数
     ///
@@ -382,7 +382,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PTTL").arg(key).to_owned())
     }
 
-    /// SETNX(不存在才设)→ 是否设置成功。对照 原实现 `setIfAbsent`。
+    /// 业务作用：SETNX(不存在才设)→ 是否设置成功。对照 原实现 `setIfAbsent`。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -395,7 +395,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SETNX").arg(key).arg(val).to_owned())
     }
 
-    /// SET key val PX ttl_ms(带过期写)。
+    /// 业务作用：SET key val PX ttl_ms(带过期写)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -417,7 +417,7 @@ impl PipelineSession {
         )
     }
 
-    /// APPEND → 追加后长度。
+    /// 业务作用：APPEND → 追加后长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -426,7 +426,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("APPEND").arg(key).arg(val).to_owned())
     }
 
-    /// GETSET → 旧值。
+    /// 业务作用：GETSET → 旧值。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -439,7 +439,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("GETSET").arg(key).arg(val).to_owned())
     }
 
-    /// GETDEL → 取并删。
+    /// 业务作用：GETDEL → 取并删。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -447,7 +447,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("GETDEL").arg(key).to_owned())
     }
 
-    /// STRLEN。
+    /// 业务作用：STRLEN。
     ///
     /// # 参数
     ///
@@ -456,7 +456,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("STRLEN").arg(key).to_owned())
     }
 
-    /// MGET(⚠ cluster 跨 slot → Redis CROSSSLOT)。空 keys 短路返回空数组。
+    /// 业务作用：MGET(⚠ cluster 跨 slot → Redis CROSSSLOT)。空 keys 短路返回空数组。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -472,7 +472,7 @@ impl PipelineSession {
     }
 
     // hash
-    /// HDEL(多 field)→ 删除数。空 field 短路返回 0(:不发非法空 HDEL)。
+    /// 业务作用：HDEL(多 field)→ 删除数。空 field 短路返回 0(:不发非法空 HDEL)。
     ///
     /// # 参数
     ///
@@ -490,7 +490,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// HSETNX → 是否新建。
+    /// 业务作用：HSETNX → 是否新建。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -505,7 +505,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HSETNX").arg(key).arg(field).arg(val).to_owned())
     }
 
-    /// HINCRBY → 增后值。
+    /// 业务作用：HINCRBY → 增后值。
     ///
     /// # 参数
     ///
@@ -522,7 +522,7 @@ impl PipelineSession {
         )
     }
 
-    /// HGETALL。
+    /// 业务作用：HGETALL。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -530,7 +530,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HGETALL").arg(key).to_owned())
     }
 
-    /// HMGET(多 field)。
+    /// 业务作用：HMGET(多 field)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -551,7 +551,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// HKEYS。
+    /// 业务作用：HKEYS。
     ///
     /// # 参数
     ///
@@ -560,7 +560,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HKEYS").arg(key).to_owned())
     }
 
-    /// HLEN。
+    /// 业务作用：HLEN。
     ///
     /// # 参数
     ///
@@ -570,7 +570,7 @@ impl PipelineSession {
     }
 
     // list
-    /// LPUSH → push 后长度。
+    /// 业务作用：LPUSH → push 后长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -579,7 +579,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPUSH").arg(key).arg(val).to_owned())
     }
 
-    /// RPUSH → push 后长度。
+    /// 业务作用：RPUSH → push 后长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -588,7 +588,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPUSH").arg(key).arg(val).to_owned())
     }
 
-    /// LPOP。
+    /// 业务作用：LPOP。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -596,7 +596,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPOP").arg(key).to_owned())
     }
 
-    /// RPOP。
+    /// 业务作用：RPOP。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -604,7 +604,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPOP").arg(key).to_owned())
     }
 
-    /// LRANGE。
+    /// 业务作用：LRANGE。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -625,7 +625,7 @@ impl PipelineSession {
         )
     }
 
-    /// LREM(count 0=全删,>0 头向尾,<0 尾向头)→ 删除数。
+    /// 业务作用：LREM(count 0=全删,>0 头向尾,<0 尾向头)→ 删除数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -640,7 +640,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LREM").arg(key).arg(count).arg(val).to_owned())
     }
 
-    /// LLEN。
+    /// 业务作用：LLEN。
     ///
     /// # 参数
     ///
@@ -649,7 +649,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LLEN").arg(key).to_owned())
     }
 
-    /// LTRIM。
+    /// 业务作用：LTRIM。
     ///
     /// # 参数
     ///
@@ -661,7 +661,7 @@ impl PipelineSession {
     }
 
     // set
-    /// SADD(单 member)→ 新增数。
+    /// 业务作用：SADD(单 member)→ 新增数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -674,7 +674,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SADD").arg(key).arg(member).to_owned())
     }
 
-    /// SREM(单 member)→ 删除数。
+    /// 业务作用：SREM(单 member)→ 删除数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -687,7 +687,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SREM").arg(key).arg(member).to_owned())
     }
 
-    /// SCARD。
+    /// 业务作用：SCARD。
     ///
     /// # 参数
     ///
@@ -696,7 +696,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SCARD").arg(key).to_owned())
     }
 
-    /// SMEMBERS。
+    /// 业务作用：SMEMBERS。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -704,7 +704,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SMEMBERS").arg(key).to_owned())
     }
 
-    /// SISMEMBER。
+    /// 业务作用：SISMEMBER。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -717,7 +717,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SISMEMBER").arg(key).arg(member).to_owned())
     }
 
-    /// SPOP(单个)。
+    /// 业务作用：SPOP(单个)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -726,7 +726,7 @@ impl PipelineSession {
     }
 
     // zset
-    /// ZREM(单 member)→ 删除数。
+    /// 业务作用：ZREM(单 member)→ 删除数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -739,7 +739,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZREM").arg(key).arg(member).to_owned())
     }
 
-    /// ZCARD。
+    /// 业务作用：ZCARD。
     ///
     /// # 参数
     ///
@@ -748,7 +748,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZCARD").arg(key).to_owned())
     }
 
-    /// ZSCORE。
+    /// 业务作用：ZSCORE。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -761,7 +761,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZSCORE").arg(key).arg(member).to_owned())
     }
 
-    /// ZRANK。
+    /// 业务作用：ZRANK。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -774,7 +774,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZRANK").arg(key).arg(member).to_owned())
     }
 
-    /// ZREVRANK。
+    /// 业务作用：ZREVRANK。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -787,7 +787,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZREVRANK").arg(key).arg(member).to_owned())
     }
 
-    /// ZCOUNT。
+    /// 业务作用：ZCOUNT。
     ///
     /// # 参数
     ///
@@ -798,7 +798,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZCOUNT").arg(key).arg(min).arg(max).to_owned())
     }
 
-    /// ZINCRBY → 增后分数。
+    /// 业务作用：ZINCRBY → 增后分数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -819,7 +819,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGEBYSCORE。
+    /// 业务作用：ZRANGEBYSCORE。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -841,7 +841,7 @@ impl PipelineSession {
     }
 
     // stream / script
-    /// XDEL → 删除数。
+    /// 业务作用：XDEL → 删除数。
     ///
     /// # 参数
     ///
@@ -859,7 +859,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// XACK → ack 数。空 ids 短路返回 0。
+    /// 业务作用：XACK → ack 数。空 ids 短路返回 0。
     ///
     /// # 参数
     ///
@@ -878,7 +878,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// XLEN。
+    /// 业务作用：XLEN。
     ///
     /// # 参数
     ///
@@ -887,7 +887,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("XLEN").arg(stream).to_owned())
     }
 
-    /// XTRIM MAXLEN(**精确**)→ 删除数。对照 原实现 `xTrimMaxlen`(= `c.xtrim(s, l)`,无 `~`)与 direct
+    /// 业务作用：XTRIM MAXLEN(**精确**)→ 删除数。对照 原实现 `xTrimMaxlen`(= `c.xtrim(s, l)`,无 `~`)与 direct
     /// `commands.rs::x_trim_maxlen_exact`(此前误用 `~` 近似,小 stream 完全不裁)。
     ///
     /// # 参数
@@ -904,7 +904,7 @@ impl PipelineSession {
         )
     }
 
-    /// XTRIM MAXLEN **近似**(`~`,radix-tree 节点边界裁剪,吞吐优先)。需要精确条数用 `x_trim_maxlen`。
+    /// 业务作用：XTRIM MAXLEN **近似**(`~`,radix-tree 节点边界裁剪,吞吐优先)。需要精确条数用 `x_trim_maxlen`。
     ///
     /// # 参数
     ///
@@ -921,7 +921,7 @@ impl PipelineSession {
         )
     }
 
-    /// EVAL(KEYS 同槽要求由调用方保证;EVAL 系已按真 key 路由)。
+    /// 业务作用：EVAL(KEYS 同槽要求由调用方保证;EVAL 系已按真 key 路由)。
     ///
     /// # 参数
     /// - `script`: Lua 脚本文本。
@@ -944,7 +944,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// EVALSHA(NOSCRIPT 时调用方需先 script_load / 退回 eval)。
+    /// 业务作用：EVALSHA(NOSCRIPT 时调用方需先 script_load / 退回 eval)。
     ///
     /// # 参数
     /// - `sha`: Redis 脚本 SHA1 摘要。
@@ -970,7 +970,7 @@ impl PipelineSession {
     // ── 全量对齐 原实现 Actuator(框架须一次铺完整,X/XAsync 折叠为单方法)──
 
     // key(其余)
-    /// TTL(秒;-1 无 TTL,-2 不存在)。
+    /// 业务作用：TTL(秒;-1 无 TTL,-2 不存在)。
     ///
     /// # 参数
     ///
@@ -979,7 +979,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("TTL").arg(key).to_owned())
     }
 
-    /// TYPE。
+    /// 业务作用：TYPE。
     ///
     /// # 参数
     ///
@@ -988,7 +988,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("TYPE").arg(key).to_owned())
     }
 
-    /// KEYS(⚠ 全量扫描 + cluster 仅落单节点,生产慎用)。
+    /// 业务作用：KEYS(⚠ 全量扫描 + cluster 仅落单节点,生产慎用)。
     ///
     /// # 参数
     ///
@@ -997,7 +997,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("KEYS").arg(pattern).to_owned())
     }
 
-    /// DUMP(序列化值)。
+    /// 业务作用：DUMP(序列化值)。
     ///
     /// # 参数
     ///
@@ -1006,7 +1006,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("DUMP").arg(key).to_owned())
     }
 
-    /// DEL(多 key)→ 删除数(⚠ cluster 跨 slot → CROSSSLOT)。空 keys 短路返回 0。
+    /// 业务作用：DEL(多 key)→ 删除数(⚠ cluster 跨 slot → CROSSSLOT)。空 keys 短路返回 0。
     ///
     /// # 参数
     ///
@@ -1022,7 +1022,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// EXISTS(多 key)→ 存在计数(⚠ cluster 跨 slot)。空 keys 短路返回 0。
+    /// 业务作用：EXISTS(多 key)→ 存在计数(⚠ cluster 跨 slot)。空 keys 短路返回 0。
     ///
     /// # 参数
     ///
@@ -1040,7 +1040,7 @@ impl PipelineSession {
     // (expire_at_secs 见上方 TTL 区块,统一单位语义)
 
     // string(其余)
-    /// SETRANGE → 修改后长度。
+    /// 业务作用：SETRANGE → 修改后长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1061,7 +1061,7 @@ impl PipelineSession {
         )
     }
 
-    /// GETRANGE。
+    /// 业务作用：GETRANGE。
     ///
     /// # 参数
     ///
@@ -1078,7 +1078,7 @@ impl PipelineSession {
         )
     }
 
-    /// DECRBY → 减后值(对照 原实现 `decrement`)。
+    /// 业务作用：DECRBY → 减后值(对照 原实现 `decrement`)。
     ///
     /// # 参数
     ///
@@ -1088,7 +1088,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("DECRBY").arg(key).arg(delta).to_owned())
     }
 
-    /// INCRBYFLOAT → 增后值。
+    /// 业务作用：INCRBYFLOAT → 增后值。
     ///
     /// # 参数
     ///
@@ -1098,7 +1098,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("INCRBYFLOAT").arg(key).arg(delta).to_owned())
     }
 
-    /// **Redis 原生 `MSET`**(单命令原子多写)。⚠ cluster 下所有 key **须同 slot**,否则 Redis loud
+    /// 业务作用：**Redis 原生 `MSET`**(单命令原子多写)。⚠ cluster 下所有 key **须同 slot**,否则 Redis loud
     /// CROSSSLOT。空 pairs 短路 no-op。**注意:这不等价 原实现 `multiSet`** ——原实现 的 `multiSet(Map)`
     /// 把每对**拆成独立 `SET`**(`kvMap.forEach((k,v)->set(k,v))`),cluster 下各自按 slot 路由;要那个语义用
     /// [`Self::multi_set_split`]。
@@ -1117,7 +1117,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// **对齐 原实现 `multiSet(Map)`**:逐对入队独立 `SET`,返回每对各自的 `Ticket<()>`。cluster 下由
+    /// 业务作用：**对齐 原实现 `multiSet(Map)`**:逐对入队独立 `SET`,返回每对各自的 `Ticket<()>`。cluster 下由
     /// `execute` 的按-slot 分桶把它们路由到各自节点(**不会 CROSSSLOT**)。空 pairs → 空 Vec。
     ///
     /// # 参数
@@ -1132,7 +1132,7 @@ impl PipelineSession {
     }
 
     // hash(其余)
-    /// HSET(多 field,= HMSET)。对照 原实现 `hMSet`。空 pairs 短路 no-op。
+    /// 业务作用：HSET(多 field,= HMSET)。对照 原实现 `hMSet`。空 pairs 短路 no-op。
     ///
     /// # 参数
     ///
@@ -1150,7 +1150,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// HEXISTS。
+    /// 业务作用：HEXISTS。
     ///
     /// # 参数
     ///
@@ -1160,7 +1160,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HEXISTS").arg(key).arg(field).to_owned())
     }
 
-    /// HVALS。
+    /// 业务作用：HVALS。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1168,7 +1168,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HVALS").arg(key).to_owned())
     }
 
-    /// HRANDFIELD(单个)。
+    /// 业务作用：HRANDFIELD(单个)。
     ///
     /// # 参数
     ///
@@ -1177,7 +1177,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("HRANDFIELD").arg(key).to_owned())
     }
 
-    /// HINCRBYFLOAT → 增后值。
+    /// 业务作用：HINCRBYFLOAT → 增后值。
     ///
     /// # 参数
     ///
@@ -1194,7 +1194,7 @@ impl PipelineSession {
         )
     }
 
-    /// HINCRBY 负增(对照 原实现 `hDecrBy`)→ 减后值。
+    /// 业务作用：HINCRBY 负增(对照 原实现 `hDecrBy`)→ 减后值。
     ///
     /// # 参数
     ///
@@ -1212,7 +1212,7 @@ impl PipelineSession {
     }
 
     // list(其余)
-    /// LPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**; 避免非法命令)。
+    /// 业务作用：LPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**; 避免非法命令)。
     ///
     /// # 参数
     ///
@@ -1230,7 +1230,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// RPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**)。
+    /// 业务作用：RPUSH(多值)→ push 后长度。空 vals 短路返回 0(no-op 哨兵,**非列表当前长度**)。
     ///
     /// # 参数
     ///
@@ -1248,7 +1248,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// LPUSHX(仅 key 存在;对照 原实现 `lPushIfAbsent`)→ push 后长度。
+    /// 业务作用：LPUSHX(仅 key 存在;对照 原实现 `lPushIfAbsent`)→ push 后长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1261,7 +1261,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPUSHX").arg(key).arg(val).to_owned())
     }
 
-    /// RPUSHX(对照 原实现 `rPushIfAbsent`)。
+    /// 业务作用：RPUSHX(对照 原实现 `rPushIfAbsent`)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1274,7 +1274,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPUSHX").arg(key).arg(val).to_owned())
     }
 
-    /// LINDEX。
+    /// 业务作用：LINDEX。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1287,7 +1287,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LINDEX").arg(key).arg(index).to_owned())
     }
 
-    /// LPOS(首个匹配下标)。
+    /// 业务作用：LPOS(首个匹配下标)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1300,7 +1300,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPOS").arg(key).arg(val).to_owned())
     }
 
-    /// LSET。
+    /// 业务作用：LSET。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1315,7 +1315,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LSET").arg(key).arg(index).arg(val).to_owned())
     }
 
-    /// LINSERT BEFORE → 插入后长度(-1=pivot 不存在)。
+    /// 业务作用：LINSERT BEFORE → 插入后长度(-1=pivot 不存在)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1337,7 +1337,7 @@ impl PipelineSession {
         )
     }
 
-    /// LINSERT AFTER。
+    /// 业务作用：LINSERT AFTER。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1360,7 +1360,7 @@ impl PipelineSession {
     }
 
     // set(其余)
-    /// SADD(多 member)→ 新增数。空 members 短路返回 0。
+    /// 业务作用：SADD(多 member)→ 新增数。空 members 短路返回 0。
     ///
     /// # 参数
     ///
@@ -1378,7 +1378,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// SREM(多 member)→ 删除数。空 members 短路返回 0。
+    /// 业务作用：SREM(多 member)→ 删除数。空 members 短路返回 0。
     ///
     /// # 参数
     ///
@@ -1396,7 +1396,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// SMOVE(⚠ src/dst 须同 slot)。
+    /// 业务作用：SMOVE(⚠ src/dst 须同 slot)。
     ///
     /// # 参数
     /// - `src`: 重命名、拷贝或迁移操作的源 key。
@@ -1411,7 +1411,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SMOVE").arg(src).arg(dst).arg(member).to_owned())
     }
 
-    /// SMISMEMBER(多 member)→ 各是否成员。空 members 短路返回空数组。
+    /// 业务作用：SMISMEMBER(多 member)→ 各是否成员。空 members 短路返回空数组。
     ///
     /// # 参数
     ///
@@ -1429,7 +1429,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// SRANDMEMBER(单个)。
+    /// 业务作用：SRANDMEMBER(单个)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1437,7 +1437,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SRANDMEMBER").arg(key).to_owned())
     }
 
-    /// SDIFF(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：SDIFF(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -1452,7 +1452,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// SINTER(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：SINTER(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -1467,7 +1467,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// SUNION(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
+    /// 业务作用：SUNION(⚠ 多 key 同 slot)。空 keys 短路返回空数组。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -1483,7 +1483,7 @@ impl PipelineSession {
     }
 
     // zset(其余)
-    /// ZREMRANGEBYRANK → 删除数(对照 原实现 `zRemRange`)。
+    /// 业务作用：ZREMRANGEBYRANK → 删除数(对照 原实现 `zRemRange`)。
     ///
     /// # 参数
     ///
@@ -1500,7 +1500,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREMRANGEBYLEX → 删除数。
+    /// 业务作用：ZREMRANGEBYLEX → 删除数。
     ///
     /// # 参数
     ///
@@ -1517,7 +1517,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREMRANGEBYSCORE → 删除数。
+    /// 业务作用：ZREMRANGEBYSCORE → 删除数。
     ///
     /// # 参数
     ///
@@ -1534,7 +1534,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZMSCORE(多 member)。
+    /// 业务作用：ZMSCORE(多 member)。
     ///
     /// # 参数
     ///
@@ -1552,7 +1552,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// ZLEXCOUNT。
+    /// 业务作用：ZLEXCOUNT。
     ///
     /// # 参数
     ///
@@ -1569,7 +1569,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGE(按下标)。
+    /// 业务作用：ZRANGE(按下标)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1590,7 +1590,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREVRANGE(按下标)。
+    /// 业务作用：ZREVRANGE(按下标)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1611,7 +1611,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGE WITHSCORES → `(member, score)` 列表。
+    /// 业务作用：ZRANGE WITHSCORES → `(member, score)` 列表。
     ///
     ///
     /// # 参数
@@ -1634,7 +1634,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREVRANGE WITHSCORES。
+    /// 业务作用：ZREVRANGE WITHSCORES。
     ///
     ///
     /// # 参数
@@ -1657,7 +1657,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGEBYSCORE WITHSCORES。
+    /// 业务作用：ZRANGEBYSCORE WITHSCORES。
     ///
     ///
     /// # 参数
@@ -1680,7 +1680,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREVRANGEBYSCORE(注意 max 在前)。
+    /// 业务作用：ZREVRANGEBYSCORE(注意 max 在前)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1701,7 +1701,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREVRANGEBYSCORE WITHSCORES。
+    /// 业务作用：ZREVRANGEBYSCORE WITHSCORES。
     ///
     ///
     /// # 参数
@@ -1724,7 +1724,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGEBYLEX。
+    /// 业务作用：ZRANGEBYLEX。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1745,7 +1745,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZPOPMIN(count 个)→ `(member, score)` 列表。
+    /// 业务作用：ZPOPMIN(count 个)→ `(member, score)` 列表。
     ///
     ///
     /// # 参数
@@ -1759,7 +1759,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZPOPMIN").arg(key).arg(count).to_owned())
     }
 
-    /// ZPOPMAX(count 个)。
+    /// 业务作用：ZPOPMAX(count 个)。
     ///
     ///
     /// # 参数
@@ -1773,7 +1773,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZPOPMAX").arg(key).arg(count).to_owned())
     }
 
-    /// ZRANDMEMBER(单个)。
+    /// 业务作用：ZRANDMEMBER(单个)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1782,7 +1782,7 @@ impl PipelineSession {
     }
 
     // stream / script / pubsub(其余)
-    /// XTRIM MINID(**精确**)→ 删除数。对照 原实现 `xTrimMinId`(= `XTrimArgs.minId(minId)`,无 `~`)。
+    /// 业务作用：XTRIM MINID(**精确**)→ 删除数。对照 原实现 `xTrimMinId`(= `XTrimArgs.minId(minId)`,无 `~`)。
     ///此前误用 `~` 近似。
     ///
     /// # 参数
@@ -1799,7 +1799,7 @@ impl PipelineSession {
         )
     }
 
-    /// XTRIM MINID **近似**(`~`,吞吐优先)。需要精确边界用 `x_trim_minid`。
+    /// 业务作用：XTRIM MINID **近似**(`~`,吞吐优先)。需要精确边界用 `x_trim_minid`。
     ///
     /// # 参数
     ///
@@ -1816,17 +1816,17 @@ impl PipelineSession {
         )
     }
 
-    /// SCRIPT FLUSH(⚠ cluster 下仅落单节点,非全节点;需全节点请 per-node)。
+    /// 业务作用：SCRIPT FLUSH(⚠ cluster 下仅落单节点,非全节点;需全节点请 per-node)。
     pub fn script_flush(&mut self) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("SCRIPT").arg("FLUSH").to_owned())
     }
 
-    /// SCRIPT KILL(⚠ cluster 下仅落单节点)。
+    /// 业务作用：SCRIPT KILL(⚠ cluster 下仅落单节点)。
     pub fn script_kill(&mut self) -> Result<Ticket<()>> {
         self.enqueue(redis::cmd("SCRIPT").arg("KILL").to_owned())
     }
 
-    /// SCRIPT LOAD → sha1。对照 原实现 `scriptLoad`。
+    /// 业务作用：SCRIPT LOAD → sha1。对照 原实现 `scriptLoad`。
     ///
     /// # 参数
     ///
@@ -1835,7 +1835,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SCRIPT").arg("LOAD").arg(script).to_owned())
     }
 
-    /// SCRIPT EXISTS(多 sha)→ 各是否已缓存。对照 原实现 `scriptExists`。空 sha 短路返回空数组。
+    /// 业务作用：SCRIPT EXISTS(多 sha)→ 各是否已缓存。对照 原实现 `scriptExists`。空 sha 短路返回空数组。
     ///
     /// # 参数
     ///
@@ -1853,7 +1853,7 @@ impl PipelineSession {
     }
 
     // ── count 重载(;对照 原实现 `lPop(key,count)`/`sPop(key,count)` 等)──
-    /// LPOP key count → 弹出的多个元素。
+    /// 业务作用：LPOP key count → 弹出的多个元素。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1866,7 +1866,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPOP").arg(key).arg(count).to_owned())
     }
 
-    /// RPOP key count → 弹出的多个元素。
+    /// 业务作用：RPOP key count → 弹出的多个元素。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1879,7 +1879,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("RPOP").arg(key).arg(count).to_owned())
     }
 
-    /// SPOP key count → 弹出的多个 member。
+    /// 业务作用：SPOP key count → 弹出的多个 member。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1892,7 +1892,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SPOP").arg(key).arg(count).to_owned())
     }
 
-    /// SRANDMEMBER key count(count<0 允许重复)→ 多个 member。
+    /// 业务作用：SRANDMEMBER key count(count<0 允许重复)→ 多个 member。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1905,7 +1905,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SRANDMEMBER").arg(key).arg(count).to_owned())
     }
 
-    /// ZRANDMEMBER key count(count<0 允许重复)→ 多个 member。
+    /// 业务作用：ZRANDMEMBER key count(count<0 允许重复)→ 多个 member。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1918,7 +1918,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("ZRANDMEMBER").arg(key).arg(count).to_owned())
     }
 
-    /// HRANDFIELD key count(count<0 允许重复)→ 多个 field。
+    /// 业务作用：HRANDFIELD key count(count<0 允许重复)→ 多个 field。
     ///
     /// # 参数
     ///
@@ -1929,7 +1929,7 @@ impl PipelineSession {
     }
 
     // ── zset LIMIT 分页 / 区间字符串重载──
-    /// ZRANGEBYSCORE key min max LIMIT offset count(min/max 用 `(`/`[`/`-inf`/`+inf` 字符串语法表达开闭/无穷)。
+    /// 业务作用：ZRANGEBYSCORE key min max LIMIT offset count(min/max 用 `(`/`[`/`-inf`/`+inf` 字符串语法表达开闭/无穷)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1957,7 +1957,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZREVRANGEBYSCORE key max min LIMIT offset count。
+    /// 业务作用：ZREVRANGEBYSCORE key max min LIMIT offset count。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1985,7 +1985,7 @@ impl PipelineSession {
         )
     }
 
-    /// ZRANGEBYLEX key min max LIMIT offset count(min/max 用 `[`/`(`/`-`/`+` lex 语法)。
+    /// 业务作用：ZRANGEBYLEX key min max LIMIT offset count(min/max 用 `[`/`(`/`-`/`+` lex 语法)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -2014,7 +2014,7 @@ impl PipelineSession {
     }
 
     // ── stream 读重载──
-    /// XRANGE key start end(`-`/`+` 表全范围)→ `Vec<(id, fields)>` 由调用方类型化。
+    /// 业务作用：XRANGE key start end(`-`/`+` 表全范围)→ `Vec<(id, fields)>` 由调用方类型化。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -2029,7 +2029,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("XRANGE").arg(key).arg(start).arg(end).to_owned())
     }
 
-    /// XRANGE key start end COUNT n。
+    /// 业务作用：XRANGE key start end COUNT n。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -2054,7 +2054,7 @@ impl PipelineSession {
         )
     }
 
-    /// XREVRANGE key end start。
+    /// 业务作用：XREVRANGE key end start。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -2075,7 +2075,7 @@ impl PipelineSession {
         )
     }
 
-    /// XREVRANGE key end start COUNT n。
+    /// 业务作用：XREVRANGE key end start COUNT n。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -2100,7 +2100,7 @@ impl PipelineSession {
         )
     }
 
-    /// Redis Pub/Sub `PUBLISH` → 收到的订阅者数。classic Pub/Sub 在 pipeline 中也让位,
+    /// 业务作用：Redis Pub/Sub `PUBLISH` → 收到的订阅者数。classic Pub/Sub 在 pipeline 中也让位,
     /// 频道发布只保留 `publish_channel`;`publish` 方法名留给 stream 事件发布。
     ///
     /// # 参数
@@ -2114,7 +2114,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PUBLISH").arg(channel).arg(message).to_owned())
     }
 
-    /// 发布 stream 事件(event-field wire),写 `XADD <stream> * <event> <StreamEnvelope JSON>`。
+    /// 业务作用：发布 stream 事件(event-field wire),写 `XADD <stream> * <event> <StreamEnvelope JSON>`。
     /// 空 stream/event 或 message 序列化为 JSON null → `Config` 错。
     ///
     /// # 参数
@@ -2140,7 +2140,7 @@ impl PipelineSession {
         )
     }
 
-    /// 使用默认 event = `STREAM_EVENT`(`"msg"`)发布一条 stream 消息。
+    /// 业务作用：使用默认 event = `STREAM_EVENT`(`"msg"`)发布一条 stream 消息。
     ///
     /// # 参数
     /// - `stream`: XADD 写入的 Redis Stream key。
@@ -2153,7 +2153,7 @@ impl PipelineSession {
         self.publish(stream, crate::stream::STREAM_EVENT, message)
     }
 
-    /// 兼容旧 pipeline 命名,语义同 [`Self::publish`]。
+    /// 业务作用：兼容旧 pipeline 命名,语义同 [`Self::publish`]。
     ///
     /// # 参数
     /// - `stream`: XADD 写入的 Redis Stream key。
@@ -2168,7 +2168,7 @@ impl PipelineSession {
         self.publish(stream, event, data)
     }
 
-    /// 兼容旧 pipeline 命名,语义同 [`Self::publish_default`]。
+    /// 业务作用：兼容旧 pipeline 命名,语义同 [`Self::publish_default`]。
     ///
     /// # 参数
     /// - `stream`: XADD 写入的 Redis Stream key。
@@ -2181,7 +2181,7 @@ impl PipelineSession {
         self.publish_default(stream, data)
     }
 
-    /// hash field 自减 `delta`,**余值 ≤0 则删该 field**,返回自减后余值(对照 原实现 `hDecrByAndDel`,EVAL
+    /// 业务作用：hash field 自减 `delta`,**余值 ≤0 则删该 field**,返回自减后余值(对照 原实现 `hDecrByAndDel`,EVAL
     /// Lua 逐字复刻 `/lua/hash_hdecriby_del.lua`)。`KEYS=[key] ARGV=[field, delta]`,cluster 安全(key 经 KEYS 路由)。
     ///
     /// # 参数
@@ -2201,7 +2201,7 @@ impl PipelineSession {
         )
     }
 
-    /// `h_decr_by_and_del` delta=1(对照 原实现 `hDecrByAndDel(key, hashKey)`)。
+    /// 业务作用：`h_decr_by_and_del` delta=1(对照 原实现 `hDecrByAndDel(key, hashKey)`)。
     ///
     /// # 参数
     ///
@@ -2211,7 +2211,7 @@ impl PipelineSession {
         self.h_decr_by_and_del(key, field, 1)
     }
 
-    /// HEXPIRE key `<秒>` FIELDS 1 `<field>`(对照 原实现 `expire(key, Duration, hashKey)` = lettuce `hexpire`,
+    /// 业务作用：HEXPIRE key `<秒>` FIELDS 1 `<field>`(对照 原实现 `expire(key, Duration, hashKey)` = lettuce `hexpire`,
     /// **秒**精度;亚秒 Duration 截断成 0=立即过期,与 原实现 一致)。返回单 field 状态码数组(1=设/2=已过期删/
     /// 0=条件未满足/-2=无此 field)。⚠ 需 Redis 7.4+(跟随 原实现 行为,不论服务端版本)。
     ///
@@ -2233,7 +2233,7 @@ impl PipelineSession {
         )
     }
 
-    /// HEXPIRE 多 field(对照 原实现 `OP_HEXPIRE_MULTI` = `c.hexpire(key, Duration, byte[][])`)。空 fields 短路空数组。
+    /// 业务作用：HEXPIRE 多 field(对照 原实现 `OP_HEXPIRE_MULTI` = `c.hexpire(key, Duration, byte[][])`)。空 fields 短路空数组。
     ///
     /// # 参数
     ///
@@ -2259,7 +2259,7 @@ impl PipelineSession {
     }
 
     // ── RedisJSON / RediSearch(feature "search";对照 原实现 jsonSet/ftSearch 等)──
-    /// JSON.SET(RedisJSON)。对照 原实现 `jsonSet`。
+    /// 业务作用：JSON.SET(RedisJSON)。对照 原实现 `jsonSet`。
     ///
     /// # 参数
     ///
@@ -2277,7 +2277,7 @@ impl PipelineSession {
         )
     }
 
-    /// JSON.GET。对照 原实现 `jsonGet`。
+    /// 业务作用：JSON.GET。对照 原实现 `jsonGet`。
     ///
     /// # 参数
     ///
@@ -2288,7 +2288,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("JSON.GET").arg(key).arg(path).to_owned())
     }
 
-    /// JSON.DEL → 删除的路径数。对照 原实现 `jsonDel`。
+    /// 业务作用：JSON.DEL → 删除的路径数。对照 原实现 `jsonDel`。
     ///
     /// # 参数
     ///
@@ -2299,7 +2299,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("JSON.DEL").arg(key).arg(path).to_owned())
     }
 
-    /// JSON.NUMINCRBY(**整数** delta)。对照 原实现 `jsonNumIncrBy(long delta)`(撮合部分成交/持仓加减热路径,
+    /// 业务作用：JSON.NUMINCRBY(**整数** delta)。对照 原实现 `jsonNumIncrBy(long delta)`(撮合部分成交/持仓加减热路径,
     /// 数量是整数)。此前用 `f64` 会把 `5.0` 原样下发,RedisJSON 把整数字段写成浮点 shape
     /// (`"qty":6.0`),后续 typed `i64/u64` 文档 serde 读回失败(`invalid type: floating point`)。
     /// 浮点自增请显式用 [`Self::json_num_incr_by_f64`]。
@@ -2325,7 +2325,7 @@ impl PipelineSession {
         )
     }
 
-    /// JSON.NUMINCRBY(**浮点** delta)。⚠ 会保留/制造 JSON 浮点形态(`"x":6.0`),整数 typed 字段勿用——
+    /// 业务作用：JSON.NUMINCRBY(**浮点** delta)。⚠ 会保留/制造 JSON 浮点形态(`"x":6.0`),整数 typed 字段勿用——
     /// 那会破坏 serde 读回(见 [`Self::json_num_incr_by`])。仅当字段本身就是浮点时用。
     ///
     /// # 参数
@@ -2349,7 +2349,7 @@ impl PipelineSession {
         )
     }
 
-    /// FT.SEARCH(原样 query;typed 解析见 search 模块)。对照 原实现 `ftSearch`。
+    /// 业务作用：FT.SEARCH(原样 query;typed 解析见 search 模块)。对照 原实现 `ftSearch`。
     ///
     /// # 参数
     ///
@@ -2360,7 +2360,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.SEARCH").arg(index).arg(query).to_owned())
     }
 
-    /// FT.AGGREGATE。对照 原实现 `ftAggregate`。
+    /// 业务作用：FT.AGGREGATE。对照 原实现 `ftAggregate`。
     ///
     /// # 参数
     ///
@@ -2371,7 +2371,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.AGGREGATE").arg(index).arg(query).to_owned())
     }
 
-    /// FT.DROPINDEX。对照 原实现 `ftDropIndex`。
+    /// 业务作用：FT.DROPINDEX。对照 原实现 `ftDropIndex`。
     ///
     /// # 参数
     ///
@@ -2381,7 +2381,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.DROPINDEX").arg(index).to_owned())
     }
 
-    /// `FT.DROPINDEX [DD]`（`dd=true` 时连同删除文档）。对照 原实现
+    /// 业务作用：`FT.DROPINDEX [DD]`（`dd=true` 时连同删除文档）。对照 原实现
     /// `ftDropIndex(index, dropDocs)`。
     ///
     /// # 参数
@@ -2398,7 +2398,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// FT.INFO。对照 原实现 `ftInfo`。
+    /// 业务作用：FT.INFO。对照 原实现 `ftInfo`。
     ///
     /// # 参数
     ///
@@ -2409,7 +2409,7 @@ impl PipelineSession {
     }
 
     // ── FT 原样 args 透传──
-    /// FT.SEARCH index 后接**原样 args**(SORTBY/LIMIT/DIALECT/RETURN/FILTER… 由调用方逐段给)。对照 原实现
+    /// 业务作用：FT.SEARCH index 后接**原样 args**(SORTBY/LIMIT/DIALECT/RETURN/FILTER… 由调用方逐段给)。对照 原实现
     /// `ftSearch(index, String[] args)`。typed 结果解析建议走 search 模块的 query builder,本入口只透传。
     ///
     /// # 参数
@@ -2426,7 +2426,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// FT.AGGREGATE index 后接原样 args。对照 原实现 `ftAggregate(index, String[] args)`。
+    /// 业务作用：FT.AGGREGATE index 后接原样 args。对照 原实现 `ftAggregate(index, String[] args)`。
     ///
     /// # 参数
     ///
@@ -2446,7 +2446,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// FT.CREATE index 后接原样 args(schema/ON HASH|JSON/PREFIX… 由调用方给)。对照 原实现 `ftCreate`。
+    /// 业务作用：FT.CREATE index 后接原样 args(schema/ON HASH|JSON/PREFIX… 由调用方给)。对照 原实现 `ftCreate`。
     ///
     /// # 参数
     ///
@@ -2462,7 +2462,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 收尾会话(消费 self):**先等齐已 auto-flush 的各段**(它们的 ticket 已在后台按段序回填),**再发出
+    /// 业务作用：收尾会话(消费 self):**先等齐已 auto-flush 的各段**(它们的 ticket 已在后台按段序回填),**再发出
     /// 最后一段未满批**。逐命令独立结果回填到各 Ticket。
     ///
     /// **standalone**:最后一段组装单条 `redis::Pipeline`,一条 driver 消息、一次 flush、严格入队顺序;
@@ -2491,7 +2491,7 @@ impl PipelineSession {
 }
 
 impl Drop for PipelineSession {
-    /// 丢弃未显式执行的 pipeline 会话。
+    /// 业务作用：丢弃未显式执行的 pipeline 会话。
     ///
     /// 已 auto-flush 的段保持后台提交；仅最后一段尚未发出的命令被标记为 `NotSent`,让调用方可安全重试。
     fn drop(&mut self) {
@@ -2535,7 +2535,7 @@ pub struct MicroBatchCfg {
 }
 
 impl Default for MicroBatchCfg {
-    /// 构造自动微批默认配置。
+    /// 业务作用：构造自动微批默认配置。
     ///
     /// 默认 1ms 时间窗、1000 条单批和 4096 入队容量,字节上限保持关闭以兼容既有业务行为。
     fn default() -> Self {
@@ -2549,7 +2549,7 @@ impl Default for MicroBatchCfg {
     }
 }
 
-/// 估算命令参数总字节(用于字节级背压;只数 `Simple` 实参,游标极小忽略)。
+/// 业务作用：估算命令参数总字节(用于字节级背压;只数 `Simple` 实参,游标极小忽略)。
 ///
 /// # 参数
 /// - `cmd`: 底层 Redis 命令对象。
@@ -2562,7 +2562,7 @@ fn estimate_cmd_bytes(cmd: &redis::Cmd) -> usize {
         .sum()
 }
 
-/// AutoPipeline 命令准入:阻塞 / Pub-Sub / 全局管理命令
+/// 业务作用：AutoPipeline 命令准入:阻塞 / Pub-Sub / 全局管理命令
 /// **不进自动微批**——它们会拖住共享后台 flusher 或改变连接语义。返回 `Some(原因)` = 拒绝。
 /// (`PipelineSession::enqueue` 保留 raw 能力;`AutoPipeline` 是共享设施故收紧。)
 ///
@@ -2610,7 +2610,7 @@ type BatchJob = (
     oneshot::Sender<std::result::Result<redis::Value, TicketErr>>,
 );
 
-/// 后台 auto-flush task 的 `JoinError`(panic/cancel)→ `ExecutionUnknown`(批级不确定,**不吞成 Ok**;
+/// 业务作用：后台 auto-flush task 的 `JoinError`(panic/cancel)→ `ExecutionUnknown`(批级不确定,**不吞成 Ok**;
 ///pipeline)。仅用于 `flush_chain` 段任务的 `JoinHandle::await` 失败映射。
 ///
 /// # 参数
@@ -2635,7 +2635,7 @@ pub struct AutoPipeline {
 }
 
 impl AutoPipeline {
-    /// 启动后台合批任务。
+    /// 业务作用：启动后台合批任务。
     ///
     /// # 参数
     ///
@@ -2659,7 +2659,7 @@ impl AutoPipeline {
         })
     }
 
-    /// 提交一条命令,await 自己的类型化结果。**队列满 → 阻塞(真 caller-runs 背压)**。
+    /// 业务作用：提交一条命令,await 自己的类型化结果。**队列满 → 阻塞(真 caller-runs 背压)**。
     /// 注:这是对 原实现 的**有意改良**——原实现 LettucePipeline 用无界 ConcurrentLinkedQueue
     /// (满了不阻塞、内存可能无界增长),Rust 用有界 `mpsc`(`queue_capacity`),满则 `send().await` 阻塞生产者
     /// = 天然限流,绝不无界堆积 OOM。
@@ -2685,7 +2685,7 @@ impl AutoPipeline {
         }
     }
 
-    /// **fire-and-forget 提交**:入队后立即返回(不等结果),只 await send 做背压 + 保证后续 [`barrier`](Self::barrier)
+    /// 业务作用：**fire-and-forget 提交**:入队后立即返回(不等结果),只 await send 做背压 + 保证后续 [`barrier`](Self::barrier)
     /// 的顺序。适合"提交一批写、再 barrier、再 direct 读"的热路径。命令仍会被 flush 执行;
     /// 只是放弃类型化结果(server error 不再回传给调用方,但同批其它命令不受影响)。
     ///
@@ -2702,7 +2702,7 @@ impl AutoPipeline {
         Ok(())
     }
 
-    /// **屏障**:等此前经 [`submit`](Self::submit)/[`execute`](Self::execute) **已入队**的命令
+    /// 业务作用：**屏障**:等此前经 [`submit`](Self::submit)/[`execute`](Self::execute) **已入队**的命令
     /// 全部 flush 到 redis 并执行完——返回后 direct 读必能看到这些 batched 写(解决 direct/batched 混用的顺序)。
     ///
     /// 实现:入队一个 `PING` 并 await。同 lane 单 flusher FIFO 保证 PING 在所有 prior 命令**之后**被处理;
@@ -2713,7 +2713,7 @@ impl AutoPipeline {
             .map(|_| ())
     }
 
-    /// 命令准入 + 字节级背压预检:阻塞/PubSub/全局命令 fail-fast;单命令超
+    /// 业务作用：命令准入 + 字节级背压预检:阻塞/PubSub/全局命令 fail-fast;单命令超
     /// `max_command_bytes` 拒绝入队。`submit`/`execute` 共用。
     ///
     /// # 参数
@@ -2734,7 +2734,7 @@ impl AutoPipeline {
         Ok(())
     }
 
-    /// 停机:停收新命令 + 后台 flush 完已入队的再退出。**幂等且对并发调用安全**
+    /// 业务作用：停机:停收新命令 + 后台 flush 完已入队的再退出。**幂等且对并发调用安全**
     /// 抢到 handle 的调用者 await drain 完成后广播信号;其余并发调用者**等同一 drain 完成信号**才返回,
     /// 不会先于后台 flush 退出就误判完成(避免上游过早释放资源)。
     pub async fn shutdown(&self) {
@@ -2761,7 +2761,7 @@ impl AutoPipeline {
 // Runs the background pipeline flush loop.
 ///
 /// # 参数
-/// - `client`: 底层客户端或连接句柄。
+/// 业务作用：- `client`: 底层客户端或连接句柄。
 /// - `rx`: 后台任务接收消息的通道。
 /// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
 /// - `cancel`: 后台任务使用的取消信号。
@@ -2811,14 +2811,14 @@ async fn flush_loop(
 // Sends one flushed batch to Redis and completes tickets.
 ///
 /// # 参数
-/// - `client`: 底层客户端或连接句柄。
+/// 业务作用：- `client`: 底层客户端或连接句柄。
 /// - `batch`: 一次性提交到 Redis 的批量命令。
 async fn flush_batch(client: &Arc<RedisClient>, batch: Vec<BatchJob>) {
     // AutoPipeline fire-and-forget:逐 ticket 结果已由 dispatch_jobs 回执,整体 Result 忽略。
     let _ = dispatch_jobs(client, batch).await;
 }
 
-/// **统一的 cluster 感知派发**(显式 `PipelineSession::execute` 与
+/// 业务作用：**统一的 cluster 感知派发**(显式 `PipelineSession::execute` 与
 /// AutoPipeline `flush_batch` **共用同一路径**——此前只有 AutoPipeline 分桶,显式会话 `save_all`
 /// 跨 slot 写确定性失败)。standalone 走单条 pipeline(保序);cluster **按 key slot 分桶**:同桶
 /// 同 slot 不 CROSSSLOT、一条 sub-pipeline 并行发,各 ticket 独立回执。返回 `Err` = 至少一个(桶的)
@@ -2867,7 +2867,7 @@ async fn dispatch_jobs(client: &RedisClient, jobs: Vec<BatchJob>) -> Result<()> 
     }
 }
 
-/// 取命令第一个 key 的 slot 用于 cluster 分桶。本库所有类型化 helper 的 key 均在 arg[1]。
+/// 业务作用：取命令第一个 key 的 slot 用于 cluster 分桶。本库所有类型化 helper 的 key 均在 arg[1]。
 /// 无 key(keyless)→ None(归 keyless 桶)。
 ///
 ///**EVAL 系命令的 key 不在 arg[1]**(arg 布局 `NAME script/sha numkeys [key...]`,
@@ -2906,7 +2906,7 @@ fn first_key_slot(cmd: &redis::Cmd) -> Option<u16> {
     }
 }
 
-/// 命令名是否为 EVAL 系(key 在 `numkeys` 之后,非 arg[1]):EVAL/EVALSHA/FCALL + `_RO` 变体。大小写无关。
+/// 业务作用：命令名是否为 EVAL 系(key 在 `numkeys` 之后,非 arg[1]):EVAL/EVALSHA/FCALL + `_RO` 变体。大小写无关。
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -2919,7 +2919,7 @@ fn is_eval_family(name: &[u8]) -> bool {
     matches!(up.as_slice(), b"EVAL" | b"EVALSHA" | b"FCALL")
 }
 
-/// 把一批 job 组成单条 pipeline 发出,结果逐槽位回填各 ticket。返回 `Err(ExecutionUnknown)` =
+/// 业务作用：把一批 job 组成单条 pipeline 发出,结果逐槽位回填各 ticket。返回 `Err(ExecutionUnknown)` =
 /// 传输失败 / 响应数不符(该批 ticket 已统一收到 Unknown);`Ok` = 已逐条分发(含内联 ServerError)。
 ///
 /// # 参数

@@ -80,12 +80,12 @@ pub struct ConsumeCtx {
 }
 
 impl ConsumeCtx {
-    /// 返回当前记录的 topic-partition 自有值。
+    /// 业务作用：返回当前记录的 topic-partition 自有值。
     pub fn topic_partition(&self) -> Tp {
         Tp::new(self.topic.clone(), self.partition)
     }
 
-    /// 解析 producer 写入的 W3C trace context；缺失、非 UTF-8 或非法值返回 `None`。
+    /// 业务作用：解析 producer 写入的 W3C trace context；缺失、非 UTF-8 或非法值返回 `None`。
     pub fn trace_context(&self) -> Option<natelemetry::TraceContext> {
         self.headers
             .last(HEADER_TRACEPARENT)
@@ -106,7 +106,7 @@ pub struct KafkaRecord<T> {
 }
 
 impl<T> KafkaRecord<T> {
-    /// 由内部 adapter 构造带确认模式的记录。
+    /// 业务作用：由内部 adapter 构造带确认模式的记录。
     ///
     /// # 参数
     ///
@@ -117,7 +117,7 @@ impl<T> KafkaRecord<T> {
         Self { value, ctx, ack }
     }
 
-    /// 在手动模式下同步记录本地确认。
+    /// 业务作用：在手动模式下同步记录本地确认。
     ///
     /// # 错误
     ///
@@ -126,12 +126,12 @@ impl<T> KafkaRecord<T> {
         self.ack.acknowledge()
     }
 
-    /// 拆出业务值与上下文，不携带手动确认能力。
+    /// 业务作用：拆出业务值与上下文，不携带手动确认能力。
     pub fn into_parts(self) -> (T, ConsumeCtx) {
         (self.value, self.ctx)
     }
 
-    /// 拆出业务值、上下文和仍受回调期约束的手动 token。
+    /// 业务作用：拆出业务值、上下文和仍受回调期约束的手动 token。
     ///
     /// # 错误
     ///
@@ -140,7 +140,7 @@ impl<T> KafkaRecord<T> {
         Ok((self.value, self.ctx, self.ack.into_token()?))
     }
 
-    /// 返回当前记录的 topic-partition 自有值。
+    /// 业务作用：返回当前记录的 topic-partition 自有值。
     pub fn topic_partition(&self) -> Tp {
         self.ctx.topic_partition()
     }
@@ -148,7 +148,7 @@ impl<T> KafkaRecord<T> {
 
 /// 为手动批消费提供连续全确认便利方法。
 pub trait AckBatchExt {
-    /// 按输入顺序确认全部记录；遇到首个错误立即停止。
+    /// 业务作用：按输入顺序确认全部记录；遇到首个错误立即停止。
     ///
     /// # 错误
     ///
@@ -157,7 +157,7 @@ pub trait AckBatchExt {
 }
 
 impl<T> AckBatchExt for [KafkaRecord<T>] {
-    /// 顺序确认 slice 中全部记录，保持首错即停语义。
+    /// 业务作用：顺序确认 slice 中全部记录，保持首错即停语义。
     fn ack_all(&self) -> Result<()> {
         self.iter().try_for_each(KafkaRecord::ack)
     }
@@ -168,28 +168,28 @@ pub trait SingleConsumer: Send + Sync + 'static {
     /// 业务消息类型及其固定 codec。
     type Message: DecodePayload;
 
-    /// 返回订阅 topic 列表；注册时读取一次并冻结。
+    /// 业务作用：返回订阅 topic 列表；注册时读取一次并冻结。
     fn topics(&self) -> Vec<String>;
 
-    /// 返回路由事件名；注册时读取一次并冻结。
+    /// 业务作用：返回路由事件名；注册时读取一次并冻结。
     fn event(&self) -> String;
 
-    /// 返回 group 解析规则。
+    /// 业务作用：返回 group 解析规则。
     fn group(&self) -> GroupSpec {
         GroupSpec::Default
     }
 
-    /// 返回稳定 handler id。
+    /// 业务作用：返回稳定 handler id。
     fn id(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
-    /// 返回 route 级确认模式。
+    /// 业务作用：返回 route 级确认模式。
     fn ack_mode(&self) -> AckMode {
         AckMode::Auto
     }
 
-    /// 处理单条记录。
+    /// 业务作用：处理单条记录。
     ///
     /// # 参数
     ///
@@ -206,28 +206,28 @@ pub trait BatchConsumer: Send + Sync + 'static {
     /// 业务消息类型及其固定 codec。
     type Message: DecodePayload;
 
-    /// 返回订阅 topic 列表；注册时读取一次并冻结。
+    /// 业务作用：返回订阅 topic 列表；注册时读取一次并冻结。
     fn topics(&self) -> Vec<String>;
 
-    /// 返回路由事件名；注册时读取一次并冻结。
+    /// 业务作用：返回路由事件名；注册时读取一次并冻结。
     fn event(&self) -> String;
 
-    /// 返回 group 解析规则。
+    /// 业务作用：返回 group 解析规则。
     fn group(&self) -> GroupSpec {
         GroupSpec::Default
     }
 
-    /// 返回稳定 handler id。
+    /// 业务作用：返回稳定 handler id。
     fn id(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
-    /// 返回 route 级确认模式。
+    /// 业务作用：返回 route 级确认模式。
     fn ack_mode(&self) -> AckMode {
         AckMode::Auto
     }
 
-    /// 处理同一 route 的连续记录 run。
+    /// 业务作用：处理同一 route 的连续记录 run。
     ///
     /// # 参数
     ///

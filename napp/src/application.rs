@@ -77,7 +77,7 @@ pub struct ApplicationInfo {
 }
 
 impl ApplicationInfo {
-    /// 校验并创建不会在运行期热替换的应用元数据。
+    /// 业务作用：校验并创建不会在运行期热替换的应用元数据。
     ///
     /// # 参数
     ///
@@ -109,7 +109,7 @@ impl ApplicationInfo {
         })
     }
 
-    /// 返回稳定应用名。
+    /// 业务作用：返回稳定应用名。
     ///
     /// # 参数
     ///
@@ -118,7 +118,7 @@ impl ApplicationInfo {
         &self.name
     }
 
-    /// 返回显式启用的本地 profile。
+    /// 业务作用：返回显式启用的本地 profile。
     ///
     /// # 参数
     ///
@@ -127,7 +127,7 @@ impl ApplicationInfo {
         self.profile.as_deref()
     }
 
-    /// 返回 preflight 固定的运行模式。
+    /// 业务作用：返回 preflight 固定的运行模式。
     ///
     /// # 参数
     ///
@@ -136,7 +136,7 @@ impl ApplicationInfo {
         self.mode
     }
 
-    /// 返回用于展示的墙上时钟启动时间。
+    /// 业务作用：返回用于展示的墙上时钟启动时间。
     ///
     /// # 参数
     ///
@@ -145,7 +145,7 @@ impl ApplicationInfo {
         self.started_at
     }
 
-    /// 使用单调时钟返回进程已运行时长。
+    /// 业务作用：使用单调时钟返回进程已运行时长。
     ///
     /// # 参数
     ///
@@ -348,7 +348,7 @@ impl Application {
         (application, task_supervisor)
     }
 
-    /// 返回启动期固定的应用元数据。
+    /// 业务作用：返回启动期固定的应用元数据。
     ///
     /// # 参数
     ///
@@ -357,7 +357,7 @@ impl Application {
         &self.inner.info
     }
 
-    /// 以 Acquire 语义读取公开生命周期状态。
+    /// 业务作用：以 Acquire 语义读取公开生命周期状态。
     ///
     /// # 参数
     ///
@@ -376,7 +376,7 @@ impl Application {
         self.inner.state.subscribe()
     }
 
-    /// 判断应用是否已经完成所有 Ready action且全部动态运行依赖当前可用。
+    /// 业务作用：判断应用是否已经完成所有 Ready action且全部动态运行依赖当前可用。
     ///
     /// # 参数
     ///
@@ -385,7 +385,7 @@ impl Application {
         self.state() == ApplicationState::Ready && self.inner.readiness.all_ready()
     }
 
-    /// 读取各依赖只读就绪快照(管理端读取):按名有序的 name/state/reason/affects_ready,以及聚合
+    /// 业务作用：读取各依赖只读就绪快照(管理端读取):按名有序的 name/state/reason/affects_ready,以及聚合
     /// `ready`/`degraded`。无 I/O、无锁竞争地读内存已发布状态,供管理端诊断「谁未就绪/谁降级」。
     ///
     /// # 参数
@@ -395,7 +395,7 @@ impl Application {
         self.inner.readiness.snapshot(std::time::Instant::now())
     }
 
-    /// 封口就绪注册表:此后组件/业务不能再注册 readiness contributor。
+    /// 业务作用：封口就绪注册表:此后组件/业务不能再注册 readiness contributor。
     ///
     /// 由 Runner 在 UserHook 成功、资源封口之后、Ready 之前调用(与 `resources().seal()` 同处),
     /// 防止运行期无界新增贡献项名称。组件必须在 Start 或 UserHook 开放期完成注册。
@@ -407,7 +407,7 @@ impl Application {
         self.inner.readiness.seal();
     }
 
-    /// 返回 Web 监听器实际绑定的地址。
+    /// 业务作用：返回 Web 监听器实际绑定的地址。
     ///
     /// # 参数
     ///
@@ -416,7 +416,7 @@ impl Application {
         self.inner.web_addr.get().copied()
     }
 
-    /// 获取当前配置视图中的不可变期望快照。
+    /// 业务作用：获取当前配置视图中的不可变期望快照。
     ///
     /// # 参数
     ///
@@ -425,7 +425,7 @@ impl Application {
         self.inner.config.load().snapshot().clone()
     }
 
-    /// 获取包含快照和各目标应用状态的同版本配置视图。
+    /// 业务作用：获取包含快照和各目标应用状态的同版本配置视图。
     ///
     /// # 参数
     ///
@@ -434,7 +434,7 @@ impl Application {
         self.inner.config.load()
     }
 
-    /// 获取与当前 config 同 generation 的 secret 快照。
+    /// 业务作用：获取与当前 config 同 generation 的 secret 快照。
     ///
     /// # 参数
     ///
@@ -445,7 +445,7 @@ impl Application {
         Arc::clone(self.inner.config.load().secrets())
     }
 
-    /// 从当前单一快照反序列化完整强类型配置。
+    /// 业务作用：从当前单一快照反序列化完整强类型配置。
     ///
     /// # 参数
     ///
@@ -454,7 +454,7 @@ impl Application {
         self.config().deserialize()
     }
 
-    /// 从当前单一快照读取并反序列化指定配置段。
+    /// 业务作用：从当前单一快照读取并反序列化指定配置段。
     ///
     /// # 参数
     ///
@@ -463,7 +463,7 @@ impl Application {
         self.config().section(path)
     }
 
-    /// 订阅配置视图的原子版本更新。
+    /// 业务作用：订阅配置视图的原子版本更新。
     ///
     /// # 参数
     ///
@@ -472,7 +472,7 @@ impl Application {
         self.inner.config.subscribe()
     }
 
-    /// 在 UserHook 开放阶段登记一个无 qualifier 的业务资源。
+    /// 业务作用：在 UserHook 开放阶段登记一个无 qualifier 的业务资源。
     ///
     /// # 参数
     ///
@@ -490,7 +490,7 @@ impl Application {
         self.inner.resources.register(value)
     }
 
-    /// 在同一资源类型下登记一个带 qualifier 的业务资源。
+    /// 业务作用：在同一资源类型下登记一个带 qualifier 的业务资源。
     ///
     /// # 参数
     ///
@@ -509,7 +509,7 @@ impl Application {
         self.inner.resources.register_named(qualifier, value)
     }
 
-    /// 登记一个需要显式异步 shutdown 的业务资源。
+    /// 业务作用：登记一个需要显式异步 shutdown 的业务资源。
     ///
     /// # 参数
     ///
@@ -527,7 +527,7 @@ impl Application {
         self.inner.resources.register_managed(value)
     }
 
-    /// 登记一个带 qualifier 且需要显式异步 shutdown 的业务资源。
+    /// 业务作用：登记一个带 qualifier 且需要显式异步 shutdown 的业务资源。
     ///
     /// # 参数
     ///
@@ -552,7 +552,7 @@ impl Application {
             .register_named_managed(qualifier, value)
     }
 
-    /// 异步借用一个无 qualifier 的已登记资源。
+    /// 业务作用：异步借用一个无 qualifier 的已登记资源。
     ///
     /// # 参数
     ///
@@ -564,7 +564,7 @@ impl Application {
         self.inner.resources.get().await
     }
 
-    /// 异步借用一个指定 qualifier 的已登记资源。
+    /// 业务作用：异步借用一个指定 qualifier 的已登记资源。
     ///
     /// # 参数
     ///
@@ -579,7 +579,7 @@ impl Application {
         self.inner.resources.get_named(qualifier).await
     }
 
-    /// 登记一个异常退出只进入报告、不主动终止 Service 的后台任务。
+    /// 业务作用：登记一个异常退出只进入报告、不主动终止 Service 的后台任务。
     ///
     /// # 参数
     ///
@@ -595,7 +595,7 @@ impl Application {
             .await
     }
 
-    /// 登记一个在 Running 状态提前退出就触发失败停机的关键任务。
+    /// 业务作用：登记一个在 Running 状态提前退出就触发失败停机的关键任务。
     ///
     /// # 参数
     ///
@@ -617,7 +617,7 @@ impl Application {
         self.spawn_task(name.into(), TaskKind::Critical, task).await
     }
 
-    /// 按名称获取数据源连接池句柄。
+    /// 业务作用：按名称获取数据源连接池句柄。
     ///
     /// 返回 clone handle 是 `MySqlPool` 自身的共享语义（内部就是 `Arc` 池），不等于把资源移出容器；
     /// 单库配置 `database` 注册在 `default` 名下。
@@ -635,7 +635,7 @@ impl Application {
         crate::db::datasource_handle(self, name).await
     }
 
-    /// 为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
+    /// 业务作用：为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
     ///
     /// migration 属**业务 schema**,不进共享 runtime;业务在 UserHook 用
     /// `sqlx::migrate!("./migrations")` 构造 [`Migrator`](crate::Migrator) 并按数据源名登记。
@@ -724,7 +724,7 @@ impl Application {
         Ok(())
     }
 
-    /// 由 `TelemetryComponent` 在 Start 阶段发布配置驱动的有界 span 导出器。
+    /// 业务作用：由 `TelemetryComponent` 在 Start 阶段发布配置驱动的有界 span 导出器。
     ///
     /// 早于流量入口 Ready 发布,使 Web 等生产者在其 Ready 装配时即可取到 exporter 入队。重复发布返回
     /// 带 Telemetry 组件身份的错误。
@@ -746,7 +746,7 @@ impl Application {
         })
     }
 
-    /// 获取遥测组件发布的有界 span 导出器;未声明遥测组件或未启用时返回 `None`。
+    /// 业务作用：获取遥测组件发布的有界 span 导出器;未声明遥测组件或未启用时返回 `None`。
     ///
     /// # 参数
     ///
@@ -759,14 +759,14 @@ impl Application {
         self.inner.telemetry_exporter.get().cloned()
     }
 
-    /// 返回只写 span 记录器，不暴露 exporter 接收端、flush 或关闭权限。
+    /// 业务作用：返回只写 span 记录器，不暴露 exporter 接收端、flush 或关闭权限。
     #[cfg(feature = "telemetry")]
     pub fn span_recorder(&self) -> Option<natelemetry::SpanRecorder> {
         self.telemetry_exporter()
             .map(natelemetry::SpanRecorder::new)
     }
 
-    /// 返回遥测有界队列/丢弃计数摘要；组件未启用时返回 `None`。
+    /// 业务作用：返回遥测有界队列/丢弃计数摘要；组件未启用时返回 `None`。
     ///
     /// 摘要不包含 OTLP endpoint、span 名或属性正文，可安全用于受保护的管理端。
     #[cfg(feature = "telemetry")]
@@ -777,7 +777,7 @@ impl Application {
             .map(|exporter| exporter.snapshot())
     }
 
-    /// 显式记录一个业务子 span。
+    /// 业务作用：显式记录一个业务子 span。
     ///
     /// 给 db/redis/kafka 等**非 web 调用点**用的显式插桩入口:业务把 handler 里拿到的
     /// [`TraceContext`](natelemetry::TraceContext)(Web trace 中间件写入请求扩展)**显式传入**,本方法
@@ -816,7 +816,7 @@ impl Application {
         });
     }
 
-    /// 取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Ready 阶段调用一次)。
+    /// 业务作用：取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Ready 阶段调用一次)。
     ///
     /// # 参数
     ///
@@ -831,7 +831,7 @@ impl Application {
             .unwrap_or_default()
     }
 
-    /// 按名称获取 Redis 客户端句柄。
+    /// 业务作用：按名称获取 Redis 客户端句柄。
     ///
     /// # 参数
     ///
@@ -846,7 +846,7 @@ impl Application {
         crate::redis::redis_handle(self, name).await
     }
 
-    /// 按 client name 获取 Kafka 的受控发布、健康和运行控制句柄。
+    /// 业务作用：按 client name 获取 Kafka 的受控发布、健康和运行控制句柄。
     ///
     /// 句柄不会暴露 `KafkaProxy`、consumer registry 或 shutdown 权；最终关闭始终由
     /// Application active stack 执行。
@@ -882,7 +882,7 @@ impl Application {
         ))
     }
 
-    /// 获取日志组件的只读运行时能力句柄。
+    /// 业务作用：获取日志组件的只读运行时能力句柄。
     ///
     /// 日志底层是进程级订阅器而不是实例客户端；句柄用于确认容器管理的初始化与生命周期，日志事件
     /// 继续通过公开日志门面写入，配置重应用和文件关闭权不对业务开放。
@@ -903,7 +903,7 @@ impl Application {
         ))
     }
 
-    /// 获取配置中心组件的受控拉取能力句柄。
+    /// 业务作用：获取配置中心组件的受控拉取能力句柄。
     ///
     /// 句柄复用组件已经建立的连接，只开放读取远端原文；发布、删除、监听注册和关闭仍由容器统一管理。
     ///
@@ -923,7 +923,7 @@ impl Application {
         ))
     }
 
-    /// 获取 Web 组件的只读运行时能力句柄。
+    /// 业务作用：获取 Web 组件的只读运行时能力句柄。
     ///
     /// 句柄可以查询真实监听地址、上下文前缀、预检路由清单、就绪状态和请求指标；它不持有也不返回
     /// 路由服务图、监听器、服务任务或资源容器，路由修改仍只能在 UserHook 使用 `configure_router`。
@@ -944,7 +944,7 @@ impl Application {
         ))
     }
 
-    /// 获取两级缓存运行时的只读能力句柄。
+    /// 业务作用：获取两级缓存运行时的只读能力句柄。
     ///
     /// 句柄只提供 generation、装配摘要和只读健康探针，不持有停机 owner，也不能替换后端。
     #[cfg(feature = "cache")]
@@ -957,7 +957,7 @@ impl Application {
         Ok(cacheable::cache_handle())
     }
 
-    /// 从 Ready 阶段发布的静态业务路由事实生成 OpenAPI 3.1 文档。
+    /// 业务作用：从 Ready 阶段发布的静态业务路由事实生成 OpenAPI 3.1 文档。
     ///
     /// `configure_router` 追加的不透明路由没有可审计的类型元数据，刻意不进入文档。授权标记同时合并
     /// 端点声明和当前 route policy 快照，避免把运行时收紧的路由误报成公开接口。
@@ -1079,7 +1079,7 @@ impl Application {
         })
     }
 
-    /// 获取 Web Ready 发布的只读 mapping 安全运行时句柄。
+    /// 业务作用：获取 Web Ready 发布的只读 mapping 安全运行时句柄。
     ///
     /// # 返回
     ///
@@ -1104,7 +1104,7 @@ impl Application {
         ))
     }
 
-    /// 获取长连接组件的发送与只读运行状态句柄。
+    /// 业务作用：获取长连接组件的发送与只读运行状态句柄。
     ///
     /// 句柄可取得底层广播发送器和真实监听地址，但不返回 server、builder、监听器或关闭入口。
     ///
@@ -1124,7 +1124,7 @@ impl Application {
         ))
     }
 
-    /// 获取服务发现组件的出站请求与注册状态句柄。
+    /// 业务作用：获取服务发现组件的出站请求与注册状态句柄。
     ///
     /// 句柄可取得底层带负载均衡能力的 HTTP 客户端；注册、摘流和关闭 provider 仍由生命周期组件执行。
     ///
@@ -1144,7 +1144,7 @@ impl Application {
         ))
     }
 
-    /// 获取调度组件的只读底层运行时句柄。
+    /// 业务作用：获取调度组件的只读底层运行时句柄。
     ///
     /// 句柄提供运行状态、任务数量和可选选主状态，不开放停止或重启调度器的能力。
     ///
@@ -1266,7 +1266,7 @@ impl Application {
         })
     }
 
-    /// 在 UserHook 阶段为指定 Kafka client 登记一次有状态 consumer 装配。
+    /// 业务作用：在 UserHook 阶段为指定 Kafka client 登记一次有状态 consumer 装配。
     ///
     /// 自动收集的属性 consumer 会先进入 builder，本闭包随后按登记顺序执行；闭包只能
     /// 注册业务 consumer，不能取得原始运行时或关闭权。
@@ -1307,7 +1307,7 @@ impl Application {
             .push_customization(name, Box::new(configure))
     }
 
-    /// 在 UserHook 阶段为指定 Kafka client 安装一次后端无关指标接收端。
+    /// 业务作用：在 UserHook 阶段为指定 Kafka client 安装一次后端无关指标接收端。
     ///
     /// sink 会通过 Start 时创建的内部桥接层立即接管后续指标；它必须无阻塞、不可 panic，
     /// 且不能持有需要在 consumer 之前关闭的业务资源。
@@ -1344,7 +1344,7 @@ impl Application {
         self.inner.kafka_runtime.install_metrics(name, sink)
     }
 
-    /// 在 UserHook 阶段登记一次原始 Axum Router 变换。
+    /// 业务作用：在 UserHook 阶段登记一次原始 Axum Router 变换。
     ///
     /// 这是自动 mapping 端点之外的 Web 逃生舱，适合完成下列工作：
     ///
@@ -1431,7 +1431,7 @@ impl Application {
         Ok(())
     }
 
-    /// 在 UserHook 阶段登记一次自动 mapping 端点的拦截器与安全运行时计划变换。
+    /// 业务作用：在 UserHook 阶段登记一次自动 mapping 端点的拦截器与安全运行时计划变换。
     ///
     /// 它是 mapping 端点的类型化装配入口，可以完成下列工作：
     ///
@@ -1528,7 +1528,7 @@ impl Application {
         Ok(())
     }
 
-    /// 在 UserHook 阶段登记一次独立 TCP/WebSocket 长连接服务的 builder 定制。
+    /// 业务作用：在 UserHook 阶段登记一次独立 TCP/WebSocket 长连接服务的 builder 定制。
     ///
     /// 该入口操作的是 `naws::ServerBuilder`，不是 HTTP Web 组件的 Axum Router。它可以完成：
     ///
@@ -1622,7 +1622,7 @@ impl Application {
         Ok(())
     }
 
-    /// 返回长连接服务实际绑定的 TCP 地址。
+    /// 业务作用：返回长连接服务实际绑定的 TCP 地址。
     ///
     /// # 参数
     ///
@@ -1632,7 +1632,7 @@ impl Application {
         self.ws().ok().and_then(|handle| handle.local_addr())
     }
 
-    /// 返回长连接服务实际绑定的 WebSocket 地址。
+    /// 业务作用：返回长连接服务实际绑定的 WebSocket 地址。
     ///
     /// # 参数
     ///
@@ -1642,7 +1642,7 @@ impl Application {
         self.ws().ok().and_then(|handle| handle.websocket_addr())
     }
 
-    /// 获取长连接广播发送器。
+    /// 业务作用：获取长连接广播发送器。
     ///
     /// 发送器在 ws 组件 Ready 构建服务时发布；业务事件处理只会在服务开始接受连接之后被触发，
     /// 因此 handler 内调用一定能取到。
@@ -1655,7 +1655,7 @@ impl Application {
         self.ws()?.sender()
     }
 
-    /// Service 模式请求优雅停机；重复调用为 no-op，Batch 模式返回阶段错误。
+    /// 业务作用：Service 模式请求优雅停机；重复调用为 no-op，Batch 模式返回阶段错误。
     ///
     /// # 参数
     ///
@@ -1673,7 +1673,7 @@ impl Application {
         Ok(())
     }
 
-    /// 尝试升级迁移期全局 Weak 槽。
+    /// 业务作用：尝试升级迁移期全局 Weak 槽。
     ///
     /// 返回 `Result` 而不是 `Option`：调用点通常在遗留静态入口里用 `?` 传播，错误值需要携带组件与阶段，
     /// 才能把“容器尚未发布/已进入 Closing”和普通业务错误区分开。框架不提供会 panic 的 `global()`。
@@ -1692,7 +1692,7 @@ impl Application {
         })
     }
 
-    /// 在 Service sealed 后发布迁移期全局 Weak 槽。
+    /// 业务作用：在 Service sealed 后发布迁移期全局 Weak 槽。
     ///
     /// # 参数
     ///
@@ -1701,7 +1701,7 @@ impl Application {
         global::install(self)
     }
 
-    /// 仅在槽仍指向当前 Application 时清除全局 Weak。
+    /// 业务作用：仅在槽仍指向当前 Application 时清除全局 Weak。
     ///
     /// # 参数
     ///
@@ -1710,7 +1710,7 @@ impl Application {
         global::clear(self);
     }
 
-    /// 记录 Runner 组件表中出现的一个组件身份。
+    /// 业务作用：记录 Runner 组件表中出现的一个组件身份。
     ///
     /// # 参数
     ///
@@ -1721,7 +1721,7 @@ impl Application {
             .fetch_or(component_mask(component), Ordering::Release);
     }
 
-    /// 校验某个强类型能力入口对应的组件确实存在于 Runner 组件表。
+    /// 业务作用：校验某个强类型能力入口对应的组件确实存在于 Runner 组件表。
     ///
     /// 该检查必须先于资源查找：否则“组件未声明”会被误报成通用资源缺失，调用方无法区分漏写属性组件
     /// 与组件已经声明但仍未发布底层对象这两类问题。
@@ -1764,7 +1764,7 @@ impl Application {
         ))
     }
 
-    /// 取走全部路由定制并关闭登记入口。
+    /// 业务作用：取走全部路由定制并关闭登记入口。
     ///
     /// 取走即封口：这是"定制能否生效"的线性化点，之后的 `configure_router` 一律得到阶段错误。
     ///
@@ -1781,7 +1781,7 @@ impl Application {
             .unwrap_or_default()
     }
 
-    /// 取走全部 mapping 计划变换并关闭登记入口。
+    /// 业务作用：取走全部 mapping 计划变换并关闭登记入口。
     ///
     /// Web Ready 必须先封口并构建计划，再调用自动路由工厂；这样监听开始后不会出现
     /// 路由图或拦截器顺序漂移。
@@ -1795,7 +1795,7 @@ impl Application {
             .unwrap_or_default()
     }
 
-    /// 发布已经通过路由审计的共享 MappingRuntime。
+    /// 业务作用：发布已经通过路由审计的共享 MappingRuntime。
     #[cfg(feature = "web")]
     pub(crate) fn publish_mapping_runtime(
         &self,
@@ -1810,13 +1810,13 @@ impl Application {
         })
     }
 
-    /// 返回 Web Ready 发布的只读 MappingRuntime 句柄。
+    /// 业务作用：返回 Web Ready 发布的只读 MappingRuntime 句柄。
     #[cfg(feature = "web")]
     pub(crate) fn mapping_runtime(&self) -> Option<Arc<naweb::MappingRuntime>> {
         self.inner.mapping_runtime.get().cloned()
     }
 
-    /// 返回 Web 请求观测中间件使用的共享运行时状态。
+    /// 业务作用：返回 Web 请求观测中间件使用的共享运行时状态。
     ///
     /// # 参数
     ///
@@ -1826,7 +1826,7 @@ impl Application {
         Arc::clone(&self.inner.web_runtime)
     }
 
-    /// 返回日志组件写入初始化结果的共享运行时状态。
+    /// 业务作用：返回日志组件写入初始化结果的共享运行时状态。
     ///
     /// # 参数
     ///
@@ -1836,7 +1836,7 @@ impl Application {
         Arc::clone(&self.inner.log_runtime)
     }
 
-    /// 返回配置中心组件发布底层客户端弱引用的共享状态。
+    /// 业务作用：返回配置中心组件发布底层客户端弱引用的共享状态。
     ///
     /// # 参数
     ///
@@ -1846,7 +1846,7 @@ impl Application {
         Arc::clone(&self.inner.nacos_config_runtime)
     }
 
-    /// 返回服务发现组件发布会话弱引用的共享状态。
+    /// 业务作用：返回服务发现组件发布会话弱引用的共享状态。
     ///
     /// # 参数
     ///
@@ -1858,7 +1858,7 @@ impl Application {
         Arc::clone(&self.inner.nacos_discovery_runtime)
     }
 
-    /// 返回调度组件发布启动和选主状态的共享单元。
+    /// 业务作用：返回调度组件发布启动和选主状态的共享单元。
     ///
     /// # 参数
     ///
@@ -1868,7 +1868,7 @@ impl Application {
         Arc::clone(&self.inner.scheduling_runtime)
     }
 
-    /// 返回 Kafka 组件发布 client 与 UserHook 定制队列的共享状态。
+    /// 业务作用：返回 Kafka 组件发布 client 与 UserHook 定制队列的共享状态。
     ///
     /// # 参数
     ///
@@ -1898,7 +1898,7 @@ impl Application {
         Arc::clone(&self.inner.outbox_runtime)
     }
 
-    /// 返回进程级统一指标 hub:各领域按 descriptor 记录到此。
+    /// 业务作用：返回进程级统一指标 hub:各领域按 descriptor 记录到此。
     ///
     /// # 参数
     ///
@@ -1908,7 +1908,7 @@ impl Application {
         Arc::clone(&self.inner.metrics_hub)
     }
 
-    /// 把一个兼容领域源(自持 registry、自渲染 Prometheus)并入进程级统一 hub。
+    /// 业务作用：把一个兼容领域源(自持 registry、自渲染 Prometheus)并入进程级统一 hub。
     ///
     /// 供 `nasa` 门面层把 **nafana** 等 napp 不直接依赖的领域接入同一 `/metrics`:门面构造领域源后
     /// 在业务 UserHook 调用本方法,其族即随框架 `/metrics` 一并渲染,并纳入 descriptor 冲突审计。
@@ -1941,7 +1941,7 @@ impl Application {
             })
     }
 
-    /// 注入业务幂等 store,在 UserHook 阶段调用一次。
+    /// 业务作用：注入业务幂等 store,在 UserHook 阶段调用一次。
     ///
     /// 注入后 Web 组件在 Ready 装配阶段把幂等中间件接进请求路径(最内层包裹 handler,重放短路)。
     /// 未注入则不启用幂等层。重复注入返回 UserHook 阶段错误。
@@ -1964,7 +1964,7 @@ impl Application {
         })
     }
 
-    /// 注入业务授权策略注册表,在 UserHook 阶段调用一次。
+    /// 业务作用：注入业务授权策略注册表,在 UserHook 阶段调用一次。
     ///
     /// 注入后 Web 组件在 Ready 装配阶段把授权中间件接进请求路径(授权在幂等之外——未授权请求
     /// 不进入幂等/handler)。未注入则不启用授权层。重复注入返回 UserHook 阶段错误。
@@ -1987,19 +1987,19 @@ impl Application {
         })
     }
 
-    /// 已注入的幂等 store(Web 装配用);未注入返回 `None`。
+    /// 业务作用：已注入的幂等 store(Web 装配用);未注入返回 `None`。
     #[cfg(feature = "web")]
     pub(crate) fn idempotency_store(&self) -> Option<crate::idempotency::SharedIdempotencyStore> {
         self.inner.idempotency_store.get().cloned()
     }
 
-    /// 已注入的授权策略注册表(Web 装配用);未注入返回 `None`。
+    /// 业务作用：已注入的授权策略注册表(Web 装配用);未注入返回 `None`。
     #[cfg(feature = "web")]
     pub(crate) fn authz_registry(&self) -> Option<crate::authz::SharedPolicyRegistry> {
         self.inner.authz_registry.get().cloned()
     }
 
-    /// 在 UserHook 注入对象级授权 provider；provider 错误/超时均 fail closed。
+    /// 业务作用：在 UserHook 注入对象级授权 provider；provider 错误/超时均 fail closed。
     #[cfg(feature = "web")]
     pub fn set_object_authorizer(
         &self,
@@ -2026,7 +2026,7 @@ impl Application {
             })
     }
 
-    /// 返回已冻结的对象授权 provider 与请求预算，供 Web Ready 阶段装配授权中间件。
+    /// 业务作用：返回已冻结的对象授权 provider 与请求预算，供 Web Ready 阶段装配授权中间件。
     #[cfg(feature = "web")]
     pub(crate) fn object_authorizer(
         &self,
@@ -2034,7 +2034,7 @@ impl Application {
         self.inner.object_authorizer.get().cloned()
     }
 
-    /// 注入业务认证器,在 UserHook 阶段调用一次。
+    /// 业务作用：注入业务认证器,在 UserHook 阶段调用一次。
     ///
     /// 注入后 Web 组件在 Ready 装配阶段把 authentication 中间件接进请求路径(装在授权之外——认证永远
     /// 早于授权)。未注入则不启用认证层。重复注入返回 UserHook 阶段错误。
@@ -2057,13 +2057,13 @@ impl Application {
         })
     }
 
-    /// 已注入的认证器(Web 装配用);未注入返回 `None`。
+    /// 业务作用：已注入的认证器(Web 装配用);未注入返回 `None`。
     #[cfg(feature = "web")]
     pub(crate) fn authenticator(&self) -> Option<crate::authn::SharedAuthenticator> {
         self.inner.authenticator.get().cloned()
     }
 
-    /// 由 `AuthComponent` 在 Ready 阶段发布配置驱动的认证器。
+    /// 业务作用：由 `AuthComponent` 在 Ready 阶段发布配置驱动的认证器。
     ///
     /// 与业务 UserHook 的 `set_authenticator` 写同一槽位:若业务已手动注入,则冲突并返回带 Auth 组件
     /// 身份的错误——同一进程只能二选一(声明 `auth` 组件由配置驱动,或业务手动注入),不允许双写。
@@ -2085,7 +2085,7 @@ impl Application {
         })
     }
 
-    /// 为一个运行依赖注册初始未就绪的动态贡献项。
+    /// 业务作用：为一个运行依赖注册初始未就绪的动态贡献项。
     ///
     /// # 参数
     ///
@@ -2143,7 +2143,7 @@ impl Application {
             })
     }
 
-    /// 发布 Start 阶段已经校验通过的 Web 上下文前缀。
+    /// 业务作用：发布 Start 阶段已经校验通过的 Web 上下文前缀。
     ///
     /// # 参数
     ///
@@ -2162,7 +2162,7 @@ impl Application {
             })
     }
 
-    /// 发布长连接服务 bind 成功后的真实监听地址。
+    /// 业务作用：发布长连接服务 bind 成功后的真实监听地址。
     ///
     /// # 参数
     ///
@@ -2184,7 +2184,7 @@ impl Application {
         ))
     }
 
-    /// 发布长连接广播发送器。
+    /// 业务作用：发布长连接广播发送器。
     ///
     /// # 参数
     ///
@@ -2201,7 +2201,7 @@ impl Application {
         ))
     }
 
-    /// 取走全部长连接定制并关闭登记入口。
+    /// 业务作用：取走全部长连接定制并关闭登记入口。
     ///
     /// # 参数
     ///
@@ -2216,7 +2216,7 @@ impl Application {
             .unwrap_or_default()
     }
 
-    /// 登记一个组件的配置重应用句柄。
+    /// 业务作用：登记一个组件的配置重应用句柄，使配置中心在 Ready 后按组件边界应用候选快照。
     ///
     /// 只允许可热刷组件在自身 Start 阶段调用：驱动创建于 Ready，因此登记与消费天然分段，
     /// 不需要额外的阶段封口协议。
@@ -2224,6 +2224,10 @@ impl Application {
     /// # 参数
     ///
     /// - `applier`：持有该组件运行态共享句柄的重应用实现。
+    ///
+    /// # 返回
+    ///
+    /// 本方法无返回值；句柄按登记顺序进入配置重应用集合。
     // 目前只有 log 是可热刷组件；驱动侧 feature 单独打开时该入口空置属于预期形态。
     #[cfg(any(feature = "log", feature = "nacos-config"))]
     #[cfg_attr(not(feature = "log"), allow(dead_code))]
@@ -2235,7 +2239,7 @@ impl Application {
             .push(applier);
     }
 
-    /// 返回全部已登记的配置重应用句柄。
+    /// 业务作用：返回全部已登记的配置重应用句柄。
     ///
     /// # 参数
     ///
@@ -2250,7 +2254,7 @@ impl Application {
             .clone()
     }
 
-    /// 返回只用于唤醒 Runner 的停机请求令牌。
+    /// 业务作用：返回只用于唤醒 Runner 的停机请求令牌。
     ///
     /// # 参数
     ///
@@ -2259,7 +2263,7 @@ impl Application {
         self.inner.shutdown_requested.clone()
     }
 
-    /// 在 Runner 即将轮询业务启动 Hook 时开放公共登记入口。
+    /// 业务作用：在 Runner 即将轮询业务启动 Hook 时开放公共登记入口。
     ///
     /// # 参数
     ///
@@ -2269,7 +2273,7 @@ impl Application {
         debug_assert!(!was_open, "user hook registration gate must open only once");
     }
 
-    /// 在 Runner 首次观察到 Hook 终止事件后关闭公共登记入口。
+    /// 业务作用：在 Runner 首次观察到 Hook 终止事件后关闭公共登记入口。
     ///
     /// 关闭先于任务通道收口、资源封存和反向清理。这样仍在运行的业务 future 即使晚一步获得调度，
     /// 也只能得到阶段错误，不能在清理开始后继续增加资源或任务。
@@ -2302,7 +2306,7 @@ impl Application {
         );
     }
 
-    /// 返回 Runner 和组件使用的资源注册表。
+    /// 业务作用：返回 Runner 和组件使用的资源注册表。
     ///
     /// # 参数
     ///
@@ -2311,7 +2315,7 @@ impl Application {
         &self.inner.resources
     }
 
-    /// 原子发布已经校验完成的下一配置视图。
+    /// 业务作用：原子发布已经校验完成的下一配置视图。
     ///
     /// # 参数
     ///
@@ -2320,7 +2324,7 @@ impl Application {
         self.inner.config.publish(next);
     }
 
-    /// 用 Nacos 合并后的最终配置树替换初始 bootstrap 视图。
+    /// 业务作用：用 Nacos 合并后的最终配置树替换初始 bootstrap 视图。
     ///
     /// 保持 version=1 与既有 reload 状态：初始合并仍属版本 1，此刻尚无订阅者（Bootstrap 阶段）。
     ///
@@ -2351,7 +2355,7 @@ impl Application {
         Ok(())
     }
 
-    /// 发布一个热刷新配置版本：版本自增并携带新的目标应用状态表。
+    /// 业务作用：发布一个热刷新配置版本：版本自增并携带新的目标应用状态表。
     ///
     /// # 参数
     ///
@@ -2396,7 +2400,7 @@ impl Application {
         Ok(next)
     }
 
-    /// 一次性发布 Web Ready 阶段得到的运行时身份。
+    /// 业务作用：一次性发布 Web Ready 阶段得到的运行时身份。
     ///
     /// 能力句柄使用同一个 OnceLock 同时观察监听地址和路由清单；兼容地址入口随后复制地址值。
     /// 同一 Application 不允许替换监听器身份或路由清单。
@@ -2435,7 +2439,7 @@ impl Application {
         })
     }
 
-    /// 发布 Starting 到 Ready 的唯一合法转换。
+    /// 业务作用：发布 Starting 到 Ready 的唯一合法转换。
     ///
     /// # 参数
     ///
@@ -2446,7 +2450,7 @@ impl Application {
             .transition(ApplicationState::Starting, ApplicationState::Ready)
     }
 
-    /// 发布 Ready 到 Stopping 的转换。
+    /// 业务作用：发布 Ready 到 Stopping 的转换。
     ///
     /// # 参数
     ///
@@ -2457,7 +2461,7 @@ impl Application {
             .transition(ApplicationState::Ready, ApplicationState::Stopping)
     }
 
-    /// 发布 Starting 到 Stopping 的启动失败、启动信号或 Batch 完成转换。
+    /// 业务作用：发布 Starting 到 Stopping 的启动失败、启动信号或 Batch 完成转换。
     ///
     /// # 参数
     ///
@@ -2468,7 +2472,7 @@ impl Application {
             .transition(ApplicationState::Starting, ApplicationState::Stopping)
     }
 
-    /// 在清理完成后发布正常终态 Stopped。
+    /// 业务作用：在清理完成后发布正常终态 Stopped。
     ///
     /// # 参数
     ///
@@ -2479,7 +2483,7 @@ impl Application {
             .transition(ApplicationState::Stopping, ApplicationState::Stopped)
     }
 
-    /// 在清理完成后发布失败终态 Failed。
+    /// 业务作用：在清理完成后发布失败终态 Failed。
     ///
     /// # 参数
     ///
@@ -2490,7 +2494,7 @@ impl Application {
             .transition(ApplicationState::Stopping, ApplicationState::Failed)
     }
 
-    /// 尝试一次提交首次终态。
+    /// 业务作用：尝试一次提交首次终态。
     ///
     /// # 参数
     ///
@@ -2499,7 +2503,7 @@ impl Application {
         self.inner.terminal.try_set(intent)
     }
 
-    /// 以 Acquire 语义读取首次终态。
+    /// 业务作用：以 Acquire 语义读取首次终态。
     ///
     /// # 参数
     ///
@@ -2508,7 +2512,7 @@ impl Application {
         self.inner.terminal.load()
     }
 
-    /// 把公共任务工厂装箱后送入 bounded Supervisor 队列并等待 ACK。
+    /// 业务作用：把公共任务工厂装箱后送入 bounded Supervisor 队列并等待 ACK。
     ///
     /// # 参数
     ///
@@ -2540,7 +2544,7 @@ impl Application {
         self.inner.supervisor.register(name, kind, future).await
     }
 
-    /// 校验当前调用仍发生在业务启动 Hook 的有效登记窗口内。
+    /// 业务作用：校验当前调用仍发生在业务启动 Hook 的有效登记窗口内。
     ///
     /// # 参数
     ///

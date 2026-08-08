@@ -1,7 +1,7 @@
 //! 实验性 tonic gRPC 传输配置与独立 listener 生命周期。
 //!
 //! 本 crate 只负责强制 HTTP/2 listener、边界配置、显式健康/反射 adapter 和有预算的 graceful drain。
-//! 业务 proto/generated service 仍归业务 crate，breaking check 归 CI。稳定组件字符串需真实业务验证后再定。
+//! 业务 proto/generated service 仍归业务 crate；该能力保持显式实验开关，不承诺稳定组件字符串。
 
 #![forbid(unsafe_code)]
 

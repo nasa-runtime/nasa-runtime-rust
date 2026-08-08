@@ -18,13 +18,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "redis-cache")]
 const MAX_MAPPER_RUNTIME_MILLIS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
-/// 非 fallible single-flight builder 统一收敛到有效毫秒范围。
+/// 业务作用：非 fallible single-flight builder 统一收敛到有效毫秒范围。
 #[cfg(feature = "redis-cache")]
 fn bounded_mapper_millis(value: u64) -> u64 {
     value.clamp(1, MAX_MAPPER_RUNTIME_MILLIS)
 }
 
-/// Redis 写入前校验 TTL，防止 value 已落盘后才因过期参数非法而留下永久字段。
+/// 业务作用：Redis 写入前校验 TTL，防止 value 已落盘后才因过期参数非法而留下永久字段。
 #[cfg(feature = "redis-cache")]
 fn validate_mapper_ttl(ttl_ms: u64) -> anyhow::Result<()> {
     if !(1..=MAX_MAPPER_RUNTIME_MILLIS).contains(&ttl_ms) {
@@ -48,7 +48,7 @@ pub struct MapperStream<T> {
 }
 
 impl<T> MapperStream<T> {
-    /// 包装一个 owned stream。
+    /// 业务作用：包装一个 owned stream。
     ///
     /// # 参数
     /// - `stream`: 由 `sqlx::query_as(...).fetch(...)` 等调用返回的 owned stream；
@@ -62,7 +62,7 @@ impl<T> MapperStream<T> {
         }
     }
 
-    /// 读取下一行。
+    /// 业务作用：读取下一行。
     ///
     /// 对业务侧而言这等价于逐行消费查询结果；返回 `None` 表示数据库结果集已经结束。
     pub async fn next(&mut self) -> Option<Result<T, sqlx::Error>> {
@@ -73,7 +73,7 @@ impl<T> MapperStream<T> {
 impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
-    /// 将外层 `MapperStream` 的轮询转发给内部 boxed stream。
+    /// 业务作用：将外层 `MapperStream` 的轮询转发给内部 boxed stream。
     ///
     /// # 参数
     /// - `self`: 当前被 pin 住的 Mapper stream。
@@ -99,7 +99,7 @@ impl PageRequest {
     /// 默认单页最大条数。
     pub const DEFAULT_MAX_PAGE_SIZE: u64 = 1_000;
 
-    /// 创建分页参数，页码从 1 开始，单页最大默认 1000。
+    /// 业务作用：创建分页参数，页码从 1 开始，单页最大默认 1000。
     ///
     /// # 参数
     /// - `page_no`: 业务请求页码，采用 1-based 语义；传 0 会返回错误。
@@ -108,7 +108,7 @@ impl PageRequest {
         Self::with_max_page_size(page_no, page_size, Self::DEFAULT_MAX_PAGE_SIZE)
     }
 
-    /// 创建分页参数并指定单页最大条数。
+    /// 业务作用：创建分页参数并指定单页最大条数。
     ///
     /// # 参数
     /// - `page_no`: 业务请求页码，采用 1-based 语义。
@@ -140,7 +140,7 @@ impl PageRequest {
         Self::from_offset_limit(offset, page_size)
     }
 
-    /// 从 offset/limit 创建分页参数。
+    /// 业务作用：从 offset/limit 创建分页参数。
     ///
     /// # 参数
     /// - `offset`: SQL `OFFSET` 原始值，适合已经由上游计算好偏移量的场景。
@@ -173,7 +173,7 @@ pub struct MapperBatchChunks<'a, T> {
 impl<'a, T> Iterator for MapperBatchChunks<'a, T> {
     type Item = &'a [T];
 
-    /// 返回下一段批量参数切片。
+    /// 业务作用：返回下一段批量参数切片。
     ///
     /// 该方法不复制业务对象，只返回原始切片的子切片，适合批量 SQL 在外层显式控制事务。
     fn next(&mut self) -> Option<Self::Item> {
@@ -190,7 +190,7 @@ impl<'a, T> Iterator for MapperBatchChunks<'a, T> {
     }
 }
 
-/// 按固定大小拆分批量参数。
+/// 业务作用：按固定大小拆分批量参数。
 ///
 /// `chunk_size` 必须大于 0；空集合会返回一个空迭代器。
 ///
@@ -216,7 +216,7 @@ pub fn batch_chunks<T>(items: &[T], chunk_size: usize) -> anyhow::Result<MapperB
 /// `column` 或 `table_alias.column` 这类简单字段名，不能返回表达式、函数调用或
 /// 用户输入字符串。
 pub trait MapperOrderField: Copy + Sized + Send + Sync + 'static {
-    /// 返回 SQL `ORDER BY` 中允许出现的字段名。
+    /// 业务作用：返回 SQL `ORDER BY` 中允许出现的字段名。
     ///
     /// 该字段名必须来自业务 enum 白名单，不能从用户输入直接拼接。
     fn mapper_order_field(self) -> &'static str;
@@ -232,7 +232,7 @@ pub enum OrderDirection {
 }
 
 impl OrderDirection {
-    /// 返回可直接写入 SQL 的排序方向关键字。
+    /// 业务作用：返回可直接写入 SQL 的排序方向关键字。
     fn sql(self) -> &'static str {
         match self {
             Self::Asc => "ASC",
@@ -251,7 +251,7 @@ pub struct OrderBy<F: MapperOrderField> {
 }
 
 impl<F: MapperOrderField> OrderBy<F> {
-    /// 创建升序排序项。
+    /// 业务作用：创建升序排序项。
     ///
     /// # 参数
     /// - `field`: 已通过 `MapperOrderField` 白名单约束的业务排序字段。
@@ -262,7 +262,7 @@ impl<F: MapperOrderField> OrderBy<F> {
         }
     }
 
-    /// 创建降序排序项。
+    /// 业务作用：创建降序排序项。
     ///
     /// # 参数
     /// - `field`: 已通过 `MapperOrderField` 白名单约束的业务排序字段。
@@ -273,14 +273,14 @@ impl<F: MapperOrderField> OrderBy<F> {
         }
     }
 
-    /// 返回字段白名单项。
+    /// 业务作用：返回字段白名单项。
     ///
     /// 该方法主要用于业务日志、调试或自定义排序组合逻辑。
     pub fn field(self) -> F {
         self.field
     }
 
-    /// 返回排序方向。
+    /// 业务作用：返回排序方向。
     ///
     /// 该方法主要用于业务日志、调试或自定义排序组合逻辑。
     pub fn direction(self) -> OrderDirection {
@@ -290,7 +290,7 @@ impl<F: MapperOrderField> OrderBy<F> {
 
 /// 可被 `<order_by value="..."/>` 标签渲染的类型。
 pub trait MapperOrderBy {
-    /// 向 `out` 写入不带 `ORDER BY` 前缀的排序片段，返回是否实际写入。
+    /// 业务作用：向 `out` 写入不带 `ORDER BY` 前缀的排序片段，返回是否实际写入。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区；实现只写字段和方向，不写 `ORDER BY` 前缀。
@@ -298,7 +298,7 @@ pub trait MapperOrderBy {
 }
 
 impl<T: MapperOrderBy + ?Sized> MapperOrderBy for &T {
-    /// 允许以引用形式复用底层排序渲染实现。
+    /// 业务作用：允许以引用形式复用底层排序渲染实现。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区。
@@ -308,7 +308,7 @@ impl<T: MapperOrderBy + ?Sized> MapperOrderBy for &T {
 }
 
 impl<T: MapperOrderBy> MapperOrderBy for Option<T> {
-    /// 渲染可选排序项；`None` 表示业务本次不追加排序。
+    /// 业务作用：渲染可选排序项；`None` 表示业务本次不追加排序。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区。
@@ -321,7 +321,7 @@ impl<T: MapperOrderBy> MapperOrderBy for Option<T> {
 }
 
 impl<F: MapperOrderField> MapperOrderBy for OrderBy<F> {
-    /// 渲染单个排序项，并在写入前再次校验字段名形状。
+    /// 业务作用：渲染单个排序项，并在写入前再次校验字段名形状。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区。
@@ -336,7 +336,7 @@ impl<F: MapperOrderField> MapperOrderBy for OrderBy<F> {
 }
 
 impl<F: MapperOrderField> MapperOrderBy for [OrderBy<F>] {
-    /// 按声明顺序渲染多个排序项。
+    /// 业务作用：按声明顺序渲染多个排序项。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区；多个排序项之间用逗号连接。
@@ -355,7 +355,7 @@ impl<F: MapperOrderField> MapperOrderBy for [OrderBy<F>] {
 }
 
 impl<F: MapperOrderField> MapperOrderBy for Vec<OrderBy<F>> {
-    /// 渲染业务常用的动态排序列表。
+    /// 业务作用：渲染业务常用的动态排序列表。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区。
@@ -365,7 +365,7 @@ impl<F: MapperOrderField> MapperOrderBy for Vec<OrderBy<F>> {
 }
 
 impl<F: MapperOrderField, const N: usize> MapperOrderBy for [OrderBy<F>; N] {
-    /// 渲染固定长度排序数组。
+    /// 业务作用：渲染固定长度排序数组。
     ///
     /// # 参数
     /// - `out`: SQL 片段输出缓冲区。
@@ -380,10 +380,10 @@ impl<F: MapperOrderField, const N: usize> MapperOrderBy for [OrderBy<F>; N] {
 /// ordinal 还原业务 enum。业务 enum 可用 `#[derive(MapperEnum)]` 按声明顺序
 /// 生成实现；需要固定业务码时应手写实现，避免变体顺序调整后产生静默兼容风险。
 pub trait MapperEnum: Copy + Sized + Send + Sync + 'static {
-    /// 返回写入数据库和 cache JSON 的 ordinal。
+    /// 业务作用：返回写入数据库和 cache JSON 的 ordinal。
     fn ordinal(self) -> i32;
 
-    /// 从数据库 ordinal 还原 enum；未知值应返回 `None`。
+    /// 业务作用：从数据库 ordinal 还原 enum；未知值应返回 `None`。
     ///
     /// # 参数
     /// - `value`: 数据库列或缓存 value 中读取到的 ordinal。
@@ -398,7 +398,7 @@ pub struct EnumOrdinal<E: MapperEnum>(
 );
 
 impl<E: MapperEnum> EnumOrdinal<E> {
-    /// 创建 ordinal enum 包装值。
+    /// 业务作用：创建 ordinal enum 包装值。
     ///
     /// # 参数
     /// - `value`: 需要按 ordinal 语义写库、读库或序列化缓存的业务 enum。
@@ -406,14 +406,14 @@ impl<E: MapperEnum> EnumOrdinal<E> {
         Self(value)
     }
 
-    /// 取回内部 enum。
+    /// 业务作用：取回内部 enum。
     ///
     /// 该方法用于业务层已经完成数据库/cache 交互后恢复原始 enum 类型。
     pub fn into_inner(self) -> E {
         self.0
     }
 
-    /// 返回当前 enum 的 ordinal。
+    /// 业务作用：返回当前 enum 的 ordinal。
     ///
     /// 该值会作为 MySQL 整数字段和缓存 JSON 整数值。
     pub fn ordinal(self) -> i32 {
@@ -422,7 +422,7 @@ impl<E: MapperEnum> EnumOrdinal<E> {
 }
 
 impl<E: MapperEnum> From<E> for EnumOrdinal<E> {
-    /// 从业务 enum 直接构造 ordinal 包装。
+    /// 业务作用：从业务 enum 直接构造 ordinal 包装。
     ///
     /// # 参数
     /// - `value`: 需要进入 Mapper 编解码流程的业务 enum。
@@ -434,14 +434,14 @@ impl<E: MapperEnum> From<E> for EnumOrdinal<E> {
 impl<E: MapperEnum> Deref for EnumOrdinal<E> {
     type Target = E;
 
-    /// 允许业务代码以只读方式访问内部 enum。
+    /// 业务作用：允许业务代码以只读方式访问内部 enum。
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
-    /// 将 enum ordinal 写成 JSON 整数。
+    /// 业务作用：将 enum ordinal 写成 JSON 整数。
     ///
     /// # 参数
     /// - `serializer`: serde 提供的目标序列化器。
@@ -454,7 +454,7 @@ impl<E: MapperEnum> serde::Serialize for EnumOrdinal<E> {
 }
 
 impl<'de, E: MapperEnum> serde::Deserialize<'de> for EnumOrdinal<E> {
-    /// 从 JSON 整数还原 enum ordinal 包装。
+    /// 业务作用：从 JSON 整数还原 enum ordinal 包装。
     ///
     /// # 参数
     /// - `deserializer`: serde 提供的来源反序列化器。
@@ -473,12 +473,12 @@ impl<'de, E: MapperEnum> serde::Deserialize<'de> for EnumOrdinal<E> {
 }
 
 impl<E: MapperEnum> sqlx::Type<sqlx::MySql> for EnumOrdinal<E> {
-    /// 告诉 sqlx 该包装类型在 MySQL 中按 `i32` 类型绑定。
+    /// 业务作用：告诉 sqlx 该包装类型在 MySQL 中按 `i32` 类型绑定。
     fn type_info() -> <sqlx::MySql as sqlx::Database>::TypeInfo {
         <i32 as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
-    /// 判断数据库列类型是否可以按 `i32` 解码。
+    /// 业务作用：判断数据库列类型是否可以按 `i32` 解码。
     ///
     /// # 参数
     /// - `ty`: sqlx 从 MySQL 元数据读取到的列类型信息。
@@ -488,7 +488,7 @@ impl<E: MapperEnum> sqlx::Type<sqlx::MySql> for EnumOrdinal<E> {
 }
 
 impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
-    /// 按值把 enum ordinal 编码进 MySQL 参数缓冲区。
+    /// 业务作用：按值把 enum ordinal 编码进 MySQL 参数缓冲区。
     ///
     /// # 参数
     /// - `buf`: sqlx 提供的 MySQL 参数缓冲区。
@@ -499,7 +499,7 @@ impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
         <i32 as sqlx::Encode<'q, sqlx::MySql>>::encode(self.0.ordinal(), buf)
     }
 
-    /// 按引用把 enum ordinal 编码进 MySQL 参数缓冲区。
+    /// 业务作用：按引用把 enum ordinal 编码进 MySQL 参数缓冲区。
     ///
     /// # 参数
     /// - `buf`: sqlx 提供的 MySQL 参数缓冲区。
@@ -513,7 +513,7 @@ impl<'q, E: MapperEnum> sqlx::Encode<'q, sqlx::MySql> for EnumOrdinal<E> {
 }
 
 impl<'r, E: MapperEnum> sqlx::Decode<'r, sqlx::MySql> for EnumOrdinal<E> {
-    /// 从 MySQL 整数字段解码 enum ordinal。
+    /// 业务作用：从 MySQL 整数字段解码 enum ordinal。
     ///
     /// # 参数
     /// - `value`: sqlx 传入的 MySQL 原始列值引用。
@@ -558,7 +558,7 @@ pub struct CacheArg {
 }
 
 impl CacheArg {
-    /// 将任意可序列化参数转成稳定缓存参数。
+    /// 业务作用：将任意可序列化参数转成稳定缓存参数。
     ///
     /// # 参数
     /// - `name`: 方法参数名,仅供自定义 `hash_key_suffix` 引用。
@@ -574,7 +574,7 @@ impl CacheArg {
     }
 }
 
-/// 将 JSON 标量转换为可读缓存 key 后缀片段。
+/// 业务作用：将 JSON 标量转换为可读缓存 key 后缀片段。
 ///
 /// # 参数
 /// - `value`: 已由 Mapper 方法参数序列化得到的 JSON value。
@@ -588,7 +588,7 @@ fn scalar_key_part(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// 生成 `IN (#{ids})` 列表参数需要的 prepared 占位符。
+/// 业务作用：生成 `IN (#{ids})` 列表参数需要的 prepared 占位符。
 ///
 /// # 参数
 /// - `len`: 集合参数元素个数；为 0 时拒绝生成非法 `IN ()` SQL。
@@ -600,7 +600,7 @@ pub fn sql_in_placeholders(len: usize) -> anyhow::Result<String> {
     Ok((0..len).map(|_| "?").collect::<Vec<_>>().join(","))
 }
 
-/// 向 SQL 写入完整 `ORDER BY ...` 子句。
+/// 业务作用：向 SQL 写入完整 `ORDER BY ...` 子句。
 ///
 /// # 参数
 /// - `value`: 业务传入的白名单排序项、排序列表或可选排序项。
@@ -621,7 +621,7 @@ pub fn write_mapper_order_by_clause<T: MapperOrderBy + ?Sized>(
     Ok(())
 }
 
-/// 校验排序字段是否满足 Mapper 的最小安全形状。
+/// 业务作用：校验排序字段是否满足 Mapper 的最小安全形状。
 ///
 /// # 参数
 /// - `field`: `MapperOrderField` 返回的字段名。
@@ -635,7 +635,7 @@ fn validate_order_field(field: &str) -> anyhow::Result<()> {
     }
 }
 
-/// 判断排序字段是否为 `column` 或 `alias.column`。
+/// 业务作用：判断排序字段是否为 `column` 或 `alias.column`。
 ///
 /// # 参数
 /// - `field`: 待检查的字段名。
@@ -657,7 +657,7 @@ fn is_valid_order_field(field: &str) -> bool {
     true
 }
 
-/// 判断字符串是否为安全 SQL 标识符片段。
+/// 业务作用：判断字符串是否为安全 SQL 标识符片段。
 ///
 /// # 参数
 /// - `value`: 待检查的单段字段名或表别名。
@@ -670,7 +670,7 @@ fn is_sql_ident(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-/// 规范化 mapper SQL，确保缓存 hash_key 中的 SQL 与实际执行 SQL 一致。
+/// 业务作用：规范化 mapper SQL，确保缓存 hash_key 中的 SQL 与实际执行 SQL 一致。
 ///
 /// # 参数
 /// - `sql`: 宏展开或运行期动态标签拼出来的 prepared SQL。
@@ -791,7 +791,7 @@ pub fn normalize_sql_whitespace(sql: &str) -> String {
     out
 }
 
-/// 应用 MyBatis 风格 `trim/where/set` 的前后缀规则。
+/// 业务作用：应用声明式 SQL 中 `trim/where/set` 的前后缀规则。
 ///
 /// # 参数
 /// - `body`: 动态 SQL 标签体已经展开后的 SQL 片段。
@@ -863,7 +863,7 @@ pub fn apply_sql_trim(
     Some(out)
 }
 
-/// 判断 SQL 片段是否以指定 token 开头，且 token 后是合法边界。
+/// 业务作用：判断 SQL 片段是否以指定 token 开头，且 token 后是合法边界。
 ///
 /// # 参数
 /// - `value`: 已经规范化空白的 SQL 片段。
@@ -884,7 +884,7 @@ fn starts_with_sql_token(value: &str, token: &str) -> bool {
         .is_none_or(is_sql_token_boundary)
 }
 
-/// 判断 SQL 片段是否以指定 token 结尾，且 token 前是合法边界。
+/// 业务作用：判断 SQL 片段是否以指定 token 结尾，且 token 前是合法边界。
 ///
 /// # 参数
 /// - `value`: 已经规范化空白的 SQL 片段。
@@ -908,7 +908,7 @@ fn ends_with_sql_token(value: &str, token: &str) -> bool {
         .is_none_or(is_sql_token_boundary)
 }
 
-/// 判断 override token 是否完全由符号组成。
+/// 业务作用：判断 override token 是否完全由符号组成。
 ///
 /// # 参数
 /// - `token`: trim/where/set 配置中的前后缀覆盖 token。
@@ -918,7 +918,7 @@ fn is_symbol_sql_token(token: &str) -> bool {
         .all(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
 }
 
-/// 判断字符是否可以作为 SQL token 边界。
+/// 业务作用：判断字符是否可以作为 SQL token 边界。
 ///
 /// # 参数
 /// - `ch`: 待判断的相邻字符。
@@ -926,7 +926,7 @@ fn is_sql_token_boundary(ch: char) -> bool {
     ch.is_ascii_whitespace() || ch == '(' || ch == ',' || ch == ')'
 }
 
-/// 生成默认二级缓存 hash_key。
+/// 业务作用：生成默认二级缓存 hash_key。
 ///
 /// `normalized_sql` 必须是 `#{name}` 已转换成 `?` 的 SQL；返回值保留 SQL 明文,
 /// 参数值用 SHA-256 小写 hex，避免长参数直接进入 Redis Hash field。
@@ -943,7 +943,7 @@ pub fn cache_hash_key(normalized_sql: &str, args: &[CacheArg]) -> anyhow::Result
     Ok(hash_key)
 }
 
-/// 用自定义参数后缀生成 hash_key，仍强制保留 SQL 明文前缀。
+/// 业务作用：用自定义参数后缀生成 hash_key，仍强制保留 SQL 明文前缀。
 ///
 /// # 参数
 /// - `normalized_sql`: 规范化后的 prepared SQL。
@@ -983,7 +983,7 @@ pub fn cache_hash_key_with_suffix(
     Ok(format!("sql:{normalized_sql}:{out}"))
 }
 
-/// 计算小写 SHA-256 hex 字符串。
+/// 业务作用：计算小写 SHA-256 hex 字符串。
 ///
 /// # 参数
 /// - `bytes`: 需要进入 hash_key 的参数 JSON bytes 或锁 key 原始 bytes。
@@ -1025,7 +1025,7 @@ pub struct MapperCacheLoad {
 }
 
 impl MapperCacheLoad {
-    /// 构造首次读取即命中的返回值。
+    /// 业务作用：构造首次读取即命中的返回值。
     ///
     /// # 参数
     /// - `bytes`: 从 L2 cache 读取到的原始 value bytes。
@@ -1036,7 +1036,7 @@ impl MapperCacheLoad {
         }
     }
 
-    /// 构造等待同 key loader 完成后命中的返回值。
+    /// 业务作用：构造等待同 key loader 完成后命中的返回值。
     ///
     /// # 参数
     /// - `bytes`: 等待期间由其它调用写入缓存后再次读取到的 value bytes。
@@ -1047,7 +1047,7 @@ impl MapperCacheLoad {
         }
     }
 
-    /// 构造由当前调用加载数据库并写入缓存后的返回值。
+    /// 业务作用：构造由当前调用加载数据库并写入缓存后的返回值。
     ///
     /// # 参数
     /// - `bytes`: loader 从数据库查询并编码后的 value bytes。
@@ -1062,14 +1062,14 @@ impl MapperCacheLoad {
 /// Mapper 二级缓存入口。业务侧可以接 Redis Hash、本地缓存或自研缓存。
 #[async_trait]
 pub trait MapperL2Cache: Send + Sync + 'static {
-    /// 读取单条查询缓存。
+    /// 业务作用：读取单条查询缓存。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace，通常来自 `#[Mapper(cache_key = "...")]`。
     /// - `hash_key`: 单条查询的 Redis Hash field / 业务缓存字段。
     async fn get(&self, key: &str, hash_key: &str) -> anyhow::Result<Option<Vec<u8>>>;
 
-    /// 写入单条查询缓存。
+    /// 业务作用：写入单条查询缓存。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -1084,20 +1084,20 @@ pub trait MapperL2Cache: Send + Sync + 'static {
         ttl_ms: Option<u64>,
     ) -> anyhow::Result<()>;
 
-    /// 删除单条查询缓存。
+    /// 业务作用：删除单条查询缓存。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
     /// - `hash_key`: 需要删除的单条查询缓存字段。
     async fn evict(&self, key: &str, hash_key: &str) -> anyhow::Result<()>;
 
-    /// 删除整个缓存组。
+    /// 业务作用：删除整个缓存组。
     ///
     /// # 参数
     /// - `key`: 需要整体清理的 Mapper cache namespace。
     async fn clear_key(&self, key: &str) -> anyhow::Result<()>;
 
-    /// 读取缓存；未命中时加载源数据、写入缓存并返回已编码结果。
+    /// 业务作用：读取缓存；未命中时加载源数据、写入缓存并返回已编码结果。
     ///
     /// 默认实现保持兼容：`get -> loader -> put`。需要防缓存击穿时可使用
     /// [`SingleFlightMapperL2Cache`] 包装具体缓存，或在业务自定义实现中重写该方法。
@@ -1122,7 +1122,7 @@ pub trait MapperL2Cache: Send + Sync + 'static {
         Ok(MapperCacheLoad::loaded(bytes))
     }
 
-    /// 删除多个缓存组。某个 key 删除失败时仍继续尝试后续 key。
+    /// 业务作用：删除多个缓存组。某个 key 删除失败时仍继续尝试后续 key。
     ///
     /// # 参数
     /// - `keys`: 需要清理的 Mapper cache namespace 列表。
@@ -1167,7 +1167,7 @@ struct SingleFlightLockCleanup<'a> {
 }
 
 impl Drop for SingleFlightLockCleanup<'_> {
-    /// 在最后一个等待者离开时移除锁表项。
+    /// 业务作用：在最后一个等待者离开时移除锁表项。
     fn drop(&mut self) {
         let Ok(mut locks) = self.locks.lock() else {
             tracing::error!(
@@ -1184,7 +1184,7 @@ impl Drop for SingleFlightLockCleanup<'_> {
 }
 
 impl SingleFlightMapperL2Cache {
-    /// 包装已有二级缓存。
+    /// 业务作用：包装已有二级缓存。
     ///
     /// # 参数
     /// - `inner`: 真实执行 `get/put/evict/clear_key` 的 L2 cache 实现。
@@ -1195,7 +1195,7 @@ impl SingleFlightMapperL2Cache {
         }
     }
 
-    /// 返回被包装的缓存。
+    /// 业务作用：返回被包装的缓存。
     ///
     /// 该方法便于业务在启动诊断或组合多层 cache wrapper 时取回底层实现。
     pub fn inner(&self) -> Arc<dyn MapperL2Cache> {
@@ -1205,7 +1205,7 @@ impl SingleFlightMapperL2Cache {
 
 #[async_trait]
 impl MapperL2Cache for SingleFlightMapperL2Cache {
-    /// 透传单条缓存读取。
+    /// 业务作用：透传单条缓存读取。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -1214,7 +1214,7 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.get(key, hash_key).await
     }
 
-    /// 透传单条缓存写入。
+    /// 业务作用：透传单条缓存写入。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -1231,7 +1231,7 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.put(key, hash_key, value, ttl_ms).await
     }
 
-    /// 透传单条缓存删除。
+    /// 业务作用：透传单条缓存删除。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -1240,7 +1240,7 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.evict(key, hash_key).await
     }
 
-    /// 透传整个缓存组清理。
+    /// 业务作用：透传整个缓存组清理。
     ///
     /// # 参数
     /// - `key`: 需要清理的 Mapper cache namespace。
@@ -1248,7 +1248,7 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         self.inner.clear_key(key).await
     }
 
-    /// 在同进程内合并相同 key 的并发 cache miss。
+    /// 业务作用：在同进程内合并相同 key 的并发 cache miss。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -1350,7 +1350,7 @@ pub struct MapperMetric<'a> {
 
 /// Mapper 指标入口。业务侧可接 Prometheus、日志、内部监控或诊断探针。
 pub trait MapperMetrics: Send + Sync + 'static {
-    /// 记录单条指标事件。实现内部应避免 panic 和长阻塞。
+    /// 业务作用：记录单条指标事件。实现内部应避免 panic 和长阻塞。
     ///
     /// # 参数
     /// - `metric`: 由宏展开代码在 cache 命中、绕过、错误等路径上产生的指标事件。
@@ -1363,19 +1363,19 @@ pub trait MapperMetrics: Send + Sync + 'static {
 /// hash_key 仍固定由 normalized SQL + 参数 JSON hash 派生，避免 codec 切换导致 key
 /// 语义漂移。
 pub trait MapperCacheCodec: Send + Sync + 'static {
-    /// 将 serde JSON value 编码为缓存 bytes。
+    /// 业务作用：将 serde JSON value 编码为缓存 bytes。
     ///
     /// # 参数
     /// - `value`: Mapper 查询结果先序列化得到的 JSON value。
     fn encode_value(&self, value: &serde_json::Value) -> anyhow::Result<Vec<u8>>;
 
-    /// 将缓存 bytes 解码为 serde JSON value。
+    /// 业务作用：将缓存 bytes 解码为 serde JSON value。
     ///
     /// # 参数
     /// - `bytes`: 从 L2 cache 读取到的原始 value bytes。
     fn decode_value(&self, bytes: &[u8]) -> anyhow::Result<serde_json::Value>;
 
-    /// 已成功解码后是否建议把该缓存 value 回写为当前 codec 格式。
+    /// 业务作用：已成功解码后是否建议把该缓存 value 回写为当前 codec 格式。
     ///
     /// 默认不回写。版本化 / fallback codec 可用它完成“读旧写新”的迁移闭环。
     ///
@@ -1391,7 +1391,7 @@ pub trait MapperCacheCodec: Send + Sync + 'static {
 pub struct JsonMapperCacheCodec;
 
 impl MapperCacheCodec for JsonMapperCacheCodec {
-    /// 用 serde JSON 直接编码缓存 value，保持最朴素的可读格式。
+    /// 业务作用：用 serde JSON 直接编码缓存 value，保持最朴素的可读格式。
     ///
     /// # 参数
     /// - `value`: Mapper 查询结果 JSON value。
@@ -1399,7 +1399,7 @@ impl MapperCacheCodec for JsonMapperCacheCodec {
         Ok(serde_json::to_vec(value)?)
     }
 
-    /// 用 serde JSON 直接解码缓存 value。
+    /// 业务作用：用 serde JSON 直接解码缓存 value。
     ///
     /// # 参数
     /// - `bytes`: Redis Hash value 或其它 L2 cache 中保存的 JSON bytes。
@@ -1429,7 +1429,7 @@ pub struct VersionedMapperCacheCodec {
 }
 
 impl VersionedMapperCacheCodec {
-    /// 创建一个带版本头的 cache value codec。
+    /// 业务作用：创建一个带版本头的 cache value codec。
     ///
     /// # 参数
     /// - `codec_name`: 当前 codec 的稳定名称，只允许 ASCII 字母、数字、`-`、`_`、`.`。
@@ -1447,7 +1447,7 @@ impl VersionedMapperCacheCodec {
         })
     }
 
-    /// 注册一个具名历史 codec，用于读取旧缓存。
+    /// 业务作用：注册一个具名历史 codec，用于读取旧缓存。
     ///
     /// # 参数
     /// - `codec_name`: 历史缓存 value 版本头中的 codec 名称。
@@ -1462,7 +1462,7 @@ impl VersionedMapperCacheCodec {
         Ok(self)
     }
 
-    /// 关闭无版本头 JSON value 的兼容读取。
+    /// 业务作用：关闭无版本头 JSON value 的兼容读取。
     ///
     /// 业务确认 Redis 中不再存在旧 JSON 缓存后可以调用，避免继续接受非当前格式数据。
     pub fn without_legacy_json_fallback(mut self) -> Self {
@@ -1472,7 +1472,7 @@ impl VersionedMapperCacheCodec {
 }
 
 impl MapperCacheCodec for VersionedMapperCacheCodec {
-    /// 写入 `namapper:codec:v1:<codec_name>:` 版本头，再追加主 codec payload。
+    /// 业务作用：写入 `namapper:codec:v1:<codec_name>:` 版本头，再追加主 codec payload。
     ///
     /// # 参数
     /// - `value`: Mapper 查询结果 JSON value。
@@ -1488,7 +1488,7 @@ impl MapperCacheCodec for VersionedMapperCacheCodec {
         Ok(bytes)
     }
 
-    /// 根据缓存 value 版本头选择当前 codec、历史 codec 或 legacy JSON 路径。
+    /// 业务作用：根据缓存 value 版本头选择当前 codec、历史 codec 或 legacy JSON 路径。
     ///
     /// # 参数
     /// - `bytes`: 从 L2 cache 读取到的缓存 value bytes。
@@ -1524,7 +1524,7 @@ impl MapperCacheCodec for VersionedMapperCacheCodec {
         }
     }
 
-    /// 判断旧格式 value 是否需要在命中后回写为当前 codec。
+    /// 业务作用：判断旧格式 value 是否需要在命中后回写为当前 codec。
     ///
     /// # 参数
     /// - `bytes`: 已命中的缓存 value bytes。
@@ -1553,7 +1553,7 @@ pub struct FallbackMapperCacheCodec {
 }
 
 impl FallbackMapperCacheCodec {
-    /// 创建 fallback codec 组合。
+    /// 业务作用：创建 fallback codec 组合。
     ///
     /// # 参数
     /// - `primary`: 当前写入和优先读取使用的 codec。
@@ -1564,7 +1564,7 @@ impl FallbackMapperCacheCodec {
         }
     }
 
-    /// 追加一个 fallback codec。
+    /// 业务作用：追加一个 fallback codec。
     ///
     /// # 参数
     /// - `fallback`: 主 codec 解码失败后尝试的历史 codec。
@@ -1573,7 +1573,7 @@ impl FallbackMapperCacheCodec {
         self
     }
 
-    /// 批量追加 fallback codec。
+    /// 业务作用：批量追加 fallback codec。
     ///
     /// # 参数
     /// - `fallbacks`: 按尝试顺序排列的历史 codec 集合。
@@ -1587,7 +1587,7 @@ impl FallbackMapperCacheCodec {
 }
 
 impl MapperCacheCodec for FallbackMapperCacheCodec {
-    /// 写入始终使用 primary codec，避免继续产生旧格式缓存。
+    /// 业务作用：写入始终使用 primary codec，避免继续产生旧格式缓存。
     ///
     /// # 参数
     /// - `value`: Mapper 查询结果 JSON value。
@@ -1595,7 +1595,7 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
         self.primary.encode_value(value)
     }
 
-    /// 读取时先尝试 primary，再按顺序尝试 fallback。
+    /// 业务作用：读取时先尝试 primary，再按顺序尝试 fallback。
     ///
     /// # 参数
     /// - `bytes`: 从 L2 cache 读取到的缓存 value bytes。
@@ -1616,7 +1616,7 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
         anyhow::bail!("mapper cache codec decode failed: {}", errors.join("; "))
     }
 
-    /// 判断是否命中了 fallback 格式，需要读旧写新。
+    /// 业务作用：判断是否命中了 fallback 格式，需要读旧写新。
     ///
     /// # 参数
     /// - `bytes`: 已命中的缓存 value bytes。
@@ -1635,20 +1635,20 @@ impl MapperCacheCodec for FallbackMapperCacheCodec {
 /// 这是 method-level 静态 codec 的低层接口，跳过 `serde_json::Value` 中间层。
 /// 它不做 dyn object 抹平，由宏在具体 `#[Query]` 返回类型上单态化调用。
 pub trait MapperTypedCacheCodec<T>: Send + Sync + 'static {
-    /// 编码具体业务返回类型。
+    /// 业务作用：编码具体业务返回类型。
     ///
     /// # 参数
     /// - `value`: `#[Query]` 方法返回的具体类型值。
     fn encode_typed(&self, value: &T) -> anyhow::Result<Vec<u8>>;
 
-    /// 解码具体业务返回类型。
+    /// 业务作用：解码具体业务返回类型。
     ///
     /// # 参数
     /// - `bytes`: 从 L2 cache 读取到的原始 value bytes。
     fn decode_typed(&self, bytes: &[u8]) -> anyhow::Result<T>;
 }
 
-/// 校验 cache codec 名称是否能安全写入版本头。
+/// 业务作用：校验 cache codec 名称是否能安全写入版本头。
 ///
 /// # 参数
 /// - `codec_name`: 业务传入的 codec 名称。
@@ -1672,7 +1672,7 @@ static DEFAULT_L2_CACHE: OnceLock<Arc<dyn MapperL2Cache>> = OnceLock::new();
 static DEFAULT_MAPPER_METRICS: OnceLock<Arc<dyn MapperMetrics>> = OnceLock::new();
 static DEFAULT_MAPPER_CACHE_CODEC: OnceLock<Arc<dyn MapperCacheCodec>> = OnceLock::new();
 
-/// 安装进程级默认 Mapper 二级缓存。
+/// 业务作用：安装进程级默认 Mapper 二级缓存。
 ///
 /// # 参数
 /// - `cache`: 默认缓存实现。
@@ -1682,14 +1682,14 @@ pub fn set_default_l2_cache(cache: Arc<dyn MapperL2Cache>) -> anyhow::Result<()>
         .map_err(|_| anyhow::anyhow!("mapper default L2 cache has already been installed"))
 }
 
-/// 获取进程级默认 Mapper 二级缓存。
+/// 业务作用：获取进程级默认 Mapper 二级缓存。
 ///
 /// 返回 clone 后的 `Arc`，业务代码可以安全持有，不影响全局默认值生命周期。
 pub fn default_l2_cache() -> Option<Arc<dyn MapperL2Cache>> {
     DEFAULT_L2_CACHE.get().cloned()
 }
 
-/// 安装进程级 Mapper 指标入口。
+/// 业务作用：安装进程级 Mapper 指标入口。
 ///
 /// # 参数
 /// - `metrics`: 业务提供的指标实现，通常转接 Prometheus、日志或 APM。
@@ -1699,14 +1699,14 @@ pub fn set_default_mapper_metrics(metrics: Arc<dyn MapperMetrics>) -> anyhow::Re
         .map_err(|_| anyhow::anyhow!("mapper default metrics has already been installed"))
 }
 
-/// 获取进程级 Mapper 指标入口。
+/// 业务作用：获取进程级 Mapper 指标入口。
 ///
 /// 返回 clone 后的 `Arc`，宏展开代码通过它记录缓存命中、绕过和错误事件。
 pub fn default_mapper_metrics() -> Option<Arc<dyn MapperMetrics>> {
     DEFAULT_MAPPER_METRICS.get().cloned()
 }
 
-/// 安装进程级 Mapper cache value codec。
+/// 业务作用：安装进程级 Mapper cache value codec。
 ///
 /// 必须在产生 cache value 之前调用。hash_key 生成不受 codec 影响。
 ///
@@ -1718,14 +1718,14 @@ pub fn set_default_mapper_cache_codec(codec: Arc<dyn MapperCacheCodec>) -> anyho
         .map_err(|_| anyhow::anyhow!("mapper default cache codec has already been installed"))
 }
 
-/// 获取进程级 Mapper cache value codec。
+/// 业务作用：获取进程级 Mapper cache value codec。
 ///
 /// 未安装时运行时会回退到 [`JsonMapperCacheCodec`]。
 pub fn default_mapper_cache_codec() -> Option<Arc<dyn MapperCacheCodec>> {
     DEFAULT_MAPPER_CACHE_CODEC.get().cloned()
 }
 
-/// 编码 Mapper 查询结果缓存值。
+/// 业务作用：编码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `value`: `#[Query(cache = true)]` 返回值或返回值集合。
@@ -1734,7 +1734,7 @@ pub fn encode_cache_value<T: serde::Serialize + ?Sized>(value: &T) -> anyhow::Re
     encode_cache_value_with_codec(value, None)
 }
 
-/// 使用指定 codec 编码 Mapper 查询结果缓存值。
+/// 业务作用：使用指定 codec 编码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `value`: `#[Query(cache = true)]` 返回值或返回值集合。
@@ -1752,7 +1752,7 @@ pub fn encode_cache_value_with_codec<T: serde::Serialize + ?Sized>(
     }
 }
 
-/// 解码 Mapper 查询结果缓存值。
+/// 业务作用：解码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `bytes`: 从 L2 cache 读出的原始 value bytes。
@@ -1761,7 +1761,7 @@ pub fn decode_cache_value<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> anyho
     decode_cache_value_with_codec(bytes, None)
 }
 
-/// 使用指定 codec 解码 Mapper 查询结果缓存值。
+/// 业务作用：使用指定 codec 解码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `bytes`: 从 L2 cache 读出的原始 value bytes。
@@ -1780,7 +1780,7 @@ pub fn decode_cache_value_with_codec<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_value(value)?)
 }
 
-/// 使用强类型 codec 编码 Mapper 查询结果缓存值。
+/// 业务作用：使用强类型 codec 编码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `value`: 具体业务返回类型值。
@@ -1793,7 +1793,7 @@ where
     codec.encode_typed(value)
 }
 
-/// 使用强类型 codec 解码 Mapper 查询结果缓存值。
+/// 业务作用：使用强类型 codec 解码 Mapper 查询结果缓存值。
 ///
 /// # 参数
 /// - `bytes`: 从 L2 cache 读出的原始 value bytes。
@@ -1806,7 +1806,7 @@ where
     codec.decode_typed(bytes)
 }
 
-/// 判断命中的缓存 value 是否应按当前 codec 回写。
+/// 业务作用：判断命中的缓存 value 是否应按当前 codec 回写。
 ///
 /// # 参数
 /// - `bytes`: 已命中的缓存 value bytes。
@@ -1819,7 +1819,7 @@ pub fn cache_value_needs_rewrite(bytes: &[u8], codec: Option<&dyn MapperCacheCod
         .unwrap_or(false)
 }
 
-/// 宏展开调用的指标记录入口。
+/// 业务作用：宏展开调用的指标记录入口。
 ///
 /// # 参数
 /// - `metric`: 本次 Mapper cache 或 SQL 路径产生的指标事件。
@@ -1830,7 +1830,7 @@ pub fn record_mapper_metric(metric: MapperMetric<'_>) {
     }
 }
 
-/// 生产启动检查：存在默认缓存查询时，必须已经安装默认 L2 cache。
+/// 业务作用：生产启动检查：存在默认缓存查询时，必须已经安装默认 L2 cache。
 ///
 /// 该函数用于应用启动期 fail-fast，避免 `cache = true` 查询在生产环境静默绕过缓存。
 ///
@@ -1844,19 +1844,19 @@ pub fn assert_l2_cache_installed_for_cached_queries() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 当前是否处于 ambient 事务中。
+/// 业务作用：当前是否处于 ambient 事务中。
 ///
 /// Mapper 宏用它决定查询是否要走事务连接，以及是否允许业务显式启用事务内 L2 cache。
 pub fn in_transaction() -> bool {
     natx::in_transaction()
 }
 
-/// 当前 ambient 事务所属 datasource；无事务时返回 `None`。
+/// 业务作用：当前 ambient 事务所属 datasource；无事务时返回 `None`。
 pub fn current_datasource() -> Option<&'static str> {
     natx::current_datasource()
 }
 
-/// 获取指定 datasource 的连接池 clone。
+/// 业务作用：获取指定 datasource 的连接池 clone。
 ///
 /// 该入口不加入 ambient 事务，主要给 `#[StreamQuery]` 这类需要拥有连接池生命周期的
 /// 无事务流式查询使用。
@@ -1867,14 +1867,14 @@ pub fn pool_for(datasource: &'static str) -> anyhow::Result<sqlx::MySqlPool> {
     natx::pool_for_datasource(datasource)
 }
 
-/// 获取当前 Mapper SQL 执行连接。
+/// 业务作用：获取当前 Mapper SQL 执行连接。
 ///
 /// 无 ambient 事务时会从默认 datasource 连接池取连接；事务内会复用当前事务连接。
 pub async fn conn() -> anyhow::Result<natx::Conn> {
     natx::conn().await
 }
 
-/// 从指定 datasource 获取 Mapper SQL 执行连接。
+/// 业务作用：从指定 datasource 获取 Mapper SQL 执行连接。
 ///
 /// # 参数
 /// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
@@ -1882,14 +1882,14 @@ pub async fn conn_for(datasource: &'static str) -> anyhow::Result<natx::Conn> {
     natx::conn_for(datasource).await
 }
 
-/// 获取必须处于事务中的 Mapper SQL 执行连接。
+/// 业务作用：获取必须处于事务中的 Mapper SQL 执行连接。
 ///
 /// 该入口用于 `tx = true` 的 Mapper 方法，事务缺失时立即报错。
 pub async fn mandatory_conn() -> anyhow::Result<natx::Conn> {
     natx::mandatory_conn().await
 }
 
-/// 从指定 datasource 获取必须处于事务中的 Mapper SQL 执行连接。
+/// 业务作用：从指定 datasource 获取必须处于事务中的 Mapper SQL 执行连接。
 ///
 /// # 参数
 /// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
@@ -1897,7 +1897,7 @@ pub async fn mandatory_conn_for(datasource: &'static str) -> anyhow::Result<natx
     natx::mandatory_conn_for(datasource).await
 }
 
-/// 根据当前 key 和关联元数据计算需要清理的缓存组。
+/// 业务作用：根据当前 key 和关联元数据计算需要清理的缓存组。
 ///
 /// # 参数
 /// - `source_key`: 当前写操作触发清理的源 key。
@@ -1924,7 +1924,7 @@ pub fn cache_clear_targets(source_key: &str, flush_refs: bool) -> Vec<String> {
     targets
 }
 
-/// 在无事务时立即清理缓存；在事务内注册 commit 后清理。
+/// 业务作用：在无事务时立即清理缓存；在事务内注册 commit 后清理。
 ///
 /// # 参数
 /// - `cache`: 当前 client 注入的缓存实现。
@@ -2000,7 +2000,7 @@ pub async fn clear_after_commit_or_now(
 
 /// Redis Hash 版 Mapper 二级缓存适配器。
 ///
-/// 数据结构对齐 MyBatis 二级缓存的 namespace/cache-key 拆分：
+/// 数据结构按 namespace/cache-key 拆分二级缓存身份：
 /// - Redis key = mapper key / namespace；
 /// - Redis hash field = `sql:{normalized_sql}:...` 形式的 hash_key；
 /// - Redis hash value = mapper 运行时序列化后的查询结果 bytes。
@@ -2015,7 +2015,7 @@ pub struct RedisMapperL2Cache {
 
 #[cfg(feature = "redis-cache")]
 impl RedisMapperL2Cache {
-    /// 创建 Redis Hash 版 Mapper 二级缓存。
+    /// 业务作用：创建 Redis Hash 版 Mapper 二级缓存。
     ///
     /// # 参数
     /// - `redis`: Redis Cluster 异步连接；内部按请求 clone 连接句柄。
@@ -2026,7 +2026,7 @@ impl RedisMapperL2Cache {
         }
     }
 
-    /// 生产启动期探测 Redis 是否真正支持 Hash field 级 TTL。
+    /// 业务作用：生产启动期探测 Redis 是否真正支持 Hash field 级 TTL。
     ///
     /// 默认 `put(..., Some(ttl_ms))` 会在 Redis 不支持 `HPEXPIRE` 时降级为 key 级
     /// `PEXPIRE`，保证旧环境可用。若业务要求必须具备 per-field TTL，请在启动阶段
@@ -2037,7 +2037,7 @@ impl RedisMapperL2Cache {
         assert_redis_hash_field_ttl_supported(self.redis.clone()).await
     }
 
-    /// 为刚写入的 Redis Hash field 设置 TTL，必要时降级为整个 key 的 TTL。
+    /// 业务作用：为刚写入的 Redis Hash field 设置 TTL，必要时降级为整个 key 的 TTL。
     ///
     /// # 参数
     /// - `conn`: 当前请求使用的 Redis Cluster 连接。
@@ -2078,7 +2078,7 @@ impl RedisMapperL2Cache {
     }
 }
 
-/// 生产启动期探测 Redis Cluster 连接是否支持 Hash field 级 TTL。
+/// 业务作用：生产启动期探测 Redis Cluster 连接是否支持 Hash field 级 TTL。
 ///
 /// 该函数只做能力探测，不安装任何 Mapper 默认缓存。探测成功说明当前 Redis 端支持
 /// `HPEXPIRE` / `HPTTL`，可安全依赖 `RedisMapperL2Cache` 的 per-field TTL 语义。
@@ -2157,7 +2157,7 @@ const REDIS_TTL_MODE_FIELD: u8 = 1;
 #[cfg(feature = "redis-cache")]
 const REDIS_TTL_MODE_KEY: u8 = 2;
 
-/// 对单个 Redis Hash field 执行毫秒级过期。
+/// 业务作用：对单个 Redis Hash field 执行毫秒级过期。
 ///
 /// # 参数
 /// - `conn`: 当前请求使用的 Redis Cluster 连接。
@@ -2193,7 +2193,7 @@ async fn redis_hpexpire_field(
     }
 }
 
-/// 判断 Redis 错误是否表示当前服务端不支持 `HPEXPIRE`。
+/// 业务作用：判断 Redis 错误是否表示当前服务端不支持 `HPEXPIRE`。
 ///
 /// # 参数
 /// - `err`: Redis 命令返回的错误。
@@ -2208,7 +2208,7 @@ fn redis_error_is_hpexpire_unsupported(err: &redis::RedisError) -> bool {
 #[cfg(feature = "redis-cache")]
 static REDIS_FIELD_TTL_PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// 生成 Redis Hash field TTL 探测用 key。
+/// 业务作用：生成 Redis Hash field TTL 探测用 key。
 ///
 /// key 中包含进程号、纳秒时间和进程内递增序号，避免并发启动的多个服务实例互相干扰。
 #[cfg(feature = "redis-cache")]
@@ -2227,7 +2227,7 @@ fn redis_hash_field_ttl_probe_key() -> String {
 #[cfg(feature = "redis-cache")]
 #[async_trait]
 impl MapperL2Cache for RedisMapperL2Cache {
-    /// 从 Redis Hash 读取单条 Mapper 查询缓存。
+    /// 业务作用：从 Redis Hash 读取单条 Mapper 查询缓存。
     ///
     /// # 参数
     /// - `key`: Redis Hash key，也就是 Mapper cache namespace。
@@ -2239,7 +2239,7 @@ impl MapperL2Cache for RedisMapperL2Cache {
         Ok(conn.hget(key, hash_key).await?)
     }
 
-    /// 写入 Redis Hash field，并按需设置 TTL。
+    /// 业务作用：写入 Redis Hash field，并按需设置 TTL。
     ///
     /// # 参数
     /// - `key`: Redis Hash key，也就是 Mapper cache namespace。
@@ -2267,7 +2267,7 @@ impl MapperL2Cache for RedisMapperL2Cache {
         Ok(())
     }
 
-    /// 删除 Redis Hash 中的单个查询缓存 field。
+    /// 业务作用：删除 Redis Hash 中的单个查询缓存 field。
     ///
     /// # 参数
     /// - `key`: Redis Hash key，也就是 Mapper cache namespace。
@@ -2280,7 +2280,7 @@ impl MapperL2Cache for RedisMapperL2Cache {
         Ok(())
     }
 
-    /// 删除整个 Redis Hash，清理当前 Mapper cache namespace 下所有查询缓存。
+    /// 业务作用：删除整个 Redis Hash，清理当前 Mapper cache namespace 下所有查询缓存。
     ///
     /// # 参数
     /// - `key`: Redis Hash key，也就是 Mapper cache namespace。
@@ -2314,7 +2314,7 @@ pub struct RedisDistributedSingleFlightMapperL2Cache {
 
 #[cfg(feature = "redis-cache")]
 impl RedisDistributedSingleFlightMapperL2Cache {
-    /// 包装已有二级缓存，并使用同一个 Redis 连接做跨进程短锁。
+    /// 业务作用：包装已有二级缓存，并使用同一个 Redis 连接做跨进程短锁。
     ///
     /// # 参数
     /// - `inner`: 真实执行缓存读写的 L2 cache 实现。
@@ -2332,7 +2332,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
         }
     }
 
-    /// 设置 Redis 锁 TTL。过短会让慢 loader 重复执行，过长会放大进程崩溃后的等待。
+    /// 业务作用：设置 Redis 锁 TTL。过短会让慢 loader 重复执行，过长会放大进程崩溃后的等待。
     ///
     /// # 参数
     /// - `lock_ttl_ms`: 分布式锁过期时间，单位毫秒；小于 1 时按 1 处理。
@@ -2341,7 +2341,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
         self
     }
 
-    /// 设置单轮等待时间；超时后会再次尝试抢锁。
+    /// 业务作用：设置单轮等待时间；超时后会再次尝试抢锁。
     ///
     /// # 参数
     /// - `wait_timeout_ms`: 等待者单轮最大等待时间，单位毫秒；小于 1 时按 1 处理。
@@ -2350,7 +2350,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
         self
     }
 
-    /// 设置等待者轮询底层 cache 的间隔。
+    /// 业务作用：设置等待者轮询底层 cache 的间隔。
     ///
     /// # 参数
     /// - `poll_interval_ms`: 等待期间读取底层 cache 的间隔，单位毫秒；小于 1 时按 1 处理。
@@ -2359,7 +2359,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
         self
     }
 
-    /// 返回被包装的缓存。
+    /// 业务作用：返回被包装的缓存。
     ///
     /// 该方法便于启动诊断或组合 wrapper 时访问底层缓存实现。
     pub fn inner(&self) -> Arc<dyn MapperL2Cache> {
@@ -2370,7 +2370,7 @@ impl RedisDistributedSingleFlightMapperL2Cache {
 #[cfg(feature = "redis-cache")]
 #[async_trait]
 impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
-    /// 透传单条缓存读取。
+    /// 业务作用：透传单条缓存读取。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -2379,7 +2379,7 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.get(key, hash_key).await
     }
 
-    /// 透传单条缓存写入。
+    /// 业务作用：透传单条缓存写入。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -2396,7 +2396,7 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.put(key, hash_key, value, ttl_ms).await
     }
 
-    /// 透传单条缓存删除。
+    /// 业务作用：透传单条缓存删除。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -2405,7 +2405,7 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.evict(key, hash_key).await
     }
 
-    /// 透传整个缓存组清理。
+    /// 业务作用：透传整个缓存组清理。
     ///
     /// # 参数
     /// - `key`: 需要清理的 Mapper cache namespace。
@@ -2413,7 +2413,7 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
         self.inner.clear_key(key).await
     }
 
-    /// 用 Redis 短锁合并跨进程相同 key 的并发 cache miss。
+    /// 业务作用：用 Redis 短锁合并跨进程相同 key 的并发 cache miss。
     ///
     /// # 参数
     /// - `key`: Mapper cache namespace。
@@ -2489,7 +2489,7 @@ impl MapperL2Cache for RedisDistributedSingleFlightMapperL2Cache {
     }
 }
 
-/// 生成分布式 single-flight 锁 key。
+/// 业务作用：生成分布式 single-flight 锁 key。
 ///
 /// # 参数
 /// - `key`: Mapper cache namespace。
@@ -2506,7 +2506,7 @@ fn distributed_single_flight_lock_key(key: &str, hash_key: &str) -> String {
 #[cfg(feature = "redis-cache")]
 static REDIS_SINGLE_FLIGHT_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// 生成分布式锁持有者 token。
+/// 业务作用：生成分布式锁持有者 token。
 ///
 /// token 由进程号、时间戳和进程内序号组成，用于释放锁时确认“锁仍属于自己”。
 #[cfg(feature = "redis-cache")]
@@ -2519,7 +2519,7 @@ fn distributed_single_flight_token() -> String {
     format!("{}:{nanos}:{counter}", std::process::id())
 }
 
-/// 尝试获取 Redis 分布式 single-flight 锁。
+/// 业务作用：尝试获取 Redis 分布式 single-flight 锁。
 ///
 /// # 参数
 /// - `conn`: 当前请求使用的 Redis Cluster 连接。
@@ -2545,7 +2545,7 @@ async fn redis_try_acquire_single_flight(
     Ok(response.is_some())
 }
 
-/// 释放 Redis 分布式 single-flight 锁。
+/// 业务作用：释放 Redis 分布式 single-flight 锁。
 ///
 /// # 参数
 /// - `conn`: 当前请求使用的 Redis Cluster 连接。

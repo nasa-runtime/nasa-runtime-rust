@@ -5,7 +5,7 @@ use crate::ApplicationError;
 /// 单条同步诊断允许写出的最大字节数，防止异常文本无限放大 stderr。
 const REPORT_MAX_BYTES: usize = 2_048;
 
-/// 以 best-effort 方式直接写入 stderr，不依赖尚未启动或已经停止的日志组件。
+/// 业务作用：以 best-effort 方式直接写入 stderr，不依赖尚未启动或已经停止的日志组件。
 ///
 /// # 参数
 ///
@@ -14,7 +14,7 @@ pub(crate) fn write_stderr(message: &str) {
     let _ = std::io::stderr().lock().write_all(message.as_bytes());
 }
 
-/// 输出同步预检阶段的唯一失败报告。
+/// 业务作用：输出同步预检阶段的唯一失败报告。
 ///
 /// # 参数
 ///
@@ -27,7 +27,7 @@ pub(crate) fn report_preflight(error: &ApplicationError) {
     write_stderr(&message);
 }
 
-/// 输出异步生命周期阶段的唯一主失败报告。
+/// 业务作用：输出异步生命周期阶段的唯一主失败报告。
 ///
 /// # 参数
 ///
@@ -40,7 +40,7 @@ pub(crate) fn report_runtime(error: &ApplicationError) {
     write_stderr(&message);
 }
 
-/// 输出不会覆盖首次终态的次要清理失败。
+/// 业务作用：输出不会覆盖首次终态的次要清理失败。
 ///
 /// # 参数
 ///
@@ -53,7 +53,7 @@ pub(crate) fn report_shutdown(error: &ApplicationError) {
     write_stderr(&message);
 }
 
-/// 展开框架错误摘要及其完整底层链，供统一脱敏管道消费。
+/// 业务作用：展开框架错误摘要及其完整底层链，供统一脱敏管道消费。
 ///
 /// `ApplicationError` 的 `Display` 只写组件、阶段和稳定摘要；`with_source` 保存的根因
 /// （bind/DB/Redis/config 等）挂在 `#[source]` 上，必须显式沿 `std::error::Error::source`
@@ -74,7 +74,7 @@ pub(crate) fn error_chain(error: &ApplicationError) -> String {
     output
 }
 
-/// 对常见 URI 凭据和敏感键赋值执行保守替换。
+/// 业务作用：对常见 URI 凭据和敏感键赋值执行保守替换。
 ///
 /// # 参数
 ///
@@ -94,7 +94,7 @@ pub(crate) fn redact(input: &str) -> String {
     output
 }
 
-/// 隐去 URI authority 中 `@` 之前的 userinfo，保留 scheme 和 host 便于定位。
+/// 业务作用：隐去 URI authority 中 `@` 之前的 userinfo，保留 scheme 和 host 便于定位。
 ///
 /// # 参数
 ///
@@ -122,7 +122,7 @@ fn redact_uri_userinfo(input: &str) -> String {
     output
 }
 
-/// 隐去一个常见敏感键后紧邻的标量值。
+/// 业务作用：隐去一个常见敏感键后紧邻的标量值。
 ///
 /// # 参数
 ///
@@ -172,7 +172,7 @@ fn redact_assignment(input: &str, key: &str) -> String {
     output
 }
 
-/// 在 UTF-8 字符边界内限制单条诊断长度。
+/// 业务作用：在 UTF-8 字符边界内限制单条诊断长度。
 ///
 /// # 参数
 ///

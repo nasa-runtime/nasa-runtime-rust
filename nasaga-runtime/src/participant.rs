@@ -1,6 +1,6 @@
 //! 参与方 adapter 支撑：`#[saga]` 宏生成代码调用的完整本地事务 wrapper。
 //!
-//! 固定事务序（§11.5.3）：身份复验（envelope 伪造不进业务路径）→ 开启本地事务 →
+//! 固定事务序：身份复验（envelope 伪造不进业务路径）→ 开启本地事务 →
 //! Inbox claim(`command_id`) → 按 `effect_id` 竞争 participant step gate → 业务 handler
 //! → 本地业务结果 + gate 落账 → 结果 Outbox → COMMIT → transport 在 COMMIT 后 ACK。
 //! `Retryable` 与任何基础设施失败返回 `Err` 使事务回滚且**不得 ACK**。

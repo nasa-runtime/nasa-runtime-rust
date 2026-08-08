@@ -44,7 +44,7 @@ use super::KeyLayout;
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// disposition marker key（每分区一个，约束“同一分区同时最多一宗 Park”，
+/// 业务作用：disposition marker key（每分区一个，约束“同一分区同时最多一宗 Park”，
 /// 与 的 park_id 多宗模型的差异已在头部注明)。
 ///
 /// # 参数
@@ -54,7 +54,7 @@ pub fn marker_key(layout: &KeyLayout, p: u32) -> String {
     format!("{}:disposition:{}", layout.prefix, p)
 }
 
-/// quarantine key(确定性:同 park_id 重入即幂等覆盖校验)。
+/// 业务作用：quarantine key(确定性:同 park_id 重入即幂等覆盖校验)。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -63,7 +63,7 @@ pub fn quarantine_key(layout: &KeyLayout, park_id: &str) -> String {
     format!("{}:quarantine:{}", layout.prefix, park_id)
 }
 
-/// parked 索引 key(value = park_id;新 owner 接管分区时读它恢复停拉)。
+/// 业务作用：parked 索引 key(value = park_id;新 owner 接管分区时读它恢复停拉)。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -108,7 +108,7 @@ pub struct OwnerLease<'a> {
 }
 
 impl OwnerLease<'_> {
-    /// 返回本次管理转换是否携带 V2 fence 的序列化标记。
+    /// 业务作用：返回本次管理转换是否携带 V2 fence 的序列化标记。
     ///
     /// Lua 脚本用 `"1"`/`"0"` 区分严格 fence 校验和原实现 V1 holder-only 校验。
     fn has_fence(&self) -> &'static str {
@@ -120,7 +120,7 @@ impl OwnerLease<'_> {
     }
 }
 
-/// 原子认领管理转换(owner-fenced + 记 operation_id)。Ok(new_version)=认领成功;Err=owner 不符
+/// 业务作用：原子认领管理转换(owner-fenced + 记 operation_id)。Ok(new_version)=认领成功;Err=owner 不符
 /// (`OwnershipChanged`,留 PEL 交新 owner)/ 状态冲突(`VersionConflict`)。
 ///
 /// # 参数
@@ -211,7 +211,7 @@ end
 return 'OK'
 "#;
 
-/// 入口 owner-fence 校验:每个 mutator 函数**开头**调用——所有状态分支
+/// 业务作用：入口 owner-fence 校验:每个 mutator 函数**开头**调用——所有状态分支
 /// (含 `*Publishing`/`Dropping`/terminal 重入)进入前都先确认调用者仍是当前 owner。**不可缺省**。
 ///
 /// # 参数
@@ -238,7 +238,7 @@ async fn verify_owner_fenced(client: &Arc<RedisClient>, lease: &OwnerLease<'_>) 
     )))
 }
 
-/// 重入身份校验:marker 记的 `transition_operation_id` 必须 == 本 op,否则 `OperationConflict`
+/// 业务作用：重入身份校验:marker 记的 `transition_operation_id` 必须 == 本 op,否则 `OperationConflict`
 /// ——**op B 不得续作 op A 的在途转换**。无记录(老 marker/首次)→ 放行。
 ///
 /// # 参数
@@ -258,7 +258,7 @@ async fn assert_op_owns(client: &Arc<RedisClient>, marker: &str, op_id: &str) ->
     }
 }
 
-/// **auto-poison 处置的 operation_id**，用于 liveness-takeover 与 auto-DLQ 崩溃恢复。
+/// 业务作用：**auto-poison 处置的 operation_id**，用于 liveness-takeover 与 auto-DLQ 崩溃恢复。
 /// auto-DLQ 由 owner **内部**触发(非 producer/admin 命令),无外部重提主体——若 publish 中途崩溃,
 /// 旧实现用一次性 `park_id` 作 op,接管方无从续作 → 分区永久冻结。
 /// 改用**可识别 + 稳定**的 `auto:{p}:{park_id}`:① `auto:` 前缀让接管方识别"这是 auto 处置、可自动续作"
@@ -272,7 +272,7 @@ pub fn auto_op_id(p: u32, park_id: &str) -> String {
     format!("auto:{p}:{park_id}")
 }
 
-/// 是否 auto-poison 处置 op(接管方据此判定可否自动续作在途 `*Publishing`)。
+/// 业务作用：是否 auto-poison 处置 op(接管方据此判定可否自动续作在途 `*Publishing`)。
 ///
 /// # 参数
 /// - `op_id`: 要判断的 operation ID。
@@ -280,7 +280,7 @@ pub fn is_auto_op(op_id: &str) -> bool {
     op_id.starts_with("auto:")
 }
 
-/// 读 marker 当前 version(诊断/审计;无 marker 或无 version 字段 → 0)。
+/// 业务作用：读 marker 当前 version(诊断/审计;无 marker 或无 version 字段 → 0)。
 ///
 /// # 参数
 /// - `client`: 读取 marker 的 Redis 客户端。
@@ -293,7 +293,7 @@ pub async fn marker_version(client: &Arc<RedisClient>, layout: &KeyLayout, p: u3
         .unwrap_or(0))
 }
 
-/// 读 quarantine 批次的全部 payload(**fail-closed**; 修正)。
+/// 业务作用：读 quarantine 批次的全部 payload(**fail-closed**; 修正)。
 /// quarantine 字段缺失 = 持久状态损坏,**绝不用空字节替代**(那会把原业务数据
 /// 静默替换成空,resume/dlq 还报告成功 = 确定性数据损坏)——一律返回携带
 /// `partition/park_id/index` 的协议损坏错误,由人工对账。
@@ -331,7 +331,7 @@ async fn load_quarantine_payloads(
     Ok(payloads)
 }
 
-/// 重入场景按已持久化的 planned 长度读 payload(同样 fail-closed)。
+/// 业务作用：重入场景按已持久化的 planned 长度读 payload(同样 fail-closed)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -434,7 +434,7 @@ redis.call('SET', KEYS[5], ARGV[3])
 return 1
 "#;
 
-/// Park 一批毒消息(coordinator 在重投超限 + policy=Park 时调用)。
+/// 业务作用：Park 一批毒消息(coordinator 在重投超限 + policy=Park 时调用)。
 /// `records` = (源 entry ID, envelope payload);成功返回 park_id。
 ///
 /// # 参数
@@ -492,7 +492,7 @@ pub async fn park(
     }
 }
 
-/// 读取分区当前 Park 信息(管理/诊断)。复用 `takeover_disposition` 归约(marker 权威),
+/// 业务作用：读取分区当前 Park 信息(管理/诊断)。复用 `takeover_disposition` 归约(marker 权威),
 /// 三态映射(损坏状态不能误报 None,必须 Err)
 ///   · NotParked   → Ok(None)
 ///   · Frozen      → Ok(Some(park_id))
@@ -557,7 +557,7 @@ const DISPOSITION_NON_TERMINAL: &[&str] = &[
 ];
 const DISPOSITION_TERMINAL: &[&str] = &["Resumed", "Dlqed", "Dropped"];
 
-/// 接管时归约 disposition marker + parked index(marker 权威,index 仅校验)。
+/// 业务作用：接管时归约 disposition marker + parked index(marker 权威,index 仅校验)。
 /// 任一读失败上抛(调用方 fail-closed 放弃接管)。
 ///
 /// # 参数
@@ -637,7 +637,7 @@ pub async fn takeover_disposition(
     }
 }
 
-/// 解析 stream ID "ms-seq"。
+/// 业务作用：解析 stream ID "ms-seq"。
 ///
 /// # 参数
 /// - `s`: 要解析的输入字符串。
@@ -646,7 +646,7 @@ fn parse_sid(s: &str) -> Option<(u64, u64)> {
     Some((ms.parse().ok()?, seq.parse().ok()?))
 }
 
-/// 从 base(last-generated-id)起预约 n 个严格递增 ID( 算法封口:
+/// 业务作用：从 base(last-generated-id)起预约 n 个严格递增 ID( 算法封口:
 /// 按 (ms, seq) 元组递增;seq 溢出进位 ms+1、seq=0;u64::MAX-u64::MAX → 报错不 wrapping)。
 ///
 /// # 参数
@@ -672,7 +672,7 @@ fn plan_ids(base: (u64, u64), n: usize) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// XINFO 等响应的 key/value 兼容取文本:SimpleString(`+`)或 BulkString(`$`)都接受。
+/// 业务作用：XINFO 等响应的 key/value 兼容取文本:SimpleString(`+`)或 BulkString(`$`)都接受。
 /// 各命令的 RESP3 Map key 类型并不统一（FT.*=SimpleString、XINFO/CONFIG=BulkString）。
 /// 硬匹配单一形态会在 Redis 版本变更 key 类型时静默漏字段，因此必须 fail-closed。
 /// 统一兼容(对齐 actuator::val_str)消除"必须记住每个命令 key 类型"的 footgun。
@@ -687,7 +687,7 @@ fn xinfo_str(v: &redis::Value) -> Option<String> {
     }
 }
 
-/// 从 XINFO 响应抽取指定字段值。**RESP3 Map / RESP2 Array 双形态**归一成 (k,val) 对后线扫,
+/// 业务作用：从 XINFO 响应抽取指定字段值。**RESP3 Map / RESP2 Array 双形态**归一成 (k,val) 对后线扫,
 /// key/value 一律走兼容 `xinfo_str`(不硬匹配 BulkString)。非 Map/Array → None(形态校验由调用方做)。
 ///
 /// # 参数
@@ -715,7 +715,7 @@ fn xinfo_field(v: redis::Value, field: &str) -> Option<String> {
     found
 }
 
-/// 读源 stream 的 last-generated-id(stream 不存在 → 0-0 基准)。
+/// 业务作用：读源 stream 的 last-generated-id(stream 不存在 → 0-0 基准)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -759,7 +759,7 @@ async fn last_generated(client: &Arc<RedisClient>, stream: &str) -> Result<(u64,
     }
 }
 
-/// 单条 reservation 的对账(重入判定表;返回 Ok(true)=已确认发布,Ok(false)=Indeterminate)。
+/// 业务作用：单条 reservation 的对账(重入判定表;返回 Ok(true)=已确认发布,Ok(false)=Indeterminate)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -807,7 +807,7 @@ async fn reconcile_one(
     Ok(false)
 }
 
-/// Resume:planned-ID reservations 协议(全流程见文件头;幂等可重入)。
+/// 业务作用：Resume:planned-ID reservations 协议(全流程见文件头;幂等可重入)。
 /// Ok(new_ids) = 已到 Resumed;Err(PublishIndeterminate) = 进入不确定态(分区保持 Parked,
 /// 仅 force_republish 可推进);Err(OperationInDoubt) = 已在不确定态被普通 resume 调用。
 ///
@@ -873,7 +873,7 @@ pub async fn resume(
     }
 }
 
-/// 发布步骤(resume/dlq 共用):marker 已认领进 *Publishing 态后调用。读 planned(缺失则补
+/// 业务作用：发布步骤(resume/dlq 共用):marker 已认领进 *Publishing 态后调用。读 planned(缺失则补
 /// 规划——认领后崩溃在写 planned 前的兜底),读 payload(fail-closed),逐条发布对账。
 ///
 /// # 参数
@@ -942,7 +942,7 @@ async fn publish_step(
     .await
 }
 
-/// 按 reservations 逐条发布 + 对账;全部确认才收尾到 Resumed。
+/// 业务作用：按 reservations 逐条发布 + 对账;全部确认才收尾到 Resumed。
 /// (参数多是 resume/dlq 双形态泛化的代价:目标/标签三参显式优于隐式全局,allow)
 ///
 /// # 参数
@@ -1047,7 +1047,7 @@ async fn publish_reserved(
     Ok(planned.to_vec())
 }
 
-/// DLQ stream key(组级一条;消费/巡检由运维侧自行 XREAD)。
+/// 业务作用：DLQ stream key(组级一条;消费/巡检由运维侧自行 XREAD)。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -1055,7 +1055,7 @@ pub fn dlq_stream_key(layout: &KeyLayout) -> String {
     format!("{}:dlq", layout.prefix)
 }
 
-/// Dlq:把 Parked 的消息按 planned-ID 协议发布到 DLQ stream,marker 终态 Dlqed。
+/// 业务作用：Dlq:把 Parked 的消息按 planned-ID 协议发布到 DLQ stream,marker 终态 Dlqed。
 /// (PoisonPolicy::Dlq = fenced Park 转存 + 本函数自动执行——中途崩溃回退为
 ///  Parked 可管理态;DlqPublishing 重入/DlqIndeterminate 语义与 resume 完全同构)
 ///
@@ -1136,7 +1136,7 @@ pub async fn dlq_from_parked(
     }
 }
 
-/// ForceRepublish:仅 ResumeIndeterminate 可调;为不确定的 index 分配**全新 planned**
+/// 业务作用：ForceRepublish:仅 ResumeIndeterminate 可调;为不确定的 index 分配**全新 planned**
 /// 重发——显式接受"可能重复、相对顺序改变"的风险(审计字段记录新旧 planned 对照)。
 ///
 /// # 参数
@@ -1330,7 +1330,7 @@ pub async fn force_republish(
     Ok(final_ids)
 }
 
-/// force 的显式-ID XADD:写**已提交的 target**。断线 → `ExecutionUnknown`(可能已执行,
+/// 业务作用：force 的显式-ID XADD:写**已提交的 target**。断线 → `ExecutionUnknown`(可能已执行,
 /// 重入时按 `force:{i}` 复账且绝不重分配；"equal/smaller(被越过)" 会复账，确认已发布则成功，
 /// 否则 `PublishIndeterminate`(target 丢失,须新 operation)。
 ///
@@ -1371,7 +1371,7 @@ async fn xadd_force_target(
     }
 }
 
-/// Drop:放弃 Park 的消息(payload 删除,marker 终态 Dropped 保留供审计)。
+/// 业务作用：Drop:放弃 Park 的消息(payload 删除,marker 终态 Dropped 保留供审计)。
 ///
 /// # 参数
 /// - `client`: 执行 drop 状态机的 Redis 客户端。
@@ -1419,7 +1419,7 @@ pub async fn drop_parked(
     Ok(())
 }
 
-/// **通用 liveness-takeover**：operator 显式接管某分区卡死的在途 `*Publishing`/`Dropping`
+/// 业务作用：**通用 liveness-takeover**：operator 显式接管某分区卡死的在途 `*Publishing`/`Dropping`
 /// ——原 op 永久丢失(进程死)、无法自行重提,普通续作因 `assert_op_owns` 异 op → `OperationConflict`
 /// 推不动,分区冻结。本函数**强制覆写** `transition_operation_id` 为本 `lease.operation_id`(显式接受
 /// "可能与原 op 重复推进"的风险,取向同 `force_republish`),再按当前 state 续作到终态。

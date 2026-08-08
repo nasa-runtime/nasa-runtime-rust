@@ -33,7 +33,7 @@ pub enum GroupState {
 }
 
 impl GroupState {
-    /// 判断当前 group 是否允许 operator 显式重建 consumer 会话。
+    /// 业务作用：判断当前 group 是否允许 operator 显式重建 consumer 会话。
     ///
     /// 允许集合 = 「需要人工介入且没有自动出路」的全部状态：
     /// `Crashed` 由 owner 外层恢复邮箱处理；`Degraded` 由运行中的 owner 在批次边界处理；
@@ -54,7 +54,7 @@ impl GroupState {
         )
     }
 
-    /// 返回允许 restart 的状态名列表，用于生成可定位的拒绝错误文本。
+    /// 业务作用：返回允许 restart 的状态名列表，用于生成可定位的拒绝错误文本。
     pub(crate) fn operator_restart_states() -> &'static str {
         "Degraded/Crashed/CommitBlocked/DltBackpressure/ProgressBackpressure"
     }

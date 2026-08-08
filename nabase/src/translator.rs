@@ -20,14 +20,14 @@ pub const CACHE_ARROW: &str = "->";
 
 /// 翻译缓存接口,只暴露翻译器需要的最小 key-value 能力。
 pub trait TranslateCache: Send + Sync + 'static {
-    /// 读取缓存;未命中返回 `None`。
+    /// 业务作用：读取缓存;未命中返回 `None`。
     ///
     /// # 参数
     ///
     /// - `key`: 由 [`cache_key`] 生成的翻译缓存键，包含源语言、目标语言和原文。
     fn get(&self, key: &str) -> Option<String>;
 
-    /// 写入缓存。实现内部错误应自行吞掉/记录,不得影响主流程。
+    /// 业务作用：写入缓存。实现内部错误应自行吞掉/记录,不得影响主流程。
     ///
     /// # 参数
     ///
@@ -35,7 +35,7 @@ pub trait TranslateCache: Send + Sync + 'static {
     /// - `value`: 翻译成功后的目标语言文本。
     fn put(&self, key: &str, value: &str);
 
-    /// 重载/清空缓存。默认 no-op。
+    /// 业务作用：重载/清空缓存。默认 no-op。
     fn reload(&self) {}
 }
 
@@ -46,24 +46,24 @@ pub struct MemoryTranslateCache {
 }
 
 impl MemoryTranslateCache {
-    /// 新建空缓存。
+    /// 业务作用：新建空缓存。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 当前缓存条数。主要给诊断用。
+    /// 业务作用：当前缓存条数。主要给诊断用。
     pub fn len(&self) -> usize {
         self.inner.read().expect("translator cache poisoned").len()
     }
 
-    /// 是否为空。主要给诊断用。
+    /// 业务作用：是否为空。主要给诊断用。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
 impl TranslateCache for MemoryTranslateCache {
-    /// 读取 get 数据；用于查询当前缓存、配置或远端状态。
+    /// 业务作用：读取 get 数据；用于查询当前缓存、配置或远端状态。
     ///
     /// # 参数
     ///
@@ -76,7 +76,7 @@ impl TranslateCache for MemoryTranslateCache {
             .cloned()
     }
 
-    /// 写入 put 数据；用于更新缓存、配置或远端状态。
+    /// 业务作用：写入 put 数据；用于更新缓存、配置或远端状态。
     ///
     /// # 参数
     ///
@@ -89,7 +89,7 @@ impl TranslateCache for MemoryTranslateCache {
             .insert(key.to_string(), value.to_string());
     }
 
-    /// 重新加载翻译表；用于让后续翻译读取最新的内存快照。
+    /// 业务作用：重新加载翻译表；用于让后续翻译读取最新的内存快照。
     fn reload(&self) {
         self.inner
             .write()
@@ -105,7 +105,7 @@ pub struct TranslateError {
 }
 
 impl TranslateError {
-    /// 新建错误。
+    /// 业务作用：新建错误。
     ///
     /// # 参数
     ///
@@ -116,14 +116,14 @@ impl TranslateError {
         }
     }
 
-    /// 错误消息。
+    /// 业务作用：错误消息。
     pub fn message(&self) -> &str {
         &self.message
     }
 }
 
 impl fmt::Display for TranslateError {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     ///
@@ -147,7 +147,7 @@ pub struct TranslateRequest<'a> {
 }
 
 impl<'a> TranslateRequest<'a> {
-    /// 新建翻译请求。
+    /// 业务作用：新建翻译请求。
     ///
     /// # 参数
     ///
@@ -162,17 +162,17 @@ impl<'a> TranslateRequest<'a> {
         }
     }
 
-    /// 源语言。
+    /// 业务作用：源语言。
     pub fn source_lang(&self) -> &'a str {
         self.source_lang
     }
 
-    /// 目标语言。
+    /// 业务作用：目标语言。
     pub fn target_lang(&self) -> &'a str {
         self.target_lang
     }
 
-    /// 待翻译文本。
+    /// 业务作用：待翻译文本。
     pub fn text(&self) -> &'a str {
         self.text
     }
@@ -183,7 +183,7 @@ impl<'a> TranslateRequest<'a> {
 /// 框架只负责调用这个 trait,不内建、不写死任何具体翻译服务。业务侧可以实现
 /// Google、DeepL、OpenAI、公司内部词库、DB 字典或任意组合策略。
 pub trait TranslateEngine: Send + Sync + 'static {
-    /// 返回 `Ok(Some(text))` 表示翻译成功;`Ok(None)` 或 `Err` 均由工具层回退原文。
+    /// 业务作用：返回 `Ok(Some(text))` 表示翻译成功;`Ok(None)` 或 `Err` 均由工具层回退原文。
     ///
     /// # 参数
     ///
@@ -200,7 +200,7 @@ pub struct FnTranslateEngine<F> {
 }
 
 impl<F> FnTranslateEngine<F> {
-    /// 包装一个 `(from, to, text) -> Result<Option<String>, TranslateError>` 函数。
+    /// 业务作用：包装一个 `(from, to, text) -> Result<Option<String>, TranslateError>` 函数。
     ///
     /// # 参数
     ///
@@ -214,7 +214,7 @@ impl<F> TranslateEngine for FnTranslateEngine<F>
 where
     F: Fn(&str, &str, &str) -> Result<Option<String>, TranslateError> + Send + Sync + 'static,
 {
-    /// 按请求语言和文本键查找译文；用于向调用方返回命中的本地化文本。
+    /// 业务作用：按请求语言和文本键查找译文；用于向调用方返回命中的本地化文本。
     ///
     /// # 参数
     ///
@@ -224,7 +224,7 @@ where
     }
 }
 
-/// 构建函数/闭包翻译器。
+/// 业务作用：构建函数/闭包翻译器。
 ///
 /// # 参数
 ///
@@ -243,7 +243,7 @@ pub struct FallbackTranslateEngine {
 }
 
 impl FallbackTranslateEngine {
-    /// 新建 fallback 组合。
+    /// 业务作用：新建 fallback 组合。
     ///
     /// # 参数
     ///
@@ -257,7 +257,7 @@ impl FallbackTranslateEngine {
         }
     }
 
-    /// 添加一个底层翻译器。
+    /// 业务作用：添加一个底层翻译器。
     ///
     /// # 参数
     ///
@@ -266,19 +266,19 @@ impl FallbackTranslateEngine {
         self.engines.push(engine);
     }
 
-    /// 底层翻译器数量。
+    /// 业务作用：底层翻译器数量。
     pub fn len(&self) -> usize {
         self.engines.len()
     }
 
-    /// 是否没有底层翻译器。
+    /// 业务作用：是否没有底层翻译器。
     pub fn is_empty(&self) -> bool {
         self.engines.is_empty()
     }
 }
 
 impl TranslateEngine for FallbackTranslateEngine {
-    /// 按请求语言和文本键查找译文；用于向调用方返回命中的本地化文本。
+    /// 业务作用：按请求语言和文本键查找译文；用于向调用方返回命中的本地化文本。
     ///
     /// # 参数
     ///
@@ -316,7 +316,7 @@ struct TranslatorState {
     locks: Vec<Mutex<()>>,
 }
 
-/// key → 条带索引(单飞:同 key 恒落同一 stripe)。
+/// 业务作用：key → 条带索引(单飞:同 key 恒落同一 stripe)。
 ///
 /// # 参数
 /// - `key`: 待翻译文本或翻译缓存 key。
@@ -328,7 +328,7 @@ fn lock_stripe(key: &str) -> usize {
 }
 
 impl TranslatorState {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),
@@ -342,27 +342,27 @@ impl TranslatorState {
 
 static STATE: OnceLock<TranslatorState> = OnceLock::new();
 
-/// 返回全局翻译状态；用于集中管理翻译器、别名和缓存。
+/// 业务作用：返回全局翻译状态；用于集中管理翻译器、别名和缓存。
 fn state() -> &'static TranslatorState {
     STATE.get_or_init(TranslatorState::new)
 }
 
-/// 开启翻译。
+/// 业务作用：开启翻译。
 pub fn enable() {
     state().enabled.store(true, Ordering::SeqCst);
 }
 
-/// 关闭翻译。
+/// 业务作用：关闭翻译。
 pub fn disable() {
     state().enabled.store(false, Ordering::SeqCst);
 }
 
-/// 是否已启用翻译。
+/// 业务作用：是否已启用翻译。
 pub fn is_enabled() -> bool {
     state().enabled.load(Ordering::SeqCst)
 }
 
-/// 设置缓存策略。
+/// 业务作用：设置缓存策略。
 ///
 /// # 参数
 ///
@@ -374,7 +374,7 @@ pub fn set_cache(cache: Arc<dyn TranslateCache>) {
         .expect("translator cache lock poisoned") = cache;
 }
 
-/// 获取当前缓存策略。
+/// 业务作用：获取当前缓存策略。
 pub fn get_cache() -> Arc<dyn TranslateCache> {
     state()
         .cache
@@ -383,12 +383,12 @@ pub fn get_cache() -> Arc<dyn TranslateCache> {
         .clone()
 }
 
-/// 重载缓存。
+/// 业务作用：重载缓存。
 pub fn reload_cache() {
     get_cache().reload();
 }
 
-/// 设置底层翻译器。
+/// 业务作用：设置底层翻译器。
 ///
 /// # 参数
 ///
@@ -400,7 +400,7 @@ pub fn set_engine(engine: Arc<dyn TranslateEngine>) {
         .expect("translator engine lock poisoned") = Some(engine);
 }
 
-/// 获取当前底层翻译器。
+/// 业务作用：获取当前底层翻译器。
 pub fn get_engine() -> Option<Arc<dyn TranslateEngine>> {
     state()
         .engine
@@ -409,7 +409,7 @@ pub fn get_engine() -> Option<Arc<dyn TranslateEngine>> {
         .clone()
 }
 
-/// 清除底层翻译器。未设置 engine 时,cache 未命中会直接回原文。
+/// 业务作用：清除底层翻译器。未设置 engine 时,cache 未命中会直接回原文。
 pub fn clear_engine() {
     *state()
         .engine
@@ -417,7 +417,7 @@ pub fn clear_engine() {
         .expect("translator engine lock poisoned") = None;
 }
 
-/// 业务侧注入底层翻译器。等价于 [`set_engine`]。
+/// 业务作用：业务侧注入底层翻译器。等价于 [`set_engine`]。
 ///
 /// # 参数
 ///
@@ -426,17 +426,17 @@ pub fn set_translator(translator: Arc<dyn TranslateEngine>) {
     set_engine(translator);
 }
 
-/// 获取当前业务注入的底层翻译器。等价于 [`get_engine`]。
+/// 业务作用：获取当前业务注入的底层翻译器。等价于 [`get_engine`]。
 pub fn get_translator() -> Option<Arc<dyn TranslateEngine>> {
     get_engine()
 }
 
-/// 清除业务注入的底层翻译器。等价于 [`clear_engine`]。
+/// 业务作用：清除业务注入的底层翻译器。等价于 [`clear_engine`]。
 pub fn clear_translator() {
     clear_engine();
 }
 
-/// 兼容旧命名:新代码优先使用 [`set_translator`] 或 [`set_engine`]。
+/// 业务作用：兼容旧命名:新代码优先使用 [`set_translator`] 或 [`set_engine`]。
 ///
 /// # 参数
 ///
@@ -445,12 +445,12 @@ pub fn set_provider(provider: Arc<dyn TranslateProvider>) {
     set_engine(provider);
 }
 
-/// 兼容旧命名:新代码优先使用 [`clear_translator`] 或 [`clear_engine`]。
+/// 业务作用：兼容旧命名:新代码优先使用 [`clear_translator`] 或 [`clear_engine`]。
 pub fn clear_provider() {
     clear_engine();
 }
 
-/// 添加单个语言映射。
+/// 业务作用：添加单个语言映射。
 ///
 /// # 参数
 ///
@@ -466,7 +466,7 @@ pub fn put_mapper(raw: impl Into<String>, normalized: impl Into<String>) {
         .insert(lang_key(&raw), normalized);
 }
 
-/// 批量添加语言映射。
+/// 业务作用：批量添加语言映射。
 ///
 /// # 参数
 ///
@@ -487,7 +487,7 @@ where
     }
 }
 
-/// 当前语言映射表快照。
+/// 业务作用：当前语言映射表快照。
 pub fn alias_map() -> HashMap<String, String> {
     state()
         .lang_mapper
@@ -496,7 +496,7 @@ pub fn alias_map() -> HashMap<String, String> {
         .clone()
 }
 
-/// active-exch `LangNormalizer` 同款默认 alias 表。
+/// 业务作用：active-exch `LangNormalizer` 同款默认 alias 表。
 pub fn default_alias_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     add_alias(
@@ -548,7 +548,7 @@ pub fn default_alias_map() -> HashMap<String, String> {
     map
 }
 
-/// 把语言别名写入映射表；用于将多种输入归一到同一语言键。
+/// 业务作用：把语言别名写入映射表；用于将多种输入归一到同一语言键。
 ///
 /// # 参数
 ///
@@ -561,7 +561,7 @@ fn add_alias(map: &mut HashMap<String, String>, normalized: &str, raw: &[&str]) 
     }
 }
 
-/// 归一化语言码(对照 active-exch `LangNormalizer.normalize`)。
+/// 业务作用：归一化语言码(对照 active-exch `LangNormalizer.normalize`)。
 ///
 /// # 参数
 ///
@@ -580,7 +580,7 @@ pub fn normalize_lang(raw: &str) -> String {
         .unwrap_or_else(|| DEFAULT_FALLBACK_LANG.to_string())
 }
 
-/// 规范化语言键；用于消除大小写和分隔符差异。
+/// 业务作用：规范化语言键；用于消除大小写和分隔符差异。
 ///
 /// # 参数
 ///
@@ -596,7 +596,7 @@ fn lang_key(raw: &str) -> String {
     key.trim().to_string()
 }
 
-/// 构建兼容 cache key:`{from}->{to}:{word}`。
+/// 业务作用：构建兼容 cache key:`{from}->{to}:{word}`。
 ///
 /// # 参数
 ///
@@ -607,7 +607,7 @@ pub fn cache_key(from: &str, to: &str, word: &str) -> String {
     format!("{from}{CACHE_ARROW}{to}:{word}")
 }
 
-/// 用默认目标语言翻译。当前没有请求上下文语言持有器,默认等价 `translate_to(ZH, word)`。
+/// 业务作用：用默认目标语言翻译。当前没有请求上下文语言持有器,默认等价 `translate_to(ZH, word)`。
 ///
 /// # 参数
 ///
@@ -616,7 +616,7 @@ pub fn translate(word: &str) -> String {
     translate_to(ZH, word)
 }
 
-/// 从中文翻译到指定语言。
+/// 业务作用：从中文翻译到指定语言。
 ///
 /// # 参数
 ///
@@ -626,7 +626,7 @@ pub fn translate_to(lang_to: &str, word: &str) -> String {
     translate_from_to(ZH, lang_to, word)
 }
 
-/// 从指定源语言翻译到指定目标语言。
+/// 业务作用：从指定源语言翻译到指定目标语言。
 ///
 /// # 参数
 ///

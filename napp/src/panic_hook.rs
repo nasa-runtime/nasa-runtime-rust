@@ -5,7 +5,7 @@ use crate::report::write_stderr;
 /// 进程级 panic 标记的总字节上限，包含固定前缀、位置和换行。
 pub(crate) const PANIC_MARKER_MAX_BYTES: usize = 512;
 
-/// 安装只输出受控代码位置的进程级 panic hook。
+/// 业务作用：安装只输出受控代码位置的进程级 panic hook。
 ///
 /// 该 hook 不读取 payload、线程名和回溯，也不调用旧 hook，从源头阻止未脱敏业务文本先于 Runner 泄漏。
 ///
@@ -22,7 +22,7 @@ pub(crate) fn install_process_panic_hook() {
     }));
 }
 
-/// 构造有界、单行且不含绝对构建路径的 panic 标记。
+/// 业务作用：构造有界、单行且不含绝对构建路径的 panic 标记。
 ///
 /// # 参数
 ///
@@ -40,7 +40,7 @@ fn panic_marker(file: &str, line: u32, column: u32) -> String {
     format!("{prefix}{file}{suffix}")
 }
 
-/// 清洗控制字符并把绝对路径压缩成末尾三个路径段。
+/// 业务作用：清洗控制字符并把绝对路径压缩成末尾三个路径段。
 ///
 /// # 参数
 ///
@@ -69,7 +69,7 @@ fn compact_source_path(file: &str) -> String {
     }
 }
 
-/// 保留字符串末尾不超过指定字节数的完整 UTF-8 字符。
+/// 业务作用：保留字符串末尾不超过指定字节数的完整 UTF-8 字符。
 ///
 /// 保留末尾可以让超长路径仍包含文件名，而不是只留下无定位价值的目录前缀。
 ///

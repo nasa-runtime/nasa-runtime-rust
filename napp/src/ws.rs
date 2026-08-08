@@ -56,7 +56,7 @@ struct WsConfig {
 }
 
 impl Default for WsConfig {
-    /// 返回只监听本机回环、不启用 WebSocket 端口的安全缺省配置。
+    /// 业务作用：返回只监听本机回环、不启用 WebSocket 端口的安全缺省配置。
     ///
     /// # 参数
     ///
@@ -82,7 +82,7 @@ impl Default for WsConfig {
 }
 
 impl WsConfig {
-    /// 校验监听地址与各项限额。
+    /// 业务作用：校验监听地址与各项限额。
     ///
     /// # 参数
     ///
@@ -139,7 +139,7 @@ impl WsConfig {
         Ok(())
     }
 
-    /// 把声明式配置写进底层 builder。
+    /// 业务作用：把声明式配置写进底层 builder。
     ///
     /// 只覆盖配置显式给出的项，其余保持底层默认值，避免框架把"没配"翻译成"配了个默认数"。
     ///
@@ -192,7 +192,7 @@ pub(crate) struct WsComponent {
 }
 
 impl WsComponent {
-    /// 创建尚未读取配置的长连接组件。
+    /// 业务作用：创建尚未读取配置的长连接组件。
     ///
     /// # 参数
     ///
@@ -203,7 +203,7 @@ impl WsComponent {
 }
 
 impl ApplicationComponent for WsComponent {
-    /// 返回长连接组件稳定身份。
+    /// 业务作用：返回长连接组件稳定身份。
     ///
     /// # 参数
     ///
@@ -212,7 +212,7 @@ impl ApplicationComponent for WsComponent {
         ComponentId::Ws
     }
 
-    /// 从最终配置读取并冻结长连接设置。
+    /// 业务作用：从最终配置读取并冻结长连接设置。
     ///
     /// # 参数
     ///
@@ -226,7 +226,7 @@ impl ApplicationComponent for WsComponent {
         })
     }
 
-    /// 应用业务定制、构建并绑定长连接服务。
+    /// 业务作用：应用业务定制、构建并绑定长连接服务。
     ///
     /// 装配顺序固定为"配置预填 → configure_ws 注册序 → build → bind"：业务定制在配置之后，
     /// 因此可以覆盖声明式取值，也能注入配置无法表达的鉴权回调与 endpoint 事件表；
@@ -297,7 +297,7 @@ struct WsShutdown {
 }
 
 impl ShutdownAction for WsShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -306,7 +306,7 @@ impl ShutdownAction for WsShutdown {
         "ws-active"
     }
 
-    /// 在自身子预算与全局剩余预算的较小值内排空长连接。
+    /// 业务作用：在自身子预算与全局剩余预算的较小值内排空长连接。
     ///
     /// 未排空不视为失败：底层已 cancel 全部任务，剩余连接会尽快退出；但必须如实记一条报告，
     /// 不把"到点仍有连接在跑"静默说成优雅停机。
@@ -331,7 +331,7 @@ impl ShutdownAction for WsShutdown {
     }
 }
 
-/// 从最终配置读取 `ws` 段；段缺失时使用回环缺省配置。
+/// 业务作用：从最终配置读取 `ws` 段；段缺失时使用回环缺省配置。
 ///
 /// # 参数
 ///
@@ -350,7 +350,7 @@ fn read_ws_config(application: &Application) -> ApplicationResult<WsConfig> {
     Ok(root.ws)
 }
 
-/// 在不创建监听器的前提下校验候选配置树中的 `ws` 段。
+/// 业务作用：在不创建监听器的前提下校验候选配置树中的 `ws` 段。
 ///
 /// # 参数
 ///
@@ -374,7 +374,7 @@ pub(crate) fn validate_ws_section(
     config.validate(phase)
 }
 
-/// 创建长连接组件的稳定生命周期错误。
+/// 业务作用：创建长连接组件的稳定生命周期错误。
 ///
 /// # 参数
 ///

@@ -28,7 +28,7 @@ pub enum MetricKind {
 }
 
 impl MetricKind {
-    /// Prometheus `# TYPE` 行使用的类型名。
+    /// 业务作用：Prometheus `# TYPE` 行使用的类型名。
     fn prometheus_type(self) -> &'static str {
         match self {
             MetricKind::Counter => "counter",
@@ -56,7 +56,7 @@ pub struct MetricDescriptor {
 }
 
 impl MetricDescriptor {
-    /// 两个同名 descriptor 是否语义一致(kind/unit/help/label_names/histogram_bounds 全相同)。
+    /// 业务作用：两个同名 descriptor 是否语义一致(kind/unit/help/label_names/histogram_bounds 全相同)。
     fn semantically_eq(&self, other: &MetricDescriptor) -> bool {
         self.kind == other.kind
             && self.unit == other.unit
@@ -68,11 +68,11 @@ impl MetricDescriptor {
 
 /// 领域 crate 记录指标的入口。`napp` 持有唯一 `MetricHub` 实例并实现本 trait。
 pub trait MetricRecorder: Send + Sync {
-    /// 计数器累加 `delta`。
+    /// 业务作用：计数器累加 `delta`。
     fn counter(&self, descriptor: &'static MetricDescriptor, delta: u64, labels: &[&str]);
-    /// 设置 gauge 为 `value`。
+    /// 业务作用：设置 gauge 为 `value`。
     fn gauge(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]);
-    /// 记录一次 histogram 观测 `value`。
+    /// 业务作用：记录一次 histogram 观测 `value`。
     fn histogram(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]);
 }
 
@@ -86,9 +86,9 @@ pub struct MetricConflict {
 /// 兼容期桥:旧的自渲染指标源(`nafana::render_metrics`、`naweb::SecurityMetrics` 等)先实现本
 /// trait,启动期用 `descriptors()` 做全局冲突审计,抓取时才调用 `render_prometheus`。迁移完成后弃用。
 pub trait LegacyMetricsSource: Send + Sync {
-    /// 本源拥有的静态 descriptor,用于启动期冲突审计。
+    /// 业务作用：本源拥有的静态 descriptor,用于启动期冲突审计。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor];
-    /// 追加渲染本源的 Prometheus 文本(保持既有 family/HELP/TYPE/label 语义)。
+    /// 业务作用：追加渲染本源的 Prometheus 文本(保持既有 family/HELP/TYPE/label 语义)。
     fn render_prometheus(&self, output: &mut String);
 }
 
@@ -115,7 +115,7 @@ pub struct MetricHub {
 }
 
 impl MetricHub {
-    /// 创建空 hub。
+    /// 业务作用：创建空 hub。
     pub fn new() -> Self {
         Self {
             descriptors: RwLock::new(BTreeMap::new()),
@@ -124,7 +124,7 @@ impl MetricHub {
         }
     }
 
-    /// 注册一个静态 descriptor 并审计冲突。
+    /// 业务作用：注册一个静态 descriptor 并审计冲突。
     ///
     /// # 错误
     ///
@@ -148,7 +148,7 @@ impl MetricHub {
         Ok(())
     }
 
-    /// 审计一个 [`LegacyMetricsSource`] 的 descriptor 纳入统一 catalog,并保存该源以便渲染。
+    /// 业务作用：审计一个 [`LegacyMetricsSource`] 的 descriptor 纳入统一 catalog,并保存该源以便渲染。
     ///
     /// 审计通过后,`render_prometheus` 会在原生族之后追加该源自渲染的族文本;原生渲染循环
     /// 跳过该源声明的族名,避免重复的 HELP/TYPE 行。
@@ -200,13 +200,13 @@ impl MetricHub {
         Ok(())
     }
 
-    /// label 值切片是否与 descriptor 的 `label_names` 数量匹配。
+    /// 业务作用：label 值切片是否与 descriptor 的 `label_names` 数量匹配。
     fn labels_match(descriptor: &MetricDescriptor, labels: &[&str]) -> bool {
         labels.len() == descriptor.label_names.len()
             && labels.iter().all(|value| value.len() <= 256)
     }
 
-    /// 确认调用方使用的是已登记且语义完全一致的 descriptor，防止同名漂移写入。
+    /// 业务作用：确认调用方使用的是已登记且语义完全一致的 descriptor，防止同名漂移写入。
     fn is_registered(&self, descriptor: &MetricDescriptor) -> bool {
         self.descriptors
             .read()
@@ -215,7 +215,7 @@ impl MetricHub {
             .is_some_and(|registered| registered.semantically_eq(descriptor))
     }
 
-    /// 只允许更新现有序列或在全局基数预算内创建新 label 组合。
+    /// 业务作用：只允许更新现有序列或在全局基数预算内创建新 label 组合。
     fn can_insert_cell(
         cells: &BTreeMap<(&'static str, Vec<String>), Cell>,
         key: &(&'static str, Vec<String>),
@@ -223,7 +223,7 @@ impl MetricHub {
         cells.contains_key(key) || cells.len() < 100_000
     }
 
-    /// 将 descriptor 名与借用 label 值固化为 hub 的有序 cell key。
+    /// 业务作用：将 descriptor 名与借用 label 值固化为 hub 的有序 cell key。
     fn key(descriptor: &MetricDescriptor, labels: &[&str]) -> (&'static str, Vec<String>) {
         (
             descriptor.name,
@@ -231,7 +231,7 @@ impl MetricHub {
         )
     }
 
-    /// 导出全部已记录指标的结构化快照,family 与 label 组合按名称有序。
+    /// 业务作用：导出全部已记录指标的结构化快照,family 与 label 组合按名称有序。
     pub fn snapshot(&self) -> Vec<MetricSample> {
         let descriptors = self
             .descriptors
@@ -275,7 +275,7 @@ impl MetricHub {
         out
     }
 
-    /// 把 hub 拥有的全部指标渲染为 Prometheus 文本(HELP/TYPE + 样本),追加到 `output`。
+    /// 业务作用：把 hub 拥有的全部指标渲染为 Prometheus 文本(HELP/TYPE + 样本),追加到 `output`。
     ///
     /// 渲染顺序:先按名称有序输出**原生族**(hub 直接记录的 descriptor + 样本),跳过兼容源声明的
     /// 族名;再按注册顺序追加每个 [`LegacyMetricsSource`] 自渲染的族文本。这样一次调用即得到 nafka
@@ -322,14 +322,14 @@ impl MetricHub {
 }
 
 impl Default for MetricHub {
-    /// 创建空指标目录与样本存储。
+    /// 业务作用：创建空指标目录与样本存储。
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl MetricRecorder for MetricHub {
-    /// 对已登记 counter 做饱和累加；非法 descriptor、label 或超基数写入被拒绝。
+    /// 业务作用：对已登记 counter 做饱和累加；非法 descriptor、label 或超基数写入被拒绝。
     fn counter(&self, descriptor: &'static MetricDescriptor, delta: u64, labels: &[&str]) {
         debug_assert!(
             Self::labels_match(descriptor, labels),
@@ -353,7 +353,7 @@ impl MetricRecorder for MetricHub {
         }
     }
 
-    /// 覆盖已登记 gauge 的当前值；非法 descriptor、label 或超基数写入被拒绝。
+    /// 业务作用：覆盖已登记 gauge 的当前值；非法 descriptor、label 或超基数写入被拒绝。
     fn gauge(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]) {
         debug_assert!(
             Self::labels_match(descriptor, labels),
@@ -377,7 +377,7 @@ impl MetricRecorder for MetricHub {
         }
     }
 
-    /// 把观测值计入首个匹配边界或 `+Inf` 桶，并同步累计 sum/count。
+    /// 业务作用：把观测值计入首个匹配边界或 `+Inf` 桶，并同步累计 sum/count。
     fn histogram(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]) {
         debug_assert!(
             Self::labels_match(descriptor, labels),
@@ -421,7 +421,7 @@ impl MetricRecorder for MetricHub {
     }
 }
 
-/// 校验 Prometheus descriptor 结构。错误沿用 `MetricConflict` 以保持现有 API，但注册不会产生副作用。
+/// 业务作用：校验 Prometheus descriptor 结构。错误沿用 `MetricConflict` 以保持现有 API，但注册不会产生副作用。
 fn validate_descriptor(descriptor: &'static MetricDescriptor) -> Result<(), MetricConflict> {
     let valid_name = |name: &str| {
         let mut bytes = name.bytes();
@@ -481,7 +481,7 @@ pub struct MetricSample {
 }
 
 impl MetricSample {
-    /// 渲染本样本的 Prometheus 文本行(不含 HELP/TYPE),追加到 `output`。
+    /// 业务作用：渲染本样本的 Prometheus 文本行(不含 HELP/TYPE),追加到 `output`。
     fn render_prometheus(&self, output: &mut String) {
         use std::fmt::Write as _;
         match &self.value {
@@ -527,7 +527,7 @@ impl MetricSample {
         }
     }
 
-    /// 渲染 `{k="v",...}` label 集合;`extra` 追加在 descriptor label 之后(如 histogram 的 `le`)。
+    /// 业务作用：渲染 `{k="v",...}` label 集合;`extra` 追加在 descriptor label 之后(如 histogram 的 `le`)。
     fn render_labels(&self, extra: &[(&str, &str)]) -> String {
         let mut parts: Vec<String> = self
             .labels
@@ -545,7 +545,7 @@ impl MetricSample {
     }
 }
 
-/// Prometheus label 值转义(`\`、`"`、换行)。
+/// 业务作用：Prometheus label 值转义(`\`、`"`、换行)。
 fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")

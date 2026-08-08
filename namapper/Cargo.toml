@@ -1,10 +1,10 @@
-# mapper —— MyBatis 风格声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
+# mapper —— 声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
 [package]
 name = "namapper"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "MyBatis style declarative mapper runtime"
+description = "Declarative mapper runtime for SQLx and ambient transactions"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

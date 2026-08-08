@@ -29,7 +29,7 @@ use anyhow::Context;
 use naml::{ConfigFormat, NacosImport, YmlImport, YmlLoader, YmlOverlay};
 use nanacos::{ConfigBundle, ConfigRef, NacosConfigClient, NacosProps};
 
-/// 把 yml 中性的 [`NacosImport`] 映射成 nacos [`ConfigRef`],并**解析出具体 group 与 file_extension**。
+/// 业务作用：把 yml 中性的 [`NacosImport`] 映射成 nacos [`ConfigRef`],并**解析出具体 group 与 file_extension**。
 ///
 /// - 分组:`import.group` 非空 → 用它;否则回退 `default_group`。
 /// - 格式:`import.file_extension` 非空 → 用它;否则回退 `default_file_extension`(NacosBootstrap.file_extension);
@@ -73,7 +73,7 @@ fn to_config_ref(
     })
 }
 
-/// 抽出 imports 里全部 Nacos 引用(分组/格式已解析成具体值、保序)。供 `watch_many_channel` 注册。
+/// 业务作用：抽出 imports 里全部 Nacos 引用(分组/格式已解析成具体值、保序)。供 `watch_many_channel` 注册。
 /// 任一 Nacos 缺格式 / 格式非法 → `Err`(fail-fast)。
 ///
 /// # 参数
@@ -98,7 +98,7 @@ pub fn nacos_refs(
 // 新入口只有 nacos.imports / yml.imports,旧 fallback 会绕过 reject_legacy_config_fields 守卫,故删除不保留、不经门面暴露。
 // app 用 `resolve_imports`(强类型 nacos.imports + yml.imports,内含守卫)。
 
-/// 按 import 声明顺序拉取/读取,拼成有序 overlay(启动期用):
+/// 业务作用：按 import 声明顺序拉取/读取,拼成有序 overlay(启动期用):
 ///   file → 读本地(格式按后缀推断);nacos → `fetch_many` 批量拉;再按原 import 顺序交错还原。
 ///
 /// # 参数
@@ -117,7 +117,7 @@ pub async fn resolve_ordered_overlays(
     assemble_overlays(imports, &bundle, default_group, default_file_extension).await
 }
 
-/// 从【已有的 `ConfigBundle`】(`watch_many_channel` 推来的)+ imports 重组有序 overlay(热刷新用:file 重读本地)。
+/// 业务作用：从【已有的 `ConfigBundle`】(`watch_many_channel` 推来的)+ imports 重组有序 overlay(热刷新用:file 重读本地)。
 ///
 /// # 参数
 /// - `imports`: 热刷新时仍按该列表恢复 overlay 顺序。
@@ -133,7 +133,7 @@ pub async fn assemble_overlays_from_bundle(
     assemble_overlays(imports, bundle, default_group, default_file_extension).await
 }
 
-/// 核心拼装:按 import 顺序,file→读本地(格式按后缀)、nacos→从 bundle 取(格式来自 `source.file_extension`)。
+/// 业务作用：核心拼装:按 import 顺序,file→读本地(格式按后缀)、nacos→从 bundle 取(格式来自 `source.file_extension`)。
 ///
 /// bundle.documents 是「成功拉取项」按 refs 顺序排列的【子序列】(optional 缺失被跳过;必需缺失 `fetch_many` 已报错)。
 /// 按 `(data_id, group)` 顺序消费即可保序还原。
@@ -208,7 +208,7 @@ async fn assemble_overlays(
     Ok(overlays)
 }
 
-/// 把「已 present(拉取/读取成功)」的内容压成 overlay。
+/// 业务作用：把「已 present(拉取/读取成功)」的内容压成 overlay。
 ///
 /// - 内容为空 → warn + 跳过(空配置合并无意义,不算错)。
 /// - 内容非空 → `required=true`(/:内容在手,格式错必须 fail-fast,不因源 optional 吞掉)。
@@ -231,7 +231,7 @@ fn push_present_overlay(
     }
 }
 
-/// 本地文件按后缀推断格式(本地 file import 可从后缀推断);无扩展名 → `Err`。
+/// 业务作用：本地文件按后缀推断格式(本地 file import 可从后缀推断);无扩展名 → `Err`。
 ///
 /// # 参数
 /// - `path`: 待加载的本地配置文件路径。
@@ -250,12 +250,12 @@ fn file_format_from_path(path: &Path) -> anyhow::Result<ConfigFormat> {
 //   连接参数 + 单/多配置 imports + 旧字段守卫 + 引导入口便利,全部收敛在这里。
 // ════════════════════════════════════════════════════════════════════════════
 
-/// nacos.group 缺省("DEFAULT_GROUP",与 NacosProps::default() 一致)。
+/// 业务作用：nacos.group 缺省("DEFAULT_GROUP",与 NacosProps::default() 一致)。
 fn default_group() -> String {
     "DEFAULT_GROUP".to_string()
 }
 
-/// import 条目 optional 缺省(true)。
+/// 业务作用：import 条目 optional 缺省(true)。
 fn default_true() -> bool {
     true
 }
@@ -299,7 +299,7 @@ pub struct NacosBootstrap {
 }
 
 impl std::fmt::Debug for NacosBootstrap {
-    /// 输出启动配置的调试视图;username/password 只标记是否已配置,避免日志泄露凭据。
+    /// 业务作用：输出启动配置的调试视图;username/password 只标记是否已配置,避免日志泄露凭据。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -344,7 +344,7 @@ pub struct NacosImportSpec {
 }
 
 impl NacosBootstrap {
-    /// enabled 路径连接前校验:enabled=false 或 server_addr 空都 Err;不检查 imports。
+    /// 业务作用：enabled 路径连接前校验:enabled=false 或 server_addr 空都 Err;不检查 imports。
     ///
     pub fn validate_connection_enabled(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -358,7 +358,7 @@ impl NacosBootstrap {
         Ok(())
     }
 
-    /// 连接参数 → NacosProps(走 builder + with_discovery_ip_opt;不手写默认值)。
+    /// 业务作用：连接参数 → NacosProps(走 builder + with_discovery_ip_opt;不手写默认值)。
     pub fn to_props(&self) -> NacosProps {
         NacosProps::new(&self.server_addr)
             .with_namespace(&self.namespace)
@@ -368,7 +368,7 @@ impl NacosBootstrap {
             .with_discovery_ip_opt(self.discovery_ip.as_deref())
     }
 
-    /// nacos.imports(强类型)→ 中性 YmlImport::Nacos 列表(保序)。
+    /// 业务作用：nacos.imports(强类型)→ 中性 YmlImport::Nacos 列表(保序)。
     pub fn nacos_imports(&self) -> Vec<YmlImport> {
         self.imports
             .iter()
@@ -384,7 +384,7 @@ impl NacosBootstrap {
     }
 }
 
-/// 旧字段迁移守卫:从【原始 boot_tree】精确检测旧 `yml.nacos.imports` / 顶层 `nacos.data_id`,命中即 `Err`。
+/// 业务作用：旧字段迁移守卫:从【原始 boot_tree】精确检测旧 `yml.nacos.imports` / 顶层 `nacos.data_id`,命中即 `Err`。
 ///
 /// ⚠️ 用精确路径匹配(`nacos.data_id` 是 nacos 段的直接子键、`yml.nacos.imports` 是 yml→nacos→imports),
 /// 绝不能深搜 key 名——否则会把合法的 `nacos.imports[].data_id` 误判、拒掉所有新配置。
@@ -417,7 +417,7 @@ pub fn reject_legacy_config_fields(boot_tree: &serde_json::Value) -> anyhow::Res
     Ok(())
 }
 
-/// app 引导入口便利:`load_tree` → `reject_legacy_config_fields` → 反序列化 `T`(复用同一棵树)。
+/// 业务作用：app 引导入口便利:`load_tree` → `reject_legacy_config_fields` → 反序列化 `T`(复用同一棵树)。
 ///
 /// 把旧字段守卫【焊死】进引导流程:app 的 `load_bootstrap()` 只需转调它,免重复 glue、守卫漏不掉。
 /// env 已在 `load_tree` 叠加,故 `APP__NACOS__DATA_ID` 之类的 env 注入旧字段也会被拦。
@@ -432,7 +432,7 @@ pub fn load_bootstrap_checked<T: serde::de::DeserializeOwned>(
     serde_json::from_value(tree).context("config-boot: 反序列化引导配置失败")
 }
 
-/// 解析最终 import 列表:`nacos.imports`(强类型,先)++ `yml.imports`(树,后)。
+/// 业务作用：解析最终 import 列表:`nacos.imports`(强类型,先)++ `yml.imports`(树,后)。
 ///
 /// 内部先调 `reject_legacy_config_fields` 拦旧字段;`boot_tree` 须来自 `YmlLoader::load_tree()`(占位符已解析)。
 ///
@@ -451,7 +451,7 @@ pub fn resolve_imports(
     Ok(imports)
 }
 
-/// enabled 路径校验最终 import 列表:至少一个 Nacos 项、每个 Nacos data_id 非空。
+/// 业务作用：enabled 路径校验最终 import 列表:至少一个 Nacos 项、每个 Nacos data_id 非空。
 ///
 ///
 /// # 参数
@@ -480,7 +480,7 @@ pub fn validate_imports_enabled(
     Ok(())
 }
 
-/// 连接配置中心:先 `validate_connection_enabled`,再 `to_props` 连接。
+/// 业务作用：连接配置中心:先 `validate_connection_enabled`,再 `to_props` 连接。
 ///
 /// # 参数
 /// - `nacos`: Nacos 引导配置,提供连接地址、命名空间、分组和鉴权信息。
@@ -489,7 +489,7 @@ pub async fn connect_config_client(nacos: &NacosBootstrap) -> anyhow::Result<Nac
     NacosConfigClient::connect(&nacos.to_props()).await
 }
 
-/// 便利包装:group/file_extension 从 bootstrap 带入,调低层 [`resolve_ordered_overlays`]。
+/// 业务作用：便利包装:group/file_extension 从 bootstrap 带入,调低层 [`resolve_ordered_overlays`]。
 ///
 /// # 参数
 /// - `client`: 已连接的 Nacos 配置客户端。
@@ -509,7 +509,7 @@ pub async fn resolve_ordered_overlays_for_bootstrap(
     .await
 }
 
-/// 便利包装:热刷新时从已有 bundle 重组 overlay,group/file_extension 从 bootstrap 带入。
+/// 业务作用：便利包装:热刷新时从已有 bundle 重组 overlay,group/file_extension 从 bootstrap 带入。
 ///
 /// # 参数
 /// - `imports`: 热刷新时仍按该列表恢复 overlay 顺序。
@@ -529,7 +529,7 @@ pub async fn assemble_overlays_from_bundle_for_bootstrap(
     .await
 }
 
-/// 便利包装:最终 imports 的 Nacos 项 → `ConfigRef`(带 group/file_extension),供 `watch_many_channel`;格式缺失默认 yaml、显式非法格式仍 fail-fast。
+/// 业务作用：便利包装:最终 imports 的 Nacos 项 → `ConfigRef`(带 group/file_extension),供 `watch_many_channel`;格式缺失默认 yaml、显式非法格式仍 fail-fast。
 ///
 /// # 参数
 /// - `imports`: 已合并完成的最终 import 列表。

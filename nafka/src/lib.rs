@@ -138,7 +138,7 @@ pub(crate) struct KafkaProxyInner {
 }
 
 impl KafkaProxyInner {
-    /// 发出一个稳定 counter，调用点不得传入高基数或敏感字段。
+    /// 业务作用：发出一个稳定 counter，调用点不得传入高基数或敏感字段。
     ///
     /// 用户实现的 panic 必须在这里被吃掉：部分调用点位于 DLT 投递任务内、
     /// `sender.send(DltCompletion)` 之前，一次 panic 会让 completion 永不到达，
@@ -148,12 +148,12 @@ impl KafkaProxyInner {
         self.emit(|| self.metrics.counter(name, delta, labels), name);
     }
 
-    /// 发出一个稳定 gauge，调用点不得传入高基数或敏感字段。
+    /// 业务作用：发出一个稳定 gauge，调用点不得传入高基数或敏感字段。
     pub(crate) fn gauge(&self, name: &'static str, value: i64, labels: MetricLabels<'_>) {
         self.emit(|| self.metrics.gauge(name, value, labels), name);
     }
 
-    /// 隔离用户指标实现的 panic；只告警，不改变调用方控制流。
+    /// 业务作用：隔离用户指标实现的 panic；只告警，不改变调用方控制流。
     ///
     /// # 参数
     ///
@@ -168,7 +168,7 @@ impl KafkaProxyInner {
         }
     }
 
-    /// 读取当前生命周期。
+    /// 业务作用：读取当前生命周期。
     pub(crate) fn lifecycle(&self) -> Lifecycle {
         match self.lifecycle.load(Ordering::Acquire) {
             0 => Lifecycle::Created,
@@ -178,7 +178,7 @@ impl KafkaProxyInner {
         }
     }
 
-    /// 尝试从预期状态切换到新状态。
+    /// 业务作用：尝试从预期状态切换到新状态。
     ///
     /// # 参数
     ///
@@ -200,7 +200,7 @@ impl KafkaProxyInner {
             })
     }
 
-    /// 判断是否仍允许外部发布入口取得资格。
+    /// 业务作用：判断是否仍允许外部发布入口取得资格。
     ///
     /// # 错误
     ///
@@ -216,7 +216,7 @@ impl KafkaProxyInner {
 }
 
 impl Drop for KafkaProxyInner {
-    /// 外部句柄已全部离开且 owner 线程真正退出后兜底归还 collected lease。
+    /// 业务作用：外部句柄已全部离开且 owner 线程真正退出后兜底归还 collected lease。
     ///
     /// 正常 shutdown 会提前取走租约；这里覆盖调用方漏掉显式 shutdown 的 best-effort
     /// 路径，释放时机仍晚于所有 owner 持有的内部 `Arc<KafkaProxyInner>`。
@@ -232,7 +232,7 @@ impl Drop for KafkaProxyInner {
     }
 }
 
-/// 将生命周期字节转换为稳定诊断文本。
+/// 业务作用：将生命周期字节转换为稳定诊断文本。
 ///
 /// # 参数
 ///
@@ -256,7 +256,7 @@ pub struct KafkaProxy {
 }
 
 impl Clone for KafkaProxy {
-    /// 克隆业务句柄并单独计入 Drop 收尾判定。
+    /// 业务作用：克隆业务句柄并单独计入 Drop 收尾判定。
     fn clone(&self) -> Self {
         self.inner.external_handles.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -266,7 +266,7 @@ impl Clone for KafkaProxy {
 }
 
 impl Drop for KafkaProxy {
-    /// 最后一个业务句柄离开时发送非阻塞 Stop；不在 Drop 内等待或 flush。
+    /// 业务作用：最后一个业务句柄离开时发送非阻塞 Stop；不在 Drop 内等待或 flush。
     fn drop(&mut self) {
         if self.inner.external_handles.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
@@ -310,7 +310,7 @@ impl Drop for KafkaProxy {
 }
 
 impl std::fmt::Debug for KafkaProxy {
-    /// 输出客户端名与当前生命周期；不含 bootstrap 之外的连接细节，也不含任何凭据。
+    /// 业务作用：输出客户端名与当前生命周期；不含 bootstrap 之外的连接细节，也不含任何凭据。
     ///
     /// - `f`: 调用方提供的格式化缓冲区。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -322,7 +322,7 @@ impl std::fmt::Debug for KafkaProxy {
 }
 
 impl KafkaProxy {
-    /// 校验配置并捕获当前异步运行时句柄。
+    /// 业务作用：校验配置并捕获当前异步运行时句柄。
     ///
     /// 本方法只完成本地构造，不连接 broker，也不隐式启动消费者。
     ///
@@ -337,7 +337,7 @@ impl KafkaProxy {
         Self::connect_with_metrics(config, Arc::new(metrics::NoopMetrics))
     }
 
-    /// 校验配置并注入后端无关的指标接收端。
+    /// 业务作用：校验配置并注入后端无关的指标接收端。
     ///
     /// # 参数
     ///
@@ -354,7 +354,7 @@ impl KafkaProxy {
         Self::connect_with_observability(config, metrics, None)
     }
 
-    /// 校验配置并注入指标与只写 span 记录器。
+    /// 业务作用：校验配置并注入指标与只写 span 记录器。
     pub fn connect_with_observability(
         config: KafkaConfig,
         metrics: Arc<dyn MetricsSink>,
@@ -411,24 +411,24 @@ impl KafkaProxy {
         Ok(Self { inner })
     }
 
-    /// 返回冻结配置。
+    /// 业务作用：返回冻结配置。
     pub fn config(&self) -> &KafkaConfig {
         &self.inner.config
     }
 
-    /// 创建一次性消费者注册 builder。
+    /// 业务作用：创建一次性消费者注册 builder。
     ///
     /// 调用本方法不会发现静态消费者，也不会创建线程；这些动作由 builder 显式控制。
     pub fn consumers(&self) -> ConsumerRegistryBuilder {
         ConsumerRegistryBuilder::new(self.clone())
     }
 
-    /// 返回延迟构造的管理端句柄。
+    /// 业务作用：返回延迟构造的管理端句柄。
     pub fn admin(&self) -> KafkaAdmin {
         KafkaAdmin::new(self.clone())
     }
 
-    /// 等待单个 group 满足 broker 就绪要求。
+    /// 业务作用：等待单个 group 满足 broker 就绪要求。
     ///
     /// # 参数
     ///
@@ -495,7 +495,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 并发等待多个 group 满足各自的 broker 就绪要求。
+    /// 业务作用：并发等待多个 group 满足各自的 broker 就绪要求。
     ///
     /// # 参数
     ///
@@ -547,7 +547,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 在绝对截止时刻前只停止消费者，保留 producer lane 与管理端供退出收尾使用。
+    /// 业务作用：在绝对截止时刻前只停止消费者，保留 producer lane 与管理端供退出收尾使用。
     ///
     /// 该入口是容器生命周期协议，不是运行期暂停按钮。成功后总状态保持 `Running`，因此
     /// 已取得的 lane 仍可发布；consumer registry 已被永久封口，不能在同一运行时再次启动。
@@ -598,7 +598,7 @@ impl KafkaProxy {
         Ok(())
     }
 
-    /// 在绝对截止时刻前完成消费者与 producer 的最终关闭。
+    /// 业务作用：在绝对截止时刻前完成消费者与 producer 的最终关闭。
     ///
     /// 若 [`Self::stop_consumers_until`] 已成功，本方法把空 group 表视为正常两段停机路径，
     /// 只排空 lane 并关闭管理端；不会重复 stop owner 或二次释放静态收集租约。
@@ -691,7 +691,7 @@ impl KafkaProxy {
         Ok(())
     }
 
-    /// 使用配置中的相对停机预算完成独立模式的全量关闭。
+    /// 业务作用：使用配置中的相对停机预算完成独立模式的全量关闭。
     ///
     /// Application 受管模式应调用 [`Self::shutdown_until`] 并传入全局绝对 deadline，
     /// 避免每个清理 action 重新获得一份完整预算。
@@ -709,7 +709,7 @@ impl KafkaProxy {
         self.shutdown_until(deadline).await
     }
 
-    /// 返回冻结后的 producer lane 表。
+    /// 业务作用：返回冻结后的 producer lane 表。
     ///
     /// # 返回
     ///
@@ -721,7 +721,7 @@ impl KafkaProxy {
             .expect("connect 必须冻结 producer lane 表")
     }
 
-    /// 快照当前受管 group，供持有生命周期门的停机路径并发等待。
+    /// 业务作用：快照当前受管 group，供持有生命周期门的停机路径并发等待。
     ///
     /// # 返回
     ///
@@ -736,7 +736,7 @@ impl KafkaProxy {
             .collect()
     }
 
-    /// 在全部 owner 已确认退出后清理 consumer 侧可见状态。
+    /// 业务作用：在全部 owner 已确认退出后清理 consumer 侧可见状态。
     ///
     /// # 返回
     ///
@@ -760,7 +760,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 构造生命周期门等待失败时的脱敏未完成资源快照。
+    /// 业务作用：构造生命周期门等待失败时的脱敏未完成资源快照。
     ///
     /// # 参数
     ///
@@ -791,7 +791,7 @@ impl KafkaProxy {
     }
 }
 
-/// 在共享绝对截止时刻前并发停止一组 owner。
+/// 业务作用：在共享绝对截止时刻前并发停止一组 owner。
 ///
 /// # 参数
 ///
@@ -819,7 +819,7 @@ async fn stop_managed_groups(
         .collect()
 }
 
-/// 校验 ready 要求本身，避免把永远不可能满足的条件伪装成 broker 超时。
+/// 业务作用：校验 ready 要求本身，避免把永远不可能满足的条件伪装成 broker 超时。
 ///
 /// # 参数
 ///
@@ -851,7 +851,7 @@ fn validate_ready_requirement(requirement: &ReadyRequirement) -> Result<()> {
     }
 }
 
-/// 判断 assignment 快照是否满足调用方就绪要求。
+/// 业务作用：判断 assignment 快照是否满足调用方就绪要求。
 ///
 /// # 参数
 ///

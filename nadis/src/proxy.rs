@@ -81,7 +81,7 @@ pub struct ProxyCfg {
 }
 
 impl Default for ProxyCfg {
-    /// 构造 stream proxy 默认配置。
+    /// 业务作用：构造 stream proxy 默认配置。
     ///
     /// 默认单消费者、100 条批量、Park 前的重投上限为 5,并设置非零 handler 超时避免慢处理器双跑。
     fn default() -> Self {
@@ -126,7 +126,7 @@ pub enum ProxyStartOffset {
 }
 
 impl ProxyStartOffset {
-    /// XGROUP CREATE 的位点字面量。
+    /// 业务作用：XGROUP CREATE 的位点字面量。
     fn redis_id(self) -> &'static str {
         match self {
             ProxyStartOffset::New => "$",
@@ -145,7 +145,7 @@ pub struct PreparedProxy {
 }
 
 impl PreparedProxy {
-    /// prepare:建共享 stream + consumer group(MKSTREAM;BUSYGROUP 幂等)。
+    /// 业务作用：prepare:建共享 stream + consumer group(MKSTREAM;BUSYGROUP 幂等)。
     /// **建组位点默认 `$`**(只消费组建后的新消息,对齐 原实现 `RedisProxy` PROXY=live-subscribe);
     /// 需要从头重放历史 backlog 时改用 [`prepare_with_offset`](Self::prepare_with_offset) 传
     /// [`ProxyStartOffset::History`]。
@@ -165,7 +165,7 @@ impl PreparedProxy {
         Self::prepare_with_offset(client, stream, group, cfg, ProxyStartOffset::New).await
     }
 
-    /// 同 [`prepare`](Self::prepare),但**显式指定建组起始位点**(原实现 `RedisProxy.xGroupCreate(stream,
+    /// 业务作用：同 [`prepare`](Self::prepare),但**显式指定建组起始位点**(原实现 `RedisProxy.xGroupCreate(stream,
     /// group, ReadOffset)` 重载的对应物):`New`=`$`(只收新消息)/ `History`=`0-0`(从头重放历史)。
     /// 位点**仅首次建组生效**(BUSYGROUP 已存在则不变)。不需要重放历史就用 [`prepare`](Self::prepare) 走默认 `$`。
     ///
@@ -278,7 +278,7 @@ impl PreparedProxy {
         })
     }
 
-    /// 注册 handler(逐 ID 解码 T;handler 失败/panic → 该批 failed)。与 partition 同形态。
+    /// 业务作用：注册 handler(逐 ID 解码 T;handler 失败/panic → 该批 failed)。与 partition 同形态。
     ///
     ///
     /// # 参数
@@ -334,7 +334,7 @@ impl PreparedProxy {
         self
     }
 
-    /// start:spawn `consumers` 个消费循环 + 1 个回收循环;返回 RunningProxy。
+    /// 业务作用：start:spawn `consumers` 个消费循环 + 1 个回收循环;返回 RunningProxy。
     pub async fn start(self) -> Result<RunningProxy> {
         let cancel = CancellationToken::new();
         let shared = Arc::new(ProxyShared {
@@ -402,7 +402,7 @@ pub struct RunningProxy {
 }
 
 impl RunningProxy {
-    /// 发布到共享 stream(无路由;consumers 竞争消费)。返回 entry ID。
+    /// 业务作用：发布到共享 stream(无路由;consumers 竞争消费)。返回 entry ID。
     ///
     /// **wire 说明**:写 `XADD * data {Envelope JSON}`——**单 `data` 字段裹标准
     /// `Envelope{topic,event,data,passthrough}`**,**不等于** 原实现 `RedisProxy.publish` 的 `XADD * {event}
@@ -443,7 +443,7 @@ impl RunningProxy {
         Ok(id)
     }
 
-    /// 停机:cancel 所有循环并等其退出(**带 drain 预算**,卡死 handler 不会让停机永久阻塞)。
+    /// 业务作用：停机:cancel 所有循环并等其退出(**带 drain 预算**,卡死 handler 不会让停机永久阻塞)。
     /// 超预算未退的 task 显式 `abort()`(JoinHandle drop 只分离不中止,卡死 handler 会变游离 task)。
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
@@ -501,7 +501,7 @@ impl RunningProxy {
 }
 
 impl Drop for RunningProxy {
-    /// 未显式 shutdown 时立即停止 consumer/reclaim，禁止句柄丢失后继续消费。
+    /// 业务作用：未显式 shutdown 时立即停止 consumer/reclaim，禁止句柄丢失后继续消费。
     ///
     /// Drop 不能安全执行 `XGROUP DELCONSUMER`：任务可能刚把消息移入 PEL。这里只关闭 admission 并
     /// abort，保留 consumer/PEL 给后续 XAUTOCLAIM；正常路径仍应调用 [`shutdown`](Self::shutdown)。
@@ -513,7 +513,7 @@ impl Drop for RunningProxy {
     }
 }
 
-/// 取消费组各 consumer 的 PEL pending 数(XPENDING summary 第 4 段 `[[name, count], ...]`)。
+/// 业务作用：取消费组各 consumer 的 PEL pending 数(XPENDING summary 第 4 段 `[[name, count], ...]`)。
 /// 用于停机时判断哪些 consumer 可安全 DELCONSUMER(count==0)。解析异常返空表(调用方保守不删)。
 ///
 /// # 参数
@@ -580,7 +580,7 @@ struct ParsedEntries {
     bad: Vec<BadEntry>,
 }
 
-/// 解析 XREADGROUP / XAUTOCLAIM 的 entry 列表 → 成功 `(id, Envelope)` + 坏 entry(保留 id,不丢)。
+/// 业务作用：解析 XREADGROUP / XAUTOCLAIM 的 entry 列表 → 成功 `(id, Envelope)` + 坏 entry(保留 id,不丢)。
 ///
 /// # 参数
 /// - `entries`: 批处理或流水线中的命令条目集合。
@@ -653,7 +653,7 @@ fn parse_entries(entries: &redis::Value) -> ParsedEntries {
     ParsedEntries { ok, bad }
 }
 
-/// 把一批 (id, Envelope) 按 (topic,event) 分桶,逐桶 dispatch handler,返回**失败 ID 集合**。
+/// 业务作用：把一批 (id, Envelope) 按 (topic,event) 分桶,逐桶 dispatch handler,返回**失败 ID 集合**。
 /// 无 handler 的 (topic,event) → 当作成功(ACK,不滞留;对齐 partition 未注册即跳过的语义)。
 ///
 /// # 参数
@@ -699,7 +699,7 @@ async fn dispatch(shared: &ProxyShared, batch: Vec<(String, Envelope)>) -> Vec<S
 // Acknowledges processed proxy stream entries.
 ///
 /// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
+/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `ids`: Redis stream entry id 或业务记录 id 列表。
 async fn ack(shared: &ProxyShared, ids: &[String]) {
     if ids.is_empty() {
@@ -720,7 +720,7 @@ async fn ack(shared: &ProxyShared, ids: &[String]) {
 // Runs one proxy consumer loop until cancellation.
 ///
 /// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
+/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `consumer`: Redis Stream consumer 名称。
 /// - `cancel`: 后台任务使用的取消信号。
 async fn consumer_loop(shared: Arc<ProxyShared>, consumer: String, cancel: CancellationToken) {
@@ -758,7 +758,7 @@ async fn consumer_loop(shared: Arc<ProxyShared>, consumer: String, cancel: Cance
 // Reads new proxy entries for one consumer.
 ///
 /// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
+/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `consumer`: Redis Stream consumer 名称。
 async fn read_new(shared: &ProxyShared, consumer: &str) -> Result<ParsedEntries> {
     // **NOBLOCK**(无 BLOCK 参数):立即返回(空则空数组)——不在共享多路复用连接上阻塞。
@@ -800,7 +800,7 @@ async fn read_new(shared: &ProxyShared, consumer: &str) -> Result<ParsedEntries>
     }
 }
 
-/// 回收循环:周期 XAUTOCLAIM 回收 idle pending(崩溃 consumer 的 + 本节点失败的)→ 查重投次数 →
+/// 业务作用：回收循环:周期 XAUTOCLAIM 回收 idle pending(崩溃 consumer 的 + 本节点失败的)→ 查重投次数 →
 /// 超 max_redeliver 的 poison(Drop/Dlq),其余重投(再 dispatch);ACK 成功子集。
 ///
 /// # 参数
@@ -826,7 +826,7 @@ async fn reclaim_loop(shared: Arc<ProxyShared>, consumer: String, cancel: Cancel
 // Reclaims stale proxy entries for retry.
 ///
 /// # 参数
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
+/// 业务作用：- `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `consumer`: Redis Stream consumer 名称。
 async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
     // XAUTOCLAIM stream group consumer min-idle 0 COUNT n —— 回收闲置 pending 到本回收 consumer
@@ -897,7 +897,7 @@ async fn reclaim_once(shared: &ProxyShared, consumer: &str) -> Result<()> {
     Ok(())
 }
 
-/// 取本批每个 id 的 delivery count(重投次数),用于 poison 判定。
+/// 业务作用：取本批每个 id 的 delivery count(重投次数),用于 poison 判定。
 ///
 ///**逐 id 精确查询**,不再用全局近似 `XPENDING stream group IDLE 0 - + count`——
 /// 后者按 entry-ID 升序取**全局最早的 N 条**,当 group PEL 里存在比本批更早的积压时(典型:某 consumer
@@ -940,7 +940,7 @@ async fn pending_counts(shared: &ProxyShared, ids: &[String]) -> Result<HashMap<
     Ok(out)
 }
 
-/// 毒消息处置。
+/// 业务作用：毒消息处置。
 /// ⚠ Dlq 路径的 XRANGE→XADD→XACK 三步**非事务**：XADD 转存成功但 XACK 失败时，
 /// 该消息会 **DLQ 重复 + 源仍重投**——这是 PROXY at-least-once 语义的固有取舍(DLQ 消费方需幂等/去重),
 /// 可接受;若需精确一次转存可改 Lua 原子化(留 backlog)。
@@ -1041,7 +1041,7 @@ async fn handle_poison(shared: &ProxyShared, ids: &[String]) {
     }
 }
 
-/// pipeline 批量回复是否**全部成功**。本 redis crate 把单命令 server error
+/// 业务作用：pipeline 批量回复是否**全部成功**。本 redis crate 把单命令 server error
 /// **逐槽位内联**成 `Value::ServerError`(不聚合成 outer `Err`,见 `pipeline.rs` 注释),故 DLQ XADD
 /// 这类写入**必须逐槽位检查**——否则 `XADD {dlq}` 撞 WRONGTYPE(key 被占成 string 等)会被当成功、随后
 /// XACK 源 → **消息既没进 DLQ 又被确认 = 永久丢失**。返回 true 仅当数量相符且无任一 `ServerError`。
@@ -1056,7 +1056,7 @@ fn all_pipeline_replies_ok(values: &[redis::Value], expected: usize) -> bool {
             .any(|v| matches!(v, redis::Value::ServerError(_)))
 }
 
-/// 标准 base64 编码(RFC 4648,带 `=` padding)。**dep-free**:仅 DLQ raw 字段做 lossless 还原用,
+/// 业务作用：标准 base64 编码(RFC 4648,带 `=` padding)。**dep-free**:仅 DLQ raw 字段做 lossless 还原用,
 /// 量小,无需引第三方 crate。
 ///
 /// # 参数
@@ -1084,7 +1084,7 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// 处置**不可解析**的坏 entry（无 `data` 字段或 `data` 不是 Envelope JSON）：
+/// 业务作用：处置**不可解析**的坏 entry（无 `data` 字段或 `data` 不是 Envelope JSON）：
 /// 此前坏 entry 被 parser 静默跳过 → 永久卡 PEL。坏 entry 确定性不可解析(重读必再失败),故
 /// **立即处置不重投**:`Drop` → XACK 丢弃;`Dlq` → 把 `{reason, stream, group, id, raw 字段}` 转存
 /// `{stream}:dlq` 后 XACK 源(原始字段 lossless 保留供运维复盘)。Dlq 转存失败 → 不 ACK,留 PEL 待下轮重试(不丢)。

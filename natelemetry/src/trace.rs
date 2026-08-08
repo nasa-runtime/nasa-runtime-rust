@@ -10,7 +10,7 @@ use rand::RngCore as _;
 /// trace-flags 的 sampled 位。
 const SAMPLED_FLAG: u8 = 0x01;
 
-/// 生成一个非零随机 span-id(8B);W3C 要求 span-id 随机且非全零。
+/// 业务作用：生成一个非零随机 span-id(8B);W3C 要求 span-id 随机且非全零。
 pub fn random_span_id() -> [u8; 8] {
     let mut id = [0u8; 8];
     loop {
@@ -21,7 +21,7 @@ pub fn random_span_id() -> [u8; 8] {
     }
 }
 
-/// 生成一个非零随机 trace-id(16B)。
+/// 业务作用：生成一个非零随机 trace-id(16B)。
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     loop {
@@ -41,7 +41,7 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
-    /// 用原始字节构造；全零 trace-id/parent-id 返回 `None`。
+    /// 业务作用：用原始字节构造；全零 trace-id/parent-id 返回 `None`。
     pub fn new(trace_id: [u8; 16], parent_id: [u8; 8], flags: u8) -> Option<Self> {
         if trace_id == [0u8; 16] || parent_id == [0u8; 8] {
             return None;
@@ -53,7 +53,7 @@ impl TraceContext {
         })
     }
 
-    /// 解析入站 `traceparent`(version-00);段数/长度错、非 hex、trace-id/span-id 全零或 version=ff 返回 `None`。
+    /// 业务作用：解析入站 `traceparent`(version-00);段数/长度错、非 hex、trace-id/span-id 全零或 version=ff 返回 `None`。
     pub fn parse_traceparent(header: &str) -> Option<Self> {
         let mut parts = header.split('-');
         let version = parts.next()?;
@@ -97,7 +97,7 @@ impl TraceContext {
         })
     }
 
-    /// 生成出站 `traceparent`(version-00)。
+    /// 业务作用：生成出站 `traceparent`(version-00)。
     pub fn to_traceparent(&self) -> String {
         format!(
             "00-{}-{}-{:02x}",
@@ -107,27 +107,27 @@ impl TraceContext {
         )
     }
 
-    /// 是否被采样(sampled 位)。
+    /// 业务作用：是否被采样(sampled 位)。
     pub fn is_sampled(&self) -> bool {
         self.flags & SAMPLED_FLAG != 0
     }
 
-    /// trace-id 十六进制。
+    /// 业务作用：trace-id 十六进制。
     pub fn trace_id_hex(&self) -> String {
         hex::encode(self.trace_id)
     }
 
-    /// parent span-id 十六进制。
+    /// 业务作用：parent span-id 十六进制。
     pub fn parent_id_hex(&self) -> String {
         hex::encode(self.parent_id)
     }
 
-    /// trace-flags 原值。
+    /// 业务作用：trace-flags 原值。
     pub fn flags(&self) -> u8 {
         self.flags
     }
 
-    /// 生成全新根上下文:随机非零 trace-id + parent span-id;`sampled` 决定采样位。
+    /// 业务作用：生成全新根上下文:随机非零 trace-id + parent span-id;`sampled` 决定采样位。
     ///
     /// 入站无 `traceparent`(或非法)时用它开启一条新链路。
     pub fn new_root(sampled: bool) -> Self {
@@ -138,7 +138,7 @@ impl TraceContext {
         }
     }
 
-    /// 派生子上下文:**同一 trace-id**,parent-id 换成新 span-id,flags 沿用(采样决策向下传播)。
+    /// 业务作用：派生子上下文:**同一 trace-id**,parent-id 换成新 span-id,flags 沿用(采样决策向下传播)。
     pub fn child(&self, new_span_id: [u8; 8]) -> Self {
         Self {
             trace_id: self.trace_id,
@@ -149,7 +149,7 @@ impl TraceContext {
 }
 
 impl fmt::Debug for TraceContext {
-    /// 输出可关联的十六进制 ID 与采样位，不包含 baggage 或业务属性。
+    /// 业务作用：输出可关联的十六进制 ID 与采样位，不包含 baggage 或业务属性。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TraceContext")

@@ -11,7 +11,7 @@ use crate::command::CommandExport;
 use crate::counters::LATENCY_LE_LABELS;
 use crate::registry;
 
-/// `/metrics` handler:业务把它挂到路由即可被 Prometheus 抓取。
+/// 业务作用：`/metrics` handler:业务把它挂到路由即可被 Prometheus 抓取。
 /// 是否鉴权由业务路由层自定(合同 安全边界);本组件不新增独立端口。
 pub async fn metrics() -> impl IntoResponse {
     (
@@ -184,7 +184,7 @@ pub fn render_metrics() -> String {
     out
 }
 
-/// 输出一族只按 (command, group) 打标签的 counter。
+/// 业务作用：输出一族只按 (command, group) 打标签的 counter。
 ///
 /// # 参数
 /// - `out`: 渲染缓冲。
@@ -202,7 +202,7 @@ fn push_counter_family(
     push_family(out, exports, name, help, "counter", pick);
 }
 
-/// 输出一族只按 (command, group) 打标签的 gauge。
+/// 业务作用：输出一族只按 (command, group) 打标签的 gauge。
 ///
 /// # 参数
 /// - `out`: 渲染缓冲。
@@ -220,7 +220,7 @@ fn push_gauge_family(
     push_family(out, exports, name, help, "gauge", pick);
 }
 
-/// counter/gauge 族的公共输出逻辑。
+/// 业务作用：counter/gauge 族的公共输出逻辑。
 ///
 /// # 参数
 /// - `out`: 渲染缓冲。
@@ -249,7 +249,7 @@ fn push_family(
     }
 }
 
-/// Prometheus label value 转义:`\` → `\\`、`"` → `\"`、换行 → `\n`(合同)。
+/// 业务作用：Prometheus label value 转义:`\` → `\\`、`"` → `\"`、换行 → `\n`(合同)。
 ///
 /// # 参数
 /// - `value`: 原始 label 值。
@@ -266,7 +266,7 @@ fn escape_label(value: &str) -> String {
     escaped
 }
 
-/// 浮点渲染:整数值不带小数点尾巴、其余保留足够精度(sum 秒)。
+/// 业务作用：浮点渲染:整数值不带小数点尾巴、其余保留足够精度(sum 秒)。
 ///
 /// # 参数
 /// - `v`: 待渲染浮点值。

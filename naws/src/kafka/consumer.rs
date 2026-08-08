@@ -19,7 +19,7 @@ use crate::{BorrowedSendResult, NodeRegistry, SendReport, Sender};
 
 /// 来源节点 fencing 接口。
 pub trait SourceFence: Send + Sync + 'static {
-    /// 判断来源 incarnation 是否仍有效；false 表示旧实例迟到数据。
+    /// 业务作用：判断来源 incarnation 是否仍有效；false 表示旧实例迟到数据。
     ///
     /// # 参数
     ///
@@ -29,7 +29,7 @@ pub trait SourceFence: Send + Sync + 'static {
 }
 
 impl SourceFence for NodeRegistry {
-    /// 复用节点目录的数值 incarnation 围栏，并只在通过时刷新活跃时间。
+    /// 业务作用：复用节点目录的数值 incarnation 围栏，并只在通过时刷新活跃时间。
     fn accept(&self, node: &str, incarnation: u128) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -50,7 +50,7 @@ pub struct SenderSlot {
 }
 
 impl SenderSlot {
-    /// 返回白名单内所有 Sender 的最小单帧上限。
+    /// 业务作用：返回白名单内所有 Sender 的最小单帧上限。
     ///
     /// 交叉校验必须取最小值：任何一个目标 Sender 装不下，那条记录就会 Halt 数据面。
     pub(crate) fn min_max_frame(&self) -> usize {
@@ -61,7 +61,7 @@ impl SenderSlot {
             .unwrap_or(usize::MAX)
     }
 
-    /// 以一个默认 Sender 构造空白名单。
+    /// 业务作用：以一个默认 Sender 构造空白名单。
     ///
     /// # 参数
     ///
@@ -73,7 +73,7 @@ impl SenderSlot {
         }
     }
 
-    /// 追加一个启动期固定 sink。
+    /// 业务作用：追加一个启动期固定 sink。
     ///
     /// # 参数
     ///
@@ -95,7 +95,7 @@ impl SenderSlot {
         Ok(self)
     }
 
-    /// 只从预注册白名单解析 Sender。
+    /// 业务作用：只从预注册白名单解析 Sender。
     ///
     /// # 参数
     ///
@@ -125,7 +125,7 @@ pub struct HeaderPassthroughAdapter {
 }
 
 impl HeaderPassthroughAdapter {
-    /// 构造并校验一个数据面 adapter。
+    /// 业务作用：构造并校验一个数据面 adapter。
     ///
     /// # 参数
     ///
@@ -172,7 +172,7 @@ impl HeaderPassthroughAdapter {
         })
     }
 
-    /// 把发送报告映射成配置化成功或重试结果。
+    /// 业务作用：把发送报告映射成配置化成功或重试结果。
     ///
     /// # 参数
     ///
@@ -204,22 +204,22 @@ impl HeaderPassthroughAdapter {
 }
 
 impl PassthroughConsumer for HeaderPassthroughAdapter {
-    /// 返回唯一 data topic。
+    /// 业务作用：返回唯一 data topic。
     fn topics(&self) -> Vec<String> {
         vec![self.topic.clone()]
     }
 
-    /// 返回固定 adapter 路由事件。
+    /// 业务作用：返回固定 adapter 路由事件。
     fn event(&self) -> String {
         NAWS_PUSH_EVENT.into()
     }
 
-    /// 返回构造时冻结的独占或稳定 group。
+    /// 业务作用：返回构造时冻结的独占或稳定 group。
     fn group(&self) -> GroupSpec {
         self.group.clone()
     }
 
-    /// 在 owner 栈内完成 header 校验、目标门禁、最终 frame 编码与有界 outbox 入队。
+    /// 业务作用：在 owner 栈内完成 header 校验、目标门禁、最终 frame 编码与有界 outbox 入队。
     fn consume_borrowed(
         &self,
         record: BorrowedKafkaRecord<'_>,
@@ -320,7 +320,7 @@ impl PassthroughConsumer for HeaderPassthroughAdapter {
     }
 }
 
-/// 把协议编码错误映射为类型化 passthrough 失败。
+/// 业务作用：把协议编码错误映射为类型化 passthrough 失败。
 ///
 /// # 参数
 ///

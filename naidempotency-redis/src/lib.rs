@@ -61,7 +61,7 @@ pub struct RedisIdempotencyStore {
 }
 
 impl RedisIdempotencyStore {
-    /// 用默认 TTL(in-flight 5min / completed 24h)构造。
+    /// 业务作用：用默认 TTL(in-flight 5min / completed 24h)构造。
     pub fn new(client: Arc<RedisClient>) -> Self {
         Self {
             client,
@@ -70,7 +70,7 @@ impl RedisIdempotencyStore {
         }
     }
 
-    /// 用自定义 TTL 构造(in-flight 应大于最长处理时间;completed 为重放窗口)。
+    /// 业务作用：用自定义 TTL 构造(in-flight 应大于最长处理时间;completed 为重放窗口)。
     pub fn with_ttls(
         client: Arc<RedisClient>,
         inflight_ttl: Duration,
@@ -83,7 +83,7 @@ impl RedisIdempotencyStore {
         }
     }
 
-    /// 组合命名空间键。普通输入继续使用 v1 形式以保留滚动升级期间的已有 replay；只有任一段含旧
+    /// 业务作用：组合命名空间键。普通输入继续使用 v1 形式以保留滚动升级期间的已有 replay；只有任一段含旧
     /// 分隔符时才切换到长度定界的 v2 摘要，堵住分隔符注入碰撞且不打断正常历史记录。
     fn redis_key(key: &IdempotencyKey) -> String {
         const SEPARATOR: char = '\u{1f}';
@@ -118,7 +118,7 @@ impl RedisIdempotencyStore {
     }
 }
 
-/// 将 TTL 转为 Redis 可接受的正 i64 毫秒范围，拒绝零值与截断。
+/// 业务作用：将 TTL 转为 Redis 可接受的正 i64 毫秒范围，拒绝零值与截断。
 fn ttl_millis(ttl: Duration) -> Result<u64, IdempotencyError> {
     let millis =
         u64::try_from(ttl.as_millis()).map_err(|_| IdempotencyError::new("invalid ttl"))?;
@@ -128,7 +128,7 @@ fn ttl_millis(ttl: Duration) -> Result<u64, IdempotencyError> {
     Ok(millis)
 }
 
-/// in-flight 值编码:`[0][fingerprint:32][lease:16]`。
+/// 业务作用：in-flight 值编码:`[0][fingerprint:32][lease:16]`。
 fn encode_inflight(fingerprint: RequestFingerprint, lease: ExecutionLease) -> Vec<u8> {
     let mut value = Vec::with_capacity(49);
     value.push(STATE_IN_FLIGHT);
@@ -137,7 +137,7 @@ fn encode_inflight(fingerprint: RequestFingerprint, lease: ExecutionLease) -> Ve
     value
 }
 
-/// completed suffix:`[status:2 LE][headers-len:4 LE][headers-json][body]`。
+/// 业务作用：completed suffix:`[status:2 LE][headers-len:4 LE][headers-json][body]`。
 fn encode_completed_suffix(response: &StoredResponse) -> Result<Vec<u8>, IdempotencyError> {
     let headers = serde_json::to_vec(&response.headers).map_err(map_err)?;
     let header_len =
@@ -157,7 +157,7 @@ struct Decoded {
     response: Option<StoredResponse>,
 }
 
-/// 解码存储值;长度不足视为损坏返回 `None`。
+/// 业务作用：解码存储值;长度不足视为损坏返回 `None`。
 fn decode(bytes: &[u8]) -> Option<Decoded> {
     if bytes.len() < 33 {
         return None;
@@ -201,7 +201,7 @@ fn decode(bytes: &[u8]) -> Option<Decoded> {
 
 #[async_trait]
 impl IdempotencyStore for RedisIdempotencyStore {
-    /// 用 `SET NX PX` 原子占位；已有值按二进制状态裁决重放、在途或指纹冲突。
+    /// 业务作用：用 `SET NX PX` 原子占位；已有值按二进制状态裁决重放、在途或指纹冲突。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -247,7 +247,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
         }
     }
 
-    /// 通过 Lua compare-and-set 将仍匹配 fingerprint/lease 的在途值替换为完成值。
+    /// 业务作用：通过 Lua compare-and-set 将仍匹配 fingerprint/lease 的在途值替换为完成值。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -269,7 +269,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
         Ok(completed == 1)
     }
 
-    /// 通过 Lua compare-and-delete 释放仍属于调用方的在途占位。
+    /// 业务作用：通过 Lua compare-and-delete 释放仍属于调用方的在途占位。
     async fn abort(
         &self,
         key: &IdempotencyKey,
@@ -287,7 +287,7 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 }
 
-/// 把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显命令/凭据/请求体)。
+/// 业务作用：把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显命令/凭据/请求体)。
 fn map_err<E>(_error: E) -> IdempotencyError {
     IdempotencyError::new("redis error")
 }

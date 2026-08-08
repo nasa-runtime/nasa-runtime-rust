@@ -21,7 +21,7 @@ pub struct WsKafkaPublisher {
 }
 
 impl WsKafkaPublisher {
-    /// 构造并校验 publisher。
+    /// 业务作用：构造并校验 publisher。
     ///
     /// # 参数
     ///
@@ -36,7 +36,7 @@ impl WsKafkaPublisher {
         Ok(Self { lane, config })
     }
 
-    /// 创建一条借用 raw payload 的安全发布 builder。
+    /// 业务作用：创建一条借用 raw payload 的安全发布 builder。
     ///
     /// # 参数
     ///
@@ -98,55 +98,55 @@ pub struct WsKafkaPublishBuilder<'a> {
 }
 
 impl<'a> WsKafkaPublishBuilder<'a> {
-    /// 追加一个客户端事件。
+    /// 业务作用：追加一个客户端事件。
     pub fn client_event(mut self, value: impl Into<String>) -> Self {
         self.events.push(value.into());
         self
     }
 
-    /// 追加一个 endpoint/router。
+    /// 业务作用：追加一个 endpoint/router。
     pub fn router(mut self, value: impl Into<String>) -> Self {
         self.routers.push(value.into());
         self
     }
 
-    /// 追加一个目标用户。
+    /// 业务作用：追加一个目标用户。
     pub fn uid(mut self, value: impl Into<String>) -> Self {
         self.uids.push(value.into());
         self
     }
 
-    /// 设置唯一目标群组。
+    /// 业务作用：设置唯一目标群组。
     pub fn group(mut self, value: impl Into<String>) -> Self {
         self.group = Some(value.into());
         self
     }
 
-    /// 追加一个排除用户。
+    /// 业务作用：追加一个排除用户。
     pub fn exclude_uid(mut self, value: impl Into<String>) -> Self {
         self.excludes.push(value.into());
         self
     }
 
-    /// 设置来源用户。
+    /// 业务作用：设置来源用户。
     pub fn from_uid(mut self, value: impl Into<String>) -> Self {
         self.from_uid = Some(value.into());
         self
     }
 
-    /// 设置需要排除的来源 session/client。
+    /// 业务作用：设置需要排除的来源 session/client。
     pub fn from_client(mut self, value: impl Into<String>) -> Self {
         self.from_client = Some(value.into());
         self
     }
 
-    /// 追加一个目标逻辑节点。
+    /// 业务作用：追加一个目标逻辑节点。
     pub fn target_node(mut self, value: impl Into<String>) -> Self {
         self.target_nodes.push(value.into());
         self
     }
 
-    /// 设置受控集群来源身份。
+    /// 业务作用：设置受控集群来源身份。
     ///
     /// # 参数
     ///
@@ -157,25 +157,25 @@ impl<'a> WsKafkaPublishBuilder<'a> {
         self
     }
 
-    /// 选择一个启动期预注册 sink。
+    /// 业务作用：选择一个启动期预注册 sink。
     pub fn sink_id(mut self, value: impl Into<String>) -> Self {
         self.sink_id = Some(value.into());
         self
     }
 
-    /// 选择 allowlist 内的原生消息编码模式。
+    /// 业务作用：选择 allowlist 内的原生消息编码模式。
     pub fn message_mode(mut self, value: Mode) -> Self {
         self.message_mode = value;
         self
     }
 
-    /// 设置 producer 分区 key。
+    /// 业务作用：设置 producer 分区 key。
     pub fn key(mut self, value: impl Into<String>) -> Self {
         self.key = Some(value.into());
         self
     }
 
-    /// 校验并发布 raw value，等待 broker delivery。
+    /// 业务作用：校验并发布 raw value，等待 broker delivery。
     ///
     /// # 错误
     ///
@@ -184,7 +184,7 @@ impl<'a> WsKafkaPublishBuilder<'a> {
         self.raw_builder()?.send().await
     }
 
-    /// 校验并把 raw value 登记到有界异步投递观察队列。
+    /// 业务作用：校验并把 raw value 登记到有界异步投递观察队列。
     ///
     /// 返回成功只表示消息已进入 producer 且 delivery observer 已登记，不表示 broker 已确认。
     ///
@@ -195,7 +195,7 @@ impl<'a> WsKafkaPublishBuilder<'a> {
         self.raw_builder()?.fire()
     }
 
-    /// 校验路由并构造只借用最终 payload 的 raw builder。
+    /// 业务作用：校验路由并构造只借用最终 payload 的 raw builder。
     ///
     /// # 错误
     ///
@@ -244,7 +244,7 @@ impl<'a> WsKafkaPublishBuilder<'a> {
             ))
     }
 
-    /// 校验 typed builder 的组合、文本和 header 容量。
+    /// 业务作用：校验 typed builder 的组合、文本和 header 容量。
     fn validate(&self) -> nafka::Result<()> {
         if self.events.is_empty() {
             return Err(route_error("至少需要一个 client_event"));
@@ -322,7 +322,7 @@ impl<'a> WsKafkaPublishBuilder<'a> {
         Ok(())
     }
 
-    /// 计算最终固定 headers 的保守精确字节数。
+    /// 业务作用：计算最终固定 headers 的保守精确字节数。
     fn estimated_header_bytes(&self) -> nafka::Result<usize> {
         let mut total = 0_usize;
         for (name, values) in [
@@ -363,7 +363,7 @@ impl<'a> WsKafkaPublishBuilder<'a> {
     }
 }
 
-/// 向 raw builder 逐项追加同名多值 header。
+/// 业务作用：向 raw builder 逐项追加同名多值 header。
 ///
 /// # 参数
 ///
@@ -381,7 +381,7 @@ fn append_many<'a>(
     builder
 }
 
-/// checked 累加一条 header 的名和值长度。
+/// 业务作用：checked 累加一条 header 的名和值长度。
 ///
 /// # 参数
 ///
@@ -395,7 +395,7 @@ fn checked_header_add(total: usize, name: &str, value_len: usize) -> nafka::Resu
         .ok_or_else(|| route_error("路由 header 字节数溢出"))
 }
 
-/// 构造不携带 header value 的路由错误。
+/// 业务作用：构造不携带 header value 的路由错误。
 ///
 /// # 参数
 ///

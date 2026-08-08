@@ -47,7 +47,7 @@ use super::KeyLayout;
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// 全局 bootstrap marker key。
+/// 业务作用：全局 bootstrap marker key。
 ///
 /// # 参数
 /// - `namespace`: Redis 协议命名空间。
@@ -55,7 +55,7 @@ pub fn bootstrap_key(namespace: &str) -> String {
     format!("nasa:fence-bootstrap:{namespace}")
 }
 
-/// bootstrap owner lease key(SET NX PX 独占,值 = owner token)。
+/// 业务作用：bootstrap owner lease key(SET NX PX 独占,值 = owner token)。
 ///
 /// # 参数
 /// - `namespace`: Redis 协议命名空间。
@@ -76,7 +76,7 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) 
 return 0
 "#;
 
-/// per-tag fence HASH key。
+/// 业务作用：per-tag fence HASH key。
 ///
 /// # 参数
 /// - `layout`: 分区组 key 布局。
@@ -185,7 +185,7 @@ end
 return n
 "#;
 
-/// 执行 bootstrap(幂等可重入;任一阶段崩溃后由新 owner 同 round 续建)。
+/// 业务作用：执行 bootstrap(幂等可重入;任一阶段崩溃后由新 owner 同 round 续建)。
 /// 返回 FenceMeta(round/nonce/epoch)供 acquire/ACK 使用。
 ///
 /// 流程:Ready 快路径 → 否则抢 owner lease;抢到 = 单 owner 推进状态机
@@ -268,7 +268,7 @@ pub async fn bootstrap(
     }
 }
 
-/// owner 视角的状态机推进(调用方已持 owner lease;marker 写入仅此处发生)。
+/// 业务作用：owner 视角的状态机推进(调用方已持 owner lease;marker 写入仅此处发生)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -421,7 +421,7 @@ async fn bootstrap_as_owner(
     })
 }
 
-/// 校验 per-tag fence 已 Ready 且三元组一致(运行节点 acquire 前置条件)。
+/// 业务作用：校验 per-tag fence 已 Ready 且三元组一致(运行节点 acquire 前置条件)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -446,7 +446,7 @@ async fn verify_tag_ready(
     Ok(())
 }
 
-/// 把一个 per-tag fence seed 到给定 round/nonce/epoch(TAG_INIT + TAG_ACTIVATE,均幂等),并校验 Ready。
+/// 业务作用：把一个 per-tag fence seed 到给定 round/nonce/epoch(TAG_INIT + TAG_ACTIVATE,均幂等),并校验 Ready。
 /// **多组**:全局 bootstrap marker 已 Ready(namespace 级),新隔离组用既有 round/nonce seed 自己的 tag;
 /// 与 `bootstrap_as_owner` 主流程的 ③⑤ 同 Lua,只是不动全局 marker。调用方必须持 owner lease。
 ///
@@ -488,7 +488,7 @@ async fn seed_tag(
     verify_tag_ready(client, fkey, round, nonce).await
 }
 
-/// 获取分区任期 stamp(锁 acquire 成功后调用;新任期使旧 stamp 失效)。
+/// 业务作用：获取分区任期 stamp(锁 acquire 成功后调用;新任期使旧 stamp 失效)。
 ///
 /// # 参数
 /// - `client`: 执行 HINCRBY 任期递增的 Redis 客户端。
@@ -569,7 +569,7 @@ pub enum FencedAck {
     Rejected(String),
 }
 
-/// V2 原子 fenced ACK(worker 专用):单 Lua 校验 holder+fence+任期后 XACK。
+/// 业务作用：V2 原子 fenced ACK(worker 专用):单 Lua 校验 holder+fence+任期后 XACK。
 /// (参数确实多:三类 key + 五个校验量 + ids——这是协议字段的自然数量,
 ///  打包结构体反而掩盖 Lua ARGV 的一一对应关系,显式 allow)
 ///

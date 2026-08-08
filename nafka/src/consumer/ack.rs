@@ -38,7 +38,7 @@ pub(crate) struct AckSlot {
 }
 
 impl AckSlot {
-    /// 创建开放确认槽。
+    /// 业务作用：创建开放确认槽。
     ///
     /// # 参数
     ///
@@ -50,7 +50,7 @@ impl AckSlot {
         }
     }
 
-    /// 在回调期内幂等记录临时确认。
+    /// 业务作用：在回调期内幂等记录临时确认。
     ///
     /// # 错误
     ///
@@ -78,7 +78,7 @@ impl AckSlot {
         }
     }
 
-    /// 封存槽并返回封存前是否已确认。
+    /// 业务作用：封存槽并返回封存前是否已确认。
     fn seal(&self) -> bool {
         self.state.swap(SLOT_SEALED, Ordering::AcqRel) == SLOT_ACKED
     }
@@ -91,7 +91,7 @@ pub struct AckToken {
 }
 
 impl AckToken {
-    /// 在当前 handler 回调期内同步记录本地确认。
+    /// 业务作用：在当前 handler 回调期内同步记录本地确认。
     ///
     /// 返回成功只表示临时确认已记录；只有 handler 最终返回成功且 assignment epoch 仍有效，
     /// owner 才会把连续安全前缀纳入提交水位。
@@ -103,7 +103,7 @@ impl AckToken {
         self.inner.acknowledge()
     }
 
-    /// 暴露内部身份给 owner fencing，不向业务公开 offset 修改入口。
+    /// 业务作用：暴露内部身份给 owner fencing，不向业务公开 offset 修改入口。
     #[allow(dead_code)]
     pub(crate) fn identity(&self) -> &AckIdentity {
         &self.inner.identity
@@ -119,7 +119,7 @@ pub(crate) enum RecordAck {
 }
 
 impl RecordAck {
-    /// 对当前记录执行手动确认。
+    /// 业务作用：对当前记录执行手动确认。
     ///
     /// # 错误
     ///
@@ -131,7 +131,7 @@ impl RecordAck {
         }
     }
 
-    /// 消费自身并取出手动 token。
+    /// 业务作用：消费自身并取出手动 token。
     ///
     /// # 错误
     ///
@@ -159,7 +159,7 @@ pub(crate) struct ManualAckSummary {
 }
 
 impl ManualAckSet {
-    /// 按连续记录身份构造一组开放确认槽。
+    /// 业务作用：按连续记录身份构造一组开放确认槽。
     ///
     /// # 参数
     ///
@@ -173,7 +173,7 @@ impl ManualAckSet {
         }
     }
 
-    /// 为指定输入下标生成不可复制的记录确认能力。
+    /// 业务作用：为指定输入下标生成不可复制的记录确认能力。
     ///
     /// # 参数
     ///
@@ -183,7 +183,7 @@ impl ManualAckSet {
         RecordAck::Manual(AckToken { inner })
     }
 
-    /// 结束本次回调，封存全部 token，并计算有效连续确认前缀。
+    /// 业务作用：结束本次回调，封存全部 token，并计算有效连续确认前缀。
     ///
     /// # 参数
     ///
@@ -209,7 +209,7 @@ impl ManualAckSet {
 }
 
 impl Drop for ManualAckSet {
-    /// handler future 被 timeout 或取消丢弃时也必须封存全部 token。
+    /// 业务作用：handler future 被 timeout 或取消丢弃时也必须封存全部 token。
     fn drop(&mut self) {
         for slot in &self.slots {
             let _ = slot.seal();

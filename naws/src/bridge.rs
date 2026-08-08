@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 /// payload 桥接:socket.io 目标出站、socket.io 客户端入站时翻译 payload。
 pub trait PayloadBridge: Send + Sync {
-    /// 出站:NASA payload(opaque bytes)→ socket.io EVENT 的 arg(一段 JSON 文本)。
+    /// 业务作用：出站:NASA payload(opaque bytes)→ socket.io EVENT 的 arg(一段 JSON 文本)。
     ///
     /// # 参数
     /// - `event`: 业务事件名,自定义 bridge 可按事件选择编码策略。
     /// - `payload`: 框架内部消息 payload 字节。
     fn outbound(&self, event: &str, payload: &[u8]) -> String;
 
-    /// 入站:socket.io EVENT 的 arg(JSON 文本)→ NASA payload bytes。
+    /// 业务作用：入站:socket.io EVENT 的 arg(JSON 文本)→ NASA payload bytes。
     ///
     /// # 参数
     /// - `event`: 业务事件名,自定义 bridge 可按事件选择解码策略。
@@ -31,7 +31,7 @@ pub trait PayloadBridge: Send + Sync {
 pub struct JsonPassthrough;
 
 impl PayloadBridge for JsonPassthrough {
-    /// 把内部负载转换为外发文本；用于适配不同客户端协议。
+    /// 业务作用：把内部负载转换为外发文本；用于适配不同客户端协议。
     ///
     /// # 参数
     /// - `event`: socket.io 事件名,用于让 bridge 选择事件级编码策略。
@@ -43,7 +43,7 @@ impl PayloadBridge for JsonPassthrough {
         }
     }
 
-    /// 把入站文本转换为内部字节负载；用于统一事件处理入口。
+    /// 业务作用：把入站文本转换为内部字节负载；用于统一事件处理入口。
     ///
     /// # 参数
     /// - `event`: socket.io 事件名,用于让 bridge 选择事件级解码策略。
@@ -53,7 +53,7 @@ impl PayloadBridge for JsonPassthrough {
     }
 }
 
-/// 返回默认负载桥接器；用于未指定协议适配器时直接透传 JSON。
+/// 业务作用：返回默认负载桥接器；用于未指定协议适配器时直接透传 JSON。
 pub fn default_bridge() -> Arc<dyn PayloadBridge> {
     Arc::new(JsonPassthrough)
 }
@@ -67,7 +67,7 @@ pub struct Base64Bridge;
 
 #[cfg(feature = "socketio")]
 impl PayloadBridge for Base64Bridge {
-    /// 把内部负载转换为外发文本；用于适配不同客户端协议。
+    /// 业务作用：把内部负载转换为外发文本；用于适配不同客户端协议。
     ///
     /// # 参数
     /// - `event`: socket.io 事件名,用于让 bridge 选择事件级编码策略。
@@ -78,7 +78,7 @@ impl PayloadBridge for Base64Bridge {
         format!("\"{b64}\"")
     }
 
-    /// 把入站文本转换为内部字节负载；用于统一事件处理入口。
+    /// 业务作用：把入站文本转换为内部字节负载；用于统一事件处理入口。
     ///
     /// # 参数
     /// - `event`: socket.io 事件名,用于让 bridge 选择事件级解码策略。
@@ -93,7 +93,7 @@ impl PayloadBridge for Base64Bridge {
     }
 }
 
-/// 把一个事件名转成 JSON 字符串字面量(最小转义),用于拼 socket.io EVENT 数组。
+/// 业务作用：把一个事件名转成 JSON 字符串字面量(最小转义),用于拼 socket.io EVENT 数组。
 ///
 /// # 参数
 /// - `s`: 待写入 socket.io EVENT 数组的事件名。

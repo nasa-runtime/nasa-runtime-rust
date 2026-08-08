@@ -1,5 +1,5 @@
 # ============================================================================
-# async-macro —— 自定义属性宏 #[Async] / #[scheduled] / #[EnableScheduling](对标 原框架 @Async/@Scheduled/@EnableScheduling)
+# async-macro —— 自定义属性宏 #[Async] / #[scheduled] / #[EnableScheduling]
 #   #[Async]            贴在 async fn 上(可带 owned 参数;属性本身无参):编译期改写成"调用即 tokio::spawn、返回 JoinHandle"。需有人调用。
 #   #[scheduled]        贴在【零参 async fn】上:linkme 自动注册 + 调度。触发源 cron / fixed_rate / fixed_delay
 #                       (各支持 _ms、数字+time_unit、_string;旧别名 every_ms/delay_ms)+ initial_delay + cron 的 zone

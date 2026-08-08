@@ -103,7 +103,7 @@ static NAFKA_DESCRIPTORS: [&MetricDescriptor; 6] = [
     &PUBLISH_FAILED_TOTAL,
 ];
 
-/// 启动期把 nafka 的 descriptor 注册进 hub 并做冲突审计。
+/// 业务作用：启动期把 nafka 的 descriptor 注册进 hub 并做冲突审计。
 ///
 /// # 错误
 ///
@@ -116,7 +116,7 @@ pub fn register_nafka_descriptors(hub: &MetricHub) -> Result<(), MetricConflict>
     Ok(())
 }
 
-/// 按 name 查找 nafka descriptor。
+/// 业务作用：按 name 查找 nafka descriptor。
 #[cfg(feature = "kafka")]
 fn nafka_descriptor(name: &str) -> Option<&'static MetricDescriptor> {
     NAFKA_DESCRIPTORS
@@ -125,7 +125,7 @@ fn nafka_descriptor(name: &str) -> Option<&'static MetricDescriptor> {
         .find(|descriptor| descriptor.name == name)
 }
 
-/// 按 `descriptor.label_names` 顺序,从 nafka 的 (key, value) 对里提取 label 值;缺失用空串。
+/// 业务作用：按 `descriptor.label_names` 顺序,从 nafka 的 (key, value) 对里提取 label 值;缺失用空串。
 #[cfg(feature = "kafka")]
 fn label_values(descriptor: &MetricDescriptor, labels: &[(&'static str, &str)]) -> Vec<String> {
     descriptor
@@ -152,7 +152,7 @@ pub struct NafkaMetricSinkAdapter {
 
 #[cfg(feature = "kafka")]
 impl NafkaMetricSinkAdapter {
-    /// 用给定的进程级 hub 创建适配器。
+    /// 业务作用：用给定的进程级 hub 创建适配器。
     pub fn new(hub: Arc<MetricHub>) -> Self {
         Self { hub }
     }
@@ -160,7 +160,7 @@ impl NafkaMetricSinkAdapter {
 
 #[cfg(feature = "kafka")]
 impl nafka::MetricsSink for NafkaMetricSinkAdapter {
-    /// 将 nafka counter 名称映射到静态 descriptor，并按声明顺序记录 labels。
+    /// 业务作用：将 nafka counter 名称映射到静态 descriptor，并按声明顺序记录 labels。
     fn counter(&self, name: &'static str, delta: u64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
         let Some(descriptor) = nafka_descriptor(name) else {
@@ -171,7 +171,7 @@ impl nafka::MetricsSink for NafkaMetricSinkAdapter {
         self.hub.counter(descriptor, delta, &refs);
     }
 
-    /// 将 nafka gauge 名称映射到静态 descriptor，并把整数值写入统一 hub。
+    /// 业务作用：将 nafka gauge 名称映射到静态 descriptor，并把整数值写入统一 hub。
     fn gauge(&self, name: &'static str, value: i64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
         let Some(descriptor) = nafka_descriptor(name) else {
@@ -291,7 +291,7 @@ pub struct NawebMetricsSource {
 
 #[cfg(feature = "web-security")]
 impl NawebMetricsSource {
-    /// 用 Web Ready 后发布的 `SecurityMetrics` 句柄创建兼容源。
+    /// 业务作用：用 Web Ready 后发布的 `SecurityMetrics` 句柄创建兼容源。
     pub fn new(metrics: Arc<naweb::SecurityMetrics>) -> Self {
         Self { metrics }
     }
@@ -299,18 +299,18 @@ impl NawebMetricsSource {
 
 #[cfg(feature = "web-security")]
 impl LegacyMetricsSource for NawebMetricsSource {
-    /// 返回 naweb 兼容源拥有的静态指标族目录。
+    /// 业务作用：返回 naweb 兼容源拥有的静态指标族目录。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &NAWEB_DESCRIPTORS
     }
 
-    /// 读取 naweb 当前 registry 快照并追加 Prometheus exposition。
+    /// 业务作用：读取 naweb 当前 registry 快照并追加 Prometheus exposition。
     fn render_prometheus(&self, output: &mut String) {
         output.push_str(&self.metrics.render_prometheus());
     }
 }
 
-/// 把 naweb 兼容源注册进 hub(审计其 descriptor 并保存以便渲染)。
+/// 业务作用：把 naweb 兼容源注册进 hub(审计其 descriptor 并保存以便渲染)。
 ///
 /// # 错误
 ///

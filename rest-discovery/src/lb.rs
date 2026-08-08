@@ -14,7 +14,7 @@ use nadisc::Instance;
 
 /// 负载均衡策略:给定服务名 + 已过滤实例,返回选中的下标(空→`None`)。
 pub trait LoadBalancer: Send + Sync {
-    /// 从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
     ///
     /// # 参数
     ///
@@ -31,14 +31,14 @@ pub struct RoundRobinLoadBalancer {
 }
 
 impl RoundRobinLoadBalancer {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub fn new() -> Self {
         Self {
             counters: DashMap::new(),
         }
     }
 
-    /// 递增并返回轮询下标；用于在同一服务的实例间均匀分配请求。
+    /// 业务作用：递增并返回轮询下标；用于在同一服务的实例间均匀分配请求。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -53,7 +53,7 @@ impl RoundRobinLoadBalancer {
 }
 
 impl LoadBalancer for RoundRobinLoadBalancer {
-    /// 从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -72,12 +72,12 @@ impl LoadBalancer for RoundRobinLoadBalancer {
 /// 实例集每次按当前传入集合**重建**(携带已存在实例的 `current_weight`),自动剪除已下线实例的陈旧状态。
 #[derive(Default)]
 pub struct WeightedRoundRobinLoadBalancer {
-    // service -> (ip:port -> current_weight)
+    // 每个 service 单独保存 endpoint 到 current_weight 的映射，避免不同服务互相污染轮询权重。
     state: DashMap<String, Mutex<HashMap<String, f64>>>,
 }
 
 impl WeightedRoundRobinLoadBalancer {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub fn new() -> Self {
         Self {
             state: DashMap::new(),
@@ -85,7 +85,7 @@ impl WeightedRoundRobinLoadBalancer {
     }
 }
 
-/// 生成实例稳定标识；用于按地址维持负载均衡状态。
+/// 业务作用：生成实例稳定标识；用于按地址维持负载均衡状态。
 ///
 /// # 参数
 /// - `inst`: 服务发现返回的实例信息。
@@ -94,7 +94,7 @@ fn instance_key(inst: &Instance) -> String {
 }
 
 impl LoadBalancer for WeightedRoundRobinLoadBalancer {
-    /// 从实例列表中选择目标下标；用于把一次请求路由到具体实例。
+    /// 业务作用：从实例列表中选择目标下标；用于把一次请求路由到具体实例。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -134,7 +134,7 @@ impl LoadBalancer for WeightedRoundRobinLoadBalancer {
     }
 }
 
-/// 每服务计数器的随机起种:进程内随机 keys 的 `RandomState` 对 service 名哈希一次。
+/// 业务作用：每服务计数器的随机起种:进程内随机 keys 的 `RandomState` 对 service 名哈希一次。
 ///
 /// # 参数
 /// - `service`: 服务名,用于服务发现或注册中心查询。

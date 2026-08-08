@@ -13,7 +13,7 @@ pub enum ProducerQueue {
 }
 
 impl std::fmt::Display for ProducerQueue {
-    /// 输出稳定的低基数队列域名称，供错误文本与指标标签复用。
+    /// 业务作用：输出稳定的低基数队列域名称，供错误文本与指标标签复用。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DeliveryObserver => formatter.write_str("delivery-observer"),

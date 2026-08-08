@@ -178,18 +178,18 @@ pub mod grafana {
         struct NafanaMetricsSource;
 
         impl LegacyMetricsSource for NafanaMetricsSource {
-            /// 返回 nafana 兼容源拥有的静态指标族目录。
+            /// 业务作用：返回 nafana 兼容源拥有的静态指标族目录。
             fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
                 &NAFANA_DESCRIPTORS
             }
 
-            /// 读取 nafana 全局 registry 当前快照并追加 Prometheus exposition。
+            /// 业务作用：读取 nafana 全局 registry 当前快照并追加 Prometheus exposition。
             fn render_prometheus(&self, output: &mut String) {
                 output.push_str(&super::render_metrics());
             }
         }
 
-        /// 返回 nafana 兼容源,供 `Application::register_metrics_source` 并入统一 hub。
+        /// 业务作用：返回 nafana 兼容源,供 `Application::register_metrics_source` 并入统一 hub。
         ///
         /// # 返回
         ///
@@ -217,7 +217,7 @@ pub mod cache {
     };
 }
 
-/// ambient 事务(task_local)+ `#[transactional]`(对标 原框架 @Transactional)。
+/// ambient 事务上下文与 `#[transactional]` 声明式事务入口。
 #[cfg(feature = "tx")]
 pub mod tx {
     pub use natx_macro::transactional;
@@ -315,7 +315,7 @@ pub mod oauth {
 }
 
 /// 异步执行与定时任务 + `#[Async]` / `#[scheduled]` / `#[EnableScheduling]`(`#[EnableAsync]` 为兼容别名)。
-/// (语义对标 原框架 @Async/@Scheduled;刻意不叫 `thread`,避免与系统线程混淆。)
+/// 入口名称强调运行时任务而非系统线程，避免调用方误判调度和取消边界。
 #[cfg(feature = "scheduling")]
 pub mod scheduling {
     pub use async_macro::{scheduled, Async, EnableAsync, EnableScheduling};
@@ -337,7 +337,7 @@ pub mod web {
     };
 }
 
-/// MyBatis 风格声明式 Mapper:trait + `#[Mapper]` / `#[Query]` / `#[Insert]` 等属性宏。
+/// 声明式 Mapper：trait + `#[Mapper]` / `#[Query]` / `#[Insert]` 等属性宏。
 #[cfg(feature = "mapper")]
 pub mod mapper {
     pub use mapper_impl::*;
@@ -346,7 +346,7 @@ pub mod mapper {
     };
 }
 
-/// 同 key 串行消费执行器(对照 原实现 TimingWheel.partition):同 key 严格按提交顺序串行、
+/// 同 key 串行消费执行器：同 key 严格按提交顺序串行、
 /// 不同 key 最大并发;不丢任务的优雅停机 + worker 死亡检测/黑洞拒收/健康面板。
 /// (注意:与 `nasa::redis::partition` 的 PollCoordinator 是两个不同概念——这里是本地
 /// 同 key 串行执行器,redis 那个是分布式分区消费。)
@@ -392,7 +392,7 @@ pub mod redis {
     pub use redis_impl::*;
 }
 
-/// 密码学工具(对照 原实现 原工具包 `Encryptor`;crate = `ncrypto`)。
+/// 密码学工具(crate = `ncrypto`)。
 /// `nasa = { features = ["crypto"] }` → `use nasa::crypto::{encrypt_aes, sha256, sign_rsa, ...};`
 /// 提供 hash/hmac/pbkdf2/aes/rsa/ed25519/base64；Web 端点加解密由 mapping 路由属性
 /// `decrypt = true` / `encrypt = true` 和统一 Web 安全运行时编排，不提供相互冲突的独立属性宏。
@@ -401,7 +401,7 @@ pub mod crypto {
     pub use crypto_impl::*;
 }
 
-/// 精确算术(对照 原实现 原工具包 `Numeric` **全量迁移**;crate = `numeric`)。
+/// 精确算术(crate = `numeric`)。
 /// `nasa = { features = ["numeric"] }` → `use nasa::numeric::{multiply, divide, align, to_fixed_str, decimal, float, ...};`
 /// i128 定点核 ×10^scale(scale≤8,默认 8)+ 全 RoundingMode + 撮合 tick 对齐 + I/O;
 /// `numeric::decimal`(BigDecimal,scale>8 任意精度)+ `numeric::float`(double 便捷算术)。
@@ -410,7 +410,7 @@ pub mod numeric {
     pub use numeric_impl::*;
 }
 
-/// 日期时间工具(对照 原实现 原工具包 `DateUtils`;crate = `date`,基于 chrono)。
+/// 日期时间工具(crate = `date`,基于 chrono)。
 /// `nasa = { features = ["date"] }` → `use nasa::date::{format, parse, add_days, today, ...};`
 /// i64 epoch ms 规范 + GMT+8 默认 + 原实现 SimpleDateFormat 风格 pattern(`"yyyy-MM-dd HH:mm:ss"`)。
 #[cfg(feature = "date")]
@@ -418,7 +418,7 @@ pub mod date {
     pub use date_impl::*;
 }
 
-/// 日志(对照 原实现 原工具包 `logback-原框架.xml`;crate = `nlog`,基于 tracing)。
+/// 日志(crate = `nalog`,基于 tracing)。
 /// `nasa = { features = ["log"] }` → `use nasa::log;` → `log::init();`。
 /// 原实现 logback 风格 formatter + 独立 `error.log` + 按天/按大小滚动(`maxFileSize`/`.%i`)
 /// + `maxHistory`/`totalSizeCap`/`cleanHistoryOnStart` 保留清理 + 运行期级别热切(配合 nacos)。
@@ -432,7 +432,7 @@ pub mod log {
     pub use log_impl::*;
 }
 
-/// 通用响应壳 `BaseResponse`(对照 原实现 原工具包 `com.nasa.common.base.BaseResponse`;crate = `base`)。
+/// 通用响应壳 `BaseResponse`(crate = `nabase`)。
 /// `nasa = { features = ["base"] }` → `use nasa::base::BaseResponse;` → `BaseResponse::ok(data)` / `::err(code, msg)`。
 /// 字段 `code`(默认 200)/ `msg`(提示信息)/ `aes`(需加密时的 AES 密钥)/ `data`,`None` 序列化省略。
 /// 另含 strings/env/size/id 纯工具;date/numeric/crypto/image 继续走 `nasa::{date,numeric,crypto,image}` 顶层入口。
@@ -468,7 +468,7 @@ pub mod yml {
     }
 }
 
-/// 图片压缩/缩放(对照 原实现 原工具包 `ImageUtils`;crate = `image`,基于 crates.io image crate)。
+/// 图片压缩/缩放(crate = `image`,基于 image crate)。
 /// `nasa = { features = ["image"] }` → `use nasa::image::{compress, compress_scale, CompressOpts, ...};`
 /// 质量(JPEG)+ 尺寸(scale/width/height)压缩;默认保留输入格式。
 #[cfg(feature = "image")]
@@ -476,7 +476,7 @@ pub mod image {
     pub use image_impl::*;
 }
 
-/// 服务发现/注册(provider-neutral,对照 原框架 DiscoveryClient):中性类型 + 各后端子模块。
+/// 服务发现/注册(provider-neutral)：中性类型 + 各后端子模块。
 /// `Instance` 与具体注册中心无关,后端复用;后端按需开 feature:`nasa::discovery::nacos`(以后可加 `::eureka`)。
 /// `nasa = { features = ["nacos-sdk"] }` → `use nasa::discovery::{Instance, nacos::{NacosDiscoveryClient, NacosProps}};`
 ///   `client.register(...)`(drop best-effort deregister;优雅停机显式 deregister)/ `discover`(健康,LB 用)/ `discover_all`(全部,管理诊断)/
@@ -502,7 +502,7 @@ pub mod discovery {
         };
     }
 
-    /// 带服务发现 + 客户端负载均衡的 HTTP 门面(crate = `rest-discovery`,对标 `@LoadBalanced RestTemplate`)。
+    /// 带服务发现与客户端负载均衡的 HTTP 门面(crate = `rest-discovery`)。
     /// `nasa = { features = ["rest-discovery-nacos"] }` → main 里:
     ///   `RestDiscovery::init_with_discovery(Arc::new(nacos_client), opts).await?;`(或 `init_external_only`)
     /// 任意位置:`RestDiscovery::get().request(Method::GET, "lb://svc/path").send().await?;`
@@ -538,7 +538,7 @@ pub mod discovery {
             WeightedRoundRobinLoadBalancer,
         };
 
-        /// OpenFeign 风格声明式客户端宏(crate = `rest-client-macro`)。
+        /// 声明式 REST 客户端宏(crate = `rest-client-macro`)。
         /// `#[rest_client]` trait + `#[GetMapping/PostMapping/PutMapping/PatchMapping/DeleteMapping]` 方法属性。
         /// 参数 helper(`#[PathVariable]`/`#[RequestParam]`/`#[RequestHeader]`/`#[RequestHeaders]`/`#[QueryMap]`/`#[RequestBody]`/`#[FormBody]`)
         /// 无需 import,由 `#[rest_client]` 消费。
@@ -549,7 +549,7 @@ pub mod discovery {
     }
 }
 
-/// 配置中心(provider-neutral 命名空间,对照 原框架 配置分离):各后端子模块。
+/// 配置中心(provider-neutral 命名空间)：各后端子模块。
 /// 后端只提供原始配置文本与 watch 回调，不解析业务 `AppConfig`；解析、合并与应用策略由应用层负责。
 /// `nasa = { features = ["nacos-sdk"] }` → `use nasa::config::nacos::{NacosConfigClient, NacosProps};`
 ///   `client.fetch(data_id, group)`(裸 yaml)/ `client.watch(...)`(推送回调拿裸 yaml)。

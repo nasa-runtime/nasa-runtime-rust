@@ -21,7 +21,7 @@ pub enum ApplicationState {
 }
 
 impl ApplicationState {
-    /// 把原子存储值保守映射为公开状态。
+    /// 业务作用：把原子存储值保守映射为公开状态。
     ///
     /// # 参数
     ///
@@ -66,7 +66,7 @@ impl StateCell {
         }
     }
 
-    /// 以 Acquire 语义读取当前公开状态。
+    /// 业务作用：以 Acquire 语义读取当前公开状态。
     ///
     /// # 参数
     ///
@@ -136,7 +136,7 @@ pub(crate) struct TerminalCell {
 }
 
 impl TerminalCell {
-    /// 创建尚未提交终止意图的单元。
+    /// 业务作用：创建尚未提交终止意图的单元。
     ///
     /// # 参数
     ///
@@ -147,7 +147,7 @@ impl TerminalCell {
         }
     }
 
-    /// 尝试提交首次终止意图；返回 false 表示已有事件获胜。
+    /// 业务作用：尝试提交首次终止意图；返回 false 表示已有事件获胜。
     ///
     /// # 参数
     ///
@@ -164,7 +164,7 @@ impl TerminalCell {
             .is_ok()
     }
 
-    /// 以 Acquire 语义读取已经提交的终止意图。
+    /// 业务作用：以 Acquire 语义读取已经提交的终止意图。
     ///
     /// # 参数
     ///

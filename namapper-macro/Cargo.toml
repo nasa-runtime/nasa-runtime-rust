@@ -1,4 +1,4 @@
-# mapper-macro —— MyBatis 风格 Mapper trait 生成宏
+# mapper-macro —— 声明式 Mapper trait 生成宏
 [package]
 name = "namapper-macro"
 version.workspace = true

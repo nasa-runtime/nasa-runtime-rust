@@ -62,7 +62,7 @@ pub struct SearchActuator<T: RedisDocument> {
 }
 
 impl<T: RedisDocument> SearchActuator<T> {
-    /// 绑定搜索执行器,在启动期完成文档元数据校验和 RediSearch/RedisJSON 能力探测。
+    /// 业务作用：绑定搜索执行器,在启动期完成文档元数据校验和 RediSearch/RedisJSON 能力探测。
     ///
     /// # 参数
     /// - `client`: 已初始化的 Redis 客户端,后续索引管理、读写和查询命令都通过它执行。
@@ -109,14 +109,14 @@ impl<T: RedisDocument> SearchActuator<T> {
         })
     }
 
-    /// Handles the meta operation.
+    /// 业务作用：返回当前文档执行器使用的静态元数据。
     pub fn meta(&self) -> &'static DocMeta {
         self.meta
     }
 
     // ─────────────────────── 索引管理 ───────────────────────
 
-    /// 按策略确保索引(校验以 FT.INFO 实测为准;漂移 diff 进错误文本)。
+    /// 业务作用：按策略确保索引(校验以 FT.INFO 实测为准;漂移 diff 进错误文本)。
     ///
     /// # 参数
     /// - `policy`: 索引存在性和漂移处理策略,决定仅校验、缺失创建还是显式重建。
@@ -145,7 +145,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 索引是否存在(FT.INFO;对照 原实现 `indexExists`)。只识别明确的"未知索引"判不存在,其余错误上抛。
+    /// 业务作用：索引是否存在(FT.INFO;对照 原实现 `indexExists`)。只识别明确的"未知索引"判不存在,其余错误上抛。
     pub async fn index_exists(&self) -> Result<bool> {
         let r: std::result::Result<redis::Value, redis::RedisError> = redis::cmd("FT.INFO")
             .arg(&self.meta.index)
@@ -167,7 +167,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 根据绑定的 RediSearch 元信息创建索引。
+    /// 业务作用：根据绑定的 RediSearch 元信息创建索引。
     ///
     /// 仅在 `ensure_index` 判定索引缺失且策略允许自动创建时调用,字段定义来自业务实体上的 search 元数据。
     async fn create_index(&self) -> Result<()> {
@@ -193,7 +193,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(())
     }
 
-    /// 将 FT.INFO 实测结果归一化后与 meta 期望全量比较。
+    /// 业务作用：将 FT.INFO 实测结果归一化后与 meta 期望全量比较。
     /// 抓四类漂移(任一不符即 fail-fast,**禁自动 DROP**,引导 RecreateExplicitly):
     ///   ① ON HASH/JSON(key_type 不符 → save 写进去也建不进倒排,查询恒空);
     ///   ② PREFIX(literal head 不在实测 prefixes → 文档不被索引拾取);
@@ -335,7 +335,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     // ─────────────────────── 写入 / id 直达(对照 原实现 save/findById)───────────────────────
 
-    /// 实体路径算 key:无占位符 fast path = prefix + id;占位符模式从
+    /// 业务作用：实体路径算 key:无占位符 fast path = prefix + id;占位符模式从
     /// placeholder_parts 取动态段(对照 原实现 keyOf(entity))。
     ///
     /// # 参数
@@ -350,7 +350,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 保存单个实体(HASH:HSET 全字段;JSON:JSON.SET $)。
+    /// 业务作用：保存单个实体(HASH:HSET 全字段;JSON:JSON.SET $)。
     ///
     /// # 参数
     /// - `doc`: 要落盘并参与索引的业务实体,其 `id()`/占位符字段共同决定 Redis key。
@@ -362,7 +362,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.save_at(&key, doc).await
     }
 
-    /// 构造单文档落盘命令(save / save_all 共用)。HASH 走 `HASH_SAVE_LUA`(原子 HDEL 缺失字段
+    /// 业务作用：构造单文档落盘命令(save / save_all 共用)。HASH 走 `HASH_SAVE_LUA`(原子 HDEL 缺失字段
     /// + HSET 新字段);JSON 走 `JSON.SET $`。
     ///
     /// # 参数
@@ -392,7 +392,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 按已算好的 key 落盘(save / save_all 共用)。
+    /// 业务作用：按已算好的 key 落盘(save / save_all 共用)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -406,7 +406,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(())
     }
 
-    /// 批量保存:分片进**真正的 `PipelineSession`**(单次 flush + 受
+    /// 业务作用：批量保存:分片进**真正的 `PipelineSession`**(单次 flush + 受
     /// `session_max_commands`/`session_max_bytes` 约束),不再 `join_all` 一次性创建全部 future
     /// (大批量内存/队列压力);逐 ticket surface 服务端错误 / ExecutionUnknown(写出后断线)。
     ///
@@ -437,7 +437,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(docs.len())
     }
 
-    /// id 直达读取(不经 FT.SEARCH;对照 原实现 findById)。
+    /// 业务作用：id 直达读取(不经 FT.SEARCH;对照 原实现 findById)。
     /// 占位符模式 key 不能只由 id 派生 → key_of 内部报错引导走 find_by_parts。
     ///
     /// # 参数
@@ -450,7 +450,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.find_at(&key).await
     }
 
-    /// parts 直达读取(占位符模式;对照 原实现 findByParts:placeholder 值按
+    /// 业务作用：parts 直达读取(占位符模式;对照 原实现 findByParts:placeholder 值按
     /// prefix 占位符顺序 + id,不经 FT.SEARCH 按 key 拼接直读)。
     ///
     /// # 参数
@@ -467,7 +467,7 @@ impl<T: RedisDocument> SearchActuator<T> {
     // Loads one document from the given Redis key.
     ///
     /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 业务作用：- `key`: 当前 Redis 命令操作的 key。
     async fn find_at(&self, key: &str) -> Result<Option<T>>
     where
         T: DeserializeOwned,
@@ -499,7 +499,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// id 直达删除(占位符模式报错引导 remove_by_parts)。
+    /// 业务作用：id 直达删除(占位符模式报错引导 remove_by_parts)。
     ///
     /// # 参数
     /// - `id`: 文档业务 ID,仅适用于无占位符 prefix 的文档类型。
@@ -507,7 +507,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(self.client.del(&[&self.meta.key_of(id)?]).await? > 0)
     }
 
-    /// parts 直达删除(占位符模式)。
+    /// 业务作用：parts 直达删除(占位符模式)。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -522,7 +522,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     // ───────────── 原实现 RediSearchOperations 对齐补全─────────────
 
-    /// 删除索引(对照 原实现 `dropIndex(deleteDocuments)`)。`delete_documents=true` → `FT.DROPINDEX DD`
+    /// 业务作用：删除索引(对照 原实现 `dropIndex(deleteDocuments)`)。`delete_documents=true` → `FT.DROPINDEX DD`
     /// (连同删除被索引的文档),否则只删索引定义、保留文档。
     ///
     /// # 参数
@@ -542,7 +542,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// id 是否存在(对照 原实现 `existsById`)——直接 `EXISTS key`,不反序列化整文档。占位符模式报错引导 parts 版。
+    /// 业务作用：id 是否存在(对照 原实现 `existsById`)——直接 `EXISTS key`,不反序列化整文档。占位符模式报错引导 parts 版。
     ///
     /// # 参数
     /// - `id`: 文档业务 ID,仅适用于无占位符 prefix 的文档类型。
@@ -551,7 +551,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.client.exists(&key).await
     }
 
-    /// parts 是否存在(占位符模式;对照 原实现 `existsById` 的 parts 重载)。
+    /// 业务作用：parts 是否存在(占位符模式;对照 原实现 `existsById` 的 parts 重载)。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -561,7 +561,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.client.exists(&key).await
     }
 
-    /// JSON.NUMINCRBY(**整数** delta;direct executor,对照 原实现 `jsonNumIncrBy(type,id,path,long)`)——
+    /// 业务作用：JSON.NUMINCRBY(**整数** delta;direct executor,对照 原实现 `jsonNumIncrBy(type,id,path,long)`)——
     /// 撮合部分成交/持仓加减热路径,不必为单次自增手工开 pipeline。返回 RedisJSON 回的结果串(如 `[6]`)。
     /// ⚠ 仅 JSON 模式；整数 delta 保持 JSON 整数 shape，与 pipeline `json_num_incr_by` 一致。
     ///
@@ -574,7 +574,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .await
     }
 
-    /// JSON.NUMINCRBY 整数 delta(占位符模式;对照 原实现 parts 重载)。
+    /// 业务作用：JSON.NUMINCRBY 整数 delta(占位符模式;对照 原实现 parts 重载)。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -595,7 +595,7 @@ impl<T: RedisDocument> SearchActuator<T> {
     // Increments a numeric JSON value at the given path.
     ///
     /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 业务作用：- `key`: 当前 Redis 命令操作的 key。
     /// - `json_path`: RedisJSON 文档内的 JSONPath。
     /// - `delta`: 计数、score 或 hash field 的增量。
     async fn json_num_incr_by_at(&self, key: &str, json_path: &str, delta: i64) -> Result<String> {
@@ -613,7 +613,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(s)
     }
 
-    /// 查首个匹配(对照 原实现 `findOne`)——内部 `LIMIT 0 1`,不受调用方 `q` 的分页影响。
+    /// 业务作用：查首个匹配(对照 原实现 `findOne`)——内部 `LIMIT 0 1`,不受调用方 `q` 的分页影响。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,只使用其过滤和排序语义,分页会被覆盖为首条。
@@ -625,7 +625,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(self.find(&one).await?.into_iter().next())
     }
 
-    /// 是否有匹配(对照 原实现 `exists(query)`)——`LIMIT 0 0` 只取 total 判 >0。
+    /// 业务作用：是否有匹配(对照 原实现 `exists(query)`)——`LIMIT 0 0` 只取 total 判 >0。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,用于渲染 FT.SEARCH 过滤表达式。
@@ -633,7 +633,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(self.count(q).await? > 0)
     }
 
-    /// 查匹配文档的 **id**(NOCONTENT;对照 原实现 `findKeys`)。占位符 prefix 模式拒绝(key→id 无法反推)。
+    /// 业务作用：查匹配文档的 **id**(NOCONTENT;对照 原实现 `findKeys`)。占位符 prefix 模式拒绝(key→id 无法反推)。
     /// **未显式 limit 时用 `LIMIT 0 1000000`**(避免默认 10 静默少取,对齐 原实现)。key 经 `literal_prefix` 反推 id。
     ///
     /// # 参数
@@ -647,7 +647,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.search_keys(q, offset, limit).await
     }
 
-    /// `find_keys` 的核心(offset/limit 由调用方定;`remove` 用大上限循环拉)。
+    /// 业务作用：`find_keys` 的核心(offset/limit 由调用方定;`remove` 用大上限循环拉)。
     ///
     /// # 参数
     /// - `q`: 查询对象或 query 参数集合。
@@ -682,7 +682,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .collect())
     }
 
-    /// 按查询批量删除(对照 原实现 `remove(query)`):循环 `LIMIT 0 1000000` 拉 key、每 1000 个 `DEL` 一批;
+    /// 业务作用：按查询批量删除(对照 原实现 `remove(query)`):循环 `LIMIT 0 1000000` 拉 key、每 1000 个 `DEL` 一批;
     /// **本轮有命中但实际删 0 → 提前退出**(防索引滞后/并发写无限循环)。返回删除总数。
     ///
     /// # 参数
@@ -711,7 +711,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     // ─────────────────────── FT.SEARCH 查询族 ───────────────────────
 
-    /// 查询(AST 渲染 → FT.SEARCH → 逐文档解码)。
+    /// 业务作用：查询(AST 渲染 → FT.SEARCH → 逐文档解码)。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,包含过滤、排序和分页设置。
@@ -733,7 +733,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.parse_search(v)
     }
 
-    /// 计数(LIMIT 0 0:只回 total)。
+    /// 业务作用：计数(LIMIT 0 0:只回 total)。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,只使用过滤表达式计算匹配总数。
@@ -768,7 +768,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Err(NasaRedisError::Config("FT.SEARCH 计数响应形态异常".into()))
     }
 
-    /// FT.AGGREGATE(最小封装):Query 出过滤表达式 + Aggregate 出聚合管道,
+    /// 业务作用：FT.AGGREGATE(最小封装):Query 出过滤表达式 + Aggregate 出聚合管道,
     /// 返回结果行(列名→值;列 = GROUPBY 字段 + reducer 输出别名)。
     /// RESP2 响应形态:[total, [k1,v1,k2,v2,...], [..], ...]。
     ///
@@ -825,7 +825,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(out)
     }
 
-    /// 把单文档 field→value 表转为 T，供 RESP2/RESP3 共用。
+    /// 业务作用：把单文档 field→value 表转为 T，供 RESP2/RESP3 共用。
     ///
     /// # 参数
     /// - `map`: 当前函数读取或更新的键值映射。
@@ -851,7 +851,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 解析 FT.SEARCH 响应。RESP2:`[total, key1, [f1,v1,...], key2, [..], ...]`;
+    /// 业务作用：解析 FT.SEARCH 响应。RESP2:`[total, key1, [f1,v1,...], key2, [..], ...]`;
     /// RESP3(协商 HELLO 3):`{total_results, results:[{id,extra_attributes:{...}},...]}`
     /// 两种响应形态都会归一化，避免 RESP3 与 count 路径产生语义分叉。
     ///
@@ -897,7 +897,7 @@ impl<T: RedisDocument> SearchActuator<T> {
     }
 }
 
-/// Redis 错误是否为"未知索引"(对齐 原实现 `Unknown Index name`/`no such index`)。`index_exists`(判不存在)
+/// 业务作用：Redis 错误是否为"未知索引"(对齐 原实现 `Unknown Index name`/`no such index`)。`index_exists`(判不存在)
 /// 与 `drop_index`(幂等)共用——只认明确的未知索引,权限/模块/代理错误不误判。
 ///
 /// # 参数
@@ -910,7 +910,7 @@ fn is_unknown_index_error(e: &redis::RedisError) -> bool {
 // Converts a Redis bulk value into a string.
 ///
 /// # 参数
-/// - `v`: 待转换的值。
+/// 业务作用：- `v`: 待转换的值。
 fn bulk_to_string(v: redis::Value) -> String {
     match v {
         redis::Value::BulkString(b) => String::from_utf8_lossy(&b).into_owned(),
@@ -919,7 +919,7 @@ fn bulk_to_string(v: redis::Value) -> String {
     }
 }
 
-/// 从 `FT.SEARCH ... NOCONTENT` 响应取 key 列表(`find_keys`/`remove` 用)。
+/// 业务作用：从 `FT.SEARCH ... NOCONTENT` 响应取 key 列表(`find_keys`/`remove` 用)。
 /// **RESP2**:`[total, k1, k2, ...]`(total 之后全是 key,无 fields 数组)。
 /// **RESP3 Map**:`results` 数组,每行是 `{id, ...}` Map,取 `id`(复用 `resp3_map_get`,与 parse_search 同源)。
 /// RESP2 NOCONTENT 形态已用 Redis Stack/RediSearch live 验证(`docker exec redis-websocket redis-cli`,5020);
@@ -949,7 +949,7 @@ fn parse_search_keys(v: redis::Value) -> Vec<String> {
     Vec::new()
 }
 
-/// 把计数类 Value 归一化为 u64(RediSearch 8 RESP3 的 total_results 可能是
+/// 业务作用：把计数类 Value 归一化为 u64(RediSearch 8 RESP3 的 total_results 可能是
 /// Int/Double/字符串)。负数/非数字 → None。
 ///
 /// # 参数
@@ -964,7 +964,7 @@ fn value_to_u64(v: &redis::Value) -> Option<u64> {
     }
 }
 
-/// 按引用取文本(RESP3 Map 遍历用,不消费 Value)。Int/Double 也归一化为裸值文本,
+/// 业务作用：按引用取文本(RESP3 Map 遍历用,不消费 Value)。Int/Double 也归一化为裸值文本,
 /// 避免落进 `{other:?}` 的 `Int(..)`/`Double(..)` Debug 串。
 ///
 /// # 参数
@@ -979,7 +979,7 @@ fn value_to_string(v: &redis::Value) -> String {
     }
 }
 
-/// 在 RESP3 Map 的 (key,val) 列表里按字段名取值(key 兼容 Simple/BulkString)。
+/// 业务作用：在 RESP3 Map 的 (key,val) 列表里按字段名取值(key 兼容 Simple/BulkString)。
 ///
 /// # 参数
 /// - `pairs`: 搜索索引的字段和值配对。
@@ -993,7 +993,7 @@ fn resp3_map_get<'a>(
         .find_map(|(k, v)| (val_str(k).as_deref() == Some(key)).then_some(v))
 }
 
-/// 从 RESP3 单行结果(Map,含 `extra_attributes` 子 Map)提取 field→value 表。
+/// 业务作用：从 RESP3 单行结果(Map,含 `extra_attributes` 子 Map)提取 field→value 表。
 /// FT.SEARCH/FT.AGGREGATE RESP3 行形态:`{id, extra_attributes:{f1:v1,...}, values:[...]}`。
 ///**带 `attributes` 回退键**——个别 RediSearch 版本/形态把字段放 `attributes`
 /// 而非 `extra_attributes`(原实现 侧亦兼容两者),漏回退会让某些版本 find 返空。
@@ -1014,7 +1014,7 @@ fn resp3_row_fields(row: &redis::Value) -> HashMap<String, String> {
     map
 }
 
-/// 从 Value 取文本(★FT.INFO 的键值是 **SimpleString**(`+`),不是 BulkString——
+/// 业务作用：从 Value 取文本(★FT.INFO 的键值是 **SimpleString**(`+`),不是 BulkString——
 /// Redis 8 实测;两形态都要兼容,只匹配 BulkString 会解析出空表)。
 ///
 /// # 参数
@@ -1027,7 +1027,7 @@ fn val_str(v: &redis::Value) -> Option<String> {
     }
 }
 
-/// 从 Value 取浮点(★RESP3 下 WEIGHT 是 `Double`、RESP2 下是 BulkString——两形态都兼容,
+/// 业务作用：从 Value 取浮点(★RESP3 下 WEIGHT 是 `Double`、RESP2 下是 BulkString——两形态都兼容,
 /// 否则 RESP3 weight 取不到会比 RESP2 少校验一项,造成两协议下行为不对称)。
 ///
 /// # 参数
@@ -1040,7 +1040,7 @@ fn val_f64(v: &redis::Value) -> Option<f64> {
     }
 }
 
-/// 把 FT.INFO 的一层归一成 (key, value) 对序列——**RESP2/RESP3 双形态兼容**:
+/// 业务作用：把 FT.INFO 的一层归一成 (key, value) 对序列——**RESP2/RESP3 双形态兼容**:
 /// RESP2 是平铺 `[k1,v1,k2,v2,...]` 数组(成对取);RESP3(HELLO 3 / `?protocol=resp3`)是
 /// `Map([(k,v),...])`。FT.INFO 顶层 / index_definition / 每个 attribute
 /// 在 RESP3 下全是 Map,旧代码只认 `Value::Array` → 命中 else 返回空 profile → ensure_index
@@ -1056,7 +1056,7 @@ fn info_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
     }
 }
 
-/// FT.INFO 归一化:提取 attributes → alias→类型 表(RESP2 平铺数组 / RESP3 Map 双形态;
+/// 业务作用：FT.INFO 归一化:提取 attributes → alias→类型 表(RESP2 平铺数组 / RESP3 Map 双形态;
 /// 各版本字段名 identifier/attribute 兼容;SimpleString/BulkString 双形态)。
 ///
 /// # 参数
@@ -1109,7 +1109,7 @@ pub struct IndexProfile {
     pub attrs: HashMap<String, AttrInfo>,
 }
 
-/// 应用一个独立 flag token(SORTABLE/NOSTEM/NOINDEX/CASESENSITIVE...)到 AttrInfo。
+/// 业务作用：应用一个独立 flag token(SORTABLE/NOSTEM/NOINDEX/CASESENSITIVE...)到 AttrInfo。
 /// RESP2 下 flag 平铺在 attribute 数组里;RESP3 下 flag 收进 `flags` 子数组——两形态共用此函数。
 /// UNF/NOFREQS/INDEXMISSING 等不参与漂移比对者落到 `_` 跳过。
 ///
@@ -1126,7 +1126,7 @@ fn apply_flag(info: &mut AttrInfo, flag: &str) {
     }
 }
 
-/// 解析单个 attribute → AttrInfo。**RESP2 平铺数组 / RESP3 Map 双形态**
+/// 业务作用：解析单个 attribute → AttrInfo。**RESP2 平铺数组 / RESP3 Map 双形态**
 /// - RESP2:`[identifier, price, attribute, price, type, NUMERIC, SORTABLE, UNF]`——成对键
 ///   (identifier/attribute/type/WEIGHT/SEPARATOR/PHONETIC)与独立 flag 平铺混排;
 /// - RESP3:`Map([(identifier,price),(type,NUMERIC),(flags,[SORTABLE,UNF])])`——flag 收进
@@ -1215,7 +1215,7 @@ fn parse_attr_value(attr: &redis::Value) -> Option<(String, AttrInfo)> {
     }
 }
 
-/// FT.INFO → IndexProfile(RESP2 平铺数组 / RESP3 Map 双形态)。
+/// 业务作用：FT.INFO → IndexProfile(RESP2 平铺数组 / RESP3 Map 双形态)。
 ///
 /// # 参数
 /// - `info`: Redis `FT.INFO` 返回值,用于抽取 key type、prefixes 和字段画像。

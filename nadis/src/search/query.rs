@@ -139,7 +139,7 @@ pub enum GeoUnit {
 }
 
 impl GeoUnit {
-    /// 返回 RediSearch GEO 半径参数使用的单位字符串。
+    /// 业务作用：返回 RediSearch GEO 半径参数使用的单位字符串。
     ///
     /// 该值会直接拼进 `FT.SEARCH`/`FT.AGGREGATE` 的 GEO 过滤表达式。
     fn as_str(&self) -> &'static str {
@@ -165,7 +165,7 @@ pub struct Query {
 }
 
 impl Query {
-    /// Creates a new instance.
+    /// 业务作用：创建不含过滤条件、使用默认分页上限的查询构造器。
     pub fn new() -> Self {
         Self {
             conds: Vec::new(),
@@ -176,7 +176,7 @@ impl Query {
         }
     }
 
-    /// 追加一个 TAG 精确匹配条件,用于状态、枚举、业务 ID 等离散值查询。
+    /// 业务作用：追加一个 TAG 精确匹配条件,用于状态、枚举、业务 ID 等离散值查询。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TAG 字段。
@@ -189,7 +189,7 @@ impl Query {
         self
     }
 
-    /// 追加一个 TAG 多选一条件,等价于同一字段的离散值 OR。
+    /// 业务作用：追加一个 TAG 多选一条件,等价于同一字段的离散值 OR。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TAG 字段。
@@ -202,7 +202,7 @@ impl Query {
         self
     }
 
-    /// 追加一个数值闭区间条件,用于价格、数量、时间戳等范围查询。
+    /// 业务作用：追加一个数值闭区间条件,用于价格、数量、时间戳等范围查询。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 NUMERIC 字段。
@@ -217,7 +217,7 @@ impl Query {
         self
     }
 
-    /// 数值开区间比较：`gt/gte/lt/lte/eq`；FT 使用 `±inf` sentinel，
+    /// 业务作用：数值开区间比较：`gt/gte/lt/lte/eq`；FT 使用 `±inf` sentinel，
     /// 不再用 `between(X, f64::MAX)` 与 原实现 `[(X +inf]` 跨语言分叉。
     ///
     /// # 参数
@@ -233,7 +233,7 @@ impl Query {
         self
     }
 
-    /// 追加一个数值大于条件。
+    /// 业务作用：追加一个数值大于条件。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
@@ -242,7 +242,7 @@ impl Query {
         self.num_cmp(field, NumOp::Gt, value)
     }
 
-    /// 追加一个数值大于等于条件。
+    /// 业务作用：追加一个数值大于等于条件。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
@@ -251,7 +251,7 @@ impl Query {
         self.num_cmp(field, NumOp::Gte, value)
     }
 
-    /// 追加一个数值小于条件。
+    /// 业务作用：追加一个数值小于条件。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
@@ -260,7 +260,7 @@ impl Query {
         self.num_cmp(field, NumOp::Lt, value)
     }
 
-    /// 追加一个数值小于等于条件。
+    /// 业务作用：追加一个数值小于等于条件。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
@@ -269,7 +269,7 @@ impl Query {
         self.num_cmp(field, NumOp::Lte, value)
     }
 
-    /// 追加一个数值相等条件。
+    /// 业务作用：追加一个数值相等条件。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 NUMERIC 字段别名或字段名。
@@ -278,7 +278,7 @@ impl Query {
         self.num_cmp(field, NumOp::Eq, value)
     }
 
-    /// 追加一个全文字面匹配条件,用于普通 TEXT 字段的分词检索。
+    /// 业务作用：追加一个全文字面匹配条件,用于普通 TEXT 字段的分词检索。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的字段别名或字段名,渲染时会校验它必须是 TEXT 字段。
@@ -291,7 +291,7 @@ impl Query {
         self
     }
 
-    /// 全文前缀匹配：`@f:(prefix*)`。
+    /// 业务作用：全文前缀匹配：`@f:(prefix*)`。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -304,7 +304,7 @@ impl Query {
         self
     }
 
-    /// 全文后缀匹配：`@f:(*suffix)`，字段建索引时必须启用 WITHSUFFIXTRIE。
+    /// 业务作用：全文后缀匹配：`@f:(*suffix)`，字段建索引时必须启用 WITHSUFFIXTRIE。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
@@ -317,7 +317,7 @@ impl Query {
         self
     }
 
-    /// 全文包含或中缀匹配：`@f:(*infix*)`，字段建索引时必须启用 WITHSUFFIXTRIE。
+    /// 业务作用：全文包含或中缀匹配：`@f:(*infix*)`，字段建索引时必须启用 WITHSUFFIXTRIE。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT/TAG 字段别名或字段名,且必须启用 WITHSUFFIXTRIE。
@@ -330,7 +330,7 @@ impl Query {
         self
     }
 
-    /// 全文模糊匹配，Levenshtein 距离限制为 1..=3，越界时收敛到有效范围。
+    /// 业务作用：全文模糊匹配，Levenshtein 距离限制为 1..=3，越界时收敛到有效范围。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -345,7 +345,7 @@ impl Query {
         self
     }
 
-    /// 全文短语匹配：`@f:("a b c")`，词序必须精确。
+    /// 业务作用：全文短语匹配：`@f:("a b c")`，词序必须精确。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 TEXT 字段别名或字段名。
@@ -358,7 +358,7 @@ impl Query {
         self
     }
 
-    /// 查询 GEO 字段在指定圆心和半径内的文档。
+    /// 业务作用：查询 GEO 字段在指定圆心和半径内的文档。
     ///
     /// # 参数
     /// - `field`: `DocMeta` 中声明的 GEO 字段别名或字段名。
@@ -384,7 +384,7 @@ impl Query {
         self
     }
 
-    /// 原始表达式逃生舱(可信调用方;文档红线:默认路径必须走类型化 AST)。
+    /// 业务作用：原始表达式逃生舱(可信调用方;文档红线:默认路径必须走类型化 AST)。
     ///
     /// # 参数
     /// - `expr`: 可信调用方提供的完整 FT 查询片段,会直接拼入查询表达式。
@@ -393,7 +393,7 @@ impl Query {
         self
     }
 
-    /// 单字段降序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
+    /// 业务作用：单字段降序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
     ///
     /// # 参数
     /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
@@ -402,7 +402,7 @@ impl Query {
         self
     }
 
-    /// 单字段升序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
+    /// 业务作用：单字段升序排序(FT.SEARCH 原生只支持单字段;多字段 = FT.AGGREGATE)。
     ///
     /// # 参数
     /// - `field`: 用于排序的 `DocMeta` 字段别名或字段名,渲染时必须声明为 SORTABLE。
@@ -411,7 +411,7 @@ impl Query {
         self
     }
 
-    /// 设置 FT.SEARCH 查询窗口。
+    /// 业务作用：设置 FT.SEARCH 查询窗口。
     ///
     /// # 参数
     /// - `offset`: 起始偏移量,对应 RediSearch `LIMIT offset limit` 的 offset。
@@ -423,22 +423,22 @@ impl Query {
         self
     }
 
-    /// 调用方是否显式设置过 limit(对照 原实现 limitExplicit;`find_keys` 据此决定默认 `LIMIT 0 1000000`)。
+    /// 业务作用：调用方是否显式设置过 limit(对照 原实现 limitExplicit;`find_keys` 据此决定默认 `LIMIT 0 1000000`)。
     pub fn is_limit_explicit(&self) -> bool {
         self.limit_explicit
     }
 
-    /// 有效 offset(默认 0)。
+    /// 业务作用：有效 offset(默认 0)。
     pub fn effective_offset(&self) -> usize {
         self.offset
     }
 
-    /// 有效 limit(默认 10;未显式设置时 `find_keys` 会改用大上限)。
+    /// 业务作用：有效 limit(默认 10;未显式设置时 `find_keys` 会改用大上限)。
     pub fn effective_limit(&self) -> usize {
         self.limit
     }
 
-    /// 渲染查询串(字段/类型强校验;meta 是唯一事实源)。
+    /// 业务作用：渲染查询串(字段/类型强校验;meta 是唯一事实源)。
     /// 渲染为 FT 查询串。**返回空串 `""` = MATCH_NONE 哨兵**:某个 TEXT 条件的值
     /// 转义后为纯空白(纯标点/空串,如 `+++`/`...`)——无任何可匹配 token,整条 AND query 匹配空集。
     /// 此时**绝不**发出 `@field:(   )`(FT 语法错误);调用方(find/count/aggregate)见 `""` 直接返回
@@ -600,7 +600,7 @@ impl Query {
         Ok(parts.join(" ")) // FT.SEARCH 空格 = AND
     }
 
-    /// 排序/分页参数(actuator 组命令用;sortable 校验在此)。
+    /// 业务作用：排序/分页参数(actuator 组命令用;sortable 校验在此)。
     ///
     /// # 参数
     /// - `meta`: 当前文档类型的元数据,用于校验排序字段存在且声明为 SORTABLE。
@@ -633,7 +633,7 @@ impl Query {
 // Looks up a field and reports the current query context on failure.
 ///
 /// # 参数
-/// - `meta`: 搜索字段的元数据定义。
+/// 业务作用：- `meta`: 搜索字段的元数据定义。
 /// - `alias`: 搜索查询中暴露给业务侧的字段别名。
 /// - `ctx`: 本次格式化、日志或运行阶段的上下文。
 fn require_field<'a>(meta: &'a DocMeta, alias: &str, ctx: &str) -> Result<&'a super::FieldMeta> {
@@ -648,7 +648,7 @@ fn require_field<'a>(meta: &'a DocMeta, alias: &str, ctx: &str) -> Result<&'a su
     })
 }
 
-/// 后缀与中缀查询要求字段是 Text/Tag **且** 建索引时启用 WITHSUFFIXTRIE；
+/// 业务作用：后缀与中缀查询要求字段是 Text/Tag **且** 建索引时启用 WITHSUFFIXTRIE；
 /// 否则引擎扫不出结果(静默空),提前 fail-fast 引导改 schema。
 ///
 /// # 参数
@@ -678,7 +678,7 @@ fn require_suffix_trie(f: &super::FieldMeta, ctx: &str) -> Result<()> {
 // Checks that a field has the required query type.
 ///
 /// # 参数
-/// - `f`: 需要校验查询类型兼容性的搜索字段元数据。
+/// 业务作用：- `f`: 需要校验查询类型兼容性的搜索字段元数据。
 /// - `ok`: 实际校验结果。
 /// - `want`: 断言期望的结果。
 fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
@@ -693,7 +693,7 @@ fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
 }
 
 impl Query {
-    /// 渲染为 RedisJSON JSONPath filter(ARRAY 模式查询通道;
+    /// 业务作用：渲染为 RedisJSON JSONPath filter(ARRAY 模式查询通道;
     /// 对照 原实现 RsQuery.toJsonPathFilter + Criteria.appendJsonPath)。
     ///
     /// # 参数
@@ -840,12 +840,12 @@ pub struct Aggregate {
 }
 
 impl Aggregate {
-    /// Creates a new instance.
+    /// 业务作用：创建空的聚合管道构造器。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 从文档加载字段进入聚合管道，供 APPLY/FILTER/SORTBY 使用。
+    /// 业务作用：从文档加载字段进入聚合管道，供 APPLY/FILTER/SORTBY 使用。
     ///
     /// # 参数
     /// - `fields`: 需要加载到聚合管道的 `DocMeta` 字段别名列表。
@@ -854,7 +854,7 @@ impl Aggregate {
         self
     }
 
-    /// 计算 APPLY 表达式并命名为输出列（例如 `apply("@sum / @n", "avg")`）。**表达式由可信调用方
+    /// 业务作用：计算 APPLY 表达式并命名为输出列（例如 `apply("@sum / @n", "avg")`）。**表达式由可信调用方
     /// 提供**(RediSearch 表达式语法,绕过转义;同 Raw 的信任边界)。
     ///
     /// # 参数
@@ -865,7 +865,7 @@ impl Aggregate {
         self
     }
 
-    /// 按 FILTER 表达式过滤聚合行（例如 `filter("@count > 10")`）。**表达式由可信调用方提供**。
+    /// 业务作用：按 FILTER 表达式过滤聚合行（例如 `filter("@count > 10")`）。**表达式由可信调用方提供**。
     ///
     /// # 参数
     /// - `expr`: RediSearch 聚合过滤表达式,直接拼入 FT.AGGREGATE 参数。
@@ -874,7 +874,7 @@ impl Aggregate {
         self
     }
 
-    /// GROUPBY 字段(meta 别名;render 时校验存在)。可多次调用。
+    /// 业务作用：GROUPBY 字段(meta 别名;render 时校验存在)。可多次调用。
     ///
     /// # 参数
     /// - `field`: 用作分组键的 `DocMeta` 字段别名或字段名。
@@ -883,7 +883,7 @@ impl Aggregate {
         self
     }
 
-    /// REDUCE + 输出别名(查询结果行里的列名)。
+    /// 业务作用：REDUCE + 输出别名(查询结果行里的列名)。
     ///
     /// # 参数
     /// - `r`: 聚合 reducer,定义 COUNT/SUM/AVG 等聚合动作及其输入字段。
@@ -893,7 +893,7 @@ impl Aggregate {
         self
     }
 
-    /// 聚合结果降序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。**可多次调用 = 多字段 SORTBY**
+    /// 业务作用：聚合结果降序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。**可多次调用 = 多字段 SORTBY**
     /// (按调用顺序 `@f1 DIR1 @f2 DIR2 ...`)。
     ///
     /// # 参数
@@ -903,7 +903,7 @@ impl Aggregate {
         self
     }
 
-    /// 聚合结果升序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。
+    /// 业务作用：聚合结果升序排序(别名 = GROUPBY 字段 / reducer 输出 / APPLY 输出)。
     ///
     /// # 参数
     /// - `alias`: GROUPBY 字段、reducer 输出或 APPLY 输出的列名。
@@ -912,7 +912,7 @@ impl Aggregate {
         self
     }
 
-    /// 设置 FT.AGGREGATE 输出窗口。
+    /// 业务作用：设置 FT.AGGREGATE 输出窗口。
     ///
     /// # 参数
     /// - `offset`: 聚合结果起始偏移量。
@@ -922,7 +922,7 @@ impl Aggregate {
         self
     }
 
-    /// 渲染 FT.AGGREGATE 的管道参数(index 与查询表达式由 actuator 拼前缀)。
+    /// 业务作用：渲染 FT.AGGREGATE 的管道参数(index 与查询表达式由 actuator 拼前缀)。
     /// GROUPBY/REDUCE 引用的字段经 meta 校验(输出别名除外)。
     ///
     /// # 参数
@@ -1050,7 +1050,7 @@ impl Aggregate {
     }
 }
 
-/// JSONPath 字符串字面量:**按内容选包裹引号**。
+/// 业务作用：JSONPath 字符串字面量:**按内容选包裹引号**。
 ///
 /// RedisJSON JSONPath **不处理包裹引号内的 `\` 转义**(`\"` 不认、`\'` 同样不认)——所以不能靠转义引号,
 /// 只能选一个**值里不出现的**引号来包裹:
@@ -1079,7 +1079,7 @@ pub(crate) fn json_path_literal(s: &str) -> Result<String> {
     Ok(format!("{quote}{s}{quote}"))
 }
 
-/// Tag 值转义:RediSearch 的 tag 语法字符(,.<>{}[]"':;!@#$%^&*()-+=~| 与空格)
+/// 业务作用：Tag 值转义:RediSearch 的 tag 语法字符(,.<>{}[]"':;!@#$%^&*()-+=~| 与空格)
 /// 一律反斜杠转义——值来自业务数据,不转义会破坏查询语法/被注入。
 ///
 /// # 参数
@@ -1101,7 +1101,7 @@ fn escape_tag(v: &str) -> String {
     out
 }
 
-/// TEXT 字面量"转义"。
+/// 业务作用：TEXT 字面量"转义"。
 ///
 /// **关键:标点/结构符一律转成空格,而非反斜杠转义。** 因为 RediSearch 默认分词把标点当**分隔符剥离**
 /// (`(beta)` 索引成 token `beta`、`C++` 索引成 `c`),若把标点反斜杠转义查**字面** token(`\(beta\)`、

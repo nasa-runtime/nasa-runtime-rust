@@ -15,7 +15,7 @@ use redis::{AsyncCommands, AsyncIter, FromRedisValue, ToRedisArgs, ToSingleRedis
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-/// Duration → 毫秒:**非零时下界 1ms**。亚毫秒 Duration 直接 `as_millis()`
+/// 业务作用：Duration → 毫秒:**非零时下界 1ms**。亚毫秒 Duration 直接 `as_millis()`
 /// 会截断成 0,使 PSETEX 报错 / PEXPIRE 0 删 key;此处保证只要 ttl>0 就不塌成非法 0。
 /// `Duration::ZERO` 仍返回 0(调用方显式表达"立即过期/删")。Redis 的相对过期参数按
 /// signed 64-bit 毫秒解析；超出该范围必须在本地拒绝，不能经 `as` 转换回绕成负数或较小 TTL。
@@ -34,7 +34,7 @@ pub(crate) fn duration_to_millis_floor1(ttl: Duration) -> Result<u64> {
     }
 }
 
-/// 把秒精度 Redis TTL 转成服务端可表达的 signed 64-bit 正整数范围。
+/// 业务作用：把秒精度 Redis TTL 转成服务端可表达的 signed 64-bit 正整数范围。
 pub(crate) fn duration_to_redis_seconds(ttl: Duration) -> Result<u64> {
     let seconds = ttl.as_secs();
     if seconds > i64::MAX as u64 {
@@ -57,7 +57,7 @@ pub enum KeyTtl {
 }
 
 impl RedisClient {
-    ///给**单次往返命令** future 套 `command.timeout_ms`(0=不限)。超时 →
+    ///业务作用：给**单次往返命令** future 套 `command.timeout_ms`(0=不限)。超时 →
     /// `ExecutionUnknown`(命令可能已写出执行,非幂等命令不得透明重试,语义同断线)。
     /// 用法:`let mut c = self.conn(); self.timed(c.get(key)).await`——conn 先绑定到本地(不让
     /// 临时量在 await 前被 drop),future 借用它传入本 helper。多往返游标(scan_match)不套此 timeout。
@@ -83,7 +83,7 @@ impl RedisClient {
 
     // ───────────────────────── string / 通用 ─────────────────────────
 
-    /// Runs the Redis GET command.
+    /// 业务作用：执行 Redis GET 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -92,7 +92,7 @@ impl RedisClient {
         self.timed(c.get(key)).await
     }
 
-    /// Runs the Redis SET command.
+    /// 业务作用：执行 Redis SET 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -102,7 +102,7 @@ impl RedisClient {
         self.timed::<()>(c.set(key, val)).await
     }
 
-    /// Runs the Redis SET with expiration command.
+    /// 业务作用：执行带过期时间的 Redis SET 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -121,7 +121,7 @@ impl RedisClient {
             .await
     }
 
-    ///cluster 下多 key 命令(del/mset/s_diff/s_inter/s_union)跨 slot 会撞服务端
+    ///业务作用：cluster 下多 key 命令(del/mset/s_diff/s_inter/s_union)跨 slot 会撞服务端
     /// `CROSSSLOT`(报错晦涩)。提前 **fail-closed** 回清晰错误(对齐 bl_pop 风格),引导用同 `{hashtag}`。
     /// standalone 无 slot 概念直接放行;`mget` 由 driver 按 slot 自动拆分,豁免不调用本守卫。
     ///
@@ -144,7 +144,7 @@ impl RedisClient {
         Ok(())
     }
 
-    /// Runs the Redis DEL command.
+    /// 业务作用：执行 Redis DEL 命令。
     ///
     /// # 参数
     ///
@@ -160,7 +160,7 @@ impl RedisClient {
         self.timed(c.del(keys)).await
     }
 
-    /// Runs the Redis EXISTS command.
+    /// 业务作用：执行 Redis EXISTS 命令。
     ///
     /// # 参数
     ///
@@ -170,7 +170,7 @@ impl RedisClient {
         self.timed(c.exists(key)).await
     }
 
-    /// Runs the Redis EXPIRE command.
+    /// 业务作用：执行 Redis EXPIRE 命令。
     ///
     /// # 参数
     ///
@@ -184,7 +184,7 @@ impl RedisClient {
             .await
     }
 
-    /// PTTL → KeyTtl(-2=Missing,-1=Persistent)。
+    /// 业务作用：PTTL → KeyTtl(-2=Missing,-1=Persistent)。
     ///
     /// # 参数
     ///
@@ -199,7 +199,7 @@ impl RedisClient {
         })
     }
 
-    /// Runs the Redis INCRBY command.
+    /// 业务作用：执行 Redis INCRBY 命令。
     ///
     /// # 参数
     ///
@@ -210,7 +210,7 @@ impl RedisClient {
         self.timed(c.incr(key, delta)).await
     }
 
-    /// SCAN 流式遍历(替代 KEYS; 第 4 条)。返回收集后的 Vec——
+    /// 业务作用：SCAN 流式遍历(替代 KEYS; 第 4 条)。返回收集后的 Vec——
     /// AsyncIter 借用连接,先在内部消费完(单页 count 由 Redis 决定,遍历期间可被并发修改)。
     /// **多往返游标不套 `command.timeout_ms`**：单命令超时语义不适用于完整 SCAN 周期；
     /// 需整体超时由调用方在外层 `tokio::time::timeout` 包裹。
@@ -232,7 +232,7 @@ impl RedisClient {
 
     // ───────────────────────── hash ─────────────────────────
 
-    /// Runs the Redis HSET command.
+    /// 业务作用：执行 Redis HSET 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -248,7 +248,7 @@ impl RedisClient {
         self.timed(c.hset(key, field, val)).await
     }
 
-    /// Runs the Redis HGET command.
+    /// 业务作用：执行 Redis HGET 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -258,7 +258,7 @@ impl RedisClient {
         self.timed(c.hget(key, field)).await
     }
 
-    /// Runs the Redis HGETALL command.
+    /// 业务作用：执行 Redis HGETALL 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -270,7 +270,7 @@ impl RedisClient {
         self.timed(c.hgetall(key)).await
     }
 
-    /// Runs the Redis HDEL command.
+    /// 业务作用：执行 Redis HDEL 命令。
     ///
     /// # 参数
     ///
@@ -285,7 +285,7 @@ impl RedisClient {
         self.timed(c.hdel(key, fields)).await
     }
 
-    /// Runs the Redis HINCRBY command.
+    /// 业务作用：执行 Redis HINCRBY 命令。
     ///
     /// # 参数
     ///
@@ -299,7 +299,7 @@ impl RedisClient {
 
     // ───────────────────────── zset ─────────────────────────
 
-    /// Runs the Redis ZADD command.
+    /// 业务作用：执行 Redis ZADD 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -315,7 +315,7 @@ impl RedisClient {
         self.timed(c.zadd(key, member, score)).await
     }
 
-    /// ZREM:移除一个或多个成员(放宽到 `ToRedisArgs`,单值/批量同一方法,
+    /// 业务作用：ZREM:移除一个或多个成员(放宽到 `ToRedisArgs`,单值/批量同一方法,
     /// 对齐 原实现 varargs,避免批量删被迫 N 次往返)。单个 `&str` 仍直接可传。
     ///
     /// # 参数
@@ -330,7 +330,7 @@ impl RedisClient {
         self.timed(c.zrem(key, members)).await
     }
 
-    /// Runs the Redis ZCARD command.
+    /// 业务作用：执行 Redis ZCARD 命令。
     ///
     /// # 参数
     ///
@@ -340,7 +340,7 @@ impl RedisClient {
         self.timed(c.zcard(key)).await
     }
 
-    /// Runs the Redis ZRANGEBYSCORE command.
+    /// 业务作用：执行 Redis ZRANGEBYSCORE 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -356,7 +356,7 @@ impl RedisClient {
         self.timed(c.zrangebyscore(key, min, max)).await
     }
 
-    /// Runs the Redis ZREMRANGEBYSCORE command.
+    /// 业务作用：执行 Redis ZREMRANGEBYSCORE 命令。
     ///
     /// # 参数
     ///
@@ -370,7 +370,7 @@ impl RedisClient {
 
     // ───────────────────────── set ─────────────────────────
 
-    /// Runs the Redis SADD command.
+    /// 业务作用：执行 Redis SADD 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -384,7 +384,7 @@ impl RedisClient {
         self.timed(c.sadd(key, member)).await
     }
 
-    /// Runs the Redis SMEMBERS command.
+    /// 业务作用：执行 Redis SMEMBERS 命令。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -397,7 +397,7 @@ impl RedisClient {
 
     // ───────────────────────── string / 批量 ─────────────────────────
 
-    /// SETNX(`set_if_absent`):key 不存在才写,返回是否写入(锁/幂等基础)。
+    /// 业务作用：SETNX(`set_if_absent`):key 不存在才写,返回是否写入(锁/幂等基础)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -411,7 +411,7 @@ impl RedisClient {
         self.timed(c.set_nx(key, val)).await
     }
 
-    /// MGET:批量取(缺失键 → None,顺序对应)。空切片短路返回空 Vec(对齐 原实现)。
+    /// 业务作用：MGET:批量取(缺失键 → None,顺序对应)。空切片短路返回空 Vec(对齐 原实现)。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -423,7 +423,7 @@ impl RedisClient {
         self.timed(c.mget(keys)).await
     }
 
-    /// MSET:批量写。空切片短路(对齐 原实现)。
+    /// 业务作用：MSET:批量写。空切片短路(对齐 原实现)。
     ///
     /// # 参数
     /// - `items`: 已编译的日志 pattern 片段列表。
@@ -437,7 +437,7 @@ impl RedisClient {
         self.timed::<()>(c.mset(items)).await
     }
 
-    /// GETSET:写新值并返回旧值。
+    /// 业务作用：GETSET:写新值并返回旧值。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -451,7 +451,7 @@ impl RedisClient {
         self.timed(c.getset(key, val)).await
     }
 
-    /// GETDEL:取值并删除。
+    /// 业务作用：GETDEL:取值并删除。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -460,7 +460,7 @@ impl RedisClient {
         self.timed(c.get_del(key)).await
     }
 
-    /// EXPIREAT:绝对过期(**秒级** unix 时间戳)。
+    /// 业务作用：EXPIREAT:绝对过期(**秒级** unix 时间戳)。
     /// ⚠ **跨语言迁移陷阱**:原实现 `expireAt(key, millis)` 是**毫秒**戳;
     /// 本方法显式命名 `_secs` 杜绝同名不同单位的静默错误。毫秒戳请用 `expire_at_millis`。
     ///
@@ -473,7 +473,7 @@ impl RedisClient {
         self.timed(c.expire_at(key, unix_secs)).await
     }
 
-    /// PEXPIREAT:绝对过期(**毫秒级** unix 时间戳;对齐 原实现 `expireAt(key, millis)`)。
+    /// 业务作用：PEXPIREAT:绝对过期(**毫秒级** unix 时间戳;对齐 原实现 `expireAt(key, millis)`)。
     ///
     /// # 参数
     ///
@@ -484,7 +484,7 @@ impl RedisClient {
         self.timed(c.pexpire_at(key, unix_millis)).await
     }
 
-    /// PERSIST:移除过期(转永久)。
+    /// 业务作用：PERSIST:移除过期(转永久)。
     ///
     /// # 参数
     ///
@@ -496,7 +496,7 @@ impl RedisClient {
 
     // ───────────────────────── hash ─────────────────────────
 
-    /// HSETNX:field 不存在才写。
+    /// 业务作用：HSETNX:field 不存在才写。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -512,7 +512,7 @@ impl RedisClient {
         self.timed(c.hset_nx(key, field, val)).await
     }
 
-    /// HMGET:批量取 field(缺失 → None)。空切片短路。
+    /// 业务作用：HMGET:批量取 field(缺失 → None)。空切片短路。
     /// (redis-rs `hget` 仅单 field,HMGET 手搓 cmd 经 execute_raw——已套 command.timeout_ms。)
     ///
     /// # 参数
@@ -534,7 +534,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// HKEYS:所有 field 名。
+    /// 业务作用：HKEYS:所有 field 名。
     ///
     /// # 参数
     ///
@@ -544,7 +544,7 @@ impl RedisClient {
         self.timed(c.hkeys(key)).await
     }
 
-    /// HLEN:field 数。
+    /// 业务作用：HLEN:field 数。
     ///
     /// # 参数
     ///
@@ -556,7 +556,7 @@ impl RedisClient {
 
     // ───────────────────────── zset 查询族 ─────────────────────────
 
-    /// ZSCORE:member 分数(不存在 → None)。
+    /// 业务作用：ZSCORE:member 分数(不存在 → None)。
     ///
     /// # 参数
     ///
@@ -567,7 +567,7 @@ impl RedisClient {
         self.timed(c.zscore(key, member)).await
     }
 
-    /// ZRANK:升序排名(不存在 → None)。
+    /// 业务作用：ZRANK:升序排名(不存在 → None)。
     ///
     /// # 参数
     ///
@@ -578,7 +578,7 @@ impl RedisClient {
         self.timed(c.zrank(key, member)).await
     }
 
-    /// ZREVRANK:降序排名。
+    /// 业务作用：ZREVRANK:降序排名。
     ///
     /// # 参数
     ///
@@ -589,7 +589,7 @@ impl RedisClient {
         self.timed(c.zrevrank(key, member)).await
     }
 
-    /// ZINCRBY:member 分数 +delta,返回新分数。
+    /// 业务作用：ZINCRBY:member 分数 +delta,返回新分数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -605,7 +605,7 @@ impl RedisClient {
         self.timed(c.zincr(key, member, delta)).await
     }
 
-    /// ZCOUNT:分数区间 `min..=max` 的成员数。
+    /// 业务作用：ZCOUNT:分数区间 `min..=max` 的成员数。
     ///
     /// # 参数
     ///
@@ -617,7 +617,7 @@ impl RedisClient {
         self.timed(c.zcount(key, min, max)).await
     }
 
-    /// ZRANGE WITHSCORES:按排名区间取 (member, score)(start/stop 支持负索引)。
+    /// 业务作用：ZRANGE WITHSCORES:按排名区间取 (member, score)(start/stop 支持负索引)。
     ///
     ///
     /// # 参数
@@ -634,7 +634,7 @@ impl RedisClient {
         self.timed(c.zrange_withscores(key, start, stop)).await
     }
 
-    /// ZREVRANGE:降序按排名区间取成员。
+    /// 业务作用：ZREVRANGE:降序按排名区间取成员。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -652,7 +652,7 @@ impl RedisClient {
 
     // ───────────────────────── set 判定族 ─────────────────────────
 
-    /// SISMEMBER:member 是否在集合。
+    /// 业务作用：SISMEMBER:member 是否在集合。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -666,7 +666,7 @@ impl RedisClient {
         self.timed(c.sismember(key, member)).await
     }
 
-    /// SMISMEMBER:批量判定成员是否在集合,返回与入参同序的 bool 列表(Redis 6.2+)。
+    /// 业务作用：SMISMEMBER:批量判定成员是否在集合,返回与入参同序的 bool 列表(Redis 6.2+)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -684,7 +684,7 @@ impl RedisClient {
         self.timed(c.smismember(key, members)).await
     }
 
-    /// SRANDMEMBER:随机取一个成员(不移除;空集 → None)。
+    /// 业务作用：SRANDMEMBER:随机取一个成员(不移除;空集 → None)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -693,7 +693,7 @@ impl RedisClient {
         self.timed(c.srandmember(key)).await
     }
 
-    /// SRANDMEMBER key count:随机取 count 个(count<0 允许重复;不移除)。
+    /// 业务作用：SRANDMEMBER key count:随机取 count 个(count<0 允许重复;不移除)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -707,7 +707,7 @@ impl RedisClient {
         self.timed(c.srandmember_multiple(key, count)).await
     }
 
-    /// SCARD:集合基数。
+    /// 业务作用：SCARD:集合基数。
     ///
     /// # 参数
     ///
@@ -717,7 +717,7 @@ impl RedisClient {
         self.timed(c.scard(key)).await
     }
 
-    /// SREM:移除一个或多个成员,返回移除数(放宽到 `ToRedisArgs` 支持批量,
+    /// 业务作用：SREM:移除一个或多个成员,返回移除数(放宽到 `ToRedisArgs` 支持批量,
     /// 对齐 原实现 varargs)。单个 `&str` 仍直接可传。
     ///
     /// # 参数
@@ -732,7 +732,7 @@ impl RedisClient {
         self.timed(c.srem(key, members)).await
     }
 
-    /// SPOP:随机弹出一个成员(空集 → None)。
+    /// 业务作用：SPOP:随机弹出一个成员(空集 → None)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -741,7 +741,7 @@ impl RedisClient {
         self.timed(c.spop(key)).await
     }
 
-    /// SPOP key count：随机弹出至多 count 个成员，与参照实现的批量语义一致。
+    /// 业务作用：SPOP key count：随机弹出至多 count 个成员，与参照实现的批量语义一致。
     /// redis-rs `spop` 无 count 形态,这里直接拼命令(execute_raw 已套 timeout)。
     ///
     /// # 参数
@@ -758,7 +758,7 @@ impl RedisClient {
 
     // ───────────────────────── list 全族 ─────────────────────────
 
-    /// LPUSH:左压入,返回新长度。
+    /// 业务作用：LPUSH:左压入,返回新长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -775,7 +775,7 @@ impl RedisClient {
         self.timed(c.lpush(key, val)).await
     }
 
-    /// RPUSH:右压入,返回新长度。
+    /// 业务作用：RPUSH:右压入,返回新长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -791,7 +791,7 @@ impl RedisClient {
         self.timed(c.rpush(key, val)).await
     }
 
-    /// LPOP:左弹出一个(空 → None)。
+    /// 业务作用：LPOP:左弹出一个(空 → None)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -800,7 +800,7 @@ impl RedisClient {
         self.timed(c.lpop(key, None)).await
     }
 
-    /// RPOP:右弹出一个(空 → None)。
+    /// 业务作用：RPOP:右弹出一个(空 → None)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -809,7 +809,7 @@ impl RedisClient {
         self.timed(c.rpop(key, None)).await
     }
 
-    /// LLEN:长度。
+    /// 业务作用：LLEN:长度。
     ///
     /// # 参数
     ///
@@ -819,7 +819,7 @@ impl RedisClient {
         self.timed(c.llen(key)).await
     }
 
-    /// LRANGE:区间取(支持负索引;`lrange(key,0,-1)` = 全量)。
+    /// 业务作用：LRANGE:区间取(支持负索引;`lrange(key,0,-1)` = 全量)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -835,7 +835,7 @@ impl RedisClient {
         self.timed(c.lrange(key, start, stop)).await
     }
 
-    /// LREM:删除 count 个等于 val 的元素(count>0 从头,<0 从尾,=0 全部),返回删除数。
+    /// 业务作用：LREM:删除 count 个等于 val 的元素(count>0 从头,<0 从尾,=0 全部),返回删除数。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -851,7 +851,7 @@ impl RedisClient {
         self.timed(c.lrem(key, count, val)).await
     }
 
-    /// LINDEX:取指定下标元素(越界 → None)。
+    /// 业务作用：LINDEX:取指定下标元素(越界 → None)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -861,7 +861,7 @@ impl RedisClient {
         self.timed(c.lindex(key, index)).await
     }
 
-    /// LTRIM:只保留 `start..=stop` 区间(其余删除)。
+    /// 业务作用：LTRIM:只保留 `start..=stop` 区间(其余删除)。
     ///
     /// # 参数
     ///
@@ -875,7 +875,7 @@ impl RedisClient {
 
     // ════════════════════ 低频命令补全(string/hash/set 运算/eval)════════════════════
 
-    /// GETRANGE:子串 `start..=end`(负索引从尾)。
+    /// 业务作用：GETRANGE:子串 `start..=end`(负索引从尾)。
     ///
     /// # 参数
     ///
@@ -887,7 +887,7 @@ impl RedisClient {
         self.timed(c.getrange(key, start, end)).await
     }
 
-    /// SETRANGE:从 offset 覆盖写,返回新长度。
+    /// 业务作用：SETRANGE:从 offset 覆盖写,返回新长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -903,7 +903,7 @@ impl RedisClient {
         self.timed(c.setrange(key, offset as isize, val)).await
     }
 
-    /// STRLEN:字符串字节长度。
+    /// 业务作用：STRLEN:字符串字节长度。
     ///
     /// # 参数
     ///
@@ -913,7 +913,7 @@ impl RedisClient {
         self.timed(c.strlen(key)).await
     }
 
-    /// APPEND:追加,返回新长度。
+    /// 业务作用：APPEND:追加,返回新长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -927,7 +927,7 @@ impl RedisClient {
         self.timed(c.append(key, val)).await
     }
 
-    /// HDECRBY:HINCRBY 负 delta(对照 原实现 hDecrBy)。
+    /// 业务作用：HDECRBY:HINCRBY 负 delta(对照 原实现 hDecrBy)。
     ///
     /// # 参数
     ///
@@ -941,7 +941,7 @@ impl RedisClient {
 
     // ───────────────────────── set 集合运算 ─────────────────────────
 
-    /// SDIFF:差集(第一个 key 减其余)。空切片短路;cluster 跨 slot fail-closed。
+    /// 业务作用：SDIFF:差集(第一个 key 减其余)。空切片短路;cluster 跨 slot fail-closed。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -954,7 +954,7 @@ impl RedisClient {
         self.timed(c.sdiff(keys)).await
     }
 
-    /// SINTER:交集。空切片短路;cluster 跨 slot fail-closed。
+    /// 业务作用：SINTER:交集。空切片短路;cluster 跨 slot fail-closed。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -967,7 +967,7 @@ impl RedisClient {
         self.timed(c.sinter(keys)).await
     }
 
-    /// SUNION:并集。空切片短路;cluster 跨 slot fail-closed。
+    /// 业务作用：SUNION:并集。空切片短路;cluster 跨 slot fail-closed。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -982,7 +982,7 @@ impl RedisClient {
 
     // ───────────────────────── 脚本(类型化封装)─────────────────────────
 
-    /// EVAL:执行 Lua 脚本(类型化返回;`execute_raw` 已套 command.timeout_ms)。
+    /// 业务作用：EVAL:执行 Lua 脚本(类型化返回;`execute_raw` 已套 command.timeout_ms)。
     /// `keys`=KEYS[1..],`args`=ARGV[1..]。Cluster 下脚本 KEYS **必须同槽**(否则 CROSSSLOT)。
     ///
     /// # 参数
@@ -1009,7 +1009,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// EVALSHA:按 SHA1 执行已缓存脚本(NOSCRIPT 时调用方需先 SCRIPT LOAD / 退回 eval)。
+    /// 业务作用：EVALSHA:按 SHA1 执行已缓存脚本(NOSCRIPT 时调用方需先 SCRIPT LOAD / 退回 eval)。
     ///
     /// # 参数
     /// - `sha1`: Redis Lua 脚本的 SHA1 摘要。
@@ -1034,7 +1034,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// SCRIPT LOAD:缓存脚本,返回 SHA1。
+    /// 业务作用：SCRIPT LOAD:缓存脚本,返回 SHA1。
     ///
     /// # 参数
     ///
@@ -1048,7 +1048,7 @@ impl RedisClient {
     // partition 内部用 XREADGROUP/XAUTOCLAIM/XACK,这里把 RedisProxy 暴露的"运维/低频"
     // Stream 命令补成对外类型化方法(execute_raw 已套 command.timeout_ms)。
 
-    /// XADD:追加一条 entry(`id="*"` 自动生成),返回服务端分配的 entry id。
+    /// 业务作用：XADD:追加一条 entry(`id="*"` 自动生成),返回服务端分配的 entry id。
     /// `fields` = [(field, value), ...]。
     ///
     /// # 参数
@@ -1071,7 +1071,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XADD(**byte-safe** value):field 名为 `&str`、value 为 `&[u8]`(序列化后的 envelope JSON 等)。
+    /// 业务作用：XADD(**byte-safe** value):field 名为 `&str`、value 为 `&[u8]`(序列化后的 envelope JSON 等)。
     /// 供 `stream` 模块的 event-field 发布用(`x_add` 的 `&str` 版仍保留给纯文本场景)。空 fields fail-fast。
     ///
     /// # 参数
@@ -1098,7 +1098,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XLEN:stream 长度。
+    /// 业务作用：XLEN:stream 长度。
     ///
     /// # 参数
     ///
@@ -1107,7 +1107,7 @@ impl RedisClient {
         self.execute_raw(redis::cmd("XLEN").arg(key)).await
     }
 
-    /// XDEL:删除指定 id 的 entries,返回实际删除数。
+    /// 业务作用：XDEL:删除指定 id 的 entries,返回实际删除数。
     ///
     /// # 参数
     ///
@@ -1132,7 +1132,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XTRIM MAXLEN ~:**近似**裁剪(`~` 让引擎按整 macro-node 裁,O(1) 摊销,可能超额保留),返回删除数。
+    /// 业务作用：XTRIM MAXLEN ~:**近似**裁剪(`~` 让引擎按整 macro-node 裁,O(1) 摊销,可能超额保留),返回删除数。
     /// ⚠ 需严格限长用 `x_trim_maxlen_exact`(原实现 默认是精确 MAXLEN)。
     ///
     /// # 参数
@@ -1150,7 +1150,7 @@ impl RedisClient {
         .await
     }
 
-    /// XTRIM MAXLEN(**精确**裁剪到 maxlen 条,对齐 原实现 默认),返回删除数。`maxlen=0` 清空 stream。
+    /// 业务作用：XTRIM MAXLEN(**精确**裁剪到 maxlen 条,对齐 原实现 默认),返回删除数。`maxlen=0` 清空 stream。
     ///
     /// # 参数
     ///
@@ -1161,7 +1161,7 @@ impl RedisClient {
             .await
     }
 
-    /// XTRIM MINID:裁掉 id < min_id 的 entries(精确),返回删除数。
+    /// 业务作用：XTRIM MINID:裁掉 id < min_id 的 entries(精确),返回删除数。
     ///
     /// # 参数
     ///
@@ -1172,7 +1172,7 @@ impl RedisClient {
             .await
     }
 
-    /// XRANGE:正序读区间(`start`/`end` 用 `-`/`+` 表全开;`count` 限条数)。
+    /// 业务作用：XRANGE:正序读区间(`start`/`end` 用 `-`/`+` 表全开;`count` 限条数)。
     /// 返回 `[(id, [(field,value),...]), ...]`(redis-rs 的 StreamRangeReply 形态由调用方泛型决定)。
     ///
     /// # 参数
@@ -1195,7 +1195,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XREVRANGE:逆序读区间(`end`/`start` 顺序与 XRANGE 相反,如 `+`/`-`)。
+    /// 业务作用：XREVRANGE:逆序读区间(`end`/`start` 顺序与 XRANGE 相反,如 `+`/`-`)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1217,7 +1217,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XGROUP CREATE:建消费组。`id="$"` 只读新消息、`"0"` 从头;`mkstream`=stream 不存在则创建。
+    /// 业务作用：XGROUP CREATE:建消费组。`id="$"` 只读新消息、`"0"` 从头;`mkstream`=stream 不存在则创建。
     /// 组已存在返回 BUSYGROUP 错误——调用方按需吞掉(对照 原实现 ignoreBusyGroup)。
     ///
     /// # 参数
@@ -1242,7 +1242,7 @@ impl RedisClient {
         Ok(())
     }
 
-    /// XGROUP CREATE,**幂等**:组已存在(BUSYGROUP)吞掉返回 false,新建返回 true,其余错误上抛
+    /// 业务作用：XGROUP CREATE,**幂等**:组已存在(BUSYGROUP)吞掉返回 false,新建返回 true,其余错误上抛
     /// (对齐 原实现 `ignoreBusyGroup`,免调用方手动判错串)。
     ///
     /// # 参数
@@ -1265,7 +1265,7 @@ impl RedisClient {
         }
     }
 
-    /// XGROUP DESTROY:销毁消费组,返回是否销毁(1/0)。
+    /// 业务作用：XGROUP DESTROY:销毁消费组,返回是否销毁(1/0)。
     ///
     /// # 参数
     ///
@@ -1276,7 +1276,7 @@ impl RedisClient {
             .await
     }
 
-    /// XACK:确认组内已处理的 entries,返回实际确认数。
+    /// 业务作用：XACK:确认组内已处理的 entries,返回实际确认数。
     ///
     /// # 参数
     ///
@@ -1302,7 +1302,7 @@ impl RedisClient {
         self.execute_raw(&cmd).await
     }
 
-    /// XPENDING(summary 形态):返回 `(待确认数, 最小id, 最大id, [(consumer, 持有数),...])`。
+    /// 业务作用：XPENDING(summary 形态):返回 `(待确认数, 最小id, 最大id, [(consumer, 持有数),...])`。
     /// 空 PEL 时 min/max 为 None。运维排障用(看积压在谁手里)。
     ///
     /// # 参数
@@ -1315,7 +1315,7 @@ impl RedisClient {
 
     // ───────────────────────── 阻塞 list(专用连接)─────────────────────────
 
-    /// BLPOP:阻塞左弹出(超时秒;0=永久阻塞)。返回 `(命中的 key, 值)` 或超时 `None`。
+    /// 业务作用：BLPOP:阻塞左弹出(超时秒;0=永久阻塞)。返回 `(命中的 key, 值)` 或超时 `None`。
     /// ⚠ **不复用共享多路复用连接**(BLOCK 会卡死整条连接的其它命令)——每次派生专用连接,
     /// 命令本身就是要阻塞等待,故不套 `command.timeout_ms`(用 `timeout_secs` 控制)。
     ///
@@ -1331,7 +1331,7 @@ impl RedisClient {
         self.blocking_pop("BLPOP", keys, timeout_secs).await
     }
 
-    /// BRPOP:阻塞右弹出(同 `bl_pop`)。
+    /// 业务作用：BRPOP:阻塞右弹出(同 `bl_pop`)。
     ///
     ///
     /// # 参数
@@ -1348,7 +1348,7 @@ impl RedisClient {
     // Runs the shared blocking pop implementation.
     ///
     /// # 参数
-    /// - `op`: 当前要执行的 Redis 或配置操作。
+    /// 业务作用：- `op`: 当前要执行的 Redis 或配置操作。
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
     /// - `timeout_secs`: 阻塞命令等待的超时时间秒数。
     async fn blocking_pop<T: FromRedisValue>(

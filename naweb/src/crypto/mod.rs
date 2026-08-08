@@ -58,7 +58,7 @@ struct KeyUsageRegistry {
 }
 
 impl KeyUsageRegistry {
-    /// 建立空的进程级密钥使用注册表。
+    /// 业务作用：建立空的进程级密钥使用注册表。
     ///
     /// # 返回
     ///
@@ -69,7 +69,7 @@ impl KeyUsageRegistry {
         }
     }
 
-    /// 原子校验并把一组新快照 key ring 绑定到持续计数器。
+    /// 业务作用：原子校验并把一组新快照 key ring 绑定到持续计数器。
     ///
     /// # 参数
     ///
@@ -166,7 +166,7 @@ impl KeyUsageRegistry {
         Ok(())
     }
 
-    /// 返回当前持续记忆的公开密钥身份数量。
+    /// 业务作用：返回当前持续记忆的公开密钥身份数量。
     ///
     /// # 返回
     ///
@@ -229,7 +229,7 @@ pub struct CryptoRuntime {
 }
 
 impl std::fmt::Debug for CryptoRuntime {
-    /// 输出组件数量和公开限制，不输出密钥材料、旁路值或后端连接信息。
+    /// 业务作用：输出组件数量和公开限制，不输出密钥材料、旁路值或后端连接信息。
     ///
     /// # 参数
     ///
@@ -256,7 +256,7 @@ impl std::fmt::Debug for CryptoRuntime {
 }
 
 impl CryptoRuntime {
-    /// 从经过 secret 合并的完整配置建立不可变密码运行时。
+    /// 业务作用：从经过 secret 合并的完整配置建立不可变密码运行时。
     ///
     /// # 参数
     ///
@@ -339,7 +339,7 @@ impl CryptoRuntime {
         })
     }
 
-    /// 在快照发布前接管当前运行时的持续密钥调用次数与生命周期记录。
+    /// 业务作用：在快照发布前接管当前运行时的持续密钥调用次数与生命周期记录。
     ///
     /// # 参数
     ///
@@ -359,7 +359,7 @@ impl CryptoRuntime {
         Ok(())
     }
 
-    /// 在端口监听前检查一条加密路由的全部依赖和算法能力。
+    /// 业务作用：在端口监听前检查一条加密路由的全部依赖和算法能力。
     ///
     /// # 参数
     ///
@@ -521,7 +521,7 @@ impl CryptoRuntime {
         Ok(())
     }
 
-    /// 返回当前运行时默认的匿名租户域。
+    /// 业务作用：返回当前运行时默认的匿名租户域。
     ///
     /// # 返回
     ///
@@ -530,7 +530,7 @@ impl CryptoRuntime {
         self.default_tenant_scope.clone()
     }
 
-    /// 返回固定快照的公开单请求限制。
+    /// 业务作用：返回固定快照的公开单请求限制。
     ///
     /// # 返回
     ///
@@ -539,7 +539,7 @@ impl CryptoRuntime {
         self.limits.clone()
     }
 
-    /// 返回全进程共享的临时内存预算。
+    /// 业务作用：返回全进程共享的临时内存预算。
     ///
     /// # 返回
     ///
@@ -548,7 +548,7 @@ impl CryptoRuntime {
         self.memory_budget.clone()
     }
 
-    /// 解析 route 固定协议实现。
+    /// 业务作用：解析 route 固定协议实现。
     ///
     /// # 参数
     ///
@@ -570,7 +570,7 @@ impl CryptoRuntime {
             .ok_or_else(|| CryptoError::new(CryptoErrorKind::Policy, "crypto-protocol-missing"))
     }
 
-    /// 解析 route 固定 provider 实现。
+    /// 业务作用：解析 route 固定 provider 实现。
     ///
     /// # 参数
     ///
@@ -592,7 +592,7 @@ impl CryptoRuntime {
             .ok_or_else(|| CryptoError::new(CryptoErrorKind::Policy, "crypto-provider-missing"))
     }
 
-    /// 按已认证 tenant 和 route key scope 解析有限 key ring。
+    /// 业务作用：按已认证 tenant 和 route key scope 解析有限 key ring。
     ///
     /// # 参数
     ///
@@ -616,7 +616,7 @@ impl CryptoRuntime {
             .ok_or_else(|| CryptoError::new(CryptoErrorKind::Key, "crypto-key-ring-missing"))
     }
 
-    /// 解析当前 route 使用的重放 guard。
+    /// 业务作用：解析当前 route 使用的重放 guard。
     ///
     /// # 返回
     ///
@@ -638,7 +638,7 @@ impl CryptoRuntime {
             .ok_or_else(|| CryptoError::new(CryptoErrorKind::Policy, "replay-guard-missing"))
     }
 
-    /// 根据只读可信元数据收窄 route 声明的密码方向。
+    /// 业务作用：根据只读可信元数据收窄 route 声明的密码方向。
     ///
     /// # 参数
     ///
@@ -671,7 +671,7 @@ impl CryptoRuntime {
         Ok(effective)
     }
 
-    /// 返回重放占位 TTL。
+    /// 业务作用：返回重放占位 TTL。
     ///
     /// # 返回
     ///
@@ -680,7 +680,7 @@ impl CryptoRuntime {
         self.replay_ttl
     }
 
-    /// 返回单次重放后端操作超时。
+    /// 业务作用：返回单次重放后端操作超时。
     ///
     /// # 返回
     ///
@@ -689,7 +689,7 @@ impl CryptoRuntime {
         self.replay_request_timeout
     }
 
-    /// 探测当前快照中 required 路由依赖的共享重放后端。
+    /// 业务作用：探测当前快照中 required 路由依赖的共享重放后端。
     ///
     /// # 参数
     ///
@@ -720,7 +720,7 @@ impl CryptoRuntime {
     }
 }
 
-/// 把对象安全组件列表收敛为唯一 ID 注册表。
+/// 业务作用：把对象安全组件列表收敛为唯一 ID 注册表。
 ///
 /// # 类型参数
 ///
@@ -754,7 +754,7 @@ where
     Ok(output)
 }
 
-/// 校验可公开的静态组件 ID。
+/// 业务作用：校验可公开的静态组件 ID。
 ///
 /// # 参数
 ///
@@ -771,7 +771,7 @@ fn valid_component_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// 校验默认组件 ID 确实存在于对应注册表。
+/// 业务作用：校验默认组件 ID 确实存在于对应注册表。
 ///
 /// # 类型参数
 ///

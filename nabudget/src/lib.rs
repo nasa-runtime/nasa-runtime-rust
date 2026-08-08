@@ -21,7 +21,7 @@ pub struct RequestBudget {
 }
 
 impl RequestBudget {
-    /// 从当前单调时刻起创建预算。
+    /// 业务作用：从当前单调时刻起创建预算。
     pub fn from_now(total: Duration) -> Self {
         Self {
             deadline: Instant::now() + total.min(MAX_BUDGET),
@@ -29,7 +29,7 @@ impl RequestBudget {
         }
     }
 
-    /// 从已有绝对 deadline 创建预算，便于跨 adapter 保持同一到期时刻。
+    /// 业务作用：从已有绝对 deadline 创建预算，便于跨 adapter 保持同一到期时刻。
     pub fn until(deadline: Instant) -> Self {
         Self {
             deadline,
@@ -37,28 +37,28 @@ impl RequestBudget {
         }
     }
 
-    /// 当前剩余预算；过期后饱和为零。
+    /// 业务作用：当前剩余预算；过期后饱和为零。
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
     }
 
-    /// 将单次 operation 上限收敛到剩余总预算；耗尽时返回 `None`。
+    /// 业务作用：将单次 operation 上限收敛到剩余总预算；耗尽时返回 `None`。
     pub fn operation_timeout(&self, maximum: Duration) -> Option<Duration> {
         let remaining = self.remaining();
         (!remaining.is_zero()).then(|| remaining.min(maximum))
     }
 
-    /// 是否已经耗尽。
+    /// 业务作用：是否已经耗尽。
     pub fn is_exhausted(&self) -> bool {
         self.remaining().is_zero()
     }
 
-    /// 绝对到期时刻。
+    /// 业务作用：绝对到期时刻。
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
 
-    /// 派生不超过父 deadline 的子预算，并继承父取消信号。
+    /// 业务作用：派生不超过父 deadline 的子预算，并继承父取消信号。
     pub fn child(&self, maximum: Duration) -> Self {
         Self {
             deadline: self.deadline.min(Instant::now() + maximum.min(MAX_BUDGET)),
@@ -66,19 +66,19 @@ impl RequestBudget {
         }
     }
 
-    /// 父/当前预算被显式取消时完成。
+    /// 业务作用：父/当前预算被显式取消时完成。
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
     }
 
-    /// 取消当前预算及全部子预算。
+    /// 业务作用：取消当前预算及全部子预算。
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
 }
 
 impl std::fmt::Debug for RequestBudget {
-    /// 仅展示剩余预算与取消状态，不暴露内部 token 或 deadline 表示。
+    /// 业务作用：仅展示剩余预算与取消状态，不暴露内部 token 或 deadline 表示。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RequestBudget")

@@ -49,7 +49,7 @@ pub struct RestDiscoveryClient {
 }
 
 impl std::fmt::Debug for RestDiscoveryClient {
-    /// 实现可读格式化输出,供错误链、日志和调试展示。
+    /// 业务作用：实现可读格式化输出,供错误链、日志和调试展示。
     ///
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
@@ -66,7 +66,7 @@ impl std::fmt::Debug for RestDiscoveryClient {
 }
 
 impl Drop for RestDiscoveryClient {
-    /// 直接用 `RestDiscoveryClient::connect()` 的底层路径(无 `RemoteRuntime`)drop 时也要收掉后台任务
+    /// 业务作用：直接用 `RestDiscoveryClient::connect()` 的底层路径(无 `RemoteRuntime`)drop 时也要收掉后台任务
     /// (索引刷新 + watch pump),否则它们成 detached 任务泄漏(`AbortHandle` drop 不会 abort)。
     /// 与 `RemoteRuntime::drop` 的显式 `shutdown_background` 不冲突:abort 幂等。
     fn drop(&mut self) {
@@ -75,7 +75,7 @@ impl Drop for RestDiscoveryClient {
 }
 
 impl RestDiscoveryClient {
-    /// 带 provider 的内部模式:`service_request`/`lb://` 走服务发现 + LB。
+    /// 业务作用：带 provider 的内部模式:`service_request`/`lb://` 走服务发现 + LB。
     ///
     /// **不启动裸 http(s) 启发式索引**(即便 `options.heuristic_http=Enabled`):索引首拉是 async,
     /// 需用 [`connect`](Self::connect)(或经 `RestDiscovery::init_with_discovery`)。本同步构造给「只用档1/档2」场景。
@@ -89,7 +89,7 @@ impl RestDiscoveryClient {
         Self::try_new(discovery, options).expect("rest-discovery: 非法 RestDiscoveryOptions")
     }
 
-    /// 同步内部模式构造的 fail-fast 版:非法 options 返回 `InvalidOptions`,不 panic。
+    /// 业务作用：同步内部模式构造的 fail-fast 版:非法 options 返回 `InvalidOptions`,不 panic。
     ///
     /// **不启动裸 http(s) 启发式索引**(即便 `heuristic_http=Enabled`,见 [`new`](Self::new) 说明)。
     ///
@@ -105,7 +105,7 @@ impl RestDiscoveryClient {
         Self::assemble_sync(discovery, options, lb)
     }
 
-    /// 注入自定义 [`LoadBalancer`] 的内部模式构造(fail-fast):**忽略 `options.lb_strategy`**,用传入算法选址。
+    /// 业务作用：注入自定义 [`LoadBalancer`] 的内部模式构造(fail-fast):**忽略 `options.lb_strategy`**,用传入算法选址。
     /// 配置只表达内置策略(round_robin/weighted);任意业务算法(按 cluster/metadata/灰度/外部状态)走本程序化入口。
     /// 同样**不启动**启发式索引(见 [`new`](Self::new));需要索引请用 [`connect_with_load_balancer`](Self::connect_with_load_balancer)。
     ///
@@ -122,7 +122,7 @@ impl RestDiscoveryClient {
         Self::assemble_sync(discovery, options, load_balancer)
     }
 
-    /// `try_new` / `try_new_with_load_balancer` 共用:校验 + 装配(不启动索引)。
+    /// 业务作用：`try_new` / `try_new_with_load_balancer` 共用:校验 + 装配(不启动索引)。
     ///
     /// # 参数
     /// - `discovery`: 服务发现客户端或运行时实例。
@@ -161,7 +161,7 @@ impl RestDiscoveryClient {
         })
     }
 
-    /// 带 provider 的内部模式,并按 `heuristic_http` 决定是否启动服务名索引(async:首拉 `list_services` + 周期刷新)。
+    /// 业务作用：带 provider 的内部模式,并按 `heuristic_http` 决定是否启动服务名索引(async:首拉 `list_services` + 周期刷新)。
     /// `heuristic_http=Enabled` + `RequireInitialServiceListWhenHeuristicEnabled` 时,首拉失败即返回 `Err`(防空索引误判)。
     ///
     /// # 参数
@@ -176,7 +176,7 @@ impl RestDiscoveryClient {
         Self::connect_inner(discovery, options, lb).await
     }
 
-    /// 注入自定义 [`LoadBalancer`] 的 `connect`:**忽略 `options.lb_strategy`**,用传入算法选址
+    /// 业务作用：注入自定义 [`LoadBalancer`] 的 `connect`:**忽略 `options.lb_strategy`**,用传入算法选址
     /// (仍按 `heuristic_http` 决定是否首拉 `list_services` + 启动索引刷新)。
     ///
     /// # 参数
@@ -192,7 +192,7 @@ impl RestDiscoveryClient {
         Self::connect_inner(discovery, options, load_balancer).await
     }
 
-    /// `connect` / `connect_with_load_balancer` 共用:校验 + 首拉 + 装配 + 启动索引刷新。
+    /// 业务作用：`connect` / `connect_with_load_balancer` 共用:校验 + 首拉 + 装配 + 启动索引刷新。
     ///
     /// # 参数
     /// - `discovery`: 服务发现客户端或运行时实例。
@@ -263,7 +263,7 @@ impl RestDiscoveryClient {
         })
     }
 
-    /// external-only 模式:只作普通 HTTP client;显式内部调用返回清晰错误,不退化成 DNS。
+    /// 业务作用：external-only 模式:只作普通 HTTP client;显式内部调用返回清晰错误,不退化成 DNS。
     /// **非法 options 直接 panic**(便利入口;fail-fast 版见 [`try_external_only`](Self::try_external_only))。
     ///
     /// # 参数
@@ -273,7 +273,7 @@ impl RestDiscoveryClient {
         Self::try_external_only(options).expect("rest-discovery: 非法 RestDiscoveryOptions")
     }
 
-    /// `external_only` 的 fail-fast 版:非法 options 返回 `InvalidOptions`,不 panic。
+    /// 业务作用：`external_only` 的 fail-fast 版:非法 options 返回 `InvalidOptions`,不 panic。
     /// 只用底层 http client,故只校验 http(不连 provider、不 watch、不建索引)。
     ///
     /// # 参数
@@ -297,19 +297,19 @@ impl RestDiscoveryClient {
         })
     }
 
-    /// 是否为 external-only(discovery 禁用)。
+    /// 业务作用：是否为 external-only(discovery 禁用)。
     pub fn is_external_only(&self) -> bool {
         self.source.is_none()
     }
 
-    /// 取分流决策指标快照。
+    /// 业务作用：取分流决策指标快照。
     pub fn metrics(&self) -> RestMetricsSnapshot {
         self.metrics.snapshot()
     }
 
     // ── 请求入口(receiver 为 `&Arc<Self>`:builder 持 `Arc<Self>` 以便 send 时回调) ──
 
-    /// 任意 method;`url` 支持 `lb://service/path`(档2)与 `http(s)://host/path`(档3)。
+    /// 业务作用：任意 method;`url` 支持 `lb://service/path`(档2)与 `http(s)://host/path`(档3)。
     ///
     ///
     /// # 参数
@@ -323,7 +323,7 @@ impl RestDiscoveryClient {
         )
     }
 
-    /// 读取 get 数据；用于查询当前缓存、配置或远端状态。
+    /// 业务作用：读取 get 数据；用于查询当前缓存、配置或远端状态。
     ///
     ///
     /// # 参数
@@ -332,7 +332,7 @@ impl RestDiscoveryClient {
         self.request(Method::GET, url)
     }
 
-    /// 创建 POST 请求构造器；用于通过发现客户端发起写入类调用。
+    /// 业务作用：创建 POST 请求构造器；用于通过发现客户端发起写入类调用。
     ///
     ///
     /// # 参数
@@ -341,7 +341,7 @@ impl RestDiscoveryClient {
         self.request(Method::POST, url)
     }
 
-    /// 写入 put 数据；用于更新缓存、配置或远端状态。
+    /// 业务作用：写入 put 数据；用于更新缓存、配置或远端状态。
     ///
     ///
     /// # 参数
@@ -350,7 +350,7 @@ impl RestDiscoveryClient {
         self.request(Method::PUT, url)
     }
 
-    /// 创建 DELETE 请求构造器；用于通过发现客户端发起删除类调用。
+    /// 业务作用：创建 DELETE 请求构造器；用于通过发现客户端发起删除类调用。
     ///
     ///
     /// # 参数
@@ -359,7 +359,7 @@ impl RestDiscoveryClient {
         self.request(Method::DELETE, url)
     }
 
-    /// 档1 显式内部服务调用:`service` 是注册中心服务名,`path` 是以 `/` 开头的逻辑路径(非完整 URL)。
+    /// 业务作用：档1 显式内部服务调用:`service` 是注册中心服务名,`path` 是以 `/` 开头的逻辑路径(非完整 URL)。
     /// 不查服务名索引、不外部 fallback;无实例直接 `NoAvailableInstance`。
     ///
     ///
@@ -383,7 +383,7 @@ impl RestDiscoveryClient {
         )
     }
 
-    /// abort 所有后台任务(索引刷新 + watch pump)(`RemoteRuntime` drop / 运行时 reset 用)。
+    /// 业务作用：abort 所有后台任务(索引刷新 + watch pump)(`RemoteRuntime` drop / 运行时 reset 用)。
     pub(crate) fn shutdown_background(&self) {
         if let Some(h) = &self.index_refresh_task {
             h.abort();
@@ -395,7 +395,7 @@ impl RestDiscoveryClient {
 
     // ── 解析与选址(send 时调用) ──
 
-    /// 把 builder 输入解析成请求计划(分类 + 路径/query 构建 + 分流 metrics)。**不选实例**——
+    /// 业务作用：把 builder 输入解析成请求计划(分类 + 路径/query 构建 + 分流 metrics)。**不选实例**——
     /// 选址留给 [`send_internal`](Self::send_internal) 的重试循环。
     ///
     /// # 参数
@@ -518,7 +518,7 @@ impl RestDiscoveryClient {
         }
     }
 
-    /// 档3 启发式命中后的实例协议:只按 `scheme_policy`(Preserve 保留原 http/https)。
+    /// 业务作用：档3 启发式命中后的实例协议:只按 `scheme_policy`(Preserve 保留原 http/https)。
     /// 不接受 `scheme_override` —— 请求级 `.scheme()` 不影响启发式裸 http(s) 命中。
     ///
     /// # 参数
@@ -537,7 +537,7 @@ impl RestDiscoveryClient {
         }
     }
 
-    /// 内部调用:取实例集 + 选址 + 发送;GET/HEAD 传输错误按 `RetryOptions` 重试下一个实例
+    /// 业务作用：内部调用:取实例集 + 选址 + 发送;GET/HEAD 传输错误按 `RetryOptions` 重试下一个实例
     /// (POST/PUT/PATCH/DELETE 默认不重试)。
     ///
     /// # 参数
@@ -724,7 +724,7 @@ impl RestDiscoveryClient {
         }))
     }
 
-    /// 为一个额外 attempt 消耗每服务 retry token，防止下游故障时所有请求同时倍增流量。
+    /// 业务作用：为一个额外 attempt 消耗每服务 retry token，防止下游故障时所有请求同时倍增流量。
     fn consume_retry_budget(&self, service: &str) -> bool {
         let now = Instant::now();
         let capacity = self.options.retry.budget_capacity;
@@ -740,7 +740,7 @@ impl RestDiscoveryClient {
         allowed
     }
 
-    /// 选一个未试过的实例下标:优先 LB 选址;若 LB 选到已试过的(或 `None`),线性取第一个未试的。
+    /// 业务作用：选一个未试过的实例下标:优先 LB 选址;若 LB 选到已试过的(或 `None`),线性取第一个未试的。
     ///
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
@@ -753,7 +753,7 @@ impl RestDiscoveryClient {
         }
     }
 
-    /// 用已解析 URL 构造 reqwest 请求。重试时每次重建。
+    /// 业务作用：用已解析 URL 构造 reqwest 请求。重试时每次重建。
     ///
     /// header 语义:同名 **后写覆盖先写**(last-wins,用 `HeaderMap::insert`);
     /// 过滤 `Host`/hop-by-hop/`Content-Length`(`is_forbidden_header`)。
@@ -824,12 +824,12 @@ impl RestDiscoveryClient {
     }
 }
 
-/// 判定一次下游响应是否应计入服务熔断与实例异常摘除。
+/// 业务作用：判定一次下游响应是否应计入服务熔断与实例异常摘除。
 fn is_circuit_failure_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
-/// 构造内部使用的 reqwest client,挂上单请求总超时 + 连接超时(默认 10s / 2s,防请求长挂)。
+/// 业务作用：构造内部使用的 reqwest client,挂上单请求总超时 + 连接超时(默认 10s / 2s,防请求长挂)。
 ///
 /// 安全默认(2026-07-13):
 /// - `redirect(none)`:LB 自己按注册实例选目标,不该追随后端返回的 3xx——否则一个有 bug/被攻陷的
@@ -850,7 +850,7 @@ fn build_http_client(http: &RestHttpOptions) -> reqwest::Client {
         .expect("rest-discovery: 构造 reqwest::Client 失败")
 }
 
-/// 服务名索引周期刷新任务:每 `interval` 拉一次 `list_services` 刷新;失败保留旧索引并 warn。
+/// 业务作用：服务名索引周期刷新任务:每 `interval` 拉一次 `list_services` 刷新;失败保留旧索引并 warn。
 /// 刷新后把【超 grace 移出索引】的服务名交给 `InstanceSource::mark_removed` 回收其 watch(churn cleanup)。
 /// 持 `Weak<InstanceSource>`:client 已 drop 时 upgrade 失败 → 本任务也会被 `shutdown_background` abort。
 ///
@@ -917,7 +917,7 @@ enum RequestPlan {
     External(reqwest::Url),
 }
 
-/// 按策略构造负载均衡器。
+/// 业务作用：按策略构造负载均衡器。
 ///
 /// # 参数
 /// - `strategy`: 实例选择和重试使用的负载均衡策略。
@@ -928,7 +928,7 @@ fn build_lb(strategy: LbStrategy) -> Arc<dyn LoadBalancer> {
     }
 }
 
-/// 可安全重试下一个实例的传输错误(连接失败 / 超时)。响应已收到的状态错误不在此列。
+/// 业务作用：可安全重试下一个实例的传输错误(连接失败 / 超时)。响应已收到的状态错误不在此列。
 ///
 /// # 参数
 /// - `e`: 错误对象或外部错误值。
@@ -936,7 +936,7 @@ fn is_retryable_transport(e: &reqwest::Error) -> bool {
     e.is_connect() || e.is_timeout()
 }
 
-/// 允许自动重试的瞬态 HTTP 状态；普通业务 4xx 永不重试。
+/// 业务作用：允许自动重试的瞬态 HTTP 状态；普通业务 4xx 永不重试。
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
@@ -947,7 +947,7 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-/// 解析 `Retry-After` 的 delta-seconds 或 HTTP-date；非法值视为未提供。
+/// 业务作用：解析 `Retry-After` 的 delta-seconds 或 HTTP-date；非法值视为未提供。
 fn retry_after_delay(response: &reqwest::Response) -> Option<Duration> {
     let value = response
         .headers()
@@ -964,7 +964,7 @@ fn retry_after_delay(response: &reqwest::Response) -> Option<Duration> {
     )
 }
 
-/// 将单次 attempt timeout 收敛到调用链剩余预算。
+/// 业务作用：将单次 attempt timeout 收敛到调用链剩余预算。
 fn effective_timeout(
     per_attempt: Duration,
     budget: Option<&RequestBudget>,
@@ -993,7 +993,7 @@ struct RetryBucket {
 }
 
 impl RetryBucket {
-    /// 以满 token 状态创建指定容量的服务级 retry bucket。
+    /// 业务作用：以满 token 状态创建指定容量的服务级 retry bucket。
     fn new(capacity: u32, now: Instant) -> Self {
         Self {
             tokens: f64::from(capacity),
@@ -1001,7 +1001,7 @@ impl RetryBucket {
         }
     }
 
-    /// 按单调时间补充 token，并原子语义地尝试消费一次 retry 配额。
+    /// 业务作用：按单调时间补充 token，并原子语义地尝试消费一次 retry 配额。
     fn try_take(&mut self, capacity: u32, refill_per_second: f64, now: Instant) -> bool {
         let elapsed = now
             .saturating_duration_since(self.last_refill)
@@ -1059,7 +1059,7 @@ pub struct RestRequestBuilder {
 }
 
 impl RestRequestBuilder {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     ///
     /// # 参数
     /// - `client`: 底层客户端或连接句柄。
@@ -1082,7 +1082,7 @@ impl RestRequestBuilder {
         }
     }
 
-    /// 覆盖实例协议(仅对 `service_request`/`lb://` 生效;外部 URL 保留原 scheme)。
+    /// 业务作用：覆盖实例协议(仅对 `service_request`/`lb://` 生效;外部 URL 保留原 scheme)。
     ///
     /// # 参数
     ///
@@ -1092,7 +1092,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 追加一个请求头(`Host`/hop-by-hop 会在 send 时被过滤)。
+    /// 业务作用：追加一个请求头(`Host`/hop-by-hop 会在 send 时被过滤)。
     ///
     /// # 参数
     ///
@@ -1104,7 +1104,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 批量并入一张 HeaderMap(供宏 `#[RequestHeaders]` 生成;`Host`/hop-by-hop 在 send 时统一过滤)。
+    /// 业务作用：批量并入一张 HeaderMap(供宏 `#[RequestHeaders]` 生成;`Host`/hop-by-hop 在 send 时统一过滤)。
     ///
     /// # 参数
     ///
@@ -1119,7 +1119,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 追加 query 参数(`&[(k,v)]` / 实现 `Serialize` 的结构体均可)。
+    /// 业务作用：追加 query 参数(`&[(k,v)]` / 实现 `Serialize` 的结构体均可)。
     ///
     /// # 参数
     /// - `q`: 查询对象或 query 参数集合。
@@ -1137,7 +1137,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 追加单个 query 参数(供宏 `#[RequestParam]` 生成;`Display` 值)。
+    /// 业务作用：追加单个 query 参数(供宏 `#[RequestParam]` 生成;`Display` 值)。
     ///
     /// # 参数
     ///
@@ -1157,7 +1157,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 追加一组同名 query(`Vec<T>` 等多值 → **重复 key**:`name=v1&name=v2`;供宏 `#[RequestParam] Vec<T>` 生成)。
+    /// 业务作用：追加一组同名 query(`Vec<T>` 等多值 → **重复 key**:`name=v1&name=v2`;供宏 `#[RequestParam] Vec<T>` 生成)。
     ///
     /// # 参数
     /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -1173,7 +1173,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 设置 JSON body(`Content-Type: application/json` 由 reqwest 处理)。
+    /// 业务作用：设置 JSON body(`Content-Type: application/json` 由 reqwest 处理)。
     ///
     /// # 参数
     /// - `body`: 请求体、响应体或待处理原始内容。
@@ -1190,7 +1190,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 设置 form body(`application/x-www-form-urlencoded`,`serde_urlencoded` 编码)。供宏 `#[FormBody]` 生成。
+    /// 业务作用：设置 form body(`application/x-www-form-urlencoded`,`serde_urlencoded` 编码)。供宏 `#[FormBody]` 生成。
     ///
     /// # 参数
     /// - `body`: 请求体、响应体或待处理原始内容。
@@ -1207,7 +1207,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 设置原样字节 body(供宏 `#[RequestBody(raw)]` 生成)。不做 JSON/urlencoded 编码;
+    /// 业务作用：设置原样字节 body(供宏 `#[RequestBody(raw)]` 生成)。不做 JSON/urlencoded 编码;
     /// Content-Type 由 `consumes` / `#[RequestHeader]` 决定,不配置就不写。`AsRef<[u8]>` 统一接 `Bytes`/`Vec<u8>`/`String`/`&str`。
     ///
     /// # 参数
@@ -1219,7 +1219,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 单请求超时。
+    /// 业务作用：单请求超时。
     ///
     /// # 参数
     ///
@@ -1229,24 +1229,24 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 绑定调用链绝对预算。预算覆盖 discovery、Retry-After 等待和全部 attempts。
+    /// 业务作用：绑定调用链绝对预算。预算覆盖 discovery、Retry-After 等待和全部 attempts。
     pub fn budget(mut self, budget: &RequestBudget) -> Self {
         self.budget = Some(budget.clone());
         self
     }
 
-    /// 绑定当前 W3C trace context；发送时自动覆盖并注入唯一 `traceparent`。
+    /// 业务作用：绑定当前 W3C trace context；发送时自动覆盖并注入唯一 `traceparent`。
     pub fn trace_context(mut self, trace_context: &TraceContext) -> Self {
         self.trace_context = Some(*trace_context);
         self
     }
 
-    /// 同时绑定 Web 请求扩展中的预算与 trace。
+    /// 业务作用：同时绑定 Web 请求扩展中的预算与 trace。
     pub fn request_context(self, budget: &RequestBudget, trace_context: &TraceContext) -> Self {
         self.budget(budget).trace_context(trace_context)
     }
 
-    /// 显式声明本请求具备业务幂等合同，允许非 GET/HEAD 方法按已配置策略自动重试。
+    /// 业务作用：显式声明本请求具备业务幂等合同，允许非 GET/HEAD 方法按已配置策略自动重试。
     ///
     /// 调用方必须有幂等键、幂等 store 或等价证明；仅因“希望成功”而打开会造成重复写。
     pub fn idempotent(mut self) -> Self {
@@ -1254,7 +1254,7 @@ impl RestRequestBuilder {
         self
     }
 
-    /// 发送并返回原始 `reqwest::Response`(不做 `error_for_status`)。
+    /// 业务作用：发送并返回原始 `reqwest::Response`(不做 `error_for_status`)。
     pub async fn send(mut self) -> Result<reqwest::Response> {
         if self
             .budget
@@ -1305,7 +1305,7 @@ impl RestRequestBuilder {
         result
     }
 
-    /// 已由 [`Self::send`] 施加绝对 deadline/cancellation 后执行解析、发现与发送。
+    /// 业务作用：已由 [`Self::send`] 施加绝对 deadline/cancellation 后执行解析、发现与发送。
     async fn send_with_context(self) -> Result<reqwest::Response> {
         let RestRequestBuilder {
             client,
@@ -1374,7 +1374,7 @@ impl RestRequestBuilder {
         }
     }
 
-    /// 发送并把 2xx body 反序列化为 `T`;非 2xx 返回 `HttpStatus`(带 body 摘要)。
+    /// 业务作用：发送并把 2xx body 反序列化为 `T`;非 2xx 返回 `HttpStatus`(带 body 摘要)。
     ///
     /// 错误分类:body 读取(传输层)失败 → `Http`;读到了但 JSON 反序列化失败(2xx 响应体不符合约定)
     /// → `ResponseDecodeFailed`,与 `send_json_unwrap` 一致(传输失败 vs 响应契约失败彻底分开)。
@@ -1395,7 +1395,7 @@ impl RestRequestBuilder {
         })
     }
 
-    /// 发送并把 2xx JSON 响应的【顶层字段 `field`】解包后反序列化为 `T`(供宏 `unwrap = "data"` 生成)。
+    /// 业务作用：发送并把 2xx JSON 响应的【顶层字段 `field`】解包后反序列化为 `T`(供宏 `unwrap = "data"` 生成)。
     /// 非 2xx → `HttpStatus`;body 非 JSON / 缺字段 / 字段类型不匹配 → `ResponseDecodeFailed`(契约错误,区别于传输层 `Http`)。
     ///
     /// # 参数
@@ -1429,7 +1429,7 @@ impl RestRequestBuilder {
         })
     }
 
-    /// 发送并返回 2xx 文本;非 2xx 返回 `HttpStatus`。
+    /// 业务作用：发送并返回 2xx 文本;非 2xx 返回 `HttpStatus`。
     pub async fn send_text(self) -> Result<String> {
         let resp = self.send().await?;
         let status = resp.status();
@@ -1443,7 +1443,7 @@ impl RestRequestBuilder {
         Ok(body)
     }
 
-    /// 发送并只校验 2xx、丢弃 body(供宏 `-> anyhow::Result<()>` 生成)。
+    /// 业务作用：发送并只校验 2xx、丢弃 body(供宏 `-> anyhow::Result<()>` 生成)。
     pub async fn send_ok(self) -> Result<()> {
         let resp = self.send().await?;
         let status = resp.status();
@@ -1457,7 +1457,7 @@ impl RestRequestBuilder {
         Ok(())
     }
 
-    /// 发送并返回 2xx 响应体字节(供宏 `response = "bytes"` 生成)。
+    /// 业务作用：发送并返回 2xx 响应体字节(供宏 `response = "bytes"` 生成)。
     pub async fn send_bytes(self) -> Result<bytes::Bytes> {
         let resp = self.send().await?;
         let status = resp.status();
@@ -1474,7 +1474,7 @@ impl RestRequestBuilder {
 
 // ── URL 重写 helper ──
 
-/// 内部档:`scheme://ip:port` + path + 已合并的 query。IPv6 ip 自动加方括号。
+/// 业务作用：内部档:`scheme://ip:port` + path + 已合并的 query。IPv6 ip 自动加方括号。
 ///
 /// # 参数
 /// - `scheme`: HTTP/HTTPS scheme。
@@ -1507,7 +1507,7 @@ fn build_instance_url(
     })
 }
 
-/// 外部档:原 URL 直发,只把 builder 累积的 query 追加上去。
+/// 业务作用：外部档:原 URL 直发,只把 builder 累积的 query 追加上去。
 ///
 /// # 参数
 /// - `url`: 外部 URL 或连接地址。
@@ -1528,7 +1528,7 @@ fn append_external_query(url: &str, query_parts: &[String]) -> Result<reqwest::U
     })
 }
 
-/// 合并「原有 query」与「builder 累积 query 片段」,空则 `None`。
+/// 业务作用：合并「原有 query」与「builder 累积 query 片段」,空则 `None`。
 ///
 /// # 参数
 /// - `existing`: Redis 中已存在的协议标记或缓存值。
@@ -1552,7 +1552,7 @@ fn merge_query(existing: Option<&str>, parts: &[String]) -> Option<String> {
     }
 }
 
-/// 拆 `/path?query` → `("/path", Some("query"))`。
+/// 业务作用：拆 `/path?query` → `("/path", Some("query"))`。
 ///
 /// # 参数
 /// - `pq`: 按权重或失败次数排序的优先队列。
@@ -1563,7 +1563,7 @@ fn split_path_query(pq: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// 连接层 / Host header:不允许从业务参数或入站请求透传到下游。
+/// 业务作用：连接层 / Host header:不允许从业务参数或入站请求透传到下游。
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -1583,7 +1583,7 @@ fn is_forbidden_header(name: &str) -> bool {
     FORBIDDEN.iter().any(|f| name.eq_ignore_ascii_case(f))
 }
 
-/// 截取响应 body 前 N 字符作错误摘要(按 char 边界,避免切断多字节)。
+/// 业务作用：截取响应 body 前 N 字符作错误摘要(按 char 边界,避免切断多字节)。
 ///
 /// # 参数
 /// - `body`: 请求体、响应体或待处理原始内容。

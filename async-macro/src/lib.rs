@@ -6,9 +6,9 @@
 // async-macro —— #[Async] / #[scheduled] / #[EnableAsync](注解驱动的异步 & 定时任务)
 //
 // 注解语义严格区分两个概念:
-//   #[Async]            ≈ @Async      —— 简单异步执行:贴在 async fn 上(可带 owned 参数;属性本身无参),调用即【后台 spawn】、立即返回
+//   #[Async]            —— 简单异步执行：贴在 async fn 上(可带 owned 参数；属性本身无参)，调用即后台 spawn、立即返回
 //                                        JoinHandle(Future),不阻塞调用方。需要有人【调用】它。
-//   #[scheduled]        ≈ @Scheduled  —— 定时任务:贴在【零参】async fn 上,被【自动注册+调度】跑,没人调它。
+//   #[scheduled]        —— 定时任务：贴在零参 async fn 上，由运行时自动注册和调度。
 //                                        触发源 cron / fixed_rate / fixed_delay(各支持 _ms、数字+time_unit、_string 三写法;
 //                                        旧别名 every_ms/delay_ms)+ initial_delay + cron 的 zone;
 //                                        fixed_rate 限流 max_in_flight/skip_if_running;支持 repeatable(同函数多个 #[scheduled])。
@@ -434,7 +434,7 @@ fn is_anyhow_result_return(output: &ReturnType) -> bool {
 /// ## 实例方法 / impl 块
 /// 可用于满足 `Send + 'static` 的方法:owned `self` 或 `self: Arc<Self>` 接收者 + owned 参数。
 /// **不可**用于 `&self` / `&mut self`(后台任务不能捕获借用接收者)——宏会直接 compile_error 提示改用 `self: Arc<Self>`。
-/// 也可贴在【inherent impl 块】上,批量改写块内所有 async 方法(对照原 @Async 的 type-level;块内出现同步方法会 compile_error;
+/// 也可贴在 inherent impl 块上，批量改写块内所有 async 方法；块内出现同步方法会 compile_error；
 /// const/type 等非方法项原样保留;**impl 级与方法级 #[Async] 不可叠加**,块内方法别再单独标 #[Async])。
 /// **trait impl 不支持**(改返回类型会破坏 trait 签名);标在 `struct`/`trait` 定义上也不支持。
 /// ```ignore
@@ -508,7 +508,7 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
         })
     };
 
-    // 入口形态:支持贴在【自由/关联 async fn】或【impl 块】上(对照原 @Async 的 METHOD/TYPE 目标——
+    // 入口形态支持自由/关联 async fn 或 impl 块；
     // impl 块是 Rust 可做的 type-level 近似:改写本块内所有 async 方法;标在 struct/trait 定义上做不到,不做)。
     let parsed = parse_macro_input!(item as syn::Item);
     match parsed {

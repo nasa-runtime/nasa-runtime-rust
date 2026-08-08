@@ -17,7 +17,7 @@ use crate::{
 #[cfg(feature = "web")]
 use crate::web::WebComponent;
 
-/// 从必需本地配置完成同步预检、创建 owned runtime，并执行完整应用生命周期。
+/// 业务作用：从必需本地配置完成同步预检、创建 owned runtime，并执行完整应用生命周期。
 ///
 /// 该函数是进程入口的唯一所有权边界：正常返回和 Runner unwind 都会消费 runtime 并调用零等待退场，避免普通析构无限等待残留 blocking work。
 ///
@@ -140,7 +140,7 @@ fn build_component(
     }
 }
 
-/// 构造 Web 组件；运行能力关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造 Web 组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -159,7 +159,7 @@ fn build_web_component(
     }
 }
 
-/// 构造缓存组件；`cache` feature 关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造缓存组件；`cache` feature 关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -175,7 +175,7 @@ fn build_cache_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
     }
 }
 
-/// 构造遥测组件；`telemetry` feature 关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造遥测组件；`telemetry` feature 关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -191,7 +191,7 @@ fn build_telemetry_component() -> Result<Box<dyn ApplicationComponent>, Applicat
     }
 }
 
-/// 构造认证组件；auth 能力随 Web 编入,`web` feature 关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造认证组件；auth 能力随 Web 编入,`web` feature 关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -207,7 +207,7 @@ fn build_auth_component() -> Result<Box<dyn ApplicationComponent>, ApplicationEr
     }
 }
 
-/// 构造 log 组件；`log` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：构造 log 组件；`log` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -223,7 +223,7 @@ fn build_log_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErr
     }
 }
 
-/// 构造配置中心组件；运行能力关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造配置中心组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -251,7 +251,7 @@ fn build_nacos_config_component(
     }
 }
 
-/// 构造 db 组件；napp 的 `db` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：构造 db 组件；napp 的 `db` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -299,7 +299,7 @@ fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, Application
     }
 }
 
-/// 构造 redis 组件；napp 的 `redis` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：构造 redis 组件；napp 的 `redis` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -315,7 +315,7 @@ fn build_redis_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
     }
 }
 
-/// 构造 Kafka 组件；napp 的 `kafka` feature 关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造 Kafka 组件；napp 的 `kafka` feature 关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -331,7 +331,7 @@ fn build_kafka_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
     }
 }
 
-/// 构造 scheduling 组件；napp 的 `scheduling` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：构造 scheduling 组件；napp 的 `scheduling` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -347,7 +347,7 @@ fn build_scheduling_component() -> Result<Box<dyn ApplicationComponent>, Applica
     }
 }
 
-/// 构造服务发现组件；运行能力关闭时给出指向门面 feature 的定向错误。
+/// 业务作用：构造服务发现组件；运行能力关闭时给出指向门面 feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -366,7 +366,7 @@ fn build_nacos_discovery_component() -> Result<Box<dyn ApplicationComponent>, Ap
     }
 }
 
-/// 构造 ws 组件；napp 的 `ws` feature 关闭时给出指向 nasa feature 的定向错误。
+/// 业务作用：构造 ws 组件；napp 的 `ws` feature 关闭时给出指向 nasa feature 的定向错误。
 ///
 /// # 参数
 ///
@@ -382,7 +382,7 @@ fn build_ws_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
     }
 }
 
-/// 构造不可由属性宏声明的内部组件身份时返回的稳定错误。
+/// 业务作用：构造不可由属性宏声明的内部组件身份时返回的稳定错误。
 ///
 /// # 参数
 ///
@@ -395,12 +395,16 @@ fn non_declarable_component_error(id: ComponentId) -> ApplicationError {
     )
 }
 
-/// 构造组件被声明但对应 nasa feature 未启用时的定向错误。
+/// 业务作用：构造组件已声明但对应 nasa feature 未启用时的定向启动错误。
 ///
 /// # 参数
 ///
 /// - `id`：被声明的组件身份。
 /// - `feature`：需要在 nasa 依赖中启用的 feature 名称。
+///
+/// # 返回
+///
+/// 返回归属 Application Bootstrap 阶段的稳定配置错误，不启动任何组件副作用。
 // 组件 feature 全开时没有任何分支会调用它；这不是缺陷，而是"每个组件都已编入"的正常结果。
 #[allow(dead_code)]
 fn feature_missing_error(id: ComponentId, feature: &str) -> ApplicationError {
@@ -414,7 +418,7 @@ fn feature_missing_error(id: ComponentId, feature: &str) -> ApplicationError {
     )
 }
 
-/// 在没有 log 组件时安装最小 fmt 日志 subscriber。
+/// 业务作用：在没有 log 组件时安装最小 fmt 日志 subscriber。
 ///
 /// 使用 `try_init`：若业务侧已安装全局 subscriber，`AlreadySet` 被忽略而不是当作启动
 /// 失败。默认级别为 `info`，`RUST_LOG` 存在时按其过滤。
@@ -429,7 +433,7 @@ fn install_fallback_subscriber() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-/// 创建由同步入口独占的多线程 runtime。
+/// 业务作用：创建由同步入口独占的多线程 runtime。
 ///
 /// # 参数
 ///

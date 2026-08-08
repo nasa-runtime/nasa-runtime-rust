@@ -1,6 +1,6 @@
 //! Orchestrator：Saga 的创建、结果推进、durable timer 裁决与管理命令。
 //!
-//! 每次推进都是一个"单一本地事务"（§11.5.4/11.5.5）：Inbox claim、attempt journal
+//! 每次推进都是一个"单一本地事务"：Inbox claim、attempt journal
 //! 记账、CAS + transition 审计行、下一条命令 Outbox 与 timer 的生死在同一 COMMIT 内
 //! 生效或一起消失。CAS 输掉竞争时整个事务回滚且不 ACK，重投后基于新快照重新裁决——
 //! 绝不用旧快照写 Outbox。

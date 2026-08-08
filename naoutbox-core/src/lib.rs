@@ -28,7 +28,7 @@ pub struct OutboxEvent {
 }
 
 impl OutboxEvent {
-    /// 用必填字段创建事件(无 trace context)。
+    /// 业务作用：用必填字段创建事件(无 trace context)。
     pub fn new(
         aggregate_type: impl Into<String>,
         aggregate_id: impl Into<String>,
@@ -45,7 +45,7 @@ impl OutboxEvent {
         }
     }
 
-    /// 附加 W3C trace context(链路穿透)。
+    /// 业务作用：附加 W3C trace context(链路穿透)。
     pub fn with_traceparent(mut self, traceparent: impl Into<String>) -> Self {
         self.traceparent = Some(traceparent.into());
         self
@@ -56,13 +56,13 @@ impl OutboxEvent {
 ///
 /// 持久实现可在 `natx` 事务上下文里 INSERT；trait 让业务与不同 provider 解耦。
 pub trait OutboxWriter {
-    /// 追加一条事件(应与当前业务事务同提交)。
+    /// 业务作用：追加一条事件(应与当前业务事务同提交)。
     fn append(&self, event: OutboxEvent);
 }
 
 /// 借用透传:`&W` 也是 writer,方便把同一个 outbox 借给审计等多个 sink 而无需 Arc。
 impl<W: OutboxWriter + ?Sized> OutboxWriter for &W {
-    /// 将借用 writer 的调用透明转发到原实现。
+    /// 业务作用：将借用 writer 的调用透明转发到原实现。
     fn append(&self, event: OutboxEvent) {
         (**self).append(event);
     }
@@ -76,12 +76,12 @@ pub struct InMemoryOutbox {
 }
 
 impl InMemoryOutbox {
-    /// 创建空 outbox。
+    /// 业务作用：创建空 outbox。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 取走全部已追加事件(FIFO),清空缓冲——模拟 dispatcher 一批取出投递。
+    /// 业务作用：取走全部已追加事件(FIFO),清空缓冲——模拟 dispatcher 一批取出投递。
     pub fn drain(&self) -> Vec<OutboxEvent> {
         let mut events = self
             .events
@@ -90,7 +90,7 @@ impl InMemoryOutbox {
         std::mem::take(&mut *events)
     }
 
-    /// 当前缓冲的事件数。
+    /// 业务作用：当前缓冲的事件数。
     pub fn len(&self) -> usize {
         self.events
             .lock()
@@ -98,14 +98,14 @@ impl InMemoryOutbox {
             .len()
     }
 
-    /// 是否为空。
+    /// 业务作用：是否为空。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
 impl OutboxWriter for InMemoryOutbox {
-    /// 按调用顺序把事件追加到进程内 FIFO。
+    /// 业务作用：按调用顺序把事件追加到进程内 FIFO。
     fn append(&self, event: OutboxEvent) {
         self.events
             .lock()
@@ -124,7 +124,7 @@ pub struct OutboxPublishError {
 }
 
 impl OutboxPublishError {
-    /// 用脱敏原因构造。
+    /// 业务作用：用脱敏原因构造。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -133,7 +133,7 @@ impl OutboxPublishError {
 }
 
 impl std::fmt::Display for OutboxPublishError {
-    /// 输出稳定脱敏原因，不包含 broker、topic 或 payload。
+    /// 业务作用：输出稳定脱敏原因，不包含 broker、topic 或 payload。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "outbox publish error: {}", self.reason)
     }
@@ -148,7 +148,7 @@ impl std::error::Error for OutboxPublishError {}
 /// 故下游消费者需按 `event_id` 幂等去重；聚合类型/id/事件类型不是事件唯一键。
 #[async_trait::async_trait]
 pub trait OutboxPublisher {
-    /// 投递一条事件;失败返回 [`OutboxPublishError`](该事件将被保留、下轮重试)。
+    /// 业务作用：投递一条事件;失败返回 [`OutboxPublishError`](该事件将被保留、下轮重试)。
     async fn publish(&self, event: &OutboxEvent) -> Result<(), OutboxPublishError>;
 }
 
@@ -164,13 +164,13 @@ pub struct DispatchReport {
 }
 
 impl DispatchReport {
-    /// 是否整批投递完成。
+    /// 业务作用：是否整批投递完成。
     pub fn is_complete(&self) -> bool {
         self.published == self.total
     }
 }
 
-/// **保序至少一次**投递一批事件:按序逐条 `publish`,遇首个失败即停(不跳过,保投递顺序),
+/// 业务作用：**保序至少一次**投递一批事件:按序逐条 `publish`,遇首个失败即停(不跳过,保投递顺序),
 /// 已成功的前缀记入 `published`。调用方据 `published` 移除已投递事件、保留未投递的下轮重试。
 ///
 /// 停在首个失败(而非继续后续)是为保证同聚合根事件的**顺序**:跳过失败项会让后发事件先落地。
@@ -197,7 +197,7 @@ where
 }
 
 impl InMemoryOutbox {
-    /// 一次投递轮:取走全部事件 → 保序投递 → **把未投递的按原序放回**(下轮重试)。返回本轮报告。
+    /// 业务作用：一次投递轮:取走全部事件 → 保序投递 → **把未投递的按原序放回**(下轮重试)。返回本轮报告。
     ///
     /// 与 `drain` 不同:失败的事件不丢,保留在 outbox 里。用于把 [`InMemoryOutbox`] 直接当 dispatcher
     /// 的事件源做端到端演示。
@@ -226,7 +226,7 @@ struct DrainedBatch<'a> {
 }
 
 impl<'a> DrainedBatch<'a> {
-    /// 创建尚未确认任何发布前缀的批次恢复守卫。
+    /// 业务作用：创建尚未确认任何发布前缀的批次恢复守卫。
     fn new(outbox: &'a InMemoryOutbox, events: Vec<OutboxEvent>) -> Self {
         Self {
             outbox,
@@ -237,7 +237,7 @@ impl<'a> DrainedBatch<'a> {
 }
 
 impl Drop for DrainedBatch<'_> {
-    /// 将未确认后缀恢复到当前队列之前，维持取消安全与原始 FIFO。
+    /// 业务作用：将未确认后缀恢复到当前队列之前，维持取消安全与原始 FIFO。
     fn drop(&mut self) {
         let published = self.published.min(self.events.len());
         let mut remaining = self.events.split_off(published);

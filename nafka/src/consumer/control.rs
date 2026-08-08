@@ -14,7 +14,7 @@ use crate::types::{AssignmentHandle, StartOffset, Tp};
 use crate::KafkaProxy;
 
 impl KafkaProxy {
-    /// 以独占 group 固定消费指定分区。
+    /// 业务作用：以独占 group 固定消费指定分区。
     ///
     /// # 参数
     ///
@@ -168,7 +168,7 @@ impl KafkaProxy {
         Ok(AssignmentHandle::new(self.clone(), group.to_owned()))
     }
 
-    /// 将一个分区定位到显式 offset，并清理该分区本地 progress/retry 状态。
+    /// 业务作用：将一个分区定位到显式 offset，并清理该分区本地 progress/retry 状态。
     ///
     /// # 参数
     ///
@@ -194,7 +194,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 将分区集合定位到最早可用 offset。
+    /// 业务作用：将分区集合定位到最早可用 offset。
     ///
     /// # 参数
     ///
@@ -212,7 +212,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 将分区集合定位到当前末尾 offset。
+    /// 业务作用：将分区集合定位到当前末尾 offset。
     ///
     /// # 参数
     ///
@@ -230,7 +230,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 按分区查询并定位到首条时间戳不小于目标值的记录。
+    /// 业务作用：按分区查询并定位到首条时间戳不小于目标值的记录。
     ///
     /// # 参数
     ///
@@ -248,7 +248,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 将分区集合定位到 group 已提交位点。
+    /// 业务作用：将分区集合定位到 group 已提交位点。
     ///
     /// # 参数
     ///
@@ -266,7 +266,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 为指定分区增加业务 `User` 暂停原因。
+    /// 业务作用：为指定分区增加业务 `User` 暂停原因。
     ///
     /// # 参数
     ///
@@ -284,7 +284,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 只移除指定分区的业务 `User` 暂停原因。
+    /// 业务作用：只移除指定分区的业务 `User` 暂停原因。
     ///
     /// # 参数
     ///
@@ -302,7 +302,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 为当前 assignment 全部分区增加业务暂停原因。
+    /// 业务作用：为当前 assignment 全部分区增加业务暂停原因。
     ///
     /// # 参数
     ///
@@ -315,7 +315,7 @@ impl KafkaProxy {
         self.pause(group, Vec::new()).await
     }
 
-    /// 只移除当前 assignment 全部分区的业务暂停原因。
+    /// 业务作用：只移除当前 assignment 全部分区的业务暂停原因。
     ///
     /// # 参数
     ///
@@ -328,7 +328,7 @@ impl KafkaProxy {
         self.resume(group, Vec::new()).await
     }
 
-    /// 查询 owner 当前消费位置。
+    /// 业务作用：查询 owner 当前消费位置。
     ///
     /// # 参数
     ///
@@ -351,7 +351,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 查询 group 当前 assignment 快照。
+    /// 业务作用：查询 group 当前 assignment 快照。
     ///
     /// # 参数
     ///
@@ -373,7 +373,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 查询 group 当前健康快照。
+    /// 业务作用：查询 group 当前健康快照。
     ///
     /// # 参数
     ///
@@ -386,7 +386,7 @@ impl KafkaProxy {
         Ok(self.group_handle(group)?.health())
     }
 
-    /// 重建处于允许恢复状态的 group owner。
+    /// 业务作用：重建处于允许恢复状态的 group owner。
     ///
     /// # 参数
     ///
@@ -403,7 +403,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 动态替换一个已运行 subscribe group 的 topic 集合。
+    /// 业务作用：动态替换一个已运行 subscribe group 的 topic 集合。
     ///
     /// route 表仍保持启动时冻结；新 topic 上未匹配 event 的记录按 unmatched policy 处理。
     ///
@@ -432,7 +432,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 取消一个 subscribe group 的当前订阅但保留 owner 与控制句柄。
+    /// 业务作用：取消一个 subscribe group 的当前订阅但保留 owner 与控制句柄。
     ///
     /// # 参数
     ///
@@ -449,7 +449,7 @@ impl KafkaProxy {
         )
     }
 
-    /// 在线性化的生命周期门禁内取得外部控制命令目标。
+    /// 业务作用：在线性化的生命周期门禁内取得外部控制命令目标。
     ///
     /// shutdown 使用同一张 group 表的写锁切换 `ShuttingDown`；因此本方法要么在切换前
     /// 取得句柄并完成 admission，要么在切换后稳定返回生命周期错误，不会把新命令塞进
@@ -488,7 +488,7 @@ impl KafkaProxy {
             .ok_or_else(|| crate::error::NafkaError::NoSuchGroup(group.to_owned()))
     }
 
-    /// 从共享 owner 表读取 group 句柄，不跨 await 持有锁。
+    /// 业务作用：从共享 owner 表读取 group 句柄，不跨 await 持有锁。
     ///
     /// # 参数
     ///
@@ -508,7 +508,7 @@ impl KafkaProxy {
     }
 }
 
-/// 校验无返回值命令没有发生内部 reply 类型错配。
+/// 业务作用：校验无返回值命令没有发生内部 reply 类型错配。
 ///
 /// # 参数
 ///

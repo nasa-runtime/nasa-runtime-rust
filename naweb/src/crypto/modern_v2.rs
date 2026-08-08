@@ -46,7 +46,7 @@ struct ModernEnvelope {
 pub struct ModernV2Protocol;
 
 impl ModernV2Protocol {
-    /// 建立无可变状态的 modern-v2 协议对象。
+    /// 业务作用：建立无可变状态的 modern-v2 协议对象。
     ///
     /// # 返回
     ///
@@ -57,7 +57,7 @@ impl ModernV2Protocol {
 }
 
 impl CryptoProtocol for ModernV2Protocol {
-    /// 返回静态协议 ID。
+    /// 业务作用：返回静态协议 ID。
     ///
     /// # 返回
     ///
@@ -66,7 +66,7 @@ impl CryptoProtocol for ModernV2Protocol {
         "modern-v2"
     }
 
-    /// 返回请求和响应共同使用的 vendor JSON 媒体类型。
+    /// 业务作用：返回请求和响应共同使用的 vendor JSON 媒体类型。
     ///
     /// # 返回
     ///
@@ -75,7 +75,7 @@ impl CryptoProtocol for ModernV2Protocol {
         MODERN_V2_MEDIA_TYPE
     }
 
-    /// 严格解析、认证解密、校验时间并最后写入重放存储。
+    /// 业务作用：严格解析、认证解密、校验时间并最后写入重放存储。
     ///
     /// # 参数
     ///
@@ -221,7 +221,7 @@ impl CryptoProtocol for ModernV2Protocol {
         })
     }
 
-    /// 使用请求固定的 rid、key、target 和 audience 加密完整响应。
+    /// 业务作用：使用请求固定的 rid、key、target 和 audience 加密完整响应。
     ///
     /// # 参数
     ///
@@ -338,7 +338,7 @@ pub struct ModernAadInput<'a> {
     pub status: Option<u16>,
 }
 
-/// 按跨语言二进制合同构造 modern-v2 AAD。
+/// 业务作用：按跨语言二进制合同构造 modern-v2 AAD。
 ///
 /// # 参数
 ///
@@ -379,7 +379,7 @@ pub fn build_modern_aad(input: ModernAadInput<'_>) -> Result<Vec<u8>, CryptoErro
     Ok(output)
 }
 
-/// 追加 `u32 big-endian length + UTF-8 bytes` 字段。
+/// 业务作用：追加 `u32 big-endian length + UTF-8 bytes` 字段。
 ///
 /// # 参数
 ///
@@ -397,7 +397,7 @@ fn push_lp(output: &mut Vec<u8>, value: &str) -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// 校验信封字符串字段在 Base64 解码前已经受限。
+/// 业务作用：校验信封字符串字段在 Base64 解码前已经受限。
 ///
 /// # 参数
 ///
@@ -430,7 +430,7 @@ fn validate_envelope_strings(
     }
 }
 
-/// 解码无 padding Base64URL 并限制解码后长度。
+/// 业务作用：解码无 padding Base64URL 并限制解码后长度。
 ///
 /// # 参数
 ///
@@ -460,7 +460,7 @@ fn decode_unpadded(value: &str, max_decoded: usize) -> Result<Vec<u8>, CryptoErr
     }
 }
 
-/// 解码固定长度的无 padding Base64URL 字段。
+/// 业务作用：解码固定长度的无 padding Base64URL 字段。
 ///
 /// # 类型参数
 ///
@@ -481,7 +481,7 @@ fn decode_exact<const N: usize>(value: &str, reason: &'static str) -> Result<[u8
         .map_err(|_| CryptoError::new(CryptoErrorKind::Envelope, reason))
 }
 
-/// 把系统时间转换成协议使用的 Unix epoch 毫秒。
+/// 业务作用：把系统时间转换成协议使用的 Unix epoch 毫秒。
 ///
 /// # 参数
 ///
@@ -499,7 +499,7 @@ fn system_time_millis(time: SystemTime) -> Result<i64, CryptoError> {
         .map_err(|_| CryptoError::new(CryptoErrorKind::Internal, "clock-out-of-range"))
 }
 
-/// 在 AEAD 认证成功后检查请求时间窗。
+/// 业务作用：在 AEAD 认证成功后检查请求时间窗。
 ///
 /// # 参数
 ///
@@ -530,7 +530,7 @@ fn validate_timestamp(
     }
 }
 
-/// 解析业务 JSON 并检查实际嵌套深度。
+/// 业务作用：解析业务 JSON 并检查实际嵌套深度。
 ///
 /// # 参数
 ///
@@ -555,7 +555,7 @@ pub fn validate_json(bytes: &[u8], max_depth: usize) -> Result<(), CryptoError> 
         .map_err(|_| CryptoError::new(CryptoErrorKind::Envelope, "plaintext-json-invalid"))
 }
 
-/// 在不分配 JSON 对象树的前提下预检容器嵌套深度。
+/// 业务作用：在不分配 JSON 对象树的前提下预检容器嵌套深度。
 ///
 /// # 参数
 ///

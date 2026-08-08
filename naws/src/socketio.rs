@@ -39,7 +39,7 @@ pub enum EngineType {
 }
 
 impl EngineType {
-    /// 从 char 构造结果；用于统一输入适配。
+    /// 业务作用：从 char 构造结果；用于统一输入适配。
     ///
     /// # 参数
     /// - `c`: 当前解析到的字符或连接对象。
@@ -56,7 +56,7 @@ impl EngineType {
         })
     }
 
-    /// 转换为 char 表示；用于对接下游接口。
+    /// 业务作用：转换为 char 表示；用于对接下游接口。
     fn to_char(self) -> char {
         (b'0' + self as u8) as char
     }
@@ -72,7 +72,7 @@ pub struct EnginePacket {
 }
 
 impl EnginePacket {
-    /// 构造 engine.io 文本包。
+    /// 业务作用：构造 engine.io 文本包。
     ///
     /// # 参数
     /// - `typ`: engine.io 包类型。
@@ -84,12 +84,12 @@ impl EnginePacket {
         }
     }
 
-    /// 编码 encode 数据；用于生成可传输或可存储的字节。
+    /// 业务作用：编码 encode 数据；用于生成可传输或可存储的字节。
     pub fn encode(&self) -> String {
         format!("{}{}", self.typ.to_char(), self.data)
     }
 
-    /// 解码 engine.io 文本包。
+    /// 业务作用：解码 engine.io 文本包。
     ///
     /// # 参数
     /// - `s`: 完整 engine.io 文本帧内容。
@@ -119,7 +119,7 @@ pub enum SioType {
 }
 
 impl SioType {
-    /// 从 char 构造结果；用于统一输入适配。
+    /// 业务作用：从 char 构造结果；用于统一输入适配。
     ///
     /// # 参数
     /// - `c`: 当前解析到的字符或连接对象。
@@ -134,7 +134,7 @@ impl SioType {
         })
     }
 
-    /// 转换为 char 表示；用于对接下游接口。
+    /// 业务作用：转换为 char 表示；用于对接下游接口。
     fn to_char(self) -> char {
         (b'0' + self as u8) as char
     }
@@ -154,7 +154,7 @@ pub struct SioPacket {
 }
 
 impl SioPacket {
-    /// 构造 socket.io 包。
+    /// 业务作用：构造 socket.io 包。
     ///
     /// # 参数
     /// - `typ`: socket.io 包类型。
@@ -168,7 +168,7 @@ impl SioPacket {
         }
     }
 
-    /// 编码 encode 数据；用于生成可传输或可存储的字节。
+    /// 业务作用：编码 encode 数据；用于生成可传输或可存储的字节。
     pub fn encode(&self) -> String {
         let mut out = String::new();
         out.push(self.typ.to_char());
@@ -186,7 +186,7 @@ impl SioPacket {
         out
     }
 
-    /// 解码 socket.io 包。
+    /// 业务作用：解码 socket.io 包。
     ///
     /// # 参数
     /// - `s`: engine.io MESSAGE 中承载的 socket.io 文本内容。
@@ -235,7 +235,7 @@ impl SioPacket {
 
 /* ============================== NASA 映射 helper(步骤 2 接入用)============================== */
 
-/// engine.io OPEN 包(WS 连上后服务端首发)。
+/// 业务作用：engine.io OPEN 包(WS 连上后服务端首发)。
 ///
 /// # 参数
 /// - `sid`: 分配给 socket.io 连接的 session id。
@@ -258,12 +258,12 @@ pub fn engineio_open(
     EnginePacket::new(EngineType::Open, json.to_string()).encode()
 }
 
-/// engine.io PONG。
+/// 业务作用：engine.io PONG。
 pub fn engineio_pong() -> String {
     EnginePacket::new(EngineType::Pong, "").encode()
 }
 
-/// socket.io CONNECT 成功(`40[/ns,]{"sid":..}`),在对应 namespace 上回应。
+/// 业务作用：socket.io CONNECT 成功(`40[/ns,]{"sid":..}`),在对应 namespace 上回应。
 ///
 /// # 参数
 /// - `sid`: 鉴权通过后的 session id。
@@ -274,7 +274,7 @@ pub fn sio_connect_ok(sid: &str, namespace: &str) -> String {
     EnginePacket::new(EngineType::Message, sio.encode()).encode()
 }
 
-/// socket.io CONNECT_ERROR(`44[/ns,]{"message":..}`)。
+/// 业务作用：socket.io CONNECT_ERROR(`44[/ns,]{"message":..}`)。
 ///
 /// # 参数
 /// - `message`: 连接失败原因,会写入 JSON `message` 字段。
@@ -288,7 +288,7 @@ pub fn sio_connect_error(message: &str, namespace: &str) -> String {
     EnginePacket::new(EngineType::Message, sio.encode()).encode()
 }
 
-/// socket.io EVENT(`42["event", data]`),载于 engine.io MESSAGE。
+/// 业务作用：socket.io EVENT(`42["event", data]`),载于 engine.io MESSAGE。
 ///
 /// # 参数
 /// - `event`: socket.io 事件名。
@@ -299,12 +299,12 @@ pub fn sio_event(event: &str, data: Value) -> String {
     EnginePacket::new(EngineType::Message, sio.encode()).encode()
 }
 
-/// engine.io PING(`2`):EIO v4 服务端发,客户端回 PONG。
+/// 业务作用：engine.io PING(`2`):EIO v4 服务端发,客户端回 PONG。
 pub fn engineio_ping() -> String {
     EnginePacket::new(EngineType::Ping, "").encode()
 }
 
-/// socket.io DISCONNECT(`41`)。
+/// 业务作用：socket.io DISCONNECT(`41`)。
 pub fn sio_disconnect() -> String {
     EnginePacket::new(
         EngineType::Message,
@@ -313,7 +313,7 @@ pub fn sio_disconnect() -> String {
     .encode()
 }
 
-/// socket.io ACK(`43<ackId><data>`):对带 ackId 的 EVENT 的应答,data 为返回参数数组。
+/// 业务作用：socket.io ACK(`43<ackId><data>`):对带 ackId 的 EVENT 的应答,data 为返回参数数组。
 ///
 /// # 参数
 /// - `ack_id`: 客户端 EVENT 携带的 ack id。
@@ -353,7 +353,7 @@ pub enum Inbound {
     Ignore,
 }
 
-/// 解析 socket.io/engine.io 入站文本帧为框架意图。
+/// 业务作用：解析 socket.io/engine.io 入站文本帧为框架意图。
 ///
 /// # 参数
 /// - `text`: WebSocket 收到的完整 engine.io 文本帧。

@@ -106,7 +106,7 @@ pub enum NasaRedisError {
 }
 
 impl NasaRedisError {
-    /// 是否为**基础设施级可重试**错误(连接断开/超时/服务端瞬时类)。
+    /// 业务作用：是否为**基础设施级可重试**错误(连接断开/超时/服务端瞬时类)。
     /// 用于管理命令决策:这类错误**不得**把命令推进到 Rejected
     /// 终态、不得 ACK+XDEL command——保留 PEL 交下一轮或新 owner 重试;反之**确定性失败**
     /// (WRONGTYPE / 语法 ERR / NOPERM / EXECABORT / 解析等)立即 Rejected,绝不空转重试。
@@ -124,7 +124,7 @@ impl NasaRedisError {
             // operation 冲突:**返 false**——`execute_one` 对 OperationConflict
             // 有**专属 match 臂**(pre-side-effect → 按 producer 窗口 bound,见 command.rs),不再走通用
             // infra-retry 臂。此处返 false 消除"专属臂必须排在 infra 臂之上"的隐式顺序依赖(任何重排都
-            // 不会让 OperationConflict 落入无界重试,回归)。
+            // 不会让 OperationConflict 落入无界重试。
             NasaRedisError::OperationConflict(_) => false,
             // Parsing / Config / ProtocolMarker / OperationInDoubt / PublishIndeterminate /
             // SessionLimit / Lock* / Codec:确定性,不重试
@@ -133,7 +133,7 @@ impl NasaRedisError {
     }
 }
 
-/// `redis::RedisError` 是否瞬时可重试:IO/超时/断连,或服务端 TRYAGAIN/LOADING/
+/// 业务作用：`redis::RedisError` 是否瞬时可重试:IO/超时/断连,或服务端 TRYAGAIN/LOADING/
 /// CLUSTERDOWN/MASTERDOWN(集群/主从切换的暂时态);WRONGTYPE/ERR/NOPERM/CROSSSLOT/
 /// EXECABORT/NOSCRIPT 等确定性服务端错误一律不重试。
 ///

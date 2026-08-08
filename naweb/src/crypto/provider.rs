@@ -29,7 +29,7 @@ pub enum CryptoDirection {
 }
 
 impl CryptoDirection {
-    /// 返回 HKDF 合同使用的固定小写方向文本。
+    /// 业务作用：返回 HKDF 合同使用的固定小写方向文本。
     ///
     /// # 返回
     ///
@@ -56,7 +56,7 @@ pub struct CryptoExecutionContext {
 }
 
 impl std::fmt::Debug for CryptoExecutionContext {
-    /// 输出不含密钥材料的操作摘要。
+    /// 业务作用：输出不含密钥材料的操作摘要。
     ///
     /// # 参数
     ///
@@ -102,7 +102,7 @@ pub struct SecretBytes {
 }
 
 impl SecretBytes {
-    /// 接管 provider 已解密的拥有字节。
+    /// 业务作用：接管 provider 已解密的拥有字节。
     ///
     /// # 参数
     ///
@@ -117,7 +117,7 @@ impl SecretBytes {
         }
     }
 
-    /// 把明文移动给 request body 重写阶段。
+    /// 业务作用：把明文移动给 request body 重写阶段。
     ///
     /// # 返回
     ///
@@ -132,7 +132,7 @@ impl SecretBytes {
 }
 
 impl std::fmt::Debug for SecretBytes {
-    /// 只输出明文长度，避免调试链泄露内容。
+    /// 业务作用：只输出明文长度，避免调试链泄露内容。
     ///
     /// # 参数
     ///
@@ -162,21 +162,21 @@ pub type CryptoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// 与线协议解析、HTTP 和 key 选择解耦的密码执行扩展点。
 pub trait WebCryptoProvider: Send + Sync + 'static {
-    /// 返回注册表使用的稳定 provider ID。
+    /// 业务作用：返回注册表使用的稳定 provider ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识，不得包含地址和 secret。
     fn id(&self) -> &'static str;
 
-    /// 返回启动审计使用的静态能力集合。
+    /// 业务作用：返回启动审计使用的静态能力集合。
     ///
     /// # 返回
     ///
     /// 返回 provider 能安全执行的算法边界。
     fn capabilities(&self) -> CryptoCapabilities;
 
-    /// 解密协议层已经严格验证的输入。
+    /// 业务作用：解密协议层已经严格验证的输入。
     ///
     /// # 参数
     ///
@@ -192,7 +192,7 @@ pub trait WebCryptoProvider: Send + Sync + 'static {
         context: CryptoExecutionContext,
     ) -> CryptoFuture<'a, Result<SecretBytes, CryptoError>>;
 
-    /// 加密通过响应合同检查的明文。
+    /// 业务作用：加密通过响应合同检查的明文。
     ///
     /// # 参数
     ///
@@ -217,7 +217,7 @@ pub struct LocalCryptoProvider {
 }
 
 impl LocalCryptoProvider {
-    /// 建立本地纯算法 provider。
+    /// 业务作用：建立本地纯算法 provider。
     ///
     /// # 参数
     ///
@@ -242,7 +242,7 @@ impl LocalCryptoProvider {
 }
 
 impl WebCryptoProvider for LocalCryptoProvider {
-    /// 返回构造时声明的稳定 ID。
+    /// 业务作用：返回构造时声明的稳定 ID。
     ///
     /// # 返回
     ///
@@ -251,7 +251,7 @@ impl WebCryptoProvider for LocalCryptoProvider {
         self.id
     }
 
-    /// 声明本地 provider 的静态算法能力。
+    /// 业务作用：声明本地 provider 的静态算法能力。
     ///
     /// # 返回
     ///
@@ -266,7 +266,7 @@ impl WebCryptoProvider for LocalCryptoProvider {
         }
     }
 
-    /// 在有界阻塞执行器中执行本地解密。
+    /// 业务作用：在有界阻塞执行器中执行本地解密。
     ///
     /// # 参数
     ///
@@ -290,7 +290,7 @@ impl WebCryptoProvider for LocalCryptoProvider {
         })
     }
 
-    /// 在有界阻塞执行器中执行本地加密。
+    /// 业务作用：在有界阻塞执行器中执行本地加密。
     ///
     /// # 参数
     ///
@@ -315,7 +315,7 @@ impl WebCryptoProvider for LocalCryptoProvider {
     }
 }
 
-/// 执行按 key 算法分派的同步解密。
+/// 业务作用：执行按 key 算法分派的同步解密。
 ///
 /// # 参数
 ///
@@ -381,7 +381,7 @@ fn decrypt_local(
     }
 }
 
-/// 执行按 key 算法分派的同步加密。
+/// 业务作用：执行按 key 算法分派的同步加密。
 ///
 /// # 参数
 ///

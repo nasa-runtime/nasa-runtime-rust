@@ -8,12 +8,12 @@ use std::fmt;
 pub struct ByteSize(pub u64);
 
 impl ByteSize {
-    /// 返回字节数。
+    /// 业务作用：返回字节数。
     pub fn bytes(self) -> u64 {
         self.0
     }
 
-    /// 解析 `"500MB"`、`"30GB"` 或纯字节数字。
+    /// 业务作用：解析 `"500MB"`、`"30GB"` 或纯字节数字。
     ///
     /// 单位大小写不敏感,按 1024 进制处理;不支持小数,避免隐式舍入。
     ///
@@ -44,7 +44,7 @@ impl ByteSize {
 }
 
 impl<'de> Deserialize<'de> for ByteSize {
-    /// 反序列化容量配置；支持数字和带单位字符串。
+    /// 业务作用：反序列化容量配置；支持数字和带单位字符串。
     ///
     /// # 参数
     /// - `deserializer`: serde 提供的容量字段反序列化器。
@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for ByteSize {
         impl serde::de::Visitor<'_> for V {
             type Value = ByteSize;
 
-            /// 描述合法输入；用于反序列化错误提示。
+            /// 业务作用：描述合法输入；用于反序列化错误提示。
             ///
             /// # 参数
             ///
@@ -66,7 +66,7 @@ impl<'de> Deserialize<'de> for ByteSize {
                 f.write_str("a byte-size string like \"500MB\" or an integer byte count")
             }
 
-            /// 读取无符号字节数。
+            /// 业务作用：读取无符号字节数。
             ///
             /// # 参数
             ///
@@ -75,7 +75,7 @@ impl<'de> Deserialize<'de> for ByteSize {
                 Ok(ByteSize(v))
             }
 
-            /// 读取有符号字节数,负数会被拒绝。
+            /// 业务作用：读取有符号字节数,负数会被拒绝。
             ///
             /// # 参数
             ///
@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for ByteSize {
                     .map_err(|_| E::custom(format!("negative byte size: {v}")))
             }
 
-            /// 读取带单位字符串。
+            /// 业务作用：读取带单位字符串。
             ///
             /// # 参数
             ///
@@ -109,7 +109,7 @@ pub enum ByteSizeError {
 }
 
 impl fmt::Display for ByteSizeError {
-    /// 格式化错误信息。
+    /// 业务作用：格式化错误信息。
     ///
     /// # 参数
     ///

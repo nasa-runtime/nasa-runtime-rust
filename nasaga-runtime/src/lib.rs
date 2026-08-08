@@ -1,6 +1,6 @@
 //! NASA Saga 运行时：Orchestrator 推进引擎与参与方 adapter 支撑。
 //!
-//! 职责边界（§11.5.7）：`nasaga-core` 是纯裁决，`nasaga-mysql` 是持久化与 CAS，
+//! 职责边界：`nasaga-core` 是纯裁决，`nasaga-mysql` 是持久化与 CAS，
 //! 本 crate 把二者组装成可运行的推进引擎——创建、结果推进、durable timer、有界重试、
 //! 崩溃恢复（durable timer + at-least-once Outbox 天然承担）与管理命令。宿主层
 //! （`napp` 托管组件）负责把 Kafka 消费循环、timer 轮询循环接到这里，本 crate 不
@@ -160,6 +160,11 @@ pub struct CommandDeliveryPolicy {
 }
 
 impl Default for CommandDeliveryPolicy {
+    /// 业务作用：提供有界的默认命令重投预算，避免单条故障消息无限阻塞分区。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：最多允许十六次普通失败重投的策略。
     fn default() -> Self {
         Self { max_retries: 16 }
     }
@@ -298,6 +303,11 @@ pub struct ResultDeliveryPolicy {
 }
 
 impl Default for ResultDeliveryPolicy {
+    /// 业务作用：提供有界的默认结果重投预算，同时保留提交不确定分支的持续收敛语义。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：最多允许十六次普通失败重投的策略。
     fn default() -> Self {
         Self { max_retries: 16 }
     }

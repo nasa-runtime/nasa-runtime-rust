@@ -13,7 +13,7 @@ use crate::envelope::canonical_bytes;
 /// 步骤 execute 超时 timer：到期进入取消屏障，绝不直接补偿。
 pub const KIND_STEP_TIMEOUT: &str = "step-timeout";
 
-/// 实例级业务 deadline timer：到期按所处阶段固定裁决（§11.5.5）。
+/// 实例级业务 deadline timer：到期按实例所处阶段执行固定裁决。
 pub const KIND_INSTANCE_DEADLINE: &str = "instance-deadline";
 
 /// 旧版未区分方向的 `Unknown` 解决预算 timer；仅用于滚动升级期间消费既有行。

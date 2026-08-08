@@ -37,7 +37,7 @@ pub struct Instance {
 }
 
 impl Default for Instance {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             ip: String::new(),
@@ -53,7 +53,7 @@ impl Default for Instance {
 }
 
 impl Instance {
-    /// 起手式:必填 `ip` + `port`,其余取默认(weight 1.0 / healthy / enabled / ephemeral);再链式 `with_*`。
+    /// 业务作用：起手式:必填 `ip` + `port`,其余取默认(weight 1.0 / healthy / enabled / ephemeral);再链式 `with_*`。
     /// 推荐用它替代结构体字面量:以后 `Instance` 加字段时构造代码不必跟着改。
     ///
     /// # 参数
@@ -68,7 +68,7 @@ impl Instance {
         }
     }
 
-    /// 负载权重(0 = 已注册但不承载流量)。
+    /// 业务作用：负载权重(0 = 已注册但不承载流量)。
     ///
     /// # 参数
     ///
@@ -78,7 +78,7 @@ impl Instance {
         self
     }
 
-    /// 健康标志(register 一般保持 true)。
+    /// 业务作用：健康标志(register 一般保持 true)。
     ///
     /// # 参数
     ///
@@ -88,7 +88,7 @@ impl Instance {
         self
     }
 
-    /// 启用标志(false = 注册但禁用,不承载流量)。
+    /// 业务作用：启用标志(false = 注册但禁用,不承载流量)。
     ///
     /// # 参数
     ///
@@ -98,7 +98,7 @@ impl Instance {
         self
     }
 
-    /// 临时实例(true,默认)/ 持久实例(false)。
+    /// 业务作用：临时实例(true,默认)/ 持久实例(false)。
     ///
     /// # 参数
     ///
@@ -108,7 +108,7 @@ impl Instance {
         self
     }
 
-    /// 集群名。
+    /// 业务作用：集群名。
     ///
     /// # 参数
     ///
@@ -118,7 +118,7 @@ impl Instance {
         self
     }
 
-    /// 可选集群名。
+    /// 业务作用：可选集群名。
     ///
     /// # 参数
     ///
@@ -128,7 +128,7 @@ impl Instance {
         self
     }
 
-    /// 追加一条元数据(可链式多次)。
+    /// 业务作用：追加一条元数据(可链式多次)。
     ///
     /// # 参数
     ///
@@ -139,7 +139,7 @@ impl Instance {
         self
     }
 
-    /// 替换整张元数据表。
+    /// 业务作用：替换整张元数据表。
     ///
     /// # 参数
     ///
@@ -150,7 +150,7 @@ impl Instance {
     }
 }
 
-/// **provider-neutral 的"可承载流量"判定**:统一各后端(nacos/eureka/…)对"这个实例能不能转流量"的口径,
+/// 业务作用：**provider-neutral 的"可承载流量"判定**:统一各后端(nacos/eureka/…)对"这个实例能不能转流量"的口径,
 /// 不依赖具体 SDK 的过滤行为。`discover` / `subscribe_channel` 等"给负载均衡用"的入口应只返回它为 `true` 的实例;
 /// `discover_all`(管理/诊断)则不应用本规则、如实返回全部。
 ///
@@ -178,24 +178,24 @@ pub fn is_traffic_instance(inst: &Instance) -> bool {
 /// 客户端负载均衡(RestDiscovery)持 `Arc<dyn DiscoveryClient>`,不绑定具体后端。
 #[async_trait::async_trait]
 pub trait DiscoveryClient: Send + Sync + 'static {
-    /// 列出全部服务名(去重)。
+    /// 业务作用：列出全部服务名(去重)。
     async fn list_services(&self) -> anyhow::Result<Vec<String>>;
 
-    /// 某服务**可承载流量**的实例(后端用 [`is_traffic_instance`] 口径过滤)。
+    /// 业务作用：某服务**可承载流量**的实例(后端用 [`is_traffic_instance`] 口径过滤)。
     ///
     /// # 参数
     ///
     /// - `service`: 要查询实例的服务名。
     async fn discover(&self, service: &str) -> anyhow::Result<Vec<Instance>>;
 
-    /// 某服务**全部**实例(含不健康/禁用/零权重),供管理/诊断。
+    /// 业务作用：某服务**全部**实例(含不健康/禁用/零权重),供管理/诊断。
     ///
     /// # 参数
     ///
     /// - `service`: 要查询全部实例的服务名。
     async fn discover_all(&self, service: &str) -> anyhow::Result<Vec<Instance>>;
 
-    /// 订阅某服务实例变化:返回 [`ServiceWatch`](初值=当前可承载流量快照 + 后续推送)。
+    /// 业务作用：订阅某服务实例变化:返回 [`ServiceWatch`](初值=当前可承载流量快照 + 后续推送)。
     ///
     /// # 参数
     ///
@@ -205,7 +205,7 @@ pub trait DiscoveryClient: Send + Sync + 'static {
             .await
     }
 
-    /// 同 [`watch`](Self::watch),但允许上层设置 provider-neutral watch 选项。
+    /// 业务作用：同 [`watch`](Self::watch),但允许上层设置 provider-neutral watch 选项。
     ///
     /// # 参数
     ///
@@ -227,7 +227,7 @@ pub struct WatchOptions {
 }
 
 impl Default for WatchOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             poll_interval: std::time::Duration::from_secs(5),
@@ -236,12 +236,12 @@ impl Default for WatchOptions {
 }
 
 impl WatchOptions {
-    /// 起手式:默认 watch 选项。
+    /// 业务作用：起手式:默认 watch 选项。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 后端用于校正服务实例快照的轮询间隔。
+    /// 业务作用：后端用于校正服务实例快照的轮询间隔。
     ///
     /// # 参数
     ///
@@ -251,7 +251,7 @@ impl WatchOptions {
         self
     }
 
-    /// 校验 watch 选项。后端实现应先调用它,再映射到自己的 provider-specific options。
+    /// 业务作用：校验 watch 选项。后端实现应先调用它,再映射到自己的 provider-specific options。
     ///
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -274,7 +274,7 @@ pub struct ServiceWatch {
 /// watch 订阅句柄抽象(后端的 SubscribeGuard 实现它)。
 #[async_trait::async_trait]
 pub trait ServiceWatchGuard: Send {
-    /// 显式取消订阅(优雅路径);不调则 drop 时兜底取消。
+    /// 业务作用：显式取消订阅(优雅路径);不调则 drop 时兜底取消。
     ///
     /// # 参数
     ///
@@ -285,7 +285,7 @@ pub trait ServiceWatchGuard: Send {
 /// 服务【注册侧】抽象:注册本实例,返回 [`Registration`] 句柄。
 #[async_trait::async_trait]
 pub trait ServiceRegistry: Send + Sync + 'static {
-    /// 执行 register 操作；用于维护服务实例生命周期。
+    /// 业务作用：执行 register 操作；用于维护服务实例生命周期。
     ///
     /// # 参数
     ///
@@ -301,7 +301,7 @@ pub trait ServiceRegistry: Send + Sync + 'static {
 /// 注册句柄抽象(后端的 RegistrationGuard 实现它):drop 即 best-effort 下线,也可显式 `deregister().await`。
 #[async_trait::async_trait]
 pub trait Registration: Send {
-    /// 执行 deregister 操作；用于维护服务实例生命周期。
+    /// 业务作用：执行 deregister 操作；用于维护服务实例生命周期。
     ///
     /// # 参数
     ///

@@ -119,7 +119,7 @@ pub struct JsonArrayOps<T: RedisDocument> {
 }
 
 impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
-    /// 绑定 ARRAY 执行器并在启动期完成元数据和 RedisJSON 能力校验。
+    /// 业务作用：绑定 ARRAY 执行器并在启动期完成元数据和 RedisJSON 能力校验。
     ///
     /// # 参数
     /// - `client`: 已初始化的 Redis 客户端,后续所有 ARRAY Lua 和 JSON 命令都从它获取连接。
@@ -160,14 +160,14 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         })
     }
 
-    /// Handles the meta operation.
+    /// 业务作用：返回数组文档使用的静态元数据。
     pub fn meta(&self) -> &'static DocMeta {
         self.meta
     }
 
     // ───────── save 族 ─────────
 
-    /// 追加保存(不查重):INIT_OR_APPEND 到实体算出的目标 key
+    /// 业务作用：追加保存(不查重):INIT_OR_APPEND 到实体算出的目标 key
     /// (ARRAY = 单 key;BUCKET = 按 subId 定桶)。同 subId 重复 save 会产生
     /// 重复子文档——需要"同 id 覆盖"语义用 save_or_replace。
     ///
@@ -187,7 +187,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(())
     }
 
-    /// 批量保存:按最终 key 分组(BUCKET 下不同 subId 自然分到不同桶),每组一条 INIT_OR_APPEND。
+    /// 业务作用：批量保存:按最终 key 分组(BUCKET 下不同 subId 自然分到不同桶),每组一条 INIT_OR_APPEND。
     ///
     /// # 参数
     /// - `docs`: 待追加写入的业务子文档列表,每个文档独立计算数组组和 bucket。
@@ -230,7 +230,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(total)
     }
 
-    /// 替换-或-追加:同 subId 旧子文档先删再追加(REPLACE_OR_APPEND 单脚本原子)。
+    /// 业务作用：替换-或-追加:同 subId 旧子文档先删再追加(REPLACE_OR_APPEND 单脚本原子)。
     /// ⚠ @JsonArrayKey/bucket_count 不可变约束见文件头——array key 字段变更后调用
     /// 本方法不会清旧 key 的旧子文档,必须业务侧先显式 remove_sub_doc(旧 parts)。
     ///
@@ -254,7 +254,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── 单子文档族(BUCKET 模式直接定位单桶,1 key 1 RTT)─────────
 
-    /// 按 subId 查单个子文档。
+    /// 业务作用：按 subId 查单个子文档。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
@@ -270,7 +270,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         })
     }
 
-    /// 子文档存在性：只判断 JSON.GET filter 是否命中，不做反序列化。
+    /// 业务作用：子文档存在性：只判断 JSON.GET filter 是否命中，不做反序列化。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
@@ -283,7 +283,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         ))
     }
 
-    /// 按 subId 删单个子文档,返回删除数(0 = 不存在)。
+    /// 业务作用：按 subId 删单个子文档,返回删除数(0 = 不存在)。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
@@ -296,7 +296,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── 全 array 族(BUCKET 模式跨桶 Lua,1 RTT 扫全桶)─────────
 
-    /// 条件查询全 array(query 经 render_json_path_filter,构建期拒 sort/limit)。
+    /// 业务作用：条件查询全 array(query 经 render_json_path_filter,构建期拒 sort/limit)。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段;BUCKET 模式下用于生成全部桶 key。
@@ -320,7 +320,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         self.json_get_entities(&key, &filter).await
     }
 
-    /// 条件删除全 array,返回总删除数。
+    /// 业务作用：条件删除全 array,返回总删除数。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段;BUCKET 模式下用于生成全部桶 key。
@@ -339,7 +339,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
             .await
     }
 
-    /// 条件计数遍历完整 array，但只累计数量，不构造实体。
+    /// 业务作用：条件计数遍历完整 array，但只累计数量，不构造实体。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段;BUCKET 模式下用于生成全部桶 key。
@@ -370,7 +370,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── 内部工具 ─────────
 
-    /// 路由:ARRAY 模式单 key;BUCKET 模式按 subId 定桶(对照 原实现 keyForSubDoc)。
+    /// 业务作用：路由:ARRAY 模式单 key;BUCKET 模式按 subId 定桶(对照 原实现 keyForSubDoc)。
     ///
     /// # 参数
     /// - `parts`: 路径、占位符或 SQL 片段拆分后的部分。
@@ -382,7 +382,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         }
     }
 
-    /// 构造 `$[?(@.{id_name}=={literal})]` filter(按 subId 精确查/删)。
+    /// 业务作用：构造 `$[?(@.{id_name}=={literal})]` filter(按 subId 精确查/删)。
     /// 字面量形态按 meta.id_numeric:数字直出(校验可解析,防注入/形态错),
     /// 字符串走 JSON 转义加引号——形态错了 `==` 永远不命中(对照 原实现 jsonLiteral
     /// 靠 Object 运行时类型分流,Rust 靠 meta 标记)。
@@ -416,7 +416,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(format!("$[?(@.{}=={})]", self.meta.id_name, lit))
     }
 
-    /// JSON.GET key filter 取原始 chunk(JSONPath 命中结果,通常是 JSON 数组)。
+    /// 业务作用：JSON.GET key filter 取原始 chunk(JSONPath 命中结果,通常是 JSON 数组)。
     /// 无命中/无 key 返 None。
     ///
     /// # 参数
@@ -431,7 +431,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(raw)
     }
 
-    /// chunk → Vec<T>(经 serde 一次解析直达实体)。
+    /// 业务作用：chunk → Vec<T>(经 serde 一次解析直达实体)。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -448,7 +448,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     // Deletes JSON values matching the array filter.
     ///
     /// # 参数
-    /// - `key`: 当前 Redis 命令操作的 key。
+    /// 业务作用：- `key`: 当前 Redis 命令操作的 key。
     /// - `filter`: 待应用的查询、日志或字段过滤条件。
     async fn json_del(&self, key: &str, filter: &str) -> Result<u64> {
         // `JSON.DEL` 对 missing key 返回 0 而不报错，因此此前前置
@@ -462,7 +462,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(n.max(0) as u64)
     }
 
-    /// MULTI_GET:返回每桶非空 JSON chunk 列表。
+    /// 业务作用：MULTI_GET:返回每桶非空 JSON chunk 列表。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -477,7 +477,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(chunks)
     }
 
-    /// MULTI_DEL / MULTI_COUNT 共用:KEYS=全桶,ARGV[1]=filter,返回整数。
+    /// 业务作用：MULTI_DEL / MULTI_COUNT 共用:KEYS=全桶,ARGV[1]=filter,返回整数。
     ///
     /// # 参数
     /// - `script`: Lua 脚本文本。
@@ -499,7 +499,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     }
 }
 
-/// chunk 是否含命中:非 None/空串/空数组/null(对照 原实现 chunkNonEmpty)。
+/// 业务作用：chunk 是否含命中:非 None/空串/空数组/null(对照 原实现 chunkNonEmpty)。
 ///
 /// # 参数
 /// - `chunk`: 分片上传中的单个文件块。

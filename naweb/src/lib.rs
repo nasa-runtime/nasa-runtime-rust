@@ -93,7 +93,7 @@ pub trait ApiSchema {
     const JSON_SCHEMA: &'static str;
 }
 
-/// 把一个 DTO 类型投影成可放入静态路由表的描述符。
+/// 业务作用：把一个 DTO 类型投影成可放入静态路由表的描述符。
 ///
 /// # 参数
 ///
@@ -128,7 +128,7 @@ pub trait ApiParameters {
     const PARAMETERS: &'static [ApiParameterDescriptor];
 }
 
-/// 把参数集类型投影成可放入静态路由表的工厂返回值。
+/// 业务作用：把参数集类型投影成可放入静态路由表的工厂返回值。
 pub fn api_parameters<T: ApiParameters>() -> &'static [ApiParameterDescriptor] {
     T::PARAMETERS
 }
@@ -155,7 +155,7 @@ pub trait ApiResponses {
     const RESPONSES: &'static [ApiResponseDescriptor];
 }
 
-/// 把响应集类型投影成静态路由表可保存的描述符切片。
+/// 业务作用：把响应集类型投影成静态路由表可保存的描述符切片。
 pub fn api_responses<T: ApiResponses>() -> &'static [ApiResponseDescriptor] {
     T::RESPONSES
 }

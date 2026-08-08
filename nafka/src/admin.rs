@@ -36,7 +36,7 @@ pub struct TopicDescription {
 }
 
 impl TopicSpec {
-    /// 构造最小 topic 契约。
+    /// 业务作用：构造最小 topic 契约。
     ///
     /// # 参数
     ///
@@ -52,7 +52,7 @@ impl TopicSpec {
         }
     }
 
-    /// 追加一个 topic 级原生配置。
+    /// 业务作用：追加一个 topic 级原生配置。
     ///
     /// # 参数
     ///
@@ -72,7 +72,7 @@ pub struct KafkaAdmin {
 }
 
 impl KafkaAdmin {
-    /// 构造管理端轻量句柄。
+    /// 业务作用：构造管理端轻量句柄。
     ///
     /// # 参数
     ///
@@ -81,7 +81,7 @@ impl KafkaAdmin {
         Self { proxy }
     }
 
-    /// 取得或并发安全地初始化共享管理客户端。
+    /// 业务作用：取得或并发安全地初始化共享管理客户端。
     ///
     /// 客户端延迟构造并可被 shutdown 丢弃，
     /// 丢弃后再次调用会重建。注意 步骤 1 只对 publish/register/control 用"拒绝"措辞，
@@ -116,7 +116,7 @@ impl KafkaAdmin {
         Ok(candidate)
     }
 
-    /// 查询集群可见的 topic 名列表。
+    /// 业务作用：查询集群可见的 topic 名列表。
     ///
     /// # 错误
     ///
@@ -132,7 +132,7 @@ impl KafkaAdmin {
             .collect())
     }
 
-    /// 判断 topic 是否存在。
+    /// 业务作用：判断 topic 是否存在。
     ///
     /// # 参数
     ///
@@ -158,7 +158,7 @@ impl KafkaAdmin {
         }
     }
 
-    /// 返回 topic 当前分区号列表。
+    /// 业务作用：返回 topic 当前分区号列表。
     ///
     /// # 参数
     ///
@@ -183,7 +183,7 @@ impl KafkaAdmin {
             })
     }
 
-    /// 读取 topic 的分区、副本和可选配置快照。
+    /// 业务作用：读取 topic 的分区、副本和可选配置快照。
     ///
     /// # 参数
     ///
@@ -204,7 +204,7 @@ impl KafkaAdmin {
             .await
     }
 
-    /// 创建 topic，并逐项检查 broker 返回结果。
+    /// 业务作用：创建 topic，并逐项检查 broker 返回结果。
     ///
     /// # 参数
     ///
@@ -218,7 +218,7 @@ impl KafkaAdmin {
         self.client()?.create_topic(&spec).await
     }
 
-    /// topic 不存在时创建，已存在时返回成功。
+    /// 业务作用：topic 不存在时创建，已存在时返回成功。
     ///
     /// # 参数
     ///
@@ -232,7 +232,7 @@ impl KafkaAdmin {
         self.client()?.create_topic_if_absent(&spec).await
     }
 
-    /// 删除 topic。
+    /// 业务作用：删除 topic。
     ///
     /// # 参数
     ///
@@ -246,7 +246,7 @@ impl KafkaAdmin {
         self.client()?.delete_topic(topic).await
     }
 
-    /// 修改已存在 topic 的一项动态配置。
+    /// 业务作用：修改已存在 topic 的一项动态配置。
     ///
     /// 用于运维侧调整 `max.message.bytes`、`retention.ms` 等 broker 动态项；
     /// 不做本地合法性推断，键值合法性由 broker 裁决。
@@ -265,7 +265,7 @@ impl KafkaAdmin {
         self.client()?.alter_topic_config(topic, key, value).await
     }
 
-    /// 只增不减 topic 分区数。
+    /// 业务作用：只增不减 topic 分区数。
     ///
     /// # 参数
     ///
@@ -291,7 +291,7 @@ impl KafkaAdmin {
         self.client()?.increase_partitions(topic, total).await
     }
 
-    /// 查询分区最早和末尾 offset。
+    /// 业务作用：查询分区最早和末尾 offset。
     ///
     /// # 参数
     ///
@@ -305,7 +305,7 @@ impl KafkaAdmin {
         self.client()?.watermarks(tps).await
     }
 
-    /// 使用不加入 group 的短命客户端查询已提交 offset。
+    /// 业务作用：使用不加入 group 的短命客户端查询已提交 offset。
     ///
     /// # 参数
     ///
@@ -329,7 +329,7 @@ impl KafkaAdmin {
             .await
     }
 
-    /// 合并 committed offset 与 end watermark 计算离线滞后。
+    /// 业务作用：合并 committed offset 与 end watermark 计算离线滞后。
     ///
     /// # 参数
     ///
@@ -365,7 +365,7 @@ impl KafkaAdmin {
     }
 }
 
-/// 校验 topic 名不为空。
+/// 业务作用：校验 topic 名不为空。
 ///
 /// # 参数
 ///
@@ -382,7 +382,7 @@ fn validate_topic(topic: &str) -> Result<()> {
     }
 }
 
-/// 校验创建 topic 的公共契约。
+/// 业务作用：校验创建 topic 的公共契约。
 ///
 /// # 参数
 ///
@@ -407,7 +407,7 @@ fn validate_spec(spec: &TopicSpec) -> Result<()> {
     Ok(())
 }
 
-/// 校验 topic-partition 列表并拒绝重复项。
+/// 业务作用：校验 topic-partition 列表并拒绝重复项。
 ///
 /// # 参数
 ///

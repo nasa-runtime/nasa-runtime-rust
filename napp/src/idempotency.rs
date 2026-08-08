@@ -44,7 +44,7 @@ pub struct IdempotencyLayerState {
 }
 
 impl IdempotencyLayerState {
-    /// 绑定 store、已经完成路由审计的 mapping runtime 与 Web context path。
+    /// 业务作用：绑定 store、已经完成路由审计的 mapping runtime 与 Web context path。
     pub fn new(
         store: SharedIdempotencyStore,
         mapping_runtime: Arc<naweb::MappingRuntime>,
@@ -72,7 +72,7 @@ struct ExecutionLeaseGuard {
 }
 
 impl ExecutionLeaseGuard {
-    /// 为一次首次执行绑定 store、命名空间、fingerprint 与随机 lease，并默认启用清理。
+    /// 业务作用：为一次首次执行绑定 store、命名空间、fingerprint 与随机 lease，并默认启用清理。
     fn new(
         store: SharedIdempotencyStore,
         key: IdempotencyKey,
@@ -88,14 +88,14 @@ impl ExecutionLeaseGuard {
         }
     }
 
-    /// 完成或显式 abort 后关闭 Drop 清理，防止重复请求后端。
+    /// 业务作用：完成或显式 abort 后关闭 Drop 清理，防止重复请求后端。
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
 impl Drop for ExecutionLeaseGuard {
-    /// 请求 future 非正常结束时，在有界后台任务中 best-effort 释放仍属于本 owner 的 lease。
+    /// 业务作用：请求 future 非正常结束时，在有界后台任务中 best-effort 释放仍属于本 owner 的 lease。
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -126,7 +126,7 @@ impl Drop for ExecutionLeaseGuard {
     }
 }
 
-/// 对 method、route、query、Content-Type 与 body 做长度定界哈希，形成请求等价类指纹。
+/// 业务作用：对 method、route、query、Content-Type 与 body 做长度定界哈希，形成请求等价类指纹。
 fn fingerprint(
     request_parts: &axum::http::request::Parts,
     route_id: &str,
@@ -150,7 +150,7 @@ fn fingerprint(
     RequestFingerprint(hasher.finalize().into())
 }
 
-/// 将持久层返回的 header 再次按 HTTP 类型校验后附加到重放响应。
+/// 业务作用：将持久层返回的 header 再次按 HTTP 类型校验后附加到重放响应。
 fn replay_headers(response: &mut Response, headers: Vec<StoredHeader>) {
     for stored in headers {
         let Ok(name) = HeaderName::try_from(stored.name) else {
@@ -163,7 +163,7 @@ fn replay_headers(response: &mut Response, headers: Vec<StoredHeader>) {
     }
 }
 
-/// 只提取固定安全白名单内、数量与长度有界的响应 header。
+/// 业务作用：只提取固定安全白名单内、数量与长度有界的响应 header。
 fn storable_headers(response: &Response) -> Vec<StoredHeader> {
     const ALLOWED: &[HeaderName] = &[
         header::CONTENT_TYPE,
@@ -189,7 +189,7 @@ fn storable_headers(response: &Response) -> Vec<StoredHeader> {
     stored
 }
 
-/// 从持久化状态、body 与白名单 header 重建无隐式 Content-Type 的 HTTP 响应。
+/// 业务作用：从持久化状态、body 与白名单 header 重建无隐式 Content-Type 的 HTTP 响应。
 fn stored_response(stored: StoredResponse) -> Response {
     let status = StatusCode::from_u16(stored.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     // `(StatusCode, Vec<u8>).into_response()` 会先注入 `application/octet-stream`；再 append 原始
@@ -201,7 +201,7 @@ fn stored_response(stored: StoredResponse) -> Response {
     response
 }
 
-/// 判断状态码是否具有稳定重放语义，排除认证失败、限流及服务端瞬态错误。
+/// 业务作用：判断状态码是否具有稳定重放语义，排除认证失败、限流及服务端瞬态错误。
 fn storable_status(status: StatusCode) -> bool {
     status.is_success()
         || status.is_redirection()
@@ -216,7 +216,7 @@ fn storable_status(status: StatusCode) -> bool {
         )
 }
 
-/// 保留数据库列范围内的既有 namespace 文本；极端长值才摘要化，避免合法身份因列溢出变成 503，
+/// 业务作用：保留数据库列范围内的既有 namespace 文本；极端长值才摘要化，避免合法身份因列溢出变成 503，
 /// 同时不打断常规 key 的已有持久 replay。
 fn bounded_namespace(value: String, max: usize) -> String {
     if value.len() <= max {
@@ -232,7 +232,7 @@ fn bounded_namespace(value: String, max: usize) -> String {
     bounded
 }
 
-/// 幂等中间件。无 `Idempotency-Key` 头则透传;有则按 (route, key, body 指纹) 裁决。
+/// 业务作用：幂等中间件。无 `Idempotency-Key` 头则透传;有则按 (route, key, body 指纹) 裁决。
 pub async fn idempotency(
     State(state): State<IdempotencyLayerState>,
     request: Request,

@@ -88,7 +88,7 @@ pub struct IdempotencyError {
 }
 
 impl IdempotencyError {
-    /// 用脱敏原因构造。
+    /// 业务作用：用脱敏原因构造。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -97,7 +97,7 @@ impl IdempotencyError {
 }
 
 impl std::fmt::Display for IdempotencyError {
-    /// 输出稳定脱敏原因，不包含 key、指纹、响应体或后端连接信息。
+    /// 业务作用：输出稳定脱敏原因，不包含 key、指纹、响应体或后端连接信息。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "idempotency store error: {}", self.reason)
     }
@@ -112,7 +112,7 @@ impl std::error::Error for IdempotencyError {}
 /// fail-closed(幂等不可用时不放行,以免重复副作用)。
 #[async_trait::async_trait]
 pub trait IdempotencyStore {
-    /// 尝试开始一次幂等请求,返回裁决(见 [`IdempotencyOutcome`])。
+    /// 业务作用：尝试开始一次幂等请求,返回裁决(见 [`IdempotencyOutcome`])。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -120,7 +120,7 @@ pub trait IdempotencyStore {
         lease: ExecutionLease,
     ) -> Result<IdempotencyOutcome, IdempotencyError>;
 
-    /// 完成：仅当 fingerprint + lease 仍属于调用方时落为 Completed。返回是否成功持有并完成租约。
+    /// 业务作用：完成：仅当 fingerprint + lease 仍属于调用方时落为 Completed。返回是否成功持有并完成租约。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -129,7 +129,7 @@ pub trait IdempotencyStore {
         response: StoredResponse,
     ) -> Result<bool, IdempotencyError>;
 
-    /// 放弃仍属于调用方的 InFlight 占位。已完成、已换 owner 或不存在均返回 `false`。
+    /// 业务作用：放弃仍属于调用方的 InFlight 占位。已完成、已换 owner 或不存在均返回 `false`。
     async fn abort(
         &self,
         key: &IdempotencyKey,
@@ -145,7 +145,7 @@ pub struct InMemoryIdempotencyStore {
 }
 
 impl InMemoryIdempotencyStore {
-    /// 创建空 store。
+    /// 业务作用：创建空 store。
     pub fn new() -> Self {
         Self::default()
     }
@@ -153,7 +153,7 @@ impl InMemoryIdempotencyStore {
 
 #[async_trait::async_trait]
 impl IdempotencyStore for InMemoryIdempotencyStore {
-    /// 原子占位或读取现有进程内记录，区分首次、在途、重放与指纹冲突。
+    /// 业务作用：原子占位或读取现有进程内记录，区分首次、在途、重放与指纹冲突。
     async fn begin(
         &self,
         key: &IdempotencyKey,
@@ -193,7 +193,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         Ok(outcome)
     }
 
-    /// 仅由仍持有 fingerprint 与 lease 的 owner 将在途记录转换为完成记录。
+    /// 业务作用：仅由仍持有 fingerprint 与 lease 的 owner 将在途记录转换为完成记录。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -224,7 +224,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         Ok(false)
     }
 
-    /// 仅删除仍属于调用方 lease 的在途占位，避免旧 owner 清除新请求。
+    /// 业务作用：仅删除仍属于调用方 lease 的在途占位，避免旧 owner 清除新请求。
     async fn abort(
         &self,
         key: &IdempotencyKey,

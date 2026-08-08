@@ -73,7 +73,7 @@ struct ProducerLaneInner {
 }
 
 impl ProducerLane {
-    /// 构造一个已配置 lane 的轻量句柄。
+    /// 业务作用：构造一个已配置 lane 的轻量句柄。
     ///
     /// # 参数
     ///
@@ -91,17 +91,17 @@ impl ProducerLane {
         })
     }
 
-    /// 返回固定 lane 名。
+    /// 业务作用：返回固定 lane 名。
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
-    /// 返回当前物理 lane 的容量与累计结果快照。
+    /// 业务作用：返回当前物理 lane 的容量与累计结果快照。
     pub fn stats(&self) -> ProducerLaneStats {
         self.inner.client.stats()
     }
 
-    /// 创建类型化发布 builder。
+    /// 业务作用：创建类型化发布 builder。
     ///
     /// # 参数
     ///
@@ -115,7 +115,7 @@ impl ProducerLane {
         PublishBuilder::new(self.clone(), topic, payload)
     }
 
-    /// 创建显式 tombstone builder。
+    /// 业务作用：创建显式 tombstone builder。
     ///
     /// # 参数
     ///
@@ -125,7 +125,7 @@ impl ProducerLane {
         TombstoneBuilder::new(self.clone(), topic, key)
     }
 
-    /// 创建不经过 codec 的 raw bytes 发布 builder。
+    /// 业务作用：创建不经过 codec 的 raw bytes 发布 builder。
     ///
     /// # 参数
     ///
@@ -135,7 +135,7 @@ impl ProducerLane {
         RawPublishBuilder::new(self.clone(), topic, payload)
     }
 
-    /// 在统一 deadline 内排空本 lane 的投递观察与底层队列。
+    /// 业务作用：在统一 deadline 内排空本 lane 的投递观察与底层队列。
     ///
     /// # 错误
     ///
@@ -151,7 +151,7 @@ impl ProducerLane {
         self.inner.client.flush_until(deadline).await
     }
 
-    /// 检查所属运行时是否仍允许取得外部发布资格。
+    /// 业务作用：检查所属运行时是否仍允许取得外部发布资格。
     ///
     /// # 错误
     ///
@@ -165,7 +165,7 @@ impl ProducerLane {
         runtime.ensure_publish_open()
     }
 
-    /// 克隆 Application-owned 只写记录器；运行时释放或未启用 telemetry 时返回 `None`。
+    /// 业务作用：克隆 Application-owned 只写记录器；运行时释放或未启用 telemetry 时返回 `None`。
     fn span_recorder(&self) -> Option<SpanRecorder> {
         self.inner
             .runtime
@@ -173,7 +173,7 @@ impl ProducerLane {
             .and_then(|runtime| runtime.span_recorder.clone())
     }
 
-    /// 把已经完成编码和校验的记录交给本 lane 并等待 delivery。
+    /// 业务作用：把已经完成编码和校验的记录交给本 lane 并等待 delivery。
     ///
     /// # 参数
     ///
@@ -211,7 +211,7 @@ impl ProducerLane {
         result
     }
 
-    /// 把已经完成编码和校验的记录同步入队并登记异步观察。
+    /// 业务作用：把已经完成编码和校验的记录同步入队并登记异步观察。
     ///
     /// # 参数
     ///
@@ -249,7 +249,7 @@ impl ProducerLane {
         result
     }
 
-    /// 上报本 lane 的队列压力：`utilization` 是**百分比**（0-100），另附绝对在途数。
+    /// 业务作用：上报本 lane 的队列压力：`utilization` 是**百分比**（0-100），另附绝对在途数。
     ///
     /// 要的是 utilization；只发绝对值时运维无法判断"离满还有多远"，
     /// 而 observer 容量是 per-lane 可配的。两条路径（send/fire）都必须发，
@@ -282,17 +282,17 @@ impl ProducerLane {
         );
     }
 
-    /// 拒绝新的业务发布，供统一关闭流程使用。
+    /// 业务作用：拒绝新的业务发布，供统一关闭流程使用。
     pub(crate) fn begin_draining(&self) {
         self.inner.client.begin_draining();
     }
 
-    /// 关闭业务入口后只保留框架收尾发布。
+    /// 业务作用：关闭业务入口后只保留框架收尾发布。
     pub(crate) fn enter_internal_only(&self) {
         self.inner.client.enter_internal_only();
     }
 
-    /// 在全局绝对截止时刻前排空本 lane。
+    /// 业务作用：在全局绝对截止时刻前排空本 lane。
     ///
     /// # 参数
     ///
@@ -305,12 +305,12 @@ impl ProducerLane {
         self.inner.client.flush_until(deadline).await
     }
 
-    /// 在排空成功后永久关闭本 lane 的全部入口。
+    /// 业务作用：在排空成功后永久关闭本 lane 的全部入口。
     pub(crate) fn close(&self) {
         self.inner.client.close();
     }
 
-    /// 发布框架内部 raw 记录，允许携带已经由框架构造的保留 headers。
+    /// 业务作用：发布框架内部 raw 记录，允许携带已经由框架构造的保留 headers。
     ///
     /// # 参数
     ///
@@ -348,7 +348,7 @@ impl ProducerLane {
     }
 }
 
-/// 从最终 headers 读取发布事件名，非法 UTF-8 仅用于观测时回退固定分类。
+/// 业务作用：从最终 headers 读取发布事件名，非法 UTF-8 仅用于观测时回退固定分类。
 ///
 /// - `headers`: builder 已完成校验的有序 headers。
 fn outbound_event(headers: &KafkaHeaders) -> &str {
@@ -382,7 +382,7 @@ struct BuilderFields {
 }
 
 impl BuilderFields {
-    /// 写入一个业务 header，并记录保留名误用。
+    /// 业务作用：写入一个业务 header，并记录保留名误用。
     ///
     /// # 参数
     ///
@@ -405,7 +405,7 @@ impl BuilderFields {
         });
     }
 
-    /// 生成 headers，并在存在父 context 时让 wire context 与 producer span 共用同一子 span-id。
+    /// 业务作用：生成 headers，并在存在父 context 时让 wire context 与 producer span 共用同一子 span-id。
     fn finish_headers_with_span(
         &self,
         codec: Option<PayloadCodec>,
@@ -473,7 +473,7 @@ pub struct PublishBuilder<'a, T> {
 }
 
 impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
-    /// 构造类型化发布 builder。
+    /// 业务作用：构造类型化发布 builder。
     ///
     /// # 参数
     ///
@@ -489,7 +489,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         }
     }
 
-    /// 设置业务事件名。
+    /// 业务作用：设置业务事件名。
     ///
     /// # 参数
     ///
@@ -499,7 +499,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 设置字符串 key。
+    /// 业务作用：设置字符串 key。
     ///
     /// # 参数
     ///
@@ -509,7 +509,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 固定目标分区。
+    /// 业务作用：固定目标分区。
     ///
     /// # 参数
     ///
@@ -519,7 +519,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 设置消息时间戳。
+    /// 业务作用：设置消息时间戳。
     ///
     /// # 参数
     ///
@@ -529,7 +529,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 追加业务 header；同名项保留顺序，不做 Map 折叠。
+    /// 业务作用：追加业务 header；同名项保留顺序，不做 Map 折叠。
     ///
     /// # 参数
     ///
@@ -540,13 +540,13 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
     }
 
-    /// 复制消费上下文中的透传 Map，便于消费后继续发布。
+    /// 业务作用：复制消费上下文中的透传 Map，便于消费后继续发布。
     ///
     /// # 参数
     ///
@@ -557,7 +557,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         self
     }
 
-    /// 写入一个可序列化透传字段。
+    /// 业务作用：写入一个可序列化透传字段。
     ///
     /// # 参数
     ///
@@ -574,7 +574,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         Ok(self)
     }
 
-    /// 编码、入队并等待 broker delivery report。
+    /// 业务作用：编码、入队并等待 broker delivery report。
     ///
     /// # 错误
     ///
@@ -604,7 +604,7 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         result
     }
 
-    /// 编码并登记可观察的异步投递。
+    /// 业务作用：编码并登记可观察的异步投递。
     ///
     /// # 错误
     ///
@@ -645,7 +645,7 @@ pub struct RawPublishBuilder<'a> {
 }
 
 impl<'a> RawPublishBuilder<'a> {
-    /// 构造 raw 发布 builder。
+    /// 业务作用：构造 raw 发布 builder。
     ///
     /// # 参数
     ///
@@ -661,7 +661,7 @@ impl<'a> RawPublishBuilder<'a> {
         }
     }
 
-    /// 设置业务事件名。
+    /// 业务作用：设置业务事件名。
     ///
     /// # 参数
     ///
@@ -671,7 +671,7 @@ impl<'a> RawPublishBuilder<'a> {
         self
     }
 
-    /// 设置字符串 key。
+    /// 业务作用：设置字符串 key。
     ///
     /// # 参数
     ///
@@ -681,7 +681,7 @@ impl<'a> RawPublishBuilder<'a> {
         self
     }
 
-    /// 固定目标分区。
+    /// 业务作用：固定目标分区。
     ///
     /// # 参数
     ///
@@ -691,7 +691,7 @@ impl<'a> RawPublishBuilder<'a> {
         self
     }
 
-    /// 设置消息时间戳。
+    /// 业务作用：设置消息时间戳。
     ///
     /// # 参数
     ///
@@ -701,7 +701,7 @@ impl<'a> RawPublishBuilder<'a> {
         self
     }
 
-    /// 追加业务 header。
+    /// 业务作用：追加业务 header。
     ///
     /// # 参数
     ///
@@ -712,13 +712,13 @@ impl<'a> RawPublishBuilder<'a> {
         self
     }
 
-    /// 绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
     }
 
-    /// 入队并等待 broker delivery report。
+    /// 业务作用：入队并等待 broker delivery report。
     ///
     /// # 错误
     ///
@@ -747,7 +747,7 @@ impl<'a> RawPublishBuilder<'a> {
         result
     }
 
-    /// 登记可观察的 raw 异步投递。
+    /// 业务作用：登记可观察的 raw 异步投递。
     ///
     /// # 错误
     ///
@@ -787,7 +787,7 @@ pub struct TombstoneBuilder<'a> {
 }
 
 impl<'a> TombstoneBuilder<'a> {
-    /// 构造 tombstone builder。
+    /// 业务作用：构造 tombstone builder。
     ///
     /// # 参数
     ///
@@ -803,7 +803,7 @@ impl<'a> TombstoneBuilder<'a> {
         }
     }
 
-    /// 设置业务事件名。
+    /// 业务作用：设置业务事件名。
     ///
     /// # 参数
     ///
@@ -813,7 +813,7 @@ impl<'a> TombstoneBuilder<'a> {
         self
     }
 
-    /// 追加业务 header。
+    /// 业务作用：追加业务 header。
     ///
     /// # 参数
     ///
@@ -824,13 +824,13 @@ impl<'a> TombstoneBuilder<'a> {
         self
     }
 
-    /// 绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
+    /// 业务作用：绑定当前 trace；发送时自动派生 producer 子 span 并写唯一 `traceparent`。
     pub fn trace_context(mut self, parent: &TraceContext) -> Self {
         self.fields.trace_parent = Some(*parent);
         self
     }
 
-    /// 发布 null value 并等待 delivery report。
+    /// 业务作用：发布 null value 并等待 delivery report。
     ///
     /// # 错误
     ///
@@ -866,7 +866,7 @@ impl<'a> TombstoneBuilder<'a> {
         result
     }
 
-    /// 登记可观察的 tombstone 异步投递。
+    /// 业务作用：登记可观察的 tombstone 异步投递。
     ///
     /// # 错误
     ///
@@ -911,7 +911,7 @@ pub struct PublishItem<T> {
 }
 
 impl<T> PublishItem<T> {
-    /// 以 payload 构造批量发布项。
+    /// 业务作用：以 payload 构造批量发布项。
     ///
     /// # 参数
     ///
@@ -924,7 +924,7 @@ impl<T> PublishItem<T> {
         }
     }
 
-    /// 设置消息 key。
+    /// 业务作用：设置消息 key。
     ///
     /// # 参数
     ///
@@ -934,7 +934,7 @@ impl<T> PublishItem<T> {
         self
     }
 
-    /// 设置事件名。
+    /// 业务作用：设置事件名。
     ///
     /// # 参数
     ///
@@ -957,7 +957,7 @@ pub struct BatchPublishError {
 }
 
 impl KafkaProxy {
-    /// 返回已配置 producer lane 的轻量句柄。
+    /// 业务作用：返回已配置 producer lane 的轻量句柄。
     ///
     /// # 参数
     ///
@@ -975,7 +975,7 @@ impl KafkaProxy {
             .ok_or_else(|| NafkaError::NoSuchProducerLane(name.to_owned()))
     }
 
-    /// 使用 default lane 创建类型化发布 builder。
+    /// 业务作用：使用 default lane 创建类型化发布 builder。
     ///
     /// # 参数
     ///
@@ -989,7 +989,7 @@ impl KafkaProxy {
         PublishBuilder::new(self.default_lane(), topic, payload)
     }
 
-    /// 使用 default lane 创建 tombstone builder。
+    /// 业务作用：使用 default lane 创建 tombstone builder。
     ///
     /// # 参数
     ///
@@ -999,7 +999,7 @@ impl KafkaProxy {
         TombstoneBuilder::new(self.default_lane(), topic, key)
     }
 
-    /// 使用 default lane 创建 raw bytes 发布 builder。
+    /// 业务作用：使用 default lane 创建 raw bytes 发布 builder。
     ///
     /// # 参数
     ///
@@ -1009,7 +1009,7 @@ impl KafkaProxy {
         RawPublishBuilder::new(self.default_lane(), topic, payload)
     }
 
-    /// 按输入顺序逐条发布，并在首个失败处停止。
+    /// 业务作用：按输入顺序逐条发布，并在首个失败处停止。
     ///
     /// # 参数
     ///
@@ -1048,7 +1048,7 @@ impl KafkaProxy {
         Ok(delivered)
     }
 
-    /// 并发排空全部已配置 lane，并共享同一个总 deadline。
+    /// 业务作用：并发排空全部已配置 lane，并共享同一个总 deadline。
     ///
     /// # 错误
     ///
@@ -1080,7 +1080,7 @@ impl KafkaProxy {
         }
     }
 
-    /// 构造 default lane 轻量句柄。
+    /// 业务作用：构造 default lane 轻量句柄。
     fn default_lane(&self) -> ProducerLane {
         let Some(lanes) = self.inner.producer_lanes.get() else {
             unreachable!("connect 必须先冻结 producer lane 表")
@@ -1092,7 +1092,7 @@ impl KafkaProxy {
     }
 }
 
-/// 校验所有发布 builder 共有的目标字段。
+/// 业务作用：校验所有发布 builder 共有的目标字段。
 ///
 /// # 参数
 ///
@@ -1115,7 +1115,7 @@ fn validate_destination(topic: &str, fields: &BuilderFields) -> Result<()> {
     Ok(())
 }
 
-/// 解析命名 lane 的有效覆盖，供底层配置构建使用。
+/// 业务作用：解析命名 lane 的有效覆盖，供底层配置构建使用。
 ///
 /// # 参数
 ///

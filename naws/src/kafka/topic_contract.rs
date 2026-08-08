@@ -33,7 +33,7 @@ pub struct WsKafkaTopicSpec {
 }
 
 impl WsKafkaTopicSpec {
-    /// 转为通用管理端创建契约。
+    /// 业务作用：转为通用管理端创建契约。
     fn create_spec(&self) -> TopicSpec {
         TopicSpec::new(
             self.name.clone(),
@@ -78,7 +78,7 @@ pub struct TopicContractLimits {
 }
 
 impl WsKafkaTopicContract {
-    /// 完成静态校验，并按策略创建或核验全部 topic。
+    /// 业务作用：完成静态校验，并按策略创建或核验全部 topic。
     ///
     /// 本方法从不删除、改配置或增加已有 topic 的分区。
     ///
@@ -120,7 +120,7 @@ impl WsKafkaTopicContract {
         Ok(())
     }
 
-    /// 只读复核全部 topic，供运行期漂移监控使用。
+    /// 业务作用：只读复核全部 topic，供运行期漂移监控使用。
     ///
     /// 即使 management 为 CreateIfAbsent，本方法也绝不创建、修改或修复 topic；运行期删除和漂移必须
     /// 暴露为错误并由 runtime 关闭 ingress。
@@ -155,7 +155,7 @@ impl WsKafkaTopicContract {
         Ok(())
     }
 
-    /// 开发创建模式下吸收 broker metadata 的短暂传播窗口。
+    /// 业务作用：开发创建模式下吸收 broker metadata 的短暂传播窗口。
     async fn describe_with_visibility_retry(
         &self,
         admin: &KafkaAdmin,
@@ -185,7 +185,7 @@ impl WsKafkaTopicContract {
         ))
     }
 
-    /// 只校验本地可判定的不变量。
+    /// 业务作用：只校验本地可判定的不变量。
     ///
     /// # 参数
     ///
@@ -247,7 +247,7 @@ impl WsKafkaTopicContract {
         Ok(())
     }
 
-    /// 以稳定顺序遍历 control、data 和 DLT 契约。
+    /// 业务作用：以稳定顺序遍历 control、data 和 DLT 契约。
     fn specs(&self) -> impl Iterator<Item = &WsKafkaTopicSpec> {
         std::iter::once(&self.control)
             .chain(std::iter::once(&self.data))
@@ -255,7 +255,7 @@ impl WsKafkaTopicContract {
     }
 }
 
-/// 校验一个 topic 的本地预期值。
+/// 业务作用：校验一个 topic 的本地预期值。
 fn validate_spec(
     spec: &WsKafkaTopicSpec,
     required_message_bytes: usize,
@@ -297,7 +297,7 @@ fn validate_spec(
     Ok(())
 }
 
-/// 把 broker 实际值与冻结契约逐项核验。
+/// 业务作用：把 broker 实际值与冻结契约逐项核验。
 fn validate_actual(
     expected: &WsKafkaTopicSpec,
     actual: &TopicDescription,
@@ -352,7 +352,7 @@ fn validate_actual(
     )
 }
 
-/// 校验一个配置项；消息上限允许 broker 实际值更大。
+/// 业务作用：校验一个配置项；消息上限允许 broker 实际值更大。
 fn validate_config(
     expected: &WsKafkaTopicSpec,
     actual: &TopicDescription,
@@ -384,12 +384,12 @@ fn validate_config(
     }
 }
 
-/// 构造稳定 TopicContract 错误。
+/// 业务作用：构造稳定 TopicContract 错误。
 fn topic_error(message: impl Into<String>) -> NafkaError {
     NafkaError::TopicContract(message.into())
 }
 
-/// 给底层错误补充 topic 归因并收敛为 TopicContract。
+/// 业务作用：给底层错误补充 topic 归因并收敛为 TopicContract。
 fn contract_error(topic: &str, error: NafkaError) -> NafkaError {
     topic_error(format!("topic `{topic}` 查询或创建失败: {error}"))
 }

@@ -87,12 +87,12 @@ const WINDOW_SECS: u64 = 10;
 
 // ── 全局命令注册表：所有被监控的路由都注册在这，SSE 端点遍历它逐个上报 ──
 static REGISTRY: OnceLock<Mutex<Vec<Arc<Command>>>> = OnceLock::new();
-/// 返回全局熔断命令表；用于集中登记和查询命令配置。
+/// 业务作用：返回全局熔断命令表；用于集中登记和查询命令配置。
 fn registry() -> &'static Mutex<Vec<Arc<Command>>> {
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// 取全局命令表的锁;一次持锁 panic 不应让后续所有请求和 Dashboard 上报都跟着 panic。
+/// 业务作用：取全局命令表的锁;一次持锁 panic 不应让后续所有请求和 Dashboard 上报都跟着 panic。
 ///
 /// # 参数
 ///
@@ -116,7 +116,7 @@ fn lock_registry() -> std::sync::MutexGuard<'static, Vec<Arc<Command>>> {
 //   「这些圈的 QPS 之和」，只差取整级别，不会再各自漂。
 //   附带好处：run() 热路径上不再有「每请求抢一个全局互斥锁」的 tps_hit。
 
-/// 读取当前 TPS（每秒事务数）= 所有计 TPS 的命令的 requestCount(×weight) 求和 / 窗口秒数。
+/// 业务作用：读取当前 TPS（每秒事务数）= 所有计 TPS 的命令的 requestCount(×weight) 求和 / 窗口秒数。
 /// 先 clone 出命令列表立刻释放 REGISTRY 锁，再逐个 snapshot（避免攥着 registry 锁去锁 stats）。
 fn tps_rate() -> f64 {
     let commands: Vec<Arc<Command>> = lock_registry().clone();
@@ -177,7 +177,7 @@ struct Rolling {
 }
 
 impl Rolling {
-    /// 构造新实例；用于集中初始化内部字段和默认状态。
+    /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -186,7 +186,7 @@ impl Rolling {
         }
     }
 
-    /// 返回当前时间相对窗口起点的第几秒。
+    /// 业务作用：返回当前时间相对窗口起点的第几秒。
     ///
     /// 该值用作桶 key,保证桶切换不依赖墙钟回拨。
     fn now_sec(&self) -> u64 {
@@ -197,7 +197,7 @@ impl Rolling {
     // 参数：now = 当前秒。floor = 窗口内允许保留的最早一秒。
     ///
     /// # 参数
-    /// - `now`: 当前时间戳,用于窗口统计和状态过期判断。
+    /// 业务作用：- `now`: 当前时间戳,用于窗口统计和状态过期判断。
     fn evict(&mut self, now: u64) {
         let floor = now.saturating_sub(WINDOW_SECS - 1);
         // 弹出过期的计数桶
@@ -215,7 +215,7 @@ impl Rolling {
         }
     }
 
-    /// 记录一次执行结果。
+    /// 业务作用：记录一次执行结果。
     /// 参数：outcome = 本次结局（成功/失败/超时/被拒）；latency_ms = 本次耗时(毫秒)。
     ///
     /// # 参数
@@ -307,7 +307,7 @@ impl Rolling {
         sum
     }
 
-    /// 只累加窗口内的请求总数,不收集也不排序延迟样本。
+    /// 业务作用：只累加窗口内的请求总数,不收集也不排序延迟样本。
     ///
     /// TPS 只需要"这个圈窗口内跑了多少次",走 `snapshot()` 会白白复制并排序最多 5000 个延迟样本;
     /// 命令多时 `tps_rate()` 每次调用的开销会随命令数线性放大。
@@ -358,7 +358,7 @@ struct Percentiles {
 }
 
 impl Percentiles {
-    /// 从【已升序排序】的延迟样本算出各分位。
+    /// 业务作用：从【已升序排序】的延迟样本算出各分位。
     /// 参数：sorted = 升序排好的延迟数组(ms)。空数组直接返回全 0（default）。
     ///
     /// # 参数
@@ -456,7 +456,7 @@ struct ConcurrentGauge<'a> {
 }
 
 impl<'a> ConcurrentGauge<'a> {
-    /// 进入命令执行区并递增当前并发数。
+    /// 业务作用：进入命令执行区并递增当前并发数。
     ///
     /// # 参数
     /// - `command`: 本次执行所属命令(并发 gauge、峰值和滚动窗口都挂在它上面)。
@@ -471,7 +471,7 @@ impl<'a> ConcurrentGauge<'a> {
         }
     }
 
-    /// 标记本次执行已产生 success/failure/timeout 结局,Drop 时不再补记 canceled。
+    /// 业务作用：标记本次执行已产生 success/failure/timeout 结局,Drop 时不再补记 canceled。
     ///
     /// # 参数
     ///
@@ -482,7 +482,7 @@ impl<'a> ConcurrentGauge<'a> {
 }
 
 impl Drop for ConcurrentGauge<'_> {
-    /// 离开命令执行区时归还当前并发计数;未产生结局的(客户端断连、外层超时丢弃、panic
+    /// 业务作用：离开命令执行区时归还当前并发计数;未产生结局的(客户端断连、外层超时丢弃、panic
     /// unwind)补记一次 canceled,避免这些请求在 QPS 与错误率里凭空消失。
     fn drop(&mut self) {
         self.command.concurrent.fetch_sub(1, Ordering::Relaxed);
@@ -493,7 +493,7 @@ impl Drop for ConcurrentGauge<'_> {
 }
 
 impl Command {
-    /// 取本命令滚动窗口的锁;一次持锁 panic 不应让该端点后续所有请求都跟着 panic。
+    /// 业务作用：取本命令滚动窗口的锁;一次持锁 panic 不应让该端点后续所有请求都跟着 panic。
     ///
     /// # 参数
     ///
@@ -513,7 +513,7 @@ impl Command {
     //   tps_weight     = None 不计 TPS / Some(w) 每请求给全局 TPS +w
     ///
     /// # 参数
-    /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+    /// 业务作用：- `name`: 业务名称、字段名或配置名,用于定位目标对象。
     /// - `group`: 消费组、服务分组或任务分组名称。
     /// - `max_concurrent`: 熔断隔离允许的最大并发数。
     /// - `timeout`: 等待或执行超时时间,用于控制阻塞边界。
@@ -594,7 +594,7 @@ impl Command {
         cmd
     }
 
-    /// 创建命令并【自动注册】到全局表（SSE 端点据此上报）。
+    /// 业务作用：创建命令并【自动注册】到全局表（SSE 端点据此上报）。
     /// name 会成为 Dashboard 里那个圈的标题；group 用于归类。
     /// 【不计入全局 TPS】——等价于 原实现 端【没标 @TPS】的接口。
     ///
@@ -608,7 +608,7 @@ impl Command {
         Self::build(name, group, Some(max_concurrent), Some(timeout), None)
     }
 
-    /// 【最通用构造器】并发上限/超时都可为 None（None = 不限并发 / 不超时），tps_weight 也可 None。
+    /// 业务作用：【最通用构造器】并发上限/超时都可为 None（None = 不限并发 / 不超时），tps_weight 也可 None。
     /// 给 #[hystrix] 属性宏用：注解里不写 max_concurrent → None(不限)，不写 timeout_ms → None(不超时)，
     ///   `#[hystrix()]` 空参 → 全 None = 只采集监控指标、不做任何拦截/限时。
     ///
@@ -628,7 +628,7 @@ impl Command {
         Self::build(name, group, max_concurrent, timeout, tps_weight)
     }
 
-    /// 同 new，但【计入全局 TPS】，weight 对应 原实现 `@TPS(value=weight)`（默认 1）。
+    /// 业务作用：同 new，但【计入全局 TPS】，weight 对应 原实现 `@TPS(value=weight)`（默认 1）。
     /// 只有用本构造器创建的命令，其请求才会累加到顶栏 TPS；其余命令对 TPS 贡献为 0。
     ///
     /// # 参数
@@ -653,7 +653,7 @@ impl Command {
         )
     }
 
-    /// 【融合自 CostTime.extra】给本命令挂一个"附加信息生成器"，每 10s 打延迟日志时拼到行尾。
+    /// 业务作用：【融合自 CostTime.extra】给本命令挂一个"附加信息生成器"，每 10s 打延迟日志时拼到行尾。
     /// 参数：
     ///   f —— 闭包 `Fn(period_ms: u64) -> String`：入参是统计周期毫秒数（= WINDOW_SECS*1000），
     ///        返回一段要追加到日志行尾的文本（如自定义吞吐/计数指标）。Send+Sync+'static 因为
@@ -671,7 +671,7 @@ impl Command {
         let _ = self.extra.set(Box::new(f));
     }
 
-    /// 设置本命令的真实接口路由（如 "/spot/kline"），只影响 CostTime 定时日志的显示。
+    /// 业务作用：设置本命令的真实接口路由（如 "/spot/kline"），只影响 CostTime 定时日志的显示。
     /// 不设则 log_cost 回退用 name（Dashboard 圈标题）。Dashboard 显示不受影响（它读 name）。
     ///
     /// # 参数
@@ -680,7 +680,7 @@ impl Command {
         let _ = self.path.set(path.to_string());
     }
 
-    /// 【自定义限流返回】设 bulkhead 满时返回的 JSON body(随后以 HTTP 200 返回)。
+    /// 业务作用：【自定义限流返回】设 bulkhead 满时返回的 JSON body(随后以 HTTP 200 返回)。
     /// 由 `#[hystrix(reject_response = "...")]` 在构造时调用(宏已在编译期校验过 JSON);传入【合法 JSON 字符串】。
     /// **非法 JSON 会被静默忽略**(回退默认 429 壳)——直接调用方若要感知失败,请用 [`try_set_reject_response_str`]。只设一次。
     ///
@@ -692,7 +692,7 @@ impl Command {
         let _ = self.try_set_reject_response_str(json);
     }
 
-    /// 同 [`set_reject_response_str`],但**返回结果供直接调用方感知**:JSON 非法 → `Err`;合法且本次设入 → `Ok(true)`;
+    /// 业务作用：同 [`set_reject_response_str`],但**返回结果供直接调用方感知**:JSON 非法 → `Err`;合法且本次设入 → `Ok(true)`;
     /// 合法但**之前已设过**(OnceLock 只设一次,本次未覆盖)→ `Ok(false)`。
     ///
     /// [`set_reject_response_str`]: Self::set_reject_response_str
@@ -704,7 +704,7 @@ impl Command {
         Ok(self.reject_body.set(v).is_ok()) // set: Ok(())=本次设入 / Err(v)=已设过
     }
 
-    /// 【自定义超时返回】设超时时返回的 JSON body(随后以 HTTP 200 返回)。用法同 [`set_reject_response_str`]。
+    /// 业务作用：【自定义超时返回】设超时时返回的 JSON body(随后以 HTTP 200 返回)。用法同 [`set_reject_response_str`]。
     /// 非法 JSON 静默忽略;要感知失败用 [`try_set_timeout_response_str`]。
     ///
     /// [`set_reject_response_str`]: Self::set_reject_response_str
@@ -716,7 +716,7 @@ impl Command {
         let _ = self.try_set_timeout_response_str(json);
     }
 
-    /// 同 [`set_timeout_response_str`],但**返回结果**:JSON 非法 → `Err`;本次设入 → `Ok(true)`;已设过 → `Ok(false)`。
+    /// 业务作用：同 [`set_timeout_response_str`],但**返回结果**:JSON 非法 → `Err`;本次设入 → `Ok(true)`;已设过 → `Ok(false)`。
     ///
     /// [`set_timeout_response_str`]: Self::set_timeout_response_str
     ///
@@ -727,7 +727,7 @@ impl Command {
         Ok(self.timeout_body.set(v).is_ok())
     }
 
-    /// 【自定义限流降级 fn】设 bulkhead 满时调用的降级闭包(产出 Response)。
+    /// 业务作用：【自定义限流降级 fn】设 bulkhead 满时调用的降级闭包(产出 Response)。
     /// 由 `#[hystrix(reject_fn = path)]` 在构造时调用;优先级高于 reject_response;只设一次(OnceLock)。
     ///
     /// # 参数
@@ -736,7 +736,7 @@ impl Command {
         let _ = self.reject_fb.set(fb);
     }
 
-    /// 【自定义超时降级 fn】设超时时调用的降级闭包(产出 Response)。用法同 set_reject_fn。
+    /// 业务作用：【自定义超时降级 fn】设超时时调用的降级闭包(产出 Response)。用法同 set_reject_fn。
     ///
     /// # 参数
     /// - `fb`: 请求超时时执行的异步降级响应闭包。
@@ -825,7 +825,7 @@ impl Command {
         }
     }
 
-    /// 【融合自 CostTime】打印本命令最近一个窗口的延迟聚合日志，由 build() 里给本命令起的那个独立 10s 周期任务每拍调一次。
+    /// 业务作用：【融合自 CostTime】打印本命令最近一个窗口的延迟聚合日志，由 build() 里给本命令起的那个独立 10s 周期任务每拍调一次。
     /// 复用现成的滚动窗口 snapshot（不像 原实现 CostTime 那样 restore 清零——因为这份 Rolling
     /// 同时喂着 SSE 流，清零会破坏 SSE；滑动窗口每 10s 读一次即"最近 10s"，语义等价）。
     fn log_cost(&self) {
@@ -878,7 +878,7 @@ impl Command {
         );
     }
 
-    /// 作为中间件包裹一次请求：bulkhead + 超时 + 指标记录。
+    /// 业务作用：作为中间件包裹一次请求：bulkhead + 超时 + 指标记录。
     /// 用法见 main.rs：`axum::middleware::from_fn(move |req, next| cmd.clone().run(req, next))`
     /// 参数：
     ///   `self: Arc<Self>` —— 用 Arc 接收者(而非 &self)，因为同一个 Command 会被多个并发请求/
@@ -1109,7 +1109,7 @@ impl Command {
 
 // ── 拒绝/超时统一返回 JSON 壳 ──
 // 注:门面 crate 不依赖业务的 BaseResponse,这里用 serde_json::json! 直接拼同样形状 {code, message, data}。
-/// bulkhead 满时的 429 响应。
+/// 业务作用：bulkhead 满时的 429 响应。
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -1123,7 +1123,7 @@ fn rejected_response(name: &str, max: usize) -> Response {
     (StatusCode::TOO_MANY_REQUESTS, body).into_response()
 }
 
-/// 超时时的 504 响应。
+/// 业务作用：超时时的 504 响应。
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
@@ -1137,7 +1137,7 @@ fn timeout_response(name: &str, dur: Duration) -> Response {
     (StatusCode::GATEWAY_TIMEOUT, body).into_response()
 }
 
-/// 自定义限流/超时返回:**HTTP 200 + 用户给的 JSON body**(对齐统一响应风格,业务码放在 body 里,
+/// 业务作用：自定义限流/超时返回:**HTTP 200 + 用户给的 JSON body**(对齐统一响应风格,业务码放在 body 里,
 /// 前端 axios 不会因 4xx/5xx 抛错)。body 由 #[hystrix(reject_response/timeout_response)] 在构造时解析存好。
 ///
 /// # 参数
@@ -1149,7 +1149,7 @@ fn custom_response(body: &Value) -> Response {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /hystrix.stream —— SSE 指标流，喂给 Hystrix Dashboard
 // ════════════════════════════════════════════════════════════════════════════
-/// 输出 Hystrix Dashboard 可消费的 SSE 指标流。
+/// 业务作用：输出 Hystrix Dashboard 可消费的 SSE 指标流。
 ///
 /// Dashboard 填入这个 URL 即可监控。它消费的是 text/event-stream,每条 `data: {json}\n\n`
 /// 是一个命令的快照;本端点每秒推一轮,每个命令一条。
@@ -1198,7 +1198,7 @@ pub async fn hystrix_stream() -> impl IntoResponse {
 // log_cost() 是「每请求 `⏱ latency` debug 日志」的生产级替代：1 行/10s/路由、相位错开、开销可忽略，
 //   可放心在 info 级别常开，不像每请求日志那样压垮吞吐。
 
-/// 读取当前全局 TPS（每秒事务数）的公开入口。
+/// 业务作用：读取当前全局 TPS（每秒事务数）的公开入口。
 /// 给 set_extra 的闭包用——例如让某条命令的 CostTime 日志行尾带上实时吞吐：
 ///   `cmd.set_extra(|_period_ms| format!("tps={:.0}/s", hystrix::current_tps()));`
 /// （tps_rate 本身是模块私有，这里开一个只读窗口暴露出去。）
@@ -1238,7 +1238,7 @@ struct IsolationTable {
 // 全局隔离表，启动时 init 一次；没配 hystrix.isolation 则保持空（dispatch 全放行）
 static ISOLATION: OnceLock<IsolationTable> = OnceLock::new();
 
-/// 启动时调用一次：把 yml 的 hystrix.isolation 建成 Trie。
+/// 业务作用：启动时调用一次：把 yml 的 hystrix.isolation 建成 Trie。
 /// 规则为空则不初始化 → dispatch 全部放行（= 配置驱动隔离未启用）。
 ///
 /// # 参数
@@ -1284,7 +1284,7 @@ pub fn init_isolation(
     );
 }
 
-/// 把 原实现 风格通配 "/download/*" 转成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
+/// 业务作用：把 原实现 风格通配 "/download/*" 转成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
 /// matchit 要求 catch-all 必须带名字且在末尾；非 "/*" 结尾的（已是具体路由）原样返回。
 /// 注：matchit 0.8 起 catch-all 用花括号 {*rest}（0.7 是 *rest），与 axum 0.8 路由占位一致。
 ///
@@ -1298,7 +1298,7 @@ fn normalize_pattern(pattern: &str) -> String {
     }
 }
 
-/// 全局中间件（对标 HystrixDashboardFilter.doFilter）：拿请求 path 在 Trie 上匹配。
+/// 业务作用：全局中间件（对标 HystrixDashboardFilter.doFilter）：拿请求 path 在 Trie 上匹配。
 ///   命中 → 按"匹配到的模式"懒加载/复用 Command，套 bulkhead+超时+指标后执行；
 ///   未命中 / 未初始化 → 直接放行（不影响硬编码路由和无需隔离的路由）。
 /// 用法见 main.rs：整个 app 套一层 from_fn(dispatch)。

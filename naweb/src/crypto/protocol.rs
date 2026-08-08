@@ -63,7 +63,7 @@ pub struct RequestCryptoContext {
 }
 
 impl std::fmt::Debug for RequestCryptoContext {
-    /// 输出不含 key、rid 与租户原值的协议摘要。
+    /// 业务作用：输出不含 key、rid 与租户原值的协议摘要。
     ///
     /// # 参数
     ///
@@ -114,21 +114,21 @@ pub struct ProtocolEncryptOutput {
 
 /// 严格线协议扩展点，负责信封、AAD、时间窗和重放顺序。
 pub trait CryptoProtocol: Send + Sync + 'static {
-    /// 返回 route policy 使用的稳定协议 ID。
+    /// 业务作用：返回 route policy 使用的稳定协议 ID。
     ///
     /// # 返回
     ///
     /// 返回非空、有限长度的 ASCII 标识。
     fn id(&self) -> &'static str;
 
-    /// 返回请求外层信封要求的精确 Content-Type。
+    /// 业务作用：返回请求外层信封要求的精确 Content-Type。
     ///
     /// # 返回
     ///
     /// 返回静态媒体类型；调用方只允许协议明确声明的参数。
     fn request_content_type(&self) -> &'static str;
 
-    /// 严格解析、认证并解密请求信封。
+    /// 业务作用：严格解析、认证并解密请求信封。
     ///
     /// # 参数
     ///
@@ -142,7 +142,7 @@ pub trait CryptoProtocol: Send + Sync + 'static {
         input: ProtocolDecryptInput,
     ) -> CryptoFuture<'a, Result<ProtocolDecryptOutput, CryptoError>>;
 
-    /// 按请求固定上下文加密 handler 响应。
+    /// 业务作用：按请求固定上下文加密 handler 响应。
     ///
     /// # 参数
     ///
@@ -157,7 +157,7 @@ pub trait CryptoProtocol: Send + Sync + 'static {
     ) -> CryptoFuture<'a, Result<ProtocolEncryptOutput, CryptoError>>;
 }
 
-/// 确认 provider 返回值在协议编码前没有异常膨胀。
+/// 业务作用：确认 provider 返回值在协议编码前没有异常膨胀。
 ///
 /// # 参数
 ///

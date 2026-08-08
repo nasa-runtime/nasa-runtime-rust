@@ -43,7 +43,7 @@ pub struct CryptoLimits {
 }
 
 impl Default for CryptoLimits {
-    /// 建立适合普通 JSON API 的保守资源上限。
+    /// 业务作用：建立适合普通 JSON API 的保守资源上限。
     ///
     /// # 返回
     ///
@@ -67,7 +67,7 @@ impl Default for CryptoLimits {
 }
 
 impl CryptoLimits {
-    /// 校验上限之间不会形成明显的无界或自相矛盾配置。
+    /// 业务作用：校验上限之间不会形成明显的无界或自相矛盾配置。
     ///
     /// # 返回
     ///
@@ -104,7 +104,7 @@ impl CryptoLimits {
         Ok(())
     }
 
-    /// 计算请求解密阶段必须在读取 body 前预留的最坏临时字节数。
+    /// 业务作用：计算请求解密阶段必须在读取 body 前预留的最坏临时字节数。
     ///
     /// 外层 HTTP body、JSON 信封中的 Base64 文本、解码密文和解密明文可能同时存在，因此不能
     /// 等读取完成后再按实际长度申请，否则大量并发请求可以在 admission 前突破进程预算。
@@ -119,7 +119,7 @@ impl CryptoLimits {
             .saturating_add(self.max_plaintext_bytes)
     }
 
-    /// 计算响应重写阶段在收集 handler body 前必须预留的最坏临时字节数。
+    /// 业务作用：计算响应重写阶段在收集 handler body 前必须预留的最坏临时字节数。
     ///
     /// handler body、可清零的拥有明文、provider 密文和最终信封在响应改写期间可能重叠；提前按
     /// 上限计费可防止并发大响应绕过同一全进程预算。
@@ -144,7 +144,7 @@ pub struct CryptoMemoryBudget {
 }
 
 impl std::fmt::Debug for CryptoMemoryBudget {
-    /// 输出容量和当前可用量，不输出任何缓冲区内容。
+    /// 业务作用：输出容量和当前可用量，不输出任何缓冲区内容。
     ///
     /// # 参数
     ///
@@ -163,7 +163,7 @@ impl std::fmt::Debug for CryptoMemoryBudget {
 }
 
 impl CryptoMemoryBudget {
-    /// 建立全进程加权内存预算。
+    /// 业务作用：建立全进程加权内存预算。
     ///
     /// # 参数
     ///
@@ -189,7 +189,7 @@ impl CryptoMemoryBudget {
         })
     }
 
-    /// 验证进程预算至少容纳一条最大请求或最大响应的临时缓冲区。
+    /// 业务作用：验证进程预算至少容纳一条最大请求或最大响应的临时缓冲区。
     ///
     /// # 参数
     ///
@@ -212,7 +212,7 @@ impl CryptoMemoryBudget {
         }
     }
 
-    /// 为一次请求按最坏并存缓冲区申请预算。
+    /// 业务作用：为一次请求按最坏并存缓冲区申请预算。
     ///
     /// # 参数
     ///

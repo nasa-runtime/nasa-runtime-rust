@@ -96,7 +96,7 @@ pub enum ApplicationPhase {
 }
 
 impl fmt::Display for ApplicationPhase {
-    /// 写出稳定的小写阶段名称。
+    /// 业务作用：写出稳定的小写阶段名称。
     ///
     /// # 参数
     ///
@@ -129,7 +129,7 @@ pub struct ApplicationError {
 }
 
 impl ApplicationError {
-    /// 创建没有底层错误链的框架错误。
+    /// 业务作用：创建没有底层错误链的框架错误。
     ///
     /// # 参数
     ///
@@ -150,7 +150,7 @@ impl ApplicationError {
         }
     }
 
-    /// 创建保留底层错误链的框架错误。
+    /// 业务作用：创建保留底层错误链的框架错误。
     ///
     /// # 参数
     ///
@@ -173,7 +173,7 @@ impl ApplicationError {
         }
     }
 
-    /// 返回错误所属组件。
+    /// 业务作用：返回错误所属组件。
     ///
     /// # 参数
     ///
@@ -182,7 +182,7 @@ impl ApplicationError {
         self.component
     }
 
-    /// 返回错误所属生命周期阶段。
+    /// 业务作用：返回错误所属生命周期阶段。
     ///
     /// # 参数
     ///
@@ -191,7 +191,7 @@ impl ApplicationError {
         self.phase
     }
 
-    /// 返回框架生成的稳定错误摘要。
+    /// 业务作用：返回框架生成的稳定错误摘要。
     ///
     /// # 参数
     ///
@@ -200,7 +200,7 @@ impl ApplicationError {
         &self.message
     }
 
-    /// 标记该主失败已经由 Runner 在反向清理前输出。
+    /// 业务作用：标记该主失败已经由 Runner 在反向清理前输出。
     ///
     /// # 参数
     ///
@@ -209,7 +209,7 @@ impl ApplicationError {
         self.reported = true;
     }
 
-    /// 判断该错误是否已经作为唯一主失败输出。
+    /// 业务作用：判断该错误是否已经作为唯一主失败输出。
     ///
     /// # 参数
     ///

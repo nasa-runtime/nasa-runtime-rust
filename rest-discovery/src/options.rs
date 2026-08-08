@@ -58,7 +58,7 @@ pub enum InstanceScheme {
 }
 
 impl InstanceScheme {
-    /// URL scheme 字面量。
+    /// 业务作用：URL scheme 字面量。
     pub fn as_str(self) -> &'static str {
         match self {
             InstanceScheme::Http => "http",
@@ -124,7 +124,7 @@ pub struct RestWatchOptions {
 }
 
 impl Default for RestWatchOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(2),
@@ -137,12 +137,12 @@ impl Default for RestWatchOptions {
 }
 
 impl RestWatchOptions {
-    /// 用默认 watch 参数创建 builder 起点。
+    /// 业务作用：用默认 watch 参数创建 builder 起点。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 设置后端 watch 的轮询兜底间隔。
+    /// 业务作用：设置后端 watch 的轮询兜底间隔。
     ///
     /// # 参数
     ///
@@ -152,7 +152,7 @@ impl RestWatchOptions {
         self
     }
 
-    /// 设置 watch 降级时 discover 快照的 TTL。
+    /// 业务作用：设置 watch 降级时 discover 快照的 TTL。
     ///
     /// # 参数
     ///
@@ -162,7 +162,7 @@ impl RestWatchOptions {
         self
     }
 
-    /// 设置 discover 出错时允许沿用旧实例的窗口。
+    /// 业务作用：设置 discover 出错时允许沿用旧实例的窗口。
     ///
     /// # 参数
     ///
@@ -172,7 +172,7 @@ impl RestWatchOptions {
         self
     }
 
-    /// 设置 watch pump 重建时的退避范围。
+    /// 业务作用：设置 watch pump 重建时的退避范围。
     ///
     /// # 参数
     ///
@@ -196,7 +196,7 @@ pub struct RestHeuristicOptions {
 }
 
 impl Default for RestHeuristicOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             refresh_interval: Duration::from_secs(30),
@@ -206,12 +206,12 @@ impl Default for RestHeuristicOptions {
 }
 
 impl RestHeuristicOptions {
-    /// 用默认启发式索引参数创建 builder 起点。
+    /// 业务作用：用默认启发式索引参数创建 builder 起点。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 设置服务名列表周期刷新间隔。
+    /// 业务作用：设置服务名列表周期刷新间隔。
     ///
     /// # 参数
     ///
@@ -221,7 +221,7 @@ impl RestHeuristicOptions {
         self
     }
 
-    /// 设置服务名消失后的保留窗口。
+    /// 业务作用：设置服务名消失后的保留窗口。
     ///
     /// # 参数
     ///
@@ -243,7 +243,7 @@ pub struct RestHttpOptions {
 }
 
 impl Default for RestHttpOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(10),
@@ -253,12 +253,12 @@ impl Default for RestHttpOptions {
 }
 
 impl RestHttpOptions {
-    /// 用默认 HTTP 超时参数创建 builder 起点。
+    /// 业务作用：用默认 HTTP 超时参数创建 builder 起点。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 设置单请求总超时。
+    /// 业务作用：设置单请求总超时。
     ///
     /// # 参数
     ///
@@ -268,7 +268,7 @@ impl RestHttpOptions {
         self
     }
 
-    /// 设置连接建立超时。
+    /// 业务作用：设置连接建立超时。
     ///
     /// # 参数
     ///
@@ -296,7 +296,7 @@ pub struct RetryOptions {
 }
 
 impl Default for RetryOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             retry_get_head_on_transport_error: false,
@@ -309,12 +309,12 @@ impl Default for RetryOptions {
 }
 
 impl RetryOptions {
-    /// 默认重试配置:不跨实例重试,只尝试一次。
+    /// 业务作用：默认重试配置:不跨实例重试,只尝试一次。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 开启 GET/HEAD 传输错误重试,并设置最大尝试次数(含首次;`>=2` 才真正重试)。
+    /// 业务作用：开启 GET/HEAD 传输错误重试,并设置最大尝试次数(含首次;`>=2` 才真正重试)。
     ///
     /// # 参数
     ///
@@ -328,7 +328,7 @@ impl RetryOptions {
         }
     }
 
-    /// 开启 GET/HEAD 的传输错误与瞬态 HTTP 状态重试，并配置有界 retry token bucket。
+    /// 业务作用：开启 GET/HEAD 的传输错误与瞬态 HTTP 状态重试，并配置有界 retry token bucket。
     pub fn get_head_on_transient_failure(
         max_attempts: usize,
         budget_capacity: u32,
@@ -361,7 +361,7 @@ pub struct RestResilienceOptions {
 }
 
 impl Default for RestResilienceOptions {
-    /// 提供有界并发和保守故障窗口；所有值仍会在 client 构造时统一校验。
+    /// 业务作用：提供有界并发和保守故障窗口；所有值仍会在 client 构造时统一校验。
     fn default() -> Self {
         Self {
             max_concurrent_per_service: 256,
@@ -374,20 +374,20 @@ impl Default for RestResilienceOptions {
 }
 
 impl RestResilienceOptions {
-    /// 设置每服务 bulkhead 并发上限。
+    /// 业务作用：设置每服务 bulkhead 并发上限。
     pub fn with_max_concurrent_per_service(mut self, limit: usize) -> Self {
         self.max_concurrent_per_service = limit;
         self
     }
 
-    /// 设置服务级熔断阈值与打开窗口。
+    /// 业务作用：设置服务级熔断阈值与打开窗口。
     pub fn with_circuit(mut self, failure_threshold: u32, open_duration: Duration) -> Self {
         self.circuit_failure_threshold = failure_threshold;
         self.circuit_open_duration = open_duration;
         self
     }
 
-    /// 设置实例级异常摘除阈值与窗口。
+    /// 业务作用：设置实例级异常摘除阈值与窗口。
     pub fn with_outlier_ejection(mut self, failure_threshold: u32, duration: Duration) -> Self {
         self.outlier_failure_threshold = failure_threshold;
         self.outlier_ejection_duration = duration;
@@ -432,7 +432,7 @@ pub struct RestDiscoveryOptions {
 }
 
 impl Default for RestDiscoveryOptions {
-    /// 返回默认配置；用于未显式设置时提供稳定基线。
+    /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
             service_match: ServiceMatchMode::CaseInsensitive,
@@ -455,18 +455,18 @@ impl Default for RestDiscoveryOptions {
 }
 
 impl RestDiscoveryOptions {
-    /// 用默认运行选项创建 builder 起点。
+    /// 业务作用：用默认运行选项创建 builder 起点。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 注入只写遥测记录器；不会把 exporter 生命周期或 flush 权限交给 REST client。
+    /// 业务作用：注入只写遥测记录器；不会把 exporter 生命周期或 flush 权限交给 REST client。
     pub fn with_span_recorder(mut self, recorder: SpanRecorder) -> Self {
         self.span_recorder = Some(recorder);
         self
     }
 
-    /// 连接实例的默认协议(`service_request`/`lb://` 用)。
+    /// 业务作用：连接实例的默认协议(`service_request`/`lb://` 用)。
     ///
     /// # 参数
     ///
@@ -476,7 +476,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 开/关裸 http(s) 启发式识别。开启后由 `RestDiscovery::init_with_discovery` / `RestDiscoveryClient::connect`
+    /// 业务作用：开/关裸 http(s) 启发式识别。开启后由 `RestDiscovery::init_with_discovery` / `RestDiscoveryClient::connect`
     /// 同步首拉一次 `list_services` 并周期刷新 `ServiceNameIndex`。
     ///
     /// # 参数
@@ -487,7 +487,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 裸 http(s) 启发式索引调优(刷新间隔 / 移除 grace)。
+    /// 业务作用：裸 http(s) 启发式索引调优(刷新间隔 / 移除 grace)。
     ///
     /// # 参数
     ///
@@ -497,7 +497,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 服务名匹配大小写策略。
+    /// 业务作用：服务名匹配大小写策略。
     ///
     /// # 参数
     ///
@@ -507,7 +507,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 裸 http(s) URL 入口的 scheme 策略。
+    /// 业务作用：裸 http(s) URL 入口的 scheme 策略。
     ///
     /// # 参数
     ///
@@ -517,7 +517,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 裸 http(s) host 未命中索引时的策略(外部直连 / 报错)。
+    /// 业务作用：裸 http(s) host 未命中索引时的策略(外部直连 / 报错)。
     ///
     /// # 参数
     ///
@@ -527,7 +527,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// host 已确认是内部服务但无可用实例 / discover 出错时的策略。
+    /// 业务作用：host 已确认是内部服务但无可用实例 / discover 出错时的策略。
     ///
     /// # 参数
     ///
@@ -537,7 +537,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 启动期是否要求初始 list_services 成功(仅启发式相关)。
+    /// 业务作用：启动期是否要求初始 list_services 成功(仅启发式相关)。
     ///
     /// # 参数
     ///
@@ -547,7 +547,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 负载均衡策略(round-robin / 加权)。
+    /// 业务作用：负载均衡策略(round-robin / 加权)。
     ///
     /// # 参数
     ///
@@ -557,7 +557,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 跨实例重试策略(GET/HEAD 传输错误重试)。
+    /// 业务作用：跨实例重试策略(GET/HEAD 传输错误重试)。
     ///
     /// # 参数
     ///
@@ -567,13 +567,13 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 设置每服务 bulkhead、熔断和实例异常摘除策略。
+    /// 业务作用：设置每服务 bulkhead、熔断和实例异常摘除策略。
     pub fn with_resilience(mut self, resilience: RestResilienceOptions) -> Self {
         self.resilience = resilience;
         self
     }
 
-    /// 底层 reqwest client 超时(单请求总超时 / 连接超时)。
+    /// 业务作用：底层 reqwest client 超时(单请求总超时 / 连接超时)。
     ///
     /// # 参数
     ///
@@ -583,7 +583,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// watch / 实例缓存调优。
+    /// 业务作用：watch / 实例缓存调优。
     ///
     /// # 参数
     ///
@@ -593,7 +593,7 @@ impl RestDiscoveryOptions {
         self
     }
 
-    /// 是否保留原始 Host header。
+    /// 业务作用：是否保留原始 Host header。
     ///
     /// # 参数
     ///
@@ -607,7 +607,7 @@ impl RestDiscoveryOptions {
     // 与 rest-discovery-nacos 的 yml 映射 fail-fast 同等严格,只是分构造器各校验其真正会用到的字段:
     // pump/index 循环里的 clamp 仍保留作内部不变量兜底,但这里先以 typed error 告诉调用方配置错了。
 
-    /// `connect()` 入口校验:http + watch;`heuristic_http=Enabled` 时再校验 heuristic
+    /// 业务作用：`connect()` 入口校验:http + watch;`heuristic_http=Enabled` 时再校验 heuristic
     /// (connect 会同步首拉 + 启动索引刷新循环,refresh_interval=0 会让 `interval()` 兜底前本应 fail-fast)。
     pub fn validate_for_connect(&self) -> Result<()> {
         validate_http(&self.http)?;
@@ -620,7 +620,7 @@ impl RestDiscoveryOptions {
         Ok(())
     }
 
-    /// `new()` 入口校验:http + watch。`new()` **不**启动启发式索引刷新,故不因 heuristic.refresh_interval=0 报错。
+    /// 业务作用：`new()` 入口校验:http + watch。`new()` **不**启动启发式索引刷新,故不因 heuristic.refresh_interval=0 报错。
     pub fn validate_for_new(&self) -> Result<()> {
         validate_http(&self.http)?;
         validate_retry(&self.retry)?;
@@ -629,7 +629,7 @@ impl RestDiscoveryOptions {
         Ok(())
     }
 
-    /// `external_only` 入口校验:只用底层 http client,故只校验 http(不连 provider、不 watch、不建索引)。
+    /// 业务作用：`external_only` 入口校验:只用底层 http client,故只校验 http(不连 provider、不 watch、不建索引)。
     pub fn validate_for_external_only(&self) -> Result<()> {
         validate_http(&self.http)?;
         validate_retry(&self.retry)?;
@@ -637,7 +637,7 @@ impl RestDiscoveryOptions {
     }
 }
 
-/// 构造配置校验错误；用于把非法选项统一转换为启动失败。
+/// 业务作用：构造配置校验错误；用于把非法选项统一转换为启动失败。
 ///
 /// # 参数
 /// - `reason`: 具体不满足约束的配置原因,会写入 `RestDiscoveryError::InvalidOptions`。
@@ -647,7 +647,7 @@ fn invalid_options(reason: impl Into<String>) -> RestDiscoveryError {
     }
 }
 
-/// 校验 HTTP client 超时约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验 HTTP client 超时约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `http`: REST 底层 HTTP client 的总超时和连接超时配置。
@@ -663,7 +663,7 @@ fn validate_http(http: &RestHttpOptions) -> Result<()> {
     Ok(())
 }
 
-/// 校验 retry 流量预算，避免配置为无界/NaN 后在故障时放大流量。
+/// 业务作用：校验 retry 流量预算，避免配置为无界/NaN 后在故障时放大流量。
 fn validate_retry(retry: &RetryOptions) -> Result<()> {
     if retry.max_attempts == 0 {
         return Err(invalid_options("retry.max_attempts 必须 >= 1"));
@@ -685,7 +685,7 @@ fn validate_retry(retry: &RetryOptions) -> Result<()> {
     Ok(())
 }
 
-/// 校验隔离/熔断参数，防止零值关闭保护或异常大 semaphore 分配。
+/// 业务作用：校验隔离/熔断参数，防止零值关闭保护或异常大 semaphore 分配。
 fn validate_resilience(resilience: &RestResilienceOptions) -> Result<()> {
     if resilience.max_concurrent_per_service == 0
         || resilience.max_concurrent_per_service > 1_000_000
@@ -720,7 +720,7 @@ fn validate_resilience(resilience: &RestResilienceOptions) -> Result<()> {
     )
 }
 
-/// 校验服务实例 watch 约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验服务实例 watch 约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `watch`: 实例轮询、过期兜底和 watch 重建退避配置。
@@ -757,7 +757,7 @@ fn validate_watch(watch: &RestWatchOptions) -> Result<()> {
     Ok(())
 }
 
-/// 校验裸 http(s) 启发式服务索引约束；用于在进入运行流程前 fail-fast。
+/// 业务作用：校验裸 http(s) 启发式服务索引约束；用于在进入运行流程前 fail-fast。
 ///
 /// # 参数
 /// - `heuristic`: 启发式索引刷新间隔和服务移除宽限配置。
@@ -776,7 +776,7 @@ fn validate_heuristic(heuristic: &RestHeuristicOptions) -> Result<()> {
     Ok(())
 }
 
-/// 拒绝会让计时器或 `Instant + Duration` 跨平台溢出的超长运行参数。
+/// 业务作用：拒绝会让计时器或 `Instant + Duration` 跨平台溢出的超长运行参数。
 fn validate_duration_bound(field: &str, duration: Duration) -> Result<()> {
     if duration > MAX_RUNTIME_DURATION {
         return Err(invalid_options(format!(

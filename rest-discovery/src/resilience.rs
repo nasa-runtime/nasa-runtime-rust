@@ -40,7 +40,7 @@ pub(crate) struct ResilienceRuntime {
 }
 
 impl ResilienceRuntime {
-    /// 创建空的有界隔离状态集合；状态只会在服务首次调用时按需分配。
+    /// 业务作用：创建空的有界隔离状态集合；状态只会在服务首次调用时按需分配。
     pub(crate) fn new() -> Self {
         Self {
             bulkheads: DashMap::new(),
@@ -49,7 +49,7 @@ impl ResilienceRuntime {
         }
     }
 
-    /// 为一个逻辑请求取得 per-service bulkhead permit；无等待队列，满载立即拒绝。
+    /// 业务作用：为一个逻辑请求取得 per-service bulkhead permit；无等待队列，满载立即拒绝。
     pub(crate) fn acquire_bulkhead(
         &self,
         service: &str,
@@ -78,7 +78,7 @@ impl ResilienceRuntime {
             })
     }
 
-    /// 在发送前进入服务熔断器；打开窗口内拒绝，窗口到期只允许一个 half-open 探针。
+    /// 业务作用：在发送前进入服务熔断器；打开窗口内拒绝，窗口到期只允许一个 half-open 探针。
     pub(crate) fn begin_circuit(
         &self,
         service: &str,
@@ -120,7 +120,7 @@ impl ResilienceRuntime {
         })
     }
 
-    /// 判断实例是否仍处于异常摘除窗口；窗口到期时原地恢复候选资格。
+    /// 业务作用：判断实例是否仍处于异常摘除窗口；窗口到期时原地恢复候选资格。
     pub(crate) fn is_ejected(&self, service: &str, instance: &Instance, now: Instant) -> bool {
         let key = instance_key(service, instance);
         let Some(state) = self.outliers.get(&key) else {
@@ -140,7 +140,7 @@ impl ResilienceRuntime {
         }
     }
 
-    /// 记录一次实例尝试结果；失败达到阈值时临时摘除，成功立即清零。
+    /// 业务作用：记录一次实例尝试结果；失败达到阈值时临时摘除，成功立即清零。
     pub(crate) fn record_instance(
         &self,
         service: &str,
@@ -190,7 +190,7 @@ pub(crate) struct CircuitAttempt {
 }
 
 impl CircuitAttempt {
-    /// 用一次逻辑请求的最终结果结算熔断状态，并阻止 Drop 重复记失败。
+    /// 业务作用：用一次逻辑请求的最终结果结算熔断状态，并阻止 Drop 重复记失败。
     pub(crate) fn complete(mut self, success: bool) {
         update_circuit(&self.state, self.threshold, self.open_duration, success);
         self.completed = true;
@@ -198,7 +198,7 @@ impl CircuitAttempt {
 }
 
 impl Drop for CircuitAttempt {
-    /// 请求被取消或提前返回时按失败结算，尤其要释放 half-open 单探针占位。
+    /// 业务作用：请求被取消或提前返回时按失败结算，尤其要释放 half-open 单探针占位。
     fn drop(&mut self) {
         if !self.completed {
             update_circuit(&self.state, self.threshold, self.open_duration, false);
@@ -206,7 +206,7 @@ impl Drop for CircuitAttempt {
     }
 }
 
-/// 在线性化锁内完成成功复位或失败开窗，保证 half-open 标记不会遗留。
+/// 业务作用：在线性化锁内完成成功复位或失败开窗，保证 half-open 标记不会遗留。
 fn update_circuit(
     state: &Mutex<CircuitState>,
     threshold: u32,
@@ -229,7 +229,7 @@ fn update_circuit(
     }
 }
 
-/// 用不可混淆的内部分隔符组合服务与实例地址，避免不同文本元组共享摘除状态。
+/// 业务作用：用不可混淆的内部分隔符组合服务与实例地址，避免不同文本元组共享摘除状态。
 fn instance_key(service: &str, instance: &Instance) -> String {
     format!("{service}\0{}\0{}", instance.ip, instance.port)
 }

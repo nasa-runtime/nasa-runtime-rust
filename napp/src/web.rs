@@ -58,7 +58,7 @@ struct CorsConfig {
 }
 
 impl Default for CorsConfig {
-    /// 返回默认关闭的安全缺省(启用需业务显式配置来源白名单)。
+    /// 业务作用：返回默认关闭的安全缺省(启用需业务显式配置来源白名单)。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -87,7 +87,7 @@ struct CompressionConfig {
 }
 
 impl Default for CompressionConfig {
-    /// 返回默认关闭的安全缺省(压缩需业务显式开启)。
+    /// 业务作用：返回默认关闭的安全缺省(压缩需业务显式开启)。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -113,7 +113,7 @@ struct RateLimitConfig {
 }
 
 impl Default for RateLimitConfig {
-    /// 返回默认关闭的安全缺省(限流需业务显式开启)。
+    /// 业务作用：返回默认关闭的安全缺省(限流需业务显式开启)。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -163,7 +163,7 @@ struct ServerConfig {
 }
 
 impl Default for ServerConfig {
-    /// 返回最小本地 Web 服务的安全缺省配置。
+    /// 业务作用：返回最小本地 Web 服务的安全缺省配置。
     ///
     /// # 参数
     ///
@@ -190,7 +190,7 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// 校验监听地址文本和可嵌套的统一路径前缀。
+    /// 业务作用：校验监听地址文本和可嵌套的统一路径前缀。
     ///
     /// # 参数
     ///
@@ -300,7 +300,7 @@ pub(crate) struct WebComponent {
 }
 
 impl WebComponent {
-    /// 从已完成运行时绑定校验的静态描述中取得两个 Web 工厂。
+    /// 业务作用：从已完成运行时绑定校验的静态描述中取得两个 Web 工厂。
     ///
     /// # 参数
     ///
@@ -326,7 +326,7 @@ impl WebComponent {
 }
 
 impl ApplicationComponent for WebComponent {
-    /// 返回 Web 组件稳定身份。
+    /// 业务作用：返回 Web 组件稳定身份。
     ///
     /// # 参数
     ///
@@ -335,7 +335,7 @@ impl ApplicationComponent for WebComponent {
         ComponentId::Web
     }
 
-    /// 从初始配置快照读取并冻结 Web 设置。
+    /// 业务作用：从初始配置快照读取并冻结 Web 设置。
     ///
     /// # 参数
     ///
@@ -367,7 +367,7 @@ impl ApplicationComponent for WebComponent {
         })
     }
 
-    /// 在业务资源封存后构造路由、绑定端口并激活 Web 停机动作。
+    /// 业务作用：在业务资源封存后构造路由、绑定端口并激活 Web 停机动作。
     ///
     /// # 参数
     ///
@@ -751,7 +751,7 @@ impl ApplicationComponent for WebComponent {
         })
     }
 
-    /// 把已绑定监听器的服务 future 移交给 Runner 关键任务监督集合。
+    /// 业务作用：把已绑定监听器的服务 future 移交给 Runner 关键任务监督集合。
     ///
     /// # 参数
     ///
@@ -767,7 +767,7 @@ struct WebShutdown {
 }
 
 impl ShutdownAction for WebShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -776,7 +776,7 @@ impl ShutdownAction for WebShutdown {
         "web-active"
     }
 
-    /// 通知服务停止接收新连接并开始等待在途请求完成。
+    /// 业务作用：通知服务停止接收新连接并开始等待在途请求完成。
     ///
     /// # 参数
     ///
@@ -787,7 +787,7 @@ impl ShutdownAction for WebShutdown {
     }
 }
 
-/// mapping/安全运行时就绪 monitor:周期执行 [`naweb::MappingRuntime::readiness_bound`],把安全
+/// 业务作用：mapping/安全运行时就绪 monitor:周期执行 [`naweb::MappingRuntime::readiness_bound`],把安全
 /// 运行时的**完整就绪合同**反映进 `/readyz`。
 ///
 /// `readiness_bound` 用启动期(mvc_router! 建路由时经 `audit_route_plans` 冻结)的 last-good 路由/interceptor
@@ -862,7 +862,7 @@ struct WebMappingMonitorShutdown {
 }
 
 impl ShutdownAction for WebMappingMonitorShutdown {
-    /// 返回清理报告使用的稳定动作名称。
+    /// 业务作用：返回清理报告使用的稳定动作名称。
     ///
     /// # 参数
     ///
@@ -871,7 +871,7 @@ impl ShutdownAction for WebMappingMonitorShutdown {
         "web-mapping-monitor"
     }
 
-    /// 取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
+    /// 业务作用：取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
     ///
     /// # 参数
     ///
@@ -901,7 +901,7 @@ impl ShutdownAction for WebMappingMonitorShutdown {
 }
 
 impl Drop for WebMappingMonitorShutdown {
-    /// 停机 future 被取消或 guard 提前释放时终止 mapping monitor，避免 detached task。
+    /// 业务作用：停机 future 被取消或 guard 提前释放时终止 mapping monitor，避免 detached task。
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(monitor) = self.monitor.take() {
@@ -910,7 +910,7 @@ impl Drop for WebMappingMonitorShutdown {
     }
 }
 
-/// 验证自动端点的保留路径、重复方法和结构路径冲突。
+/// 业务作用：验证自动端点的保留路径、重复方法和结构路径冲突。
 ///
 /// # 参数
 ///
@@ -975,7 +975,7 @@ fn validate_routes(routes: &mut [RouteMeta], health_enabled: bool) -> Applicatio
     Ok(())
 }
 
-/// 从预检后的静态元数据构造对外只读路由清单。
+/// 业务作用：从预检后的静态元数据构造对外只读路由清单。
 ///
 /// # 参数
 ///
@@ -997,7 +997,7 @@ fn build_route_manifest(routes: &[RouteMeta], health_enabled: bool) -> Arc<[Rout
     Arc::from(manifest)
 }
 
-/// 补充底层路径树未覆盖的静态路由格式检查。
+/// 业务作用：补充底层路径树未覆盖的静态路由格式检查。
 ///
 /// # 参数
 ///
@@ -1026,7 +1026,7 @@ fn validate_route_path(route: &RouteMeta) -> ApplicationResult<()> {
     Ok(())
 }
 
-/// 返回不依赖 Application 状态的存活探针结果。
+/// 业务作用：返回不依赖 Application 状态的存活探针结果。
 ///
 /// # 参数
 ///
@@ -1035,7 +1035,7 @@ async fn liveness() -> StatusCode {
     StatusCode::OK
 }
 
-/// 根据公开生命周期状态返回就绪探针结果。
+/// 业务作用：根据公开生命周期状态返回就绪探针结果。
 ///
 /// # 参数
 ///
@@ -1048,7 +1048,7 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
     }
 }
 
-/// 渲染进程级统一指标 hub 为 Prometheus 文本:nafka(原生)+ naweb(兼容源)。
+/// 业务作用：渲染进程级统一指标 hub 为 Prometheus 文本:nafka(原生)+ naweb(兼容源)。
 ///
 /// # 参数
 ///
@@ -1068,7 +1068,7 @@ async fn metrics_endpoint(
     )
 }
 
-/// 在最外层 Web 边界记录请求进入、响应状态和在途数量。
+/// 业务作用：在最外层 Web 边界记录请求进入、响应状态和在途数量。
 ///
 /// 守卫的析构路径覆盖 future 被取消的情况，确保摘流期间不会留下虚高的在途计数。
 ///
@@ -1088,7 +1088,7 @@ async fn observe_web_request(
     response
 }
 
-/// 把底层服务循环错误包装为带组件和阶段的框架错误。
+/// 业务作用：把底层服务循环错误包装为带组件和阶段的框架错误。
 ///
 /// # 参数
 ///
@@ -1102,7 +1102,7 @@ fn web_serve_error(error: std::io::Error) -> ApplicationError {
     )
 }
 
-/// 在不产生任何副作用的前提下校验候选配置树中的 `server` 段。
+/// 业务作用：在不产生任何副作用的前提下校验候选配置树中的 `server` 段。
 ///
 /// 供配置热刷新在发布候选前使用：段非法时整帧候选不发布，运行中的监听器保持不变。
 ///
@@ -1125,7 +1125,7 @@ pub(crate) fn validate_server_section(
     root.server.validate(phase)
 }
 
-/// 创建 Web 组件的稳定生命周期错误。
+/// 业务作用：创建 Web 组件的稳定生命周期错误。
 ///
 /// # 参数
 ///

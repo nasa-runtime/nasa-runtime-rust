@@ -2,7 +2,7 @@ use super::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// 合批 poll + demux(不变量 3:一条多 stream XREADGROUP NOBLOCK)。
+/// 业务作用：合批 poll + demux(不变量 3:一条多 stream XREADGROUP NOBLOCK)。
 pub(super) async fn poll_and_dispatch(
     rt: &Arc<GroupRuntime>,
     slots: &mut HashMap<u32, ClaimSlot>,
@@ -152,7 +152,7 @@ pub(super) async fn poll_and_dispatch(
     }
 }
 
-/// 解析 XREADGROUP 响应:[[stream, [[id, [f1,v1,...]], ...]], ...](RESP2 数组形态)。
+/// 业务作用：解析 XREADGROUP 响应:[[stream, [[id, [f1,v1,...]], ...]], ...](RESP2 数组形态)。
 /// 只取 DATA_FIELD 字段;其余 field 忽略(与 原实现 容器 demux 行为一致)。
 ///
 ///**协议错误不再静默跳过**——XREADGROUP 已把消息放进 PEL,若 entry/stream
@@ -203,7 +203,7 @@ pub(super) fn parse_xreadgroup(
     all_ok
 }
 
-/// 解析单个 stream 的 (key, entries):key 反解分区号,entries 提取 (id, data body)。
+/// 业务作用：解析单个 stream 的 (key, entries):key 反解分区号,entries 提取 (id, data body)。
 /// entries/entry/fields 段形态异常 → 该分区记入 `protocol_err`(转 Recovering 收编)。
 /// 返回 `false` = **stream key 无法反解出分区号**(理论不可达:key 是我们自己拼的 STREAMS 入参;
 /// 仅 prefix 损坏/RESP3 异形态触发)。调用方据此**全 polled 转 Recovering 兜底**(
@@ -284,7 +284,7 @@ fn parse_one_stream(
     true
 }
 
-/// 从 redis::Value 提取 bytes(BulkString/SimpleString 两形态)。
+/// 业务作用：从 redis::Value 提取 bytes(BulkString/SimpleString 两形态)。
 pub(super) fn value_bytes(v: redis::Value) -> Vec<u8> {
     match v {
         redis::Value::BulkString(b) => b,

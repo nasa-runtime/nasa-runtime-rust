@@ -43,7 +43,7 @@ pub struct SecretKeyMaterial {
 }
 
 impl SecretKeyMaterial {
-    /// 从已经过 secret 来源合并的拥有字节建立材料。
+    /// 业务作用：从已经过 secret 来源合并的拥有字节建立材料。
     ///
     /// # 参数
     ///
@@ -58,7 +58,7 @@ impl SecretKeyMaterial {
         }
     }
 
-    /// 在一次受控密码调用期间借用密钥字节。
+    /// 业务作用：在一次受控密码调用期间借用密钥字节。
     ///
     /// # 返回
     ///
@@ -69,7 +69,7 @@ impl SecretKeyMaterial {
 }
 
 impl std::fmt::Debug for SecretKeyMaterial {
-    /// 只输出材料长度，防止配置错误和 panic 泄露密钥。
+    /// 业务作用：只输出材料长度，防止配置错误和 panic 泄露密钥。
     ///
     /// # 参数
     ///
@@ -129,7 +129,7 @@ pub struct KeyEntrySpec {
 }
 
 impl std::fmt::Debug for KeyEntry {
-    /// 输出非敏感元数据，不输出材料和当前调用的外部输入。
+    /// 业务作用：输出非敏感元数据，不输出材料和当前调用的外部输入。
     ///
     /// # 参数
     ///
@@ -150,7 +150,7 @@ impl std::fmt::Debug for KeyEntry {
 }
 
 impl KeyEntry {
-    /// 建立一条由快照独占的密钥记录。
+    /// 业务作用：建立一条由快照独占的密钥记录。
     ///
     /// # 参数
     ///
@@ -173,7 +173,7 @@ impl KeyEntry {
         }
     }
 
-    /// 借用敏感材料供单次 provider 操作使用。
+    /// 业务作用：借用敏感材料供单次 provider 操作使用。
     ///
     /// # 返回
     ///
@@ -182,7 +182,7 @@ impl KeyEntry {
         self.material.expose()
     }
 
-    /// 在每次密码操作前原子消费一次调用配额。
+    /// 业务作用：在每次密码操作前原子消费一次调用配额。
     ///
     /// # 参数
     ///
@@ -209,7 +209,7 @@ impl KeyEntry {
             .map_err(|_| CryptoError::new(CryptoErrorKind::Key, "key-invocation-limit"))
     }
 
-    /// 只检查当前时间和方向是否允许使用，不消费调用次数。
+    /// 业务作用：只检查当前时间和方向是否允许使用，不消费调用次数。
     ///
     /// # 参数
     ///
@@ -231,7 +231,7 @@ impl KeyEntry {
             && self.not_after.is_none_or(|value| now <= value)
     }
 
-    /// 返回当前绑定的共享调用计数器。
+    /// 业务作用：返回当前绑定的共享调用计数器。
     ///
     /// # 返回
     ///
@@ -240,7 +240,7 @@ impl KeyEntry {
         self.invocations.load_full()
     }
 
-    /// 把当前快照记录绑定到进程级共享调用计数器。
+    /// 业务作用：把当前快照记录绑定到进程级共享调用计数器。
     ///
     /// # 参数
     ///
@@ -249,7 +249,7 @@ impl KeyEntry {
         self.invocations.store(counter);
     }
 
-    /// 返回当前已经消费的密码调用次数。
+    /// 业务作用：返回当前已经消费的密码调用次数。
     ///
     /// # 返回
     ///
@@ -258,7 +258,7 @@ impl KeyEntry {
         self.invocations.load().load(Ordering::Acquire)
     }
 
-    /// 计算不暴露原始材料的固定长度密钥指纹。
+    /// 业务作用：计算不暴露原始材料的固定长度密钥指纹。
     ///
     /// # 返回
     ///
@@ -280,7 +280,7 @@ pub struct KeyRing {
 }
 
 impl std::fmt::Debug for KeyRing {
-    /// 输出非敏感 ring 摘要，不输出密钥材料。
+    /// 业务作用：输出非敏感 ring 摘要，不输出密钥材料。
     ///
     /// # 参数
     ///
@@ -301,7 +301,7 @@ impl std::fmt::Debug for KeyRing {
 }
 
 impl KeyRing {
-    /// 从完整 key 集合建立一个有界密钥环。
+    /// 业务作用：从完整 key 集合建立一个有界密钥环。
     ///
     /// # 参数
     ///
@@ -375,7 +375,7 @@ impl KeyRing {
         })
     }
 
-    /// 按信封显式 kid 解析可用于解密的 key。
+    /// 业务作用：按信封显式 kid 解析可用于解密的 key。
     ///
     /// # 参数
     ///
@@ -399,7 +399,7 @@ impl KeyRing {
         Ok(key)
     }
 
-    /// 选择当前快照唯一 active key 进行新加密。
+    /// 业务作用：选择当前快照唯一 active key 进行新加密。
     ///
     /// # 参数
     ///
@@ -418,7 +418,7 @@ impl KeyRing {
         Ok(key)
     }
 
-    /// 返回启动审计使用的 active key 非敏感元数据句柄。
+    /// 业务作用：返回启动审计使用的 active key 非敏感元数据句柄。
     ///
     /// # 返回
     ///
@@ -441,7 +441,7 @@ impl KeyRing {
         Ok(key)
     }
 
-    /// 返回 legacy-v1 无 kid 信封允许尝试的固定有界解密序列。
+    /// 业务作用：返回 legacy-v1 无 kid 信封允许尝试的固定有界解密序列。
     ///
     /// # 参数
     ///
@@ -482,7 +482,7 @@ impl KeyRing {
         Ok(result)
     }
 
-    /// 返回 key ring 中全部有限记录，供进程级调用次数注册表在热更新时重新绑定。
+    /// 业务作用：返回 key ring 中全部有限记录，供进程级调用次数注册表在热更新时重新绑定。
     ///
     /// # 返回
     ///
@@ -492,7 +492,7 @@ impl KeyRing {
     }
 }
 
-/// 在监听端口前验证 legacy key 的真实算法格式。
+/// 业务作用：在监听端口前验证 legacy key 的真实算法格式。
 ///
 /// 只检查长度、UTF-8、Base64/DER 和 RSA 模数，不执行私钥加解密，也不把材料写入诊断。这样错误
 /// AES 长度或损坏 RSA 私钥会成为清晰的启动错误，而不是第一条业务请求上的统一 4xx/5xx。
@@ -520,7 +520,7 @@ fn validate_legacy_key_material(key: &KeyEntry) -> Result<(), MappingBuildError>
     }
 }
 
-/// 校验租户与路由密钥域文本。
+/// 业务作用：校验租户与路由密钥域文本。
 ///
 /// # 参数
 ///
@@ -533,7 +533,7 @@ fn valid_scope(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
 }
 
-/// 校验信封公开 kid 的字符集与长度。
+/// 业务作用：校验信封公开 kid 的字符集与长度。
 ///
 /// # 参数
 ///

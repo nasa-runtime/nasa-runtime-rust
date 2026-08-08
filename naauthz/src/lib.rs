@@ -58,7 +58,7 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// 用 scope 列表构造。
+    /// 业务作用：用 scope 列表构造。
     pub fn with_scopes<I, S>(scopes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -70,7 +70,7 @@ impl Principal {
         }
     }
 
-    /// 返回可用于安全命名空间的认证身份：优先 `sub`，否则 `client_id`。
+    /// 业务作用：返回可用于安全命名空间的认证身份：优先 `sub`，否则 `client_id`。
     pub fn authenticated_identity(&self) -> Option<&str> {
         self.subject
             .as_deref()
@@ -119,7 +119,7 @@ pub struct PolicySet {
 }
 
 impl PolicySet {
-    /// 从策略列表构造并**校验**:route_id 非空、required_scopes 非空、无重复 route。
+    /// 业务作用：从策略列表构造并**校验**:route_id 非空、required_scopes 非空、无重复 route。
     pub fn build(policies: Vec<RoutePolicy>) -> Result<Self, PolicyError> {
         let mut map = HashMap::with_capacity(policies.len());
         for policy in policies {
@@ -137,7 +137,7 @@ impl PolicySet {
         Ok(Self { policies: map })
     }
 
-    /// 对某 route + 主体决策:无策略的 route 放行(authz 不适用),有策略则按 mode 判 scope。
+    /// 业务作用：对某 route + 主体决策:无策略的 route 放行(authz 不适用),有策略则按 mode 判 scope。
     pub fn decide(&self, route_id: &str, principal: &Principal) -> AuthzDecision {
         let Some(policy) = self.policies.get(route_id) else {
             return AuthzDecision::Permit; // 未受 authz 保护的 route
@@ -169,17 +169,17 @@ impl PolicySet {
         }
     }
 
-    /// 策略条数。
+    /// 业务作用：策略条数。
     pub fn len(&self) -> usize {
         self.policies.len()
     }
 
-    /// 是否无策略。
+    /// 业务作用：是否无策略。
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
     }
 
-    /// 判断完整 route_id 是否受当前快照保护。
+    /// 业务作用：判断完整 route_id 是否受当前快照保护。
     pub fn is_protected(&self, route_id: &str) -> bool {
         self.policies.contains_key(route_id)
     }
@@ -223,7 +223,7 @@ pub struct ObjectAuthorizationRequest {
 /// 对象级授权 provider。实现可以查询 DB owner/ACL 或远程 PDP。
 #[async_trait::async_trait]
 pub trait ObjectAuthorizer: Send + Sync {
-    /// 返回 permit/deny；内部错误只返回无细节标记。
+    /// 业务作用：返回 permit/deny；内部错误只返回无细节标记。
     async fn authorize(
         &self,
         request: &ObjectAuthorizationRequest,
@@ -254,7 +254,7 @@ pub struct RequestSecurityContext {
 }
 
 impl RequestSecurityContext {
-    /// 由 Web 授权边界创建同代请求快照。
+    /// 业务作用：由 Web 授权边界创建同代请求快照。
     pub fn new(
         principal: Principal,
         policy_set: Arc<PolicySet>,
@@ -271,22 +271,22 @@ impl RequestSecurityContext {
         }
     }
 
-    /// 已验签主体。
+    /// 业务作用：已验签主体。
     pub fn principal(&self) -> &Principal {
         &self.principal
     }
 
-    /// 本请求冻结的 policy generation。
+    /// 业务作用：本请求冻结的 policy generation。
     pub fn policy_generation(&self) -> u64 {
         self.policy_generation
     }
 
-    /// 用本请求冻结的 route policy 快照做决策。
+    /// 业务作用：用本请求冻结的 route policy 快照做决策。
     pub fn decide_route(&self, route_id: &str) -> AuthzDecision {
         self.policy_set.decide(route_id, &self.principal)
     }
 
-    /// 对业务对象执行 fail-closed 授权；错误和超时均不降级为 permit。
+    /// 业务作用：对业务对象执行 fail-closed 授权；错误和超时均不降级为 permit。
     pub async fn authorize_object(
         &self,
         action: impl Into<String>,
@@ -314,7 +314,7 @@ impl RequestSecurityContext {
 }
 
 impl PolicyRegistry {
-    /// 用初始 policy set 建注册表,generation=1。
+    /// 业务作用：用初始 policy set 建注册表,generation=1。
     pub fn new(initial: PolicySet) -> Self {
         Self {
             current: ArcSwap::from_pointee(initial),
@@ -323,12 +323,12 @@ impl PolicyRegistry {
         }
     }
 
-    /// 从策略列表校验并建注册表。
+    /// 业务作用：从策略列表校验并建注册表。
     pub fn from_policies(policies: Vec<RoutePolicy>) -> Result<Self, PolicyError> {
         Ok(Self::new(PolicySet::build(policies)?))
     }
 
-    /// 热更新:**先校验候选**(此处由调用方以 [`PolicySet::build`] 保证)通过则原子发布并 generation++;
+    /// 业务作用：热更新:**先校验候选**(此处由调用方以 [`PolicySet::build`] 保证)通过则原子发布并 generation++;
     /// 失败保留 last-good、generation 不变。此签名收 `Result<PolicySet>` 以显式表达"校验失败即保 last-good"。
     pub fn reload(&self, candidate: Result<PolicySet, PolicyError>) -> Result<u64, PolicyError> {
         let policy_set = candidate?; // 校验失败:直接返回,current/generation 不变
@@ -340,17 +340,17 @@ impl PolicyRegistry {
         Ok(self.generation.fetch_add(1, Ordering::AcqRel) + 1)
     }
 
-    /// 当前 policy set(原子快照)。
+    /// 业务作用：当前 policy set(原子快照)。
     pub fn current(&self) -> Arc<PolicySet> {
         self.current.load_full()
     }
 
-    /// 当前 generation(每次成功 reload +1)。
+    /// 业务作用：当前 generation(每次成功 reload +1)。
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// 原子读取 policy set 与 generation，供一次请求冻结同代安全快照。
+    /// 业务作用：原子读取 policy set 与 generation，供一次请求冻结同代安全快照。
     pub fn snapshot(&self) -> (Arc<PolicySet>, u64) {
         let _gate = self
             .snapshot_gate
@@ -362,7 +362,7 @@ impl PolicyRegistry {
         )
     }
 
-    /// 便捷:用当前 policy set 决策。
+    /// 业务作用：便捷:用当前 policy set 决策。
     pub fn decide(&self, route_id: &str, principal: &Principal) -> AuthzDecision {
         self.current().decide(route_id, principal)
     }

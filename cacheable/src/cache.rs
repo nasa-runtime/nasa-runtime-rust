@@ -8,15 +8,13 @@
 //   │   三防：穿透(空哨兵短 TTL) / 击穿(进程内 key 级锁) / 雪崩(TTL 抖动)。
 //   │   适合：以 TTL 自动过期保新鲜、不需要写后主动失效的只读热点查询。
 //   │
-//   └─ GroupedCache ── 分组缓存（对标 原实现 MybatisCache）+ 跨节点 single-flight
+//   └─ GroupedCache ── 分组缓存 + 跨节点 single-flight
 //       按【组】组织(一个 group = 一个 Redis Hash)，以【显式失效】为主、长兜底 TTL 兜底。
-//       支持 invalidate_field/invalidate_group + 关联失效(@CacheClearRef)；single-flight 两级
+//       支持 invalidate_field/invalidate_group 与关联失效；single-flight 两级
 //       去重(进程内 tokio::Mutex + Redis SET NX 分布式锁)。
 //       适合：写库后要让缓存立刻失效、需要强一致 / 关联失效的场景（撮合/账务）。
 //
-// ⚠️ 与 原实现 端 MyBatis 二级缓存（MybatisCache）的差异：
-//   - MyBatis 缓存【框架透明】：CachingExecutor 在执行 SQL 前后自动查/写/清缓存，DAO 无感。
-//   - 本文件两者都是【显式调用】：service 主动 get_or_load / invalidate（sqlx 不是 ORM、无执行器钩子）。
+// 本文件提供显式缓存调用：service 主动执行 get_or_load / invalidate，不依赖数据访问层隐式拦截。
 //
 // ⚠️ 必须在 Tokio 运行时内使用。
 // ⚠️ GroupedCache 的 per-field 兜底 TTL 用 HPEXPIRE，需 Redis 7.4+。
@@ -34,7 +32,7 @@ use std::sync::RwLock; // 读写锁：GroupedCache.clear_map 注册罕见、读�
                        //   ★ 它是【同步】锁，绝不能跨 .await 持有 —— 本文件只在同步代码段内 read()/write()
 use std::time::{Duration, Instant}; // Duration=时长（给 sleep/锁 TTL）；Instant=单调时钟（算等待截止点）
 
-use dashmap::DashMap; // 并发安全的 HashMap（内部分段加锁）：存 single-flight 的 key->锁，≈ ConcurrentHashMap
+use dashmap::DashMap; // 分段锁保护的并发 HashMap，保存 single-flight 的 key 到锁映射。
 use rand::Rng; // ★ trait：gen_range 等方法"挂"在这个 trait 上。Rust 里方法解析靠"trait 必须在作用域内"，
                //   不 use 进来，哪怕类型对，conn.gen_range(..) 也编译不过（原实现 没有这个概念）
 use redis::aio::ConnectionManager; // 异步 Redis【单机】连接管理器：句柄可 clone、内部自带断线重连（GroupedCache 仍用它作单机演示）
@@ -44,7 +42,7 @@ use redis::AsyncCommands; // ★ 同理：.get()/.pset_ex()/.hget()/.hset()/.del
 use serde::de::DeserializeOwned; // 约束：能从 JSON 反序列化出【完全自有】的值（读缓存时用，详见 where 注释）
 use serde::Serialize; // 约束：能序列化成 JSON（写缓存时用 serde_json::to_string）
 use tokio::sync::Mutex; // 异步互斥锁：锁可以【跨 .await 持有】。注意不是 std::sync::Mutex——后者跨 await 持有会出问题
-use tracing::{debug, warn}; // 结构化日志宏（类似 原实现 slf4j 的 log.debug / log.warn）
+use tracing::{debug, warn}; // 结构化记录缓存命中、降级和失效故障。
 
 /// 释放分布式锁的 compare-and-del 脚本（Lua，在 Redis 服务端原子执行）。GroupedCache 用。
 /// 只有锁值仍等于自己写入的 token 才删，否则不动。
@@ -88,7 +86,7 @@ struct FlightGuard<'b> {
     lock: Arc<Mutex<()>>,
 }
 impl Drop for FlightGuard<'_> {
-    /// 释放 key 级 single-flight 锁表条目。
+    /// 业务作用：释放 key 级 single-flight 锁表条目。
     ///
     /// Drop 是 Rust 的析构钩子（≈ 没有的 原实现 finalize，但确定性触发）：离开作用域立刻跑。
     fn drop(&mut self) {
@@ -114,19 +112,19 @@ impl Drop for FlightGuard<'_> {
 /// 对象安全(`Arc<dyn CacheBackend>`)靠 `async-trait`;方法只读写单 key,不感知 scene/group。
 #[async_trait::async_trait]
 pub trait CacheBackend: Send + Sync {
-    /// 执行不修改业务数据的后端健康探针。
+    /// 业务作用：执行不修改业务数据的后端健康探针。
     ///
     /// 编排层的 readiness monitor 调用本方法确认当前代后端仍可服务。实现不得把成功构造客户端
     /// 当成健康，也不得写入探针 key；Redis 实现使用 `PING`。
     async fn health_check(&self) -> anyhow::Result<()>;
 
-    /// 读一个 key;不存在返回 `Ok(None)`。底层报错原样上抛,由 `CacheLayer` 决定降级回源。
+    /// 业务作用：读一个 key;不存在返回 `Ok(None)`。底层报错原样上抛,由 `CacheLayer` 决定降级回源。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>>;
 
-    /// 以毫秒 TTL 写入一个 key(PSETEX 语义);TTL 抖动/空值短 TTL 由 `CacheLayer` 决定后传入。
+    /// 业务作用：以毫秒 TTL 写入一个 key(PSETEX 语义);TTL 抖动/空值短 TTL 由 `CacheLayer` 决定后传入。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -134,7 +132,7 @@ pub trait CacheBackend: Send + Sync {
     /// - `ttl_ms`: 过期毫秒数(> 0)。
     async fn set(&self, key: &str, value: &str, ttl_ms: u64) -> anyhow::Result<()>;
 
-    /// 删除一个 key(失效用)。
+    /// 业务作用：删除一个 key(失效用)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -150,7 +148,7 @@ pub struct ClusterConnectionBackend {
 }
 
 impl ClusterConnectionBackend {
-    /// 用一个已建立的集群连接构造后端。
+    /// 业务作用：用一个已建立的集群连接构造后端。
     ///
     /// # 参数
     /// - `redis`: 已连接的 `ClusterConnection`(通常来自 [`crate::connect_cluster`])。
@@ -161,7 +159,7 @@ impl ClusterConnectionBackend {
 
 #[async_trait::async_trait]
 impl CacheBackend for ClusterConnectionBackend {
-    /// 使用 Redis `PING` 验证当前集群连接仍可完成一次协议往返。
+    /// 业务作用：使用 Redis `PING` 验证当前集群连接仍可完成一次协议往返。
     async fn health_check(&self) -> anyhow::Result<()> {
         let mut conn = self.redis.clone();
         let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
@@ -172,7 +170,7 @@ impl CacheBackend for ClusterConnectionBackend {
         Ok(())
     }
 
-    /// 读一个 key(GET,返回 `Option<String>`)。
+    /// 业务作用：读一个 key(GET,返回 `Option<String>`)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -181,7 +179,7 @@ impl CacheBackend for ClusterConnectionBackend {
         Ok(conn.get::<_, Option<String>>(key).await?)
     }
 
-    /// 以毫秒 TTL 写入一个 key(PSETEX)。
+    /// 业务作用：以毫秒 TTL 写入一个 key(PSETEX)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -193,7 +191,7 @@ impl CacheBackend for ClusterConnectionBackend {
         Ok(())
     }
 
-    /// 删除一个 key(DEL)。
+    /// 业务作用：删除一个 key(DEL)。
     ///
     /// # 参数
     /// - `key`: 完整缓存 key。
@@ -244,7 +242,7 @@ pub struct CacheLayer {
 }
 
 impl CacheLayer {
-    /// 构造 Redis 二级缓存层；由启动代码传入 Redis 集群连接与缓存 TTL 配置。
+    /// 业务作用：构造 Redis 二级缓存层；由启动代码传入 Redis 集群连接与缓存 TTL 配置。
     ///
     /// # 参数
     /// - `redis`: Redis 集群连接句柄,用于读取、写入和删除 L2 缓存。
@@ -259,7 +257,7 @@ impl CacheLayer {
         )
     }
 
-    /// 用任意 [`CacheBackend`] 构造二级缓存层。
+    /// 业务作用：用任意 [`CacheBackend`] 构造二级缓存层。
     ///
     /// 让 `CacheLayer` 与具体 Redis 连接类型解耦:编排层可传入**复用受管 Redis** 的 adapter,而不必新开一条
     /// 集群连接。single-flight/TTL 抖动/空值哨兵/serde 全在本层,与 backend 具体实现无关。
@@ -281,14 +279,14 @@ impl CacheLayer {
         }
     }
 
-    /// 对当前 L2 后端执行一次只读健康探针。
+    /// 业务作用：对当前 L2 后端执行一次只读健康探针。
     ///
     /// 该入口只供拥有运行时生命周期的组件 monitor 使用；请求热路径不会同步探测远端。
     pub async fn health_check(&self) -> anyhow::Result<()> {
         self.backend.health_check().await
     }
 
-    /// 删除一个 key（给缓存失效用，对标 Cacheable @CacheInvalidate 的远程删除）。
+    /// 业务作用：删除一个 key（给缓存失效用，对标 Cacheable @CacheInvalidate 的远程删除）。
     /// 由 cacheable::invalidate 调用。删 L2(Redis)这一份;失败上抛由调用方决定怎么处理。
     ///
     /// # 参数
@@ -298,7 +296,7 @@ impl CacheLayer {
         self.backend.delete(key).await
     }
 
-    /// 通用 cache-aside 读取:先查 Redis,未命中时用 single-flight 串行化回源并回填。
+    /// 业务作用：通用 cache-aside 读取:先查 Redis,未命中时用 single-flight 串行化回源并回填。
     ///
     /// 三防能力:空结果短缓存防穿透、key 级互斥防击穿、非空 TTL 抖动防雪崩。调用方只需要提供完整缓存 key 和回源闭包。
     ///
@@ -432,13 +430,13 @@ impl CacheLayer {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ GroupedCache —— 分组缓存（对标 MybatisCache）+ 跨节点 single-flight       ║
+// ║ GroupedCache —— 分组缓存 + 跨节点 single-flight                          ║
 // ║                                                                            ║
-// ║ B. 写失效 / 关联失效（MybatisCache 的核心）                                ║
+// ║ B. 写失效 / 关联失效                                                       ║
 // ║   · 按【组】组织：一个 group = 一个 Redis Hash，entry 是 hash 的 field      ║
 // ║   · invalidate_field(group, field) = HDEL            （≈ removeObject）     ║
 // ║   · invalidate_group(group)        = DEL 整个 Hash    （≈ clear()）         ║
-// ║   · 关联失效 register_clear_ref(source, also_clear)  （≈ @CacheClearRef）   ║
+// ║   · 关联失效 register_clear_ref(source, also_clear)                        ║
 // ║                                                                            ║
 // ║ C. 跨节点 single-flight（防分布式击穿）：两级去重                          ║
 // ║   ① 进程内 tokio::Mutex（本节点并发压成 1）                                ║
@@ -481,16 +479,16 @@ pub struct GroupedCache {
     poll_ms: u64,
     // 进程内 single-flight：缓存键 -> 一把异步锁（包 Arc 让同 key 并发请求共享同一把）
     locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    // 关联失效表：source_group -> {失效 source 时连带失效的组}（对应 MybatisCache.clearMap）
+    // 关联失效表：source_group -> {失效 source 时连带失效的组}。
     // 外层 Arc 让多处共享，内层 RwLock 保证并发读写安全
     clear_map: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 }
 
 impl GroupedCache {
-    /// 构造。`backstop_ttl_secs` = 兜底 TTL（秒）。
+    /// 业务作用：构造。`backstop_ttl_secs` = 兜底 TTL（秒）。
     /// 以显式 invalidate 为主、长兜底 TTL 防漏清/防 OOM。
     ///   · 建议设【小时/天级】（如 86400 = 1 天）：正常靠失效保新鲜，TTL 永远等不到，只在漏网时救命。
-    ///   · 设 0 = 关闭兜底（退化成纯 MybatisCache 无 TTL 模型）——除非你能从框架层面保证"写库必清缓存"，否则不推荐。
+    ///   · 设 0 = 关闭兜底；仅当调用方能够保证写库后必定清理缓存时使用。
     /// 其余参数（锁 TTL / 等待 / 轮询）给了一组保守默认值，需要可后续暴露 setter。
     ///
     /// # 参数
@@ -501,7 +499,7 @@ impl GroupedCache {
             .expect("grouped cache backstop TTL must fit Redis milliseconds")
     }
 
-    /// 校验 Redis 毫秒 TTL 后构造；外部配置应优先使用本入口，把单位转换错误留在启动阶段。
+    /// 业务作用：校验 Redis 毫秒 TTL 后构造；外部配置应优先使用本入口，把单位转换错误留在启动阶段。
     pub fn try_new(redis: ConnectionManager, backstop_ttl_secs: u64) -> anyhow::Result<Self> {
         let backstop_ttl_ms = backstop_ttl_secs
             .checked_mul(1000)
@@ -519,12 +517,12 @@ impl GroupedCache {
         })
     }
 
-    /// 注册关联失效（对应 `@CacheClearRef`）：失效 `source_group` 时，连带失效 `also_clear` 里的组。
+    /// 业务作用：注册关联失效：失效 `source_group` 时，连带失效 `also_clear` 里的组。
     ///
     /// 例：订单写表会让"用户持仓"缓存失效 → `register_clear_ref("order", &["position"])`，
     /// 之后 `invalidate_group("order")` 会同时 DEL `order` 和 `position` 两个 Hash。
     ///
-    /// 对应 MybatisCache 构造里 `clearMap.computeIfAbsent(C, ..).add(this.id)` 那段建表逻辑。
+    /// 注册关系在写入时去重，读取路径只需展开已经确认的目标集合。
     ///
     /// # 参数
     /// - `source_group`: 触发失效的源缓存组名。
@@ -541,7 +539,7 @@ impl GroupedCache {
         }
     }
 
-    /// cache-aside 取值：先查 Hash，未命中则【两级 single-flight】回源并回填。
+    /// 业务作用：cache-aside 取值：先查 Hash，未命中则【两级 single-flight】回源并回填。
     ///
     /// ── 键约定（务必遵守，详见文件底部 SEP / field()）──
     ///   · `group` = Redis key   = 【业务隔离串】，整组失效的单位。例：`"spot:kline"` / `"perp:order"`
@@ -672,7 +670,7 @@ impl GroupedCache {
             .await
     }
 
-    /// 失效单个条目（≈ MybatisCache.removeObject）：HDEL group field。
+    /// 业务作用：通过 HDEL 失效指定 group 的单个 field。
     ///
     /// # 参数
     /// - `group`: Redis Hash key,表示要操作的缓存组。
@@ -684,7 +682,7 @@ impl GroupedCache {
         Ok(())
     }
 
-    /// 失效整个组 + 关联组（≈ MybatisCache.clear() + @CacheClearRef 级联）。
+    /// 业务作用：失效整个组及其登记的关联组。
     ///
     /// # 参数
     /// - `group`: 要清理的源缓存组名;函数会同时清理已登记的关联组。
@@ -700,7 +698,7 @@ impl GroupedCache {
 
     // ── 内部辅助 ──────────────────────────────────────────────────────────
 
-    /// 读 Hash field 并反序列化；脏值 / Redis 报错都降级为「未命中」（返回 None 继续回源）。
+    /// 业务作用：读 Hash field 并反序列化；脏值 / Redis 报错都降级为「未命中」（返回 None 继续回源）。
     ///
     /// # 参数
     /// - `conn`: 执行 HGET 的 Redis connection manager。
@@ -739,7 +737,7 @@ impl GroupedCache {
         }
     }
 
-    /// 回源 + 回填（HSET），并按需给【该 field】设 per-field 兜底 TTL（HPEXPIRE，带抖动防雪崩）。
+    /// 业务作用：回源 + 回填（HSET），并按需给【该 field】设 per-field 兜底 TTL（HPEXPIRE，带抖动防雪崩）。
     ///
     /// # 参数
     /// - `conn`: 执行 HSET/HPEXPIRE 的 Redis connection manager。
@@ -808,7 +806,7 @@ impl GroupedCache {
 /// 键约定的统一分隔符。业务串 / 子业务串内【禁止】出现它，否则拼接后可能与别的键碰撞。
 pub const SEP: &str = ":";
 
-/// 拼 hash field（子业务隔离串）：把多段用 [`SEP`] 连接。
+/// 业务作用：拼 hash field（子业务隔离串）：把多段用 [`SEP`] 连接。
 ///
 /// 用它而非各 service 手拼字符串：① 分隔符集中一处、改一次全改；② 杜绝"这里用 `:`、那里用 `_`"的不一致。
 /// 例：`field(&["BTCUSDT", "1m"])` → `"BTCUSDT:1m"`；`field(&[&uid.to_string(), symbol])` → `"123:BTCUSDT"`。
@@ -819,7 +817,7 @@ pub fn field(parts: &[&str]) -> String {
     parts.join(SEP)
 }
 
-/// 通用"空"判断：空数组 / null / 空对象 / 空串都算空（CacheLayer 与 GroupedCache 共用）。
+/// 业务作用：通用"空"判断：空数组 / null / 空对象 / 空串都算空（CacheLayer 与 GroupedCache 共用）。
 /// matches! 宏：判断 s 是否匹配右边任一字面量，等价一串 ||，但更紧凑可读。
 ///
 /// # 参数
@@ -828,8 +826,8 @@ fn is_empty_payload(s: &str) -> bool {
     matches!(s, "[]" | "null" | "{}" | "")
 }
 
-/// 计算失效 `group` 时要 DEL 的目标集合：自身 + clear_map 里登记的关联组。
-/// 对应 MybatisCache.clear() 里 `clearMap.get(this.id)`（其集合天然含 id 自身）的逻辑。
+/// 业务作用：计算失效 `group` 时要 DEL 的目标集合：自身 + clear_map 里登记的关联组。
+/// 返回集合始终包含源组自身，保证没有关联项时仍能完成本组清理。
 ///
 /// # 参数
 /// - `map`: 当前函数读取或更新的键值映射。
@@ -837,7 +835,7 @@ fn is_empty_payload(s: &str) -> bool {
 fn cascade_targets(map: &HashMap<String, HashSet<String>>, group: &str) -> Vec<String> {
     // 用 HashSet 收集去重：自身和关联组可能重叠，避免 DEL 重复 key
     let mut set: HashSet<String> = HashSet::new();
-    // 自身一定在内（同 MybatisCache：clearMap[id] 含 id）
+    // 源组必须进入集合，否则只有关联组会被清理而源组继续暴露旧值。
     set.insert(group.to_string());
     // 查 clear_map：登记过关联组就并进来；没登记则只剩自身
     if let Some(deps) = map.get(group) {

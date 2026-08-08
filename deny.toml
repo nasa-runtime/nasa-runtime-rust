@@ -1,5 +1,4 @@
-# cargo-deny 配置 —— 发布前 supply-chain 门禁(`cargo deny check`)。
-# CI 里跑,拦已知漏洞 / 非法 license / 未知源。
+# cargo-deny 配置：声明依赖漏洞、许可证与来源策略。
 
 [advisories]
 version = 2

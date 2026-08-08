@@ -40,7 +40,7 @@ pub struct MonitorConflict {
 }
 
 impl std::fmt::Display for MonitorConflict {
-    /// 人类可读的冲突描述,方便直接进日志。
+    /// 业务作用：人类可读的冲突描述,方便直接进日志。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -56,19 +56,19 @@ type Entry = (CommandParams, Arc<Command>);
 // 全局注册表,进程内唯一;/metrics 渲染与 current_tps 都遍历它。
 static REGISTRY: OnceLock<Mutex<BTreeMap<CommandKey, Entry>>> = OnceLock::new();
 
-/// 返回全局注册表(懒初始化)。
+/// 业务作用：返回全局注册表(懒初始化)。
 fn registry() -> &'static Mutex<BTreeMap<CommandKey, Entry>> {
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// 取得注册表锁；一次持锁 panic 不应永久破坏指标与业务请求。
+/// 业务作用：取得注册表锁；一次持锁 panic 不应永久破坏指标与业务请求。
 fn lock_registry() -> std::sync::MutexGuard<'static, BTreeMap<CommandKey, Entry>> {
     registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// 取或建(合同 去重语义):
+/// 业务作用：取或建(合同 去重语义):
 /// - 首次见到 key → 调 `build` 创建并注册;
 /// - key 已存在且参数一致 → 返回既有实例;
 /// - key 已存在但参数不同 → 保留既有实例并返回 `Err`(调用方决定 warn 复用还是上抛)。
@@ -108,7 +108,7 @@ pub(crate) fn get_or_register(
     Ok(cmd)
 }
 
-/// 快照全部命令(已按 (group, command) 排序);clone Arc 列表后立即放锁,
+/// 业务作用：快照全部命令(已按 (group, command) 排序);clone Arc 列表后立即放锁,
 /// 调用方再逐个 snapshot,避免攥着注册表锁去锁各命令的滚动窗口。
 pub(crate) fn all() -> Vec<Arc<Command>> {
     lock_registry()

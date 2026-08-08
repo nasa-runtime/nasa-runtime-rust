@@ -37,7 +37,7 @@ enum LegacyAesField {
     Value(String),
 }
 
-/// 只在字段实际出现时区分 JSON null 与字符串；字段缺失由 `Default` 产生。
+/// 业务作用：只在字段实际出现时区分 JSON null 与字符串；字段缺失由 `Default` 产生。
 fn deserialize_legacy_aes_field<'de, D>(deserializer: D) -> Result<LegacyAesField, D::Error>
 where
     D: Deserializer<'de>,
@@ -69,7 +69,7 @@ struct LegacyResponseEnvelope {
 pub struct LegacyV1Protocol;
 
 impl LegacyV1Protocol {
-    /// 建立无可变状态的 legacy-v1 协议对象。
+    /// 业务作用：建立无可变状态的 legacy-v1 协议对象。
     ///
     /// # 返回
     ///
@@ -80,7 +80,7 @@ impl LegacyV1Protocol {
 }
 
 impl CryptoProtocol for LegacyV1Protocol {
-    /// 返回静态兼容协议 ID。
+    /// 业务作用：返回静态兼容协议 ID。
     ///
     /// # 返回
     ///
@@ -89,7 +89,7 @@ impl CryptoProtocol for LegacyV1Protocol {
         "legacy-v1"
     }
 
-    /// 返回 legacy 信封要求的 JSON 媒体类型。
+    /// 业务作用：返回 legacy 信封要求的 JSON 媒体类型。
     ///
     /// # 返回
     ///
@@ -98,7 +98,7 @@ impl CryptoProtocol for LegacyV1Protocol {
         LEGACY_V1_MEDIA_TYPE
     }
 
-    /// 严格解析旧信封并按 active 加至多一个 previous key 解密。
+    /// 业务作用：严格解析旧信封并按 active 加至多一个 previous key 解密。
     ///
     /// # 参数
     ///
@@ -231,7 +231,7 @@ impl CryptoProtocol for LegacyV1Protocol {
         })
     }
 
-    /// 严格验证 `BaseResponse` 并只改写非空 data 字段。
+    /// 业务作用：严格验证 `BaseResponse` 并只改写非空 data 字段。
     ///
     /// # 参数
     ///
@@ -363,7 +363,7 @@ impl CryptoProtocol for LegacyV1Protocol {
     }
 }
 
-/// 计算标准 Base64 文本解码后的保守字节上界，不解析或分配输出缓冲区。
+/// 业务作用：计算标准 Base64 文本解码后的保守字节上界，不解析或分配输出缓冲区。
 ///
 /// # 参数
 ///
@@ -380,7 +380,7 @@ fn decoded_base64_upper_bound(encoded_len: usize) -> usize {
         .saturating_mul(3)
 }
 
-/// 序列化 legacy 响应并应用最终信封上限。
+/// 业务作用：序列化 legacy 响应并应用最终信封上限。
 ///
 /// # 参数
 ///

@@ -20,7 +20,7 @@ use syn::{parse_macro_input, ItemFn, LitInt, LitStr};
 // ════════════════════════════════════════════════════════════════════════════
 // #[cached] —— 读路径:两级缓存
 // ════════════════════════════════════════════════════════════════════════════
-/// 业务作用：# `#[cached]` —— 两级缓存读路径(对标 原框架 `@Cacheable` / JetCache)
+/// 业务作用：`#[cached]` 为异步读取函数生成 L1/L2 两级缓存编排。
 ///
 /// 贴在【async 方法/函数】上,改写成"先查 L1(moka)→ L2(Redis 三防)→ 未命中才跑原体(DB)"。
 /// 原体返回 `anyhow::Result<T>`,本注解透传同一个 `T`(签名/返回类型不变)。
@@ -160,7 +160,7 @@ pub fn cached(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 // #[cache_invalidate] —— 写路径:执行原体后失效 L1+L2
 // ════════════════════════════════════════════════════════════════════════════
-/// 业务作用：# `#[cache_invalidate]` —— 写后失效(对标 原框架 `@CacheEvict`)
+/// 业务作用：`#[cache_invalidate]` 在异步写操作完成后触发 L1/L2 缓存失效。
 ///
 /// 贴在【写操作 async 方法/函数】上:先跑原体(写 DB),再失效对应 key 的 L1 + L2。
 /// 失效是尽力而为(失败仅告警,不影响写结果);返回类型不变。
@@ -232,7 +232,7 @@ pub fn cache_invalidate(attr: TokenStream, item: TokenStream) -> TokenStream {
     // ── 2. 解析函数 ──
     let func = parse_macro_input!(item as ItemFn);
     // 形态校验:必须 async fn(展开体含 `(async move {..}).await` 与 `invalidate(..).await`,同步 fn 会报 await 不在 async 上下文)。
-    //   注:本注解【内联 await】原体(不像 #[cached] 把原体丢进后台刷新 spawn),故 &self / &mut self 合法,不做接收者限制。
+    // 本注解内联等待原函数体，不会把接收者移入后台任务，因此允许 `&self` / `&mut self`。
     if func.sig.asyncness.is_none() {
         return syn::Error::new_spanned(&func.sig.ident, "#[cache_invalidate] 只能用于 async fn")
             .to_compile_error()

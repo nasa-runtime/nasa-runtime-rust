@@ -222,7 +222,7 @@ sum by (instance) (
 结果应为两个 instance 各约 `9/s`，卡片的 Cluster QPS 应约 `18/s`。若两个 instance 各约 `18/s`、集群
 约 `36/s`，说明两路流量进入了同一个进程，而该进程又被两个 target 重复抓取。
 
-## 9. 验收顺序
+## 接入核对顺序
 
 1. 调用一次 `#[grafana]` 业务接口，使命令完成首次注册。
 2. 直接访问业务 `/metrics`，确认存在 `nafana_` 指标。
@@ -230,6 +230,6 @@ sum by (instance) (
 4. 确认 Targets 页面显示该 job 的实际抓取间隔不大于 5 秒，再查询 `nafana_requests_total`。
 5. Grafana 选择正确的数据源与 `job`。
 6. 鼠标移入接口折线，确认出现十字、时间以及完整指标列表。
-7. 给每个实例发送已知速率流量，确认单实例 QPS 与压测器发送速率一致，Cluster QPS 等于各实例之和。
+7. 给每个实例发送已知速率流量，确认单实例 QPS 与流量发生端速率一致，Cluster QPS 等于各实例之和。
 8. `$instance=All` 时对照 Prometheus 验证 QPS、Error、Hosts 和 histogram 分位是集群聚合值。
 9. 停止全部业务实例，确认空状态不出现 `Field not found`。
