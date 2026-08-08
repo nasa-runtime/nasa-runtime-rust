@@ -5,7 +5,7 @@
 # Web scrape adapter 与 Telemetry OTLP exporter 各自读取同一 MetricHub,不重新拥有领域指标语义。
 [package]
 name = "nametrics-core"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 进程级 provider-neutral 指标核心:descriptor catalog + 冲突审计 + 进程内记录 + 结构化/Prometheus 导出(不依赖 OTel/Prometheus/Axum/napp)"

@@ -1,6 +1,6 @@
 [package]
 name = "nainbox-core"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Inbox provider-neutral deduplication contract"
