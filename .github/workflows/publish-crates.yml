@@ -31,6 +31,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  NAPART_RELEASE_COMMIT: a785b0743d5900986394cb6aff3dca9c7dc3e98b
 
 jobs:
   guard:
@@ -72,6 +73,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: select immutable napart source
+        if: inputs.batch == 'napart'
+        shell: bash
+        run: |
+          # napart 必须先于门面依赖下限进入 registry；专批从已验收且依赖仍可解析的提交打包。
+          git merge-base --is-ancestor "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA"
+          git diff --exit-code "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA" -- napart
+          git checkout --detach "$NAPART_RELEASE_COMMIT"
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
         with:
           components: clippy,rustfmt
@@ -197,6 +208,16 @@ jobs:
     environment: crates-io
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: select immutable napart source
+        if: inputs.batch == 'napart'
+        shell: bash
+        run: |
+          # 发布阶段复验源码未漂移，保证上传内容与 verify 阶段使用同一不可变提交。
+          git merge-base --is-ancestor "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA"
+          git diff --exit-code "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA" -- napart
+          git checkout --detach "$NAPART_RELEASE_COMMIT"
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
       - name: select release crates
         env:
