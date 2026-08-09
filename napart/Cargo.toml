@@ -1,4 +1,4 @@
-# napart —— 分 lane 串行/并行执行器。
+# napart —— 带保序任务窃取的分 lane 串行/并行执行器。
 # 顺序边界是「分区 + 任务类型」:严格类型同分区按提交顺序串行,非严格类型跨分区并发;
 # 空闲分区经执行权 CAS 接管热点严格 lane(不搬数据,FIFO 由队列保证)。
 # 兼容入口保持同 key 严格 FIFO、有界背压与被拒可见;显式停机提供退出证明和损耗报告。
@@ -8,12 +8,12 @@ name = "napart"
 version = "1.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 分 lane 串行/并行执行器(同 key 严格 FIFO + 类型化并发 + 有界背压 + 可审计停机)"
+description = "带保序任务窃取的 NASA 分 lane 执行器（严格 FIFO、类型化并发、有界背压、可审计停机）"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["async", "executor", "partition", "work-stealing", "fifo"]
+categories = ["asynchronous", "concurrency"]
 readme = "README.md"
 documentation = "https://docs.rs/napart"
 

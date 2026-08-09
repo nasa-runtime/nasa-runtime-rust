@@ -1,10 +1,70 @@
 # napart
 
-`napart` 是分 lane 的串行/并行执行器。顺序边界是「原始分区 + 任务类型」：同一 key
-的严格类型任务按提交顺序串行落地；不同 key 会散列到原始分区，落入同一分区且类型相同的
-严格任务也会串行。不同类型不共享严格顺序门禁，非严格 lane 允许多个空闲 worker 并发消费。
-空闲分区还可通过一次执行权转移接管其它分区的严格 lane，不移动队列数据，FIFO 由 lane
-队列保证。该模型适合订单、账户、用户维度的异步事件处理。
+`napart` 是带**保序任务窃取**的分 lane 串行/并行执行器。它把稳定 key 路由、严格 FIFO、
+跨类型并发、有界背压和可审计停机放在同一个生命周期内，适合订单、账户、用户维度的
+异步事件处理。
+
+## 核心价值：保序任务窃取
+
+固定分区执行器容易出现一种浪费：某个 worker 被一类长任务占用时，同分区其它独立业务类型
+也只能排队，而其它 worker 可能完全空闲。`napart` 把调度单元细化为「原始分区 + 任务类型」
+对应的 lane；空闲 worker 可以接管有积压的外分区 lane，利用闲置算力推进任务。
+
+**窃取的是 lane 的执行权，不是任务载荷。** 队列始终留在原 lane，提交方也始终按原始分区入队。
+严格 lane 通过原子执行权与执行门禁保证任一时刻只有一个 worker 能从队首取出并执行任务，因此
+接管前后 FIFO 不变，也不会复制、搬运或重复执行载荷。非严格 lane 没有独占执行权，任意空闲
+worker 都可代服务，以顺序换取吞吐。
+
+这套机制提供三个直接收益：
+
+- **缓解分区倾斜**：空闲 worker 可处理其它分区中尚未执行的 lane，不必等待其原 worker 空闲。
+- **保留业务顺序**：严格 lane 的 pop 与执行处于同一门禁内，执行权转移不会改变队列顺序。
+- **隔离热点类型**：同一 key 的不同 `TaskType` 使用不同 lane，严格主流程与可并发旁路任务互不
+  占用顺序门禁。
+
+任务窃取不会把单条严格 lane 并行化：同一 lane 始终串行，单个长任务仍会阻塞它后面的任务。
+它解决的是 worker 之间的负载倾斜，以及一个 worker 忙碌时其余 lane 无人推进的问题。兼容
+`submit*` 入口在每个原始分区只有一条保留的严格 lane；希望同分区的独立业务类型绕过队首阻塞，
+必须使用不同的稳定 `TaskType` 拆成类型化 lane。
+
+## 运行架构
+
+```text
+submit(key, TaskSpec)
+          │
+          ├─ hash(key) ─────────> 原始分区 home
+          │
+          └─ (home, TaskType) ──> LaneRegistry ──> lane 队列
+                                                        │
+                               ┌────────────────────────┴───────────────────────┐
+                               │                                                │
+                    strict lane: owner + gate                       relaxed lane: 无独占 owner
+                               │                                                │
+                    home worker 或窃取 worker                           任意空闲 worker 代服务
+                               │                                                │
+                               └──────────────────> 任务终态 <───────────────────┘
+                                                    │
+                                      归还全局预算、更新指标与证据
+```
+
+1. **路由**：进程内 hash 把 key 映射到原始分区，`(home, TaskType)` 唯一确定 lane。严格顺序的
+   真实边界是「原始分区 + 任务类型」；不同 key 若 hash 到同一分区且类型相同，也会共享串行
+   边界。该分区号只服务当前单进程调度，不是跨进程或跨程序版本的持久化分片标识。
+2. **准入**：提交先通过每 lane 深度与全局在飞预算，再把唯一任务载荷放入 lane 队列；拒绝对
+   调用方可见，不以静默丢弃换取吞吐。
+3. **本地服务**：每个原始分区有一个常驻 worker，公平轮转本分区 lane 与已接管的外分区 lane。
+4. **执行权接管**：空闲 worker 周期扫描有积压的外分区 lane。严格 lane 优先通过原子 CAS 从
+   `home` 接管 `owner`，不形成第三方之间的接管链；取得门禁后再次核对执行权，再从队首取任务
+   并等待其完成。即使接管发生在原 worker 正在执行期间，新持有方也必须等待同一门禁，不会与
+   前一任务并行。
+5. **公平与归还**：持续有进展的 worker 也会周期性重做窃取裁决，避免新出现的严格热点长期
+   饥饿。被接管 lane 排空、本 worker 的原籍 lane 出现积压或持有达到上界时，执行权归还原分区
+   并定向唤醒其 worker；每个 worker 的接管数量有界，避免囤积热点。
+6. **异常边界**：worker 异常退出时，其负责的严格 lane 会冻结并留下未执行任务证据，而不是在
+   执行权不明时盲目换人；任务自身 panic 只终结该任务，不冻结 lane。
+7. **注册表与扫描成本**：lane 首次创建串行发布，worker 在无锁快照上读取和扫描。类型化 lane
+   不会自动回收，`with_max_lanes` 同时限制常驻注册表规模、指标基数与窃取扫描成本；`TaskType`
+   应是少量、稳定的业务常量，不能按实体或请求动态生成。
 
 直接依赖：
 
@@ -80,7 +140,8 @@ async fn run(executor: &PartitionExecutor) {
 
 ## 延迟提交
 
-到期前只占一个全局名额、不占任何 lane 深度；到期时按当时路由入队。
+登记时计算 key 的进程内路由；到期前只占一个全局名额、不创建或占用任何 lane 深度，到期时
+查找或创建对应 lane 并尝试入队。
 
 ```rust
 let handle = executor.submit_after(
@@ -160,7 +221,24 @@ if report.frozen > 0 || report.aborted > 0 {
 
 ## 观测
 
-`is_healthy()`（运行中且无 worker 死亡、无 lane 冻结）、`dead_partitions()`、`failed_lanes()`、`lanes()`、`metrics_snapshot()`（受理/完成/取消/panic/停机中止、七类拒绝、窃取与归还、冻结、排队深度、预算余量、延迟登记量等低基数计数）。计数口径：`submitted` 按受理时点计（延迟提交在登记返回句柄时即计入）；`cancelled` 计取消成功的真实次数（取消发生即计数，含到期前取消的延迟任务），不是载荷被物理丢弃的时点；七类拒绝计数为 `rejected_shutting_down` / `rejected_queue_full` / `rejected_overloaded` / `rejected_ordering_conflict` / `rejected_lane_failed` / `rejected_lane_limit` / `rejected_reserved_type`，其中前六类含延迟到期变体（如 `queue_full_at_expiry` 计入 `rejected_queue_full`）。排空后公开累计量守恒：`submitted == completed + cancelled + task_panics + 已受理延迟任务的到期或停机拒绝 + frozen + aborted`；同步拒绝（含 `rejected_reserved_type`）发生在受理之前，不计入 `submitted`，也不属于该守恒式的分解项。`shutdown` 之后 `is_healthy()` 恒为 false（设计如此，监控口径注意）。
+`is_healthy()`（运行中且无 worker 死亡、无 lane 冻结）、`dead_partitions()`、`failed_lanes()`、
+`lanes()`、`metrics_snapshot()` 提供受理、完成、取消、panic、停机中止、七类拒绝、执行权窃取与
+归还、冻结、排队深度、预算余量和延迟登记量等低基数计数。
+
+任务窃取由 `steal_attempts`、`steal_successes`、`releases` 观察：attempt 只统计严格 lane 的
+执行权 CAS 尝试，非严格 lane 的直接代服务不进入这三个计数。持续倾斜压测中 success 恒为 0，
+通常表示没有形成独立 typed lane、没有空闲 worker 或未出现可接管窗口；attempt 很高而 success
+很低表示执行权竞争或扫描候选失效，需要结合 `queued_depth`、lane 分布与业务耗时判断。
+
+计数口径：`submitted` 按受理时点计（延迟提交在登记返回句柄时即计入）；`cancelled` 计取消成功
+的真实次数（取消发生即计数，含到期前取消的延迟任务），不是载荷被物理丢弃的时点。七类拒绝
+计数为 `rejected_shutting_down` / `rejected_queue_full` / `rejected_overloaded` /
+`rejected_ordering_conflict` / `rejected_lane_failed` / `rejected_lane_limit` /
+`rejected_reserved_type`，其中前六类含延迟到期变体（如 `queue_full_at_expiry` 计入
+`rejected_queue_full`）。排空后公开累计量守恒：`submitted == completed + cancelled +
+task_panics + 已受理延迟任务的到期或停机拒绝 + frozen + aborted`；同步拒绝（含
+`rejected_reserved_type`）发生在受理之前，不计入 `submitted`，也不属于该守恒式的分解项。
+`shutdown` 之后 `is_healthy()` 恒为 false（设计如此，监控口径注意）。
 
 ## 选型建议
 
@@ -170,7 +248,8 @@ if report.frozen > 0 || report.aborted > 0 {
 
 ## 行为边界
 
-- 严格 lane 顺序保证：pop 与执行整体互斥，执行权转移不搬数据，因此转移前后顺序不变；一个正在执行的长任务会推迟该 lane 被接管的时点。
+- 严格 lane 顺序保证：pop 与执行整体互斥，执行权转移不搬数据，因此转移前后顺序不变；接管可
+  在原 worker 执行长任务期间完成，但接管方必须等待门禁，长任务会推迟后继任务开始执行。
 - `submit`/`submit_sync` 非阻塞，队满返回 `QueueFull`；`submit_async` 等待容量，**永不** `QueueFull`。
 - `submit_sync` 的闭包直接占用异步 worker，必须保持短小且不得执行阻塞 I/O；长耗时或阻塞工作
   应先移出执行器，或在业务侧使用受控的 blocking 线程池并等待其结果。
@@ -202,7 +281,7 @@ partition_executor:
 | --- | --- | --- |
 | `partitions` | `2 × CPU` 后向上取 2 的幂 | 显式值也会至少取 1 并向上取 2 的幂。 |
 | `queue_capacity` | `65536` | 每 lane 深度上限；最小按 1、最大按 `u32::MAX` 处理，满时非阻塞提交返回错误。 |
-| `global_inflight` | `partitions × (queue_capacity + 1)` | `with_partitions*` 构造器采用的排队 + 执行中总量上限；`with_limits` 由应用显式提供。 |
+| `global_inflight` | `partitions × (queue_capacity + 1)` | `with_partitions*` 构造器采用的排队 + 执行中总量上限；`with_limits` 由应用显式提供，最小按 1、最大按 Tokio `Semaphore::MAX_PERMITS` 处理。 |
 | `max_lanes` | `max(4096, partitions)` | 类型化 lane 总数上限；兼容入口保留 lane 豁免不计入，显式值低于分区数时按分区数生效。 |
 | `shutdown_timeout_ms` | `2000` | 排空阶段等待上限；最大按 365 天处理，超时后中止在途任务、冻结未排空任务并等待退出证明。 |
 | `full_policy` | `reject` | 应用侧策略示例；组件只返回明确错误，不读取此键，重试或降级由业务决定。 |
@@ -223,4 +302,7 @@ let executor = napart::PartitionExecutor::with_limits(
 ));
 ```
 
-同 key 的任务必须使用稳定 key，例如 `order:{id}`、`account:{id}`。不要把随机值、时间戳或请求 ID 放进 key，否则会破坏串行语义。任务类型同理：`TaskType` 必须是编译期稳定的业务常量，不要动态生成。
+同 key 的任务必须使用稳定 key，例如 `order:{id}`、`account:{id}`。不要把随机值、时间戳或请求
+ID 放进 key，否则会破坏串行语义。路由只承诺同一执行器内相同 key 得到相同原始分区，不应把
+分区号持久化或用于跨进程协议。任务类型同理：`TaskType` 必须是编译期稳定的业务常量，不要动态
+生成。
