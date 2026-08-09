@@ -1,18 +1,21 @@
-# napart —— 同 key 串行消费执行器(从 原实现 TimingWheel.partition 移植,生产硬化版)。
-# 语义:同 key 严格按提交顺序串行、不同 key 最大并发;不丢任务的优雅停机;
-#       任务 panic 隔离 + worker 死亡检测/黑洞拒收/健康面板。
-# 独立发布入口:napart = "1";use napart::PartitionExecutor。
+# napart —— 分 lane 串行/并行执行器。
+# 顺序边界是「分区 + 任务类型」:严格类型同分区按提交顺序串行,非严格类型跨分区并发;
+# 空闲分区经执行权 CAS 接管热点严格 lane(不搬数据,FIFO 由队列保证)。
+# 兼容入口保持同 key 严格 FIFO、有界背压与被拒可见;显式停机提供退出证明和损耗报告。
+# 独立发布入口:napart = "1.1";use napart::PartitionExecutor。
 [package]
 name = "napart"
-version.workspace = true
+version = "1.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 同 key 串行消费执行器(对照原分区执行器;不丢任务优雅停机 + 黑洞防护)"
+description = "NASA 分 lane 串行/并行执行器(同 key 严格 FIFO + 类型化并发 + 有界背压 + 可审计停机)"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/napart"
 
 
 [lib]
@@ -22,3 +25,7 @@ name = "napart"
 # macros: tokio::select! 需要(worker 循环里用到)。
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
+# MPMC 队列:严格 lane 靠门禁把消费者串行化为一个,非严格 lane 直接多消费者并发。
+crossbeam-queue = "0.3"
+# lane 注册表的无锁读快照(写侧串行创建、读侧 load 即最新)。
+arc-swap = "1"

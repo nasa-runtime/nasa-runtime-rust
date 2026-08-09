@@ -76,7 +76,7 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 同 key 串行消费执行器。无重依赖，仅使用 tokio 运行时原语。
+# 本地同 key 严格 FIFO 执行器，提供有界背压、任务隔离与显式停机。
 partition = ["dep:partition_impl"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。

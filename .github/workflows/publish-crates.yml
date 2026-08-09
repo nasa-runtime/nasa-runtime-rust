@@ -16,8 +16,9 @@ on:
           - 6
           - 7
           - 8
+          - napart
       confirm:
-        description: "输入 publish-1.0.2 确认本轮补丁发布"
+        description: "历史批次输入 publish-1.0.2；napart 专批输入 publish-napart-1.1.0"
         required: true
         type: string
 
@@ -38,14 +39,29 @@ jobs:
     steps:
       - name: verify immutable release intent
         env:
+          RELEASE_BATCH: ${{ inputs.batch }}
           RELEASE_CONFIRM: ${{ inputs.confirm }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" != "refs/heads/release/1.0.2" ]]; then
-            echo "仅允许从 release/1.0.2 发布，当前 ref: $GITHUB_REF" >&2
+          case "$RELEASE_BATCH" in
+            napart)
+              expected_ref="refs/heads/release/1.0.3"
+              expected_confirm="publish-napart-1.1.0"
+              ;;
+            1|2|3|4|5|6|7|8)
+              expected_ref="refs/heads/release/1.0.2"
+              expected_confirm="publish-1.0.2"
+              ;;
+            *)
+              echo "未知发布批次: $RELEASE_BATCH" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$GITHUB_REF" != "$expected_ref" ]]; then
+            echo "批次 $RELEASE_BATCH 仅允许从 $expected_ref 发布，当前 ref: $GITHUB_REF" >&2
             exit 1
           fi
-          if [[ "$RELEASE_CONFIRM" != "publish-1.0.2" ]]; then
+          if [[ "$RELEASE_CONFIRM" != "$expected_confirm" ]]; then
             echo "确认文本不匹配，拒绝发布" >&2
             exit 1
           fi
@@ -92,6 +108,9 @@ jobs:
             8)
               echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
               ;;
+            napart)
+              echo "RELEASE_CRATES=napart" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -131,6 +150,9 @@ jobs:
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
+              napart)
+                expected_version="1.1.0"
+                ;;
               natx|nafka|napp|nasa)
                 expected_version="1.0.2"
                 ;;
@@ -206,6 +228,9 @@ jobs:
             8)
               echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
               ;;
+            napart)
+              echo "RELEASE_CRATES=napart" >> "$GITHUB_ENV"
+              ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
               exit 1
@@ -263,7 +288,7 @@ jobs:
               return 1
             fi
 
-            # 工作流修复会改变 git.sha1，但不得改变 path_in_vcs 或任何真正进入 crate 的发布内容。
+            # 工作流提交会改变 git.sha1，但不得改变 path_in_vcs 或任何真正进入 crate 的发布内容。
             jq -S '.git.sha1 = "<release-commit>"' "$local_vcs" > "$compare_root/local-vcs.json"
             jq -S '.git.sha1 = "<release-commit>"' "$remote_vcs" > "$compare_root/remote-vcs.json"
             if ! diff -u "$compare_root/local-vcs.json" "$compare_root/remote-vcs.json"; then
@@ -280,6 +305,9 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
+              napart)
+                expected_version="1.1.0"
+                ;;
               natx|nafka|napp|nasa)
                 expected_version="1.0.2"
                 ;;

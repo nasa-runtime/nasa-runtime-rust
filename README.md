@@ -310,7 +310,7 @@ scheduling:             # scheduling 组件
 | [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列与停机 flush | `telemetry.*` 由 `napp` 读取 |
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
-| [napart](napart/README.md) | `partition` | 同 key 串行、有界队列、停机取消 | `partition_executor.*` |
+| [napart](napart/README.md) | `partition` | 同 key 严格 FIFO、类型化 lane、有界背压与可审计停机 | 无固定根；应用可映射 `partition_executor.*` |
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |

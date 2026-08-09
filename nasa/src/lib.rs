@@ -346,12 +346,15 @@ pub mod mapper {
     };
 }
 
-/// 同 key 串行消费执行器：同 key 严格按提交顺序串行、
-/// 不同 key 最大并发;不丢任务的优雅停机 + worker 死亡检测/黑洞拒收/健康面板。
-/// (注意:与 `nasa::redis::partition` 的 PollCoordinator 是两个不同概念——这里是本地
-/// 同 key 串行执行器,redis 那个是分布式分区消费。)
+/// 本地有界分区执行器：同 key 严格按提交顺序串行，不同 key 按分区并发；提供非阻塞或等待型
+/// 背压、任务 panic 隔离、健康观测与显式异步停机。
 ///
-///   use nasa::partition::PartitionExecutor;
+/// 该模块与 `nasa::redis::partition` 的 `PollCoordinator` 含义不同：这里管理单进程任务执行，
+/// Redis 模块管理分布式分区消费。
+///
+/// ```
+/// use nasa::partition::PartitionExecutor;
+/// ```
 #[cfg(feature = "partition")]
 pub mod partition {
     pub use partition_impl::*;

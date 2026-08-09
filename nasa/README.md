@@ -98,7 +98,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `grpc-experimental` | `nasa::grpc` | 实验性独立 gRPC listener，不进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
-| `partition` | `nasa::partition` | 同 key 串行、有界分区执行器 |
+| `partition` | `nasa::partition` | 同 key 严格 FIFO、有界背压与显式异步停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
