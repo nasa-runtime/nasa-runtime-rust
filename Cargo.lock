@@ -2877,10 +2877,10 @@ dependencies = [
 
 [[package]]
 name = "napart"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f180a27b4206c64ef2d5ae8c99a8a1866fa1baca3b41b6ee7a022b2d378d23f"
+version = "1.1.0"
 dependencies = [
+ "arc-swap",
+ "crossbeam-queue",
  "tokio",
  "tracing",
 ]
@@ -2888,6 +2888,8 @@ dependencies = [
 [[package]]
 name = "napart"
 version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1eda65f267304f1c472dc24af6341323318ad5f02c4ebf3d2ec6f8b889e4ece7"
 dependencies = [
  "arc-swap",
  "crossbeam-queue",
@@ -3055,7 +3057,7 @@ dependencies = [
  "naopenapi 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "napart 1.0.0",
+ "napart 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
