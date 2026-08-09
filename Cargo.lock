@@ -2878,6 +2878,8 @@ dependencies = [
 [[package]]
 name = "napart"
 version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1eda65f267304f1c472dc24af6341323318ad5f02c4ebf3d2ec6f8b889e4ece7"
 dependencies = [
  "arc-swap",
  "crossbeam-queue",
@@ -2887,9 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "napart"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1eda65f267304f1c472dc24af6341323318ad5f02c4ebf3d2ec6f8b889e4ece7"
+version = "1.1.1"
 dependencies = [
  "arc-swap",
  "crossbeam-queue",

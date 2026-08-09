@@ -5,7 +5,7 @@
 # 独立发布入口:napart = "1.1";use napart::PartitionExecutor。
 [package]
 name = "napart"
-version = "1.1.0"
+version = "1.1.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "带保序任务窃取的 NASA 分 lane 执行器（严格 FIFO、类型化并发、有界背压、可审计停机）"
