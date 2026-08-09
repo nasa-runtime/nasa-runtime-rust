@@ -18,7 +18,7 @@ on:
           - 8
           - napart
       confirm:
-        description: "历史批次输入 publish-1.0.2；napart 专批输入 publish-napart-1.1.0"
+        description: "历史批次输入 publish-1.0.2；napart 专批输入 publish-napart-1.1.1"
         required: true
         type: string
 
@@ -31,7 +31,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NAPART_RELEASE_COMMIT: a785b0743d5900986394cb6aff3dca9c7dc3e98b
+  NAPART_RELEASE_COMMIT: 965c12245304902269ea5d8534391c5cd5756d30
 
 jobs:
   guard:
@@ -47,7 +47,7 @@ jobs:
           case "$RELEASE_BATCH" in
             napart)
               expected_ref="refs/heads/release/1.0.3"
-              expected_confirm="publish-napart-1.1.0"
+              expected_confirm="publish-napart-1.1.1"
               ;;
             1|2|3|4|5|6|7|8)
               expected_ref="refs/heads/release/1.0.2"
@@ -162,7 +162,7 @@ jobs:
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
               napart)
-                expected_version="1.1.0"
+                expected_version="1.1.1"
                 ;;
               natx|nafka|napp|nasa)
                 expected_version="1.0.2"
@@ -327,7 +327,7 @@ jobs:
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
               napart)
-                expected_version="1.1.0"
+                expected_version="1.1.1"
                 ;;
               natx|nafka|napp|nasa)
                 expected_version="1.0.2"
