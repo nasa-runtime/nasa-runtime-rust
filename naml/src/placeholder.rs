@@ -374,7 +374,7 @@ fn resolve_placeholder_value(
         }
     }
 
-    // 环境变量 fallback:先原样 key(兼容 `${LOCAL__NETWORK__IP}` 旧脚本形态),再 relaxed key。
+    // 环境变量 fallback 先查原样 key，再查 relaxed key。
     // relaxed = `.`/`-` 转 `_` 后大写(`${server.port}` → `SERVER_PORT`):这是「按名取值」的
     // 命名映射,与 `APP__...` 覆盖层的「按结构注入」规则刻意不同,不做双下划线。
     let relaxed = relaxed_env_key(spec.key);

@@ -1,25 +1,24 @@
-# yml —— 通用分层 YAML 配置加载器(从各 app 的 config.rs 下沉,机制写一次复用)。
-# 业务经门面 `use nasa::yml::{YmlLoader, YmlOverlay};` 引用(crate 真名 naml,业务无感知)。
-#
-# 职责：合并本地主配置、profile、内存 overlay（含 Nacos 拉回的多配置）与环境变量，
-#   叠加后解析 ${...} 占位符,再反序列化成调用方给定的强类型 T。
-# 边界:**不连接 Nacos、不存全局、不热替换、不认识业务 AppConfig**;
-#   import 解析只产出中性 YmlImport(File/Nacos 描述),真正的 Nacos 拉取由门面层胶水完成。
+# naml 只处理通用配置来源、分层合并、占位符和强类型反序列化。
+# 远端配置由调用方作为内存 overlay 提供；本 crate 不连接配置中心，也不发布业务配置。
 [package]
 name = "naml"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "通用分层 YAML 配置加载器(本地+profile+overlay+env+${}占位符 → 强类型 T);不认识业务 AppConfig"
+description = "通用分层配置加载器，支持来源追踪、有界读取与可选精确文件 watcher"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-
+keywords = ["configuration", "yaml", "serde", "hot-reload", "overlay"]
+categories = ["config", "development-tools"]
 
 [lib]
 name = "naml"
+
+[features]
+default = []
+watch = ["dep:notify"]
+
 [dependencies]
 nabase = { package = "nabase", version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
@@ -29,3 +28,4 @@ serde_json = "1"
 config = { version = "0.15", default-features = false, features = ["yaml", "json", "toml"] }
 anyhow = "1"
 tracing = "0.1"
+notify = { version = "8.2", optional = true }
