@@ -143,7 +143,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 方法级 L1/L2 缓存 | `cache` | `nasa::cache::{cached, cache_invalidate}` |
 | 接口保护与 Prometheus/Grafana 面板 | `grafana` | `nasa::grafana::{grafana, Command, metrics}` |
 | 日志 | `log` | `nasa::log::LogManager` |
-| yml 配置加载 | `yml` / `config-boot` | `nasa::yml`、`nasa::config_boot` |
+| yml 配置加载与文件观察 | `yml` / `yml-watch` / `config-boot` | `nasa::yml`、`nasa::yml::watch`、`nasa::yml::nacos` |
 | 注册中心 | `nacos` / `nacos-sdk` | `nasa::nacos` |
 | 静态/DNS 服务发现 | `discovery` | `nasa::discovery::{StaticDiscovery, DnsDiscovery}` |
 | REST 负载均衡 | `rest-discovery` / `rest-discovery-nacos` | `nasa::discovery::rest` |
@@ -272,7 +272,7 @@ scheduling:             # scheduling 组件
 | [nasa](nasa/README.md) | 门面包 | 统一导出所有业务能力 | 不直接读取 yml，按组件配置 |
 | [napp](napp/README.md) | `application` | `#[nasa::application]` 应用生命周期运行时:组件编排、信号、优雅停机、配置热刷新 | `application.*` 及各组件配置根 |
 | [napp-macro](napp-macro/README.md) | `application` | `#[nasa::application(...)]` 属性宏与编译期校验 | 由 `napp` 运行时读取 |
-| [naml](naml/README.md) | `yml` | 分层 yml、profile、环境变量覆盖、解析本地/远端 import 描述 | `yml.*`、业务自定义根节点 |
+| [naml](naml/README.md) | `yml` / `yml-watch` | 分层配置、来源追踪、精确文件观察与本地/Nacos import 中性描述 | `yml.*`、业务自定义根节点 |
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
 | [nanacos](nanacos/README.md) | `nacos` / `nacos-sdk` | Nacos 配置、注册、发现、监听 | `nacos.*` |
 | [nadisc](nadisc/README.md) | `discovery` | 服务发现抽象、实例过滤、watch 契约 | `discovery.*` |

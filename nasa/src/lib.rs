@@ -446,11 +446,13 @@ pub mod base {
 
 /// 通用分层 YAML 配置加载器(对照;crate = `yml`)。
 /// `nasa = { features = ["yml"] }` → `use nasa::yml::{YmlLoader, YmlOverlay};`
+/// `nasa = { features = ["yml-watch"] }` → `use nasa::yml::watch::YmlWatcher;`
 /// 本地主配置 `zcf/application.yml` + profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。
 ///
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load()?;                       // 纯本地
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load_with_overlays(&ovs)?;     // 叠加 Nacos 多配置
 ///
+/// watcher 只报告精确来源变化，候选校验、运行态资源准备和配置发布仍由应用负责。
 /// 边界:**不连接 Nacos、不存全局、不热替换、不认识业务 AppConfig**;`import` 只产出中性
 /// `YmlImport`(File/Nacos 描述),「按 import 调 Nacos 拉取拼 overlay」的胶水在门面/app 侧(yml 零 Nacos 依赖)。
 #[cfg(feature = "yml")]

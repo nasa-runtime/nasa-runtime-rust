@@ -90,3 +90,7 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
+
+# 工作区消费者统一解析当前 naml 源码，确保加载器、来源事实与 watcher 使用同一 package 实例。
+[patch.crates-io]
+naml = { path = "naml" }
