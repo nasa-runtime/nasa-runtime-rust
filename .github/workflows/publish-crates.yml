@@ -16,9 +16,10 @@ on:
           - 6
           - 7
           - 8
+          - naml
           - napart
       confirm:
-        description: "历史批次输入 publish-1.0.2；napart 专批输入 publish-napart-1.1.1"
+        description: "naml 专批输入 publish-naml-1.0.2；napart 专批输入 publish-napart-1.1.1"
         required: true
         type: string
 
@@ -45,6 +46,10 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
+            naml)
+              expected_ref="refs/heads/release/1.0.3"
+              expected_confirm="publish-naml-1.0.2"
+              ;;
             napart)
               expected_ref="refs/heads/release/1.0.3"
               expected_confirm="publish-napart-1.1.1"
@@ -95,6 +100,9 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
+            naml)
+              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
             1)
               echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
               ;;
@@ -161,6 +169,9 @@ jobs:
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
+              naml)
+                expected_version="1.0.2"
+                ;;
               napart)
                 expected_version="1.1.1"
                 ;;
@@ -225,6 +236,9 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
+            naml)
+              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
+              ;;
             1)
               echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
               ;;
@@ -326,6 +340,9 @@ jobs:
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
             case "$crate_name" in
+              naml)
+                expected_version="1.0.2"
+                ;;
               napart)
                 expected_version="1.1.1"
                 ;;

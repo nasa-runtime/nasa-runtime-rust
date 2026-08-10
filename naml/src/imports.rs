@@ -1,6 +1,6 @@
-//! import 列表解析(对照)。
+//! import 列表解析。
 //!
-//! Rust 侧不兼容其它生态的配置导入语法,用自己的 `yml` 段表达导入:
+//! `naml` 使用 `yml` 段表达导入：
 //!
 //! - `yml.imports`:完整显式列表,可混合本地 `file:` 与远端 `nacos:`,表达力更强(交错保序)。
 //!
@@ -44,7 +44,7 @@ pub struct NacosImport {
     pub file_extension: Option<String>,
 }
 
-/// 业务作用：从合并后的配置树解析 `yml.imports` 列表(对照)。
+/// 业务作用：从合并后的配置树解析 `yml.imports` 列表。
 ///
 /// # 参数
 /// - `tree`: 已合并并解析占位符后的配置 Value 树。
