@@ -103,6 +103,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
 | `yml` | `nasa::yml` | 分层 YAML、overlay、环境变量和占位符 |
+| `yml-watch` | `nasa::yml::watch` | 精确文件变化观察；同时启用 `yml` |
 | `config-boot` / `nacos-config` | `nasa::yml::nacos` | 配置中心引导与应用组件桥 |
 | `discovery` | `nasa::discovery` | 静态/DNS/provider-neutral 发现合同 |
 | `nacos` / `nacos-sdk` | `nasa::config::nacos`、`nasa::discovery::nacos` | API 层与真实传输层 |
