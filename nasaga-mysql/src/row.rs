@@ -51,6 +51,41 @@ pub struct SagaInstanceRow {
     pub deadline_at_ms: Option<i64>,
     /// 最近一次失败的稳定原因码；无失败时为空。
     pub failure_code: Option<String>,
+    /// 实例最新因果上下文（canonical W3C traceparent）；创建入口显式传入、每次已认证
+    /// result 推进同事务更新。为空表示调用链未提供上下文，投递不受影响。
+    pub traceparent: Option<String>,
+}
+
+/// 业务作用：实例只读检索返回的摘要行——只含身份、状态、当前步骤、版本、稳定原因码
+/// 与时间戳，不携带业务 payload，可安全进入管理面响应。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaInstanceSummary {
+    /// 实例身份。
+    pub saga_id: SagaId,
+    /// 租户身份（与查询条件一致，仅回显本租户）。
+    pub tenant: TenantId,
+    /// workflow 名称。
+    pub workflow: WorkflowName,
+    /// 业务幂等键。
+    pub business_key: BusinessKey,
+    /// 固定到实例的 definition 版本。
+    pub definition_version: DefinitionVersion,
+    /// 业务状态。
+    pub status: SagaStatus,
+    /// 管理面控制状态。
+    pub control_state: ControlState,
+    /// 推进方向。
+    pub direction: Direction,
+    /// 当前步骤名称；未定位时为空。
+    pub current_step: Option<StepName>,
+    /// 乐观并发版本。
+    pub version: u64,
+    /// 最近一次失败的稳定原因码；无失败时为空。
+    pub failure_code: Option<String>,
+    /// 创建时刻（epoch 毫秒）。
+    pub created_at_ms: i64,
+    /// 最近更新时刻（epoch 毫秒）。
+    pub updated_at_ms: i64,
 }
 
 /// 业务作用：orchestrator step journal 的一行投影快照。
@@ -163,6 +198,46 @@ pub(crate) fn parse_instance_row(row: &MySqlRow) -> Result<SagaInstanceRow, Saga
         version: row.try_get("version").map_err(map_database)?,
         deadline_at_ms: row.try_get("deadline_at").map_err(map_database)?,
         failure_code: row.try_get("failure_code").map_err(map_database)?,
+        traceparent: row.try_get("traceparent").map_err(map_database)?,
+    })
+}
+
+/// 业务作用：从检索查询结果解析实例摘要行，稳定文本列收敛回封闭枚举。
+///
+/// 参数说明：
+/// - `row`: 检索 `SELECT` 出的摘要行。
+///
+/// 返回：解析成功返回摘要；任一列不在封闭词汇表内返回标记列名的数据损坏错误。
+pub(crate) fn parse_instance_summary(
+    row: &MySqlRow,
+) -> Result<SagaInstanceSummary, SagaStoreError> {
+    let saga_id: String = row.try_get("saga_id").map_err(map_database)?;
+    let tenant: String = row.try_get("tenant_id").map_err(map_database)?;
+    let workflow: String = row.try_get("workflow_name").map_err(map_database)?;
+    let business_key: String = row.try_get("business_key").map_err(map_database)?;
+    let definition_version: u32 = row.try_get("definition_version").map_err(map_database)?;
+    let status: String = row.try_get("status").map_err(map_database)?;
+    let control_state: String = row.try_get("control_state").map_err(map_database)?;
+    let direction: String = row.try_get("direction").map_err(map_database)?;
+    let current_step: Option<String> = row.try_get("current_step").map_err(map_database)?;
+    Ok(SagaInstanceSummary {
+        saga_id: SagaId::new(saga_id).map_err(|_| corrupt("saga_id"))?,
+        tenant: TenantId::new(tenant).map_err(|_| corrupt("tenant_id"))?,
+        workflow: WorkflowName::new(workflow).map_err(|_| corrupt("workflow_name"))?,
+        business_key: BusinessKey::new(business_key).map_err(|_| corrupt("business_key"))?,
+        definition_version: DefinitionVersion::new(definition_version)
+            .map_err(|_| corrupt("definition_version"))?,
+        status: SagaStatus::parse(&status).ok_or_else(|| corrupt("status"))?,
+        control_state: ControlState::parse(&control_state)
+            .ok_or_else(|| corrupt("control_state"))?,
+        direction: Direction::parse(&direction).ok_or_else(|| corrupt("direction"))?,
+        current_step: current_step
+            .map(|step| StepName::new(step).map_err(|_| corrupt("current_step")))
+            .transpose()?,
+        version: row.try_get("version").map_err(map_database)?,
+        failure_code: row.try_get("failure_code").map_err(map_database)?,
+        created_at_ms: row.try_get("created_at_ms").map_err(map_database)?,
+        updated_at_ms: row.try_get("updated_at_ms").map_err(map_database)?,
     })
 }
 

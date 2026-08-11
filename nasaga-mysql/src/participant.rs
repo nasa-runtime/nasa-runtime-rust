@@ -658,7 +658,7 @@ impl MySqlSagaStore {
                 Ok(ExternalCancelAdmission::Admitted)
             }
             // 已提交 PENDING 说明旧调用方取得准入后绕过 settle 仍然提交；继续调用外部
-            // cancel 会建立在不完整事实之上，必须 fail-closed 等人工修复。
+            // cancel 会建立在不完整事实之上，必须 fail-closed 交由人工核对后处置。
             StepForwardStatus::Pending => Err(SagaStoreError::new(
                 "external cancel gate row was committed in PENDING state",
             )),

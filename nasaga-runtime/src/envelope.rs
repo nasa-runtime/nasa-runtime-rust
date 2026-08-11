@@ -374,6 +374,9 @@ impl SagaCommandEnvelope {
             event_type: COMMAND_EVENT_TYPE.to_string(),
             payload: serde_json::to_vec(self)?,
             traceparent: None,
+            // 租户归因取自已验真的 envelope 身份,与受信写入上下文同源;写入权威
+            // 仍是 append 时的 OutboxWriteContext。
+            tenant: self.tenant_id.clone(),
         })
     }
 }
@@ -471,6 +474,7 @@ impl SagaResultEnvelope {
             event_type: RESULT_EVENT_TYPE.to_string(),
             payload: serde_json::to_vec(self)?,
             traceparent: None,
+            tenant: self.tenant_id.clone(),
         })
     }
 }

@@ -12,6 +12,9 @@ use std::time::Duration;
 use nasaga_mysql::SagaStoreMetrics;
 
 static KAFKA_RESULT_PROCESSING_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// 按租户配额拒绝的创建请求进程累计。
+static QUOTA_REJECTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ACTION_RATE_REJECTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static KAFKA_RESULT_PROCESSING_MICROS: AtomicU64 = AtomicU64::new(0);
 static KAFKA_RESULT_RETRY_TOTAL: AtomicU64 = AtomicU64::new(0);
 static KAFKA_RESULT_DLT_REQUESTED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +38,13 @@ pub struct SagaOperationalMetrics {
     pub compensated_total: u64,
     /// 进入 `MANUAL_INTERVENTION` 的历史迁移数。
     pub manual_intervention_total: u64,
+    /// 进入 `MANUALLY_CLOSED` 的历史迁移数（系统外处置后人工关闭自动化）。
+    pub manually_closed_total: u64,
+    /// 当前进程按租户配额拒绝的创建请求数（不携带租户标签,精确用量走受鉴权管理查询）。
+    pub quota_rejections_total: u64,
+    /// 当前进程按租户速率拒绝的变更类管理动作数（不携带租户标签,当前窗口用量走
+    /// 受鉴权管理查询）。
+    pub action_rate_rejections_total: u64,
     /// 历史 Unknown attempt 数。
     pub unknown_result_total: u64,
     /// 历史业务 attempt 重试数。
@@ -100,6 +110,21 @@ impl SagaOperationalMetrics {
             &mut output,
             "nasaga_manual_intervention_total",
             self.manual_intervention_total,
+        );
+        counter(
+            &mut output,
+            "nasaga_manually_closed_total",
+            self.manually_closed_total,
+        );
+        counter(
+            &mut output,
+            "nasaga_quota_rejections_total",
+            self.quota_rejections_total,
+        );
+        counter(
+            &mut output,
+            "nasaga_action_rate_rejections_total",
+            self.action_rate_rejections_total,
         );
         counter(
             &mut output,
@@ -204,6 +229,9 @@ impl From<SagaStoreMetrics> for SagaOperationalMetrics {
             completed_total: store.completed_total,
             compensated_total: store.compensated_total,
             manual_intervention_total: store.manual_intervention_total,
+            manually_closed_total: store.manually_closed_total,
+            quota_rejections_total: QUOTA_REJECTIONS_TOTAL.load(Ordering::Relaxed),
+            action_rate_rejections_total: ACTION_RATE_REJECTIONS_TOTAL.load(Ordering::Relaxed),
             unknown_result_total: store.unknown_result_total,
             retry_attempt_total: store.retry_attempt_total,
             conflict_total: store.conflict_total,
@@ -232,6 +260,24 @@ impl From<SagaStoreMetrics> for SagaOperationalMetrics {
             kafka_command_duplicate_total: KAFKA_COMMAND_DUPLICATE_TOTAL.load(Ordering::Relaxed),
         }
     }
+}
+
+/// 业务作用：累计一次按租户配额拒绝的创建请求,供低基数观测面导出。
+///
+/// 参数说明: 无。
+///
+/// 返回：无返回值。
+pub(crate) fn record_quota_rejection() {
+    QUOTA_REJECTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 业务作用：累计一次按租户速率拒绝的变更类管理动作,供低基数观测面导出。
+///
+/// 参数说明: 无。
+///
+/// 返回：无返回值。
+pub(crate) fn record_action_rate_rejection() {
+    ACTION_RATE_REJECTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 业务作用：记录一次 Kafka Saga result 的端到端 handler 耗时。

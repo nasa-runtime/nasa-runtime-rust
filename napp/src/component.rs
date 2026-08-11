@@ -25,7 +25,7 @@ pub trait ShutdownAction: Send {
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a>;
 }
 
-/// 内置组件的三阶段生命周期协议；boxed future 保持 trait object-safe。
+/// 内置组件的受管生命周期协议；boxed future 保持 trait object-safe。
 pub trait ApplicationComponent: Send {
     /// 业务作用：返回组件的稳定身份。
     ///
@@ -64,7 +64,17 @@ pub trait ApplicationComponent: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// 业务作用：在 UserHook 成功后激活对外服务或调度终端。
+    /// 业务作用：在业务 initializer 之前完成 migration 和出站依赖门禁。
+    ///
+    /// 参数说明：
+    /// - `_context`：只提供 Application、组件资源登记和 action 激活能力的阶段上下文。
+    ///
+    /// 返回：出站依赖已可供 initializer 安全使用时成功；失败时禁止初始化和接流。
+    fn prepare<'a>(&'a mut self, _context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// 业务作用：在 Prepare、业务初始化与 Seal 全部成功后激活对外服务或调度终端。
     ///
     /// # 参数
     ///
@@ -91,8 +101,14 @@ pub(crate) enum ActiveStep {
         component: ComponentId,
         action: Box<dyn ShutdownAction>,
     },
+    InitializerAction {
+        initializer: std::sync::Arc<str>,
+        action: Box<dyn ShutdownAction>,
+    },
     ComponentResources(ComponentId),
+    InitializerResources(std::sync::Arc<str>),
     BusinessResources,
+    InitializerTasks,
     UserTasks,
 }
 
@@ -100,6 +116,7 @@ pub(crate) enum ActiveStep {
 pub(crate) struct ActiveStack {
     steps: Vec<ActiveStep>,
     component_resources: HashSet<ComponentId>,
+    initializer_resources: HashSet<std::sync::Arc<str>>,
 }
 
 impl ActiveStack {
@@ -112,6 +129,7 @@ impl ActiveStack {
         Self {
             steps: Vec::new(),
             component_resources: HashSet::new(),
+            initializer_resources: HashSet::new(),
         }
     }
 
@@ -133,6 +151,16 @@ impl ActiveStack {
         self.steps.push(ActiveStep::UserTasks);
     }
 
+    /// 业务作用：在 Ready action 之前压入受管任务清理门。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；该步骤位于 initializer action/资源之上、Ready action 之下，
+    /// 因此停机先关入口，再停任务，最后释放 initializer 所有权。
+    pub(crate) fn push_initializer_tasks(&mut self) {
+        self.steps.push(ActiveStep::InitializerTasks);
+    }
+
     /// 业务作用：弹出最后成功激活的步骤。
     ///
     /// # 参数
@@ -140,6 +168,15 @@ impl ActiveStack {
     /// 本方法无参数；返回顺序天然实现副作用的严格反向撤销。
     pub(crate) fn pop(&mut self) -> Option<ActiveStep> {
         self.steps.pop()
+    }
+
+    /// 业务作用：返回尚待逆序处置的 active step 数量，供停机摘要区分已尝试与被 deadline 放弃的步骤。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前栈内仍持有所有权的步骤数量，不改变清理顺序。
+    pub(crate) fn len(&self) -> usize {
+        self.steps.len()
     }
 
     /// 业务作用：把组件已经成功形成的可逆副作用压栈。
@@ -160,6 +197,37 @@ impl ActiveStack {
     fn ensure_component_resources(&mut self, component: ComponentId) {
         if self.component_resources.insert(component) {
             self.steps.push(ActiveStep::ComponentResources(component));
+        }
+    }
+
+    /// 业务作用：把 initializer 已完整生效的可逆副作用立即压入统一清理栈。
+    ///
+    /// 参数说明：
+    /// - `initializer`：产生副作用的 canonical initializer 身份。
+    /// - `action`：持有撤销所需句柄的清理动作。
+    ///
+    /// 返回：无返回值；后续失败会严格逆序撤销。
+    pub(crate) fn activate_initializer(
+        &mut self,
+        initializer: std::sync::Arc<str>,
+        action: Box<dyn ShutdownAction>,
+    ) {
+        self.steps.push(ActiveStep::InitializerAction {
+            initializer,
+            action,
+        });
+    }
+
+    /// 业务作用：为 initializer 首次资源登记建立唯一清理步骤。
+    ///
+    /// 参数说明：
+    /// - `initializer`：拥有随后登记资源的 canonical 身份。
+    ///
+    /// 返回：无返回值；同一 initializer 仅压栈一次。
+    pub(crate) fn ensure_initializer_resources(&mut self, initializer: std::sync::Arc<str>) {
+        if self.initializer_resources.insert(initializer.clone()) {
+            self.steps
+                .push(ActiveStep::InitializerResources(initializer));
         }
     }
 }
@@ -280,4 +348,5 @@ macro_rules! lifecycle_context {
 
 lifecycle_context!(BootstrapContext);
 lifecycle_context!(StartContext);
+lifecycle_context!(PrepareContext);
 lifecycle_context!(ReadyContext);

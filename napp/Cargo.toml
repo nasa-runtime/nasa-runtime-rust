@@ -1,13 +1,14 @@
 [package]
 name = "napp"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA application lifecycle runtime"
+description = "NASA application lifecycle runtime with dependency-ordered initialization barriers"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["runtime", "lifecycle", "initializer", "microservices", "async"]
 categories.workspace = true
 
 [features]
@@ -19,7 +20,7 @@ log = ["dep:nalog"]
 nacos-config = ["dep:config-boot", "dep:nanacos"]
 nacos-config-sdk = ["nacos-config", "nanacos/nacos"]
 # db：MySQL 数据源；建池与探测能力在 natx，napp 不直接依赖 SQLx；
-# migration 门禁由 namigrate 提供，在 DB 组件 Ready 前执行且不新增组件字符串。
+# migration 门禁由 namigrate 提供，在 DB 组件 Prepare 执行且不新增组件字符串。
 db = ["dep:natx", "dep:namigrate"]
 # redis：统一客户端建连与显式停机由 nadis 提供，napp 只做编排。
 redis = ["dep:nadis"]
@@ -37,6 +38,9 @@ outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql"]
 # Saga：在 UserHook 接收已完成业务定义装配的运行时，Ready 前执行合同与历史实例门禁，
 # 并由 Application 监督 durable timer 轮询。数据库可以由 db 组件或业务 Hook 初始化。
 saga = ["db", "outbox", "dep:nasaga-runtime"]
+# Saga 的 Redis Streams 受管 transport:组件在 Ready 前校验拓扑/group/route owner,
+# 消费循环受 Runner 监督,停机先关领取再排空、最后由 Redis 组件释放连接。
+saga-redis-stream = ["saga", "redis", "nasaga-runtime/redis-stream"]
 # Web：自动端点收集、监听与排空；无 Web 的批处理不编译路由和网络依赖。
 web = ["dep:axum", "dep:naweb", "dep:matchit", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
 # Web 安全端点：把 naweb 的 auth/crypto 组合显式编入 Application 容器路径。
@@ -59,6 +63,8 @@ arc-swap = "1"
 axum = { version = "0.8", optional = true }
 config-boot = { version = "1.0.1", optional = true }
 futures = { version = "0.3", optional = true }
+futures-util = "0.3"
+linkme = "0.3"
 naweb = { version = "1.0.1", optional = true }
 matchit = { version = "0.8", optional = true }
 naml = { version = "1.0.1" }
@@ -82,9 +88,9 @@ async-trait = { version = "0.1", optional = true }
 nadis = { version = "1.0.1", optional = true }
 nalog = { version = "1.0.0", optional = true }
 nafka = { version = "1.0.2", optional = true, default-features = false }
-naoutbox-core = { version = "1.0.1", optional = true }
-naoutbox-mysql = { version = "1.0.1", optional = true }
-nasaga-runtime = { version = "1.0.1", optional = true }
+naoutbox-core = { version = "1.0.2", optional = true }
+naoutbox-mysql = { version = "1.0.2", optional = true }
+nasaga-runtime = { version = "1.0.2", optional = true }
 nanacos = { version = "1.0.1", optional = true, default-features = false }
 nasched = { version = "1.0.1", optional = true }
 naws = { version = "1.0.1", optional = true, default-features = false }

@@ -10,7 +10,9 @@
 //!    不得继续用旧快照写 Outbox。`transition_seq` 直接取 CAS 推进后的 `version`。
 
 use crate::error::{is_unique_violation, map_connection, map_database, SagaStoreError};
-use crate::row::{parse_instance_row, SagaInstanceRow};
+use crate::row::{
+    parse_instance_row, parse_instance_summary, SagaInstanceRow, SagaInstanceSummary,
+};
 use crate::MySqlSagaStore;
 use nasaga_core::{
     check_transition, ControlState, DefinitionVersion, Direction, SagaId, SagaStatus, StepName,
@@ -53,6 +55,30 @@ pub struct NewSagaInstance<'a> {
     pub trigger_kind: TriggerKind,
     /// 初始 transition 的触发身份（event id 或 operation id）。
     pub trigger_id: &'a str,
+    /// 创建入口显式传入的 canonical W3C traceparent；为空表示调用链未提供上下文。
+    /// 该值随实例持久化，是 timer 与崩溃恢复命令保持链路连续的唯一来源。
+    pub traceparent: Option<&'a str>,
+}
+
+/// 业务作用：描述一次租户受限实例检索的全部过滤条件。
+///
+/// 字段说明：`tenant` 是强制条件——检索面绝不跨租户；`statuses` 为空表示不过滤状态；
+/// 时间窗以 epoch 毫秒表达并允许只给单边；`after` 是上一页最后一个 saga_id 的 keyset
+/// 游标，复用与非终态扫描一致的分页口径，插删不跳行。
+#[derive(Debug, Clone, Copy)]
+pub struct SagaInstanceQuery<'a> {
+    /// 租户身份，强制过滤条件。
+    pub tenant: &'a nasaga_core::TenantId,
+    /// 业务状态集合；为空不过滤。
+    pub statuses: Option<&'a [SagaStatus]>,
+    /// 创建时刻下界（含，epoch 毫秒）；为空不设下界。
+    pub created_from_ms: Option<i64>,
+    /// 创建时刻上界（不含，epoch 毫秒）；为空不设上界。
+    pub created_to_ms: Option<i64>,
+    /// keyset 游标：上一页最后一个 saga_id；为空从首行开始。
+    pub after: Option<&'a SagaId>,
+    /// 页大小，必须在 1..=1000。
+    pub limit: u32,
 }
 
 /// 业务作用：区分创建入口的两种合法结果，驱动调用方决定是否发布首步命令。
@@ -155,14 +181,14 @@ pub enum ManagementAuditOutcome {
 /// 按实例身份加载快照的查询；列集合与 [`parse_instance_row`] 一一对应。
 const SELECT_INSTANCE_BY_ID_SQL: &str = "SELECT saga_id, tenant_id, workflow_name, business_key, \
      definition_version, definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
-     compensation_plan_version, version, deadline_at, failure_code FROM saga_instance \
+     compensation_plan_version, version, deadline_at, failure_code, traceparent FROM saga_instance \
      WHERE saga_id = ?";
 
 /// 按业务幂等键加载快照的查询；列集合与 [`parse_instance_row`] 一一对应。
 const SELECT_INSTANCE_BY_BUSINESS_SQL: &str = "SELECT saga_id, tenant_id, workflow_name, \
      business_key, definition_version, definition_digest, status, control_state, control_version, direction, \
-     start_request_digest, current_step, compensation_plan_version, version, deadline_at, failure_code \
-     FROM saga_instance WHERE tenant_id = ? AND workflow_name = ? AND business_key = ?";
+     start_request_digest, current_step, compensation_plan_version, version, deadline_at, failure_code, \
+     traceparent FROM saga_instance WHERE tenant_id = ? AND workflow_name = ? AND business_key = ?";
 
 impl MySqlSagaStore {
     /// 业务作用：以受保护事务幂等创建 Saga 实例。
@@ -185,6 +211,9 @@ impl MySqlSagaStore {
         validate_digest(spec.definition_digest)?;
         validate_digest(spec.start_request_digest)?;
         validate_trigger_id(spec.trigger_id)?;
+        if let Some(traceparent) = spec.traceparent {
+            validate_traceparent(traceparent)?;
+        }
         // 创建必须与首步命令 Outbox/timer/Audit 同一事务原子提交:事务外 autocommit 会打开
         // "实例已存在但首步命令永远丢失"的窗口。
         require_ambient_transaction()?;
@@ -193,7 +222,7 @@ impl MySqlSagaStore {
         let inserted = sqlx::query(
             "INSERT INTO saga_instance (saga_id, tenant_id, workflow_name, business_key, \
              definition_version, definition_digest, start_request_digest, status, control_state, control_version, direction, \
-             current_step, version, deadline_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?)",
+             current_step, version, deadline_at, traceparent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)",
         )
         .bind(spec.saga_id.as_str())
         .bind(spec.tenant.as_str())
@@ -207,6 +236,7 @@ impl MySqlSagaStore {
         .bind(Direction::Forward.as_str())
         .bind(spec.current_step.map(StepName::as_str))
         .bind(spec.deadline_at_ms)
+        .bind(spec.traceparent)
         .execute(connection.as_mut())
         .await;
 
@@ -295,6 +325,70 @@ impl MySqlSagaStore {
         self.list_non_terminal_after(None, limit).await
     }
 
+    /// 业务作用：租户受限的实例只读检索——按状态集合与创建时间窗过滤，saga_id keyset
+    /// 分页，服务运维定位待处置对象（此前只能直连数据库）。
+    ///
+    /// 查询是纯读动作：不携带 payload，不改变任何状态；租户过滤在 SQL 层强制，
+    /// 不同租户的实例存在性不经本查询泄漏。全部可选条件以恒绑定参数表达
+    /// （`COALESCE`/哨兵值），避免动态拼接 SQL。
+    ///
+    /// 参数说明：
+    /// - `query`: 租户、状态集合、创建时间窗、cursor 与页大小。
+    ///
+    /// 返回：满足条件的实例摘要，按 saga_id 升序；页大小非法返回错误。
+    pub async fn list_instances(
+        &self,
+        query: &SagaInstanceQuery<'_>,
+    ) -> Result<Vec<SagaInstanceSummary>, SagaStoreError> {
+        if query.limit == 0 || query.limit > 1_000 {
+            return Err(SagaStoreError::new(
+                "instance query page size must be within 1..=1000",
+            ));
+        }
+        if let (Some(from), Some(to)) = (query.created_from_ms, query.created_to_ms) {
+            if from > to {
+                return Err(SagaStoreError::new(
+                    "instance query time window is inverted",
+                ));
+            }
+        }
+        // 状态集合来自封闭枚举的稳定文本,逗号拼接后经 FIND_IN_SET 比对;不存在把任意
+        // 文本拼进语句的通道。
+        let statuses = query.statuses.map(|set| {
+            set.iter()
+                .map(|status| status.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let rows = sqlx::query(
+            "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
+             status, control_state, direction, current_step, version, failure_code, \
+             CAST(ROUND(UNIX_TIMESTAMP(created_at) * 1000) AS SIGNED) AS created_at_ms, \
+             CAST(ROUND(UNIX_TIMESTAMP(updated_at) * 1000) AS SIGNED) AS updated_at_ms \
+             FROM saga_instance \
+             WHERE tenant_id = ? \
+             AND saga_id > COALESCE(?, '') \
+             AND (? IS NULL OR created_at >= FROM_UNIXTIME(? / 1000.0)) \
+             AND (? IS NULL OR created_at < FROM_UNIXTIME(? / 1000.0)) \
+             AND (? IS NULL OR FIND_IN_SET(status, ?) > 0) \
+             ORDER BY saga_id ASC LIMIT ?",
+        )
+        .bind(query.tenant.as_str())
+        .bind(query.after.map(SagaId::as_str))
+        .bind(query.created_from_ms)
+        .bind(query.created_from_ms)
+        .bind(query.created_to_ms)
+        .bind(query.created_to_ms)
+        .bind(statuses.as_deref())
+        .bind(statuses.as_deref())
+        .bind(query.limit)
+        .fetch_all(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        rows.iter().map(parse_instance_summary).collect()
+    }
+
     /// 业务作用：以 saga_id keyset 分页扫描非终态实例，避免启动预检只覆盖首批数据。
     ///
     /// 参数说明：
@@ -319,25 +413,27 @@ impl MySqlSagaStore {
                 Some(after) => sqlx::query(
                     "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
                      definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
-                     compensation_plan_version, version, deadline_at, failure_code \
-                     FROM saga_instance WHERE saga_id > ? AND status NOT IN (?, ?) \
+                     compensation_plan_version, version, deadline_at, failure_code, traceparent \
+                     FROM saga_instance WHERE saga_id > ? AND status NOT IN (?, ?, ?) \
                      ORDER BY saga_id ASC LIMIT ?",
                 )
                 .bind(after.as_str())
                 .bind(SagaStatus::Completed.as_str())
                 .bind(SagaStatus::Compensated.as_str())
+                .bind(SagaStatus::ManuallyClosed.as_str())
                 .bind(limit)
                 .fetch_all(connection.as_mut())
                 .await,
                 None => sqlx::query(
                     "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
                      definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
-                     compensation_plan_version, version, deadline_at, failure_code \
-                     FROM saga_instance WHERE status NOT IN (?, ?) \
+                     compensation_plan_version, version, deadline_at, failure_code, traceparent \
+                     FROM saga_instance WHERE status NOT IN (?, ?, ?) \
                      ORDER BY saga_id ASC LIMIT ?",
                 )
                 .bind(SagaStatus::Completed.as_str())
                 .bind(SagaStatus::Compensated.as_str())
+                .bind(SagaStatus::ManuallyClosed.as_str())
                 .bind(limit)
                 .fetch_all(connection.as_mut())
                 .await,
@@ -369,6 +465,37 @@ impl MySqlSagaStore {
             .await
             .map_err(map_database)?;
         row.as_ref().map(parse_instance_row).transpose()
+    }
+
+    /// 业务作用：在结果推进事务内更新实例的最新因果上下文（canonical W3C traceparent）。
+    ///
+    /// 上下文是观测面元数据：更新不递增 `version`、不写 transition 行，也不参与 CAS——
+    /// 它随本次推进事务一起提交或回滚，推进输掉 CAS 时更新同样被回滚，因此已提交实例
+    /// 上的 traceparent 永远来自一次真实生效的推进或创建。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    /// - `traceparent`: 已通过 W3C 语法校验的 canonical `traceparent` 文本。
+    ///
+    /// 返回：更新成功返回 `Ok`（实例不存在时静默无行，由推进路径的 CAS 负责失败）；
+    /// 文本越界、事务缺失或底层失败返回错误。
+    pub async fn update_trace_context(
+        &self,
+        saga_id: &SagaId,
+        traceparent: &str,
+    ) -> Result<(), SagaStoreError> {
+        validate_traceparent(traceparent)?;
+        // 因果上下文必须与触发它的结果推进同事务:事务外 autocommit 会让"上下文已换新
+        // 但推进被回滚"的实例把后续命令挂到从未生效的 trace 上。
+        require_ambient_transaction()?;
+        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        sqlx::query("UPDATE saga_instance SET traceparent = ? WHERE saga_id = ?")
+            .bind(traceparent)
+            .bind(saga_id.as_str())
+            .execute(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+        Ok(())
     }
 
     /// 业务作用：以数据库 CAS 推进实例状态，并在同一事务内写 transition 审计行。
@@ -412,6 +539,15 @@ impl MySqlSagaStore {
             && spec.to_status == SagaStatus::Running
         {
             TransitionGuard::new(self.any_compensation_succeeded(saga_id).await?)
+        } else if spec.to_status == SagaStatus::ManuallyClosed {
+            // 人工关闭的放行证据只认"与本次触发同一 operation 的 manual_close 审计行",
+            // 且触发来源必须是管理面:自动触发(事件/timer)既没有 Admin 来源也不可能
+            // 预先写入该审计,因此无法经本边伪造终态。审计行在同一事务内读取,保证
+            // 证据与 CAS 属于同一提交。
+            TransitionGuard::manual_close(
+                spec.trigger_kind == TriggerKind::Admin
+                    && self.manual_close_audited(saga_id, spec.trigger_id).await?,
+            )
         } else {
             TransitionGuard::default()
         };
@@ -468,7 +604,15 @@ impl MySqlSagaStore {
         .execute(connection.as_mut())
         .await;
         match transition {
-            Ok(_) => Ok(CasOutcome::Applied { new_version }),
+            Ok(_) => {
+                // 实例进入终态即释放在飞名额:与终态迁移同一事务提交,账本不产生
+                // "已终结仍占额"或"回滚后少记"的窗口。
+                if spec.to_status.is_terminal() {
+                    drop(connection);
+                    self.release_tenant_quota(saga_id).await?;
+                }
+                Ok(CasOutcome::Applied { new_version })
+            }
             Err(error) if is_unique_violation(&error) => Ok(CasOutcome::DuplicateTrigger),
             Err(error) => Err(map_database(error)),
         }
@@ -716,6 +860,42 @@ fn validate_trigger_id(trigger_id: &str) -> Result<(), SagaStoreError> {
         || trigger_id.chars().any(char::is_control)
     {
         return Err(SagaStoreError::new("invalid trigger id"));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验落库的 traceparent 是 W3C version-00 canonical 形态，保护列宽合同并
+/// 阻止把任意文本当作因果上下文持久化。
+///
+/// 只做结构校验（四段、小写十六进制、长度 55）；trace 语义合法性（全零拒绝等）由运行时
+/// 层的 `TraceContext` 解析承担，本层是最后的列合同防线。
+///
+/// 参数说明：
+/// - `traceparent`: 待持久化的 canonical `traceparent` 文本。
+///
+/// 返回：结构合法返回 `Ok`；否则返回稳定错误。
+fn validate_traceparent(traceparent: &str) -> Result<(), SagaStoreError> {
+    let mut parts = traceparent.split('-');
+    let shape_ok = traceparent.len() == 55
+        && matches!(
+            (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ),
+            (Some(version), Some(trace_id), Some(parent_id), Some(flags), None)
+                if version.len() == 2
+                    && trace_id.len() == 32
+                    && parent_id.len() == 16
+                    && flags.len() == 2
+        )
+        && traceparent
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
+    if !shape_ok {
+        return Err(SagaStoreError::new("invalid traceparent"));
     }
     Ok(())
 }

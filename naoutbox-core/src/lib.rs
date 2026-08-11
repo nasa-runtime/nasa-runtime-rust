@@ -25,6 +25,11 @@ pub struct OutboxEvent {
     pub payload: Vec<u8>,
     /// 可选 W3C `traceparent`,供跨 DB→Kafka 传播 trace。
     pub traceparent: Option<String>,
+    /// 受信租户归因。写入权威是受信入口的 [`OutboxWriteContext`](crate::OutboxWriteContext)
+    /// 与持久 `tenant` 列;从存储读出的事件由读取路径回填该列值。发布端与归档端据此
+    /// 选择租户隔离空间、加密键与授权,禁止从 payload、`aggregate_id` 或自报 header
+    /// 另行推导身份。构造入口未声明租户时固定为 [`SYSTEM_TENANT`]。
+    pub tenant: String,
 }
 
 impl OutboxEvent {
@@ -42,6 +47,7 @@ impl OutboxEvent {
             event_type: event_type.into(),
             payload,
             traceparent: None,
+            tenant: SYSTEM_TENANT.to_string(),
         }
     }
 
@@ -114,6 +120,182 @@ impl OutboxWriter for InMemoryOutbox {
     }
 }
 
+// ───────────────────────────── 受信写入上下文与租户配额 ─────────────────────────────
+
+/// 未走受信写入上下文的历史 append 路径映射到的固定租户。
+pub const SYSTEM_TENANT: &str = "system";
+
+/// 每租户在飞事件配额拒绝的稳定原因码；调用方以此与系统故障区分,不得改写。
+pub const TENANT_QUOTA_EXCEEDED_REASON: &str = "outbox_tenant_quota_exceeded";
+
+/// 业务作用：受信的 Outbox 写入上下文——租户身份只能由已认证的业务上下文填充。
+///
+/// `outbox_event` 的租户列是配额与归因的依据,绝不允许从 payload、`aggregate_id` 或
+/// 自报 header 解析:那会把配额边界交给消息内容,任何能构造 payload 的调用方都能
+/// 冒用他租户额度。未携带上下文的历史 append 路径固定映射 [`SYSTEM_TENANT`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxWriteContext {
+    tenant: String,
+}
+
+impl OutboxWriteContext {
+    /// 业务作用：从已认证的租户身份构造写入上下文。
+    ///
+    /// 参数说明：
+    /// - `tenant`: 已认证租户;要求非空、长度 ≤256 且不含控制字符——上界与 Saga
+    ///   `TenantId` 公开合同及租户列宽一致,合法租户不允许在 Outbox 双写处被窄化拒绝。
+    ///
+    /// 返回：合法时返回上下文;越界或含控制字符返回不透出内容的静态原因。
+    pub fn new(tenant: impl Into<String>) -> Result<Self, &'static str> {
+        let tenant = tenant.into();
+        if tenant.is_empty() || tenant.len() > 256 {
+            return Err("outbox tenant must be 1..=256 bytes");
+        }
+        if tenant.chars().any(char::is_control) {
+            return Err("outbox tenant must not contain control characters");
+        }
+        Ok(Self { tenant })
+    }
+
+    /// 业务作用：读取已认证租户身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：租户字符串。
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+}
+
+// ───────────────────────────── retention(保留、归档与清理合同)─────────────────────────────
+
+/// 业务作用：冻结一份 Outbox 保留清理策略——执行器绝不从"开启了 Outbox"推断保留期，
+/// 没有已批准策略就没有任何删除。
+///
+/// 行分类合同：`dispatched = 1` 的已投递行达到最小保留期后才可归档/删除；`dead = 1`
+/// 死信默认不清理，只有独立批准（`dead_approval`）、最小年龄与归档收据齐备才可清理；
+/// `dispatched = 0 AND dead = 0` 的待投递行**永不**进入保留清理，无论年龄。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxRetentionPolicy {
+    /// 已投递行的最小保留期（毫秒），到龄才成为清理候选；必须为正。
+    pub dispatched_min_age_ms: i64,
+    /// 单批候选行上限；每批立即提交，禁止无上限 DELETE。
+    pub batch_limit: u32,
+    /// 单轮时间预算（毫秒）；有效范围 1..=3_600_000，超出即停止本轮，未处理候选
+    /// 留给下一轮。
+    pub round_time_budget_ms: i64,
+    /// 是否要求"归档收据在手才可删除源行"；开启后无收据零删除。
+    pub archive_required: bool,
+    /// 是否清理死信；默认关闭。开启必须同时给出 `dead_min_age_ms` 与 `dead_approval`，
+    /// 且死信删除始终要求归档收据（不受 `archive_required` 影响）。
+    pub delete_dead: bool,
+    /// 死信最小保留期（毫秒）；`delete_dead` 时必填且为正。
+    pub dead_min_age_ms: Option<i64>,
+    /// 死信清理的独立批准标识（工单/审批号）；`delete_dead` 时必填非空。
+    pub dead_approval: Option<String>,
+}
+
+impl OutboxRetentionPolicy {
+    /// 业务作用：Ready 前校验策略值自洽；不合理配置直接拒绝启动，不做"自动修正"。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部值有界自洽返回 `Ok`；否则返回稳定的拒绝原因文本。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dispatched_min_age_ms <= 0 {
+            return Err("dispatched_min_age_ms must be positive".to_string());
+        }
+        if self.batch_limit == 0 || self.batch_limit > 10_000 {
+            return Err("batch_limit must be within 1..=10000".to_string());
+        }
+        if !(1..=3_600_000).contains(&self.round_time_budget_ms) {
+            return Err("round_time_budget_ms must be within 1..=3600000".to_string());
+        }
+        if self.delete_dead {
+            match self.dead_min_age_ms {
+                Some(age) if age > 0 => {}
+                _ => return Err("delete_dead requires a positive dead_min_age_ms".to_string()),
+            }
+            match self.dead_approval.as_deref() {
+                // 上限与处置事实表 `outbox_dead_disposal.approval VARCHAR(128)` 对齐:
+                // 校验放行而列装不下的配置会通过启动门禁、却在首批死信清理写处置
+                // 事实时持续失败,属于不可执行配置,必须在这里拦下。
+                Some(approval)
+                    if !approval.is_empty()
+                        && approval.trim() == approval
+                        && approval.len() <= 128
+                        && !approval.chars().any(char::is_control) => {}
+                _ => {
+                    return Err(
+                        "delete_dead requires a non-empty bounded dead_approval identifier"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 归档端返回的可复验收据；删除源行前必须持有并可重查。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveReceipt {
+    /// 归档端确认已幂等落地的事件身份。
+    pub event_id: String,
+}
+
+/// 归档失败原因(脱敏;不含归档端地址/凭据/payload)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxArchiveError {
+    /// 稳定脱敏原因。
+    pub reason: String,
+}
+
+impl OutboxArchiveError {
+    /// 业务作用：用脱敏原因构造归档错误。
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for OutboxArchiveError {
+    /// 业务作用：输出不含归档端身份或事件正文的稳定原因。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "outbox archive error: {}", self.reason)
+    }
+}
+
+impl std::error::Error for OutboxArchiveError {}
+
+/// 把待清理事件写入归档端的合同。
+///
+/// **删除的前置是收据**：`archive` 必须按 `event_id` 幂等——重复归档同一事件不产生第二份
+/// 记录；回包丢失时清理执行器用 `receipt_of` 重查而不是盲目重写，也绝不在无收据时删源行。
+/// 归档 payload 沿用原分类加密与授权，不进日志。
+#[async_trait::async_trait]
+pub trait OutboxArchive {
+    /// 业务作用：按事件身份幂等写入归档端。
+    ///
+    /// 参数说明：
+    /// - `event`：待归档的完整事件（含 payload 与 trace 元数据）。
+    ///
+    /// 返回：归档端确认落地后返回收据；不确定或失败返回错误（调用方停止本轮并重查）。
+    async fn archive(&self, event: &OutboxEvent) -> Result<ArchiveReceipt, OutboxArchiveError>;
+
+    /// 业务作用：重查某事件的归档收据，服务回包丢失后的确定性恢复。
+    ///
+    /// 参数说明：
+    /// - `event_id`：事件身份。
+    ///
+    /// 返回：已归档返回收据；未归档返回 `None`；归档端不可达返回错误。
+    async fn receipt_of(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<ArchiveReceipt>, OutboxArchiveError>;
+}
+
 // ───────────────────────────── dispatcher(轮询投递核心)─────────────────────────────
 
 /// 投递失败原因(脱敏;不含 broker 地址/凭据/payload)。
@@ -121,14 +303,44 @@ impl OutboxWriter for InMemoryOutbox {
 pub struct OutboxPublishError {
     /// 稳定脱敏原因(如 "kafka publish failed")。
     pub reason: String,
+    /// 失败类别:是否允许死信预算裁决。
+    pub class: PublishErrorClass,
+}
+
+/// 业务作用：发布失败的封闭类别——决定 dispatcher 的死信预算是否适用。
+///
+/// 结果不确定(deadline、断连、回包丢失)与基础设施瞬态失败绝不允许因重投预算耗尽
+/// 被标死并越过:远端可能已经提交,离开投递流等于放弃后续收敛与重查。只有携带稳定
+/// 原因码的确定性拒绝才可以进入死信裁决。类别必须由发布端在构造错误时声明并一路
+/// 传到存储裁决,不能在 dispatcher 侧靠字符串猜测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishErrorClass {
+    /// 确定性失败:重投永远得到同一拒绝,允许按预算进入死信集合。
+    Terminal,
+    /// 瞬态或结果不确定:必须保留重投,不消耗死信预算,永不自动标死。
+    Transient,
 }
 
 impl OutboxPublishError {
-    /// 业务作用：用脱敏原因构造。
+    /// 业务作用：用脱敏原因构造确定性失败(默认类别,保持既有毒丸预算语义)。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
+            class: PublishErrorClass::Terminal,
         }
+    }
+
+    /// 业务作用：用脱敏原因构造瞬态/结果不确定失败——保留重投,豁免死信预算。
+    pub fn transient(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            class: PublishErrorClass::Transient,
+        }
+    }
+
+    /// 业务作用：判断本失败是否豁免死信预算。
+    pub fn is_transient(&self) -> bool {
+        self.class == PublishErrorClass::Transient
     }
 }
 

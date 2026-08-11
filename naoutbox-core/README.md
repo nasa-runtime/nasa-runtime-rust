@@ -29,6 +29,11 @@ let event = OutboxEvent::new(
 实现 `OutboxPublisher` 后，`dispatch_in_order` 按输入顺序逐条发布，遇首个失败立即停止。成功前缀
 由调用方标记或移除，失败项和后缀留到下一轮，因此消费者必须按 `event_id` 幂等去重。
 
+`OutboxPublishError` 的类别属于发布端合同：`Terminal` 只用于身份、路由或协议等确定性拒绝，允许由
+已经批准的死信预算裁决；`Transient` 覆盖网络失败、deadline、断连、回包丢失和远端结果不确定，必须
+保留重投且不消耗死信预算。dispatcher 不解析错误文本猜测类别。Saga command/result 默认使用
+`Block`，首个未确认事件停止同一通道后续投递，避免把瞬态失败当成可越过的毒丸。
+
 ## YML 配置
 
 本 crate 不读取 yml。topic 路由、批量上限、轮询间隔和死信策略归具体 dispatcher；事件 schema
@@ -40,3 +45,5 @@ let event = OutboxEvent::new(
 - `aggregate_id` 常用于分区 key，但不能代替唯一 `event_id`。
 - payload 应有业务大小上限；敏感正文不能进入错误和日志。
 - 取消正在进行的内存投递时，未确认批次会恢复到队首。
+- gRPC/HTTP 等 request/response 发布端只有收到明确 `Committed`/`Duplicate` 收据才能返回成功；
+  response 丢失属于结果不确定。

@@ -20,6 +20,8 @@ pub struct SagaStoreMetrics {
     pub compensated_total: u64,
     /// 进入 `MANUAL_INTERVENTION` 的历史迁移数。
     pub manual_intervention_total: u64,
+    /// 进入 `MANUALLY_CLOSED` 的历史迁移数（系统外处置后由人工关闭自动化）。
+    pub manually_closed_total: u64,
     /// 参与方报告 `UNKNOWN` 的历史 attempt 数。
     pub unknown_result_total: u64,
     /// attempt 号大于 1 的历史重试数。
@@ -65,6 +67,7 @@ impl MySqlSagaStore {
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'COMPLETED') AS SIGNED) AS completed_total, \
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'COMPENSATED') AS SIGNED) AS compensated_total, \
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'MANUAL_INTERVENTION') AS SIGNED) AS manual_total, \
+             CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'MANUALLY_CLOSED') AS SIGNED) AS manually_closed_total, \
              CAST((SELECT COUNT(*) FROM saga_step_attempt WHERE status = 'UNKNOWN') AS SIGNED) AS unknown_total, \
              CAST((SELECT COUNT(*) FROM saga_step_attempt WHERE attempt_no > 1) AS SIGNED) AS retry_total, \
              CAST((SELECT COUNT(*) FROM saga_conflict_fact) AS SIGNED) AS conflict_total, \
@@ -73,9 +76,9 @@ impl MySqlSagaStore {
              CAST((SELECT COUNT(*) FROM saga_instance WHERE status = 'COMPENSATING') AS SIGNED) AS compensating_current, \
              CAST((SELECT COUNT(*) FROM saga_instance WHERE status = 'MANUAL_INTERVENTION') AS SIGNED) AS manual_current, \
              CAST((SELECT COUNT(*) FROM saga_timer WHERE state = 'READY' AND available_at <= ?) AS SIGNED) AS due_timer_current, \
-             CAST((SELECT COUNT(*) FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'FAILED')) AS SIGNED) AS duration_count, \
+             CAST((SELECT COUNT(*) FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED')) AS SIGNED) AS duration_count, \
              CAST((SELECT COALESCE(SUM(TIMESTAMPDIFF(MICROSECOND, created_at, updated_at)), 0) \
-                FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'FAILED')) AS SIGNED) AS duration_micros_sum",
+                FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED')) AS SIGNED) AS duration_micros_sum",
         )
         .bind(now_ms)
         .fetch_one(connection.as_mut())
@@ -87,6 +90,7 @@ impl MySqlSagaStore {
             completed_total: metric(&row, "completed_total")?,
             compensated_total: metric(&row, "compensated_total")?,
             manual_intervention_total: metric(&row, "manual_total")?,
+            manually_closed_total: metric(&row, "manually_closed_total")?,
             unknown_result_total: metric(&row, "unknown_total")?,
             retry_attempt_total: metric(&row, "retry_total")?,
             conflict_total: metric(&row, "conflict_total")?,

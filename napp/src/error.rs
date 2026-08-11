@@ -85,6 +85,12 @@ pub enum ApplicationPhase {
     Start,
     /// 执行业务注册和装配钩子的阶段。
     UserHook,
+    /// 在业务初始化前执行 migration 和出站依赖门禁的阶段。
+    Prepare,
+    /// 按全局屏障执行业务 initializer 的阶段。
+    Initialization,
+    /// 关闭初始化期登记并封存资源与 readiness 的阶段。
+    Seal,
     /// 完成外部探针并发布就绪资源的阶段。
     Ready,
     /// 应用已经对外服务的阶段。
@@ -106,6 +112,9 @@ impl fmt::Display for ApplicationPhase {
             Self::Bootstrap => "bootstrap",
             Self::Start => "start",
             Self::UserHook => "user-hook",
+            Self::Prepare => "prepare",
+            Self::Initialization => "initialization",
+            Self::Seal => "seal",
             Self::Ready => "ready",
             Self::Running => "running",
             Self::Stopping => "stopping",

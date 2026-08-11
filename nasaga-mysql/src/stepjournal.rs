@@ -170,6 +170,37 @@ impl MySqlSagaStore {
         Ok(present != 0)
     }
 
+    /// 业务作用：判断人工关闭的审计证据是否已在当前事务可见——为 `MANUALLY_CLOSED`
+    /// 唯一入边提供同事务放行事实。
+    ///
+    /// 只认 `(saga_id, operation_id)` 上 action 为 [`crate::MANUAL_CLOSE_ACTION`] 的
+    /// 审计行：操作身份与迁移触发身份必须同源，防止用其它管理操作的审计冒充关闭证据。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    /// - `operation_id`: 触发本次关闭迁移的管理 operation 身份。
+    ///
+    /// 返回：证据存在返回真；底层失败返回错误。
+    pub async fn manual_close_audited(
+        &self,
+        saga_id: &SagaId,
+        operation_id: &str,
+    ) -> Result<bool, SagaStoreError> {
+        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let row = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM saga_management_audit WHERE saga_id = ? \
+             AND operation_id = ? AND action = ?) AS present",
+        )
+        .bind(saga_id.as_str())
+        .bind(operation_id)
+        .bind(crate::MANUAL_CLOSE_ACTION)
+        .fetch_one(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        let present: i64 = row.try_get("present").map_err(map_database)?;
+        Ok(present != 0)
+    }
+
     /// 业务作用：在命令写入 Outbox 的同一事务内登记一次投递尝试，占用其全局去重身份。
     ///
     /// journal 行以 `STARTED` 落库并同步刷新 `saga_step` 的当前 attempt 投影；

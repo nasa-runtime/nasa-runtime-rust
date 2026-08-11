@@ -2,6 +2,18 @@
 //!
 //! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、事务、Inbox、Outbox、
 //! Saga、消息传输、缓存、路由、调度、配置、发现和工具模块。
+//!
+//! # 持久化 Saga
+//!
+//! `saga-runtime` 将本地 ACID、Outbox 至少一次、Inbox 幂等、持久化状态机与显式补偿组合为
+//! 最终一致性流程。稳定 `effect_id`、定义摘要、取消/裁决屏障、冻结补偿计划与 timer fencing
+//! 让重复投递、Unknown 结果、进程崩溃和多副本竞争从已提交事实收敛。Kafka 和 Redis Streams
+//! 提供受管 connector；HTTP 使用显式认证构件；gRPC 收据 connector 为实验能力。Saga 不提供
+//! 跨服务 ACID、物理 exactly-once 或并发隔离。
+//!
+//! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
+//! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
+//! 才开放监听、消费与服务发现；依赖边优先于 `order`，失败会阻止 Ready 并进入逆序清理。
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //
@@ -21,21 +33,25 @@
 // ============================================================================
 #![forbid(unsafe_code)]
 
-/// 应用运行时：生命周期、配置快照、类型资源容器和受管任务。
+/// 应用运行时：生命周期、Ready 前业务初始化屏障、配置快照、类型资源容器和受管任务。
 ///
 /// `#[nasa::application("saga")]` 会隐式纳入 DB 与 Outbox；独立
 /// `#[nasa::application("outbox")]` 会隐式纳入 DB。Inbox 是事务内原语，不声明为生命周期组件；
 /// Kafka、Redis Streams 或 HTTP 等消息传输由业务按实际实现显式选择。
+///
+/// `#[nasa::initializer]` 静态项与 Service 启动 Hook 动态登记项合并后，在组件 `Prepare` 与
+/// `Seal` 之间执行全部 `before -> initialize -> after`。全部成功前不发布 Ready；外部已提交事实
+/// 不会被本地逆序清理撤销，业务实现必须使用事务或稳定幂等键保证可安全重跑。
 #[cfg(feature = "application")]
 pub mod application {
     pub use application_impl::*;
-    pub use application_macro::application;
+    pub use application_macro::{application, initializer};
 }
 
 #[cfg(feature = "application")]
 pub use application_impl::Application;
 #[cfg(feature = "application")]
-pub use application_macro::application;
+pub use application_macro::{application, initializer};
 
 /// 路由级隔离、Dashboard 监控、`#[hystrix]` 与 `#[global_fallback]` 终态降级。
 #[cfg(feature = "hystrix")]
@@ -290,9 +306,9 @@ pub mod object {
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
 /// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
 ///
-/// `full` 会编入运行时与 Kafka adapter；业务仍须显式声明 Application 的 `"saga"` 组件并提交
-/// 流程定义、参与方信任关系和发布端。DB 与 Outbox 由 Saga 声明隐式纳入，未装配计划时启动会
-/// fail-closed。
+/// `full` 会编入运行时与 Kafka adapter；Redis Streams 替代通道和实验 gRPC 收据 connector 仍需
+/// 显式 feature。业务必须声明 Application 的 `"saga"` 组件并提交流程定义、参与方信任关系和
+/// 发布端。DB 与 Outbox 由 Saga 声明隐式纳入，未装配计划时启动会 fail-closed。
 #[cfg(feature = "saga")]
 pub mod saga {
     #[cfg(feature = "saga-runtime")]
@@ -346,8 +362,9 @@ pub mod mapper {
     };
 }
 
-/// 本地有界分区执行器：同 key 严格按提交顺序串行，不同 key 按分区并发；提供非阻塞或等待型
-/// 背压、任务 panic 隔离、健康观测与显式异步停机。
+/// 本地有界分区执行器：空闲 worker 可在不移动队列数据的前提下保序接管其它分区的 lane；
+/// 同 key 严格按提交顺序串行，不同 key 按分区并发；提供非阻塞或等待型背压、任务 panic
+/// 隔离、健康观测与显式异步停机。
 ///
 /// 该模块与 `nasa::redis::partition` 的 `PollCoordinator` 含义不同：这里管理单进程任务执行，
 /// Redis 模块管理分布式分区消费。

@@ -78,14 +78,32 @@ readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中
 ## Saga 部署
 
 `#[nasa::application("saga")]` 会隐式纳入 DB 与受管 Outbox；业务只提交 Saga 运行计划和发布端。
-Kafka 仅在选用内置托管消息适配器时显式声明，不是 Saga 的强制依赖。
+Kafka 仅在选用 Kafka 托管消息适配器时声明 `"kafka"`；Redis Streams 托管模式声明 `"redis"` 并
+提交 `SagaRedisTransportPlan`。HTTP 与实验 gRPC 由宿主拥有 listener。transport 不是 Saga 的隐式
+依赖，发布和消费两端必须成对具备确认、重领、认证与 durable DLT 语义。
 
-Saga 采用 expand-first：先按 Saga 与 Outbox 迁移清单扩展结构并核对历史行，再滚动启动新 binary。只有旧 binary 已
-完全退出、审计已导出且 replay horizon 允许时，才执行结构回退。
+Saga 采用 expand-first，部署顺序固定为：
+
+1. 按 Saga 与 Outbox 迁移清单扩展每个本地事务域，保存 DDL、行数、索引与校验事实。
+2. 准备 transport 路由、consumer identity、ACL/mTLS/HMAC、DLT、消息保留期和 replay horizon。
+3. 滚动启动可读取新结构但尚不产生不兼容状态的 binary，确认 Ready、定义摘要、descriptor 与历史实例。
+4. 需要租户配额时，先升级全部写入方，再事务内对账并置初始化标记，最后启用上限。
+5. 需要 `MANUALLY_CLOSED` 时，先确认全部副本都能解析该终态，再打开 `enable_manual_close`。
+6. 观察 timer、Inbox/Outbox、transport、配额、人工介入和提交不确定指标后再扩大流量。
+
+只有旧 binary 已完全退出、审计已导出且 replay horizon 允许时，才执行结构回退。已产生新终态或新
+持久字段后，不得通过回退旧二进制假装兼容；应保持入口 NotReady，先完成数据与读者兼容评估。
 
 Saga binary collation 脚本没有通用 down。执行前记录原 collation，并单独评估大表重建、metadata
 lock、复制延迟、磁盘余量和完成时间。Ready 前完成 `Orchestrator::verify_startup`；任何活跃定义或
 descriptor 漂移都拒绝接流。
 
+每个 Orchestrator 副本的 timer owner 必须唯一且重启稳定；Redis `(stream, group, consumer)` 同样
+逐循环唯一。扩缩容不能复制旧副本的运行实例 nonce、fencing capability 或 consumer identity。
+正常下线先 NotReady/摘流，再停止领取 timer 和新消息，排空已接管事务，最后关闭 Outbox、transport
+与数据库。强制终止后依赖 durable timer、PEL/offset、Inbox 与 Outbox 事实接管，不能手工 ACK 或删除
+记录制造“已排空”。
+
 本地容器能够确认 MySQL 提升、Kafka 多 broker、ACL、消息重投和故障恢复语义，但不能替代生产网络、
-磁盘、容量和灾难恢复批准。完整边界见 [Saga 生产运行指南](saga-production.md)。
+Redis Cluster 槽迁移、磁盘、容量和灾难恢复批准。实验 gRPC connector 还必须由具体服务证明 listener
+资源上限、已验证 peer identity、deadline 与 drain。完整边界见 [Saga 生产运行指南](saga-production.md)。

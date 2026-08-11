@@ -2,6 +2,38 @@ use std::io::Write;
 
 use crate::ApplicationError;
 
+/// 一次 active stack 清理的有界结构化摘要。
+pub(crate) struct ShutdownSummary {
+    /// 首次停机原因的稳定分类。
+    pub(crate) reason: &'static str,
+    /// 清理开始时栈内的步骤数。
+    pub(crate) planned_steps: usize,
+    /// 实际取得执行机会的步骤数。
+    pub(crate) attempted_steps: usize,
+    /// 全局 deadline 耗尽后未执行的步骤数。
+    pub(crate) abandoned_steps: usize,
+    /// 组件 action 步骤数。
+    pub(crate) component_actions: usize,
+    /// initializer action 步骤数。
+    pub(crate) initializer_actions: usize,
+    /// Supervisor 全局任务排空门步骤数。
+    pub(crate) task_gates: usize,
+    /// 业务资源清理步骤数。
+    pub(crate) business_resources: usize,
+    /// 组件资源清理步骤数。
+    pub(crate) component_resources: usize,
+    /// initializer 资源清理步骤数。
+    pub(crate) initializer_resources: usize,
+    /// 清理链累计的失败数。
+    pub(crate) failures: usize,
+    /// 是否进入过任务强制 abort 路径。
+    pub(crate) task_abort_attempted: bool,
+    /// 是否因共享停机预算耗尽而留下失败或未执行步骤。
+    pub(crate) deadline_exhausted: bool,
+    /// 完整 active stack 清理耗时。
+    pub(crate) duration: std::time::Duration,
+}
+
 /// 单条同步诊断允许写出的最大字节数，防止异常文本无限放大 stderr。
 const REPORT_MAX_BYTES: usize = 2_048;
 
@@ -49,6 +81,40 @@ pub(crate) fn report_shutdown(error: &ApplicationError) {
     let message = bounded(&format!(
         "application shutdown warning: {}\n",
         redact(&error_chain(error))
+    ));
+    write_stderr(&message);
+}
+
+/// 业务作用：在日志组件可能已经关闭后，仍以有界、可机器解析的单行文本报告成功或失败的停机收口。
+///
+/// 参数说明：
+/// - `summary`：只含稳定分类、计数、布尔结果与耗时的停机摘要，不携带业务数据或配置值。
+///
+/// 返回：无返回值；stderr 写入采用 best-effort，不能反向改变已经确定的退出语义。
+pub(crate) fn report_shutdown_summary(summary: &ShutdownSummary) {
+    let outcome = if summary.abandoned_steps > 0 || summary.deadline_exhausted {
+        "deadline-exhausted"
+    } else if summary.failures > 0 {
+        "completed-with-failures"
+    } else {
+        "completed"
+    };
+    let message = bounded(&format!(
+        "application shutdown summary: outcome={outcome} reason={} planned_steps={} attempted_steps={} abandoned_steps={} component_actions={} initializer_actions={} task_gates={} business_resources={} component_resources={} initializer_resources={} failures={} task_abort_attempted={} deadline_exhausted={} duration_ms={}\n",
+        summary.reason,
+        summary.planned_steps,
+        summary.attempted_steps,
+        summary.abandoned_steps,
+        summary.component_actions,
+        summary.initializer_actions,
+        summary.task_gates,
+        summary.business_resources,
+        summary.component_resources,
+        summary.initializer_resources,
+        summary.failures,
+        summary.task_abort_attempted,
+        summary.deadline_exhausted,
+        summary.duration.as_millis(),
     ));
     write_stderr(&message);
 }

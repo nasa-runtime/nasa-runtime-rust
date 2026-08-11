@@ -4,14 +4,15 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust shared runtime facade"
+description = "NASA Rust facade for managed lifecycle, durable Saga orchestration, messaging and web services"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["runtime", "saga", "lifecycle", "microservices", "async"]
 categories.workspace = true
 
 [features]
@@ -53,6 +54,10 @@ saga = ["dep:saga_core_impl"]
 saga-runtime = ["saga", "inbox", "outbox", "dep:saga_runtime_impl", "dep:nasaga_macro", "application_impl?/saga"]
 # Saga 真实 Kafka hosted transport；要求同时启用 nasa Kafka 门面并向下打开 runtime adapter。
 saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
+# Saga Redis Streams hosted transport：显式 ACK 裁决、pending reclaim、原子 DLT 与消息签名。
+saga-redis-stream = ["saga-runtime", "redis", "saga_runtime_impl/redis-stream", "application_impl?/saga-redis-stream"]
+# Saga gRPC request/response transport 的封闭收据裁决（实验；listener 上限与 drain 由 grpc 组件承担）。
+saga-grpc-experimental = ["saga-runtime", "saga_runtime_impl/grpc-transport"]
 # 实验性 gRPC listener 生命周期；不进入 full，稳定组件合同待真实项目收敛。
 grpc-experimental = ["dep:grpc_impl"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。
@@ -76,7 +81,7 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 本地同 key 严格 FIFO 执行器，提供有界背压、任务隔离与显式停机。
+# 本地保序任务窃取执行器，提供同 key 严格 FIFO、有界背压、任务隔离与显式停机。
 partition = ["dep:partition_impl"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
@@ -129,7 +134,7 @@ base = ["dep:base_impl"]
 # 本地主配置 + profile + overlay(含 Nacos 多配置)+ env + ${} 占位符 → 强类型 T;不认识业务 AppConfig。
 # 「按 import 调 Nacos 拉取拼 overlay」的胶水在门面层(yml 本身零 Nacos 依赖)。
 yml = ["dep:yml_impl"]
-# 文件变化观察按需启用；同时开放基础加载能力并透传 naml 的 watcher。
+# 文件变化观察按需启用；同时开放基础加载能力并向 naml 透传 watcher。
 yml-watch = ["yml", "yml_impl/watch"]
 
 # 配置引导胶水(yml × nacos;crate = config-boot):按 import 拉远端配置、拼有序 overlay(nasa::yml::nacos)。
@@ -220,8 +225,8 @@ full = [
 
 [dependencies]
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "1.0.2", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.1", optional = true }
+application_impl = { package = "napp", version = "1.0.3", optional = true }
+application_macro = { package = "napp-macro", version = "1.0.2", optional = true }
 hystrix_impl = { package = "hystrix", version = "1.0.1", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
 grafana_impl = { package = "nafana", version = "1.0.1", optional = true }
@@ -232,8 +237,8 @@ tx_impl = { package = "natx", version = "1.0.2", optional = true }
 natx_macro = { package = "natx-macro", version = "1.0.0", optional = true }
 inbox_core_impl = { package = "nainbox-core", version = "1.0.1", optional = true }
 inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.1", optional = true }
-outbox_core_impl = { package = "naoutbox-core", version = "1.0.1", optional = true }
-outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.1", optional = true }
+outbox_core_impl = { package = "naoutbox-core", version = "1.0.2", optional = true }
+outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.2", optional = true }
 idempotency_impl = { package = "naidempotency", version = "1.0.1", optional = true }
 idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.1", optional = true }
 idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.1", optional = true }
@@ -244,9 +249,9 @@ secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
 object_impl = { package = "naobject", version = "1.0.0", optional = true }
-saga_core_impl = { package = "nasaga-core", version = "1.0.0", optional = true }
-saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.1", optional = true }
-nasaga_macro = { package = "nasaga-macro", version = "1.0.1", optional = true }
+saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
+nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
 grpc_impl = { package = "nagrpc", version = "1.0.1", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.1", optional = true }

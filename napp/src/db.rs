@@ -46,7 +46,7 @@ struct DbConfigRoot {
 pub(crate) struct DbComponent {
     /// Ready 后交由 Runner 按关键任务监督的唯一 DB 健康 monitor；无数据源时为 None。
     critical_task: Option<ApplicationFuture<'static>>,
-    /// Start 建好的各数据源池;供 Ready 迁移门禁按名查找。
+    /// Start 建好的各数据源池;供 Prepare 迁移门禁按名查找。
     ///
     /// 不经资源容器读取:资源在 UserHook 后已封口,直接用 Start 已持有的 clone 更直观且不与容器
     /// 读取语义耦合。池的清理所有权仍在各自的 `DbShutdown` action,本表只是只读借道。
@@ -56,10 +56,10 @@ pub(crate) struct DbComponent {
     /// Saga 动态建库路径在 UserHook 完成后才取得默认池；该标记禁止 Start 阶段误连通用库。
     #[cfg(feature = "saga")]
     deferred_saga_default: bool,
-    /// 延后引导仍须在 readiness 封口前登记贡献项，Ready 只补真实连接观测。
+    /// 延后引导仍须在 readiness 封口前登记贡献项，Prepare 补真实连接观测。
     #[cfg(feature = "saga")]
     deferred_contributor: Option<ReadinessContributor>,
-    /// Start 阶段预先压栈的关闭槽；Ready 只填入 UserHook 已注入的池，保持任务先停、连接后关。
+    /// Start 阶段预先压栈的关闭槽；Prepare 填入 UserHook 已注入的池，保持任务先停、连接后关。
     #[cfg(feature = "saga")]
     deferred_shutdown_pool: Option<Arc<Mutex<Option<MySqlPool>>>>,
 }
@@ -207,7 +207,7 @@ impl ApplicationComponent for DbComponent {
                 )?;
                 contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
                 let shutdown_pool = Arc::new(Mutex::new(None));
-                // 延后池尚未出现也必须先占据正确的反向清理位置；若等到 Ready 才压栈，关闭动作会
+                // 延后池尚未出现也必须先占据正确的反向清理位置；若等到 Prepare 才压栈，关闭动作会
                 // 越过任务清理步骤，导致 dispatcher 尚未退出时数据库连接已经开始释放。
                 context.activate(Box::new(DeferredDbShutdown {
                     name: DEFAULT_DATASOURCE.to_owned(),
@@ -280,7 +280,7 @@ impl ApplicationComponent for DbComponent {
                     contributor,
                 });
 
-                // Ready 迁移门禁必须复用同一受管池，防止门禁检查与业务实际连接到不同数据库。
+                // Prepare 迁移门禁必须复用同一受管池，防止门禁检查与业务实际连接到不同数据库。
                 // 显式门禁设置按数据源留档，未配置时回退只读校验。
                 self.pools.insert(name.clone(), pool.clone());
                 if let Some(settings) = migrations {
@@ -307,24 +307,27 @@ impl ApplicationComponent for DbComponent {
     /// 没有任何登记项时本阶段是无副作用的空操作,不触碰数据库。
     ///
     /// 参数说明：
-    /// - `context`：提供 Application(据此取走迁移登记队列)的 Ready 上下文。
+    /// - `context`：提供 Application(据此取走迁移登记队列)的 Prepare 上下文。
     ///
-    /// 返回：延后池已接管且全部迁移门禁通过时成功；池缺失、探针失败或结构漂移时拒绝 Ready。
-    fn ready<'a>(&'a mut self, context: &'a mut crate::ReadyContext<'_>) -> ApplicationFuture<'a> {
+    /// 返回：延后池已接管且全部迁移门禁通过时成功；池缺失、探针失败或结构漂移时拒绝业务初始化。
+    fn prepare<'a>(
+        &'a mut self,
+        context: &'a mut crate::PrepareContext<'_>,
+    ) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let application = context.application().clone();
             #[cfg(feature = "saga")]
             if self.deferred_saga_default {
                 let pool = natx::pool_for_datasource(DEFAULT_DATASOURCE).map_err(|error| {
                     db_error_src(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database bootstrap did not install the default datasource",
                         error,
                     )
                 })?;
                 let shutdown_pool = self.deferred_shutdown_pool.take().ok_or_else(|| {
                     db_error(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database shutdown ownership is missing",
                     )
                 })?;
@@ -334,7 +337,7 @@ impl ApplicationComponent for DbComponent {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if slot.is_some() {
                         return Err(db_error(
-                            ApplicationPhase::Ready,
+                            ApplicationPhase::Prepare,
                             "saga user-hook database shutdown ownership was already filled",
                         ));
                     }
@@ -342,14 +345,14 @@ impl ApplicationComponent for DbComponent {
                 }
                 pool.acquire().await.map_err(|error| {
                     db_error_src(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database probe failed",
                         error,
                     )
                 })?;
                 let contributor = self.deferred_contributor.take().ok_or_else(|| {
                     db_error(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database readiness contributor is missing",
                     )
                 })?;
@@ -365,7 +368,7 @@ impl ApplicationComponent for DbComponent {
             for (name, migrator) in &registrations {
                 let pool = self.pools.get(name).ok_or_else(|| {
                     db_error(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         format!(
                             "configure_migrations registered datasource `{name}`, but it is not a configured datasource"
                         ),
@@ -384,7 +387,7 @@ impl ApplicationComponent for DbComponent {
                         // MigrationError 的 Display 已脱敏(只含版本与稳定 reason,无 SQL);不接源链,
                         // 避免底层错误正文经统一报告管道泄露。
                         db_error(
-                            ApplicationPhase::Ready,
+                            ApplicationPhase::Prepare,
                             format!("datasource `{name}` migration gate failed: {error}"),
                         )
                     })?;
@@ -417,7 +420,7 @@ struct DbShutdown {
     pool: Option<MySqlPool>,
 }
 
-/// 业务作用：持有 Start 阶段预占、Ready 阶段填充的动态默认池关闭所有权。
+/// 业务作用：持有 Start 阶段预占、Prepare 阶段填充的动态默认池关闭所有权。
 #[cfg(feature = "saga")]
 struct DeferredDbShutdown {
     name: String,

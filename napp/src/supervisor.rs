@@ -285,6 +285,33 @@ impl TaskSupervisor {
         Ok(self.spawn_task(name, TaskKind::Critical, future))
     }
 
+    /// 业务作用：在 Ready 完成后由 Runner 直接激活 initializer 暂存的受管任务。
+    ///
+    /// 参数说明：
+    /// - `name`：已限定为 `initializer/{initializer}/{task}` 的全局稳定名称。
+    /// - `kind`：后台或关键任务的运行期退出分类。
+    /// - `future`：只在 Ready 激活边界后才构造的任务主体。
+    ///
+    /// 返回：名称唯一时返回真实 `TaskId`；重名或非法 UserHook 类型时返回错误。
+    pub(crate) fn spawn_initializer_task(
+        &mut self,
+        name: Arc<str>,
+        kind: TaskKind,
+        future: ManagedTaskFuture,
+    ) -> ApplicationResult<TaskId> {
+        if kind == TaskKind::UserHook {
+            return Err(supervisor_error(
+                "initializer task cannot use the reserved user-hook kind",
+            ));
+        }
+        if !self.task_names.insert(name.clone()) {
+            return Err(supervisor_error(format!(
+                "managed task `{name}` is already registered"
+            )));
+        }
+        Ok(self.spawn_task(name, kind, future))
+    }
+
     /// 业务作用：接受并确认一个注册请求，或把拒绝原因回传给调用方。
     ///
     /// # 参数
@@ -429,6 +456,15 @@ impl TaskSupervisor {
     /// - `self`：需要读取状态的任务监督器。
     pub(crate) fn task_group_state(&self) -> TaskGroupState {
         self.task_group_state
+    }
+
+    /// 业务作用：为 Runner 直接激活的 initializer 任务创建组级子取消令牌。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只接收统一停机广播、不能反向取消整组的子令牌。
+    pub(crate) fn task_token(&self) -> CancellationToken {
+        self.task_group_token.child_token()
     }
 
     /// 业务作用：永久关闭注册入口，并拒绝通道中尚未处理的请求。

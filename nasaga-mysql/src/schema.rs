@@ -37,6 +37,7 @@ const CREATE_INSTANCE_SQL: &str = "CREATE TABLE IF NOT EXISTS saga_instance ( \
      version BIGINT UNSIGNED NOT NULL, \
      deadline_at BIGINT NULL, \
      failure_code VARCHAR(64) NULL, \
+     traceparent VARCHAR(55) NULL, \
      paused_at TIMESTAMP(6) NULL, \
      created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
      updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), \
@@ -198,12 +199,20 @@ impl MySqlSagaStore {
             CREATE_MANAGEMENT_AUDIT_SQL,
             CREATE_CONFLICT_FACT_SQL,
             CREATE_TIMER_SQL,
+            crate::quota::CREATE_QUOTA_SQL,
+            crate::action_rate::CREATE_ACTION_RATE_SQL,
         ] {
             sqlx::query(statement)
                 .execute(connection.as_mut())
                 .await
                 .map_err(map_database)?;
         }
+        // 旧演示库的配额账本补初始化标记列;生产环境由正式 migration 拥有该变更。
+        let _ = sqlx::query(
+            "ALTER TABLE saga_tenant_quota ADD COLUMN initialized TINYINT NOT NULL DEFAULT 0",
+        )
+        .execute(connection.as_mut())
+        .await;
         // 旧演示库可能已经由早期 Saga 原型建表；available_at 把“轮询退避”与不可变
         // 业务 deadline 分离。只在列缺失时做向前兼容，生产环境仍应使用正式 migration。
         let has_available_at: i64 = sqlx::query_scalar(
@@ -226,6 +235,25 @@ impl MySqlSagaStore {
                 .execute(connection.as_mut())
                 .await
                 .map_err(map_database)?;
+        }
+        // 实例因果上下文列:创建入口显式 trace 在此落库,result 推进同事务更新,timer 与
+        // 崩溃恢复读取它保持链路连续。生产库由 saga_instance_trace_context 迁移添加。
+        let has_traceparent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'saga_instance' \
+             AND COLUMN_NAME = 'traceparent'",
+        )
+        .fetch_one(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        if has_traceparent == 0 {
+            sqlx::query(
+                "ALTER TABLE saga_instance ADD COLUMN traceparent VARCHAR(55) NULL \
+                 AFTER failure_code",
+            )
+            .execute(connection.as_mut())
+            .await
+            .map_err(map_database)?;
         }
         // 控制态使用独立 generation 防止 ACTIVE→PAUSED→ACTIVE 后，旧 pause 请求
         // 仅凭未变化的业务 version 再次命中（ABA）。生产环境应以正式 migration 添加。

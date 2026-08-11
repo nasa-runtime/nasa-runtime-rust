@@ -4,6 +4,25 @@
 业务应用通常通过 `nasa` 门面的 `saga` feature 使用；只有自定义运行时或持久化适配器
 需要直接依赖本 crate。
 
+它解决的是分布式业务流程的**确定性裁决**：重投不会换一个业务效果身份，定义升级不会用新流程解释
+旧实例，结果未知不会被当成失败直接补偿，补偿计划也不会在运行中被迟到事件改写。该层不访问数据库
+或消息系统，因此 Orchestrator、参与方和自定义 adapter 可以复用同一份状态与身份合同。
+
+## 合同架构
+
+```text
+WorkflowDefinition + definition digest
+                  │
+                  ├─ stable identity: saga / business / effect / command
+                  ├─ typed outcome: success / reject / unknown
+                  └─ closed transition: forward → cancel/resolve → compensate/manual
+                                                   │
+                                                   └─ frozen compensation plan
+```
+
+定义、身份和状态迁移都是普通值；I/O、事务、重投、租约与进程生命周期分别由
+`nasaga-mysql`、`nasaga-runtime` 和 `napp` 承担。
+
 ```toml
 [dependencies]
 nasa = { version = "1", features = ["saga"] }
@@ -60,4 +79,5 @@ let definition = WorkflowDefinition::new(
 - Saga 提供本地事务、可靠消息和补偿组成的最终一致性，不提供跨服务 ACID 或并发隔离。
 - 资源竞争仍需由业务唯一键、条件更新、语义锁或可交换操作保护。
 
-部署与恢复边界见 [Saga 生产运行指南](../docs/saga-production.md)。
+部署与恢复边界见
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

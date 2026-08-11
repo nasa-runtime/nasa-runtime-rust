@@ -60,7 +60,7 @@ pub(crate) type KafkaCustomization = Box<
 
 /// `configure_migrations` 登记的一次数据源迁移门禁项:`(数据源名, 业务嵌入 migrator)`。
 ///
-/// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Ready
+/// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Prepare
 /// 阶段(监听器就绪、Web/Kafka consumer 接流之前)按数据源逐项取出,依 `database.migrations.mode`
 /// 运行 [`namigrate::run_gate`]。migrator 是嵌入式常量数据,`Send + 'static`,可跨阶段存放。
 #[cfg(feature = "db")]
@@ -160,6 +160,11 @@ pub(crate) struct ApplicationInner {
     info: ApplicationInfo,
     config: ConfigStore,
     resources: ResourceRegistry,
+    /// Service 装配窗口中受理、随后由 Runner 一次性冻结的业务 initializer。
+    ///
+    /// 登记还必须通过 `user_registration_gate` 和 `user_hook_open`，因此计划关闭与
+    /// UserHook 关闭共享同一线性化边界，不借用资源封口表示 initializer 状态。
+    initializers: crate::initialization::InitializerRegistry,
     state: Arc<StateCell>,
     terminal: TerminalCell,
     shutdown_requested: CancellationToken,
@@ -181,9 +186,9 @@ pub(crate) struct ApplicationInner {
     declared_components: AtomicU32,
     /// 汇总运行依赖动态健康的通用就绪注册表；没有贡献项时保持既有语义。
     readiness: Arc<crate::readiness::ReadinessRegistry>,
-    /// UserHook 登记的数据源迁移门禁队列;DB 组件 Ready 取走后封口。
+    /// UserHook 登记的数据源迁移门禁队列;DB 组件 Prepare 取走后封口。
     ///
-    /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Ready
+    /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Prepare
     /// 阶段一次性取走,此后再登记不可能生效,必须报阶段错误而非静默丢弃。同步互斥锁只保护一次
     /// push/take,不跨 await 持有。
     #[cfg(feature = "db")]
@@ -244,7 +249,6 @@ pub(crate) struct ApplicationInner {
     ///
     /// nafka 域为原生记录(fan-out 到本 hub,取代业务手工 sink);naweb 域经
     /// `NawebMetricsSource` 兼容源并入。nafana 迁移属门面层增量,不在 napp。
-    #[cfg(any(feature = "kafka", feature = "web"))]
     metrics_hub: Arc<nametrics_core::MetricHub>,
     /// 业务经 UserHook 注入的幂等 store;注入后 Web 组件在 Ready 装配幂等中间件。
     ///
@@ -285,11 +289,15 @@ impl Application {
         initial_config: Arc<ConfigView>,
     ) -> (Self, TaskSupervisor) {
         let (supervisor, task_supervisor) = TaskSupervisor::channel();
+        let metrics_hub = Arc::new(nametrics_core::MetricHub::new());
+        crate::initialization::register_metrics(&metrics_hub)
+            .expect("initializer metric descriptors must be internally consistent");
         let application = Self {
             inner: Arc::new(ApplicationInner {
                 info,
                 config: ConfigStore::new(initial_config),
                 resources: ResourceRegistry::new(),
+                initializers: crate::initialization::InitializerRegistry::new(),
                 state: Arc::new(StateCell::new()),
                 terminal: TerminalCell::new(),
                 shutdown_requested: CancellationToken::new(),
@@ -333,8 +341,7 @@ impl Application {
                 saga_runtime: Arc::new(crate::saga::SagaRuntimeState::new()),
                 #[cfg(feature = "outbox")]
                 outbox_runtime: Arc::new(crate::outbox::OutboxRuntimeState::new()),
-                #[cfg(any(feature = "kafka", feature = "web"))]
-                metrics_hub: Arc::new(nametrics_core::MetricHub::new()),
+                metrics_hub,
                 #[cfg(feature = "web")]
                 idempotency_store: OnceLock::new(),
                 #[cfg(feature = "web")]
@@ -366,7 +373,6 @@ impl Application {
         self.inner.state.load()
     }
 
-    #[cfg(feature = "outbox")]
     /// 业务作用：订阅进程生命周期转换，供受管组件在 Ready 与停机边界被精确唤醒。
     ///
     /// 参数说明: 无。
@@ -397,8 +403,9 @@ impl Application {
 
     /// 业务作用：封口就绪注册表:此后组件/业务不能再注册 readiness contributor。
     ///
-    /// 由 Runner 在 UserHook 成功、资源封口之后、Ready 之前调用(与 `resources().seal()` 同处),
-    /// 防止运行期无界新增贡献项名称。组件必须在 Start 或 UserHook 开放期完成注册。
+    /// 由 Runner 在 Initialization 成功后、Ready 之前调用(与 `resources().seal()` 同处),
+    /// 防止运行期无界新增贡献项名称。组件必须在 Start/UserHook 登记，hosted
+    /// initializer 必须在 Initialization 登记。
     ///
     /// # 参数
     ///
@@ -552,6 +559,39 @@ impl Application {
             .register_named_managed(qualifier, value)
     }
 
+    /// 业务作用：在 Service UserHook 装配窗口登记一个运行时 initializer。
+    ///
+    /// 参数说明：
+    /// - `spec`：包含 canonical 身份、顺序、依赖与生存类型的元数据。
+    /// - `initializer`：在三轮全局屏障之间保持状态的唯一实例。
+    ///
+    /// 返回：整项在 UserHook 结束前线性化写入时成功；Batch、窗口关闭或元数据非法时返回阶段错误。
+    pub fn register_initializer<I>(
+        &self,
+        spec: crate::InitializerSpec,
+        initializer: I,
+    ) -> ApplicationResult<()>
+    where
+        I: crate::Initialization,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("initializer registration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Application,
+                ApplicationPhase::UserHook,
+                "runtime initializers are only accepted during the Service user hook",
+            ));
+        }
+        self.inner
+            .initializers
+            .register(spec, Box::new(initializer))
+    }
+
     /// 业务作用：异步借用一个无 qualifier 的已登记资源。
     ///
     /// # 参数
@@ -617,6 +657,67 @@ impl Application {
         self.spawn_task(name.into(), TaskKind::Critical, task).await
     }
 
+    /// 业务作用：在 UserHook 登记一个只有 Application 发布 Ready 后才构造并 poll 的关键服务任务。
+    ///
+    /// 该入口用于业务自管 listener 或其它入站端点：启动失败、初始化未完成或已进入
+    /// 停机时，任务工厂不会被调用。运行后提前退出与 `spawn_critical` 相同，触发故障停机。
+    ///
+    /// 参数说明：
+    /// - `name`：应用任务组内唯一且非空的稳定名称。
+    /// - `serve`：Ready 发布后才接收组级取消令牌并构造服务 future 的一次性工厂。
+    ///
+    /// 返回：Supervisor 完整受理等待任务后返回真实 `TaskId`；Batch、非 UserHook、重名或通道关闭时返回错误。
+    pub async fn serve_when_ready<N, F, Fut>(&self, name: N, serve: F) -> ApplicationResult<TaskId>
+    where
+        N: Into<Arc<str>>,
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        self.ensure_user_hook_open("ready-gated service registration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Supervisor,
+                ApplicationPhase::UserHook,
+                "ready-gated services are not allowed in Batch mode",
+            ));
+        }
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(ApplicationError::new(
+                ComponentId::Supervisor,
+                ApplicationPhase::UserHook,
+                "ready-gated service name cannot be empty",
+            ));
+        }
+        let token = self.inner.supervisor.task_token();
+        let application = self.clone();
+        let guarded: ManagedTaskFuture = Box::pin(async move {
+            let mut states = application.subscribe_state();
+            loop {
+                match *states.borrow() {
+                    ApplicationState::Starting => {}
+                    ApplicationState::Ready => break,
+                    ApplicationState::Stopping
+                    | ApplicationState::Stopped
+                    | ApplicationState::Failed => return Ok(()),
+                }
+                tokio::select! {
+                    _ = token.cancelled() => return Ok(()),
+                    changed = states.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            serve(token).await
+        });
+        self.inner
+            .supervisor
+            .register(name, TaskKind::Critical, guarded)
+            .await
+    }
+
     /// 业务作用：按名称获取数据源连接池句柄。
     ///
     /// 返回 clone handle 是 `MySqlPool` 自身的共享语义（内部就是 `Arc` 池），不等于把资源移出容器；
@@ -641,11 +742,11 @@ impl Application {
     /// `sqlx::migrate!("./migrations")` 构造 [`Migrator`](crate::Migrator) 并按数据源名登记。
     /// 具体裁决(disabled/validate/apply)由配置 `database.migrations.mode`(多库为
     /// `datasources.<名>.migrations.mode`)决定,生产默认 `validate`(只读校验版本一致,绝不改
-    /// schema)。门禁在 DB 组件 Ready 阶段执行——因 `db` 声明序在 `web`/`kafka` 之前,故迁移在任何
+    /// schema)。门禁在 DB 组件 Prepare 阶段执行，早于 initializer 与任何
     /// 监听器接流、任何 Kafka consumer 启动之前完成;校验失败(未应用、checksum 漂移)直接 fail
     /// startup,监听端口从不对外服务。
     ///
-    /// 不新增 `"migration"` 组件字符串:它是已声明 `db` 组件的 Ready 前子阶段。
+    /// 不新增 `"migration"` 组件字符串:它是已声明 `db` 组件的 Prepare 子阶段。
     ///
     /// # 参数
     ///
@@ -655,7 +756,7 @@ impl Application {
     /// # 错误
     ///
     /// 非 UserHook 阶段、未声明 `db` 组件、数据源名为空、同一数据源重复登记,或 Ready 已封口时返回
-    /// 阶段错误。门禁运行期的未应用/漂移/后端错误在 DB 组件 Ready 阶段转成启动失败(只含版本与稳定
+    /// 阶段错误。门禁运行期的未应用/漂移/后端错误在 DB 组件 Prepare 阶段转成启动失败(只含版本与稳定
     /// reason,不含 SQL 正文)。
     ///
     /// # 示例
@@ -682,14 +783,14 @@ impl Application {
             ApplicationPhase::UserHook,
             "migration registration",
         )?;
-        // 门禁在 DB 组件 Ready 阶段执行,而 Batch 模式不执行 Ready:登记会被静默丢弃。
+        // Batch 的 Prepare 早于其工作负载 UserHook，此时登记迁移已经错过该边界。
         // 与其静默漏跑,不如直接拒绝并指向显式 API——Batch 任务可在 Hook 里自行调用
         // `nasa::run_gate`(经 `nasa::MigrationSettings` 构造设置)完成一次性校验/应用。
         if self.inner.info.mode() == ApplicationMode::Batch {
             return Err(ApplicationError::new(
                 ComponentId::Db,
                 ApplicationPhase::UserHook,
-                "configure_migrations requires Service mode; the migration gate runs in the DB Ready sub-phase, which Batch does not execute. Run namigrate::run_gate explicitly in a batch hook instead",
+                "configure_migrations requires Service mode; Batch Prepare completes before its workload hook. Run namigrate::run_gate explicitly in a batch hook instead",
             ));
         }
         let datasource = datasource.trim();
@@ -816,7 +917,7 @@ impl Application {
         });
     }
 
-    /// 业务作用：取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Ready 阶段调用一次)。
+    /// 业务作用：取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Prepare 阶段调用一次)。
     ///
     /// # 参数
     ///
@@ -1888,6 +1989,19 @@ impl Application {
         Arc::clone(&self.inner.saga_runtime)
     }
 
+    /// 业务作用：导出 Saga Redis Streams 消费面的 Prometheus 指标文本——受管消费的
+    /// 积压、PEL 年龄、处理时长与死信计数按 (stream, group) 分组,供外部采集器或
+    /// 诊断路径在 `/metrics` 端点之外直接读取。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Prometheus exposition 文本;未装配任何 stream 消费者时为空串。纯内存
+    /// 读取,不触发 I/O,任何生命周期阶段可安全调用。
+    #[cfg(feature = "saga-redis-stream")]
+    pub fn saga_stream_metrics_prometheus(&self) -> String {
+        crate::saga::render_stream_metrics(&self.saga_runtime())
+    }
+
     /// 业务作用：取得 Outbox 生命周期共享状态，供组件与公开能力使用同一权限源。
     ///
     /// 参数说明: 无。
@@ -1903,7 +2017,6 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数;返回共享 hub 的 Arc 副本,克隆只增加所有权不复制注册表。
-    #[cfg(any(feature = "kafka", feature = "web"))]
     pub(crate) fn metrics_hub(&self) -> Arc<nametrics_core::MetricHub> {
         Arc::clone(&self.inner.metrics_hub)
     }
@@ -2105,16 +2218,6 @@ impl Application {
     /// # 错误
     ///
     /// 名称为空、重名、封口后或阈值非法时返回 Start 阶段错误。
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
     pub(crate) fn register_readiness(
         &self,
         component: ComponentId,
@@ -2140,6 +2243,50 @@ impl Application {
                     }
                 };
                 ApplicationError::new(component, ApplicationPhase::Start, detail)
+            })
+    }
+
+    /// 业务作用：为 hosted initializer 登记一个受封口约束的动态就绪贡献项。
+    ///
+    /// 参数说明：
+    /// - `initializer`：冻结计划中的 canonical initializer 身份。
+    /// - `name`：已限定在 initializer 下的稳定贡献项名。
+    /// - `policy`：影响全局就绪的阈值与 stale 策略。
+    ///
+    /// 返回：首次登记返回独占更新句柄；重名、策略非法或 Seal 后返回初始化错误。
+    pub(crate) fn register_initializer_readiness(
+        &self,
+        initializer: Arc<str>,
+        name: Arc<str>,
+        policy: crate::readiness::ReadinessPolicy,
+    ) -> ApplicationResult<crate::readiness::ReadinessContributor> {
+        self.inner
+            .readiness
+            .register_component(
+                Arc::<str>::from(format!("initializer/{initializer}")),
+                name,
+                policy,
+            )
+            .map_err(|error| {
+                let detail = match error {
+                    crate::readiness::RegisterError::EmptyName => {
+                        "initializer readiness contributor name is empty"
+                    }
+                    crate::readiness::RegisterError::Duplicate => {
+                        "initializer readiness contributor name is already registered"
+                    }
+                    crate::readiness::RegisterError::Sealed => {
+                        "initializer readiness registration is closed after Seal"
+                    }
+                    crate::readiness::RegisterError::InvalidPolicy => {
+                        "initializer readiness thresholds must be greater than zero"
+                    }
+                };
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Initialization,
+                    detail,
+                )
             })
     }
 
@@ -2271,6 +2418,31 @@ impl Application {
     pub(crate) fn open_user_hook(&self) {
         let was_open = self.inner.user_hook_open.swap(true, Ordering::AcqRel);
         debug_assert!(!was_open, "user hook registration gate must open only once");
+    }
+
+    /// 业务作用：在 Service UserHook 开始前同步开放 initializer 运行时登记。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；Runner 每个 Service 生命周期只调用一次。
+    pub(crate) fn open_initializer_registration(&self) {
+        self.inner.initializers.open();
+    }
+
+    /// 业务作用：在 UserHook 登记门关闭后取走完整运行时 initializer 集合。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：首次冻结返回全部已受理项；重复冻结返回 Initialization 阶段错误。
+    pub(crate) fn freeze_initializers(
+        &self,
+    ) -> ApplicationResult<Vec<crate::initialization::InitializerRegistration>> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.inner.initializers.freeze()
     }
 
     /// 业务作用：在 Runner 首次观察到 Hook 终止事件后关闭公共登记入口。

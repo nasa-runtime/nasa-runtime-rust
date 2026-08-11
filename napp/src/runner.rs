@@ -1,10 +1,20 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    time::{Duration, Instant as StdInstant},
+};
 
+use futures_util::FutureExt;
 use tokio::time::{timeout, Instant};
 
 use crate::{
     component::{ActiveStack, ActiveStep},
-    report::report_shutdown,
+    initialization::{
+        freeze_plan, order_enabled, EnabledInitializer, FrozenInitializer, FrozenInitializerPlan,
+        InitializerFailure, InitializerFailureKind, InitializerStage, StagedInitializerTask,
+    },
+    report::{report_shutdown, report_shutdown_summary, ShutdownSummary},
     signal::{SignalBroker, SignalEvent, SignalMode},
     state::TerminalIntent,
     supervisor::{
@@ -12,7 +22,8 @@ use crate::{
     },
     Application, ApplicationComponent, ApplicationError, ApplicationInfo, ApplicationMode,
     ApplicationPhase, ApplicationResult, ApplicationState, BootstrapContext, ComponentId,
-    ConfigView, ReadyContext, ShutdownContext, ShutdownReason, ShutdownSignal, StartContext,
+    ConfigView, InitializationContext, PrepareContext, ReadyContext, ShutdownContext,
+    ShutdownReason, ShutdownSignal, StartContext,
 };
 
 /// 生命周期全局启动/停机预算的硬上限；避免外部 `u64` 毫秒配置在 `Instant` 加法处溢出。
@@ -82,6 +93,17 @@ enum ServiceTerminal {
     Failure(ApplicationError),
 }
 
+/// active stack 各类步骤的停机计数；字段集合固定，不把业务名称放入指标维度。
+#[derive(Default)]
+struct ShutdownStepCounts {
+    component_actions: usize,
+    initializer_actions: usize,
+    task_gates: usize,
+    business_resources: usize,
+    component_resources: usize,
+    initializer_resources: usize,
+}
+
 /// 宏展开层使用的生命周期执行器。
 ///
 /// Runner 独占组件表、active stack、任务 JoinSet 和终态写权限，从而让所有关键顺序都由一个异步控制流线性化。
@@ -117,7 +139,7 @@ impl ApplicationRunner {
         }
     }
 
-    /// 业务作用：设置覆盖 Bootstrap、Start、UserHook 和 Ready 的单一启动预算。
+    /// 业务作用：设置覆盖全部启动阶段的单一绝对预算。
     ///
     /// # 参数
     ///
@@ -170,7 +192,7 @@ impl ApplicationRunner {
     ///
     /// # 参数
     ///
-    /// - `component`：由 Runner 独占所有权并依次执行三个启动阶段的组件对象。
+    /// - `component`：由 Runner 独占所有权并依次执行 Bootstrap、Start、Prepare 和 Ready 的组件对象。
     #[doc(hidden)]
     pub fn with_component(mut self, component: Box<dyn ApplicationComponent>) -> Self {
         // 这里是唯一完整观察组件表的位置；先发布声明位，全部能力入口才能用同一来源区分未声明与未就绪。
@@ -191,9 +213,11 @@ impl ApplicationRunner {
 
     /// 业务作用：执行完整的组件启动、UserHook、Running 和反向清理生命周期。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `user_hook`：接收 Application 所有权副本并返回受监督 future 的业务启动入口。
+    ///
+    /// 返回：Service 正常停机或 Batch 工作完成时返回含退出原因、退出码和次要清理错误的结果；
+    /// 无法建立生命周期控制面或无法提交最终状态时返回主错误。
     #[doc(hidden)]
     pub async fn run<F, Fut, E>(mut self, user_hook: F) -> ApplicationResult<ApplicationExit>
     where
@@ -201,6 +225,11 @@ impl ApplicationRunner {
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: Into<anyhow::Error> + 'static,
     {
+        // 生命周期入口不止进程 `run` 一个:公开 Runner 直接执行时同样会运行业务
+        // initializer、UserHook 与组件代码。panic hook 必须在任何业务代码可能 panic
+        // 之前安装——catch_unwind 在 hook 之后才生效,拦不住默认 hook 先把 payload
+        // 写进 stderr。重复安装由 Once 收敛。
+        crate::panic_hook::install_process_panic_hook();
         // handler ready ACK 是所有异步组件的前置屏障，确保启动卡住时仍可被终止。
         let signal_mode = std::mem::replace(&mut self.signal_mode, SignalMode::Disabled);
         let mut broker = match SignalBroker::start(signal_mode, self.application.clone()).await {
@@ -233,28 +262,44 @@ impl ApplicationRunner {
             return self.handle_startup_stop(stop, &mut broker).await;
         }
 
-        // 动态步骤在 poll hook 之前入栈，保证部分资源或任务登记也能走同一回滚链。
-        self.active.push_business_resources();
-        self.active.push_user_tasks();
-        if let Err(stop) = self
-            .run_user_hook(user_hook, startup_deadline, &mut broker)
-            .await
-        {
-            return self.handle_startup_stop(stop, &mut broker).await;
-        }
-
-        // 先关闭登记并应答所有排队命令，再封存资源 key，消除 hook 完成边界上的晚到写入。
-        self.supervisor.close_registration().await;
-        if let Err(error) = self.application.resources().seal() {
-            return self
-                .handle_startup_stop(StartupStop::Failure(error), &mut broker)
-                .await;
-        }
-        // readiness 与资源同点封口:组件只在 Start/UserHook 注册 contributor,Ready 起不再新增。
-        self.application.seal_readiness();
-
-        match self.application.info().mode() {
+        let mode = self.application.info().mode();
+        match mode {
             ApplicationMode::Batch => {
+                // Batch 的 UserHook 就是工作负载；先冻结静态计划并完成准备与初始化，
+                // 才能保证初始化失败时业务负载从未被 poll。
+                let plan = match self.freeze_initializer_plan(mode) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        return self
+                            .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                            .await;
+                    }
+                };
+                if let Err(stop) = self.prepare_components(startup_deadline, &mut broker).await {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                if let Err(stop) = self
+                    .run_initializers(plan, startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+
+                // 工作负载可登记现有业务资源/任务，但 initializer 登记门从未开放。
+                self.active.push_business_resources();
+                self.active.push_user_tasks();
+                if let Err(stop) = self
+                    .run_user_hook(user_hook, false, startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                self.supervisor.close_registration().await;
+                if let Err(error) = self.seal_initialization() {
+                    return self
+                        .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                        .await;
+                }
                 self.application
                     .set_terminal(TerminalIntent::BatchCompleted);
                 let shutdown_failures = self
@@ -267,12 +312,57 @@ impl ApplicationRunner {
                 })
             }
             ApplicationMode::Service => {
+                // 动态步骤在 poll hook 之前入栈，保证部分装配也能走同一回滚链。
+                self.active.push_business_resources();
+                self.active.push_user_tasks();
+                if let Err(stop) = self
+                    .run_user_hook(user_hook, true, startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+
+                // 先关闭 UserHook 与 initializer 登记，再关闭 Supervisor 公共通道并排净 ACK；
+                // 这是任何工厂开始前的唯一冻结边界。
+                self.supervisor.close_registration().await;
+                let plan = match self.freeze_initializer_plan(mode) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        return self
+                            .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                            .await;
+                    }
+                };
+                if let Err(stop) = self.prepare_components(startup_deadline, &mut broker).await {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                let staged_tasks = match self
+                    .run_initializers(plan, startup_deadline, &mut broker)
+                    .await
+                {
+                    Ok(tasks) => tasks,
+                    Err(stop) => {
+                        // 已启动的公共任务必须先于 initializer action/资源停止，
+                        // 失败出口额外压栈使这一顺序在反向清理时成立。
+                        self.active.push_initializer_tasks();
+                        return self.handle_startup_stop(stop, &mut broker).await;
+                    }
+                };
+                // Ready action 会压在该清理门之上：停机先关闭入站能力，再终止全部受管任务，
+                // 最后才撤销 initializer action 和资源。这也覆盖 Seal/Ready 失败时尚未激活 staged task 的路径。
+                self.active.push_initializer_tasks();
+
                 // Mapper L2 兜底断言（Service 专属）：存在 cache=true 的 Mapper 查询却没有在
                 // Hook 中显式安装 L2 时，在对外提供服务之前 fail-fast，避免生产流量静默绕过缓存。
                 // 断言放在 Hook 之后，业务装配已经完成；Batch 不做该断言，因为它的 Hook 本身就是
                 // 工作负载，事后断言会把已经完成的批任务错误改判为失败。
                 #[cfg(feature = "mapper-cache")]
                 if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
+                    return self
+                        .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                        .await;
+                }
+                if let Err(error) = self.seal_initialization() {
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
@@ -284,6 +374,12 @@ impl ApplicationRunner {
                         .await;
                 }
                 if let Err(stop) = self.ready_components(startup_deadline, &mut broker).await {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                if let Err(stop) = self
+                    .activate_initializer_tasks(staged_tasks, startup_deadline, &mut broker)
+                    .await
+                {
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
                 if let Err(error) = self.application.mark_ready() {
@@ -460,11 +556,369 @@ impl ApplicationRunner {
         Ok(())
     }
 
+    /// 业务作用：关闭运行时 initializer 登记并在任何工厂调用前完成全量元数据校验。
+    ///
+    /// 参数说明：
+    /// - `mode`：preflight 已固定的 Service 或 Batch 模式。
+    ///
+    /// 返回：静态描述与运行时实例合并后的冻结计划；重名、超限或模式冲突时返回错误。
+    fn freeze_initializer_plan(
+        &self,
+        mode: ApplicationMode,
+    ) -> ApplicationResult<FrozenInitializerPlan> {
+        let runtime = self.application.freeze_initializers()?;
+        freeze_plan(mode, runtime)
+    }
+
+    /// 业务作用：按声明顺序执行组件 Prepare，为 initializer 建立 migration 与出站依赖边界。
+    ///
+    /// 参数说明：
+    /// - `deadline`：与 Bootstrap、Start 和后续初始化共享的绝对截止时刻。
+    /// - `broker`：组件 future 阻塞时仍持续观察启动中断信号的控制面。
+    ///
+    /// 返回：全部出站门禁通过时成功；组件失败、任务失败、超时或终止时返回唯一启动中断。
+    async fn prepare_components(
+        &mut self,
+        deadline: Instant,
+        broker: &mut SignalBroker,
+    ) -> Result<(), StartupStop> {
+        let cancellation = self.application.cancellation_token();
+        for component in &mut self.components {
+            let component_id = component.id();
+            let mut context = PrepareContext::new(
+                &self.application,
+                component_id,
+                &mut self.active,
+                deadline.into(),
+            );
+            let future = component.prepare(&mut context);
+            tokio::pin!(future);
+            loop {
+                let remaining = startup_remaining(deadline, ApplicationPhase::Prepare)?;
+                tokio::select! {
+                    result = &mut future => {
+                        result.map_err(StartupStop::Failure)?;
+                        break;
+                    }
+                    _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                    signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                    completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                        if let Some(completion) = completion {
+                            classify_startup_completion(completion)?;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare)));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 业务作用：构造条件启用项、稳定拓扑排序，并执行三轮全局 initializer 屏障。
+    ///
+    /// 参数说明：
+    /// - `plan`：Prepare 前已完成元数据校验的冻结计划。
+    /// - `deadline`：全启动流程共享的绝对截止时刻。
+    /// - `broker`：在工厂和每个阶段 future 期间保持活跃的信号控制面。
+    ///
+    /// 返回：三轮全部成功时返回尚未构造/轮询的长期任务工厂；任一失败立即停止后续项。
+    async fn run_initializers(
+        &mut self,
+        plan: FrozenInitializerPlan,
+        deadline: Instant,
+        broker: &mut SignalBroker,
+    ) -> Result<Vec<StagedInitializerTask>, StartupStop> {
+        let mut enabled = Vec::with_capacity(plan.entries.len());
+        for entry in plan.entries {
+            match entry {
+                FrozenInitializer::Static { spec, factory } => {
+                    let name: Arc<str> = Arc::from(spec.name());
+                    let started = StdInstant::now();
+                    let future = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        factory(self.application.clone())
+                    }))
+                    .map_err(|_| {
+                        crate::initialization::record_duration(
+                            &self.application,
+                            &name,
+                            InitializerStage::Factory,
+                            started.elapsed(),
+                        );
+                        crate::initialization::record_failure(
+                            &self.application,
+                            &name,
+                            InitializerStage::Factory,
+                            InitializerFailureKind::Panicked,
+                        );
+                        StartupStop::Failure(initializer_failure_error(
+                            name.clone(),
+                            InitializerStage::Factory,
+                            InitializerFailureKind::Panicked,
+                            None,
+                        ))
+                    })?;
+                    let initializer = await_initializer_future(
+                        future,
+                        name.clone(),
+                        InitializerStage::Factory,
+                        deadline,
+                        &self.application,
+                        &mut self.supervisor,
+                        broker,
+                    )
+                    .await?;
+                    tracing::info!(
+                        initializer = %name,
+                        stage = %InitializerStage::Factory,
+                        duration_seconds = started.elapsed().as_secs_f64(),
+                        enabled = initializer.is_some(),
+                        "initializer factory completed"
+                    );
+                    if let Some(initializer) = initializer {
+                        enabled.push(EnabledInitializer { spec, initializer });
+                    }
+                }
+                FrozenInitializer::Runtime { spec, initializer } => {
+                    enabled.push(EnabledInitializer { spec, initializer });
+                }
+            }
+        }
+
+        let mut ordered = order_enabled(enabled).map_err(StartupStop::Failure)?;
+        let mut staged_tasks = Vec::new();
+        for stage in [
+            InitializerStage::Before,
+            InitializerStage::Initialize,
+            InitializerStage::After,
+        ] {
+            for entry in &mut ordered {
+                let name: Arc<str> = Arc::from(entry.spec.name());
+                let started = StdInstant::now();
+                let cancellation = self.application.cancellation_token();
+                let mut context = InitializationContext {
+                    application: &self.application,
+                    initializer: name.clone(),
+                    kind: entry.spec.initializer_kind(),
+                    stage,
+                    active: &mut self.active,
+                    staged_tasks: &mut staged_tasks,
+                    deadline,
+                    cancellation,
+                };
+                // trait 方法调用也放进 async 边界，使“构造 future 时 panic”与
+                // “poll 时 panic”都被同一 `catch_unwind` 收敛，不越过 Runner 回滚边界。
+                let future = async {
+                    match stage {
+                        InitializerStage::Before => entry.initializer.before(&mut context).await,
+                        InitializerStage::Initialize => {
+                            entry.initializer.initialize(&mut context).await
+                        }
+                        InitializerStage::After => entry.initializer.after(&mut context).await,
+                        InitializerStage::Factory | InitializerStage::Activation => unreachable!(
+                            "initializer barrier only executes before, initialize, and after"
+                        ),
+                    }
+                };
+                await_initializer_future(
+                    future,
+                    name.clone(),
+                    stage,
+                    deadline,
+                    &self.application,
+                    &mut self.supervisor,
+                    broker,
+                )
+                .await?;
+                tracing::info!(
+                    initializer = %name,
+                    stage = %stage,
+                    duration_seconds = started.elapsed().as_secs_f64(),
+                    "initializer stage completed"
+                );
+            }
+        }
+        Ok(staged_tasks)
+    }
+
+    /// 业务作用：封存 initializer 登记期允许扩展的资源 key 和 readiness 名称集合。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：资源容器首次封存成功时返回成功；重复或非法阶段返回 Seal 错误。
+    fn seal_initialization(&self) -> ApplicationResult<()> {
+        self.application.resources().seal().map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::Application,
+                ApplicationPhase::Seal,
+                "failed to seal application resources after initialization",
+                error,
+            )
+        })?;
+        // readiness 必须与资源同一阶段封口，防止 Ready 后无界增长名称和指标基数。
+        self.application.seal_readiness();
+        Ok(())
+    }
+
+    /// 业务作用：在全部组件 Ready action 成功后激活 initializer 暂存的受管任务。
+    ///
+    /// 参数说明：
+    /// - `tasks`：`stage_*` 保存的一次性任务工厂。
+    /// - `deadline`：激活仍必须遵守的共享启动截止时刻。
+    /// - `broker`：每个任务激活边界都复验的启动信号控制面。
+    ///
+    /// 返回：全部任务已加入 Supervisor 时成功；超时、工厂 panic 或名称冲突时停止接流。
+    async fn activate_initializer_tasks(
+        &mut self,
+        tasks: Vec<StagedInitializerTask>,
+        deadline: Instant,
+        broker: &mut SignalBroker,
+    ) -> Result<(), StartupStop> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        for task in tasks {
+            startup_remaining(deadline, ApplicationPhase::Ready)?;
+            let started = StdInstant::now();
+            let cancellation = self.application.cancellation_token();
+            // 激活循环可能包含多个同步工厂；每项之间显式让出并优先处理停止事件，
+            // 避免启动已取消时仍继续构造后续业务 future。
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    crate::initialization::record_duration(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        started.elapsed(),
+                    );
+                    crate::initialization::record_failure(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        InitializerFailureKind::Cancelled,
+                    );
+                    return Err(StartupStop::Requested);
+                }
+                signal = broker.next() => {
+                    crate::initialization::record_duration(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        started.elapsed(),
+                    );
+                    crate::initialization::record_failure(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        InitializerFailureKind::Cancelled,
+                    );
+                    return Err(signal_to_startup_stop(signal));
+                }
+                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                    if let Some(completion) = completion {
+                        if let Err(stop) = classify_startup_completion(completion) {
+                            crate::initialization::record_duration(
+                                &self.application,
+                                &task.initializer,
+                                InitializerStage::Activation,
+                                started.elapsed(),
+                            );
+                            crate::initialization::record_failure(
+                                &self.application,
+                                &task.initializer,
+                                InitializerStage::Activation,
+                                InitializerFailureKind::Cancelled,
+                            );
+                            return Err(stop);
+                        }
+                    }
+                }
+                _ = tokio::task::yield_now() => {}
+            }
+            let token = self.supervisor.task_token();
+            let future =
+                std::panic::catch_unwind(AssertUnwindSafe(|| (task.factory)(token.clone())))
+                    .map_err(|_| {
+                        crate::initialization::record_failure(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            InitializerFailureKind::Panicked,
+                        );
+                        crate::initialization::record_duration(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            started.elapsed(),
+                        );
+                        StartupStop::Failure(initializer_failure_error(
+                            task.initializer.clone(),
+                            InitializerStage::Activation,
+                            InitializerFailureKind::Panicked,
+                            None,
+                        ))
+                    })?;
+            let application = self.application.clone();
+            let guarded = Box::pin(async move {
+                let mut states = application.subscribe_state();
+                loop {
+                    match *states.borrow() {
+                        ApplicationState::Starting => {}
+                        ApplicationState::Ready => break,
+                        ApplicationState::Stopping
+                        | ApplicationState::Stopped
+                        | ApplicationState::Failed => return Ok(()),
+                    }
+                    tokio::select! {
+                        _ = token.cancelled() => return Ok(()),
+                        changed = states.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                future.await
+            });
+            self.supervisor
+                .spawn_initializer_task(task.name, task.kind, guarded)
+                .map_err(|error| {
+                    crate::initialization::record_failure(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        InitializerFailureKind::Error,
+                    );
+                    crate::initialization::record_duration(
+                        &self.application,
+                        &task.initializer,
+                        InitializerStage::Activation,
+                        started.elapsed(),
+                    );
+                    StartupStop::Failure(initializer_failure_error(
+                        task.initializer.clone(),
+                        InitializerStage::Activation,
+                        InitializerFailureKind::Error,
+                        Some(anyhow::Error::from(error)),
+                    ))
+                })?;
+            crate::initialization::record_duration(
+                &self.application,
+                &task.initializer,
+                InitializerStage::Activation,
+                started.elapsed(),
+            );
+        }
+        Ok(())
+    }
+
     /// 业务作用：按声明顺序执行 Service 组件的 Ready 阶段，同时监督已经登记的关键任务。
     ///
     /// # 参数
     ///
-    /// - `deadline`：与 Bootstrap、Start 和 UserHook 共享的启动截止时间。
+    /// - `deadline`：与 Bootstrap、Start、UserHook、Prepare 和 Initialization 共享的启动截止时间。
     /// - `broker`：持续观察启动中断信号的控制面。
     async fn ready_components(
         &mut self,
@@ -525,6 +979,7 @@ impl ApplicationRunner {
     async fn run_user_hook<F, Fut, E>(
         &mut self,
         user_hook: F,
+        allow_initializer_registration: bool,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop>
@@ -534,6 +989,9 @@ impl ApplicationRunner {
         E: Into<anyhow::Error> + 'static,
     {
         self.application.open_user_hook();
+        if allow_initializer_registration {
+            self.application.open_initializer_registration();
+        }
         let application = self.application.clone();
         self.supervisor.spawn_user_hook(Box::pin(async move {
             user_hook(application).await.map_err(Into::into)
@@ -781,14 +1239,22 @@ impl ApplicationRunner {
 
     /// 业务作用：严格逆序执行所有 active step，并让每一步只消费全局 deadline 的剩余预算。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `context`：携带首次停机原因和不可重置的绝对截止时间。
+    ///
+    /// 返回：按发生顺序累计的次要清理错误；无论成功、失败或预算耗尽都会输出一次有界停机摘要。
     async fn shutdown_active_stack(&mut self, context: &ShutdownContext) -> Vec<ApplicationError> {
+        let shutdown_started = StdInstant::now();
+        let planned_steps = self.active.len();
         let mut failures = Vec::new();
+        let mut counts = ShutdownStepCounts::default();
+        let mut attempted_steps = 0_usize;
+        let mut abandoned_steps = 0_usize;
         let mut task_abort_attempted = false;
         while let Some(step) = self.active.pop() {
             if context.is_expired() {
+                // 当前步骤已经出栈但尚未执行；连同仍在栈内的步骤统一计入放弃数，避免摘要谎报完成。
+                abandoned_steps = planned_steps.saturating_sub(attempted_steps);
                 failures.push(runner_error(
                     ApplicationPhase::Stopping,
                     "global shutdown deadline expired; remaining active steps were abandoned",
@@ -796,11 +1262,15 @@ impl ApplicationRunner {
                 break;
             }
 
+            let sequence = attempted_steps + 1;
+            let step_started = StdInstant::now();
+            let failures_before = failures.len();
             match step {
                 ActiveStep::Action {
                     component,
                     mut action,
                 } => {
+                    counts.component_actions += 1;
                     let label = action.label();
                     match timeout(context.remaining(), action.shutdown(context)).await {
                         Ok(Ok(())) => {}
@@ -816,8 +1286,52 @@ impl ApplicationRunner {
                             format!("shutdown action `{label}` exceeded the global deadline"),
                         )),
                     }
+                    log_shutdown_step(
+                        sequence,
+                        "component-action",
+                        component,
+                        Some(label),
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
                 }
-                ActiveStep::UserTasks => {
+                ActiveStep::InitializerAction {
+                    initializer,
+                    mut action,
+                } => {
+                    counts.initializer_actions += 1;
+                    let label = action.label();
+                    match timeout(context.remaining(), action.shutdown(context)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => failures.push(ApplicationError::with_source(
+                            ComponentId::Application,
+                            ApplicationPhase::Stopping,
+                            format!(
+                                "initializer `{initializer}` shutdown action `{label}` failed"
+                            ),
+                            error,
+                        )),
+                        Err(_) => failures.push(ApplicationError::new(
+                            ComponentId::Application,
+                            ApplicationPhase::Stopping,
+                            format!(
+                                "initializer `{initializer}` shutdown action `{label}` exceeded the global deadline"
+                            ),
+                        )),
+                    }
+                    log_shutdown_step(
+                        sequence,
+                        "initializer-action",
+                        initializer.as_ref(),
+                        Some(label),
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
+                }
+                ActiveStep::UserTasks | ActiveStep::InitializerTasks => {
+                    counts.task_gates += 1;
                     // 先切状态再 cancel，Runner 随后收割到的 critical exit 才不会被误判成运行期故障。
                     self.supervisor.begin_stopping();
                     while self.supervisor.has_tasks() && !context.is_expired() {
@@ -849,8 +1363,18 @@ impl ApplicationRunner {
                             ));
                         }
                     }
+                    log_shutdown_step(
+                        sequence,
+                        "task-gate",
+                        "supervisor",
+                        None,
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
                 }
                 ActiveStep::BusinessResources => {
+                    counts.business_resources += 1;
                     // 全局槽在业务资源进入 Closing 前清除，阻止新的迁移期查找延长资源借用。
                     self.application.clear_global();
                     match timeout(
@@ -865,8 +1389,18 @@ impl ApplicationRunner {
                             "business resource shutdown exceeded the global deadline",
                         )),
                     }
+                    log_shutdown_step(
+                        sequence,
+                        "business-resources",
+                        "application",
+                        None,
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
                 }
                 ActiveStep::ComponentResources(component) => {
+                    counts.component_resources += 1;
                     match timeout(
                         context.remaining(),
                         self.application
@@ -882,8 +1416,47 @@ impl ApplicationRunner {
                             "component resource shutdown exceeded the global deadline",
                         )),
                     }
+                    log_shutdown_step(
+                        sequence,
+                        "component-resources",
+                        component,
+                        None,
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
+                }
+                ActiveStep::InitializerResources(initializer) => {
+                    counts.initializer_resources += 1;
+                    match timeout(
+                        context.remaining(),
+                        self.application
+                            .resources()
+                            .shutdown_initializer(initializer.clone(), context),
+                    )
+                    .await
+                    {
+                        Ok(mut resource_failures) => failures.append(&mut resource_failures),
+                        Err(_) => failures.push(ApplicationError::new(
+                            ComponentId::Application,
+                            ApplicationPhase::Stopping,
+                            format!(
+                                "initializer `{initializer}` resource shutdown exceeded the global deadline"
+                            ),
+                        )),
+                    }
+                    log_shutdown_step(
+                        sequence,
+                        "initializer-resources",
+                        initializer.as_ref(),
+                        None,
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
                 }
             }
+            attempted_steps += 1;
         }
 
         // deadline 可能在更高层 action 上耗尽；仍需切换任务组并 abort，不能让 JoinSet 随普通析构失去分类信息。
@@ -891,6 +1464,7 @@ impl ApplicationRunner {
             self.supervisor.begin_stopping();
         }
         if self.supervisor.has_tasks() && !task_abort_attempted {
+            task_abort_attempted = true;
             let drained = self.supervisor.abort_and_drain(context.remaining()).await;
             if !drained {
                 failures.push(runner_error(
@@ -899,8 +1473,243 @@ impl ApplicationRunner {
                 ));
             }
         }
+        let deadline_exhausted = abandoned_steps > 0
+            || task_abort_attempted
+            || (context.is_expired() && (!failures.is_empty() || self.supervisor.has_tasks()));
+        report_shutdown_summary(&ShutdownSummary {
+            reason: shutdown_reason_label(context.reason()),
+            planned_steps,
+            attempted_steps,
+            abandoned_steps,
+            component_actions: counts.component_actions,
+            initializer_actions: counts.initializer_actions,
+            task_gates: counts.task_gates,
+            business_resources: counts.business_resources,
+            component_resources: counts.component_resources,
+            initializer_resources: counts.initializer_resources,
+            failures: failures.len(),
+            task_abort_attempted,
+            deadline_exhausted,
+            duration: shutdown_started.elapsed(),
+        });
         failures
     }
+}
+
+/// 业务作用：把一个已尝试的 active step 记录为带严格序号的结构化 debug 事件，供停机顺序复盘。
+///
+/// 参数说明：
+/// - `sequence`：本次反向清理中从 1 开始、严格递增的执行序号。
+/// - `step_kind`：固定集合内的步骤类型。
+/// - `owner`：稳定组件名、canonical initializer 名或框架所有者名。
+/// - `action`：`ShutdownAction::label()` 返回的静态名称；资源和任务门没有 action 名。
+/// - `started`：当前步骤开始执行的单调时钟。
+/// - `failures_before`：执行当前步骤前的累计失败数。
+/// - `failures_after`：执行当前步骤后的累计失败数。
+///
+/// 返回：无返回值；日志是否启用不影响清理结果和顺序。
+fn log_shutdown_step(
+    sequence: usize,
+    step_kind: &'static str,
+    owner: impl std::fmt::Display,
+    action: Option<&'static str>,
+    started: StdInstant,
+    failures_before: usize,
+    failures_after: usize,
+) {
+    let failures_added = failures_after.saturating_sub(failures_before);
+    tracing::debug!(
+        shutdown_sequence = sequence,
+        shutdown_step = step_kind,
+        owner = %owner,
+        action = action.unwrap_or("-"),
+        duration_seconds = started.elapsed().as_secs_f64(),
+        failures_added,
+        outcome = if failures_added == 0 { "completed" } else { "failed" },
+        "application shutdown step completed"
+    );
+}
+
+/// 业务作用：把首次停机原因映射为固定、无业务输入的摘要分类。
+///
+/// 参数说明：
+/// - `reason`：贯穿全部清理步骤且不可变的首次停机原因。
+///
+/// 返回：用于同步停机摘要的稳定短名称。
+fn shutdown_reason_label(reason: &ShutdownReason) -> &'static str {
+    match reason {
+        ShutdownReason::Requested => "requested",
+        ShutdownReason::Signal(signal) => signal.name(),
+        ShutdownReason::BatchCompleted => "batch-completed",
+        ShutdownReason::CriticalTaskFailed => "critical-task-failed",
+        ShutdownReason::StartupFailed => "startup-failed",
+        ShutdownReason::ComponentFailed => "component-failed",
+    }
+}
+
+/// 业务作用：在 initializer future、panic 边界、全局 deadline、取消、信号与关键任务之间统一裁决。
+///
+/// 参数说明：
+/// - `future`：当前工厂或三轮屏障的唯一受监督 future。
+/// - `name`：冻结计划中的 canonical initializer 身份。
+/// - `stage`：当前工厂或屏障阶段。
+/// - `deadline`：完整启动流程共享的绝对截止时刻。
+/// - `application`：提供启动取消观察的应用容器。
+/// - `supervisor`：用于在初始化阻塞时继续收割早退任务。
+/// - `broker`：启动期间的进程信号控制面。
+///
+/// 返回：future 成功时返回业务值；错误、panic、超时或中断收敛为单一 `StartupStop`。
+async fn await_initializer_future<T, F>(
+    future: F,
+    name: Arc<str>,
+    stage: InitializerStage,
+    deadline: Instant,
+    application: &Application,
+    supervisor: &mut TaskSupervisor,
+    broker: &mut SignalBroker,
+) -> Result<T, StartupStop>
+where
+    F: Future<Output = ApplicationResult<T>> + Send,
+{
+    let started = StdInstant::now();
+    let future = AssertUnwindSafe(future).catch_unwind();
+    tokio::pin!(future);
+    let cancellation = application.cancellation_token();
+    loop {
+        let remaining = startup_remaining(deadline, ApplicationPhase::Initialization)?;
+        tokio::select! {
+            result = &mut future => {
+                return match result {
+                    Ok(Ok(value)) => {
+                        crate::initialization::record_duration(
+                            application,
+                            &name,
+                            stage,
+                            started.elapsed(),
+                        );
+                        Ok(value)
+                    }
+                    Ok(Err(error)) => {
+                        crate::initialization::record_duration(
+                            application,
+                            &name,
+                            stage,
+                            started.elapsed(),
+                        );
+                        crate::initialization::record_failure(
+                            application,
+                            &name,
+                            stage,
+                            InitializerFailureKind::Error,
+                        );
+                        Err(StartupStop::Failure(initializer_failure_error(
+                            name,
+                            stage,
+                            InitializerFailureKind::Error,
+                            Some(anyhow::Error::new(error)),
+                        )))
+                    }
+                    Err(_) => {
+                        crate::initialization::record_duration(
+                            application,
+                            &name,
+                            stage,
+                            started.elapsed(),
+                        );
+                        crate::initialization::record_failure(
+                            application,
+                            &name,
+                            stage,
+                            InitializerFailureKind::Panicked,
+                        );
+                        Err(StartupStop::Failure(initializer_failure_error(
+                            name,
+                            stage,
+                            InitializerFailureKind::Panicked,
+                            None,
+                        )))
+                    }
+                };
+            }
+            _ = cancellation.cancelled() => {
+                crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                crate::initialization::record_failure(
+                    application,
+                    &name,
+                    stage,
+                    InitializerFailureKind::Cancelled,
+                );
+                return Err(StartupStop::Requested);
+            }
+            signal = broker.next() => {
+                crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                crate::initialization::record_failure(
+                    application,
+                    &name,
+                    stage,
+                    InitializerFailureKind::Cancelled,
+                );
+                return Err(signal_to_startup_stop(signal));
+            }
+            completion = supervisor.join_next(), if supervisor.has_tasks() => {
+                if let Some(completion) = completion {
+                    if let Err(stop) = classify_startup_completion(completion) {
+                        crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                        crate::initialization::record_failure(
+                            application,
+                            &name,
+                            stage,
+                            InitializerFailureKind::Cancelled,
+                        );
+                        return Err(stop);
+                    }
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                crate::initialization::record_failure(
+                    application,
+                    &name,
+                    stage,
+                    InitializerFailureKind::TimedOut,
+                );
+                return Err(StartupStop::Failure(initializer_failure_error(
+                    name,
+                    stage,
+                    InitializerFailureKind::TimedOut,
+                    None,
+                )));
+            }
+        }
+    }
+}
+
+/// 业务作用：构造带 initializer 身份、阶段和低基数分类的全局初始化错误。
+///
+/// 参数说明：
+/// - `name`：冻结计划中的 canonical 身份。
+/// - `stage`：失败所属工厂、三轮屏障或激活阶段。
+/// - `kind`：不依赖底层错误文本的稳定分类。
+/// - `source`：可选底层错误，只交给统一脱敏诊断链。
+///
+/// 返回：归因到 Application/Initialization 的公开错误。
+fn initializer_failure_error(
+    name: Arc<str>,
+    stage: InitializerStage,
+    kind: InitializerFailureKind,
+    source: Option<anyhow::Error>,
+) -> ApplicationError {
+    let message = format!("initializer `{name}` failed during {stage}: {kind}");
+    let failure = match source {
+        Some(source) => InitializerFailure::with_source(name, stage, source),
+        None => InitializerFailure::new(name, stage, kind),
+    };
+    ApplicationError::with_source(
+        ComponentId::Application,
+        ApplicationPhase::Initialization,
+        message,
+        failure,
+    )
 }
 
 /// 业务作用：在启动组件 future、绝对 deadline 和信号控制面之间进行选择。

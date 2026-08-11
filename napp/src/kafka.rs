@@ -11,13 +11,14 @@ use serde_json::Value;
 use crate::{
     application::KafkaCustomization, capabilities::KafkaClientCapability, Application,
     ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase, ApplicationResult,
-    ApplicationState, ComponentId, ReadyContext, ShutdownAction, ShutdownContext, StartContext,
+    ApplicationState, ComponentId, PrepareContext, ReadyContext, ShutdownAction, ShutdownContext,
+    StartContext,
 };
 
-/// Kafka Ready 归因错误相对 Application 全局 deadline 预留的固定诊断余量。
+/// Kafka 启动门禁相对 Application 全局 deadline 预留的固定诊断余量。
 ///
 /// 余量只用于让带 client/group/topic 的组件错误先于 Runner 通用超时完成，不会扩大全局预算。
-const READY_DIAGNOSTIC_RESERVE: Duration = Duration::from_millis(50);
+const STARTUP_DIAGNOSTIC_RESERVE: Duration = Duration::from_millis(50);
 
 /// 受管 client 是否启动 consumer registry。
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -495,9 +496,9 @@ impl KafkaRuntimeState {
     }
 }
 
-/// `#[application("kafka")]` 对应的三阶段生命周期组件。
+/// `#[application("kafka")]` 对应的受管生命周期组件。
 pub(crate) struct KafkaComponent {
-    /// Start 构造、Ready 启动并由 monitor 只读观察的有序 client 表。
+    /// Start 构造、Prepare 探测、Ready 启动并由 monitor 只读观察的有序 client 表。
     clients: BTreeMap<String, KafkaClientPlan>,
     /// Ready 成功后交给 Runner 的唯一关键健康任务。
     critical_task: Option<ApplicationFuture<'static>>,
@@ -508,7 +509,7 @@ impl KafkaComponent {
     ///
     /// # 返回
     ///
-    /// 返回可由 Runner 依次推进 Start 和 Ready 的空组件。
+    /// 返回可由 Runner 依次推进 Start、Prepare 和 Ready 的空组件。
     pub(crate) fn new() -> Self {
         Self {
             clients: BTreeMap::new(),
@@ -614,22 +615,41 @@ impl ApplicationComponent for KafkaComponent {
         })
     }
 
-    /// 业务作用：在 UserHook 封口后启动 consumer、等待真实 broker Ready 并创建运行期健康 monitor。
+    /// 业务作用：在 initializer 之前验证全部 Kafka client 的真实 broker metadata 能力。
+    ///
+    /// 参数说明：
+    /// - `context`：提供完整启动流程共享的绝对 deadline。
+    ///
+    /// 返回：所有 client 的只读 metadata 探针通过时成功；配置收集目标、broker
+    /// 连通性或 topic 门禁失败时拒绝进入业务初始化。
+    fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
+        Box::pin(async move {
+            validate_collected_targets(&self.clients)?;
+            let deadline = kafka_startup_subdeadline(
+                context.deadline(),
+                ApplicationPhase::Prepare,
+                "kafka metadata probe",
+            )?;
+
+            // producer 出站句柄在 initializer 可见前必须已通过真实 broker 往返；
+            // consumer owner 仍保留到 Ready 才启动，避免初始化期抢先收消。
+            probe_all_clients_metadata(&self.clients, deadline).await
+        })
+    }
+
+    /// 业务作用：在初始化封口后启动 consumer、等待真实 group Ready 并创建运行期健康 monitor。
     ///
     /// # 参数
     ///
     /// - `context`：提供 UserHook 后的 Application、共享启动 deadline 和 Ready 层 action 栈。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
-            validate_collected_targets(&self.clients)?;
             let application = context.application().clone();
-            let deadline = kafka_ready_deadline(context.deadline())?;
-
-            // 启动任何 consumer 之前，先对**所有** client 执行只读 broker metadata 探针，
-            // (consumer client 也探,不再只探 producer-only)。只读、无 owner 副作用,失败无需回滚;
-            // 全部失败按 client 名稳定排序后主错误报第一个。metadata 成功**不**冒充 consumer Ready——
-            // consumer 仍须在最终就绪门禁中等待真实 group join/assignment。
-            probe_all_clients_metadata(&self.clients, deadline).await?;
+            let deadline = kafka_startup_subdeadline(
+                context.deadline(),
+                ApplicationPhase::Ready,
+                "kafka consumer readiness",
+            )?;
 
             let runtime = application.kafka_runtime();
             let mut customizations = runtime.take_customizations();
@@ -955,6 +975,7 @@ async fn run_kafka_monitor(
                     &client.proxy,
                     client.producer_probe_topic.as_deref(),
                     deadline,
+                    ApplicationPhase::Running,
                 )
                 .await
                 .is_ok();
@@ -1184,14 +1205,14 @@ fn parse_kafka_client(
 ///
 /// # 错误
 ///
-/// 收集项指向未知或 producer-only client 时返回 Ready 错误，避免静默漏消费。
+/// 收集项指向未知或 producer-only client 时返回 Prepare 错误，避免静默漏消费。
 fn validate_collected_targets(
     clients: &BTreeMap<String, KafkaClientPlan>,
 ) -> ApplicationResult<()> {
     for collected in nafka::COLLECTED_CONSUMERS {
         let Some(client) = clients.get(collected.client) else {
             return Err(kafka_error(
-                ApplicationPhase::Ready,
+                ApplicationPhase::Prepare,
                 format!(
                     "collected kafka consumer `{}` targets an unconfigured client",
                     collected.id
@@ -1200,7 +1221,7 @@ fn validate_collected_targets(
         };
         if client.container.consumers == ConsumerMode::Disabled {
             return Err(kafka_error(
-                ApplicationPhase::Ready,
+                ApplicationPhase::Prepare,
                 format!(
                     "collected kafka consumer `{}` targets a producer-only client",
                     collected.id
@@ -1259,29 +1280,32 @@ fn resolve_group_rules(
         .collect())
 }
 
-/// 业务作用：计算严格早于 Application 全局时刻的 Kafka Ready 子 deadline。
+/// 业务作用：计算严格早于 Application 全局时刻的 Kafka 子 deadline。
 ///
 /// # 参数
 ///
 /// - `application_deadline`：Runner 为完整启动流程建立的绝对截止时刻。
+/// - `phase`：本次 Kafka 门禁所属的 Application 阶段。
+/// - `operation`：不含配置值的稳定操作名。
 ///
 /// # 返回
 ///
-/// 剩余时间足够时返回扣除固定诊断余量后的绝对时刻。
-///
-/// # 错误
-///
-/// 全局剩余预算已经不足诊断余量时立即返回 Kafka Ready 超时归因。
-fn kafka_ready_deadline(application_deadline: Instant) -> ApplicationResult<Instant> {
+/// 返回：剩余时间足够时返回扣除固定诊断余量后的绝对时刻；预算不足时返回
+/// 归因到 `phase` 的 Kafka 启动错误。
+fn kafka_startup_subdeadline(
+    application_deadline: Instant,
+    phase: ApplicationPhase,
+    operation: &'static str,
+) -> ApplicationResult<Instant> {
     let now = Instant::now();
     let remaining = application_deadline.saturating_duration_since(now);
-    if remaining <= READY_DIAGNOSTIC_RESERVE {
+    if remaining <= STARTUP_DIAGNOSTIC_RESERVE {
         return Err(kafka_error(
-            ApplicationPhase::Ready,
-            "kafka readiness has no remaining startup budget",
+            phase,
+            format!("{operation} has no remaining startup budget"),
         ));
     }
-    Ok(application_deadline - READY_DIAGNOSTIC_RESERVE)
+    Ok(application_deadline - STARTUP_DIAGNOSTIC_RESERVE)
 }
 
 /// 业务作用：在共享子 deadline 内验证 producer-only client 的 broker metadata。
@@ -1299,7 +1323,7 @@ fn kafka_ready_deadline(application_deadline: Instant) -> ApplicationResult<Inst
 ///
 /// # 错误
 ///
-/// 请求失败、topic 不存在/无分区或 deadline 到期时返回带 client 归因的 Ready 错误。
+/// 请求失败、topic 不存在/无分区或 deadline 到期时返回带 client 归因的 Prepare 错误。
 /// 规范化 Kafka bootstrap 列表为安全展示形式:按**原顺序**去空白拼接 `host:port` 列表。
 /// Kafka bootstrap 不含 userinfo/SASL 凭据(凭据在独立配置项),故整串可安全进日志与错误;空则占位符。
 ///
@@ -1330,17 +1354,22 @@ fn safe_bootstrap_endpoint(bootstrap: &str) -> String {
 /// - `proxy`:该 client 的 KafkaProxy(取 admin 连接与 bootstrap endpoint)。
 /// - `topic`:producer-only client 可选的指定探测 topic;consumer client 为 None,走 cluster metadata。
 /// - `deadline`:本次探针的绝对上限(严格早于 Application 启动 deadline)。
+/// - `phase`：探针失败应归因的当前生命周期阶段。
+///
+/// 返回：metadata 满足配置合同时成功；超时、broker 失败或 topic 无分区时返回
+/// 归因到 `phase` 的错误。
 async fn probe_client_metadata(
     client_name: &str,
     proxy: &nafka::KafkaProxy,
     topic: Option<&str>,
     deadline: Instant,
+    phase: ApplicationPhase,
 ) -> ApplicationResult<()> {
     let endpoint = safe_bootstrap_endpoint(&proxy.config().bootstrap_servers);
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(kafka_error(
-            ApplicationPhase::Ready,
+            phase,
             format!("kafka client `{client_name}` timed out during metadata on {endpoint} (no remaining startup budget)"),
         ));
     }
@@ -1350,7 +1379,7 @@ async fn probe_client_metadata(
             .await
             .map_err(|_| {
                 kafka_error(
-                    ApplicationPhase::Ready,
+                    phase,
                     format!("kafka client `{client_name}` timed out during metadata on {endpoint} (topic `{topic}` after {}ms)", remaining.as_millis()),
                 )
             })?
@@ -1368,7 +1397,7 @@ async fn probe_client_metadata(
             .await
             .map_err(|_| {
                 kafka_error(
-                    ApplicationPhase::Ready,
+                    phase,
                     format!("kafka client `{client_name}` timed out during metadata on {endpoint} (cluster metadata after {}ms)", remaining.as_millis()),
                 )
             })?
@@ -1376,7 +1405,7 @@ async fn probe_client_metadata(
     };
     result.map_err(|error| {
         kafka_source_error(
-            ApplicationPhase::Ready,
+            phase,
             format!("kafka client `{client_name}` probe failed during metadata on {endpoint}"),
             error,
         )
@@ -1392,6 +1421,9 @@ async fn probe_client_metadata(
 ///
 /// - `clients`:Start 已构造的全部 client 计划。
 /// - `deadline`:所有探针共享、严格早于 Application 启动 deadline 的子 deadline。
+///
+/// 返回：全部 client 已完成真实 metadata 往返时成功；任一失败时按 client 名稳定选择
+/// 主错误，且不启动任何 consumer。
 async fn probe_all_clients_metadata(
     clients: &BTreeMap<String, KafkaClientPlan>,
     deadline: Instant,
@@ -1403,7 +1435,14 @@ async fn probe_all_clients_metadata(
         let proxy = plan.proxy.clone();
         let topic = plan.container.readiness.producer_probe_topic.clone();
         probes.push(Box::pin(async move {
-            let result = probe_client_metadata(&name, &proxy, topic.as_deref(), deadline).await;
+            let result = probe_client_metadata(
+                &name,
+                &proxy,
+                topic.as_deref(),
+                deadline,
+                ApplicationPhase::Prepare,
+            )
+            .await;
             Ok((name, result))
         }));
     }

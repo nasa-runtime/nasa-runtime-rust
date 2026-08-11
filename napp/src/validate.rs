@@ -25,7 +25,7 @@ pub trait ValidateRequest {
     fn validate(&self) -> Vec<FieldViolation>;
 }
 
-/// 业务作用：解析失败(400):不回显底层 serde 错误,只给稳定 code + 可修复提示。
+/// 业务作用：解析失败(400):不回显底层 serde 错误,只给稳定 code + 客户端纠正提示。
 fn parse_problem(kind: &'static str) -> Response {
     ApiProblem::new(
         "about:blank",

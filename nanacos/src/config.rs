@@ -713,9 +713,8 @@ fn resolved_group(group: &Option<String>, default_group: &str) -> String {
 
 /// 业务作用：纯编排:按 `refs` 顺序调用 `fetch_one` 拉取,组装成保序的 [`ConfigBundle`]。
 ///
-/// - `optional=true` 拉取失败：warn + 跳过（兼容策略不细分“配置不存在”与鉴权/网络错误，
-///   后续应细分,避免环境故障被静默吞掉)。
-/// - `optional=false` 拉取失败:返回 `Err`,启动/重拉 fail-fast。
+/// - `optional=true` 只在服务端明确返回配置不存在时跳过；鉴权、网络和协议错误仍失败。
+/// - `optional=false` 缺失或拉取失败都返回 `Err`，启动/重拉 fail-fast。
 ///
 /// 抽成【与 nacos-sdk 无关】的泛型函数,供真实 `fetch_many`/watch 复用，并保持拉取顺序、
 /// optional 跳过、required 报错与分组回退的编排边界集中一致。
@@ -732,14 +731,14 @@ async fn collect_bundle<F, Fut>(
     fetch_one: F,
 ) -> anyhow::Result<ConfigBundle>
 where
-    F: Fn(String, String) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<String>>,
+    F: Fn(String, String, bool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Option<String>>>,
 {
     let mut documents = Vec::with_capacity(refs.len());
     for r in refs {
         let group = resolved_group(&r.group, default_group);
-        match fetch_one(r.data_id.clone(), group.clone()).await {
-            Ok(content) => documents.push(ConfigDocument {
+        match fetch_one(r.data_id.clone(), group.clone(), r.optional).await {
+            Ok(Some(content)) => documents.push(ConfigDocument {
                 // source = 解析后的 ref:group 落成具体值,file_extension 保留门面层填好的格式,随文档带走。
                 source: ConfigRef {
                     data_id: r.data_id.clone(),
@@ -749,16 +748,49 @@ where
                 },
                 content,
             }),
-            Err(e) => {
-                if r.optional {
-                    tracing::warn!(data_id = %r.data_id, group = %group, error = %e, "nacos: 可选配置拉取失败,跳过");
-                } else {
-                    return Err(e.context(format!("nacos: 必需配置 {} 拉取失败", r.data_id)));
-                }
-            }
+            Ok(None) => tracing::debug!(
+                data_id = %r.data_id,
+                group = %group,
+                "nacos: 可选配置不存在,跳过"
+            ),
+            Err(e) => return Err(e.context(format!("nacos: 配置 {} 拉取失败", r.data_id))),
         }
     }
     Ok(ConfigBundle { documents })
+}
+
+/// 业务作用：按引用的 required/optional 语义拉取单份配置，并只把服务端明确的 not-found 转成缺省。
+///
+/// 参数说明：`service` 是 Nacos 配置服务；`data_id`/`group` 定位文档；`optional` 决定缺失是否允许。
+///
+/// 返回：文档存在时返回正文；可选文档不存在时返回 `None`；必需文档缺失或依赖故障返回错误。
+#[cfg(feature = "nacos")]
+async fn get_bundle_document(
+    service: &nacos_sdk::api::config::ConfigService,
+    data_id: &str,
+    group: &str,
+    optional: bool,
+) -> anyhow::Result<Option<String>> {
+    if !optional {
+        return get_one(service, data_id, group).await.map(Some);
+    }
+    validate_cfg(data_id, group)?;
+    match service
+        .get_config(data_id.to_string(), group.to_string())
+        .await
+    {
+        Ok(response) => Ok(Some(response.content().to_string())),
+        Err(nacos_sdk::api::error::Error::ConfigNotFound(_))
+        | Err(nacos_sdk::api::error::Error::ErrResponse(_, _, 300, _)) => Ok(None),
+        Err(nacos_sdk::api::error::Error::ErrResult(message))
+            if is_config_not_found_result(&message) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "nacos: get_config({data_id},{group}) failed: {error}"
+        )),
+    }
 }
 
 /// 业务作用：拉单份配置原文(fetch / fetch_many 共用的最小单元:校验 + get_config + 结构化日志)。
@@ -901,8 +933,8 @@ impl NacosConfigClient {
         }
         #[cfg(feature = "nacos")]
         {
-            collect_bundle(&self.group, refs, |data_id, group| async move {
-                get_one(&self.config, &data_id, &group).await
+            collect_bundle(&self.group, refs, |data_id, group, optional| async move {
+                get_bundle_document(&self.config, &data_id, &group, optional).await
             })
             .await
         }
@@ -980,9 +1012,11 @@ impl NacosConfigClient {
                 let refs = refs_for_fetch.clone();
                 let dg = group_for_fetch.clone();
                 async move {
-                    collect_bundle(&dg, &refs, |data_id, group| {
+                    collect_bundle(&dg, &refs, |data_id, group, optional| {
                         let service = service.clone();
-                        async move { get_one(&service, &data_id, &group).await }
+                        async move {
+                            get_bundle_document(&service, &data_id, &group, optional).await
+                        }
                     })
                     .await
                 }

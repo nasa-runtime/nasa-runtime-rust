@@ -41,9 +41,10 @@ pub enum ResourcePhase {
 }
 
 /// 区分框架组件资源和 UserHook 手工登记业务资源的所有者。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResourceOwner {
     Component(ComponentId),
+    Initializer(Arc<str>),
     Business,
 }
 
@@ -84,7 +85,8 @@ struct RegistryState {
     entries: HashMap<ResourceKey, ResourceEntry>,
 }
 
-/// Application 拥有的类型资源容器，支持 UserHook 登记、运行期只读借用和逆序清理。
+/// Application 拥有的类型资源容器，支持组件、UserHook 和 initializer 登记，以及运行期
+/// 只读借用和逆序清理。
 pub struct ResourceRegistry {
     state: RwLock<RegistryState>,
 }
@@ -267,7 +269,59 @@ impl ResourceRegistry {
         )
     }
 
-    /// 业务作用：在 UserHook 成功且任务登记关闭后封存资源 key 集合。
+    /// 业务作用：由受控上下文登记一个 initializer 拥有的普通资源。
+    ///
+    /// 参数说明：
+    /// - `initializer`：冻结计划中的 canonical 所有者身份。
+    /// - `qualifier`：同类型多实例的可选名称。
+    /// - `value`：所有权交给容器的线程安全值。
+    ///
+    /// 返回：登记成功后可供后续 initializer 借用；重名或封口后返回错误。
+    pub(crate) fn register_initializer<T>(
+        &self,
+        initializer: Arc<str>,
+        qualifier: Option<&str>,
+        value: T,
+    ) -> ApplicationResult<()>
+    where
+        T: Send + Sync + 'static,
+    {
+        let qualifier = qualifier.map(normalize_qualifier).transpose()?;
+        self.register_inner(
+            qualifier,
+            value,
+            ResourceOwner::Initializer(initializer),
+            None,
+        )
+    }
+
+    /// 业务作用：由受控上下文登记一个 initializer 拥有的受管资源。
+    ///
+    /// 参数说明：
+    /// - `initializer`：冻结计划中的 canonical 所有者身份。
+    /// - `qualifier`：同类型多实例的可选名称。
+    /// - `value`：需要显式异步 shutdown 的资源。
+    ///
+    /// 返回：登记成功后纳入对应 initializer 的逆序清理；否则返回错误。
+    pub(crate) fn register_initializer_managed<T>(
+        &self,
+        initializer: Arc<str>,
+        qualifier: Option<&str>,
+        value: T,
+    ) -> ApplicationResult<()>
+    where
+        T: ManagedResource,
+    {
+        let qualifier = qualifier.map(normalize_qualifier).transpose()?;
+        self.register_inner(
+            qualifier,
+            value,
+            ResourceOwner::Initializer(initializer),
+            Some(shutdown_managed::<T>),
+        )
+    }
+
+    /// 业务作用：在业务初始化成功且任务登记关闭后封存资源 key 集合。
     ///
     /// # 参数
     ///
@@ -309,6 +363,22 @@ impl ResourceRegistry {
         context: &ShutdownContext,
     ) -> Vec<ApplicationError> {
         self.shutdown_matching(ResourceOwner::Component(component), context)
+            .await
+    }
+
+    /// 业务作用：按逆登记顺序清理指定 initializer 拥有的资源。
+    ///
+    /// 参数说明：
+    /// - `initializer`：需要移除资源的 canonical 所有者身份。
+    /// - `context`：限制锁等待和 managed shutdown 的全局清理上下文。
+    ///
+    /// 返回：所有可观测的清理失败，单项失败不会中断后续清理。
+    pub(crate) async fn shutdown_initializer(
+        &self,
+        initializer: Arc<str>,
+        context: &ShutdownContext,
+    ) -> Vec<ApplicationError> {
+        self.shutdown_matching(ResourceOwner::Initializer(initializer), context)
             .await
     }
 

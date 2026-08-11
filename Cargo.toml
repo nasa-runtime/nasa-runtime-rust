@@ -90,3 +90,29 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
+
+# 本地开发期统一来源:成员间依赖固定公开坐标(见各 crate manifest 注释),跨 crate 改动经
+# workspace patch 指向本地路径,发布前移除对应条目并按依赖序发版。
+[patch.crates-io]
+# 进程一致性依赖必须单来源:task-local 事务上下文与 Inbox 访问若在同一图里出现
+# 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
+natx = { path = "natx" }
+nainbox-mysql = { path = "nainbox-mysql" }
+# 同版本双身份消除:成员既按 path 直依赖、又经其它成员的公开坐标传递引用的 crate,
+# 必须统一来源,否则类型跨身份流动即编译失败或行为分裂。
+ncrypto = { path = "ncrypto" }
+naaudit = { path = "naaudit" }
+naws-proto = { path = "naws-proto" }
+rest-discovery = { path = "rest-discovery" }
+async-macro = { path = "async-macro" }
+nasaga-core = { path = "nasaga-core" }
+nasaga-mysql = { path = "nasaga-mysql" }
+nasaga-runtime = { path = "nasaga-runtime" }
+nasaga-macro = { path = "nasaga-macro" }
+naoutbox-core = { path = "naoutbox-core" }
+naoutbox-mysql = { path = "naoutbox-mysql" }
+# 门面对 napp 用公开坐标声明，缺这一条会让工作区内的 nasa 解析到 registry 上的旧 napp，
+# 组合组件的新能力在本地构建里等于不存在。
+napp = { path = "napp" }
+napp-macro = { path = "napp-macro" }
+nadis = { path = "nadis" }

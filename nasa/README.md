@@ -6,6 +6,12 @@
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
 
+其中的 Saga 能力用本地事务、Outbox/Inbox、持久化状态机、稳定效果身份和显式补偿组成最终一致性
+闭环；进程崩溃、重复投递、Unknown 结果和 timer 多副本竞争均从已提交事实恢复。它不把远端调用
+伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。业务通常启用 `application` +
+`saga-runtime`，再显式选择 Kafka、Redis Streams、HTTP 或实验 gRPC transport；完整合同见
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
+
 ```toml
 [dependencies]
 nasa = { version = "1", features = [
@@ -50,12 +56,31 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 声明组件时必须启用对应 feature。`auth` 必须与 `web` 同时声明；`hystrix`、`grafana`、`mapper`、
 `openapi` 等是函数级或门面能力，不是组件字符串。完整生命周期合同见
-[napp README](../napp/README.md)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md)。
 
 `#[nasa::application("saga")]` 隐式纳入 DB 与 Outbox，业务无需再声明 `"db"` 或 `"outbox"`；
 `#[nasa::application("outbox")]` 可脱离 Saga 独立运行，并隐式纳入 DB。Inbox 是事务内原语，没有独立
 组件字符串。Kafka、Redis Streams 或 HTTP 等 transport 不由 Saga 猜测，业务必须按发布端和消费端的
 真实实现显式选择。显式同时写出 `"saga"`、`"db"` 与 `"outbox"` 也合法，并与只声明 `"saga"` 等价。
+
+## 业务初始化屏障
+
+initializer 用于在 migration 与出站依赖已经可用、入站监听和消费循环尚未开放的窗口，装配动态
+路由与注册表、恢复业务状态、回填或预热依赖。`#[nasa::initializer(...)]` 在业务二进制中静态收集
+initializer；Service 的启动 Hook 也可通过
+`app.register_initializer(spec, instance)` 动态登记。两种入口使用同一份依赖图，在 migration 和
+出站依赖就绪后严格执行全部 `before -> initialize -> after` 三轮屏障，完成前不开放入站监听。
+属性入口省略 `name` 时从实现类型名派生 canonical kebab-case，省略 `order` 时使用 `100000`；运行时
+入口仍需在 `InitializerSpec::new(name)` 中显式提供稳定名称，并使用相同的默认顺序。派生名称也是依赖、
+日志和指标 label 使用的稳定身份；需要让这些身份跨实现类型重命名保持不变时应显式填写 `name`。
+依赖边始终优先于 `order`，同一可执行集合中数值越小越先执行。失败、panic、启动超时或取消都会阻止
+Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关闭资源；已经提交到 DB、Redis 或 Kafka
+的事实不会被本地清理伪装成已撤销，因此实现必须使用事务或稳定幂等键保证可安全重跑。initializer
+没有独立超时
+配置，执行与条件工厂共同消费 `application.startup_timeout_ms` 的全局绝对预算。
+
+完整元数据、`one-shot`/`hosted` 任务激活、指标与幂等边界见
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务-initializer)。
 
 ## Feature 总表
 
@@ -83,6 +108,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
 | `saga-kafka` | `nasa::saga` | 受管 command/result Kafka transport |
+| `saga-redis-stream` | `nasa::saga`、`nasa::application` | 受管 Redis Streams 发布、消费、重领、原子 DLT 与积压观测 |
+| `saga-grpc-experimental` | `nasa::saga` | 实验性 gRPC command/result 封闭收据裁决；不包含 listener |
 | `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |
@@ -98,7 +125,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `grpc-experimental` | `nasa::grpc` | 实验性独立 gRPC listener，不进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
-| `partition` | `nasa::partition` | 同 key 严格 FIFO、有界背压与显式异步停机 |
+| `partition` | `nasa::partition` | 保序任务窃取、同 key 严格 FIFO、有界背压与显式异步停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
@@ -118,7 +145,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `libsasl2-dev` 或 `cyrus-sasl-devel`，具体包名由发行版决定。
 
 `nacos` 和 `rest-discovery-nacos` 只保证 API 可编译；真正连接后端必须同时启用 `nacos-sdk`。
-实验能力已有资源上限和显式生命周期，但在两个真实业务项目形成共同合同之前不承诺稳定 API。
+`full` 选择 Kafka 作为默认纳入的 Saga transport，不会隐式启用 Redis Streams 替代通道或实验 gRPC；
+需要这些能力时仍应显式开启对应 feature。实验能力已有资源上限和显式生命周期，但在两个真实业务
+项目形成共同合同之前不承诺稳定 API。
 
 ## YML 配置与使用
 

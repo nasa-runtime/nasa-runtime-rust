@@ -2,8 +2,8 @@
 
 ## 支持范围
 
-安全修复覆盖当前受保护分支上的全部稳定组件。标记为 experimental 的能力同样接受漏洞报告，但在
-晋升前不承诺稳定 API。具体源码状态和修复沿革以 Git 提交记录与安全公告为准。
+安全维护覆盖当前受保护分支上的全部稳定组件。标记为 experimental 的能力同样接受漏洞报告，但在
+晋升前不承诺稳定 API。具体源码状态和处置沿革以 Git 提交记录与安全公告为准。
 
 ## 漏洞报告
 
@@ -11,7 +11,7 @@
 [Private vulnerability reporting](https://github.com/nasa-runtime/nasa-runtime-rust/security/advisories/new)
 私密提交。
 
-不要在修复可用前公开漏洞细节。若私密入口暂时不可用，只创建不含技术细节、凭据、复现路径或受
+不要在安全处置可用前公开漏洞细节。若私密入口暂时不可用，只创建不含技术细节、凭据、复现路径或受
 影响目标的普通 issue，请求维护者恢复私密报告入口。
 
 安全敏感问题包括：
@@ -36,6 +36,9 @@
 - 历史私钥解密路径默认不进入稳定能力组合，启用时还需要运行期风险控制。
 - Saga command/result producer 来自 broker ACL、mTLS principal 或覆盖完整 envelope 的消息签名，
   不能相信 payload 自报身份。
+- Redis Streams 的消息签名覆盖 stream、event identity、payload 和 trace 存在性；Cluster 下源 stream、
+  DLT 与 marker 必须同槽。gRPC peer identity 只能来自已验证 mTLS principal 或端到端签名，metadata
+  自报服务名不构成身份。
 - Saga 管理 actor 与权限来自 JWT、mTLS 或等价受信上下文，正文不能覆盖。
 - Participant 授权精确绑定 `(workflow, definition_version, digest)`、步骤与 Orchestrator；禁止跨业务域
   扁平白名单。

@@ -1054,11 +1054,30 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
 ///
 /// - `application`：当前 Web Router 持有的统一 Application 状态,经它取进程级 hub。
 #[cfg(any(feature = "kafka", feature = "web"))]
-async fn metrics_endpoint(
-    State(application): State<Application>,
-) -> impl axum::response::IntoResponse {
+async fn metrics_endpoint(State(application): State<Application>) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
     let mut body = String::new();
     application.metrics_hub().render_prometheus(&mut body);
+    // Outbox 组件声明且 Ready 时必须完整暴露其积压/死信/预算文本:该组件的指标含
+    // 数据库实测值,渲染失败按 503 拒绝整个抓取,禁止以缺失指标伪装健康;
+    // 未声明组件或组件未就绪(启动/停机窗口)时不追加,不阻塞其余指标。
+    if let Ok(outbox) = application.outbox() {
+        match outbox.render_prometheus().await {
+            Ok(text) => body.push_str(&text),
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "outbox metrics unavailable",
+                )
+                    .into_response();
+            }
+        }
+    }
+    // Saga Redis Streams 消费面的进程内计数:纯内存读取,无失败分支。
+    #[cfg(feature = "saga-redis-stream")]
+    body.push_str(&crate::saga::render_stream_metrics(
+        &application.saga_runtime(),
+    ));
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -1066,6 +1085,7 @@ async fn metrics_endpoint(
         )],
         body,
     )
+        .into_response()
 }
 
 /// 业务作用：在最外层 Web 边界记录请求进入、响应状态和在途数量。

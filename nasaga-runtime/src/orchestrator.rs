@@ -28,16 +28,19 @@ use nasaga_core::{
 use nasaga_mysql::{
     AttemptConflictFact, AttemptOutcomeRecord, CasOutcome, ControlCasOutcome,
     ControlTransitionSpec, ManagementAuditOutcome, MySqlSagaStore, NewSagaInstance,
-    SagaConflictKind, SagaCreation, SagaInstanceRow, SagaStepRow, SagaTimerRow, StepJournalPatch,
-    TimerFencing, TimerFencingToken, TimerFencingTokenIssuer, TimerScope, TimerSpec,
-    TransitionSpec,
+    SagaConflictKind, SagaCreation, SagaInstanceQuery, SagaInstanceRow, SagaInstanceSummary,
+    SagaStepRow, SagaTimerRow, StepJournalPatch, TimerFencing, TimerFencingToken,
+    TimerFencingTokenIssuer, TimerScope, TimerSpec, TransitionSpec,
 };
+use natelemetry::TraceContext;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::envelope::{canonical_bytes, SagaCommandEnvelope, SagaResultEnvelope, VerifiedIdentity};
 use crate::management::{SagaAuditTrail, SagaManagementContext, SagaManagementPermission};
-use crate::observability::SagaOperationalMetrics;
+use crate::observability::{
+    record_action_rate_rejection, record_quota_rejection, SagaOperationalMetrics,
+};
 use crate::registry::DefinitionRegistry;
 use crate::timers::{
     derive_timer_id, parse_step_scope, phase_timeout_kind, resolution_budget_kind,
@@ -71,6 +74,26 @@ pub struct OrchestratorConfig {
     pub pause_backoff_ms: i64,
     /// 启动预检扫描非终态实例的上限。
     pub startup_scan_limit: u32,
+    /// 每租户在飞实例上限（冻结表）。
+    ///
+    /// 未列出的租户不设限但仍精确记账（"先观测,不拒绝"档);列出的租户在创建事务内
+    /// 原子预留,超限以稳定原因码拒绝新建、不影响已在飞实例收敛。上限只作用于创建,
+    /// 配额拒绝与系统故障可区分,且不泄漏其它租户用量。
+    pub tenant_quotas: std::collections::BTreeMap<String, u64>,
+    /// 每租户变更类管理动作的速率上限（冻结表）。
+    ///
+    /// 覆盖 pause/resume/retry-compensation/retry-resolution/manual-close 五个会向恢复
+    /// 通道注入外部副作用的动作；只读动作（检索、审计、用量查询）不占预算。未列出的
+    /// 租户不限速且不写账本；`max_actions = 0` 表示完全封禁该租户的变更类管理动作。
+    /// 预算与动作事务同提交:动作失败回滚时预算退还,拒绝携带稳定原因码并与系统
+    /// 故障可区分,不泄漏其它租户用量。
+    pub tenant_action_rates: std::collections::BTreeMap<String, TenantActionRate>,
+    /// 人工关闭（`MANUALLY_CLOSED`）管理动作的受信能力开关。
+    ///
+    /// 滚动升级门禁：新终态一旦落库就不可回退，必须先让**全部**副本升级为能解析
+    /// `MANUALLY_CLOSED` 的读者，再由部署方打开本开关放行管理动作。默认关闭——
+    /// 未显式开启的部署是"可读不产生"的兼容读者。
+    pub enable_manual_close: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -89,8 +112,24 @@ impl Default for OrchestratorConfig {
             timer_lease_ms: 60_000,
             pause_backoff_ms: 30_000,
             startup_scan_limit: 1_000,
+            tenant_quotas: std::collections::BTreeMap::new(),
+            tenant_action_rates: std::collections::BTreeMap::new(),
+            // 默认保持"可读不产生":人工关闭动作须在全部副本可解析新终态后显式开启。
+            enable_manual_close: false,
         }
     }
+}
+
+/// 业务作用：单租户变更类管理动作的固定窗口速率上限。
+///
+/// 窗口边界由**数据库时钟**对齐,多副本 Orchestrator 共享同一套窗口;预算按提交的
+/// 动作调用计——幂等重放同样提交并计数,失败回滚的尝试不消耗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantActionRate {
+    /// 单窗口允许提交的动作数;0 表示完全封禁。
+    pub max_actions: u64,
+    /// 窗口长度（毫秒）,必须为正;非法值在动作路径上报配置错误而不是稳定拒绝。
+    pub window_ms: i64,
 }
 
 /// 业务作用：区分创建入口的两种结果；`AlreadyExists` 表示业务幂等键命中，无新副作用。
@@ -205,6 +244,21 @@ fn validate_config(config: &OrchestratorConfig) -> anyhow::Result<()> {
         || config.startup_scan_limit == 0
     {
         anyhow::bail!("orchestrator config violates the Inbox key contract or positive budgets");
+    }
+    // 冻结表在构造期整体校验:非法租户键会静默成为永不匹配的配置,窗口非法则要到
+    // 首次管理动作才以系统错误暴露——不合理值必须在 Ready 之前失败。
+    for tenant in config.tenant_quotas.keys() {
+        if TenantId::new(tenant.as_str()).is_err() {
+            anyhow::bail!("tenant quota key is not a valid tenant id");
+        }
+    }
+    for (tenant, rate) in &config.tenant_action_rates {
+        if TenantId::new(tenant.as_str()).is_err() {
+            anyhow::bail!("tenant action rate key is not a valid tenant id");
+        }
+        if rate.window_ms <= 0 {
+            anyhow::bail!("tenant action rate window_ms must be positive");
+        }
     }
     Ok(())
 }
@@ -380,6 +434,19 @@ impl Orchestrator {
         // 本进程收集的步骤合同必须先于历史实例扫描校验；否则同一 binary 内重复 handler 或
         // 合同漂移可能在数据库事实通过后才随首条命令暴露，形成已 Ready 但不可安全推进的窗口。
         crate::verify_descriptors(&self.registry)?;
+        // 设限租户的配额账本必须已完成初始化回填:存量非终态实例未入账时,其终态释放
+        // 会扣掉新实例的名额、上限被静默穿透。回填只能在全部写入方都运行记账版本后
+        // 经 reconcile 的受锁窗口执行——这里 fail-fast,不把部署错误拖到首次预留。
+        for tenant in self.config.tenant_quotas.keys() {
+            let tenant = TenantId::new(tenant.as_str())
+                .map_err(|_| anyhow::anyhow!("tenant quota key is not a valid tenant id"))?;
+            if !self.store.tenant_quota_initialized(&tenant).await? {
+                anyhow::bail!(
+                    "tenant quota ledger for a capped tenant is not initialized; \
+                     run reconcile_tenant_quota after every writer runs the accounting binary"
+                );
+            }
+        }
         self.registry
             .verify_non_terminal(&self.store, self.config.startup_scan_limit)
             .await
@@ -446,6 +513,94 @@ impl Orchestrator {
             management_operations: self.store.load_management_audit(saga_id, limit).await?,
             conflicts: self.store.load_conflict_audit(saga_id, limit).await?,
         })
+    }
+
+    /// 业务作用：租户受限的实例只读检索——按状态与创建时间窗过滤、keyset 分页，让运维
+    /// 无需直连数据库即可定位待处置对象（如全部 `MANUAL_INTERVENTION` 实例）。
+    ///
+    /// 检索是纯读动作，使用与写动作分离的 `saga.instance.list` 权限；响应只含身份、
+    /// 状态、当前步骤、版本、稳定原因码与时间戳，不携带业务 payload。租户过滤由查询
+    /// 条件强制，不同租户实例的存在性不经本入口泄漏。
+    ///
+    /// 参数说明：
+    /// - `management`: 已认证主体与权限快照。
+    /// - `query`: 租户、状态集合、时间窗、cursor 与页大小。
+    ///
+    /// 返回：满足条件的实例摘要（saga_id 升序）；无权限、页大小非法或持久层失败返回错误。
+    pub async fn list_instances(
+        &self,
+        management: &SagaManagementContext,
+        query: &SagaInstanceQuery<'_>,
+    ) -> anyhow::Result<Vec<SagaInstanceSummary>> {
+        // 检索响应含实例身份与状态,必须先鉴权;权限独立于任何写动作。
+        management.require(SagaManagementPermission::ListInstances)?;
+        Ok(self.store.list_instances(query).await?)
+    }
+
+    /// 业务作用：读取单个租户的精确在飞配额用量——只经受鉴权管理查询返回,不进指标标签。
+    ///
+    /// 参数说明：
+    /// - `management`: 已认证主体与权限快照（要求 `saga.audit.read`）。
+    /// - `tenant`: 目标租户。
+    ///
+    /// 返回：账本记录的在飞实例数;无权限返回错误。
+    pub async fn tenant_quota_usage(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+    ) -> anyhow::Result<u64> {
+        management.require(SagaManagementPermission::ReadAudit)?;
+        Ok(self.store.tenant_quota_usage(tenant).await?)
+    }
+
+    /// 业务作用：读取单个租户当前窗口的管理动作用量——只经受鉴权管理查询返回,不进指标标签。
+    ///
+    /// 参数说明：
+    /// - `management`: 已认证主体与权限快照（要求 `saga.audit.read`）。
+    /// - `tenant`: 目标租户。
+    ///
+    /// 返回：`Some((窗口起点毫秒, 已用动作数))`;该租户未配置速率时返回 `None`。
+    pub async fn tenant_action_rate_usage(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+    ) -> anyhow::Result<Option<(u64, u64)>> {
+        management.require(SagaManagementPermission::ReadAudit)?;
+        let Some(rate) = self.config.tenant_action_rates.get(tenant.as_str()) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.store
+                .tenant_action_rate_usage(tenant, rate.window_ms)
+                .await?,
+        ))
+    }
+
+    /// 业务作用：在变更类管理动作事务内按租户预留一次速率预算——单租户刷重试类动作
+    /// 不能挤占其它租户的恢复通道。
+    ///
+    /// 未配置速率的租户直接放行且不写账本;超限以稳定原因码拒绝并使动作事务回滚,
+    /// 与系统故障可区分。必须在 ambient 事务内调用:动作失败回滚时预算一并退还。
+    ///
+    /// 参数说明：
+    /// - `tenant`: 已认证管理主体被授权访问的租户。
+    ///
+    /// 返回：预算可用返回 `Ok`;超限或底层失败返回错误。
+    async fn reserve_action_rate_budget(&self, tenant: &TenantId) -> anyhow::Result<()> {
+        let Some(rate) = self.config.tenant_action_rates.get(tenant.as_str()) else {
+            return Ok(());
+        };
+        if matches!(
+            self.store
+                .reserve_tenant_action_rate(tenant, rate.max_actions, rate.window_ms)
+                .await?,
+            nasaga_mysql::ActionRateReservation::Exceeded
+        ) {
+            record_action_rate_rejection();
+            // 稳定原因码使速率拒绝与系统故障可区分;错误文本不携带其它租户信息。
+            anyhow::bail!("saga_tenant_action_rate_exceeded");
+        }
+        Ok(())
     }
 
     /// 业务作用：读取一份不含业务身份标签的 Saga 运行指标快照。
@@ -515,9 +670,35 @@ impl Orchestrator {
         producer: &ServiceIdentity,
         now_ms: i64,
     ) -> anyhow::Result<HandleOutcome> {
+        self.handle_authenticated_result_traced(envelope, producer, None, now_ms)
+            .await
+    }
+
+    /// 业务作用：携带 transport 收据链路上下文消费结果——参与方到编排端的 trace 由此续接。
+    ///
+    /// `receipt_trace` 必须来自 transport 收据（如 Kafka 消息 header）的显式解析，框架不
+    /// 读取 ambient 状态。推进真实生效时，该上下文在同一事务内写入实例作为最新因果上下文，
+    /// 本事务内发出的下一条命令与之后的 timer/恢复命令都从它派生 child span。
+    ///
+    /// 参数说明：
+    /// - `envelope`: 参与方结果 envelope。
+    /// - `producer`: transport 信任策略解析出的逻辑服务身份。
+    /// - `receipt_trace`: 收据中已校验的链路上下文；`None` 表示收据未携带。
+    /// - `now_ms`: 当前 epoch 毫秒。
+    ///
+    /// 返回：语义与 [`handle_authenticated_result`](Self::handle_authenticated_result)
+    /// 完全一致；trace 不改变认证、去重与推进边界。
+    pub async fn handle_authenticated_result_traced(
+        &self,
+        envelope: &SagaResultEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
+        now_ms: i64,
+    ) -> anyhow::Result<HandleOutcome> {
         // producer 权限必须在 Inbox claim 之前复验，防止越权消息抢占 event id。
         self.verify_result_producer(envelope, producer)?;
-        self.handle_verified_result(envelope, now_ms).await
+        self.handle_verified_result(envelope, receipt_trace, now_ms)
+            .await
     }
 
     /// 业务作用：以受保护事务幂等创建 Saga 并发布首步命令。
@@ -532,6 +713,27 @@ impl Orchestrator {
     /// 返回：真实创建返回 [`StartOutcome::Started`]；幂等命中返回 `AlreadyExists`；
     /// workflow 未注册、definition 为空或底层失败返回错误（事务回滚）。
     pub async fn start_saga(&self, request: &StartSagaRequest<'_>) -> anyhow::Result<StartOutcome> {
+        self.start_saga_traced(request, None).await
+    }
+
+    /// 业务作用：携带显式链路上下文创建 Saga——发起入口的调用链由此接入 Saga 全程追踪。
+    ///
+    /// 框架不读取线程或任务 ambient 状态：调用方（Web 入口、调度任务）显式传入已校验的
+    /// [`TraceContext`]，其 canonical `traceparent` 随实例同事务持久化；首步命令与之后
+    /// 每一条自动命令（含 timer、崩溃恢复发出的）都从已提交实例读取同一 trace 并派生
+    /// 新 child span。缺少上下文时传 `None`，实例照常创建与投递。
+    ///
+    /// 参数说明：
+    /// - `request`: 创建请求。
+    /// - `trace`: 发起入口已校验的链路上下文；`None` 表示调用链未提供。
+    ///
+    /// 返回：语义与 [`start_saga`](Self::start_saga) 完全一致；trace 不改变创建、幂等
+    /// 与拒绝边界。
+    pub async fn start_saga_traced(
+        &self,
+        request: &StartSagaRequest<'_>,
+        trace: Option<&TraceContext>,
+    ) -> anyhow::Result<StartOutcome> {
         let definition = self
             .registry
             .get(request.workflow, request.version)
@@ -542,6 +744,7 @@ impl Orchestrator {
             .first()
             .ok_or_else(|| anyhow::anyhow!("definition has no steps"))?;
         let start_request_digest = derive_start_request_digest(request, &digest, first_step.name());
+        let canonical_trace = trace.map(TraceContext::to_traceparent);
 
         let outcome = crate::transaction::run(async {
             let creation = self
@@ -559,6 +762,9 @@ impl Orchestrator {
                     current_step: Some(first_step.name()),
                     trigger_kind: request.trigger_kind,
                     trigger_id: request.trigger_id,
+                    // 因果上下文与实例同事务落库:首步命令在同一事务内从创建回读的
+                    // 实例行取 trace,发起入口的调用链从第一跳起就不断开。
+                    traceparent: canonical_trace.as_deref(),
                 })
                 .await?;
             let instance = match creation {
@@ -566,6 +772,21 @@ impl Orchestrator {
                 SagaCreation::Existing(row) => return Ok(StartOutcome::AlreadyExists(row)),
                 SagaCreation::Created(row) => row,
             };
+            // 配额预留只对真实创建执行且与创建同事务:幂等命中不占额,创建回滚时预留
+            // 一并回滚。条件自增在租户行锁上串行化并发创建——无锁计数会穿透上限。
+            let cap = self
+                .config
+                .tenant_quotas
+                .get(request.tenant.as_str())
+                .copied();
+            if matches!(
+                self.store.reserve_tenant_quota(request.tenant, cap).await?,
+                nasaga_mysql::QuotaReservation::Exceeded
+            ) {
+                record_quota_rejection();
+                // 稳定原因码使配额拒绝与系统故障可区分;错误文本不携带其它租户信息。
+                anyhow::bail!("saga_tenant_quota_exceeded");
+            }
             self.store
                 .register_steps(request.saga_id, definition)
                 .await?;
@@ -631,6 +852,7 @@ impl Orchestrator {
     async fn handle_verified_result(
         &self,
         envelope: &SagaResultEnvelope,
+        receipt_trace: Option<&TraceContext>,
         now_ms: i64,
     ) -> anyhow::Result<HandleOutcome> {
         // 身份复验在任何持久化动作之前:伪造 envelope 不允许占用去重身份。
@@ -727,6 +949,23 @@ impl Orchestrator {
                 }
                 AttemptOutcomeRecord::Recorded => {}
             }
+
+            // 已认证结果是实例最新的因果事实:在同一推进事务内落库,并刷新内存快照——
+            // 本事务随后发出的下一条命令、之后的 timer 与崩溃恢复命令都从同一 trace
+            // 派生 child。推进输掉 CAS 时整个事务回滚,上下文不会先于推进生效。
+            let instance = match receipt_trace {
+                Some(trace) => {
+                    let canonical = trace.to_traceparent();
+                    self.store
+                        .update_trace_context(&identity.saga_id, &canonical)
+                        .await?;
+                    SagaInstanceRow {
+                        traceparent: Some(canonical),
+                        ..instance
+                    }
+                }
+                None => instance,
+            };
 
             let context = ResultContext {
                 instance: &instance,
@@ -1044,6 +1283,9 @@ impl Orchestrator {
         // 权限门禁必须早于实例查询，避免无权主体利用存在性与租户错误枚举 saga_id。
         management.require(SagaManagementPermission::Pause)?;
         crate::transaction::run(async {
+            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
+            // 实例数据也不泄漏存在性。
+            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .store
                 .load_instance(saga_id)
@@ -1102,6 +1344,9 @@ impl Orchestrator {
         // 与 pause 相同，先鉴权再读实例，防止管理读侧成为跨租户枚举 oracle。
         management.require(SagaManagementPermission::Resume)?;
         crate::transaction::run(async {
+            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
+            // 实例数据也不泄漏存在性。
+            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .store
                 .load_instance(saga_id)
@@ -1171,6 +1416,9 @@ impl Orchestrator {
         // 人工恢复会再次发布外部补偿命令，必须先做最小权限校验，再接触实例数据。
         management.require(SagaManagementPermission::RetryCompensation)?;
         let status = crate::transaction::run(async {
+            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
+            // 实例数据也不泄漏存在性。
+            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .store
                 .load_instance(saga_id)
@@ -1310,6 +1558,9 @@ impl Orchestrator {
     ) -> anyhow::Result<SagaStatus> {
         management.require(SagaManagementPermission::RetryResolution)?;
         let status = crate::transaction::run(async {
+            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
+            // 实例数据也不泄漏存在性。
+            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .store
                 .load_instance(saga_id)
@@ -1422,6 +1673,102 @@ impl Orchestrator {
             operation_id,
             saga_status = status.as_str(),
             "Saga 人工解决查询恢复操作已提交"
+        );
+        Ok(status)
+    }
+
+    /// 业务作用：系统外人工处置完成后关闭自动化——`MANUAL_INTERVENTION -> MANUALLY_CLOSED`
+    /// 的唯一管理入口，实例由此离开非终态集合，`nasaga_manual_intervention` 回落。
+    ///
+    /// 关闭只记录"自动化已由人工关闭"这一事实：不写 `COMPLETED`/`COMPENSATED`、不伪造
+    /// 未经系统证明的业务结果；未完成的补偿计划仍以快照保留。动作与
+    /// [`MANUAL_CLOSE_ACTION`](nasaga_mysql::MANUAL_CLOSE_ACTION) 审计同事务提交，
+    /// 状态机受限出边只放行携带该同事务证据的迁移，自动 worker 无法触发。
+    ///
+    /// 参数说明：
+    /// - `management`: 已认证主体、强制原因与 `saga.manual_close` 权限快照。
+    /// - `tenant`: 已认证管理主体被授权访问的租户。
+    /// - `saga_id`: 实例身份。
+    /// - `operation_id`: 一次性管理 operation 身份；重放按幂等成功返回，不产生第二次迁移。
+    ///
+    /// 返回：关闭后（或幂等重放时）的实例状态。能力开关未开启、无权限、实例不在
+    /// `MANUAL_INTERVENTION`、PAUSED 或 CAS 冲突返回错误。
+    pub async fn manual_close(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+    ) -> anyhow::Result<SagaStatus> {
+        management.require(SagaManagementPermission::ManualClose)?;
+        // 滚动升级门禁:新终态一旦落库不可回退,旧副本读到未知状态会按数据损坏停止推进。
+        // 必须先全量部署可解析 MANUALLY_CLOSED 的读者,再由部署方开启本能力。
+        if !self.config.enable_manual_close {
+            anyhow::bail!(
+                "manual close is disabled: deploy MANUALLY_CLOSED-aware readers to every replica, then enable it explicitly"
+            );
+        }
+        let status = crate::transaction::run(async {
+            // 速率预算先于实例读写:预算按提交的动作调用计,幂等重放同样提交并计数;
+            // 动作失败回滚时预算同事务退还。
+            self.reserve_action_rate_budget(tenant).await?;
+            let instance = self
+                .store
+                .load_instance(saga_id)
+                .await?
+                .filter(|instance| &instance.tenant == tenant)
+                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
+            if !instance.control_state.allows_automatic_actions() {
+                // PAUSED 下 advance 的 CAS 必然失败;先拒绝并要求显式 resume,避免写下
+                // 审计后整个事务回滚、operation 身份被白白消耗。
+                anyhow::bail!("manual_close requires ACTIVE control state; resume first");
+            }
+            // 审计先行且与迁移同事务:状态机对本边的放行证据就是这行审计,先写审计
+            // 再 CAS 的顺序保证证据与迁移一起提交或一起消失。
+            match self
+                .store
+                .record_management_operation(
+                    saga_id,
+                    operation_id,
+                    nasaga_mysql::MANUAL_CLOSE_ACTION,
+                    management.actor(),
+                    management.reason(),
+                )
+                .await?
+            {
+                // 同一 operation 已提交过关闭;重放直接返回当前状态,不再迁移。
+                ManagementAuditOutcome::AlreadyRecorded => return Ok(instance.status),
+                ManagementAuditOutcome::Recorded => {}
+            }
+            if instance.status != SagaStatus::ManualIntervention {
+                anyhow::bail!("manual_close requires MANUAL_INTERVENTION");
+            }
+            self.advance(
+                &instance,
+                SagaStatus::ManuallyClosed,
+                instance.direction,
+                None,
+                TriggerKind::Admin,
+                operation_id,
+                None,
+                None,
+            )
+            .await?;
+            // 终态后实例级 deadline 不再有业务含义;残留 timer 由 stale 吸收,但在此
+            // 作废可让 due_timer 观测面立即回落。
+            self.store
+                .cancel_scope_timers(saga_id, TimerScope::Instance, None)
+                .await?;
+            Ok(SagaStatus::ManuallyClosed)
+        })
+        .await?;
+        tracing::info!(
+            saga_id = saga_id.as_str(),
+            tenant = tenant.as_str(),
+            actor = management.actor(),
+            operation_id,
+            saga_status = status.as_str(),
+            "Saga 人工关闭操作已提交"
         );
         Ok(status)
     }
@@ -3081,9 +3428,26 @@ impl Orchestrator {
             recovery_operation_id: recovery_operation_id.map(str::to_owned),
             payload,
         };
+        // 命令继承实例已提交的因果上下文并派生新 span:同一 trace-id 串联发起入口、
+        // 编排端与参与方,每一跳都是新的 child;列值损坏或缺失时按无上下文投递——
+        // trace 是观测面,不阻塞业务命令。
+        let event = match instance
+            .traceparent
+            .as_deref()
+            .and_then(TraceContext::parse_traceparent)
+        {
+            Some(base) => envelope
+                .to_outbox_event()?
+                .with_traceparent(base.child(natelemetry::random_span_id()).to_traceparent()),
+            None => envelope.to_outbox_event()?,
+        };
         // 关键双写:命令进 Outbox 必须与状态迁移同事务,事务外 autocommit 被拒绝。
+        // 租户归因取已提交实例身份(受信写入上下文),供 Outbox 层配额与对账使用;
+        // 绝不从命令 payload 解析租户。
+        let write_context = naoutbox_core::OutboxWriteContext::new(instance.tenant.as_str())
+            .map_err(|reason| anyhow::anyhow!("outbox write context rejected: {reason}"))?;
         self.outbox
-            .append_transactional(&envelope.to_outbox_event()?)
+            .append_transactional_with_context(&write_context, &event)
             .await?;
         // 命令与它的超时保护同生:写命令的事务同时写 timer,步骤不会无限滞留。
         let timeout_ms = duration_millis(step_def.timeout())?;

@@ -1,6 +1,6 @@
 [package]
 name = "naoutbox-core"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Outbox 核心:业务 DB 事务内写事件(Debezium Outbox Event Router 兼容),不依赖 Kafka/napp"

@@ -1,15 +1,19 @@
-//! 应用入口属性宏。
+//! 应用入口与业务 initializer 属性宏。
 //!
-//! 宏在业务二进制内生成静态组件描述、路由收集工厂和同步进程入口。
+//! `#[application]` 在业务二进制内生成静态组件描述、路由收集工厂和同步进程入口；
+//! `#[initializer]` 把完整 `Initialization` trait impl 登记到同一二进制的静态集合。运行时会把
+//! 静态项与 Service 启动 Hook 动态登记项冻结为统一依赖计划，在 `Prepare` 后、`Seal` 前严格执行
+//! 全部 `before -> initialize -> after` 三轮，全部成功前不开放入站能力。
 
 use std::collections::HashSet;
 
 use nasa_macro_support::runtime_root;
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, punctuated::Punctuated, FnArg, GenericArgument, ItemFn, LitStr,
-    PathArguments, ReturnType, Token, Type,
+    parse_macro_input, punctuated::Punctuated, Expr, FnArg, GenericArgument, ItemFn, ItemImpl, Lit,
+    LitStr, Meta, Path, PathArguments, ReturnType, Token, Type,
 };
 
 /// 业务作用：把业务异步 `main` 转换为统一生命周期进程入口。
@@ -99,6 +103,512 @@ pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(expanded) => expanded.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// 业务作用：把完整 `Initialization` trait impl 登记为业务二进制内的静态 initializer，
+/// 并与 Service 启动 Hook 动态登记的 initializer 合并成同一份冻结计划。
+///
+/// 本属性只能标注安全、正向、无 impl 泛型参数的 `Initialization` trait impl，不能标注单个方法、
+/// 固有 impl、unsafe impl 或其它 trait。被登记的实例会严格参与三轮全局屏障：全部 `before` 完成后
+/// 才进入全部 `initialize`，全部 `initialize` 完成后才进入全部 `after`。
+///
+/// # 执行阶段
+///
+/// Service 模式的时序为：业务 `UserHook` 完成登记并冻结 initializer 计划，组件完成 `Prepare`
+/// （包括 migration 和出站依赖门禁），然后调用条件工厂并执行三轮 initializer 屏障。只有全部成功后，
+/// Runner 才进入 `Seal`、组件 `Ready`、staged task 激活和 `mark_ready()`；因此 initializer 执行期间
+/// Web/WS listener、consumer 和服务发现尚未对外接流。
+///
+/// Batch 模式只收集静态 `one-shot` initializer，在组件 `Prepare` 之后、业务工作负载被 poll 之前
+/// 执行条件工厂和三轮屏障；`hosted` initializer 会被拒绝，Batch 工作负载中也不能动态补登记
+/// initializer。`hosted` initializer 暂存的长期任务只在 Service 的组件 `Ready` 全部成功后交给
+/// Supervisor，任务主体还会继续等待 `mark_ready()`，不会与初始化阶段并发执行。
+///
+/// # 属性
+///
+/// - `name = "..."`：可选。应用内唯一的 canonical 身份，只允许 ASCII 小写字母、数字、`_`、`-`、`.`，
+///   长度为 1..=128 字节。省略时从 impl 的实现类型名派生 kebab-case，例如
+///   `OrderCacheInitialization` 派生为 `order-cache-initialization`；无法稳定派生时必须显式声明。
+///   派生结果仍是依赖名、日志字段和指标 label 使用的稳定业务身份，重命名实现类型会同步改变该身份；
+///   需要跨发布保持依赖引用和观测连续性时必须显式填写 `name`。
+/// - `order = ...`：可选 `i32` 整数字面量，默认 `100000`。依赖条件相同且当前都可执行时，数值越小
+///   越先执行；数值相同按 `name` 升序消除平局。`requires` 依赖边始终优先于 `order`，低 `order`
+///   不能越过尚未完成的依赖。
+/// - `requires = ["..."]`：可选，默认空。声明本项执行前必须成功启用并完成同阶段调用的 initializer，
+///   最多 32 项；缺失、重复、自依赖或依赖环都会拒绝启动。
+/// - `kind = "one-shot" | "hosted"`：可选，默认 `"one-shot"`。`hosted` 只允许 Service 模式，
+///   并可在 `after` 暂存 Ready 后启动的长期任务或 readiness；`one-shot` 只执行有界初始化。
+/// - `factory = path`：可选异步条件工厂。签名必须为
+///   `async fn(Application) -> ApplicationResult<Option<T>>`；`Some(T)` 启用本项，`None` 表示条件未命中，
+///   `Err` 阻止应用接流。省略时实现类型必须实现 `Default`。
+///
+/// # 示例
+///
+/// ```ignore
+/// #[derive(Default)]
+/// struct OrderCacheInitialization;
+///
+/// #[nasa::initializer(order = 200, requires = ["schema"])]
+/// impl nasa::application::Initialization for OrderCacheInitialization {
+///     // 实现 before / initialize / after 中实际需要的阶段。
+/// }
+/// ```
+///
+/// 参数说明：
+/// - `attr`：`name/order/requires/kind/factory` 元数据。
+/// - `item`：无 impl 泛型参数的安全、正向 `Initialization` trait impl。
+///
+/// 返回：原 trait impl、类型擦除工厂和 linkme 静态描述；合同非法时返回定位到属性或 impl 的编译错误。
+#[proc_macro_attribute]
+pub fn initializer(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
+    let item_impl = parse_macro_input!(item as ItemImpl);
+    match expand_initializer(metas, item_impl) {
+        Ok(expanded) => expanded.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// initializer 属性完成字面量校验后的内部参数。
+struct InitializerArgs {
+    name: LitStr,
+    order: Option<i32>,
+    requires: Vec<LitStr>,
+    kind: InitializerKindArg,
+    factory: Option<Path>,
+}
+
+/// initializer 生存类型的封闭宏层表示。
+enum InitializerKindArg {
+    OneShot,
+    Hosted,
+}
+
+/// 业务作用：校验 initializer impl 形状并生成独立的静态收集项。
+///
+/// 参数说明：
+/// - `metas`：属性内的名值参数。
+/// - `item_impl`：被标注的 trait impl 语法树。
+///
+/// 返回：元数据、工厂和 trait 合同均合法时返回展开代码。
+fn expand_initializer(
+    metas: Punctuated<Meta, Token![,]>,
+    item_impl: ItemImpl,
+) -> syn::Result<TokenStream2> {
+    verify_initializer_impl(&item_impl)?;
+    let args = parse_initializer_args(&metas, &item_impl.self_ty)?;
+    let runtime = runtime_root("application", "napp")
+        .map_err(|message| syn::Error::new_spanned(&item_impl.self_ty, message))?;
+    let initializer_type = (*item_impl.self_ty).clone();
+    let name = args.name;
+    let order = args
+        .order
+        .map(|value| quote!(#value))
+        .unwrap_or_else(|| quote!(#runtime::DEFAULT_INITIALIZER_ORDER));
+    let requires = args.requires;
+    let kind = match args.kind {
+        InitializerKindArg::OneShot => quote!(#runtime::InitializerKind::OneShot),
+        InitializerKindArg::Hosted => quote!(#runtime::InitializerKind::Hosted),
+    };
+    let construct = match args.factory {
+        Some(factory) => quote! {
+            let result: #runtime::ApplicationResult<::std::option::Option<#initializer_type>> =
+                #factory(application).await;
+            let initializer = result?;
+            ::std::result::Result::Ok(initializer.map(|value| {
+                ::std::boxed::Box::new(value)
+                    as ::std::boxed::Box<dyn #runtime::Initialization>
+            }))
+        },
+        None => quote! {
+            let _ = application;
+            let value: #initializer_type =
+                <#initializer_type as ::std::default::Default>::default();
+            ::std::result::Result::Ok(::std::option::Option::Some(
+                ::std::boxed::Box::new(value)
+                    as ::std::boxed::Box<dyn #runtime::Initialization>
+            ))
+        },
+    };
+
+    Ok(quote! {
+        #item_impl
+
+        const _: () = {
+            /// 业务作用：把强类型条件工厂适配为 Application Runner 可收集的对象安全工厂。
+            ///
+            /// 参数说明：
+            /// - `application`：Prepare 成功后的容器所有权副本。
+            ///
+            /// 返回：`Some` 表示当前配置启用，`None` 表示条件未命中，失败则拒绝接流。
+            fn __nasa_initializer_factory(
+                application: #runtime::Application,
+            ) -> #runtime::ApplicationFuture<
+                'static,
+                ::std::option::Option<
+                    ::std::boxed::Box<dyn #runtime::Initialization>
+                >,
+            > {
+                ::std::boxed::Box::pin(async move { #construct })
+            }
+
+            #[#runtime::__private::linkme::distributed_slice(#runtime::COLLECTED_INITIALIZERS)]
+            #[linkme(crate = #runtime::__private::linkme)]
+            static __NASA_INITIALIZER_DESCRIPTOR: #runtime::InitializerDescriptor =
+                #runtime::InitializerDescriptor::__new(
+                    #name,
+                    #order,
+                    &[#(#requires),*],
+                    #kind,
+                    __nasa_initializer_factory,
+                    concat!(module_path!(), ":", file!(), ":", line!()),
+                );
+        };
+    })
+}
+
+/// 业务作用：把 initializer 属性参数解析为封闭内部元数据。
+///
+/// 参数说明：
+/// - `metas`：属性中按源码顺序出现的参数。
+/// - `self_type`：未声明 `name` 时用于派生默认 canonical 名称的实现类型。
+///
+/// 返回：已确定名称与可选顺序/依赖/类型/工厂；重复键、未知键或非法字面量返回编译错误。
+fn parse_initializer_args(
+    metas: &Punctuated<Meta, Token![,]>,
+    self_type: &Type,
+) -> syn::Result<InitializerArgs> {
+    let mut name = None;
+    let mut order = None;
+    let mut requires = None;
+    let mut kind = None;
+    let mut factory = None;
+    for meta in metas {
+        let Meta::NameValue(value) = meta else {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "initializer attributes must use `key = value` syntax",
+            ));
+        };
+        let key = value
+            .path
+            .get_ident()
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &value.path,
+                    "initializer attribute key must be an identifier",
+                )
+            })?;
+        match key.as_str() {
+            "name" => set_once(&mut name, parse_string_expr(&value.value, "name")?, meta)?,
+            "order" => {
+                let parsed = parse_initializer_order(&value.value)?;
+                set_once(&mut order, parsed, meta)?;
+            }
+            "requires" => {
+                let Expr::Array(array) = &value.value else {
+                    return Err(syn::Error::new_spanned(
+                        &value.value,
+                        "initializer requires must be an array of string literals",
+                    ));
+                };
+                let mut parsed = Vec::with_capacity(array.elems.len());
+                for element in &array.elems {
+                    parsed.push(parse_string_expr(element, "requires entry")?);
+                }
+                set_once(&mut requires, parsed, meta)?;
+            }
+            "kind" => {
+                let literal = parse_string_expr(&value.value, "kind")?;
+                let parsed = match literal.value().as_str() {
+                    "one-shot" => InitializerKindArg::OneShot,
+                    "hosted" => InitializerKindArg::Hosted,
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "initializer kind must be `one-shot` or `hosted`",
+                        ));
+                    }
+                };
+                set_once(&mut kind, parsed, meta)?;
+            }
+            "factory" => {
+                let Expr::Path(path) = &value.value else {
+                    return Err(syn::Error::new_spanned(
+                        &value.value,
+                        "initializer factory must be a function path",
+                    ));
+                };
+                set_once(&mut factory, path.path.clone(), meta)?;
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &value.path,
+                    "unknown initializer attribute key",
+                ));
+            }
+        }
+    }
+
+    let name = match name {
+        Some(name) => name,
+        None => default_initializer_name(self_type)?,
+    };
+    validate_initializer_name(&name, "initializer name")?;
+    let requires = requires.unwrap_or_default();
+    if requires.len() > 32 {
+        return Err(syn::Error::new_spanned(
+            &name,
+            "initializer requires cannot contain more than 32 entries",
+        ));
+    }
+    let mut seen = HashSet::new();
+    for required in &requires {
+        validate_initializer_name(required, "initializer dependency")?;
+        if required.value() == name.value() {
+            return Err(syn::Error::new_spanned(
+                required,
+                "initializer cannot require itself",
+            ));
+        }
+        if !seen.insert(required.value()) {
+            return Err(syn::Error::new_spanned(
+                required,
+                "initializer dependency is repeated",
+            ));
+        }
+    }
+    Ok(InitializerArgs {
+        name,
+        order,
+        requires,
+        kind: kind.unwrap_or(InitializerKindArg::OneShot),
+        factory,
+    })
+}
+
+/// 业务作用：从被标注的具体实现类型派生可用于依赖、日志和指标的默认 initializer 身份。
+///
+/// 参数说明：
+/// - `self_type`：`impl Initialization for Type` 中的 `Type`。
+///
+/// 返回：路径末段类型名转为 canonical kebab-case；无法稳定派生时要求调用方显式声明 `name`。
+fn default_initializer_name(self_type: &Type) -> syn::Result<LitStr> {
+    let Type::Path(path) = self_type else {
+        return Err(syn::Error::new_spanned(
+            self_type,
+            "initializer name cannot be derived from this type; declare `name` explicitly",
+        ));
+    };
+    if path.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            self_type,
+            "initializer name cannot be derived from a qualified self type; declare `name` explicitly",
+        ));
+    }
+    let segment = path.path.segments.last().ok_or_else(|| {
+        syn::Error::new_spanned(
+            self_type,
+            "initializer name cannot be derived from this type; declare `name` explicitly",
+        )
+    })?;
+    let identifier = segment.ident.to_string();
+    let name = canonicalize_type_name(&identifier).ok_or_else(|| {
+        syn::Error::new_spanned(
+            &segment.ident,
+            "initializer type name cannot form a canonical name; declare `name` explicitly",
+        )
+    })?;
+    let name = LitStr::new(&name, segment.ident.span());
+    validate_initializer_name(&name, "derived initializer name")?;
+    Ok(name)
+}
+
+/// 业务作用：把 Rust 类型标识符确定性转换成 initializer canonical kebab-case。
+///
+/// 参数说明：
+/// - `identifier`：实现类型的最后一个 Rust 路径标识符。
+///
+/// 返回：ASCII 字母、数字和下划线可转换时返回小写名称；其它字符或空结果返回 `None`。
+fn canonicalize_type_name(identifier: &str) -> Option<String> {
+    let identifier = identifier.strip_prefix("r#").unwrap_or(identifier);
+    let bytes = identifier.as_bytes();
+    let mut output = String::with_capacity(bytes.len());
+    let mut pending_separator = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == b'_' {
+            pending_separator = !output.is_empty();
+            continue;
+        }
+        if !byte.is_ascii_alphanumeric() {
+            return None;
+        }
+        let previous = index
+            .checked_sub(1)
+            .and_then(|value| bytes.get(value))
+            .copied();
+        let next = bytes.get(index + 1).copied();
+        let word_boundary = byte.is_ascii_uppercase()
+            && (previous.is_some_and(|value| value.is_ascii_lowercase() || value.is_ascii_digit())
+                || (previous.is_some_and(|value| value.is_ascii_uppercase())
+                    && next.is_some_and(|value| value.is_ascii_lowercase())));
+        if (pending_separator || word_boundary) && !output.is_empty() && !output.ends_with('-') {
+            output.push('-');
+        }
+        output.push(byte.to_ascii_lowercase() as char);
+        pending_separator = false;
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+/// 业务作用：解析 initializer 的有符号稳定优先级，保证属性入口与运行时 `i32` 合同一致。
+///
+/// 参数说明：
+/// - `expression`：属性 `order` 等号右侧的表达式。
+///
+/// 返回：正负整数字面量在 `i32` 范围内时返回其值；其它表达式或越界值返回编译错误。
+fn parse_initializer_order(expression: &Expr) -> syn::Result<i32> {
+    let invalid = || {
+        syn::Error::new_spanned(
+            expression,
+            "initializer order must be an i32 integer literal",
+        )
+    };
+    let signed = match expression {
+        Expr::Lit(expr) => match &expr.lit {
+            Lit::Int(value) => value.base10_parse::<i64>().map_err(|_| invalid())?,
+            _ => return Err(invalid()),
+        },
+        Expr::Unary(expr) if matches!(expr.op, syn::UnOp::Neg(_)) => match expr.expr.as_ref() {
+            Expr::Lit(expr) => match &expr.lit {
+                Lit::Int(value) => value
+                    .base10_parse::<i64>()
+                    .ok()
+                    .and_then(i64::checked_neg)
+                    .ok_or_else(invalid)?,
+                _ => return Err(invalid()),
+            },
+            _ => return Err(invalid()),
+        },
+        _ => return Err(invalid()),
+    };
+    i32::try_from(signed).map_err(|_| invalid())
+}
+
+/// 业务作用：校验属性只标注可静态收集的安全正向 `Initialization` impl。
+///
+/// 参数说明：
+/// - `item_impl`：待校验的 impl 块。
+///
+/// 返回：形状可用时成功；固有、unsafe、负向、泛型或错误 trait 时返回编译错误。
+fn verify_initializer_impl(item_impl: &ItemImpl) -> syn::Result<()> {
+    if item_impl.unsafety.is_some() {
+        return Err(syn::Error::new_spanned(
+            item_impl.unsafety,
+            "initializer cannot annotate an unsafe impl",
+        ));
+    }
+    if !item_impl.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item_impl.generics,
+            "initializer impl cannot declare generic parameters",
+        ));
+    }
+    let Some((polarity, trait_path, _)) = &item_impl.trait_ else {
+        return Err(syn::Error::new_spanned(
+            &item_impl.self_ty,
+            "initializer must annotate an Initialization trait impl",
+        ));
+    };
+    if polarity.is_some() {
+        return Err(syn::Error::new_spanned(
+            polarity,
+            "initializer cannot annotate a negative impl",
+        ));
+    }
+    if trait_path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "Initialization")
+    {
+        return Err(syn::Error::new_spanned(
+            trait_path,
+            "initializer trait path must end with Initialization",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：解析 initializer 属性中必须是字符串的表达式。
+///
+/// 参数说明：
+/// - `expression`：待解析的属性值。
+/// - `field`：出错时的稳定字段名。
+///
+/// 返回：字符串字面量；其它表达式返回编译错误。
+fn parse_string_expr(expression: &Expr, field: &str) -> syn::Result<LitStr> {
+    match expression {
+        Expr::Lit(expr) => match &expr.lit {
+            Lit::Str(value) => Ok(value.clone()),
+            _ => Err(syn::Error::new_spanned(
+                expression,
+                format!("initializer {field} must be a string literal"),
+            )),
+        },
+        _ => Err(syn::Error::new_spanned(
+            expression,
+            format!("initializer {field} must be a string literal"),
+        )),
+    }
+}
+
+/// 业务作用：保证同一 initializer 属性键只设置一次。
+///
+/// 参数说明：
+/// - `slot`：当前字段已解析的可选值。
+/// - `value`：本次准备写入的值。
+/// - `meta`：重复时用于定位的属性项。
+///
+/// 返回：首次写入成功；重复键返回编译错误。
+fn set_once<T>(slot: &mut Option<T>, value: T, meta: &Meta) -> syn::Result<()> {
+    if slot.is_some() {
+        return Err(syn::Error::new_spanned(
+            meta,
+            "initializer attribute key is repeated",
+        ));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+/// 业务作用：在宏展开前校验 initializer 与依赖的 canonical 名称合同。
+///
+/// 参数说明：
+/// - `name`：待校验的字符串字面量。
+/// - `field`：出错时的稳定字段分类。
+///
+/// 返回：1..=128 字节且仅含小写 ASCII、数字、`_`/`-`/`.` 时成功。
+fn validate_initializer_name(name: &LitStr, field: &str) -> syn::Result<()> {
+    let value = name.value();
+    if value.is_empty() || value.len() > 128 {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{field} must contain between 1 and 128 bytes"),
+        ));
+    }
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+    }) {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{field} must contain only lowercase ASCII letters, digits, `_`, `-`, or `.`"),
+        ));
+    }
+    Ok(())
 }
 
 /// 业务作用：校验入口契约并生成静态描述、业务 Hook 包装和同步主函数。

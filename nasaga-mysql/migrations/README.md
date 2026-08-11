@@ -16,6 +16,18 @@
 9. 按受信定义发布记录回填全部历史 participant gate，并逐组核对影响行数
 10. 确认摘要没有 `NULL`、空串、长度错误或非法字符后执行
     `saga_participant_definition_digest_required.up.sql`
+11. Orchestrator 数据库执行 `saga_instance_trace_context.up.sql`（须先于携带 trace 传播能力的
+    新版本二进制部署；旧版本按显式列名读取，加列期间可继续运行）
+12. Orchestrator 数据库执行 `saga_tenant_quota.up.sql`（须先于开启任何租户配额上限;
+    仅观测模式同样依赖该表记账）
+13. Orchestrator 数据库执行 `saga_tenant_action_rate.up.sql`（须先于配置任何租户的管理
+    动作速率上限;未配置速率的部署不读写该表）
+
+配额上限的启用纪律（存量库）：账本带初始化标记，仅 `reconcile_tenant_quota` 在事务内
+置位。给某租户配置上限前必须依次完成——① 全部写入方升级到记账版本（创建预留、终态释放
+已生效）；② 在受控窗口内对该租户执行一次事务内对账，把存量非终态实例入账并置位；
+③ 再下发上限配置。跳过 ② 时该租户的预留与 `verify_startup` 都会以部署错误拒绝——存量
+实例的终态释放会扣掉新实例名额，上限被静默穿透，这不是可以用"稍后对账"补救的状态。
 
 普通迁移期间先阻止旧 binary 写 Saga 表，再执行 DDL，最后滚动启动新 binary。上线前需要在与目标
 数据量相当的副本上评估 `EXPLAIN ALTER`、元数据锁等待、复制延迟和完成时间，并由部署负责人批准

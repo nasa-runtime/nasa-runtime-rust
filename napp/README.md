@@ -2,6 +2,9 @@
 
 `napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、组件启动/停机编排、任务监督、信号处理与退出码。业务项目**不要直接依赖本 crate**，经 `nasa` 门面开启 `application` feature 使用；使用入口与生命周期约束见仓库的快速开始和运维指南。
 
+其中的业务 initializer 是 Ready 前的初始化屏障：migration 与出站依赖完成后统一执行静态宏和运行时
+登记项的 `before -> initialize -> after` 三轮，全部成功前不开放监听、消费或服务发现。
+
 ```toml
 nasa = { version = "1", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
@@ -18,7 +21,7 @@ mod controller;
     "kafka", "auth", "web", "nacos-discovery", "scheduling"
 )]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    // 业务启动 Hook：注册资源、登记受监督任务、注入路由/长连接定制;成功返回后资源封存。
+    // 业务启动 Hook：注册资源、登记受监督任务、注入路由/长连接定制和运行时 initializer。
     app.configure_router(|router| router)?;
     Ok(())
 }
@@ -63,8 +66,19 @@ auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改�
 
 `"saga"` 是组合组件：宏会隐式加入 DB 与 Outbox，业务不再重复写 `"db"`、`"outbox"` 或手工
 dispatcher。Inbox 没有后台生命周期，它由 Orchestrator 和参与方在本地事务中直接调用，因此不存在
-单独的 `"inbox"` 组件字符串。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测，只有业务明确
-选择 Kafka 托管消费时才声明 `"kafka"` 并启用 `saga-kafka`。
+单独的 `"inbox"` 组件字符串。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测：业务明确
+选择 Kafka 托管消费时声明 `"kafka"` 并启用 `saga-kafka`；选择 Redis Streams 托管消费时声明
+`"redis"` 并启用 `saga-redis-stream`,经 `SagaApplicationPlan::with_redis_stream_transport`
+提交已构造的 result/command 消费者(`(stream, group, consumer)` 身份须唯一)。Redis 组件在
+Saga 之前建立、在其之后释放;Ready 前用真实客户端统一探测 PING/配置合同/group 幂等创建
+(兼 ACL 探测),失败拒绝 Ready;消费循环由 Runner 监督,停机先关领取、排空在途轮次、未确认
+消息留 PEL 交重启后重领。按冻结 (stream, group) 导出 `napp_saga_stream_*` 低基数指标
+(`Application::saga_stream_metrics_prometheus`),其中 `deleted_pending_total` 非零必须告警。
+
+gRPC request/response connector 通过门面 `saga-grpc-experimental` 启用，只提供封闭收据裁决，不是
+Application 组件字符串，也不拥有 listener。业务必须另行启用并托管 `grpc-experimental` listener，
+完成 mTLS/签名身份映射、deadline、资源上限与 drain；回包缺失和 `Retryable` 都让发布端保留 Outbox
+行重投，不能按确定失败消耗死信预算。
 
 为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
 `#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
@@ -74,7 +88,7 @@ dispatcher。Inbox 没有后台生命周期，它由 Orchestrator 和参与方�
 历史非终态实例、数据库与 Outbox 门禁，随后启动 timer 和 dispatcher：
 
 对应的门面依赖至少启用 `application` 与 `saga-runtime`；选用受管 Kafka transport 时再启用
-`saga-kafka`。
+`saga-kafka`，选用受管 Redis Streams transport 时启用 `saga-redis-stream` 并声明 `"redis"`。
 
 ```rust
 use std::sync::Arc;
@@ -122,18 +136,55 @@ saga:
 ```
 
 `database_bootstrap` 默认为 `application`，DB 组件在 Start 阶段按 `database` 或 `datasources` 建池。
-确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件仍会在 Ready 前接管
-探针、健康监督和停机关闭；关闭所有权在 Start 阶段预占，确保受监督任务退出后才释放连接。Ready 后
+确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件会在 Prepare 接管并
+完成连接探针与 migration 门禁；关闭所有权在 Start 阶段预占，确保受监督任务退出后才释放连接。Ready 后
 `app.datasource("default")` 返回同一受管池，停机态拒绝新的借用。该模式不读取
 `database`/`datasources` 的连接设置并会记录提示，不能用来绕过数据库门禁。
 
 timer owner 不从共享配置推断，必须随计划提供逐副本唯一且重启稳定的 canonical 身份。
+
+`OrchestratorConfig` 也是 UserHook 前构造、提交后冻结的业务合同：`tenant_quotas` 限制每租户在飞实例，
+`tenant_action_rates` 限制 pause/resume/retry/manual-close 等变更动作，`enable_manual_close` 默认关闭并
+要求全部副本先升级为可解析 `MANUALLY_CLOSED` 的读者。它们不是 `saga:` YAML 热配置；精确用量只能
+通过有权限的管理查询读取，Prometheus 只导出无租户标签的拒绝总数。
+
+完整事务、transport、迁移、恢复和生产批准边界见
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 独立 Outbox 场景可显式声明 `#[nasa::application("outbox")]`，并在 UserHook 调用
 `app.configure_outbox(OutboxApplicationPlan::new(publisher))`。该声明会隐式加入 DB，但不会加入 Saga 或
 Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确认提交后会立即唤醒本进程 dispatcher；
 `outbox.poll_interval_ms` 是跨进程写入、进程重启和漏通知恢复的兜底上限，不会固定消耗每条 Saga
 步骤的执行预算。下游失败时提交通知不能绕过 `error_backoff_ms`。
+
+已投递行与死信的保留清理是显式子计划：`plan.with_retention(policy, interval_ms, archive)`。
+执行器绝不从"开启了 Outbox"推断保留期——未提交策略就没有任何删除；策略值不自洽、要求收据却
+缺归档端或间隔越界都在 UserHook 拒绝启动。行分类合同固定：待投递行（`dispatched=0 AND dead=0`）
+永不删除；已投递行达到最小保留期才可归档/删除；死信默认保留，只有独立批准标识、最小年龄与
+归档收据齐备才逐批清理。清理使用与 dispatcher 分离的 session-bound retention claim（同库同刻
+仅一个清理 owner，竞争即让路），按主键集合逐批独立提交删除，受批大小与单轮时间预算约束；
+若启用归档，先按 `event_id` 幂等写入并取得可复验收据才删源行，回包不确定用收据重查恢复。
+清理停摆只体现在 `napp_outbox_retention_*` 指标与"最后成功时刻"上（严格治理 degraded 信号），
+绝不反向停止 dispatcher 投递。删除 `COMMIT` 的应答不确定会单独增加
+`napp_outbox_retention_commit_uncertain_total`，不虚增已确认删除数，也不刷新最近成功时刻；下一轮
+按数据库中的持久候选事实继续收敛。
+
+多通道分片是显式 opt-in：`plan.with_channel_lanes(routes, lanes)` 提交 aggregate_type → lane 的
+冻结路由与本进程 lane 集合（必须含默认 `global` lane）。写侧按路由稳定派生 lane——只依赖聚合类型，
+同一聚合根二元组自始至终同 lane；路由进程级冻结，运行期变更被拒绝。每个 lane 拥有独立
+session-bound claim、退避与指标，毒丸只停摆自己的 lane（`Block` 语义与"成功前缀才标记"不变，
+改变的只是停摆半径）；整体 readiness 在全部 lane 健康时 Ready，`napp_outbox_lane_*{channel=...}`
+区分单领域停摆与整体退出。启用分片后同库禁止再运行未分片 dispatcher（两种 claim 锁名不同，
+并行会双重发布）；上线顺序见 naoutbox-mysql 迁移说明（先加列回填、行为不变，再切按 lane 所有权）。
+
+### Outbox 租户配额
+
+`OutboxApplicationPlan::with_tenant_quotas` 提交每租户在飞事件上限(进程级冻结,Ready 时安装,
+冲突拒绝 Ready)。列出的租户在受信 append(`append_transactional_with_context`)事务内原子预留,
+投递标记/死信裁决同语句(或同事务)释放;超限以稳定原因码 `outbox_tenant_quota_exceeded` 拒绝
+且事件行从未写入。未列出的租户不记账不设限。**把某租户纳入配额前,该租户全部写入必须已改走
+受信上下文入口**,否则释放路径造成账本漂移(由 `reconcile_outbox_tenant_quota` 在事务内有界对账收敛)。
+拒绝计数经 `napp_outbox_tenant_quota_rejections_total` 导出,不带租户标签。
 
 ## Kafka 受管模式
 
@@ -223,12 +274,74 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 安全协议、用户名、密码、证书路径和原生 properties 仍使用 `KafkaConfig` 对应字段；这些值不要写进示例、
 日志或管理端点。运行期配置变更只报告 `RestartRequired`，必须通过应用重启生效。
 
+## 业务 initializer
+
+initializer 用于在 migration 和出站依赖已就绪、入站监听和消费循环尚未启动时，完成动态路由、
+注册表、恢复、回填和预热。静态属性入口与 Service UserHook 中的运行时入口会合并为同一个冻结计划：
+
+```rust
+use nasa::application::{
+    ApplicationFuture, Initialization, InitializationContext, InitializerSpec,
+};
+
+#[derive(Default)]
+struct RoutesInitialization;
+
+#[nasa::initializer(
+    name = "routes",
+    order = 100,
+    requires = ["schema"],
+    kind = "one-shot",
+)]
+impl Initialization for RoutesInitialization {
+    fn initialize<'a>(
+        &'a mut self,
+        context: &'a mut InitializationContext<'_>,
+    ) -> ApplicationFuture<'a> {
+        Box::pin(async move {
+            let routes = build_routes(context.config())?;
+            context.register_resource(None, routes)?;
+            Ok(())
+        })
+    }
+}
+
+// Service UserHook 内也可以登记已构造的实例。
+app.register_initializer(
+    InitializerSpec::new("tenant-cache")
+        .order(200)
+        .requires(["routes"]),
+    TenantCacheInitialization::new(),
+)?;
+```
+
+`name` 和 `requires` 使用 canonical 名称；依赖边始终优先于 `order`，无依赖冲突时按
+`(order, name)` 稳定裁决。条件工厂返回 `None` 表示本项未启用；其它项仍依赖它时启动失败，
+不会静默删边。实际启用项严格串行执行三轮全局屏障：全部 `before`，再全部 `initialize`，
+最后全部 `after`。
+
+属性入口可省略 `name` 和 `order`。宏挂在完整 trait impl 上，因此默认 `name` 从实现类型名转换为
+canonical kebab-case，例如 `RoutesInitialization` 得到 `routes-initialization`；类型无法稳定转换时必须
+显式声明。派生名称同样是依赖、日志和指标 label 使用的稳定业务身份；重命名实现类型会改变该身份，
+需要跨发布保持依赖引用和观测连续性时应显式声明 `name`。默认 `order` 为 `100000`。运行时入口没有可供推导的实现项，仍通过
+`InitializerSpec::new(name)` 显式给出名称，其默认 `order` 同样为 `100000`。
+
+`one-shot` 只做有界初始化。`hosted` 只允许 Service，可通过 `register_readiness`、
+`stage_background` 和 `stage_critical` 暂存长期能力；任务在所有 initializer、Seal 和组件 Ready action
+成功后才交给 Supervisor，任务主体等到 Application 发布 Ready 才开始。业务自管 listener 应使用
+`app.serve_when_ready(...)`，这会保证启动失败或停机时根本不调用 listener 工厂。
+
+initializer 失败、panic、超时或取消都会停止后续阶段，不发布 Ready，并严格逆序停止任务、
+撤销 action 和关闭受管资源。已提交的 DB/Redis/Kafka 外部事实无法由本地回滚，因此实现必须可安全重跑：
+单库多步写使用事务，跨资源事实使用稳定幂等键或与 Outbox 同事务提交。
+
 ## 生命周期要点
 
 - `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写只记 `RestartRequired`。
-- `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/scheduling 任一长生命周期组件时解析为 Service，否则 Batch；显式 Batch 不允许声明这些组件。
+- `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
+- Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
-- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。
+- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
 - 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化如实记 `RestartRequired`。`app.config_view()` 保证快照与状态表同版本。
 - 错误报告统一脱敏（URI userinfo、常见敏感键）后输出完整错误链；进程级 panic hook 只写受控 location marker，不读 payload。
 
@@ -238,6 +351,8 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 | --- | --- | --- |
 | `app.register / register_named / register_managed` | 启动 Hook | 把业务资源所有权交给容器；运行期只读借用 `app.resource::<T>()` |
 | `app.spawn_critical / spawn_background` | 启动 Hook | 受监督任务；critical 提前退出触发失败停机 |
+| `app.serve_when_ready` | Service 启动 Hook | 登记只在 Application Ready 后才构造与 poll 的自管 listener |
+| `app.register_initializer` | Service 启动 Hook | 登记运行时 initializer，与 `#[nasa::initializer]` 静态项合并冻结 |
 | `app.configure_router(...)` | 启动 Hook | Web 逃生舱：手写路由、全局中间件、`/hystrix.stream` 等 |
 | `app.configure_mapping(...)` | 启动 Hook | 手动 global/scope/selector、窄 State 与安全运行时计划；`global = true` 的 interceptor 无需在此重复登记 |
 | `app.configure_ws(...)` | 启动 Hook | 长连接逃生舱：`authorize`、endpoint 事件表、集群 notifier（声明 `ws` 组件时必须至少提供 `authorize`） |

@@ -47,6 +47,56 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 组件字符串可按任意顺序书写，宏会按规范顺序启动并严格反向停机。需要 Saga 时只声明
 `#[nasa::application("saga", "web")]`；Saga 会隐式加入 DB 与 Outbox，transport 仍由业务显式选择。
 
+## Saga 最小接线
+
+Orchestrator 服务启用 Application 与 MySQL Saga runtime；Kafka、Redis Streams、HTTP 或实验 gRPC
+按真实链路另选，不能只配置地址就假定已经具备消费、确认和 DLT 闭环：
+
+```toml
+[dependencies]
+nasa = { version = "1", features = ["application", "saga-runtime", "web"] }
+```
+
+```rust
+use std::sync::Arc;
+use nasa::application::SagaApplicationPlan;
+use nasa::saga::{DefinitionRegistry, Orchestrator, OrchestratorConfig};
+
+#[nasa::application("saga", "web")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let mut definitions = DefinitionRegistry::new();
+    definitions.register(checkout_definition()?)?;
+
+    let orchestrator = Arc::new(Orchestrator::new(
+        definitions,
+        OrchestratorConfig::default(),
+    )?);
+    let publisher = Arc::new(build_event_publisher(&app).await?);
+
+    app.configure_saga(
+        SagaApplicationPlan::orchestrator(orchestrator, "checkout-orchestrator-a")?
+            .with_event_publisher(publisher)?,
+    )?;
+    Ok(())
+}
+```
+
+`timer_owner` 必须逐副本唯一且重启稳定。纯参与方使用
+`SagaApplicationPlan::participant(name, runtime)`；同一进程同时承载 Orchestrator 与参与方时用
+`with_participant` 追加。发布端必须实现 `OutboxPublisher` 并且只在下游已经明确确认后返回成功。
+
+启动前必须按 [Saga MySQL 迁移顺序](../nasaga-mysql/migrations/README.md) 和
+[Outbox MySQL 迁移顺序](../naoutbox-mysql/migrations/README.md) 准备每个本地事务域。Application 会在
+Ready 前校验定义、descriptor、历史非终态实例、数据库结构、发布端和参与方信任；任何一项不完整都
+拒绝开放监听或消费。
+
+| transport | 需要的门面 feature | Application 声明 | 额外责任 |
+| --- | --- | --- | --- |
+| Kafka | `saga-kafka` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
+| Redis Streams | `saga-redis-stream` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
+| HTTP | `saga-runtime` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
+| gRPC（实验） | `saga-grpc-experimental` + `grpc-experimental` | 按宿主 listener | generated service、mTLS、deadline、资源上限与 drain |
+
 ## 配置
 
 在业务进程工作目录提供 `zcf/application.yml`：

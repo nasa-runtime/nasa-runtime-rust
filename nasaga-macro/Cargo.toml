@@ -1,14 +1,15 @@
 [package]
 name = "nasaga-macro"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Saga #[saga] participant step attribute macro with compile-time contract checks"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["saga", "workflow", "macro", "compensation", "microservices"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

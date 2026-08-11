@@ -1,5 +1,19 @@
 //! NASA 应用生命周期运行时核心。
 //!
+//! 本 crate 统一拥有配置快照、组件启动与反向停机、受管任务以及 Ready 发布。业务 initializer
+//! 是 `Prepare` 与 `Seal` 之间的固定屏障：静态属性入口与 Service 启动 Hook 的运行时入口先合并
+//! 冻结为同一份依赖图；migration 和出站依赖准备完成后再严格执行全部 `before`、全部
+//! `initialize`、全部 `after`。三轮全部成功前不会开放入站监听、消费循环或服务发现。
+//!
+//! 依赖边优先于数值 `order`；失败、panic、启动超时或取消会阻止 Ready，并让已经取得所有权的
+//! action、资源和任务沿 active stack 逆序关闭。外部系统中已经提交的事实不属于本地回滚能力，
+//! initializer 必须通过事务或稳定幂等键保证可安全重跑。
+//!
+//! 启用 Saga 组件时，Application 隐式拥有 DB 与 Outbox 生命周期，在 Ready 前校验 definition、
+//! descriptor、历史非终态实例和参与方信任投影，再监督 durable timer 与所选受管消费循环。
+//! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
+//! `nasaga-runtime` 的持久合同承担。
+//!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 
 #![forbid(unsafe_code)]
@@ -21,7 +35,7 @@ mod telemetry;
 /// 业务仍需自身直依赖 `sqlx` 以调用 `sqlx::migrate!("./migrations")` 生成 [`Migrator`]
 /// (嵌入式 migration 与 sqlx 天然耦合,这是唯一被门面放行的第三方类型穿透点);本组再导出让
 /// 业务能命名门禁的配置/报告/错误类型,并在 `Application::configure_migrations` 登记后由 DB 组件
-/// 在监听器 Ready 前按 `database.migrations.mode` 执行门禁。
+/// 在 initializer 之前的 Prepare 阶段按 `database.migrations.mode` 执行门禁。
 #[cfg(feature = "db")]
 pub use namigrate::{
     run_gate, MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
@@ -31,6 +45,7 @@ mod discovery;
 mod error;
 mod future;
 mod global;
+mod initialization;
 #[cfg(feature = "kafka")]
 mod kafka;
 #[cfg(feature = "log")]
@@ -139,7 +154,9 @@ mod readiness;
 
 /// 只读就绪快照类型(管理端读取):供业务经 [`Application::readiness_snapshot`] 读取各依赖的聚合
 /// 状态。只暴露**读取**——注册/观测/封口等 owner 权限仍只在框架内部,不做成业务 API。
-pub use readiness::{DependencySnapshot, DependencyState, ReadinessSnapshot};
+pub use readiness::{
+    DependencySnapshot, DependencyState, ReadinessContributor, ReadinessPolicy, ReadinessSnapshot,
+};
 
 #[cfg(feature = "redis")]
 mod redis;
@@ -184,7 +201,8 @@ pub use capabilities::WsHandle;
 #[cfg(feature = "kafka")]
 pub use capabilities::{KafkaHandle, KafkaReadinessSnapshot};
 pub use component::{
-    ApplicationComponent, BootstrapContext, ReadyContext, ShutdownAction, StartContext,
+    ApplicationComponent, BootstrapContext, PrepareContext, ReadyContext, ShutdownAction,
+    StartContext,
 };
 pub use config::{
     ConfigProvider, ConfigSnapshot, ConfigSource, ConfigStore, ConfigView, ReloadState,
@@ -192,13 +210,23 @@ pub use config::{
 };
 pub use error::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 pub use future::ApplicationFuture;
+pub use initialization::{
+    Initialization, InitializationContext, InitializerDescriptor, InitializerFailure,
+    InitializerFailureKind, InitializerKind, InitializerSpec, InitializerStage,
+    COLLECTED_INITIALIZERS, DEFAULT_INITIALIZER_ORDER, MAX_INITIALIZERS, MAX_INITIALIZER_REQUIRES,
+};
 #[cfg(feature = "web")]
 pub use mapping_handle::MappingHandle;
 #[cfg(feature = "outbox")]
-pub use outbox::{OutboxApplicationPlan, OutboxHandle, OutboxPoisonPolicy, OutboxSnapshot};
+pub use outbox::{
+    OutboxApplicationPlan, OutboxChannelPlan, OutboxHandle, OutboxPoisonPolicy,
+    OutboxRetentionPlan, OutboxSnapshot,
+};
 pub use process::run;
 pub use resources::{ManagedResource, ResourcePhase, ResourceRef, ResourceRegistry};
 pub use runner::{ApplicationExit, ApplicationExitReason, ApplicationRunner};
+#[cfg(feature = "saga-redis-stream")]
+pub use saga::SagaRedisTransportPlan;
 #[cfg(feature = "saga")]
 pub use saga::{SagaApplicationPlan, SagaHandle};
 pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal};
@@ -322,6 +350,7 @@ pub mod __private {
     pub use anyhow;
     #[cfg(feature = "web")]
     pub use axum;
+    pub use linkme;
     #[cfg(feature = "web")]
     pub use naweb;
 }

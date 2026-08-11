@@ -1,11 +1,12 @@
 # 当前变更说明
 
-源码沿革由 Git 提交记录保存。本文件只概括当前工作区相对既有公开能力的业务变化。
+源码沿革由 Git 提交记录保存。本文件只概括当前公开业务能力。
 
 ## Saga
 
 - 新增 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime` 与 `nasaga-macro`，通过门面 feature 提供流程
-  定义、持久化 Orchestrator、参与方事务 adapter 和可选 Kafka transport。
+  定义、持久化 Orchestrator、参与方事务 adapter、Kafka/Redis Streams 受管 transport 和实验 gRPC
+  收据 connector。
 - 建立 `effect_id`、`command_id`、目标业务效果身份与定义摘要的确定性派生，阻止身份漂移造成重复
   外部副作用。
 - Orchestrator 将 Inbox、状态 CAS、attempt、迁移事实、下一 command Outbox 和 timer 放入同一本地
@@ -19,12 +20,16 @@
   继续提交副作用。
 - 增加低基数运行指标、管理审计、冲突事实、durability-first DLT 和 Prometheus 告警规则。
 - 数据库迁移采用语义化文件名；参与方摘要执行两阶段封口，排序规则转换具有独立维护窗边界。
+- W3C trace 上下文随实例、command 与 result 的已提交因果链显式传播；缺少 trace 不阻断投递。
+- 增加非终态分页检索、人工关闭终态与滚动升级门禁、调度批次幂等发起、租户在飞实例配额和管理动作速率。
+- Redis Streams connector 提供消息签名、显式 ACK、XAUTOCLAIM、原子 DLT、安全清剪与 Application
+  生命周期；gRPC connector 使用封闭收据表达提交、重复、确定性拒绝与结果不确定。
 
 ## 应用运行时
 
 - 完善受管组件的启动、Ready、反向停机、配置快照切换和资源 owner 语义。
 - `#[nasa::application("saga")]` 隐式纳入数据库与受管 Outbox，业务通过单一计划提交运行角色、
-  timer owner 与发布端；Kafka 保持显式 transport 选择。
+  timer owner、发布端与可选 Redis Streams 消费计划；全部 transport 保持显式选择。
 - Outbox 可以独立声明，提供持久化积压、死信、发布量和失败轮次观测；事务提交会立即唤醒本进程
   dispatcher，固定轮询只承担跨进程与崩溃恢复兜底。
 - 数据库、Redis、Kafka、WebSocket、调度和 telemetry 后台任务具备显式容量、超时、取消与排空边界。

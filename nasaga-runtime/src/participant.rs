@@ -12,6 +12,7 @@
 use nainbox_core::InboxClaim;
 use nainbox_mysql::MySqlInbox;
 use naoutbox_mysql::MySqlOutbox;
+use natelemetry::TraceContext;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nasaga_core::{
@@ -49,6 +50,31 @@ pub trait SagaCommandService: Send + Sync + 'static {
         envelope: &'a SagaCommandEnvelope,
         producer: &'a ServiceIdentity,
     ) -> impl std::future::Future<Output = anyhow::Result<ParticipantHandled>> + Send + 'a;
+
+    /// 业务作用：携带命令收据链路上下文的类型化分发入口；参与方结果事件由收据派生
+    /// 子上下文，保持跨服务 trace 连续。
+    ///
+    /// 默认实现忽略收据上下文并委托给
+    /// [`handle_saga_command`](Self::handle_saga_command)，旧版本宏展开在滚动升级期间
+    /// 继续满足本 trait；当前宏展开会覆写本方法并把 trace 传入事务 wrapper。
+    ///
+    /// 参数说明：
+    /// - `runtime`: 本服务的参与方运行时。
+    /// - `envelope`: 已认证且 route 精确匹配的 command envelope。
+    /// - `producer`: transport 从可信来源映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: 收据中已校验的链路上下文；`None` 表示收据未携带。
+    ///
+    /// 返回：语义与 [`handle_saga_command`](Self::handle_saga_command) 一致。
+    fn handle_saga_command_traced<'a>(
+        &'a self,
+        runtime: &'a ParticipantRuntime,
+        envelope: &'a SagaCommandEnvelope,
+        producer: &'a ServiceIdentity,
+        receipt_trace: Option<&'a TraceContext>,
+    ) -> impl std::future::Future<Output = anyhow::Result<ParticipantHandled>> + Send + 'a {
+        let _ = receipt_trace;
+        self.handle_saga_command(runtime, envelope, producer)
+    }
 }
 
 /// 业务作用：参与方命令处理的可 ACK 结论。
@@ -245,6 +271,34 @@ impl ParticipantRuntime {
         S: SagaStep,
         S::Command: DeserializeOwned,
     {
+        self.handle_authenticated_execute_traced(service, envelope, producer, None, allow_unknown)
+            .await
+    }
+
+    /// 业务作用：携带命令收据链路上下文的 execute 事务 wrapper——结果事件由收据派生
+    /// 子上下文，保持参与方到编排端的 trace 连续。
+    ///
+    /// 参数说明：
+    /// - `service`: 业务步骤实现。
+    /// - `envelope`: 已通过 transport 层 producer 认证的命令 envelope。
+    /// - `producer`: transport 认证并映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: transport 收据显式解析出的链路上下文；`None` 表示未携带。
+    /// - `allow_unknown`: descriptor 声明的 `allow_unknown`。
+    ///
+    /// 返回：语义与 [`handle_authenticated_execute`](Self::handle_authenticated_execute)
+    /// 完全一致；trace 不改变事务序与可 ACK 边界。
+    pub async fn handle_authenticated_execute_traced<S>(
+        &self,
+        service: &S,
+        envelope: &SagaCommandEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
+        allow_unknown: bool,
+    ) -> anyhow::Result<ParticipantHandled>
+    where
+        S: SagaStep,
+        S::Command: DeserializeOwned,
+    {
         let identity = self.verified_command_identity(envelope, producer)?;
         if identity.phase != StepPhase::Execute {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
@@ -274,7 +328,8 @@ impl ParticipantRuntime {
                 // 的身份重发结果事件,零业务效果。
                 ExecuteAdmission::AlreadyTerminal(terminal) => {
                     let status = forward_to_attempt_status(terminal)?;
-                    self.emit_result(envelope, status, None, None).await?;
+                    self.emit_result(receipt_trace, envelope, status, None, None)
+                        .await?;
                     Ok(ParticipantHandled::Replayed(status))
                 }
                 ExecuteAdmission::Admitted => {
@@ -291,8 +346,14 @@ impl ParticipantRuntime {
                                     StepForwardStatus::Succeeded,
                                 )
                                 .await?;
-                            self.emit_result(envelope, StepAttemptStatus::Succeeded, None, None)
-                                .await?;
+                            self.emit_result(
+                                receipt_trace,
+                                envelope,
+                                StepAttemptStatus::Succeeded,
+                                None,
+                                None,
+                            )
+                            .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
                         Ok(SagaOutcome::Rejected { code }) => {
@@ -305,6 +366,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Rejected,
                                 None,
@@ -323,6 +385,7 @@ impl ParticipantRuntime {
                                     )
                                     .await?;
                                 self.emit_result(
+                                    receipt_trace,
                                     envelope,
                                     StepAttemptStatus::Unknown,
                                     None,
@@ -341,6 +404,7 @@ impl ParticipantRuntime {
                                     )
                                     .await?;
                                 self.emit_result(
+                                    receipt_trace,
                                     envelope,
                                     StepAttemptStatus::Halted,
                                     None,
@@ -359,6 +423,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Halted,
                                 None,
@@ -390,6 +455,25 @@ impl ParticipantRuntime {
         &self,
         envelope: &SagaCommandEnvelope,
         producer: &ServiceIdentity,
+    ) -> anyhow::Result<ParticipantHandled> {
+        self.handle_authenticated_cancel_local_traced(envelope, producer, None)
+            .await
+    }
+
+    /// 业务作用：携带命令收据链路上下文的本地可围栏取消事务 wrapper；结果事件由收据
+    /// 派生子上下文，语义与 [`handle_authenticated_cancel_local`](Self::handle_authenticated_cancel_local) 一致。
+    ///
+    /// 参数说明：
+    /// - `envelope`: 已通过 transport owner/route 认证的 cancel command。
+    /// - `producer`: transport 认证并映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: transport 收据显式解析出的链路上下文；`None` 表示未携带。
+    ///
+    /// 返回：真实裁决与结果事件 COMMIT 后返回可 ACK 结论；失败返回错误并回滚。
+    pub async fn handle_authenticated_cancel_local_traced(
+        &self,
+        envelope: &SagaCommandEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
     ) -> anyhow::Result<ParticipantHandled> {
         let identity = self.verified_command_identity(envelope, producer)?;
         if identity.phase != StepPhase::Cancel {
@@ -433,7 +517,8 @@ impl ParticipantRuntime {
                     (StepAttemptStatus::ResolutionPending, None)
                 }
             };
-            self.emit_result(envelope, status, terminal, None).await?;
+            self.emit_result(receipt_trace, envelope, status, terminal, None)
+                .await?;
             Ok(ParticipantHandled::Executed(status))
         })
         .await
@@ -457,6 +542,31 @@ impl ParticipantRuntime {
         service: &C,
         envelope: &SagaCommandEnvelope,
         producer: &ServiceIdentity,
+    ) -> anyhow::Result<ParticipantHandled>
+    where
+        C: SagaCancelStep,
+        C::Command: DeserializeOwned,
+    {
+        self.handle_authenticated_cancel_external_traced(service, envelope, producer, None)
+            .await
+    }
+
+    /// 业务作用：携带命令收据链路上下文的外部取消事务 wrapper；结果事件由收据派生
+    /// 子上下文，语义与 [`handle_authenticated_cancel_external`](Self::handle_authenticated_cancel_external) 一致。
+    ///
+    /// 参数说明：
+    /// - `service`: 同时托管步骤取消能力的业务 Service。
+    /// - `envelope`: 已通过 transport owner/route 认证的 cancel command。
+    /// - `producer`: transport 认证并映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: transport 收据显式解析出的链路上下文；`None` 表示未携带。
+    ///
+    /// 返回：真实裁决与结果事件 COMMIT 后返回可 ACK 结论；失败返回错误并回滚。
+    pub async fn handle_authenticated_cancel_external_traced<C>(
+        &self,
+        service: &C,
+        envelope: &SagaCommandEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
     ) -> anyhow::Result<ParticipantHandled>
     where
         C: SagaCancelStep,
@@ -498,7 +608,8 @@ impl ParticipantRuntime {
                     // 已提交裁决只能重放 result；再次调用外部取消接口可能把幂等缺陷放大为
                     // 误取消别的业务请求，因此 gate 事实优先于新 delivery attempt。
                     let (status, terminal) = cancel_adjudication_result(adjudication);
-                    self.emit_result(envelope, status, terminal, None).await?;
+                    self.emit_result(receipt_trace, envelope, status, terminal, None)
+                        .await?;
                     Ok(ParticipantHandled::Replayed(status))
                 }
                 ExternalCancelAdmission::Admitted => {
@@ -526,7 +637,8 @@ impl ParticipantRuntime {
                                     cancel,
                                 )
                                 .await?;
-                            self.emit_result(envelope, status, terminal, reason).await?;
+                            self.emit_result(receipt_trace, envelope, status, terminal, reason)
+                                .await?;
                             Ok(ParticipantHandled::Executed(status))
                         }
                         Err(SagaExecutionError::Retryable { code }) => {
@@ -556,6 +668,31 @@ impl ParticipantRuntime {
         service: &S,
         envelope: &SagaCommandEnvelope,
         producer: &ServiceIdentity,
+    ) -> anyhow::Result<ParticipantHandled>
+    where
+        S: SagaStep,
+        S::Compensation: DeserializeOwned,
+    {
+        self.handle_authenticated_compensate_traced(service, envelope, producer, None)
+            .await
+    }
+
+    /// 业务作用：携带命令收据链路上下文的补偿事务 wrapper；结果事件由收据派生子上下文，
+    /// 语义与 [`handle_authenticated_compensate`](Self::handle_authenticated_compensate) 一致。
+    ///
+    /// 参数说明：
+    /// - `service`: 业务步骤实现。
+    /// - `envelope`: 已通过 transport owner/route 认证的 compensate command。
+    /// - `producer`: transport 认证并映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: transport 收据显式解析出的链路上下文；`None` 表示未携带。
+    ///
+    /// 返回：补偿裁决与结果事件 COMMIT 后返回可 ACK 结论；失败返回错误并回滚。
+    pub async fn handle_authenticated_compensate_traced<S>(
+        &self,
+        service: &S,
+        envelope: &SagaCommandEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
     ) -> anyhow::Result<ParticipantHandled>
     where
         S: SagaStep,
@@ -600,13 +737,15 @@ impl ParticipantRuntime {
                         StepCompensationStatus::Halted => Some("compensation_already_halted"),
                         _ => None,
                     };
-                    self.emit_result(envelope, status, None, reason).await?;
+                    self.emit_result(receipt_trace, envelope, status, None, reason)
+                        .await?;
                     Ok(ParticipantHandled::Replayed(status))
                 }
                 // 协议破坏:补偿只会对已记账成功的步骤发出。提交违规事实并告警,
                 // 不自旋等待正向命令,也不进入无限重试。
                 CompensationAdmission::MissingForwardEffect => {
                     self.emit_result(
+                        receipt_trace,
                         envelope,
                         StepAttemptStatus::Halted,
                         None,
@@ -631,8 +770,14 @@ impl ParticipantRuntime {
                                     StepCompensationStatus::Succeeded,
                                 )
                                 .await?;
-                            self.emit_result(envelope, StepAttemptStatus::Succeeded, None, None)
-                                .await?;
+                            self.emit_result(
+                                receipt_trace,
+                                envelope,
+                                StepAttemptStatus::Succeeded,
+                                None,
+                                None,
+                            )
+                            .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
                         Ok(CompensationOutcome::Unknown { code }) => {
@@ -644,6 +789,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Unknown,
                                 None,
@@ -661,6 +807,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Halted,
                                 None,
@@ -702,6 +849,31 @@ impl ParticipantRuntime {
         R: SagaResolveStep,
         R::Command: DeserializeOwned,
     {
+        self.handle_authenticated_resolve_traced(service, envelope, producer, None)
+            .await
+    }
+
+    /// 业务作用：携带命令收据链路上下文的解决查询事务 wrapper；结果事件由收据派生
+    /// 子上下文，语义与 [`handle_authenticated_resolve`](Self::handle_authenticated_resolve) 一致。
+    ///
+    /// 参数说明：
+    /// - `service`: 托管解决查询能力的业务 Service。
+    /// - `envelope`: 已通过 transport owner/route 认证的 resolve command。
+    /// - `producer`: transport 认证并映射出的 Orchestrator 逻辑身份。
+    /// - `receipt_trace`: transport 收据显式解析出的链路上下文；`None` 表示未携带。
+    ///
+    /// 返回：解决裁决与结果事件 COMMIT 后返回可 ACK 结论；失败返回错误并回滚。
+    pub async fn handle_authenticated_resolve_traced<R>(
+        &self,
+        service: &R,
+        envelope: &SagaCommandEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
+    ) -> anyhow::Result<ParticipantHandled>
+    where
+        R: SagaResolveStep,
+        R::Command: DeserializeOwned,
+    {
         let identity = self.verified_command_identity(envelope, producer)?;
         if identity.phase != StepPhase::Resolve {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
@@ -734,7 +906,7 @@ impl ParticipantRuntime {
             {
                 ResolutionAdmission::AlreadySettled { status, .. } => {
                     let attempt_status = resolution_to_attempt_status(status)?;
-                    self.emit_result(envelope, attempt_status, None, None)
+                    self.emit_result(receipt_trace, envelope, attempt_status, None, None)
                         .await?;
                     Ok(ParticipantHandled::Replayed(attempt_status))
                 }
@@ -742,6 +914,7 @@ impl ParticipantRuntime {
                     // 没有未知业务事实时不得调用查询 handler：凭空查询可能命中其它请求，
                     // 也会掩盖 command 链断裂。提交 Halted 供 Orchestrator 转人工审计。
                     self.emit_result(
+                        receipt_trace,
                         envelope,
                         StepAttemptStatus::Halted,
                         None,
@@ -773,8 +946,14 @@ impl ParticipantRuntime {
                                     StepResolutionStatus::Succeeded,
                                 )
                                 .await?;
-                            self.emit_result(envelope, StepAttemptStatus::Succeeded, None, None)
-                                .await?;
+                            self.emit_result(
+                                receipt_trace,
+                                envelope,
+                                StepAttemptStatus::Succeeded,
+                                None,
+                                None,
+                            )
+                            .await?;
                             Ok(ParticipantHandled::Executed(StepAttemptStatus::Succeeded))
                         }
                         Ok(SagaOutcome::Rejected { code }) => {
@@ -789,6 +968,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Rejected,
                                 None,
@@ -807,6 +987,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Unknown,
                                 None,
@@ -825,6 +1006,7 @@ impl ParticipantRuntime {
                                 )
                                 .await?;
                             self.emit_result(
+                                receipt_trace,
                                 envelope,
                                 StepAttemptStatus::Halted,
                                 None,
@@ -916,9 +1098,11 @@ impl ParticipantRuntime {
     /// 业务作用：把处理结论以稳定身份写入结果 Outbox，与业务写同事务发布。
     ///
     /// result 事件 id 由命令身份确定性派生：参与方事务重试不会为同一结果占用两个
-    /// 去重身份。
+    /// 去重身份。命令收据携带 trace 时，结果事件从它派生子上下文——参与方是链路
+    /// 中的一跳而不是终点，编排端由此续接同一 trace。
     ///
     /// 参数说明：
+    /// - `receipt_trace`: 命令收据中已校验的链路上下文；`None` 表示收据未携带。
     /// - `envelope`: 触发本结果的命令 envelope。
     /// - `status`: 处理结论。
     /// - `terminal`: 取消裁决 `ALREADY_TERMINAL` 携带的正向真实终态。
@@ -927,6 +1111,7 @@ impl ParticipantRuntime {
     /// 返回：写入成功返回 `Ok`。
     async fn emit_result(
         &self,
+        receipt_trace: Option<&TraceContext>,
         envelope: &SagaCommandEnvelope,
         status: StepAttemptStatus,
         terminal: Option<StepForwardStatus>,
@@ -954,7 +1139,21 @@ impl ParticipantRuntime {
         let event = result
             .to_outbox_event()
             .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
-        self.outbox.append_transactional(&event).await?;
+        // 结果事件从命令收据派生子上下文:同一 trace-id 下参与方处理是新的一跳,
+        // 编排端消费该结果时以此续接;收据未携带时按无上下文投递,不阻塞结果。
+        let event = match receipt_trace {
+            Some(trace) => {
+                event.with_traceparent(trace.child(natelemetry::random_span_id()).to_traceparent())
+            }
+            None => event,
+        };
+        // 租户归因取命令合同里的已认证租户(与本地 gate 同事务写入的同一身份),
+        // 供参与方 Outbox 层配额与对账使用;不读取 payload 自报身份。
+        let write_context = naoutbox_core::OutboxWriteContext::new(envelope.tenant_id.as_str())
+            .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
+        self.outbox
+            .append_transactional_with_context(&write_context, &event)
+            .await?;
         Ok(())
     }
 }

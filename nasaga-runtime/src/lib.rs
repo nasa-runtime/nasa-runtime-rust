@@ -1,16 +1,27 @@
-//! NASA Saga 运行时：Orchestrator 推进引擎与参与方 adapter 支撑。
+//! NASA Saga 运行时：可恢复的 Orchestrator、参与方事务 adapter 与 transport 裁决。
 //!
 //! 职责边界：`nasaga-core` 是纯裁决，`nasaga-mysql` 是持久化与 CAS，
 //! 本 crate 把二者组装成可运行的推进引擎——创建、结果推进、durable timer、有界重试、
-//! 崩溃恢复（durable timer + at-least-once Outbox 天然承担）与管理命令。宿主层
-//! （`napp` 托管组件）负责把 Kafka 消费循环、timer 轮询循环接到这里，本 crate 不
+//! 崩溃恢复（durable timer + at-least-once Outbox 天然承担）、租户治理与管理命令。宿主层
+//! （`napp` 托管组件）负责把所选 transport 消费循环、timer 轮询循环接到这里，本 crate 不
 //! 自行 `tokio::spawn` 任何无限循环。
+//!
+//! # 端到端架构
+//!
+//! Orchestrator 在一个本地事务内提交结果 Inbox、实例 CAS、attempt/transition、durable timer
+//! 与下一 command Outbox；参与方在自己的本地事务内提交 command Inbox、gate、业务事实与
+//! result Outbox。两端通过至少一次 transport 连接，`effect_id` 跨重投稳定，重复由 Inbox 和
+//! 目标业务幂等键吸收。进程崩溃后由数据库事实恢复，不依赖内存队列续跑。
+//!
+//! Kafka 与 Redis Streams feature 提供完整消费裁决；HTTP 入口提供认证/重放构件；gRPC feature
+//! 只提供封闭收据与服务端裁决器，listener、mTLS 身份、deadline 和 drain 仍由宿主显式拥有。
+//! `TraceContext` 只作为已验证的显式输入传播，不读取 ambient 状态，也不是投递前置条件。
 //!
 //! # 能力范围与明确不承诺
 //!
 //! - Orchestration、带不可变版本的严格串行步骤、MySQL store、Outbox/Inbox 可靠通道；
-//! - transport 层 producer 认证（topic-to-owner/端到端签名）与 quarantine 在 Kafka
-//!   接入层落地，本层假定 envelope 已通过认证，但仍做**身份复验**（派生比对）兜底；
+//! - transport 层 producer 认证（topic-to-owner、mTLS 或端到端签名）在 connector
+//!   边界落地，本层仍做**身份复验**（派生比对）兜底；
 //! - 公开保证只能是"本地 ACID + Outbox 至少一次 + Inbox 幂等 + 持久化状态机与显式
 //!   补偿 = 最终一致性"；不承诺物理 exactly-once、跨服务 ACID 或并发 Saga 隔离性。
 
@@ -23,11 +34,22 @@ mod observability;
 mod orchestrator;
 mod participant;
 mod registry;
+mod scheduled;
 mod timers;
 mod transaction;
 #[cfg(feature = "kafka")]
 mod transport;
 mod transport_auth;
+#[cfg(feature = "grpc-transport")]
+mod transport_grpc;
+#[cfg(feature = "redis-stream")]
+mod transport_redis;
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-stream",
+    feature = "grpc-transport"
+))]
+mod transport_shared;
 
 pub use envelope::{
     derive_result_event_id, SagaCommandEnvelope, SagaResultEnvelope, VerifiedIdentity,
@@ -36,7 +58,8 @@ pub use envelope::{
 pub use management::{SagaAuditTrail, SagaManagementContext, SagaManagementPermission};
 pub use observability::SagaOperationalMetrics;
 pub use orchestrator::{
-    HandleOutcome, Orchestrator, OrchestratorConfig, StartOutcome, StartSagaRequest, TimerOutcome,
+    HandleOutcome, Orchestrator, OrchestratorConfig, StartOutcome, StartSagaRequest,
+    TenantActionRate, TimerOutcome,
 };
 pub use transport_auth::{
     render_saga_http_command_dlt_metric, SagaHttpMessageAuthError, SagaHttpMessageAuthFailure,
@@ -361,12 +384,21 @@ pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDi
     }
 }
 
-pub use nasaga_mysql::{TimerFencingToken, TimerFencingTokenIssuer};
+// 检索查询/摘要与 fencing 类型同为公开管理面输入输出,经本 crate 统一再导出。
+pub use nasaga_mysql::{
+    SagaInstanceQuery, SagaInstanceSummary, TimerFencingToken, TimerFencingTokenIssuer,
+};
+// 链路上下文的公开类型:发起入口与 transport 收据以它显式传递 trace,宏展开也经本
+// 重导出引用,避免业务/宏直接依赖 natelemetry 坐标。
+pub use natelemetry::TraceContext;
 pub use participant::{
     AuthenticatedParticipantRuntime, ParticipantCommandTrust, ParticipantHandled,
     ParticipantRuntime, SagaCommandService,
 };
 pub use registry::DefinitionRegistry;
+pub use scheduled::{
+    derive_scheduled_business_key, ScheduledBatchReport, ScheduledBatchSpec, ScheduledItem,
+};
 pub use timers::{
     derive_timer_id, KIND_CANCEL_TIMEOUT, KIND_COMPENSATE_TIMEOUT,
     KIND_COMPENSATION_RESOLUTION_BUDGET, KIND_FORWARD_RESOLUTION_BUDGET, KIND_INSTANCE_DEADLINE,
@@ -375,10 +407,27 @@ pub use timers::{
 pub use transaction::SagaTransactionError;
 #[cfg(feature = "kafka")]
 pub use transport::{
-    ParticipantCommandHandler, SagaCommandHandler, SagaCommandRoute, SagaKafkaCommandConsumer,
-    SagaKafkaCommandConsumerConfig, SagaKafkaResultConsumer, SagaKafkaResultConsumerConfig,
-    SagaResultHandler,
+    SagaCommandRoute, SagaKafkaCommandConsumer, SagaKafkaCommandConsumerConfig,
+    SagaKafkaResultConsumer, SagaKafkaResultConsumerConfig,
 };
+#[cfg(feature = "grpc-transport")]
+pub use transport_grpc::{
+    outbox_disposition_of, SagaGrpcCommandServer, SagaGrpcPeerIdentity, SagaGrpcReceipt,
+    SagaGrpcResultServer,
+};
+#[cfg(feature = "redis-stream")]
+pub use transport_redis::{
+    publisher_duplicate_hints_total, safe_trim_by_group_frontier, stream_group_backlog,
+    verify_stream_transport_ready, SagaRedisStreamCommandConsumer, SagaRedisStreamPublisher,
+    SagaRedisStreamResultConsumer, SagaStreamAuth, SagaStreamConsumerConfig, SagaStreamPoller,
+    StreamPollReport,
+};
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-stream",
+    feature = "grpc-transport"
+))]
+pub use transport_shared::{ParticipantCommandHandler, SagaCommandHandler, SagaResultHandler};
 
 use nasaga_core::{CancelMode, Compensation, ResolutionMode};
 

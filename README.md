@@ -1,11 +1,30 @@
 # nasa-runtime-rust
 
 NASA Rust 共享库是一组按特性组合的基础设施包。
-**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启映射、事务、缓存、Redis、WebSocket、配置、服务发现等特性。
+**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、WebSocket、配置、服务发现等特性。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
+
+## 持久化 Saga 编排
+
+本仓库提供面向生产故障语义的 Saga：用**本地 ACID + Outbox 至少一次 + Inbox 幂等 + 持久化状态机 +
+显式补偿**协调跨服务业务步骤。核心价值不是把远端调用包装成“分布式事务”，而是让进程崩溃、消息重投、
+结果未知和多副本竞争都收敛到可恢复、可审计的数据库事实。
+
+```text
+Orchestrator DB                    Participant DB
+Inbox + CAS/journal + timer        Inbox + gate + business fact
+          │                                      │
+          └─ command Outbox → transport → result Outbox ─┘
+```
+
+流程定义摘要、稳定 `effect_id`、取消/裁决屏障、冻结补偿计划和 timer fencing 共同阻止定义漂移、重复
+副作用、未知结果误补偿与失权副本继续写入。Kafka 和 Redis Streams 提供受管消费接入；HTTP 可复用认证
+构件；gRPC 收据 connector 仍为实验能力。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离，
+业务资源竞争仍需唯一键、条件更新或语义锁。接入入口见 [Saga 快速开始](docs/quickstart.md#saga-最小接线)，
+完整架构、迁移、运维与恢复边界见 [Saga 生产运行指南](docs/saga-production.md)。
 
 ## 使用
 
@@ -48,6 +67,10 @@ pub async fn save_user() -> anyhow::Result<()> {
 服务型项目推荐用声明式入口替代手写 main 装配：配置装载、组件启动/停机顺序、信号处理、优雅停机、
 任务监督与配置热刷新全部由应用运行时接管，业务只声明组件与启动钩子：
 
+`application` 同时提供业务初始化屏障：静态 `#[nasa::initializer]` 与启动 Hook 动态登记的
+initializer 先合并冻结为一份依赖计划；migration 和出站依赖准备完成后再严格执行全部
+`before -> initialize -> after` 三轮。全部成功前不开放入站监听、消费循环或服务发现。
+
 ```toml
 [dependencies]
 nasa = { git = "https://github.com/nasa-runtime/nasa-runtime-rust.git", features = [
@@ -73,6 +96,31 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `outbox`，业务入口无需重复声明这两个组件；为兼容显式依赖，三者同时写出也合法且语义相同。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
 详见 [napp](napp/README.md)。
+
+### 业务初始化屏障
+
+initializer 适合装配动态路由与注册表、恢复业务状态、回填或预热依赖。它不是新的组件字符串，而是
+`application` 生命周期中位于 `Prepare` 与 `Seal` 之间的固定阶段：
+
+```text
+UserHook 登记 -> InitializerFreeze -> Prepare（migration / 出站门禁）
+              -> before 全局轮 -> initialize 全局轮 -> after 全局轮
+              -> Seal -> Ready（监听、消费与服务发现）
+```
+
+属性入口可省略 `name` 和 `order`：默认名称从实现类型派生 canonical kebab-case，默认顺序为
+`100000`。依赖边始终优先于 `order`；同一可执行集合中 `order` 越小越先执行，再按名称稳定裁决。
+Service 启动 Hook 也可用 `Application::register_initializer` 登记已经构造的实例，两种入口共享同一份
+名称唯一性、依赖环和顺序校验。
+
+失败、panic、启动超时或取消都会阻止 Ready，并沿 active stack 严格逆序停止受管任务、撤销
+initializer action 并关闭资源。框架不能撤销已经提交到 DB、Redis 或 Kafka 的外部事实，因此
+initializer 必须可安全重跑：单库多步写使用事务，跨资源事实使用稳定幂等键或与 Outbox 同事务提交。
+阶段耗时和失败按稳定
+initializer 名称输出低基数指标；停机逐步骤事件与最终有界摘要可用于核对真实清理顺序。
+
+完整宏属性、`one-shot`/`hosted` 边界、条件工厂和运行时示例见
+[napp 的业务 initializer 章节](napp/README.md#业务-initializer)。
 
 ### Mapping interceptor：手动与自动装配
 
@@ -119,6 +167,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 业务场景 | 建议特性 | 常用入口 |
 | --- | --- | --- |
 | 应用入口与生命周期 | `application` | `#[nasa::application(...)]`、`nasa::Application` |
+| 业务初始化屏障 | `application` | `#[nasa::initializer(...)]`、`Application::register_initializer` |
 | HTTP 路由 | `web` | `nasa::web::{get_mapping, mvc_router}` |
 | 路由身份认证 | `web-auth` | `nasa::web::auth::{AuthProvider, AuthContext}` |
 | 路由双协议加密 | `web-crypto` | `nasa::web::crypto::{CryptoRuntime, KeyRing}` |
@@ -130,6 +179,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | Saga 纯合同 | `saga` | `nasa::saga::{WorkflowDefinition, SagaOutcome}` |
 | Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
 | Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
+| Saga Redis Streams command/result 托管 | `saga-redis-stream` | `SagaRedisStreamPublisher`、`SagaRedisStreamCommandConsumer`、`SagaRedisStreamResultConsumer` |
+| Saga gRPC 收据 connector（实验） | `saga-grpc-experimental` | `SagaGrpcCommandServer`、`SagaGrpcResultServer`、`SagaGrpcReceipt` |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
@@ -287,7 +338,7 @@ scheduling:             # scheduling 组件
 | [natx-macro](natx-macro/README.md) | `tx` | `#[transactional]` 事务宏 | 由 `natx` 运行时读取 |
 | [nasaga-core](nasaga-core/README.md) | `saga` | Saga 身份、definition、状态机、结果与补偿计划合同 | 无 I/O；definition 由业务注册 |
 | [nasaga-mysql](nasaga-mysql/README.md) | runtime 内部 store | Saga journal、CAS、timer fencing、参与方 gate 与 migration | 复用 `natx` MySQL pool |
-| [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` | Orchestrator、参与方事务 adapter、管理审计、指标与 Kafka result consumer | 由业务注入 definition、topic owner 与投递策略 |
+| [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略；gRPC connector 为实验能力 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
 | [nadis](nadis/README.md) | `redis` | Redis 单点或集群、流水线、数据流、锁 | `redis.*` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
@@ -310,7 +361,7 @@ scheduling:             # scheduling 组件
 | [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列与停机 flush | `telemetry.*` 由 `napp` 读取 |
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
-| [napart](napart/README.md) | `partition` | 同 key 严格 FIFO、类型化 lane、有界背压与可审计停机 | 无固定根；应用可映射 `partition_executor.*` |
+| [napart](napart/README.md) | `partition` | 保序任务窃取、同 key 严格 FIFO、类型化 lane、有界背压与可审计停机 | 无固定根；应用可映射 `partition_executor.*` |
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
@@ -343,10 +394,10 @@ scheduling:             # scheduling 组件
   随机盐 + Argon2id + AES-256-GCM，返回自描述 `NC2.*` 令牌；业务可用 AAD 绑定租户或记录上下文。
   既有 PBKDF2-HMAC-SHA256 的 `NC1.*` 仅保持兼容读取，错误口令、AAD 错配或密文篡改都会失败。
 
-- **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前没有上游修复。**
+- **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前没有上游安全更新。**
   由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；历史
   PKCS#1 v1.5 私钥解密与私钥 type-1 运算受专用编译 feature 和 Web 运行时开关双重隔离，
-  且不进入 `full`。`deny.toml` 仍按包级 advisory 显式登记，待上游发布修复即移除。
+  且不进入 `full`。`deny.toml` 仍按包级 advisory 显式登记，待上游提供安全更新后移除。
 
 - **拒绝服务攻击防护与资源上限**（默认已提供保守兜底，可按部署调整）：
   - `ws`:`ServerConfig.max_connections`(连接总数,accept 处背压)、`max_unauthenticated`
@@ -372,7 +423,7 @@ scheduling:             # scheduling 组件
 | [公开归档说明](docs/publishing.md) | 多包依赖拓扑、归档内容和许可说明。 |
 | [贡献指南](CONTRIBUTING.md) | 贡献规则、文档、注释和代码维护约束。 |
 | [安全说明](SECURITY.md) | 安全报告方式、敏感面和默认安全策略。 |
-| [当前变更说明](CHANGELOG.md) | 当前工作区的业务能力变化。 |
+| [当前变更说明](CHANGELOG.md) | 当前公开业务能力概览。 |
 
 ## 许可证
 

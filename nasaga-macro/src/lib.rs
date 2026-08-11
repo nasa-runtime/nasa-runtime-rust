@@ -79,7 +79,7 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
     let compensate_dispatch = if args.compensable {
         quote!(
             runtime
-                .handle_authenticated_compensate(self, envelope, producer)
+                .handle_authenticated_compensate_traced(self, envelope, producer, receipt_trace)
                 .await
         )
     } else {
@@ -87,49 +87,56 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
         // fail-closed；否则伪造或人工误发 compensate 命令可撤销不可补偿效果。
         quote!(Err(#root::SagaCommandProcessingError::ContractInvalid.into()))
     };
-    let (cancel_mode, resolution_mode, cancel_dispatch, resolve_dispatch) =
-        match args.cancel_mode.as_str() {
-            "local-fenceable" => (
-                quote!(#root::__private::core::CancelMode::LocalFenceable),
-                quote!(None),
-                quote!(
-                    runtime
-                        .handle_authenticated_cancel_local(envelope, producer)
-                        .await
-                ),
-                quote!(Err(#root::SagaCommandProcessingError::ContractInvalid.into())),
+    let (cancel_mode, resolution_mode, cancel_dispatch, resolve_dispatch) = match args
+        .cancel_mode
+        .as_str()
+    {
+        "local-fenceable" => (
+            quote!(#root::__private::core::CancelMode::LocalFenceable),
+            quote!(None),
+            quote!(
+                runtime
+                    .handle_authenticated_cancel_local_traced(envelope, producer, receipt_trace)
+                    .await
             ),
-            "resolve-only" => (
-                quote!(#root::__private::core::CancelMode::ResolveOnly),
-                quote!(Some(#root::__private::core::ResolutionMode::Poll)),
-                quote!(Err(#root::SagaCommandProcessingError::ContractInvalid.into())),
-                // 该分支让 Rust 类型系统强制 Service 同时实现 SagaResolveStep；缺失实现
-                // 会在应用编译期失败，不能带着 allow_unknown 的空能力进入 Ready。
-                quote!(
-                    runtime
-                        .handle_authenticated_resolve(self, envelope, producer)
-                        .await
-                ),
+            quote!(Err(#root::SagaCommandProcessingError::ContractInvalid.into())),
+        ),
+        "resolve-only" => (
+            quote!(#root::__private::core::CancelMode::ResolveOnly),
+            quote!(Some(#root::__private::core::ResolutionMode::Poll)),
+            quote!(Err(#root::SagaCommandProcessingError::ContractInvalid.into())),
+            // 该分支让 Rust 类型系统强制 Service 同时实现 SagaResolveStep；缺失实现
+            // 会在应用编译期失败，不能带着 allow_unknown 的空能力进入 Ready。
+            quote!(
+                runtime
+                    .handle_authenticated_resolve_traced(self, envelope, producer, receipt_trace)
+                    .await
             ),
-            "externally-cancellable" => (
-                quote!(#root::__private::core::CancelMode::ExternallyCancellable),
-                quote!(Some(#root::__private::core::ResolutionMode::Poll)),
-                // 该调用让 Rust 类型系统强制 Service 实现 SagaCancelStep；外部取消缺失
-                // 时应用无法编译，不能在运行期退化成本地伪屏障。
-                quote!(
-                    runtime
-                        .handle_authenticated_cancel_external(self, envelope, producer)
-                        .await
-                ),
-                // ResolutionPending/execute Unknown 必须有同一 Service 的 Poll 收敛能力。
-                quote!(
-                    runtime
-                        .handle_authenticated_resolve(self, envelope, producer)
-                        .await
-                ),
+        ),
+        "externally-cancellable" => (
+            quote!(#root::__private::core::CancelMode::ExternallyCancellable),
+            quote!(Some(#root::__private::core::ResolutionMode::Poll)),
+            // 该调用让 Rust 类型系统强制 Service 实现 SagaCancelStep；外部取消缺失
+            // 时应用无法编译，不能在运行期退化成本地伪屏障。
+            quote!(
+                runtime
+                    .handle_authenticated_cancel_external_traced(
+                        self,
+                        envelope,
+                        producer,
+                        receipt_trace
+                    )
+                    .await
             ),
-            _ => unreachable!("取消形态已在参数解析阶段封闭校验"),
-        };
+            // ResolutionPending/execute Unknown 必须有同一 Service 的 Poll 收敛能力。
+            quote!(
+                runtime
+                    .handle_authenticated_resolve_traced(self, envelope, producer, receipt_trace)
+                    .await
+            ),
+        ),
+        _ => unreachable!("取消形态已在参数解析阶段封闭校验"),
+    };
 
     Ok(quote! {
         #item_impl
@@ -172,6 +179,28 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
                 envelope: &#root::SagaCommandEnvelope,
                 producer: &#root::__private::core::ServiceIdentity,
             ) -> #root::__private::anyhow::Result<#root::ParticipantHandled> {
+                self.saga_handle_command_traced(runtime, envelope, producer, None)
+                    .await
+            }
+
+            /// 业务作用：携带命令收据链路上下文的分发入口——结果事件由收据派生子上下文，
+            /// 保持参与方到编排端的 trace 连续；语义与 `saga_handle_command` 一致。
+            ///
+            /// 参数说明：
+            /// - `runtime`: 参与方运行时。
+            /// - `envelope`: 已通过 transport 认证的命令 envelope。
+            /// - `producer`: transport 从可信凭据映射出的 Orchestrator 逻辑身份。
+            /// - `receipt_trace`: transport 收据显式解析出的链路上下文。
+            ///
+            /// 返回：可 ACK 的处理结论；`Retryable` 或基础设施失败返回错误
+            /// （事务已回滚，不得 ACK）。
+            pub async fn saga_handle_command_traced(
+                &self,
+                runtime: &#root::ParticipantRuntime,
+                envelope: &#root::SagaCommandEnvelope,
+                producer: &#root::__private::core::ServiceIdentity,
+                receipt_trace: Option<&#root::TraceContext>,
+            ) -> #root::__private::anyhow::Result<#root::ParticipantHandled> {
                 // 即使调用方绕过 hosted transport 直接调用 adapter，也必须在 Inbox claim
                 // 前绑定宏声明的精确步骤，避免可信 Orchestrator 的错 topic 路由执行错误业务。
                 if envelope.workflow != #workflow
@@ -181,7 +210,7 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
                     return Err(#root::SagaCommandProcessingError::RouteUnauthorized.into());
                 }
                 match envelope.phase.as_str() {
-                    "execute" => runtime.handle_authenticated_execute(self, envelope, producer, #allow_unknown).await,
+                    "execute" => runtime.handle_authenticated_execute_traced(self, envelope, producer, receipt_trace, #allow_unknown).await,
                     "cancel" => #cancel_dispatch,
                     "compensate" => #compensate_dispatch,
                     "resolve" => #resolve_dispatch,
@@ -199,6 +228,18 @@ fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Resul
                 producer: &'a #root::__private::core::ServiceIdentity,
             ) -> #root::__private::anyhow::Result<#root::ParticipantHandled> {
                 self.saga_handle_command(runtime, envelope, producer).await
+            }
+
+            /// 业务作用：把收据链路上下文随命令一起交给事务 wrapper，结果事件派生子上下文。
+            async fn handle_saga_command_traced<'a>(
+                &'a self,
+                runtime: &'a #root::ParticipantRuntime,
+                envelope: &'a #root::SagaCommandEnvelope,
+                producer: &'a #root::__private::core::ServiceIdentity,
+                receipt_trace: Option<&'a #root::TraceContext>,
+            ) -> #root::__private::anyhow::Result<#root::ParticipantHandled> {
+                self.saga_handle_command_traced(runtime, envelope, producer, receipt_trace)
+                    .await
             }
         }
     })

@@ -251,20 +251,22 @@ impl ApplicationSpec {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：声明 Saga、Kafka、Outbox、Web、长连接、注册发现或调度时返回 Service，否则返回 Batch。
+    /// 返回：声明长驻组件或存在静态 hosted initializer 时返回 Service，否则返回 Batch。
     pub(crate) fn resolve_auto_mode(&self) -> ApplicationMode {
-        if self.components.iter().any(|component| {
-            matches!(
-                component,
-                ComponentId::Saga
-                    | ComponentId::Kafka
-                    | ComponentId::Outbox
-                    | ComponentId::Web
-                    | ComponentId::Ws
-                    | ComponentId::NacosDiscovery
-                    | ComponentId::Scheduling
-            )
-        }) {
+        if crate::initialization::has_hosted_static_initializer()
+            || self.components.iter().any(|component| {
+                matches!(
+                    component,
+                    ComponentId::Saga
+                        | ComponentId::Kafka
+                        | ComponentId::Outbox
+                        | ComponentId::Web
+                        | ComponentId::Ws
+                        | ComponentId::NacosDiscovery
+                        | ComponentId::Scheduling
+                )
+            })
+        {
             ApplicationMode::Service
         } else {
             ApplicationMode::Batch
@@ -279,6 +281,11 @@ impl ApplicationSpec {
     /// 返回：模式与组件相容时成功；Batch 包含任一长生命周期组件时返回配置错误。
     pub(crate) fn validate_mode(&self, mode: ApplicationMode) -> ApplicationResult<()> {
         if mode == ApplicationMode::Batch {
+            if crate::initialization::has_hosted_static_initializer() {
+                return Err(spec_error(
+                    "batch mode cannot activate a hosted initializer",
+                ));
+            }
             if let Some(component) = self.components.iter().find(|component| {
                 matches!(
                     component,
@@ -356,6 +363,9 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Web, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Saga)?;
+    // Saga 的 Redis Streams 受管 transport 在 Saga Ready 阶段需要已建立的 Redis 客户端;
+    // 反向顺序会让 Ready 探测拿不到连接。停机按逆序执行,消费停止后 Redis 才释放。
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Outbox)?;

@@ -3,6 +3,9 @@
 `nasaga-macro` 提供参与方 `#[saga]` 属性宏，在编译期检查步骤声明，并生成静态 descriptor 与事务
 adapter。业务通过 `nasa` 门面的 `saga-runtime` feature 使用，不需要直接依赖宏 crate。
 
+宏的价值是把“声明了某种取消/裁决能力”和“类型确实实现该能力”绑定在一起，并把本地步骤投影加入
+启动预检；它不会把业务方法包装成一个缺少 Inbox、gate 或 Outbox 的半事务入口。
+
 ```toml
 [dependencies]
 nasa = { version = "1", features = ["saga-runtime"] }
@@ -31,6 +34,14 @@ impl SagaStep for InventoryService {
 `saga_handle_command` 把命令交给 `ParticipantRuntime` 持有的完整事务边界，业务方法不得自行提交
 结果消息。
 
+```text
+#[saga] 声明
+  ├─ 编译期：属性组合 + trait 能力检查
+  ├─ 链接期：descriptor 进入静态收集表
+  ├─ Ready：descriptor 与受信 WorkflowDefinition 精确对齐
+  └─ 运行期：saga_handle_command → ParticipantRuntime 完整事务 wrapper
+```
+
 ## 合法声明
 
 | `cancel_mode` | `allow_unknown` | 类型合同 |
@@ -53,4 +64,5 @@ topic 路由和投递预算由运行时与部署配置负责。
 - 业务方法不能绕过 `ParticipantRuntime` 另开事务，否则 gate、业务事实与结果 Outbox 无法原子提交。
 - `externally-cancellable` 的取消结论必须来自真实业务裁决，不能由 adapter 推测。
 
-完整运行合同见 [Saga 生产运行指南](../docs/saga-production.md)。
+完整运行合同见
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

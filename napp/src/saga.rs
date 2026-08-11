@@ -14,6 +14,8 @@ use std::{
 };
 
 use naoutbox_core::OutboxPublisher;
+#[cfg(feature = "saga-redis-stream")]
+use nasaga_runtime::SagaStreamPoller;
 use nasaga_runtime::{DefinitionRegistry, Orchestrator, ParticipantRuntime};
 use serde::Deserialize;
 
@@ -98,6 +100,146 @@ pub struct SagaApplicationPlan {
     orchestrator: Option<OrchestratorPlan>,
     participants: BTreeMap<String, Arc<ParticipantRuntime>>,
     outbox: Option<crate::outbox::OutboxApplicationPlan>,
+    #[cfg(feature = "saga-redis-stream")]
+    redis_transport: Option<SagaRedisTransportPlan>,
+}
+
+/// 业务作用：Saga 的 Redis Streams 受管消费子计划——把已构造的 result/command 消费者
+/// 交给 Application 生命周期:Ready 前统一探测拓扑/group/ACL/route owner,运行期由
+/// Runner 监督消费循环,停机先关领取、排空在途轮次,Redis 连接由更早启动的 Redis
+/// 组件在其后释放(`DB -> Redis -> Saga -> Outbox` 的逆序)。
+///
+/// 发布端不在本计划内:command/result 事件仍经由受管 Outbox 的发布端合同投递,
+/// 本计划只托管消费侧。
+#[cfg(feature = "saga-redis-stream")]
+pub struct SagaRedisTransportPlan {
+    client_name: String,
+    pollers: Vec<Arc<dyn SagaStreamPoller>>,
+    poll_idle_ms: u64,
+    error_backoff_ms: u64,
+}
+
+#[cfg(feature = "saga-redis-stream")]
+impl SagaRedisTransportPlan {
+    /// 业务作用：创建绑定某个受管 Redis 客户端、尚无消费者的传输子计划。
+    ///
+    /// 参数说明：
+    /// - `client_name`: 受管 Redis 实例 qualifier(单实例配置固定 `default`)。
+    ///
+    /// 返回：必须继续加入至少一个消费者后才能提交的空子计划。
+    pub fn new(client_name: impl Into<String>) -> Self {
+        Self {
+            client_name: client_name.into(),
+            pollers: Vec::new(),
+            poll_idle_ms: 10,
+            error_backoff_ms: 1_000,
+        }
+    }
+
+    /// 业务作用：加入一个已构造的消费者(result 或 command)。
+    ///
+    /// 消费身份 `(stream, group, consumer)` 在计划内必须唯一:同一身份重复轮询会把
+    /// 同一份 PEL 交给两个循环,重领与确认互相踩踏。
+    ///
+    /// 参数说明：
+    /// - `poller`: 已通过构造期配置校验的消费者。
+    ///
+    /// 返回：身份唯一时返回自身;重复身份返回 UserHook 配置错误。
+    pub fn with_poller(mut self, poller: Arc<dyn SagaStreamPoller>) -> ApplicationResult<Self> {
+        let config = poller.config();
+        let identity = (
+            config.stream.clone(),
+            config.group.clone(),
+            config.consumer.clone(),
+        );
+        if self.pollers.iter().any(|existing| {
+            let existing = existing.config();
+            (
+                existing.stream.as_str(),
+                existing.group.as_str(),
+                existing.consumer.as_str(),
+            ) == (
+                identity.0.as_str(),
+                identity.1.as_str(),
+                identity.2.as_str(),
+            )
+        }) {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga redis transport pollers must have unique (stream, group, consumer)",
+            ));
+        }
+        self.pollers.push(poller);
+        Ok(self)
+    }
+
+    /// 业务作用：调整轮询间歇与故障退避(默认 10ms/1s)。
+    ///
+    /// 间歇只是让位调度的下限——XREADGROUP 的 BLOCK 预算才是等待新消息的主体;
+    /// 退避防止 Redis 故障期忙循环。两者都必须有界。
+    ///
+    /// 参数说明：
+    /// - `poll_idle_ms`: 相邻两轮之间的间歇毫秒(1..=60_000)。
+    /// - `error_backoff_ms`: 单轮失败后的退避毫秒(1..=60_000)。
+    ///
+    /// 返回：预算有界时返回自身;越界返回 UserHook 配置错误。
+    pub fn with_budgets(
+        mut self,
+        poll_idle_ms: u64,
+        error_backoff_ms: u64,
+    ) -> ApplicationResult<Self> {
+        if !(1..=60_000).contains(&poll_idle_ms) || !(1..=60_000).contains(&error_backoff_ms) {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga redis transport budgets must be within 1ms..=60s",
+            ));
+        }
+        self.poll_idle_ms = poll_idle_ms;
+        self.error_backoff_ms = error_backoff_ms;
+        Ok(self)
+    }
+
+    /// 业务作用：校验子计划完整性——空消费者集合的传输计划没有业务意义。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：客户端名与消费者集合合法返回 `Ok`。
+    fn validate(&self) -> ApplicationResult<()> {
+        if self.client_name.is_empty() || self.client_name.len() > 128 {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga redis transport requires a bounded client name",
+            ));
+        }
+        if self.pollers.is_empty() {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga redis transport requires at least one poller",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 业务作用：单条受管 stream 消费的进程级观测状态——区分"某条流停摆"与"整个
+/// 消费任务退出";标签值来自 Ready 时冻结的 (stream, group),基数有界。
+#[cfg(feature = "saga-redis-stream")]
+pub(crate) struct StreamRuntime {
+    stream: String,
+    group: String,
+    consumer: String,
+    acked: std::sync::atomic::AtomicU64,
+    dead_lettered: std::sync::atomic::AtomicU64,
+    retained: std::sync::atomic::AtomicU64,
+    reclaimed: std::sync::atomic::AtomicU64,
+    deleted_pending: std::sync::atomic::AtomicU64,
+    auth_rejected: std::sync::atomic::AtomicU64,
+    failed_rounds: std::sync::atomic::AtomicU64,
+    handled: std::sync::atomic::AtomicU64,
+    handler_micros_sum: std::sync::atomic::AtomicU64,
+    pending: std::sync::atomic::AtomicU64,
+    oldest_pel_age_ms: std::sync::atomic::AtomicU64,
+    healthy: AtomicBool,
 }
 
 impl SagaApplicationPlan {
@@ -111,6 +253,8 @@ impl SagaApplicationPlan {
             orchestrator: None,
             participants: BTreeMap::new(),
             outbox: None,
+            #[cfg(feature = "saga-redis-stream")]
+            redis_transport: None,
         }
     }
 
@@ -215,6 +359,33 @@ impl SagaApplicationPlan {
         Ok(self)
     }
 
+    /// 业务作用：为 Saga 内部必需的 Outbox 绑定一份**已完整配置**的发布计划——发布端之外
+    /// 还要保留清理、多通道分片等能力时使用本入口。
+    ///
+    /// [`with_event_publisher`](Self::with_event_publisher) 只绑定发布端，是最简形式；隐式
+    /// Outbox 的其余能力（`with_retention`、`with_channel_lanes` 等）都构建在
+    /// [`OutboxApplicationPlan`](crate::OutboxApplicationPlan) 上，因此本入口直接接收整份
+    /// 计划，避免每新增一个 Outbox 能力就要在 Saga 侧复制一个透传方法、也不会让受管 Saga
+    /// 的业务够不到已有能力。两个入口互斥，只能选其一且只能调用一次。
+    ///
+    /// 参数说明：
+    /// - `plan`：已绑定发布端并按需附加保留清理、通道分片的 Outbox 计划。
+    ///
+    /// 返回：首次绑定返回更新后的 Saga 计划；重复绑定返回 UserHook 配置错误。
+    pub fn with_event_publisher_plan(
+        mut self,
+        plan: crate::outbox::OutboxApplicationPlan,
+    ) -> ApplicationResult<Self> {
+        if self.outbox.is_some() {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga event publisher can be configured only once",
+            ));
+        }
+        self.outbox = Some(plan);
+        Ok(self)
+    }
+
     /// 业务作用：确认计划至少托管一个可对外提供的 Saga 角色。
     ///
     /// 参数说明: 无。
@@ -228,6 +399,31 @@ impl SagaApplicationPlan {
             ));
         }
         Ok(())
+    }
+
+    /// 业务作用：提交 Redis Streams 受管消费子计划——消费循环交给 Application 监督。
+    ///
+    /// 需要组合声明包含受管 Redis 组件(`redis` 角色);Ready 前用真实客户端统一探测
+    /// 拓扑、group 幂等创建与 ACL,失败拒绝 Ready。发布端不受影响,仍走受管 Outbox。
+    ///
+    /// 参数说明：
+    /// - `transport`: 已装配消费者的传输子计划。
+    ///
+    /// 返回：首次提交且子计划自洽时返回自身;重复提交或计划不完整返回 UserHook 错误。
+    #[cfg(feature = "saga-redis-stream")]
+    pub fn with_redis_stream_transport(
+        mut self,
+        transport: SagaRedisTransportPlan,
+    ) -> ApplicationResult<Self> {
+        if self.redis_transport.is_some() {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga redis transport can be configured only once",
+            ));
+        }
+        transport.validate()?;
+        self.redis_transport = Some(transport);
+        Ok(self)
     }
 
     /// 业务作用：把 Saga 组合声明内的发布计划移交给隐式 Outbox 组件。
@@ -308,6 +504,8 @@ pub(crate) struct SagaRuntimeState {
     lifecycle: AtomicU8,
     orchestrator: OnceLock<Arc<Orchestrator>>,
     participants: OnceLock<Arc<BTreeMap<String, Arc<ParticipantRuntime>>>>,
+    #[cfg(feature = "saga-redis-stream")]
+    streams: OnceLock<Arc<Vec<Arc<StreamRuntime>>>>,
 }
 
 impl SagaRuntimeState {
@@ -323,6 +521,8 @@ impl SagaRuntimeState {
             lifecycle: AtomicU8::new(0),
             orchestrator: OnceLock::new(),
             participants: OnceLock::new(),
+            #[cfg(feature = "saga-redis-stream")]
+            streams: OnceLock::new(),
         }
     }
 
@@ -439,6 +639,8 @@ impl SagaRuntimeState {
 pub(crate) struct SagaComponent {
     settings: Option<SagaSettings>,
     contributor: Option<ReadinessContributor>,
+    #[cfg(feature = "saga-redis-stream")]
+    stream_contributor: Option<ReadinessContributor>,
     critical_task: Option<ApplicationFuture<'static>>,
 }
 
@@ -452,6 +654,8 @@ impl SagaComponent {
         Self {
             settings: None,
             contributor: None,
+            #[cfg(feature = "saga-redis-stream")]
+            stream_contributor: None,
             critical_task: None,
         }
     }
@@ -495,6 +699,22 @@ impl ApplicationComponent for SagaComponent {
                     stale_after: None,
                 },
             )?;
+            // 就绪注册表在 UserHook 完成时封口,而计划要到 UserHook 才提交:此处必须
+            // 先注册 stream 贡献项占位;Ready 阶段若计划不含 Redis transport,占位被
+            // 一次性置绿中和,不影响未启用者。
+            #[cfg(feature = "saga-redis-stream")]
+            {
+                self.stream_contributor = Some(context.application().register_readiness(
+                    ComponentId::Saga,
+                    Arc::<str>::from("saga:redis-stream"),
+                    ReadinessPolicy {
+                        affects_ready: true,
+                        failure_threshold: settings.timer_failure_threshold,
+                        recovery_threshold: 1,
+                        stale_after: None,
+                    },
+                )?);
+            }
             self.settings = Some(settings);
             self.contributor = Some(contributor);
             Ok(())
@@ -511,7 +731,12 @@ impl ApplicationComponent for SagaComponent {
         Box::pin(async move {
             let application = context.application().clone();
             let state = application.saga_runtime();
-            let plan = state.take_plan()?;
+            #[cfg_attr(not(feature = "saga-redis-stream"), allow(unused_mut))]
+            let mut plan = state.take_plan()?;
+            // Redis transport 属组件生命周期资产,不随计划进入只读能力发布;必须在
+            // publish 前取走。
+            #[cfg(feature = "saga-redis-stream")]
+            let redis_transport = plan.redis_transport.take();
 
             if let Some(orchestrator) = plan.orchestrator.as_ref() {
                 // definition/descriptor 与历史非终态实例必须在能力发布前同时通过；否则旧实例可能被
@@ -555,18 +780,101 @@ impl ApplicationComponent for SagaComponent {
             })?;
             contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
 
-            if let Some(orchestrator) = orchestrator {
-                let settings = self.settings.clone().ok_or_else(|| {
-                    saga_error(ApplicationPhase::Ready, "saga settings are missing")
-                })?;
-                self.critical_task = Some(Box::pin(run_timer_loop(
-                    application,
-                    orchestrator.runtime,
-                    orchestrator.timer_owner,
-                    settings,
-                    contributor,
-                )));
-            }
+            let timer_task: Option<ApplicationFuture<'static>> =
+                if let Some(orchestrator) = orchestrator {
+                    let settings = self.settings.clone().ok_or_else(|| {
+                        saga_error(ApplicationPhase::Ready, "saga settings are missing")
+                    })?;
+                    Some(Box::pin(run_timer_loop(
+                        application.clone(),
+                        orchestrator.runtime,
+                        orchestrator.timer_owner,
+                        settings,
+                        contributor,
+                    )))
+                } else {
+                    None
+                };
+
+            #[cfg(feature = "saga-redis-stream")]
+            let stream_task: Option<ApplicationFuture<'static>> = {
+                let stream_contributor =
+                    self.stream_contributor.as_ref().cloned().ok_or_else(|| {
+                        saga_error(
+                            ApplicationPhase::Ready,
+                            "saga stream readiness contributor is missing",
+                        )
+                    })?;
+                match redis_transport {
+                    Some(transport) => {
+                        // Ready 前用真实客户端统一探测:PING、配置合同、group 幂等创建
+                        // (兼 ACL 探测)。任何失败都拒绝 Ready——不能带着无法领取消息的
+                        // 消费拓扑对外宣布可用。
+                        let client = application.redis(&transport.client_name).await?;
+                        let configs: Vec<&nasaga_runtime::SagaStreamConsumerConfig> = transport
+                            .pollers
+                            .iter()
+                            .map(|poller| poller.config())
+                            .collect();
+                        nasaga_runtime::verify_stream_transport_ready(&client, &configs)
+                            .await
+                            .map_err(|error| {
+                                saga_source_error(
+                                    ApplicationPhase::Ready,
+                                    "saga redis stream transport readiness probe failed",
+                                    error,
+                                )
+                            })?;
+                        let runtimes: Vec<Arc<StreamRuntime>> = transport
+                            .pollers
+                            .iter()
+                            .map(|poller| {
+                                let config = poller.config();
+                                Arc::new(StreamRuntime::new(
+                                    &config.stream,
+                                    &config.group,
+                                    &config.consumer,
+                                ))
+                            })
+                            .collect();
+                        state.publish_streams(runtimes.clone())?;
+                        stream_contributor.observe(
+                            DependencyState::Ready,
+                            reason::HEALTHY,
+                            Instant::now(),
+                        );
+                        Some(Box::pin(run_stream_poll_loop(
+                            application.clone(),
+                            client,
+                            transport.pollers,
+                            runtimes,
+                            transport.poll_idle_ms,
+                            transport.error_backoff_ms,
+                            stream_contributor,
+                        )) as ApplicationFuture<'static>)
+                    }
+                    None => {
+                        // 计划不含 Redis transport:Start 注册的占位贡献项一次性置绿,
+                        // 不影响未启用者的 readiness。
+                        stream_contributor.observe(
+                            DependencyState::Ready,
+                            reason::HEALTHY,
+                            Instant::now(),
+                        );
+                        None
+                    }
+                }
+            };
+            #[cfg(not(feature = "saga-redis-stream"))]
+            let stream_task: Option<ApplicationFuture<'static>> = None;
+
+            self.critical_task = match (timer_task, stream_task) {
+                (None, None) => None,
+                (Some(timer), None) => Some(timer),
+                (timer, Some(stream)) => {
+                    Some(Box::pin(run_saga_supervised_loops(timer, Some(stream))))
+                }
+            };
             Ok(())
         })
     }
@@ -577,9 +885,11 @@ impl ApplicationComponent for SagaComponent {
     ///
     /// 返回：托管 Orchestrator 时首次调用返回任务；纯参与方或重复调用返回 `None`。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
+        // 标签固定:任务内容(timer/stream 消费)由 Ready 阶段组装,Runner 只看单一
+        // 受监督入口;任一内部循环异常退出都会以本任务失败触发统一停机。
         self.critical_task
             .take()
-            .map(|task| ("saga-timer-poller", task))
+            .map(|task| ("saga-runtime-loops", task))
     }
 }
 
@@ -611,6 +921,308 @@ impl ShutdownAction for SagaShutdown {
     }
 }
 
+#[cfg(feature = "saga-redis-stream")]
+impl StreamRuntime {
+    /// 业务作用：创建单条受管 stream 的零值观测状态。
+    ///
+    /// 参数说明：
+    /// - `stream`: 源 stream 名(冻结标签值)。
+    /// - `group`: consumer group 名(冻结标签值)。
+    ///
+    /// 返回：全零计数、初始健康的状态。
+    fn new(stream: &str, group: &str, consumer: &str) -> Self {
+        Self {
+            stream: stream.to_string(),
+            group: group.to_string(),
+            consumer: consumer.to_string(),
+            acked: std::sync::atomic::AtomicU64::new(0),
+            dead_lettered: std::sync::atomic::AtomicU64::new(0),
+            retained: std::sync::atomic::AtomicU64::new(0),
+            reclaimed: std::sync::atomic::AtomicU64::new(0),
+            deleted_pending: std::sync::atomic::AtomicU64::new(0),
+            auth_rejected: std::sync::atomic::AtomicU64::new(0),
+            failed_rounds: std::sync::atomic::AtomicU64::new(0),
+            handled: std::sync::atomic::AtomicU64::new(0),
+            handler_micros_sum: std::sync::atomic::AtomicU64::new(0),
+            pending: std::sync::atomic::AtomicU64::new(0),
+            oldest_pel_age_ms: std::sync::atomic::AtomicU64::new(0),
+            healthy: AtomicBool::new(true),
+        }
+    }
+
+    /// 业务作用：吸收一轮消费报告到累计计数。
+    ///
+    /// 参数说明：
+    /// - `report`: 单轮 poll 报告。
+    ///
+    /// 返回：无返回值。
+    fn absorb(&self, report: &nasaga_runtime::StreamPollReport) {
+        self.acked.fetch_add(report.acked, Ordering::Relaxed);
+        self.dead_lettered
+            .fetch_add(report.dead_lettered, Ordering::Relaxed);
+        self.retained.fetch_add(report.retained, Ordering::Relaxed);
+        self.reclaimed
+            .fetch_add(report.reclaimed, Ordering::Relaxed);
+        self.deleted_pending
+            .fetch_add(report.deleted_pending, Ordering::Relaxed);
+        self.auth_rejected
+            .fetch_add(report.auth_rejected, Ordering::Relaxed);
+        self.handled.fetch_add(report.handled, Ordering::Relaxed);
+        self.handler_micros_sum
+            .fetch_add(report.handler_micros_sum, Ordering::Relaxed);
+    }
+
+    /// 业务作用：刷新本流的积压 gauge——pending 数与最老 PEL 年龄。
+    ///
+    /// 参数说明：
+    /// - `pending`: 当前 PEL 数。
+    /// - `oldest_age_ms`: 最老 pending entry 年龄;PEL 为空时归零。
+    ///
+    /// 返回：无返回值。
+    fn set_backlog(&self, pending: u64, oldest_age_ms: Option<u64>) {
+        self.pending.store(pending, Ordering::Relaxed);
+        self.oldest_pel_age_ms
+            .store(oldest_age_ms.unwrap_or(0), Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "saga-redis-stream")]
+impl SagaRuntimeState {
+    /// 业务作用：Ready 时一次性发布冻结的受管 stream 观测集合。
+    ///
+    /// 参数说明：
+    /// - `runtimes`: 与消费者一一对应的观测状态。
+    ///
+    /// 返回：首次发布成功;重复发布返回 Ready 错误。
+    fn publish_streams(&self, runtimes: Vec<Arc<StreamRuntime>>) -> ApplicationResult<()> {
+        self.streams.set(Arc::new(runtimes)).map_err(|_| {
+            saga_error(
+                ApplicationPhase::Ready,
+                "saga stream runtimes were already published",
+            )
+        })
+    }
+
+    /// 业务作用：读取冻结的受管 stream 观测集合,供低基数指标渲染。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Ready 前或未启用 transport 时为空集合。
+    pub(crate) fn stream_runtimes(&self) -> Arc<Vec<Arc<StreamRuntime>>> {
+        self.streams
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+}
+
+/// 业务作用：渲染受管 stream 消费的低基数 Prometheus 文本——标签值来自 Ready 冻结的
+/// (stream, group) 集合;`deleted_pending` 非零表示 entry 在确认前被外部删除,必须告警。
+///
+/// 参数说明：
+/// - `state`: Saga 运行时状态。
+///
+/// 返回：按 stream 分组的指标文本;未启用 transport 时为空串。
+#[cfg(feature = "saga-redis-stream")]
+pub(crate) fn render_stream_metrics(state: &SagaRuntimeState) -> String {
+    /// Prometheus label 值转义:合法配置里的反斜线、引号与换行不允许破坏 exposition。
+    fn escape_label(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
+    let mut output = String::new();
+    for runtime in state.stream_runtimes().iter() {
+        // 标签含 consumer 维度:同一 (stream, group) 允许多个消费身份,缺它会导出
+        // 多条完全相同 label set 的 series。三个标签值都来自 Ready 冻结集合,基数有界。
+        let labels = format!(
+            "{{stream=\"{}\",group=\"{}\",consumer=\"{}\"}}",
+            escape_label(&runtime.stream),
+            escape_label(&runtime.group),
+            escape_label(&runtime.consumer)
+        );
+        output.push_str(&format!(
+            "napp_saga_stream_acked_total{labels} {}\n\
+             napp_saga_stream_dead_lettered_total{labels} {}\n\
+             napp_saga_stream_retained_total{labels} {}\n\
+             napp_saga_stream_reclaimed_total{labels} {}\n\
+             napp_saga_stream_deleted_pending_total{labels} {}\n\
+             napp_saga_stream_auth_rejected_total{labels} {}\n\
+             napp_saga_stream_failed_rounds_total{labels} {}\n\
+             napp_saga_stream_handled_total{labels} {}\n\
+             napp_saga_stream_handler_micros_sum{labels} {}\n\
+             napp_saga_stream_pending{labels} {}\n\
+             napp_saga_stream_oldest_pel_age_ms{labels} {}\n\
+             napp_saga_stream_healthy{labels} {}\n",
+            runtime.acked.load(Ordering::Relaxed),
+            runtime.dead_lettered.load(Ordering::Relaxed),
+            runtime.retained.load(Ordering::Relaxed),
+            runtime.reclaimed.load(Ordering::Relaxed),
+            runtime.deleted_pending.load(Ordering::Relaxed),
+            runtime.auth_rejected.load(Ordering::Relaxed),
+            runtime.failed_rounds.load(Ordering::Relaxed),
+            runtime.handled.load(Ordering::Relaxed),
+            runtime.handler_micros_sum.load(Ordering::Relaxed),
+            runtime.pending.load(Ordering::Relaxed),
+            runtime.oldest_pel_age_ms.load(Ordering::Relaxed),
+            u8::from(runtime.healthy.load(Ordering::Relaxed)),
+        ));
+    }
+    if !output.is_empty() {
+        // 发布端重复提示是进程级计数(publisher 不绑定单一 stream 标签),随流指标一并导出。
+        output.push_str(&format!(
+            "napp_saga_stream_publisher_duplicate_hints_total {}\n",
+            nasaga_runtime::publisher_duplicate_hints_total()
+        ));
+    }
+    output
+}
+
+/// 业务作用：把 timer 轮询与 stream 消费收敛为单一受监督入口——任一循环异常退出都
+/// 视为关键任务失败,由 Runner 触发统一停机;正常停机时两循环各自观察应用状态退出。
+///
+/// 参数说明：
+/// - `timer`: 可选的 durable timer 循环(托管 Orchestrator 时存在)。
+/// - `stream`: 可选的 Redis Streams 消费循环。
+///
+/// 返回：全部循环正常退出返回 `Ok`;任一循环错误或 panic 返回关键任务错误。
+async fn run_saga_supervised_loops(
+    timer: Option<ApplicationFuture<'static>>,
+    stream: Option<ApplicationFuture<'static>>,
+) -> ApplicationResult<()> {
+    let mut set = tokio::task::JoinSet::new();
+    if let Some(task) = timer {
+        set.spawn(task);
+    }
+    if let Some(task) = stream {
+        set.spawn(task);
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.map_err(|_| {
+            saga_error(
+                ApplicationPhase::Running,
+                "saga supervised loop terminated abnormally",
+            )
+        })??;
+    }
+    Ok(())
+}
+
+/// 业务作用：持续轮询受管 stream 消费者,按封闭裁决推进并以 readiness 表达连续故障。
+///
+/// 停机语义固定:观察到应用停止即**先关领取**——不再发起新的 XREADGROUP/XAUTOCLAIM;
+/// 在途轮次内已接管的消息由 `poll_once` 自身排空(handler 完成或超时留 PEL),未确认
+/// 消息留在 PEL 交由重启后重领;Redis 连接由更早启动的 Redis 组件在本组件之后释放。
+///
+/// 参数说明：
+/// - `application`: 观察统一停机状态。
+/// - `client`: 受管 Redis 客户端。
+/// - `pollers`: 冻结的消费者集合。
+/// - `runtimes`: 与消费者一一对应的观测状态。
+/// - `poll_idle_ms`: 轮间让位间歇。
+/// - `error_backoff_ms`: 故障退避。
+/// - `contributor`: stream 消费独占的动态就绪贡献项。
+///
+/// 返回：应用进入停机态时正常退出;系统时钟不可表示时返回关键任务错误。
+#[cfg(feature = "saga-redis-stream")]
+async fn run_stream_poll_loop(
+    application: Application,
+    client: Arc<nadis::RedisClient>,
+    pollers: Vec<Arc<dyn SagaStreamPoller>>,
+    runtimes: Vec<Arc<StreamRuntime>>,
+    poll_idle_ms: u64,
+    error_backoff_ms: u64,
+    contributor: ReadinessContributor,
+) -> ApplicationResult<()> {
+    loop {
+        match application.state() {
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
+                contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
+                return Ok(());
+            }
+            ApplicationState::Starting => {
+                sleep_observing_state(&application, poll_idle_ms).await;
+                continue;
+            }
+            ApplicationState::Ready => {}
+        }
+        let now_ms = epoch_millis()?;
+        let mut round_healthy = true;
+        for (poller, runtime) in pollers.iter().zip(runtimes.iter()) {
+            // 停机信号在流与流之间复查:先关领取,不把停机窗口拖长到整轮结束。
+            if !matches!(application.state(), ApplicationState::Ready) {
+                break;
+            }
+            match poller.poll_once(&client, now_ms).await {
+                Ok(report) => {
+                    runtime.absorb(&report);
+                    // 积压 gauge 与消费同轮刷新:pending 与最老 PEL 年龄是"消费是否
+                    // 追得上"的直接证据;探测失败与消费失败同等计入轮失败,不导出
+                    // 陈旧假数据。
+                    let config = poller.config();
+                    match nasaga_runtime::stream_group_backlog(
+                        &client,
+                        &config.stream,
+                        &config.group,
+                        now_ms,
+                    )
+                    .await
+                    {
+                        Ok((pending, oldest_age_ms)) => {
+                            runtime.set_backlog(pending, oldest_age_ms);
+                            runtime.healthy.store(true, Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            round_healthy = false;
+                            runtime.failed_rounds.fetch_add(1, Ordering::Relaxed);
+                            runtime.healthy.store(false, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Redis 往返失败:消息原位保留(PEL/stream 不动),只退避重试;
+                    // 摘流由 contributor 阈值统一裁决,不在单轮内武断退出。
+                    round_healthy = false;
+                    runtime.failed_rounds.fetch_add(1, Ordering::Relaxed);
+                    runtime.healthy.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+        let delay = if round_healthy {
+            contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+            poll_idle_ms
+        } else {
+            contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
+            error_backoff_ms
+        };
+        // 停机不等退避:分片睡眠把响应上界固定在一个分片内,停机信号落在退避中途
+        // 也立即收口;循环顶部据状态退出,未确认消息留在 PEL 交给重启后重领。
+        sleep_observing_state(&application, delay).await;
+    }
+}
+
+/// 业务作用：可被停机打断的分片睡眠——把任意长的退避/轮询间歇切成 ≤200ms 片,
+/// 每片后复查应用状态。停机信号无论落在睡眠的哪个时刻,响应上界都固定在一个分片,
+/// 不会被 60 秒级故障退避拖满。
+///
+/// 参数说明：
+/// - `application`: 观察统一停机状态。
+/// - `total_ms`: 期望睡眠总时长(毫秒)。
+///
+/// 返回：睡满或状态离开 Ready 提前返回;由调用方循环顶部统一裁决去留。
+async fn sleep_observing_state(application: &Application, total_ms: u64) {
+    let mut remaining = total_ms;
+    while remaining > 0 {
+        let slice = remaining.min(200);
+        tokio::time::sleep(Duration::from_millis(slice)).await;
+        remaining -= slice;
+        if !matches!(application.state(), ApplicationState::Ready) {
+            return;
+        }
+    }
+}
+
 /// 业务作用：持续领取并裁决到期 timer，以 readiness 表达持久化依赖的连续故障与恢复。
 ///
 /// 参数说明：
@@ -635,7 +1247,7 @@ async fn run_timer_loop(
                 return Ok(());
             }
             ApplicationState::Starting => {
-                tokio::time::sleep(Duration::from_millis(settings.timer_poll_interval_ms)).await;
+                sleep_observing_state(&application, settings.timer_poll_interval_ms).await;
                 continue;
             }
             ApplicationState::Ready => {}
@@ -659,7 +1271,8 @@ async fn run_timer_loop(
                 settings.timer_error_backoff_ms
             }
         };
-        tokio::time::sleep(Duration::from_millis(delay)).await;
+        // 退避同样必须可被停机打断:分片睡眠保证失权后一个分片内退出轮询。
+        sleep_observing_state(&application, delay).await;
     }
 }
 

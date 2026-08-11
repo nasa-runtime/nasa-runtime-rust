@@ -23,6 +23,16 @@ pub enum SagaManagementPermission {
     RetryResolution,
     /// 读取实例、attempt、transition、control 与冲突审计。
     ReadAudit,
+    /// 租户受限的实例只读检索（状态/时间窗过滤 + keyset 分页）。
+    ///
+    /// 与写动作权限分离：运维定位待处置对象只需要本权限，不需要任何改变实例状态的
+    /// 能力；响应不含业务 payload。
+    ListInstances,
+    /// 系统外处置完成后把 `MANUAL_INTERVENTION` 实例人工关闭为 `MANUALLY_CLOSED`。
+    ///
+    /// 关闭只表达"自动化已由人工关闭"，不伪造 `COMPLETED`/`COMPENSATED` 业务事实；
+    /// 动作要求一次性 operation identity 并与审计同事务提交。
+    ManualClose,
 }
 
 impl SagaManagementPermission {
@@ -38,6 +48,8 @@ impl SagaManagementPermission {
             Self::RetryCompensation => "saga.retry_compensation",
             Self::RetryResolution => "saga.retry_resolution",
             Self::ReadAudit => "saga.audit.read",
+            Self::ListInstances => "saga.instance.list",
+            Self::ManualClose => "saga.manual_close",
         }
     }
 }

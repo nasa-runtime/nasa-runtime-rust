@@ -276,7 +276,7 @@ impl ApplicationComponent for CacheComponent {
         Box::pin(async move {
             let config = read_cache_config(context.application())?;
             config.validate(ApplicationPhase::Start)?;
-            // scene 一致性审计:同名 scene 的 `#[cached]` 值类型/TTL 合同不一致是代码 bug,前移到
+            // scene 一致性审计:同名 scene 的 `#[cached]` 值类型/TTL 合同不一致属于代码合同冲突,前移到
             // 启动期拒绝(否则运行期 L1 downcast panic)。纯编译期 descriptor 比对,无网络/无 backend 依赖,
             // 故无论 mode 是否 disabled 都先审计——声明了 cache 组件即对本进程全部 scene 负责。
             cacheable::audit_scenes().map_err(|error| {

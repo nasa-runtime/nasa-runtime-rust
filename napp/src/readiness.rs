@@ -17,16 +17,6 @@
 //! `ReadinessRegistry::all_ready`)保留,kafka 侧无需改动;各组件逐步迁移到
 //! `observe`/policy 富合同。
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 use std::{
     collections::BTreeMap,
     sync::{Mutex, RwLock},
@@ -41,16 +31,6 @@ use std::{
 };
 
 /// 稳定就绪原因码。只允许编译期常量,禁止把动态错误文本(地址、SQL、key、凭据)当 reason。
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub mod reason {
     /// 依赖最近一次观测就绪且未过 stale 窗。
     pub const HEALTHY: &str = "healthy";
@@ -105,16 +85,6 @@ pub enum DependencyState {
 /// 应大于 monitor 间隔(否则依赖会被误判 stale),`None` 表示不做 stale 检查(适用于一次性
 /// 发布、不由 monitor 周期刷新的兼容贡献项)。
 #[derive(Debug, Clone, Copy)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub struct ReadinessPolicy {
     /// 该依赖是否参与"是否摘流"的关键裁决。`true`=关键(失败则 503),`false`=非关键(失败仅 Degraded)。
     pub affects_ready: bool,
@@ -126,16 +96,6 @@ pub struct ReadinessPolicy {
     pub stale_after: Option<Duration>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl ReadinessPolicy {
     /// 业务作用：关键、立即生效、不检查 stale 的策略。
     ///
@@ -145,7 +105,6 @@ impl ReadinessPolicy {
     /// # 返回
     ///
     /// `affects_ready=true`、两个阈值均为 1、`stale_after=None` 的策略。
-    #[cfg(any(feature = "kafka", feature = "nacos-discovery"))]
     pub const fn critical_immediate() -> Self {
         Self {
             affects_ready: true,
@@ -158,16 +117,6 @@ impl ReadinessPolicy {
 
 /// 注册失败的结构化原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub enum RegisterError {
     /// 名称去除首尾空白后为空。
     EmptyName,
@@ -207,16 +156,6 @@ pub struct ReadinessSnapshot {
 
 /// 单个贡献项的可变状态,置于 per-entry 短临界区之后。
 #[derive(Debug)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 struct EntryState {
     component: Arc<str>,
     policy: ReadinessPolicy,
@@ -227,16 +166,6 @@ struct EntryState {
     last_observed: Option<Instant>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl EntryState {
     /// 业务作用：创建尚无观测的贡献项状态，并冻结组件身份与阈值策略。
     fn new(component: Arc<str>, policy: ReadinessPolicy) -> Self {
@@ -314,37 +243,17 @@ impl EntryState {
 /// 组件只持有自己的句柄并 `observe` 自身观测,不能枚举或修改其他组件的贡献项;动态健康
 /// 因此不需要把具体组件类型反向写进 Application 核心。
 #[derive(Clone, Debug)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub struct ReadinessContributor {
     entry: Arc<Mutex<EntryState>>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl ReadinessContributor {
     /// 业务作用：发布一次原始观测,由策略阈值决定是否改变已发布状态。
     ///
     /// # 参数
     ///
     /// - `state`:本次观测的原始状态(通常 `Ready`/`Degraded`/`NotReady`)。
-    /// - `reason`:静态原因码(见 [`reason`]),禁止动态错误文本。
+    /// - `reason`:静态原因码（见内部 `reason` 目录），禁止动态错误文本。
     /// - `now`:当前单调时刻,用于 stale 判定;由调用方传入以便确定性推进。
     pub fn observe(&self, state: DependencyState, reason: &'static str, now: Instant) {
         self.entry
@@ -395,20 +304,11 @@ impl ReadinessContributor {
 
 /// 汇总全部运行依赖动态就绪状态的通用注册表。
 ///
-/// 没有贡献项时聚合结果 `ready=true`,保证未声明动态依赖的既有应用语义不变。注册只在
-/// Start/UserHook 开放期发生;`seal` 之后注册返回 [`RegisterError::Sealed`]。运行期只读
+/// 没有贡献项时聚合结果 `ready=true`,保证未声明动态依赖的既有应用语义不变。组件在
+/// Start/UserHook 登记，hosted initializer 可在 Initialization 登记；`seal` 之后返回
+/// [`RegisterError::Sealed`]。运行期只读
 /// 各 entry 的已发布状态并聚合,不做网络 I/O。
 pub struct ReadinessRegistry {
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
     entries: RwLock<BTreeMap<Arc<str>, Arc<Mutex<EntryState>>>>,
     sealed: AtomicBool,
 }
@@ -421,32 +321,12 @@ impl ReadinessRegistry {
     /// 聚合 `ready=true` 的空注册表,直到组件注册关键贡献项。
     pub fn new() -> Self {
         Self {
-            #[cfg(any(
-                feature = "kafka",
-                feature = "db",
-                feature = "redis",
-                feature = "nacos-config",
-                feature = "nacos-discovery",
-                feature = "telemetry",
-                feature = "cache",
-                feature = "web"
-            ))]
             entries: RwLock::new(BTreeMap::new()),
             sealed: AtomicBool::new(false),
         }
     }
 
     /// 业务作用：注册一个带稳定组件归属的贡献项。
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
     pub fn register_component(
         &self,
         component: impl Into<Arc<str>>,
@@ -485,7 +365,7 @@ impl ReadinessRegistry {
 
     /// 业务作用：封口注册表:此后 `register` 返回 [`RegisterError::Sealed`]。
     ///
-    /// 由 Application 在资源封口(UserHook 结束)时调用,防止运行期无界新增贡献项名称。
+    /// 由 Application 在 Initialization 结束的 Seal 边界调用，防止运行期无界新增贡献项名称。
     pub fn seal(&self) {
         self.sealed.store(true, Ordering::Release);
     }
@@ -501,80 +381,49 @@ impl ReadinessRegistry {
     /// [`ReadinessSnapshot`]:`ready` 表示无关键依赖处于未就绪;`degraded` 表示存在可恢复降级;
     /// `entries` 为按名称有序的各依赖有效状态。O(贡献项数量),无网络 I/O。
     pub fn snapshot(&self, now: Instant) -> ReadinessSnapshot {
-        #[cfg(not(any(
-            feature = "kafka",
-            feature = "db",
-            feature = "redis",
-            feature = "nacos-config",
-            feature = "nacos-discovery",
-            feature = "telemetry",
-            feature = "cache",
-            feature = "web"
-        )))]
-        {
-            let _ = now;
-            ReadinessSnapshot {
-                ready: true,
-                degraded: false,
-                entries: Arc::from([]),
-            }
-        }
-
-        #[cfg(any(
-            feature = "kafka",
-            feature = "db",
-            feature = "redis",
-            feature = "nacos-config",
-            feature = "nacos-discovery",
-            feature = "telemetry",
-            feature = "cache",
-            feature = "web"
-        ))]
-        {
-            let entries = self
-                .entries
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut snapshots: Vec<DependencySnapshot> = Vec::with_capacity(entries.len());
-            let mut ready = true;
-            let mut degraded = false;
-            for (name, entry) in entries.iter() {
-                let (component, affects_ready, state, reason) = {
-                    let guard = entry
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let (state, reason) = guard.effective(now);
-                    (
-                        Arc::clone(&guard.component),
-                        guard.policy.affects_ready,
-                        state,
-                        reason,
-                    )
-                };
-                match state {
-                    DependencyState::Ready => {}
-                    DependencyState::Degraded => degraded = true,
-                    DependencyState::NotReady | DependencyState::Unknown => {
-                        if affects_ready {
-                            ready = false;
-                        } else {
-                            degraded = true;
-                        }
-                    }
-                }
-                snapshots.push(DependencySnapshot {
-                    component,
-                    name: Arc::clone(name),
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshots: Vec<DependencySnapshot> = Vec::with_capacity(entries.len());
+        let mut ready = true;
+        let mut degraded = false;
+        for (name, entry) in entries.iter() {
+            let (component, affects_ready, state, reason) = {
+                let guard = entry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (state, reason) = guard.effective(now);
+                (
+                    Arc::clone(&guard.component),
+                    guard.policy.affects_ready,
                     state,
                     reason,
-                    affects_ready,
-                });
+                )
+            };
+            match state {
+                DependencyState::Ready => {}
+                DependencyState::Degraded => degraded = true,
+                DependencyState::NotReady | DependencyState::Unknown => {
+                    if affects_ready {
+                        ready = false;
+                    } else {
+                        degraded = true;
+                    }
+                }
             }
-            ReadinessSnapshot {
-                ready,
-                degraded,
-                entries: Arc::from(snapshots),
-            }
+            snapshots.push(DependencySnapshot {
+                component,
+                name: Arc::clone(name),
+                state,
+                reason,
+                affects_ready,
+            });
+        }
+        ReadinessSnapshot {
+            ready,
+            degraded,
+            entries: Arc::from(snapshots),
         }
     }
 

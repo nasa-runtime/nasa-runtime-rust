@@ -25,6 +25,20 @@ license = "MIT OR Apache-2.0"
 
 凭据、证书、临时输出和内部路径不得进入归档。
 
+## 文档归档门禁
+
+代码、单元测试和 `cargo package` 能执行都不等于公开文档完整。每个待发布 crate 必须从生成的
+`.crate` 文件直接核对，而不是只读工作树：
+
+1. 解包后打开 README，确认首屏准确说明核心价值、适用场景和明确不解决的问题。
+2. 对照独立架构章节、crate rustdoc、manifest description、keywords/categories，确认定位一致。
+3. 检查示例只依赖归档外真实可访问的公开链接；crate README 不引用归档中不存在的 `../docs`。
+4. 对照实际 feature 和公开 API 检查配置、初始化、失败语义、观测、停机与恢复边界。
+5. 核对规范化 manifest、许可证、迁移 SQL和最终文件清单，再给出文档验收结论。
+
+Saga 发布至少覆盖 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime`、`nasaga-macro`、`napp`、`nasa`，
+并同步检查根 README、Saga 生产指南、迁移指南、运维指南、告警规则以及 Inbox/Outbox 交叉合同。
+
 ## 依赖边界
 
 公开 crate 的同仓依赖只使用 registry 版本约束，不携带本地 `path`。归档内规范化后的 manifest 必须
@@ -53,6 +67,14 @@ cargo publish --dry-run -p <crate> --locked
 
 上传后等待 registry 索引能够解析当前 crate，再推进依赖它的下游 crate。禁止用工作区 `[patch]` 掩盖
 registry 尚不可用的事实。
+
+Saga 依赖顺序为：先发布并回读 `nasaga-core`，再发布 `nasaga-mysql` 与 `nasaga-macro`，随后发布
+`nasaga-runtime`，最后才是依赖它的 `napp` 与 `nasa`。每一步都要等 registry 能从一个不带本地 patch
+的隔离解析图取得前置版本。
+
+默认发布流程是完成提交、推送目标分支、远端 CI 全绿、核对远端 SHA、取得明确发布授权、上传 registry、
+回读 registry 元数据与 README。dry-run 或本地归档通过不构成上传授权；公开版本不可原地替换，发现归档
+遗漏时必须停止并使用新的补丁版本承载后续内容。
 
 ## 门面要求
 

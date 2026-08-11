@@ -82,19 +82,33 @@ NotReady / 摘流
 
 先查看 `nasaga_manual_intervention`、`nasaga_waiting_resolution`、`nasaga_due_timer`、
 `nasaga_conflict_total`、`napp_outbox_pending`、`napp_outbox_dead`、`napp_outbox_published_total`、
-`napp_outbox_failed_rounds_total`、`nasaga_kafka_command_*` 和 `nasaga_kafka_result_*`，再关联所选
-transport 的 retry、DLT 与 commit 指标。
+`napp_outbox_failed_rounds_total`、`napp_outbox_retention_commit_uncertain_total`、
+`nasaga_quota_rejections_total`、`nasaga_action_rate_rejections_total`，再关联 Kafka 的
+`nasaga_kafka_command_*` / `nasaga_kafka_result_*`、Redis Streams 的 `napp_saga_stream_*` 或具体
+HTTP/gRPC connector 的 retry、DLT 与收据指标。
 
-- `authentication_failed_total` 上升：核对凭据、时钟和报文完整性；
-- `replay_rejected_total` 上升：追踪重复来源，不清空仍有效 nonce；
-- `capacity_rejected_total` 上升：隔离异常 producer/path，并核对该信任边的容量预算；
+- `nasaga_http_*_replay_authentication_failed_total` 上升：核对凭据、时钟和报文完整性；
+- `nasaga_http_*_replay_rejected_total` 上升：追踪重复来源，不清空仍有效 nonce；
+- `nasaga_http_*_replay_capacity_rejected_total` 上升：隔离异常 producer/path，并核对该信任边的容量预算；
 - `nasaga_http_command_dlt_total` 上升：核对原 envelope、冻结定义摘要和部署快照；
 - `napp_outbox_pending` 非零且发布量不增长：核对首个未确认事件、唯一 publisher 路由和下游确认；
 - `napp_outbox_dead` 非零：按已批准的毒丸策略处理，不得直接删除事件绕过顺序；
+- `napp_outbox_retention_commit_uncertain_total` 上升：先查数据库候选和处置收据，允许下一轮按持久
+  事实收敛；不得按本轮返回值补记删除，也不得立即重写归档；
+- `napp_saga_stream_deleted_pending_total` 非零：entry 在确认前被外部删除，立即停止清剪并核对全部
+  group 的 PEL/frontier；不得用空 PEL 推断业务已处理；
+- `napp_saga_stream_oldest_pel_age_ms` 持续增长：检查 consumer 存活、XAUTOCLAIM、handler 预算、
+  DLT/marker 同槽与 Redis ACL；不要直接 XACK；
+- `nasaga_quota_rejections_total` 上升：区分正常租户上限和账本未初始化；精确用量只经受权管理查询，
+  不给 Prometheus 增加 tenant label；
+- `nasaga_action_rate_rejections_total` 上升：核对单租户恢复动作流量、数据库窗口和审批；只读检索不应
+  消耗预算，不能通过绕过管理入口执行状态写入；
 - Unknown 积压：检查 typed resolver、外部事实和 resolution budget，不能手改状态；
 - timer fencing 丢失：旧 worker 已失权，停止推进，由新 owner 重新领取。
 
 人工恢复先读取 attempt、迁移、控制、管理和冲突审计，再沿冻结计划使用稳定
-`operation_id/effect_id` 操作。禁止删除 Inbox、participant gate 或 DLT 来消除告警。
+`operation_id/effect_id` 操作。`manual_close` 只用于外部人工事实已经完成且全部副本通过终态兼容门禁的
+场景；完成后核对实例离开非终态集合、`nasaga_manual_intervention` 回落并且
+`nasaga_manually_closed_total` 增加一次。禁止删除 Inbox、participant gate 或 DLT 来消除告警。
 
 部署边界见 [应用部署指南](deployment.md)，Saga 细节见 [Saga 生产运行指南](saga-production.md)。

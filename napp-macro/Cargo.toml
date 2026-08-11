@@ -1,13 +1,13 @@
 [package]
 name = "napp-macro"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA application entry attribute"
+description = "NASA application entry and dependency-ordered initializer attributes"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["runtime", "lifecycle", "initializer", "microservices", "async"]
 categories.workspace = true
 
 [lib]
