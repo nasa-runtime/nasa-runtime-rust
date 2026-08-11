@@ -356,9 +356,15 @@ impl ApplicationComponent for DbComponent {
                         "saga user-hook database readiness contributor is missing",
                     )
                 })?;
-                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+                // 延后池直到 UserHook 后才存在，但 Initializer 工厂与三阶段必须经统一 Application
+                // 句柄读取它；只写入内部 pools 会让 migration 可运行、业务 getter 却不可见，形成
+                // 两套互相矛盾的资源视图。显式关闭所有权仍由 Start 预压栈的 DeferredDbShutdown 持有。
+                context.register_resource(Some(DEFAULT_DATASOURCE), pool.clone())?;
                 self.pools
                     .insert(DEFAULT_DATASOURCE.to_owned(), pool.clone());
+                // 统一资源视图先完成发布，健康状态才可对 Runner 可见；即使后续 migration 门禁拒绝，
+                // 启动失败也会按既有清理栈撤销资源并显式关闭连接池。
+                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 self.critical_task = Some(Box::pin(run_db_monitor(
                     application.clone(),
                     vec![DbMonitorInput { pool, contributor }],
