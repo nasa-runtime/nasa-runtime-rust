@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 cache feature；内部迁移可直接依赖 cacheable 包。
 [package]
 name = "cacheable"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "两级缓存门面(L1 moka + L2 Redis 三防 + #[cached]/#[cache_invalidate])"

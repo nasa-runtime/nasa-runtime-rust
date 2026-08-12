@@ -3,10 +3,10 @@
 //! 撮合 / 金额场景的精确算术根。值表示为 **`i128` 定点数**:`真实值 = mantissa × 10^(−scale)`。
 //!
 //! ## 既定设计:**有限数 / 正常输入路径逐值对齐 原实现**
-//! 逐值复刻 原实现 `Numeric`(含其 f64 中间运算)保证跨语言一致;**少数 原实现 边界 bug 采用安全偏离并在函数文档标注**:
+//! 逐值复刻 原实现 `Numeric`(含其 f64 中间运算)保证跨语言一致；少数不安全的边界行为采用明确偏离并在函数文档标注：
 //! - `to_fixed_f64`/`float::*` 的 NaN/±Inf → `Err`(非 原实现 `Math.round` 的 0/Long 边界)。
 //! - `next_int_max(i32::MAX)` 正常工作(非 原实现 `max+1` 溢出抛异常)。
-//! - `copy_to_char_array(i64::MIN)` 输出正确十进制串(非 原实现 `-Long.MIN_VALUE` 取负溢出 bug)。
+//! - `copy_to_char_array(i64::MIN)` 输出正确十进制串，不沿用 原实现 `-Long.MIN_VALUE` 的取负溢出行为。
 //! - `decimal::random_step_bd` 超 i64 域按符号**饱和**(非 原实现 `BigDecimal.longValue()` 低 64 位回绕)。
 //! - 泛型比较 `eq/gt/...` 的 f64 `NaN` 走 Rust `PartialOrd`;需 原实现 `Double.compareTo` 总序用 [`eq_f64`] 等专用族(**已提供,非偏离**)。
 //!
@@ -19,7 +19,7 @@
 //! - **`add`/`subtract`/`align*`/`to_plain_string`/`string_size`**:原实现 本就是纯整数,Rust 纯整数一致。
 //!
 //! 类型用 `i128`(非 原实现 `long`=i64):同算法下,**对 原实现 不溢出的输入逐值一致**;i128 仅避免复刻 原实现 long
-//! 中间积的静默回绕(那是 bug,不该复刻),超 i128 域返 `Err`。
+//! 中间积的静默回绕，超 i128 域返 `Err`。
 //!
 //! ## 舍入(两套,原实现 本就不一致,分别保真)
 //! - `multiply/divide`:`roundHalfUp` = **ties away-from-zero**(负 .5 远离零);全 8 mode 走 `applyRounding`。
@@ -226,7 +226,7 @@ pub fn copy_to_char_array(number: i64, chars: &mut [u8], start: usize) -> usize 
 /// `length` 应 = [`string_size`]`(number)`(传过大则左侧位保持原值,与 原实现 一致)。
 ///
 /// **安全偏离**:`i64::MIN` 直接经 `to_string()` 输出正确的 `-9223372036854775808`,**不复刻 原实现
-/// `number = -number` 对 `Long.MIN_VALUE` 取负溢出的 bug**(原实现 那条会算错)。
+/// `number = -number` 对 `Long.MIN_VALUE` 的取负溢出行为**。
 ///
 /// # Panics
 /// `length < string_size(number)`(右对齐区放不下)或 `chars` 容量不足 `start+length` 时 panic。

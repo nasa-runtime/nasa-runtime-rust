@@ -27,6 +27,12 @@ mod component;
 mod config;
 #[cfg(feature = "db")]
 mod db;
+/// 实验性 gRPC listener：UserHook Router 计划、Ready 绑定、关键监督与有界排空。
+#[cfg(feature = "grpc-experimental")]
+mod grpc;
+/// 保序分 lane 执行器组件：UserHook 计划、Prepare 发布、动态健康与有界停机。
+#[cfg(feature = "partition")]
+mod partition;
 /// OpenTelemetry traces 组件:配置驱动的有界 span 导出管道 + 受管 drainer + 停机 flush。
 #[cfg(feature = "telemetry")]
 mod telemetry;
@@ -40,6 +46,8 @@ mod telemetry;
 pub use namigrate::{
     run_gate, MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
 };
+#[cfg(feature = "telemetry")]
+pub use telemetry::OtlpMetricsSnapshot;
 #[cfg(feature = "nacos-discovery")]
 mod discovery;
 mod error;
@@ -62,7 +70,10 @@ mod metrics;
 /// `nasa` 门面据此构造 nafana 等**领域兼容源**并经 [`Application::register_metrics_source`] 并入
 /// 进程级 hub,无需业务或门面直接依赖 `nametrics-core`。
 #[cfg(any(feature = "kafka", feature = "web"))]
-pub use nametrics_core::{LegacyMetricsSource, MetricDescriptor, MetricKind};
+pub use nametrics_core::{
+    LegacyMetricsSource, MetricDescriptor, MetricFamilySnapshot, MetricKind, MetricSample,
+    MetricValue,
+};
 
 mod secret;
 
@@ -210,6 +221,8 @@ pub use config::{
 };
 pub use error::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 pub use future::ApplicationFuture;
+#[cfg(feature = "grpc-experimental")]
+pub use grpc::GrpcApplicationPlan;
 pub use initialization::{
     Initialization, InitializationContext, InitializerDescriptor, InitializerFailure,
     InitializerFailureKind, InitializerKind, InitializerSpec, InitializerStage,
@@ -222,6 +235,8 @@ pub use outbox::{
     OutboxApplicationPlan, OutboxChannelPlan, OutboxHandle, OutboxPoisonPolicy,
     OutboxRetentionPlan, OutboxSnapshot,
 };
+#[cfg(feature = "partition")]
+pub use partition::{PartitionApplicationHandle, PartitionApplicationPlan};
 pub use process::run;
 pub use resources::{ManagedResource, ResourcePhase, ResourceRef, ResourceRegistry};
 pub use runner::{ApplicationExit, ApplicationExitReason, ApplicationRunner};
@@ -290,6 +305,20 @@ pub mod components {
     /// 遥测组件的编译期能力探测点。
     #[cfg(feature = "telemetry")]
     pub mod telemetry {
+        /// 组件能力已编入时可被属性展开代码引用的零大小标记。
+        pub const FEATURE_CHECK: () = ();
+    }
+
+    /// 保序分 lane 执行器的编译期能力探测点。
+    #[cfg(feature = "partition")]
+    pub mod partition {
+        /// 组件能力已编入时可被属性展开代码引用的零大小标记。
+        pub const FEATURE_CHECK: () = ();
+    }
+
+    /// 实验性受管 gRPC listener 的编译期能力探测点。
+    #[cfg(feature = "grpc-experimental")]
+    pub mod grpc {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();
     }

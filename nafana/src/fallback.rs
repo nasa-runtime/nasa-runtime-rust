@@ -244,6 +244,7 @@ enum GlobalFallbackOrigin {
     Collected(&'static str),
 }
 
+/// 业务作用：把全局降级处理器与其安装来源绑定，保证进程内只发布一份可追溯运行时。
 struct GlobalFallbackRuntime {
     handler: GlobalFallbackHandlerKind,
     origin: GlobalFallbackOrigin,
@@ -255,6 +256,7 @@ thread_local! {
     static GLOBAL_FALLBACK_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// 业务作用：在一次全局降级调用期间持有线程局部递归门禁，并在离开作用域时解除门禁。
 struct GlobalFallbackGuard;
 
 impl Drop for GlobalFallbackGuard {

@@ -1048,7 +1048,7 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
     }
 }
 
-/// 业务作用：渲染进程级统一指标 hub 为 Prometheus 文本:nafka(原生)+ naweb(兼容源)。
+/// 业务作用：把进程级统一指标 hub 的原生源与兼容源渲染为同一份 Prometheus 文本。
 ///
 /// # 参数
 ///
@@ -1056,28 +1056,11 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
 #[cfg(any(feature = "kafka", feature = "web"))]
 async fn metrics_endpoint(State(application): State<Application>) -> axum::response::Response {
     use axum::response::IntoResponse as _;
+    // 外部事实源失败时仍发布其它独立指标族与该源的 last-good 快照；源自身必须同时暴露
+    // refresh_failed 和 snapshot_age，避免单一后端抖动让整个进程的观测面失明。
+    let _ = application.refresh_metric_sources().await;
     let mut body = String::new();
     application.metrics_hub().render_prometheus(&mut body);
-    // Outbox 组件声明且 Ready 时必须完整暴露其积压/死信/预算文本:该组件的指标含
-    // 数据库实测值,渲染失败按 503 拒绝整个抓取,禁止以缺失指标伪装健康;
-    // 未声明组件或组件未就绪(启动/停机窗口)时不追加,不阻塞其余指标。
-    if let Ok(outbox) = application.outbox() {
-        match outbox.render_prometheus().await {
-            Ok(text) => body.push_str(&text),
-            Err(_) => {
-                return (
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "outbox metrics unavailable",
-                )
-                    .into_response();
-            }
-        }
-    }
-    // Saga Redis Streams 消费面的进程内计数:纯内存读取,无失败分支。
-    #[cfg(feature = "saga-redis-stream")]
-    body.push_str(&crate::saga::render_stream_metrics(
-        &application.saga_runtime(),
-    ));
     (
         [(
             axum::http::header::CONTENT_TYPE,

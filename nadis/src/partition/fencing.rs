@@ -123,7 +123,7 @@ pub struct FenceMeta {
 /// per-tag init Lua
 /// ①不存在→建 Initializing;②round 相同且字段完整→幂等;③本地 round 更大→拒;
 /// ④输入更大→仅覆盖 Initializing&&counter 全零的旧态(单 tag 简化:覆盖即重建);
-/// ⑤字段残缺→CORRUPT(禁猜值修复)。
+/// ⑤字段残缺→CORRUPT（禁止猜测缺省值）。
 const TAG_INIT_LUA: &str = r#"
 local state = redis.call('HGET', KEYS[1], 'state')
 local round = tonumber(redis.call('HGET', KEYS[1], 'round') or '0')

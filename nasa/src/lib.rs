@@ -111,6 +111,13 @@ pub mod grafana {
             &["command", "group"]
         );
         nafana_desc!(
+            GLOBAL_FALLBACK_TOTAL,
+            "nafana_global_fallback_total",
+            "全局降级处理器结局单调计数。",
+            MetricKind::Counter,
+            &["command", "group", "outcome"]
+        );
+        nafana_desc!(
             TPS_TOTAL,
             "nafana_tps_total",
             "TPS 单调计数:每请求按 tps_weight 累加。",
@@ -159,14 +166,16 @@ pub mod grafana {
             MetricKind::Gauge,
             &["command", "group"]
         );
-        nafana_desc!(
-            LATENCY,
-            "nafana_latency_seconds",
-            "执行延迟直方图(秒);rejected/canceled 不进延迟统计。",
-            MetricKind::Histogram,
-            &["command", "group"],
-            &[0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-        );
+        static LATENCY: MetricDescriptor = MetricDescriptor {
+            name: "nafana_latency_seconds",
+            help: "执行延迟直方图(秒);rejected/canceled 不进延迟统计。",
+            unit: "seconds",
+            kind: MetricKind::Histogram,
+            label_names: &["command", "group"],
+            histogram_bounds: &[
+                0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ],
+        };
         nafana_desc!(
             COMMAND_INFO,
             "nafana_command_info",
@@ -176,9 +185,10 @@ pub mod grafana {
         );
 
         /// nafana 全部指标族的静态 descriptor manifest。
-        static NAFANA_DESCRIPTORS: [&MetricDescriptor; 11] = [
+        static NAFANA_DESCRIPTORS: [&MetricDescriptor; 12] = [
             &REQUESTS_TOTAL,
             &FALLBACK_TOTAL,
+            &GLOBAL_FALLBACK_TOTAL,
             &TPS_TOTAL,
             &INFLIGHT,
             &INFLIGHT_ROLLING_MAX,
@@ -195,11 +205,56 @@ pub mod grafana {
 
         impl LegacyMetricsSource for NafanaMetricsSource {
             /// 业务作用：返回 nafana 兼容源拥有的静态指标族目录。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：启动期冲突审计和结构化校验共用的全部 nafana descriptor。
             fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
                 &NAFANA_DESCRIPTORS
             }
 
+            /// 业务作用：把 nafana 全局 registry 的结构化快照映射到统一指标样本。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：始终为 `Some`，其中保留 command、group、结局与直方图形状的
+            /// provider-neutral 样本。
+            fn snapshot(&self) -> Option<Vec<application_impl::MetricSample>> {
+                Some(
+                    super::structured_metrics_snapshot()
+                        .into_iter()
+                        .map(|sample| application_impl::MetricSample {
+                            name: sample.name,
+                            labels: sample.labels,
+                            value: match sample.value {
+                                super::PrometheusMetricValue::Counter(value) => {
+                                    application_impl::MetricValue::Counter(value)
+                                }
+                                super::PrometheusMetricValue::Gauge(value) => {
+                                    application_impl::MetricValue::Gauge(value)
+                                }
+                                super::PrometheusMetricValue::Histogram {
+                                    buckets,
+                                    sum,
+                                    count,
+                                } => application_impl::MetricValue::Histogram {
+                                    bounds: LATENCY.histogram_bounds,
+                                    buckets,
+                                    sum,
+                                    count,
+                                },
+                            },
+                        })
+                        .collect(),
+                )
+            }
+
             /// 业务作用：读取 nafana 全局 registry 当前快照并追加 Prometheus exposition。
+            ///
+            /// 参数说明：
+            /// - `output`: 接收旧源文本的缓冲区。
+            ///
+            /// 返回：无；该入口仅保留给显式选择文本旧源模式的兼容调用方。
             fn render_prometheus(&self, output: &mut String) {
                 output.push_str(&super::render_metrics());
             }
@@ -207,9 +262,9 @@ pub mod grafana {
 
         /// 业务作用：返回 nafana 兼容源,供 `Application::register_metrics_source` 并入统一 hub。
         ///
-        /// # 返回
+        /// 参数说明: 无。
         ///
-        /// 一个无状态源:每次渲染读取 nafana 进程级全局 registry 的当前快照。
+        /// 返回：无状态源；每次快照读取 nafana 进程级全局 registry 的当前值。
         pub fn metrics_source() -> Arc<dyn LegacyMetricsSource> {
             Arc::new(NafanaMetricsSource)
         }
@@ -318,7 +373,8 @@ pub mod saga {
     pub use saga_runtime_impl::*;
 }
 
-/// 实验性 gRPC transport、health/reflection 与 graceful drain。
+/// 实验性 gRPC transport、health/reflection、连接上限与 graceful drain；与 `application` 组合时
+/// 可通过 `GrpcApplicationPlan` 交给 `"grpc"` 组件托管。
 #[cfg(feature = "grpc-experimental")]
 pub mod grpc {
     pub use grpc_impl::*;

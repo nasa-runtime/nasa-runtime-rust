@@ -791,7 +791,7 @@ pub use nacache_macro::{cache_invalidate, cached};
 
 // ── 缓存场景使用 descriptor 的编译期收集──
 // `#[cached]` 除生成读路径 wrapper 外,还额外注册一条**静态** `CacheSceneUsage`(不改写业务函数);
-// 运行时/组件可遍历 [`scene_usages`] 做启动断言(如同一 scene 被声明为不同 value 类型即为 bug)。
+// 运行时/组件可遍历 [`scene_usages`] 做启动断言，例如拒绝同一 scene 声明不同 value 类型。
 
 /// 一条 `#[cached]` 声明的缓存场景使用元信息(字段全 `'static`,可放进 static 被 linkme 收集)。
 #[derive(Clone, Copy)]
@@ -852,7 +852,7 @@ impl std::error::Error for SceneAuditError {}
 /// 值类型(`TypeId`)与 TTL 合同(`refresh_ms`/`expire_ms`)**。
 ///
 /// 否则运行期 L1(按 scene 分池、类型擦除存 `Arc<dyn Any>`)会因值类型不一致 downcast panic,或因 TTL
-/// 分歧产生难查的软刷新/过期行为。本审计把该 bug **前移到启动期**一次性拒绝(结构化运行时错误仍是最后
+/// 分歧产生难查的软刷新/过期行为。本审计把这类声明冲突**前移到启动期**一次性拒绝(结构化运行时错误仍是最后
 /// 防线)。按 scene 名与 handler 名稳定排序后比对,冲突可复现。
 ///
 /// # 返回

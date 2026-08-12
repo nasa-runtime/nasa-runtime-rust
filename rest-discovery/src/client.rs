@@ -831,8 +831,8 @@ fn is_circuit_failure_status(status: reqwest::StatusCode) -> bool {
 
 /// 业务作用：构造内部使用的 reqwest client,挂上单请求总超时 + 连接超时(默认 10s / 2s,防请求长挂)。
 ///
-/// 安全默认(2026-07-13):
-/// - `redirect(none)`:LB 自己按注册实例选目标,不该追随后端返回的 3xx——否则一个有 bug/被攻陷的
+/// 安全默认：
+/// - `redirect(none)`:LB 自己按注册实例选目标,不该追随后端返回的 3xx——否则一个行为异常或被攻陷的
 ///   上游实例可用 `Location:` 把请求弹到任意 host(如云元数据 `169.254.169.254`),破坏「只连注册
 ///   实例」隔离;且 reqwest 跨 host 重定向只剥 `Authorization`,业务经 `.header()` 传的鉴权 token 会
 ///   被重放到重定向目标。

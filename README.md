@@ -90,8 +90,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`saga`、`kafka`、
-`outbox`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
+可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、`kafka`、
+`outbox`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
 启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。`saga` 会隐式加入 `db` 与
 `outbox`，业务入口无需重复声明这两个组件；为兼容显式依赖，三者同时写出也合法且语义相同。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
@@ -189,7 +189,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | OAuth/JWKS/Metadata | `oauth` | `nasa::oauth::{MetadataClient, JwksRegistry}` |
 | Schema Registry（实验） | `kafka-schema-registry` | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
 | 对象存储（实验） | `object-store-experimental` | `nasa::object::{ObjectStore, S3ObjectStore}` |
-| gRPC listener（实验） | `grpc-experimental` | `nasa::grpc::{GrpcServerConfig, GrpcServerHandle}` |
+| gRPC listener（实验） | `grpc-experimental` | `nasa::grpc::{GrpcServerConfig, GrpcServerHandle, GrpcServerObserver}`、`nasa::application::GrpcApplicationPlan`、`#[application("grpc")]` |
 | Redis 命令、Stream、锁 | `redis` | `nasa::redis::RedisClient` |
 | 方法级 L1/L2 缓存 | `cache` | `nasa::cache::{cached, cache_invalidate}` |
 | 接口保护与 Prometheus/Grafana 面板 | `grafana` | `nasa::grafana::{grafana, Command, metrics}` |
@@ -357,11 +357,11 @@ scheduling:             # scheduling 组件
 | [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 宏 | 由 `hystrix` 运行时读取 |
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
 | [nafana-macro](nafana-macro/README.md) | `grafana` | `#[grafana]` 编译期参数校验与包装 | 无运行期 yml |
-| [nametrics-core](nametrics-core/README.md) | `application` 内部合同 | 指标目录、冲突审计、结构化与 Prometheus 导出 | 无运行期 yml |
-| [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列与停机 flush | `telemetry.*` 由 `napp` 读取 |
+| [nametrics-core](nametrics-core/README.md) | `application` 内部合同 | 单一指标目录、冲突审计、同源 Prometheus/OTLP 快照与样本拒绝诊断 | 无运行期 yml |
+| [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列，并由 `napp` 统一管理 OTLP trace/metrics 停机 flush | `telemetry.*` 由 `napp` 读取 |
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
-| [napart](napart/README.md) | `partition` | 保序任务窃取、同 key 严格 FIFO、类型化 lane、有界背压与可审计停机 | 无固定根；应用可映射 `partition_executor.*` |
+| [napart](napart/README.md) | `partition` | 保序任务窃取、同 key 严格 FIFO、类型化 lane、有界背压与可审计停机；可通过 `PartitionApplicationPlan` 纳入 Application | 无固定根；受管模式由 UserHook 提交纯参数计划 |
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
@@ -382,7 +382,7 @@ scheduling:             # scheduling 组件
 | [nasecret-http](nasecret-http/README.md) | `secret-http` | 随 secret 代际轮换的 TLS/mTLS HTTP client | 引用 `secrets.*` ID |
 | [nasecret-vault](nasecret-vault/README.md) | `secret-vault` | 有界 KV v2 secret provider | provider 配置由业务投影 |
 | [naobject](naobject/README.md) | `object-store-experimental` | 有界对象合同与 S3-compatible adapter | 无受管组件配置；业务显式构造 |
-| [nagrpc](nagrpc/README.md) | `grpc-experimental` | 独立 HTTP/2 listener、健康、反射与排空 | 无受管组件配置；业务显式构造 |
+| [nagrpc](nagrpc/README.md) | `grpc-experimental` | HTTP/2 listener、连接上限、健康、反射与排空 | `grpc.*`；可独立构造或交给 Application 托管 |
 | [macro-support](macro-support/README.md) | 宏内部依赖 | 过程宏路径解析 | 无运行时 yml |
 
 ## 安全说明(务必阅读)

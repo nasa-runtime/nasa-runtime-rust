@@ -1,5 +1,10 @@
 use std::time::{Duration, Instant};
 
+/// 子排空为报告生成与后续逆序清理保留的最小尾部预算。
+const MIN_SHUTDOWN_TAIL_RESERVE: Duration = Duration::from_millis(100);
+/// 尾部预算上限，避免长停机窗口过度压缩当前子系统的正常排空时间。
+const MAX_SHUTDOWN_TAIL_RESERVE: Duration = Duration::from_secs(1);
+
 /// 运行期统一识别的进程终止信号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownSignal {
@@ -98,6 +103,35 @@ impl ShutdownContext {
     /// 本方法无参数；过期后饱和为零而不会回绕。
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// 业务作用：为可能用满自身预算的子排空计算提前收口时长，避免与全局 deadline 同时到期。
+    ///
+    /// 参数说明：
+    /// - `requested`: 当前子系统按自身合同允许消费的最长时长。
+    ///
+    /// 返回：不超过请求值与全局剩余预算；通常保留余量的 10%，且保留值处于 100ms 到 1s
+    /// 之间。全局余量不足 100ms 时全部留给收尾，调用方应立即进入有损或强制收口。
+    pub fn child_budget(&self, requested: Duration) -> Duration {
+        let remaining = self.remaining();
+        let reserve = (remaining / 10)
+            .max(MIN_SHUTDOWN_TAIL_RESERVE)
+            .min(MAX_SHUTDOWN_TAIL_RESERVE)
+            .min(remaining);
+        requested.min(remaining.saturating_sub(reserve))
+    }
+
+    /// 业务作用：为单个 Runner action 创建共享原因但提前截止的子上下文，隔离后续逆序清理预算。
+    ///
+    /// 参数说明：
+    /// - `requested`: 当前 action 按自身合同允许消费的最长时长。
+    ///
+    /// 返回：deadline 不晚于父上下文安全子预算、停机原因保持不变的新上下文。
+    pub(crate) fn child_context(&self, requested: Duration) -> Self {
+        Self::new(
+            Instant::now() + self.child_budget(requested),
+            self.reason.clone(),
+        )
     }
 
     /// 业务作用：判断全局清理预算是否已经耗尽。

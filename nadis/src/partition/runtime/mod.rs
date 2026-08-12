@@ -113,7 +113,7 @@ struct ClaimSlot {
     state: ClaimState,
     /// 分区锁守卫(unlock 时整个 slot 退场)。
     guard: LockGuard,
-    /// 串行 worker 的投递口(容量 1:状态机已保证同时只发一批,满 = bug)。
+    /// 串行 worker 的投递口(容量 1；状态机保证同时只发一批，满载表示内部不变量被破坏)。
     work_tx: mpsc::Sender<WorkBatch>,
     /// worker task 的取消令牌(release/停机时取消;worker 在 process_batch 期间亦监听)。
     worker_cancel: CancellationToken,

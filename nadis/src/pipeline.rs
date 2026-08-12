@@ -90,7 +90,7 @@ impl<T: FromRedisValue> Ticket<T> {
             )),
             // sender 被 drop(execute future 被取消 / 内部未送达):命令**可能已写到服务端执行**
             // (写命令!)——按 `ExecutionUnknown` 处置(兑现文档 取消语义),
-            // 不再误报"内部不变量被破坏"(把 async 取消的真实 bug 误导成内部错误)。
+            // 不能误报"内部不变量被破坏"，async 取消对应的是提交结果不确定。
             Err(oneshot::error::TryRecvError::Closed) => Err(NasaRedisError::ExecutionUnknown(
                 "ticket 通道关闭(execute 被取消或未送达,命令可能已发到服务端执行)".into(),
             )),

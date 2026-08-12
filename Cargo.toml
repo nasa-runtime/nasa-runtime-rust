@@ -94,6 +94,19 @@ categories = ["asynchronous", "web-programming"]
 # 本地开发期统一来源:成员间依赖固定公开坐标(见各 crate manifest 注释),跨 crate 改动经
 # workspace patch 指向本地路径,发布前移除对应条目并按依赖序发版。
 [patch.crates-io]
+# 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
+macro-support = { path = "macro-support" }
+cacheable = { path = "cacheable" }
+nadis-derive = { path = "nadis-derive" }
+nafka = { path = "nafka" }
+namapper = { path = "namapper" }
+namigrate = { path = "namigrate" }
+nanum = { path = "nanum" }
+naws = { path = "naws" }
+# 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
+hystrix = { path = "hystrix" }
+# 配置加载器的新公开坐标尚未进入 registry，依赖它的组合组件统一解析到本地成员。
+naml = { path = "naml" }
 # 进程一致性依赖必须单来源:task-local 事务上下文与 Inbox 访问若在同一图里出现
 # 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
 natx = { path = "natx" }
@@ -111,6 +124,17 @@ nasaga-runtime = { path = "nasaga-runtime" }
 nasaga-macro = { path = "nasaga-macro" }
 naoutbox-core = { path = "naoutbox-core" }
 naoutbox-mysql = { path = "naoutbox-mysql" }
+# 门面与 Application 生命周期必须共享同一 napart 身份，否则受管句柄无法流经公开门面类型。
+napart = { path = "napart" }
+# 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
+nagrpc = { path = "nagrpc" }
+# 指标统一目录与领域结构化快照必须共享同一类型身份，才能由 Application 完成文本与 OTLP 双出口。
+nametrics-core = { path = "nametrics-core" }
+natelemetry = { path = "natelemetry" }
+nanacos = { path = "nanacos" }
+config-boot = { path = "config-boot" }
+naweb = { path = "naweb" }
+nafana = { path = "nafana" }
 # 门面对 napp 用公开坐标声明，缺这一条会让工作区内的 nasa 解析到 registry 上的旧 napp，
 # 组合组件的新能力在本地构建里等于不存在。
 napp = { path = "napp" }

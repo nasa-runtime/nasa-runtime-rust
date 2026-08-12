@@ -264,6 +264,8 @@ impl ApplicationSpec {
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
                         | ComponentId::Scheduling
+                        | ComponentId::Partition
+                        | ComponentId::Grpc
                 )
             })
         {
@@ -296,6 +298,8 @@ impl ApplicationSpec {
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
                         | ComponentId::Scheduling
+                        | ComponentId::Partition
+                        | ComponentId::Grpc
                 )
             }) {
                 return Err(spec_error(format!(
@@ -397,11 +401,33 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
         ComponentId::NacosDiscovery,
     )?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Scheduling)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Grpc)?;
     // cache:redis 先于 cache(配 redis_ref 时复用其连接),cache 先于 kafka/web。cache 不强制
     // Service 和 Batch 都可使用该能力；仅在同时声明 Redis 时校验相对顺序，避免把可选后端误设为强依赖。
     ensure_before_if_both(components, ComponentId::Redis, ComponentId::Cache)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Web)?;
+    // partition 在 UserHook 后才按计划创建，不依赖外部组件；放在流量入口之前使宏生成的组件图
+    // 与“先具备本地执行能力，再开放业务入口”的诊断顺序一致。真实停机顺序仍由 active stack 保证。
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Ws)?;
+    ensure_before_if_both(
+        components,
+        ComponentId::Partition,
+        ComponentId::NacosDiscovery,
+    )?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Scheduling)?;
+    // gRPC Router 在 Ready 才构造并绑定，所有 handler 依赖必须先启动，反向停机则先关闭
+    // listener 再释放数据库、消息 transport 与本地执行器。服务发现必须最后发布并最先摘除。
+    ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Cache, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Grpc, ComponentId::NacosDiscovery)?;
     // auth:配置中心先于 auth(读最终 overlay),auth 先于 Web(Ready 发布 Authenticator 供 Web 消费)。
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Auth)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Auth)?;

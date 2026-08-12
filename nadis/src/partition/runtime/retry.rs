@@ -51,7 +51,7 @@ pub(super) async fn retry_redeliver(
     //   · 不用批次最大 count 连坐;每 ID 独立判定;
     //   · **以实际 PEL delivery count 为准,不信 marker desired**(:损坏 desired 会
     //     绕过 CAS 五规则直接 Drop 正常消息)。actual_count < desired-1 = marker 损坏
-    //     (CAS 的 CORRUPT 规则)→ **冻结整分区重试,绝不 Drop/Park/DLQ**,等人工/受控修复。
+    //     (CAS 的 CORRUPT 规则)→ **冻结整分区重试,绝不 Drop/Park/DLQ**,等待人工或受控处置。
     let max_redeliver = rt.cfg.max_redeliver;
     let mut poison: Vec<super::retryop::RetryIntent> = Vec::new();
     let mut retryable: Vec<super::retryop::RetryIntent> = Vec::new();

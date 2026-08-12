@@ -2,7 +2,7 @@
 # 远端配置由调用方作为内存 overlay 提供；本 crate 不连接配置中心，也不发布业务配置。
 [package]
 name = "naml"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "通用分层配置加载器，支持来源追踪、有界读取与可选精确文件 watcher"

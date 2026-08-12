@@ -4,7 +4,7 @@
 // 红线:bytes/string 原语为基础,**JSON 是显式选择**——`Json<T>` 包装类型,
 // 不让所有 Redis 值默认走 serde(计数器/ZSet member/Hash field 与 JSON 文档语义不同)。
 //
-// **产品决定(2026-06-14):不支持 Jackson `default-typing=true`(NON_FINAL)**。`Json<T>` 用
+// 不支持 Jackson `default-typing=true`(NON_FINAL)。`Json<T>` 用
 // 标准 serde_json(写出裸 `{"id":7,...}`,无 `@class`/类名包装)。
 // **⚠ 重要:原实现 框架(`NasaLettuceConfig`/`RedisProxy`)
 // default-typing 默认是 `true`**(写出 `["类名",{...}]` 的**多态包装数组**)——要与本框架标准 JSON

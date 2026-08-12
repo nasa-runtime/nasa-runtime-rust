@@ -690,7 +690,7 @@ pub trait RedisDocument: Sized + Send + Sync {
 
     /// 业务作用：HASH 编码:全部字段 →(field, value)字符串对(含 id 字段本身)。
     /// 占位符模式注意:占位符字段也必须在内——值只存在 key 里且 key 不可逆推,
-    /// 不写 HASH 则 find(query) 读回为 null(对照 原实现 storedFields 修复)。
+    /// 不写 HASH 则 find(query) 读回为 null（与 原实现 storedFields 合同一致）。
     fn to_fields(&self) -> Vec<(String, String)>;
 
     /// 业务作用：HASH 解码:从 field→value 表重建(缺字段按业务默认/报错,impl 决定)。

@@ -7,9 +7,9 @@ use rand::Rng;
 ///
 /// `min == max` 返 `min`;`min > max` → `Err(Range)`(对照 原实现 抛 `IllegalArgumentException`)。
 ///
-/// **`min > max` 不再静默返 `min`**——静默会吞掉上游范围/配置 bug,且违反 crate
+/// **`min > max` 不再静默返 `min`**——静默会吞掉上游范围或配置错误，且违反 crate
 /// "可失败 API 返 Result"纪律。**`max == i32::MAX` 正常工作**(`gen_range(0..=i32::MAX)` 无溢出),
-/// 是对 原实现 `max+1` 溢出 bug 的有意修正。
+/// 明确避开 原实现 `max+1` 的溢出行为。
 ///
 /// # 参数
 ///

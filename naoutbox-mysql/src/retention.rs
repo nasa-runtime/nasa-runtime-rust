@@ -790,6 +790,17 @@ async fn delete_rows_committed(
     Ok(TxOutcome::Committed(deleted))
 }
 
+/// 业务作用：在同一事务中写入死信处置凭据并删除已复验的死信行，避免处置事实与删除结果分裂。
+///
+/// 参数说明：
+/// - `connection`: 持有 retention claim 的 MySQL 会话。
+/// - `ids`: 本批死信主键集合。
+/// - `candidates`: 已在当前轮次复验的候选事实。
+/// - `approval`: 绑定本次处置授权的稳定凭据。
+/// - `deadline`: 本轮剩余预算截止时刻。
+///
+/// 返回：事务提交成功时返回已删除行数；预算耗尽或数据库失败时返回中断或脱敏存储错误，
+/// 提交前失败由会话关闭触发事务回滚。
 async fn delete_dead_rows_with_disposal(
     connection: &mut MySqlConnection,
     ids: &[i64],
@@ -831,6 +842,14 @@ async fn delete_dead_rows_with_disposal(
     Ok(TxOutcome::Committed(deleted))
 }
 
+/// 业务作用：按固定分类条件和已绑定主键删除本轮复验行，防止并发状态变化导致跨类误删。
+///
+/// 参数说明：
+/// - `connection`: 当前 retention 事务使用的 MySQL 会话。
+/// - `class_guard`: 由调用方固定提供的状态复验条件，不接受外部文本。
+/// - `ids`: 本批已复验主键集合。
+///
+/// 返回：成功时返回实际删除行数；执行失败时返回已分类且脱敏的存储错误。
 async fn delete_rows(
     connection: &mut MySqlConnection,
     class_guard: &str,

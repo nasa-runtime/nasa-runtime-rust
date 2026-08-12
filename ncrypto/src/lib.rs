@@ -9,7 +9,7 @@
 //! - hex 大小写按函数区分:`sha256` 与 **AES-HEX 密文**(`encrypt_aes_hex`/`EncOutput::Hex`)**大写**
 //!   (对照 原实现 `StringUtils.toHex`);`md5`/`sha1`/`sha384`/`sha512`/`hmac*`/`pbkdf2`/`generate_salt`/
 //!   `generate_aes_key_hex` 均**小写**(`toHex` 后再 `toLowerCase`)。
-//!   ⚠ 安全说明 已纠正:此前本行误把"AES-HEX 密文"归入小写——实现一直是大写(`hex_upper`,有 golden 佐证)。
+//!   AES-HEX 密文使用大写编码(`hex_upper`)；其它列出的摘要与派生结果使用小写编码。
 //! - **AES key = key 字符串的 UTF-8 字节(不解码)**,故 key 串长度必须 16/24/32。
 //! - AES-CBC 默认变体 IV = key 字节;AES-GCM 布局 = `Base64(IV[12] ‖ ct ‖ tag[16])`。
 //! - RSA = PKCS1 v1.5;自动分段(encrypt 块=keyLen-11、decrypt 块=keyLen);私钥加密 = PKCS1 **type-1**。
@@ -27,7 +27,7 @@
 //! - **AES-ECB**(Web 默认策略用)、**AES-CBC 用 key 当 IV**、**RSA 私钥加密当机密性**(实为签名语义,公钥人人可解)、
 //!   **MD5/SHA-1/HMAC-MD5**——均为遗留/弱实践,**新(非互通)用途请改用** GCM/OAEP/Ed25519/SHA-256/Argon2id/BCrypt。
 //! - `rsa` crate 的 PKCS1 v1.5 **私钥解密**背负 RUSTSEC-2023-0071(Marvin Attack,时序
-//!   侧信道),至今无修复版本。默认构建只保留 RS256 公钥验签等不执行该私钥解密的能力；
+//!   侧信道),至今没有不受影响的上游版本。默认构建只保留 RS256 公钥验签等不执行该私钥解密的能力；
 //!   `decrypt_rsa_private` 与历史私钥 type-1 运算必须显式启用 `legacy-rsa-private`，Web 层还需
 //!   同时通过运行时风险门。该 feature 只用于有截止日期的互通迁移，不应作为新协议安全边界。
 

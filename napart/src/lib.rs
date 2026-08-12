@@ -25,6 +25,18 @@
 //! 4. 接管数量、持有周期与重扫周期均有界；持续有进展时也会重新裁决，避免严格热点长期饥饿。
 //! 5. worker 异常退出时冻结其负责的严格 lane 并保留证据，不在执行权不明时盲目推进。
 //!
+//! # Application 受管模式
+//!
+//! `napp` / `nasa` 可以通过 `#[nasa::application("partition")]` 唯一托管本执行器。业务在
+//! UserHook 提交 `PartitionApplicationPlan`，容器在 Prepare 创建 worker，并由
+//! `Application::partition()` 发布不含 `shutdown*` 的业务句柄。执行器健康会进入 readiness；
+//! worker 失权或 lane 冻结会触发统一停机。反向停机取计划预算与 Application 剩余预算的较小值，
+//! `frozen` 与 `aborted` 作为有损收口证据保留。
+//!
+//! 直接使用本 crate 时，调用方自行拥有 [`PartitionExecutor`] 并显式执行
+//! [`PartitionExecutor::shutdown`] 或 [`PartitionExecutor::shutdown_with_report`]。两种所有权模式
+//! 不能共同管理同一个执行器；受管业务代码不得另建同职责执行器规避容器的健康与停机边界。
+//!
 //! 兼容入口 [`PartitionExecutor::submit`] / [`PartitionExecutor::submit_sync`] /
 //! [`PartitionExecutor::submit_async`] 保持既有语义：同 key 严格 FIFO、有界背压、被拒可见。
 //! 类型化入口 [`PartitionExecutor::submit_typed`] 额外提供任务句柄（状态查询 / 取消 / 等待
@@ -1518,6 +1530,22 @@ impl PartitionExecutor {
     /// 返回：所有调用方（含并发与事后调用）都获得同一份终局损耗报告。`frozen > 0` 或
     /// `aborted > 0` 表示有损停机，对应任务以 `Failed` 终态与稳定原因码保留在证据容器中。
     pub async fn shutdown_with_report(&self) -> ShutdownReport {
+        self.shutdown_with_report_timeout(self.stop_timeout).await
+    }
+
+    /// 业务作用：使用调用方当前拥有的收口预算驱动停机并返回可审计报告。
+    ///
+    /// 本入口用于上层生命周期把多个资源约束在同一个绝对 deadline 内。只有首次把执行器从
+    /// Accepting 推进到 Stopping 的调用者能确定排空预算；并发或后到调用者只等待同一终局，
+    /// 不能延长或缩短已经开始的停机。驱动仍在独立任务中运行，等待 future 被取消不会让阶段
+    /// 永久停在 Stopping。
+    ///
+    /// 参数说明：
+    /// - `stop_timeout`: 首个停机调用允许排空 worker 的最长时长；超过 365 天按 365 天生效，
+    ///   零时长表示立即进入有损收口。
+    ///
+    /// 返回：全部 worker、在途任务和延迟定时器已有退出证明后的唯一终局报告。
+    pub async fn shutdown_with_report_timeout(&self, stop_timeout: Duration) -> ShutdownReport {
         // 阶段 CAS 保证只有首个调用者启动停机驱动;并发调用者等待完成即可,不重复清扫。
         if self
             .inner
@@ -1535,7 +1563,7 @@ impl PartitionExecutor {
             tokio::spawn(drive_shutdown(
                 self.inner.clone(),
                 handles,
-                self.stop_timeout,
+                stop_timeout.min(MAX_STOP_TIMEOUT),
             ));
         }
         while self.inner.phase() != PHASE_STOPPED {
@@ -1908,6 +1936,11 @@ impl DelayedJobGuard {
 }
 
 impl Drop for DelayedJobGuard {
+    /// 业务作用：在延迟任务未转交 lane 时隔离析构业务载荷，避免析构异常杀死定时或停机驱动。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；仍持有的载荷会在隔离边界内完成析构并记录失败原因。
     fn drop(&mut self) {
         if let Some(job) = self.0.take() {
             // 未执行结局统一在此收口:载荷 Drop 的单次 panic 由隔离边界捕获并结构化记录,

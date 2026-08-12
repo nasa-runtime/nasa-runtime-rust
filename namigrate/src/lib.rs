@@ -67,7 +67,7 @@ impl MigrationSettings {
     /// 业务作用: 校验安全合同。
     ///
     /// `allow_dirty=true` 不能通用地解释成“从失败处继续”：MySQL DDL 可能已经部分提交，runtime
-    /// 无法推断 schema 的真实修复点。该旋钮保留用于给旧配置稳定报错，调用方必须先人工修复并删除
+    /// 无法推断 schema 的安全恢复点。该旋钮保留用于给旧配置稳定报错，调用方必须先人工检查并删除
     /// dirty 记录，而不是让框架盲目续跑。
     ///
     /// # 错误
@@ -102,7 +102,7 @@ pub enum MigrationError {
     Pending(Vec<i64>),
     /// `validate`/`apply`:某版本已应用记录的 checksum 与嵌入不符(schema 漂移)。
     ChecksumMismatch(i64),
-    /// migration 表存在失败记录；必须先人工检查/修复部分 DDL。
+    /// migration 表存在失败记录；必须先人工检查部分 DDL 及其实际状态。
     Dirty(i64),
     /// `apply` 未在配置上限内取得 SQLx 兼容的数据库 advisory lock。
     LockTimeout(u64),

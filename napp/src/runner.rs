@@ -1272,7 +1272,12 @@ impl ApplicationRunner {
                 } => {
                     counts.component_actions += 1;
                     let label = action.label();
-                    match timeout(context.remaining(), action.shutdown(context)).await {
+                    // 任一 action 都是公开扩展点，Runner 必须在外层强制预留后续逆序清理预算；
+                    // 即使实现方误用全部 remaining，也不能阻断其后的资源释放。
+                    let action_context = context.child_context(Duration::MAX);
+                    match timeout(action_context.remaining(), action.shutdown(&action_context))
+                        .await
+                    {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => failures.push(ApplicationError::with_source(
                             component,
@@ -1283,7 +1288,7 @@ impl ApplicationRunner {
                         Err(_) => failures.push(ApplicationError::new(
                             component,
                             ApplicationPhase::Stopping,
-                            format!("shutdown action `{label}` exceeded the global deadline"),
+                            format!("shutdown action `{label}` exceeded its derived deadline"),
                         )),
                     }
                     log_shutdown_step(
@@ -1302,7 +1307,15 @@ impl ApplicationRunner {
                 } => {
                     counts.initializer_actions += 1;
                     let label = action.label();
-                    match timeout(context.remaining(), action.shutdown(context)).await {
+                    // initializer action 与框架 action 共享同一安全边界，不能因来源不同获得耗尽
+                    // 全局 deadline 的权限。
+                    let action_context = context.child_context(Duration::MAX);
+                    match timeout(
+                        action_context.remaining(),
+                        action.shutdown(&action_context),
+                    )
+                    .await
+                    {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => failures.push(ApplicationError::with_source(
                             ComponentId::Application,
@@ -1316,7 +1329,7 @@ impl ApplicationRunner {
                             ComponentId::Application,
                             ApplicationPhase::Stopping,
                             format!(
-                                "initializer `{initializer}` shutdown action `{label}` exceeded the global deadline"
+                                "initializer `{initializer}` shutdown action `{label}` exceeded its derived deadline"
                             ),
                         )),
                     }
@@ -1334,8 +1347,10 @@ impl ApplicationRunner {
                     counts.task_gates += 1;
                     // 先切状态再 cancel，Runner 随后收割到的 critical exit 才不会被误判成运行期故障。
                     self.supervisor.begin_stopping();
-                    while self.supervisor.has_tasks() && !context.is_expired() {
-                        match timeout(context.remaining(), self.supervisor.join_next()).await {
+                    // 任务主体由业务提供，收割与强制中止同样必须预留后续资源和组件动作的预算。
+                    let task_context = context.child_context(Duration::MAX);
+                    while self.supervisor.has_tasks() && !task_context.is_expired() {
+                        match timeout(task_context.remaining(), self.supervisor.join_next()).await {
                             Ok(Some(completion)) => {
                                 if let TaskOutcome::Failed(error) = completion.outcome {
                                     failures.push(ApplicationError::with_source(
@@ -1355,11 +1370,14 @@ impl ApplicationRunner {
                     }
                     if self.supervisor.has_tasks() {
                         task_abort_attempted = true;
-                        let drained = self.supervisor.abort_and_drain(context.remaining()).await;
+                        let drained = self
+                            .supervisor
+                            .abort_and_drain(task_context.remaining())
+                            .await;
                         if !drained {
                             failures.push(runner_error(
                                 ApplicationPhase::Stopping,
-                                "managed tasks did not finish before the global shutdown deadline",
+                                "managed tasks did not finish before their derived deadline",
                             ));
                         }
                     }
@@ -1377,16 +1395,21 @@ impl ApplicationRunner {
                     counts.business_resources += 1;
                     // 全局槽在业务资源进入 Closing 前清除，阻止新的迁移期查找延长资源借用。
                     self.application.clear_global();
+                    // 资源批次不得取得父上下文的全部余量，否则其中一个公开 ManagedResource
+                    // 就能让后续组件动作和资源释放永久失去执行机会。
+                    let resource_context = context.child_context(Duration::MAX);
                     match timeout(
-                        context.remaining(),
-                        self.application.resources().shutdown_business(context),
+                        resource_context.remaining(),
+                        self.application
+                            .resources()
+                            .shutdown_business(&resource_context),
                     )
                     .await
                     {
                         Ok(mut resource_failures) => failures.append(&mut resource_failures),
                         Err(_) => failures.push(runner_error(
                             ApplicationPhase::Stopping,
-                            "business resource shutdown exceeded the global deadline",
+                            "business resource shutdown exceeded its derived deadline",
                         )),
                     }
                     log_shutdown_step(
@@ -1401,11 +1424,12 @@ impl ApplicationRunner {
                 }
                 ActiveStep::ComponentResources(component) => {
                     counts.component_resources += 1;
+                    let resource_context = context.child_context(Duration::MAX);
                     match timeout(
-                        context.remaining(),
+                        resource_context.remaining(),
                         self.application
                             .resources()
-                            .shutdown_component(component, context),
+                            .shutdown_component(component, &resource_context),
                     )
                     .await
                     {
@@ -1413,7 +1437,7 @@ impl ApplicationRunner {
                         Err(_) => failures.push(ApplicationError::new(
                             component,
                             ApplicationPhase::Stopping,
-                            "component resource shutdown exceeded the global deadline",
+                            "component resource shutdown exceeded its derived deadline",
                         )),
                     }
                     log_shutdown_step(
@@ -1428,11 +1452,12 @@ impl ApplicationRunner {
                 }
                 ActiveStep::InitializerResources(initializer) => {
                     counts.initializer_resources += 1;
+                    let resource_context = context.child_context(Duration::MAX);
                     match timeout(
-                        context.remaining(),
+                        resource_context.remaining(),
                         self.application
                             .resources()
-                            .shutdown_initializer(initializer.clone(), context),
+                            .shutdown_initializer(initializer.clone(), &resource_context),
                     )
                     .await
                     {
@@ -1441,7 +1466,7 @@ impl ApplicationRunner {
                             ComponentId::Application,
                             ApplicationPhase::Stopping,
                             format!(
-                                "initializer `{initializer}` resource shutdown exceeded the global deadline"
+                                "initializer `{initializer}` resource shutdown exceeded its derived deadline"
                             ),
                         )),
                     }

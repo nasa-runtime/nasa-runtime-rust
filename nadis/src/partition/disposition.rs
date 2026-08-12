@@ -1242,10 +1242,8 @@ pub async fn force_republish(
     //    **每个 index 在 XADD 前先持久化 `force:{i}`=target**;重入对账**已持久化的同一 target**:
     //    已发布(Ok(true))复用、RETRYABLE 同 target 幂等补发——绝不为这两种情形重新分配,杜绝
     //    "崩溃一次多一条副本"的无界重复。**唯一例外**:已持久 target 被越过且从未发布(Ok(false))=死
-    //    target → **同 op 内弃死 target、重分配 `> last-gen` 的全新 ID 并发布**(/
-    //    死结修复,详见下方 :1099-1106;旧 target 从未发布故不产生重复,force 语义本就显式接受重复/变序)。
-    //    (历史注:此处曾写"→ ForceIndeterminate 须新 operation 再授权"的旧行为——已随 作废,
-    //     `ForceIndeterminate` 全代码无任何 HSET、是死词,勿据旧注释判"死结"。)──
+    //    target → **同 op 内放弃不可达 target、重分配 `> last-gen` 的全新 ID 并发布**；旧 target
+    //    从未发布，因此不会产生重复，force 语义本就显式接受重复或变序。
     let stream = layout.stream(p);
     let mut final_ids = planned.clone();
     let mut audit: Vec<(usize, String, String)> = Vec::new(); // (index, 旧 planned, 新 target)
@@ -1267,10 +1265,9 @@ pub async fn force_republish(
                 }
                 Ok(false) => {
                     // 已提交 target 被越过且从未发布时，它已成为不可达目标，必须重新分配。
-                    // 此前直接 return PublishIndeterminate → 同 op 重入恒读此死 target、恒 Ok(false) → marker
-                    // 永停 ForcePublishing、quarantine/index 不删、producer 永远拿不到终态;且 op_id 稳定
-                    // (`direct:{p}:{park_id}`)→ force_takeover 覆写后仍是同 op、读同一死 target → **不自愈**。
-                    // 修复:**弃死 target、重分配 > last-gen 的全新 target 并发布**(同首发 Ok(false) 路径)。
+                    // 若在这里直接返回，稳定 op_id 会让重入始终读取同一不可达 target，marker 永停
+                    // ForcePublishing，quarantine/index 也无法收口。因此必须放弃该 target，重分配
+                    // `> last-gen` 的全新 target 并发布。
                     // 旧 target 从未发布(Ok(false)),重分配不产生重复;force 语义本就显式接受重复/变序。
                     // 崩在覆写后由下次重入据**新 target** 复账;若新 target 又被越过则下次重入再重分配 → 自愈。
                     let base = last_generated(client, &stream).await?;

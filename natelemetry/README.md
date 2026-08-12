@@ -35,13 +35,19 @@ span。低层集成方直接依赖本 crate 时，guard 未显式 `finish` 也�
 telemetry:
   enabled: true
   service_name: order-service
+  service_instance_id: order-service-az1-01
   queue_capacity: 2048
   otlp_endpoint: http://127.0.0.1:4318/v1/traces
+  otlp_metrics_endpoint: http://127.0.0.1:4318/v1/metrics
+  metrics_interval_ms: 10000
   otlp_encoding: protobuf
   root_sample_ratio: 0.25
 ```
 
-未配置 `otlp_endpoint` 时使用结构化日志 sink。编码可选 `json` 或 `protobuf`。
+未配置 `otlp_endpoint` 时使用结构化日志 sink；未配置 `otlp_metrics_endpoint` 时
+指标 OTLP 出口关闭，Prometheus 文本不受影响。指标快照来自 `nametrics-core`，实际 HTTP
+导出与停机管理由 `napp` 完成，不在本 crate 内建立第二份 registry。编码可选 `json` 或
+`protobuf`。
 `root_sample_ratio` 只裁决没有上游 `traceparent` 的新根链路，范围为 `0.0..=1.0`；已有上游
 上下文始终沿用其 sampled 位，未采样 span 只传播且不计入 dropped。
 

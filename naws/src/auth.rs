@@ -126,7 +126,7 @@ impl<'a> PolicyContext<'a> {
     }
 }
 
-/// 客户端入站消息的路由授权。**默认 deny**(对齐修复后 原实现 RoutePolicy.denyAll)。
+/// 客户端入站消息的路由授权。**默认 deny**（对齐当前 原实现 RoutePolicy.denyAll 合同）。
 /// 只作用于客户端触发的自动 relay;服务端直接 `Sender::send` 不经过它。
 pub type InboundPolicy = Arc<dyn Fn(&PolicyContext, &Message) -> RouteDecision + Send + Sync>;
 

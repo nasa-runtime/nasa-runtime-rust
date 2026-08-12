@@ -17,6 +17,10 @@ pub enum ComponentId {
     Redis,
     /// Trace 生产、导出和停机刷新。
     Telemetry,
+    /// 保序分 lane 任务执行器。
+    Partition,
+    /// 实验性受管 gRPC listener。
+    Grpc,
     /// 进程内及分布式缓存。
     Cache,
     /// Kafka 发布、消费和健康状态。
@@ -59,6 +63,8 @@ impl fmt::Display for ComponentId {
             Self::Db => "db",
             Self::Redis => "redis",
             Self::Telemetry => "telemetry",
+            Self::Partition => "partition",
+            Self::Grpc => "grpc",
             Self::Cache => "cache",
             Self::Kafka => "kafka",
             Self::Outbox => "outbox",

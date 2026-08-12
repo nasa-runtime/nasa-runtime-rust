@@ -2,7 +2,7 @@
 # 消费方用依赖别名保持 `use proto::...` 不变:proto = { package = "naws-proto", ... }。
 [package]
 name = "naws-proto"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "ProtocolBytes 的 Rust 移植(逐字节兼容原协议)。VARINT_TLV/BITPACK_TLV/JSON_BYTES codec。"

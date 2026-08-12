@@ -21,14 +21,14 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["grafana", "web"] }
+nasa = { version = "1", features = ["grafana", "web"] }
 ```
 
 只使用原生 Axum 路由时不需要 `web` feature：
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["grafana"] }
+nasa = { version = "1", features = ["grafana"] }
 axum = "0.8"
 ```
 
@@ -36,7 +36,7 @@ axum = "0.8"
 
 ```toml
 [dependencies]
-nafana = "1.0.0"
+nafana = "1"
 axum = "0.8"
 ```
 
@@ -714,6 +714,12 @@ handler 返回 5xx 时记为 `failure`；其它 handler 响应，包括业务主
 延迟 histogram，也不触发拒绝/超时降级。
 
 命令在第一次请求时注册。因此从未调用过的 `#[grafana]` handler 不会出现在 `/metrics` 或 Dashboard 中。
+
+需要把同一份指标接入统一 OTLP 或其它 provider-neutral 出口时，可调用
+`structured_metrics_snapshot()` 取得 `PrometheusMetricSample`。该快照与 Prometheus 文本读取同一
+registry，保留 Counter、Gauge、Histogram 及其 label 语义且不清零累计值；`napp` 的统一
+`MetricHub` 会在启动期审计 descriptor 冲突。并发观测按 count 先于 bucket 的顺序发布；抓取若跨越
+一次写入，尚未可见的有限 bucket 会暂归入 `+Inf`，bucket 总和始终与 count 一致，下一次抓取自然收敛。
 
 ### 7.1 延迟直方图边界
 

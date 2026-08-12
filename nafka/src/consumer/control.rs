@@ -472,7 +472,7 @@ impl KafkaProxy {
             crate::Lifecycle::Running => {}
             // Created 时 group 表必然为空(表写入与 Running 转换在同一写锁内绑定)：
             // 调用方的真实问题是"该 group 尚未启动"，报 NoSuchGroup 比"生命周期拒绝
-            // Created"更能指向修复动作(先 start()/assign())。
+            // Created"更能指向正确动作（先 start()/assign()）。
             crate::Lifecycle::Created => {
                 return Err(crate::error::NafkaError::NoSuchGroup(group.to_owned()));
             }

@@ -7,7 +7,7 @@
 # 依赖别名保持 `use proto::...` 与 `ws::proto` 不变。
 [package]
 name = "naws"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "纯 Rust 长连接消息中心框架(对照原长连接模块);通用 lib,业务无关。"

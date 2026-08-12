@@ -30,6 +30,7 @@ pub struct YmlWatchEvent {
 }
 
 #[derive(Clone, Debug)]
+/// 业务作用：汇总一个配置目标的逻辑路径、真实别名和观察目录，使符号链接换代仍可精确归因。
 struct WatchPathIdentity {
     logical: PathBuf,
     aliases: HashSet<PathBuf>,
@@ -75,6 +76,7 @@ impl WatchPathIdentity {
 }
 
 #[derive(Clone, Debug)]
+/// 业务作用：按配置来源类别保存 watcher 的精确匹配集合与最小目录观察集合。
 struct WatchTargets {
     base: HashSet<PathBuf>,
     profiles: HashSet<PathBuf>,

@@ -4,7 +4,7 @@
 # @TextField/@NumericField/@JsonArrayKey → MetaResolver 启动期解析)。
 [package]
 name = "nadis-derive"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[derive(RedisDocument)] —— nadis RediSearch 文档元数据派生宏。"

@@ -1,6 +1,6 @@
 [package]
 name = "namigrate"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA DB migration 版本门禁(disabled/validate/apply;listener Ready 前完成;错误脱敏),不依赖 napp"

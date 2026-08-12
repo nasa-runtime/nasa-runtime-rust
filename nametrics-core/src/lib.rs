@@ -14,7 +14,13 @@
 //!   都读取同一 `MetricHub`,不各自建 registry。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// 单个 label 值允许占用的最大 UTF-8 字节数。
+///
+/// 该上限只约束单值内存，不限制 label 组合数量；基数仍由全局 cell 预算独立约束。
+const MAX_LABEL_VALUE_BYTES: usize = 4 * 1024;
 
 /// 指标类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +61,152 @@ pub struct MetricDescriptor {
     pub histogram_bounds: &'static [f64],
 }
 
+static SAMPLE_REJECTIONS_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "nametrics_samples_rejected_total",
+    help: "统一指标目录拒绝的不合规样本累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &["source", "reason"],
+    histogram_bounds: &[],
+};
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum SampleRejectionReason {
+    UnknownFamily,
+    LabelShape,
+    LabelValueTooLong,
+    ValueKind,
+    HistogramShape,
+    UnregisteredDescriptor,
+    CardinalityLimit,
+}
+
+const SAMPLE_REJECTION_REASONS: [SampleRejectionReason; 7] = [
+    SampleRejectionReason::UnknownFamily,
+    SampleRejectionReason::LabelShape,
+    SampleRejectionReason::LabelValueTooLong,
+    SampleRejectionReason::ValueKind,
+    SampleRejectionReason::HistogramShape,
+    SampleRejectionReason::UnregisteredDescriptor,
+    SampleRejectionReason::CardinalityLimit,
+];
+
+impl SampleRejectionReason {
+    /// 业务作用：返回拒绝原因在固定原子计数数组中的稳定位置。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 [`SAMPLE_REJECTION_REASONS`] 顺序一致的数组下标。
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// 业务作用：返回可用于低基数指标 label 的稳定拒绝原因。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不包含动态输入或样本内容的固定原因文本。
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UnknownFamily => "unknown_family",
+            Self::LabelShape => "label_shape",
+            Self::LabelValueTooLong => "label_value_too_long",
+            Self::ValueKind => "value_kind",
+            Self::HistogramShape => "histogram_shape",
+            Self::UnregisteredDescriptor => "unregistered_descriptor",
+            Self::CardinalityLimit => "cardinality_limit",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SampleRejectionSource {
+    Native,
+    Legacy,
+}
+
+impl SampleRejectionSource {
+    /// 业务作用：返回可用于低基数指标 label 的稳定样本来源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`native` 表示直接记录入口，`legacy` 表示兼容源结构化快照。
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// 业务作用：以固定来源和固定原因维度保存目录拒绝计数，使基数预算耗尽时仍能暴露拒绝事实。
+struct SampleRejectionCounters {
+    native: [AtomicU64; SAMPLE_REJECTION_REASONS.len()],
+    legacy: [AtomicU64; SAMPLE_REJECTION_REASONS.len()],
+}
+
+impl SampleRejectionCounters {
+    /// 业务作用：创建按固定来源和原因分组的拒绝计数器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部计数从零开始的无锁计数器集合。
+    fn new() -> Self {
+        Self {
+            native: std::array::from_fn(|_| AtomicU64::new(0)),
+            legacy: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    /// 业务作用：累计一次被统一目录拒绝的样本检查事件。
+    ///
+    /// 参数说明：
+    /// - `source`: 样本来自直接记录入口还是兼容源快照。
+    /// - `reason`: 不包含动态内容的固定拒绝原因。
+    ///
+    /// 返回：无；对应来源与原因的累计值饱和前单调递增。
+    fn increment(&self, source: SampleRejectionSource, reason: SampleRejectionReason) {
+        let counters = match source {
+            SampleRejectionSource::Native => &self.native,
+            SampleRejectionSource::Legacy => &self.legacy,
+        };
+        let counter = &counters[reason.index()];
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+    }
+
+    /// 业务作用：把非零拒绝计数转换为统一目录自身的结构化指标样本。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按来源、原因稳定排序的累计 counter，不暴露被拒样本的 label 内容。
+    fn snapshot(&self) -> Vec<MetricSample> {
+        let mut samples = Vec::new();
+        for (source, counters) in [
+            (SampleRejectionSource::Native, &self.native),
+            (SampleRejectionSource::Legacy, &self.legacy),
+        ] {
+            for reason in SAMPLE_REJECTION_REASONS {
+                let value = counters[reason.index()].load(Ordering::Relaxed);
+                if value == 0 {
+                    continue;
+                }
+                samples.push(MetricSample {
+                    name: SAMPLE_REJECTIONS_TOTAL.name,
+                    labels: vec![
+                        ("source", source.label().to_owned()),
+                        ("reason", reason.label().to_owned()),
+                    ],
+                    value: MetricValue::Counter(value),
+                });
+            }
+        }
+        samples
+    }
+}
+
 impl MetricDescriptor {
     /// 业务作用：两个同名 descriptor 是否语义一致(kind/unit/help/label_names/histogram_bounds 全相同)。
     fn semantically_eq(&self, other: &MetricDescriptor) -> bool {
@@ -83,12 +235,31 @@ pub struct MetricConflict {
     pub name: &'static str,
 }
 
-/// 兼容期桥:旧的自渲染指标源(`nafana::render_metrics`、`naweb::SecurityMetrics` 等)先实现本
-/// trait,启动期用 `descriptors()` 做全局冲突审计,抓取时才调用 `render_prometheus`。迁移完成后弃用。
+/// 兼容期桥：旧指标源先实现本 trait，启动期用 `descriptors()` 做全局冲突审计，文本与非文本出口
+/// 优先读取 `snapshot()` 的同源结构化值；明确返回 `None` 的旧源仅在文本抓取时回落到
+/// `render_prometheus()`。迁移完成后弃用。
 pub trait LegacyMetricsSource: Send + Sync {
     /// 业务作用：本源拥有的静态 descriptor,用于启动期冲突审计。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：本源拥有且在启动期登记的全部 descriptor。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor];
+    /// 业务作用：导出与文本端点同源的结构化当前值，供 OTLP 等非文本后端复用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`Some` 表示该源支持结构化快照，即使当前没有样本也返回 `Some(Vec::new())`；`None`
+    /// 表示旧源只支持 Prometheus 自渲染，不会进入非文本 exporter。
+    fn snapshot(&self) -> Option<Vec<MetricSample>> {
+        None
+    }
     /// 业务作用：追加渲染本源的 Prometheus 文本(保持既有 family/HELP/TYPE/label 语义)。
+    ///
+    /// 参数说明：
+    /// - `output`: 接收本源文本的目标缓冲区。
+    ///
+    /// 返回：无；在现有缓冲区尾部追加，不清空已有内容。
     fn render_prometheus(&self, output: &mut String);
 }
 
@@ -109,22 +280,37 @@ pub struct MetricHub {
     descriptors: RwLock<BTreeMap<&'static str, &'static MetricDescriptor>>,
     /// (family 名, label 值序列) → 值。BTreeMap 使导出顺序稳定,便于 golden 对比。
     cells: RwLock<BTreeMap<(&'static str, Vec<String>), Cell>>,
-    /// 兼容领域源(nafana/naweb 等)自渲染其族的 Prometheus 文本;其 descriptor 已并入
-    /// catalog 供冲突审计,但值仍由源自渲染。渲染时 hub 原生循环跳过这些族名以避免重复 HELP/TYPE。
+    /// 兼容领域源(nafana/naweb 等)的 registry；其 descriptor 已并入 catalog，结构化快照由
+    /// hub 统一导出，只有明确不支持结构化快照的旧源才使用自身 Prometheus 文本入口。
     sources: RwLock<Vec<Arc<dyn LegacyMetricsSource>>>,
+    /// 所有拒绝原因均为固定低基数 label；不保存被拒样本的动态内容。
+    rejections: SampleRejectionCounters,
 }
 
 impl MetricHub {
-    /// 业务作用：创建空 hub。
+    /// 业务作用：创建只预留统一目录拒绝指标、尚未登记业务指标源的 hub。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可执行 descriptor 冲突审计、记录和双出口快照的独立指标目录。
     pub fn new() -> Self {
+        let mut descriptors = BTreeMap::new();
+        descriptors.insert(SAMPLE_REJECTIONS_TOTAL.name, &SAMPLE_REJECTIONS_TOTAL);
         Self {
-            descriptors: RwLock::new(BTreeMap::new()),
+            descriptors: RwLock::new(descriptors),
             cells: RwLock::new(BTreeMap::new()),
             sources: RwLock::new(Vec::new()),
+            rejections: SampleRejectionCounters::new(),
         }
     }
 
     /// 业务作用：注册一个静态 descriptor 并审计冲突。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 需要纳入进程唯一目录的静态指标语义。
+    ///
+    /// 返回：首次登记或同一业务 descriptor 幂等登记时成功；内部诊断 family 与业务 family
+    /// 语义冲突时失败，目录保持原状。
     ///
     /// # 错误
     ///
@@ -132,6 +318,13 @@ impl MetricHub {
     /// [`MetricConflict`];同名且完全一致是幂等的(返回 `Ok`)。
     pub fn register(&self, descriptor: &'static MetricDescriptor) -> Result<(), MetricConflict> {
         validate_descriptor(descriptor)?;
+        if descriptor.name == SAMPLE_REJECTIONS_TOTAL.name
+            && !std::ptr::eq(descriptor, &SAMPLE_REJECTIONS_TOTAL)
+        {
+            return Err(MetricConflict {
+                name: descriptor.name,
+            });
+        }
         let mut descriptors = self
             .descriptors
             .write()
@@ -148,10 +341,11 @@ impl MetricHub {
         Ok(())
     }
 
-    /// 业务作用：审计一个 [`LegacyMetricsSource`] 的 descriptor 纳入统一 catalog,并保存该源以便渲染。
+    /// 业务作用：审计一个 [`LegacyMetricsSource`] 的 descriptor 纳入统一 catalog，并保存该源以便导出。
     ///
-    /// 审计通过后,`render_prometheus` 会在原生族之后追加该源自渲染的族文本;原生渲染循环
-    /// 跳过该源声明的族名,避免重复的 HELP/TYPE 行。
+    /// 审计通过后，`Some` 结构化快照同时进入 Prometheus 与非文本出口；明确返回 `None` 的旧源
+    /// 只进入 `render_prometheus` 回落路径。原生渲染循环跳过文本旧源声明的族名，避免重复
+    /// HELP/TYPE。
     ///
     /// # 错误
     ///
@@ -200,14 +394,39 @@ impl MetricHub {
         Ok(())
     }
 
-    /// 业务作用：label 值切片是否与 descriptor 的 `label_names` 数量匹配。
-    fn labels_match(descriptor: &MetricDescriptor, labels: &[&str]) -> bool {
-        labels.len() == descriptor.label_names.len()
-            && labels.iter().all(|value| value.len() <= 256)
+    /// 业务作用：校验直接记录入口的 label 数量与单值内存上限。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 已声明 label 顺序的静态指标语义。
+    /// - `labels`: 调用方按 descriptor 顺序提交的 label 值。
+    ///
+    /// 返回：满足数量和单值上限时成功，否则返回稳定拒绝原因。
+    fn validate_labels(
+        descriptor: &MetricDescriptor,
+        labels: &[&str],
+    ) -> Result<(), SampleRejectionReason> {
+        if labels.len() != descriptor.label_names.len() {
+            return Err(SampleRejectionReason::LabelShape);
+        }
+        if labels
+            .iter()
+            .any(|value| value.len() > MAX_LABEL_VALUE_BYTES)
+        {
+            return Err(SampleRejectionReason::LabelValueTooLong);
+        }
+        Ok(())
     }
 
     /// 业务作用：确认调用方使用的是已登记且语义完全一致的 descriptor，防止同名漂移写入。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 本次记录入口携带的静态 descriptor。
+    ///
+    /// 返回：业务 descriptor 与目录语义一致时返回 `true`；内部拒绝指标只接受目录私有实例。
     fn is_registered(&self, descriptor: &MetricDescriptor) -> bool {
+        if descriptor.name == SAMPLE_REJECTIONS_TOTAL.name {
+            return std::ptr::eq(descriptor, &SAMPLE_REJECTIONS_TOTAL);
+        }
         self.descriptors
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -231,8 +450,73 @@ impl MetricHub {
         )
     }
 
-    /// 业务作用：导出全部已记录指标的结构化快照,family 与 label 组合按名称有序。
+    /// 业务作用：导出全部原生与兼容源指标的结构化快照，family 与 label 组合按名称有序。
+    ///
+    /// 兼容源必须直接读取自己的原子 registry，不从 Prometheus 文本反解析。源返回的 family、label
+    /// 或 value kind 与启动期 descriptor 不一致时，该样本会被拒绝，避免非文本出口绕过 catalog。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 family 与 label 有序的完整当前快照；读取不会清零计数或 histogram。
     pub fn snapshot(&self) -> Vec<MetricSample> {
+        self.collect_snapshot().0
+    }
+
+    /// 业务作用：一次性收集原生与结构化兼容源样本，并识别只能自渲染文本的旧源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：第一项是经过 descriptor 校验的统一快照，第二项是明确返回 `None` 的文本旧源；结构化
+    /// 源即使当前为空或全部样本被拒绝也不会退回另一条数据路径。
+    fn collect_snapshot(&self) -> (Vec<MetricSample>, Vec<Arc<dyn LegacyMetricsSource>>) {
+        let mut out = Vec::new();
+        let mut text_only_sources = Vec::new();
+        let sources = self
+            .sources
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for source in sources {
+            let Some(samples) = source.snapshot() else {
+                text_only_sources.push(source);
+                continue;
+            };
+            let owned: BTreeMap<&'static str, &'static MetricDescriptor> = source
+                .descriptors()
+                .iter()
+                .map(|descriptor| (descriptor.name, *descriptor))
+                .collect();
+            for sample in samples {
+                let Some(descriptor) = owned.get(sample.name).copied() else {
+                    self.rejections.increment(
+                        SampleRejectionSource::Legacy,
+                        SampleRejectionReason::UnknownFamily,
+                    );
+                    continue;
+                };
+                match validate_sample(&sample, descriptor) {
+                    Ok(()) => out.push(sample),
+                    Err(reason) => self
+                        .rejections
+                        .increment(SampleRejectionSource::Legacy, reason),
+                }
+            }
+        }
+        out.extend(self.native_snapshot());
+        out.sort_by(|left, right| {
+            left.name
+                .cmp(right.name)
+                .then_with(|| left.labels.cmp(&right.labels))
+        });
+        (out, text_only_sources)
+    }
+
+    /// 业务作用：导出由 hub 直接记录的指标值，不触发兼容源的快照副作用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 hub 有序 cell 生成的当前值以及非零拒绝诊断；调用时不清零任何计数。
+    fn native_snapshot(&self) -> Vec<MetricSample> {
         let descriptors = self
             .descriptors
             .read()
@@ -272,25 +556,60 @@ impl MetricHub {
                 value,
             });
         }
+        drop(cells);
+        drop(descriptors);
+        out.extend(self.rejections.snapshot());
         out
+    }
+
+    /// 业务作用：把当前值按启动期 descriptor 聚合成可直接编码的指标 family 快照。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只包含当前至少有一个样本的 family；名称、说明、单位、类型与 histogram 边界均来自
+    /// 唯一 catalog，OTLP 与 Prometheus 不会各自维护第二份指标语义。
+    pub fn family_snapshot(&self) -> Vec<MetricFamilySnapshot> {
+        let samples = self.snapshot();
+        let descriptors = self
+            .descriptors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut families: BTreeMap<&'static str, MetricFamilySnapshot> = BTreeMap::new();
+        for sample in samples {
+            let Some(descriptor) = descriptors.get(sample.name).copied() else {
+                continue;
+            };
+            families
+                .entry(descriptor.name)
+                .or_insert_with(|| MetricFamilySnapshot {
+                    name: descriptor.name,
+                    description: descriptor.help,
+                    unit: descriptor.unit,
+                    kind: descriptor.kind,
+                    histogram_bounds: descriptor.histogram_bounds,
+                    samples: Vec::new(),
+                })
+                .samples
+                .push(sample);
+        }
+        families.into_values().collect()
     }
 
     /// 业务作用：把 hub 拥有的全部指标渲染为 Prometheus 文本(HELP/TYPE + 样本),追加到 `output`。
     ///
-    /// 渲染顺序:先按名称有序输出**原生族**(hub 直接记录的 descriptor + 样本),跳过兼容源声明的
-    /// 族名;再按注册顺序追加每个 [`LegacyMetricsSource`] 自渲染的族文本。这样一次调用即得到 nafka
-    /// (原生)+ nafana/naweb(兼容源)的统一 exposition,且同一 family 只有一组 HELP/TYPE。
+    /// 渲染顺序:先按名称有序输出原生 family 和结构化兼容源，再按注册顺序处理文本旧源。返回
+    /// `Some(Vec::new())` 的结构化源只表示当前无样本，不会调用另一份自渲染入口。
+    /// 同一 family 始终只有一组 HELP/TYPE，结构化源与 OTLP 共用同一值和边界。
+    ///
+    /// 参数说明：
+    /// - `output`: 接收完整 Prometheus exposition 的目标缓冲区。
+    ///
+    /// 返回：无；在现有缓冲区尾部追加，不清空已有内容。
     pub fn render_prometheus(&self, output: &mut String) {
         use std::fmt::Write as _;
-        // 先取 snapshot(内部完成锁的获取与释放),再取其余读锁,避免同线程嵌套读锁
-        // (std RwLock 递归读锁在部分平台会死锁)。
-        let samples = self.snapshot();
-        let sources = self
-            .sources
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // 兼容源声明的族名:原生循环必须跳过,值由源自渲染,否则重复 HELP/TYPE。
-        let legacy_names: BTreeSet<&'static str> = sources
+        // 单次收集同时决定结构化与文本旧源，避免“结构化快照为空”在不同出口被解释成不同数据源。
+        let (samples, text_only_sources) = self.collect_snapshot();
+        let text_only_names: BTreeSet<&'static str> = text_only_sources
             .iter()
             .flat_map(|source| source.descriptors().iter().map(|d| d.name))
             .collect();
@@ -300,7 +619,12 @@ impl MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 按 family 分组渲染原生族,每个 family 一组 HELP/TYPE。
         for (name, descriptor) in descriptors.iter() {
-            if legacy_names.contains(name) {
+            if text_only_names.contains(name) {
+                continue;
+            }
+            if *name == SAMPLE_REJECTIONS_TOTAL.name
+                && !samples.iter().any(|sample| sample.name == *name)
+            {
                 continue;
             }
             let _ = writeln!(output, "# HELP {name} {}", descriptor.help);
@@ -314,10 +638,63 @@ impl MetricHub {
             }
         }
         drop(descriptors);
-        // 追加兼容源自渲染的族文本(nafana/naweb 各自的 registry)。
-        for source in sources.iter() {
+        // 只有显式声明不支持结构化快照的旧源使用自身文本入口；结构化源的文本与 OTLP 始终共用上面的值。
+        for source in text_only_sources {
             source.render_prometheus(output);
         }
+    }
+}
+
+/// 业务作用：验证兼容源样本与启动期 descriptor 的名称、label 顺序、资源上限和 value kind 完全一致。
+///
+/// 参数说明：
+/// - `sample`: 兼容源从自身 registry 读取的当前值。
+/// - `descriptor`: 该源在注册时提交并通过冲突审计的静态语义。
+///
+/// 返回：样本可安全进入统一快照时成功；不符合合同则返回可观测的固定拒绝原因。
+fn validate_sample(
+    sample: &MetricSample,
+    descriptor: &MetricDescriptor,
+) -> Result<(), SampleRejectionReason> {
+    if sample.name != descriptor.name
+        || sample.labels.len() != descriptor.label_names.len()
+        || sample
+            .labels
+            .iter()
+            .zip(descriptor.label_names)
+            .any(|((actual, _), expected)| actual != expected)
+    {
+        return Err(SampleRejectionReason::LabelShape);
+    }
+    if sample
+        .labels
+        .iter()
+        .any(|(_, value)| value.len() > MAX_LABEL_VALUE_BYTES)
+    {
+        return Err(SampleRejectionReason::LabelValueTooLong);
+    }
+    match (&sample.value, descriptor.kind) {
+        (MetricValue::Counter(_), MetricKind::Counter)
+        | (MetricValue::Gauge(_), MetricKind::Gauge) => Ok(()),
+        (
+            MetricValue::Histogram {
+                bounds,
+                buckets,
+                count,
+                ..
+            },
+            MetricKind::Histogram,
+        ) => {
+            if *bounds == descriptor.histogram_bounds
+                && buckets.len() == bounds.len() + 1
+                && buckets.iter().copied().fold(0_u64, u64::saturating_add) == *count
+            {
+                Ok(())
+            } else {
+                Err(SampleRejectionReason::HistogramShape)
+            }
+        }
+        _ => Err(SampleRejectionReason::ValueKind),
     }
 }
 
@@ -329,14 +706,25 @@ impl Default for MetricHub {
 }
 
 impl MetricRecorder for MetricHub {
-    /// 业务作用：对已登记 counter 做饱和累加；非法 descriptor、label 或超基数写入被拒绝。
+    /// 业务作用：对已登记 counter 做饱和累加，并对不合规写入累计固定原因诊断。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 启动期登记的静态 counter 语义。
+    /// - `delta`: 本次需要累计的非负增量。
+    /// - `labels`: 按 descriptor 顺序提供的低基数 label 值。
+    ///
+    /// 返回：无；合法写入饱和累加，非法 descriptor、label 或超基数写入不改变业务样本。
     fn counter(&self, descriptor: &'static MetricDescriptor, delta: u64, labels: &[&str]) {
-        debug_assert!(
-            Self::labels_match(descriptor, labels),
-            "counter `{}` label count mismatch",
-            descriptor.name
-        );
-        if !Self::labels_match(descriptor, labels) || !self.is_registered(descriptor) {
+        if let Err(reason) = Self::validate_labels(descriptor, labels) {
+            self.rejections
+                .increment(SampleRejectionSource::Native, reason);
+            return;
+        }
+        if !self.is_registered(descriptor) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::UnregisteredDescriptor,
+            );
             return;
         }
         let mut cells = self
@@ -345,6 +733,10 @@ impl MetricRecorder for MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
         if !Self::can_insert_cell(&cells, &key) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::CardinalityLimit,
+            );
             return;
         }
         match cells.entry(key).or_insert(Cell::Counter(0)) {
@@ -353,14 +745,25 @@ impl MetricRecorder for MetricHub {
         }
     }
 
-    /// 业务作用：覆盖已登记 gauge 的当前值；非法 descriptor、label 或超基数写入被拒绝。
+    /// 业务作用：覆盖已登记 gauge 的当前值，并对不合规写入累计固定原因诊断。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 启动期登记的静态 gauge 语义。
+    /// - `value`: 需要发布的当前值。
+    /// - `labels`: 按 descriptor 顺序提供的低基数 label 值。
+    ///
+    /// 返回：无；合法写入覆盖当前值，非法 descriptor、label 或超基数写入不改变业务样本。
     fn gauge(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]) {
-        debug_assert!(
-            Self::labels_match(descriptor, labels),
-            "gauge `{}` label count mismatch",
-            descriptor.name
-        );
-        if !Self::labels_match(descriptor, labels) || !self.is_registered(descriptor) {
+        if let Err(reason) = Self::validate_labels(descriptor, labels) {
+            self.rejections
+                .increment(SampleRejectionSource::Native, reason);
+            return;
+        }
+        if !self.is_registered(descriptor) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::UnregisteredDescriptor,
+            );
             return;
         }
         let mut cells = self
@@ -369,6 +772,10 @@ impl MetricRecorder for MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
         if !Self::can_insert_cell(&cells, &key) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::CardinalityLimit,
+            );
             return;
         }
         match cells.entry(key).or_insert(Cell::Gauge(0.0)) {
@@ -377,14 +784,25 @@ impl MetricRecorder for MetricHub {
         }
     }
 
-    /// 业务作用：把观测值计入首个匹配边界或 `+Inf` 桶，并同步累计 sum/count。
+    /// 业务作用：把观测值计入首个匹配边界或 `+Inf` 桶，并对不合规写入累计固定原因诊断。
+    ///
+    /// 参数说明：
+    /// - `descriptor`: 启动期登记的静态 histogram 语义与边界。
+    /// - `value`: 本次观测值。
+    /// - `labels`: 按 descriptor 顺序提供的低基数 label 值。
+    ///
+    /// 返回：无；合法写入同步累计 bucket、sum、count，非法写入不改变业务样本。
     fn histogram(&self, descriptor: &'static MetricDescriptor, value: f64, labels: &[&str]) {
-        debug_assert!(
-            Self::labels_match(descriptor, labels),
-            "histogram `{}` label count mismatch",
-            descriptor.name
-        );
-        if !Self::labels_match(descriptor, labels) || !self.is_registered(descriptor) {
+        if let Err(reason) = Self::validate_labels(descriptor, labels) {
+            self.rejections
+                .increment(SampleRejectionSource::Native, reason);
+            return;
+        }
+        if !self.is_registered(descriptor) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::UnregisteredDescriptor,
+            );
             return;
         }
         let bounds = descriptor.histogram_bounds;
@@ -394,6 +812,10 @@ impl MetricRecorder for MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
         if !Self::can_insert_cell(&cells, &key) {
+            self.rejections.increment(
+                SampleRejectionSource::Native,
+                SampleRejectionReason::CardinalityLimit,
+            );
             return;
         }
         let cell = cells.entry(key).or_insert_with(|| Cell::Histogram {
@@ -478,6 +900,23 @@ pub struct MetricSample {
     pub labels: Vec<(&'static str, String)>,
     /// 样本值。
     pub value: MetricValue,
+}
+
+/// 一个带唯一 descriptor 语义的指标 family 当前快照。
+#[derive(Debug, Clone)]
+pub struct MetricFamilySnapshot {
+    /// family 名称。
+    pub name: &'static str,
+    /// 稳定业务说明。
+    pub description: &'static str,
+    /// UCUM 单位；无单位时为空串。
+    pub unit: &'static str,
+    /// counter、gauge 或 histogram 类型。
+    pub kind: MetricKind,
+    /// histogram 显式边界；其它类型为空切片。
+    pub histogram_bounds: &'static [f64],
+    /// 按 label 有序的当前数据点。
+    pub samples: Vec<MetricSample>,
 }
 
 impl MetricSample {

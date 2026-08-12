@@ -6,7 +6,7 @@
 #   配置的 parse+merge+apply 是 app 策略,留在各 app。
 [package]
 name = "nanacos"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Nacos 配置中心 + 注册中心传输门面(NacosConfigClient / NacosDiscoveryClient)"

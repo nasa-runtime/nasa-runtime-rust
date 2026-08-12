@@ -18,10 +18,11 @@ mod controller;
 
 #[nasa::application(
     "log", "nacos-config", "telemetry", "db", "redis", "cache",
-    "kafka", "auth", "web", "nacos-discovery", "scheduling"
+    "partition", "kafka", "auth", "web", "nacos-discovery", "scheduling"
 )]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
     // 业务启动 Hook：注册资源、登记受监督任务、注入路由/长连接定制和运行时 initializer。
+    app.configure_partition(nasa::application::PartitionApplicationPlan::default())?;
     app.configure_router(|router| router)?;
     Ok(())
 }
@@ -29,7 +30,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## `application` 支持的组件字符串
 
-属性当前只接受下面 14 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
+属性当前只接受下面 16 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
 未知名称和重复名称，再按唯一规范顺序生成组件列表。字符串对应的门面 feature 没有启用时会在编译期
 拒绝，不会静默跳过。
 
@@ -37,13 +38,15 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | --- | --- | --- | --- | --- |
 | `"log"` | `log` | `log` | 两阶段日志：早期控制台 → 最终文件日志；运行期 `log` 段可热重应用 | `app.log()` |
 | `"nacos-config"` | `nacos-config`；真实远端连接再加 `nacos-sdk` | `nacos` | 远端 overlay 首拉与 watch 热刷新；`enabled=false` 走纯本地 | `app.nacos_config()` |
-| `"telemetry"` | `telemetry` | `telemetry` | 有界 span 管道、日志或 OTLP/HTTP sink、受管停机 flush | `app.telemetry_snapshot()` |
+| `"telemetry"` | `telemetry` | `telemetry` | 有界 span 管道、可选 OTLP trace/metrics、受管停机 flush | `app.telemetry_snapshot()` / `app.otlp_metrics_snapshot()` |
 | `"db"` | `tx` | `database` 或 `datasources.<name>` | 数据源探测、建池、资源注册和事务运行时注入 | `app.datasource(name).await` |
 | `"redis"` | `redis` | `redis` | 统一客户端建连与显式停机 | `app.redis(name).await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
+| `"partition"` | `partition` | 无固定配置根；UserHook 提交 `PartitionApplicationPlan` | Prepare 创建保序分 lane 执行器、动态健康与有界停机 | `app.partition()` |
 | `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)` |
 | `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
+| `"grpc"` | `grpc-experimental` | `grpc` | initializer 后构造 Router、绑定 listener、关键监督与有界排空 | `app.grpc()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、探针、监听与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
@@ -58,9 +61,81 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
 
-规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> saga -> kafka -> outbox ->
-auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
+规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox ->
+grpc -> auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
 `auth` 缺少 `web` 会被拒绝，`cache.redis_ref` 指向受管 Redis 时还必须声明 `"redis"`。
+
+## Partition 受管模式
+
+`"partition"` 把 `napart::PartitionExecutor` 纳入 Application 的唯一所有权。UserHook 只提交
+`PartitionApplicationPlan`，不自行创建 worker；组件在 UserHook 成功结束后的 Prepare 阶段创建执行器，
+登记到统一资源视图并发布 `app.partition()`。因此静态工厂与 initializer 三阶段可以使用同一句柄，
+但初始化后续失败仍会沿 active stack 停止 worker，不留下脱离容器的执行器。该业务句柄只开放提交与
+只读观测，不开放 `shutdown*`；完整执行器的收口权只属于 Application 生命周期 action。
+
+```rust
+use std::time::Duration;
+use nasa::application::PartitionApplicationPlan;
+
+#[nasa::application("partition", "web")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let plan = PartitionApplicationPlan::new(16, 1_024, 16_384)?
+        .with_max_lanes(4_096)?
+        .with_shutdown_timeout(Duration::from_secs(5))?;
+    app.configure_partition(plan)?;
+    Ok(())
+}
+```
+
+`partitions`、每 lane 深度、全局在飞量、lane 总数和停机排空预算都必须有界；计划非法或声明组件后
+漏交计划会在监听前拒绝启动。worker 异常死亡或 lane 冻结会使 `partition:executor` readiness 变为
+NotReady，并通过关键 monitor 触发应用统一停机。反向停机先拒绝新任务，再在计划预算与 Application
+全局剩余 deadline 派生的子预算内排空，并为损耗报告与后续逆序清理保留尾部预算；`frozen` 或
+`aborted` 非零会进入停机失败，同时证据仍可由业务句柄读取。`app.partition()` 返回的受管业务句柄
+支持任务提交和只读观测，但不开放 `shutdown*`；执行器收口权只属于 Application 生命周期。
+直接依赖 `napart` 的调用方仍可自管执行器；只有声明 `"partition"` 才形成上述容器合同。
+
+## OTLP trace 与指标
+
+`"telemetry"` 组件默认只把 span 写入结构化日志，OTLP 指标默认关闭。显式配置两个
+endpoint 后，trace 和 metrics 使用相同的 `service.name` / `service.instance.id` resource、
+JSON 或 protobuf 编码和 Application 停机剩余预算：
+
+```yaml
+telemetry:
+  enabled: true
+  service_name: order-service
+  service_instance_id: order-service-az1-01
+  queue_capacity: 2048
+  otlp_endpoint: http://127.0.0.1:4318/v1/traces
+  otlp_metrics_endpoint: http://127.0.0.1:4318/v1/metrics
+  otlp_encoding: protobuf
+  metrics_interval_ms: 10000
+  root_sample_ratio: 1.0
+```
+
+`service_instance_id` 留空时会从进程 ID 与 Application 启动时刻生成本进程稳定值。
+`metrics_interval_ms` 在启用指标出口时必须为 `1000..=300000`。Counter 使用 cumulative
+temporality，Gauge 发当前快照，Histogram 直接复用 Prometheus descriptor 的边界。
+
+Prometheus `/metrics` 与 OTLP 从同一 `MetricHub` 结构化快照读取，包括原生指标、
+naweb、nafana、Outbox 和 Saga Streams；两个出口并存且都不清零计数。单次失败只将
+`telemetry:metrics-exporter` 降级，不重试当前快照、不背压业务；停机时在全局剩余预算内
+尝试最后一次快照。`app.otlp_metrics_snapshot()` 只暴露批次、已确认样本和失败数，
+不暴露 endpoint 或 label 值。
+
+结构化兼容源当前无样本时仍保持同一快照路径，不会改读自身文本入口。单个 label 值最多 4096 个
+UTF-8 字节；超过资源上限或与 descriptor 形状不一致的样本会从 Prometheus 与 OTLP 一致拒绝，并以
+`nametrics_samples_rejected_total{source,reason}` 累计，诊断 label 不包含业务输入。
+
+Outbox 的 `pending`、`dead` 与逐 lane `pending` 来自数据库已提交事实，每次完整刷新需要执行
+`2 + lane 数` 条计数查询。Prometheus 与 OTLP 共享同一串行缓存，最多每 30 秒刷新一次，因而
+`metrics_interval_ms` 只控制 OTLP 导出频率，不会同比放大数据库查询频率；这些 gauge 正常情况下
+最多滞后 30 秒。刷新失败会保留上一份完整快照并每秒重试，通过
+`napp_outbox_metrics_refresh_failed`、`napp_outbox_metrics_refresh_failures_total` 和
+`napp_outbox_metrics_snapshot_age_seconds` 明确其可信边界；Prometheus 继续返回其它独立指标族，
+OTLP 继续发送完整缓存并把 exporter 标为 Degraded。停机在数据库释放前强制刷新一次，最终 OTLP
+flush 只读取缓存。
 
 ## Saga 受管模式
 
@@ -75,10 +150,11 @@ Saga 之前建立、在其之后释放;Ready 前用真实客户端统一探测 P
 消息留 PEL 交重启后重领。按冻结 (stream, group) 导出 `napp_saga_stream_*` 低基数指标
 (`Application::saga_stream_metrics_prometheus`),其中 `deleted_pending_total` 非零必须告警。
 
-gRPC request/response connector 通过门面 `saga-grpc-experimental` 启用，只提供封闭收据裁决，不是
-Application 组件字符串，也不拥有 listener。业务必须另行启用并托管 `grpc-experimental` listener，
-完成 mTLS/签名身份映射、deadline、资源上限与 drain；回包缺失和 `Retryable` 都让发布端保留 Outbox
-行重投，不能按确定失败消耗死信预算。
+gRPC request/response connector 通过门面 `saga-grpc-experimental` 启用，只提供封闭收据裁决，不会
+隐式声明 listener。业务可显式声明实验性 `"grpc"` 组件并通过 `GrpcApplicationPlan` 提交 Router；
+Application 在 initializer 之后绑定、监督 listener，并在全局预算内停止准入和排空。mTLS/签名
+principal 映射仍由业务 service 完成；回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按
+确定失败消耗死信预算。
 
 为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
 `#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
@@ -341,7 +417,7 @@ initializer 失败、panic、超时或取消都会停止后续阶段，不发布
 - `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
-- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
+- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
 - 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化如实记 `RestartRequired`。`app.config_view()` 保证快照与状态表同版本。
 - 错误报告统一脱敏（URI userinfo、常见敏感键）后输出完整错误链；进程级 panic hook 只写受控 location marker，不读 payload。
 

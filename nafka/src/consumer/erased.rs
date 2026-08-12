@@ -251,11 +251,11 @@ fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
 ///
 /// 校验点必须在 `build_meta`：宏面的 `deny_padded` 只覆盖 `#[kafka_consumer]`，
 /// 而 `ConsumerRegistry::register` / `register_batch` 与手写 `impl SingleConsumer`
-/// 是同等的公开入口，走的正是这里。此前这两条路只做 `trim().is_empty()` 判空，
-/// 却**存未 trim 的值**，于是 `event: " created "` 编译通过、运行期与 header 永不匹配，
+/// 是同等的公开入口，走的正是这里。如果只做 `trim().is_empty()` 判空却保存未 trim 的值，
+/// `event: " created "` 会在运行期与 header 永不匹配，
 /// `GroupSpec::Named(" g ")` 则直接换成另一个 group.id（孤儿 offset + 按 reset 重置）。
 ///
-/// 刻意报错而非静默 trim：静默 trim 会与用户写下的意图不符，且掩盖上游的拼接 bug。
+/// 刻意报错而非静默 trim：静默 trim 会与用户写下的意图不符，且掩盖上游拼接错误。
 ///
 /// # 参数
 ///

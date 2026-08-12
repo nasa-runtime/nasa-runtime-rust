@@ -197,7 +197,7 @@ pub async fn ensure_pending(
     ids: &[String],
 ) -> Result<Vec<RetryIntent>> {
     //**显式拒绝**请求中的重复 ID(旧实现靠 BTreeSet 静默去重,会让
-    // "同一 ID 出现两次"的上游 bug 被掩盖,且 op_id 含重复元素)。
+    // "同一 ID 出现两次"的非法输入被掩盖,且 op_id 含重复元素)。
     let uniq: std::collections::BTreeSet<&str> = ids.iter().map(|s| s.as_str()).collect();
     if uniq.len() != ids.len() {
         return Err(NasaRedisError::ProtocolMarker(format!(

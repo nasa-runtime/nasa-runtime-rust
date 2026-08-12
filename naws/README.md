@@ -205,7 +205,7 @@ Redis 集群广播是 at-most-once 语义，适合 presence 对账、订阅状�
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["ws-kafka"] }
+nasa = { version = "1", features = ["ws-kafka"] }
 # 生产使用 SASL_SSL 时再加 "kafka-tls"；使用 Zstd 时再加 "kafka-zstd"。
 ```
 

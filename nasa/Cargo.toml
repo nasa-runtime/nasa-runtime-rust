@@ -59,7 +59,7 @@ saga-redis-stream = ["saga-runtime", "redis", "saga_runtime_impl/redis-stream", 
 # Saga gRPC request/response transport 的封闭收据裁决（实验；listener 上限与 drain 由 grpc 组件承担）。
 saga-grpc-experimental = ["saga-runtime", "saga_runtime_impl/grpc-transport"]
 # 实验性 gRPC listener 生命周期；不进入 full，稳定组件合同待真实项目收敛。
-grpc-experimental = ["dep:grpc_impl"]
+grpc-experimental = ["dep:grpc_impl", "application_impl?/grpc-experimental"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。
 oauth = ["dep:oauth_impl"]
 # 弱依赖桥：同时启用 application 时把 napp 的 scheduling 组件编入。
@@ -81,8 +81,8 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 本地保序任务窃取执行器，提供同 key 严格 FIFO、有界背压、任务隔离与显式停机。
-partition = ["dep:partition_impl"]
+# 本地保序任务窃取执行器；同时启用 application 时纳入受管计划、readiness 与反向停机。
+partition = ["dep:partition_impl", "application_impl?/partition"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
 ws = ["dep:ws_impl", "application_impl?/ws"]
@@ -227,9 +227,9 @@ full = [
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
 application_impl = { package = "napp", version = "1.0.3", optional = true }
 application_macro = { package = "napp-macro", version = "1.0.2", optional = true }
-hystrix_impl = { package = "hystrix", version = "1.0.1", optional = true }
+hystrix_impl = { package = "hystrix", version = "1.0.2", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
-grafana_impl = { package = "nafana", version = "1.0.1", optional = true }
+grafana_impl = { package = "nafana", version = "1.0.2", optional = true }
 grafana_macro = { package = "nafana-macro", version = "1.0.1", optional = true }
 cache_impl = { package = "cacheable", version = "1.0.1", optional = true }
 nacache_macro = { package = "nacache-macro", version = "1.0.1", optional = true }
@@ -252,15 +252,15 @@ object_impl = { package = "naobject", version = "1.0.0", optional = true }
 saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.0.1", optional = true }
+grpc_impl = { package = "nagrpc", version = "1.0.2", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.1", optional = true }
 async_macro = { package = "async-macro", version = "1.0.1", optional = true }
-web_impl = { package = "naweb", version = "1.0.1", optional = true }
+web_impl = { package = "naweb", version = "1.0.2", optional = true }
 web_macro = { package = "naweb-macro", version = "1.0.0", optional = true }
 mapper_impl = { package = "namapper", version = "1.0.1", optional = true }
 namapper_macro = { package = "namapper-macro", version = "1.0.1", optional = true }
-partition_impl = { package = "napart", version = "1.1.1", optional = true }
+partition_impl = { package = "napart", version = "1.1.2", optional = true }
 ws_impl = { package = "naws", version = "1.0.1", optional = true, default-features = false }
 kafka_impl = { package = "nafka", version = "1.0.2", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.1", optional = true, default-features = false }
@@ -269,11 +269,11 @@ numeric_impl = { package = "nanum", version = "1.0.1", optional = true }
 date_impl = { package = "nadate", version = "1.0.0", optional = true }
 log_impl = { package = "nalog", version = "1.0.0", optional = true }
 base_impl = { package = "nabase", version = "1.0.1", optional = true }
-yml_impl = { package = "naml", version = "1.0.2", optional = true }
-config_boot_impl = { package = "config-boot", version = "1.0.1", optional = true }
+yml_impl = { package = "naml", version = "1.0.3", optional = true }
+config_boot_impl = { package = "config-boot", version = "1.0.2", optional = true }
 image_impl = { package = "naimg", version = "1.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "1.0.1", optional = true }
-nacos_impl = { package = "nanacos", version = "1.0.1", optional = true, default-features = false }
+nacos_impl = { package = "nanacos", version = "1.0.2", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "1.0.1", optional = true }
 rest_client_macro = { package = "rest-client-macro", version = "1.0.1", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.1", optional = true, default-features = false }

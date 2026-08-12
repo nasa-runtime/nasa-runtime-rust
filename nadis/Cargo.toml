@@ -3,7 +3,7 @@
 # partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
 name = "nadis"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Redis 基础层(client/commands/pipeline/lock;兼容 RedisProxy 五件套)"

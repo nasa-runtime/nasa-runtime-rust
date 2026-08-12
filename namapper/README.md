@@ -32,7 +32,7 @@ use nasa::mapper::{Mapper, Query, Insert, Update, Delete, Execute};
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["mapper"] }
+nasa = { version = "1", features = ["mapper"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -42,14 +42,14 @@ serde = { version = "1", features = ["derive"] }
 需要 Redis Hash 二级缓存：
 
 ```toml
-nasa = { version = "1.0.0", features = ["mapper-redis-cache"] }
+nasa = { version = "1", features = ["mapper-redis-cache"] }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 ```
 
 直接依赖 `namapper`：
 
 ```toml
-namapper = { version = "1.0.0" }
+namapper = { version = "1" }
 natx = { version = "1.0.0" }
 ```
 

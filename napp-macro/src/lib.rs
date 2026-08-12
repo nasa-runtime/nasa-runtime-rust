@@ -20,13 +20,17 @@ use syn::{
 ///
 /// # 支持的组件字符串
 ///
-/// `attr` 可以为空；非空时只接受下面 14 个区分大小写的精确字符串，不支持别名：
+/// `attr` 可以为空；非空时只接受下面 16 个区分大小写的精确字符串，不支持别名：
 ///
 /// - `"log"`：启用两阶段日志。Bootstrap 先建立早期控制台日志，最终配置就绪后再安装文件日志，
 ///   并支持运行期日志级别热更新；需要 `nasa` 的 `log` feature。
 /// - `"nacos-config"`：启用 Nacos 配置中心。启动时拉取远端配置 overlay，运行期监听配置变化并按
 ///   last-known-good 规则热刷新；需要 `nacos-config` feature，真实连接 Nacos 还需要 `nacos-sdk`。
 /// - `"telemetry"`：启用有界 OpenTelemetry span 管道与受管停机 flush；需要 `telemetry` feature。
+/// - `"partition"`：启用保序分 lane 执行器。业务在 UserHook 提交有界计划，容器在 Prepare
+///   创建执行器、发布强类型句柄并监督动态健康与停机排空；需要 `partition` feature。
+/// - `"grpc"`：启用实验性受管 gRPC listener。业务在 UserHook 提交 Router 工厂，容器在 Ready
+///   绑定端口、监督 serve 所有权并在停机时排空；需要 `grpc-experimental` feature。
 /// - `"db"`：启用 MySQL 数据源。启动时校验并探测地址、鉴权和数据库，创建连接池、注册应用资源，
 ///   同时注入 `#[transactional]` 和 Mapper 使用的事务运行时；需要 `tx` feature。
 /// - `"redis"`：启用 Redis 客户端。启动时校验配置、探测 standalone/cluster 拓扑并建立受管客户端，
@@ -61,7 +65,7 @@ use syn::{
 ///
 /// **业务侧不需要按启动顺序书写组件字符串**：宏接受任意顺序,内部按唯一的规范启动顺序
 /// （`CANONICAL_COMPONENT_ORDER`：log → nacos-config → telemetry → db → redis → cache →
-/// saga → kafka → outbox → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
+/// partition → saga → kafka → outbox → grpc → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
 /// `#[application("web", "log", "kafka")]` 与 `#[application("log", "kafka", "web")]` 完全等价,
 /// 都按 log → kafka → web 启动、严格反序停机。宏仍会拒绝未知组件名和重复声明。
 ///
@@ -72,6 +76,8 @@ use syn::{
 ///     "log",
 ///     "nacos-config",
 ///     "telemetry",
+///     "partition",
+///     "grpc",
 ///     "redis",
 ///     "cache",
 ///     "saga",
@@ -905,16 +911,18 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
 ///
 /// 该数组既是合法组件白名单，也是唯一的规范启动顺序：配置先于资源，DB 先于 Saga/Outbox，
 /// transport 先于业务入口。新增组件时必须按依赖与反向停机关系插入。
-const CANONICAL_COMPONENT_ORDER: [&str; 14] = [
+const CANONICAL_COMPONENT_ORDER: [&str; 16] = [
     "log",
     "nacos-config",
     "telemetry",
     "db",
     "redis",
     "cache",
+    "partition",
     "saga",
     "kafka",
     "outbox",
+    "grpc",
     "auth",
     "web",
     "ws",
@@ -983,6 +991,8 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
         "redis" => "Redis",
         "telemetry" => "Telemetry",
         "cache" => "Cache",
+        "partition" => "Partition",
+        "grpc" => "Grpc",
         "saga" => "Saga",
         "kafka" => "Kafka",
         "outbox" => "Outbox",
@@ -1009,8 +1019,8 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
 /// 返回：返回供展开代码引用的能力模块标识；内部传入未校验名称时返回宏展开错误。
 fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
     match name {
-        "log" | "db" | "redis" | "telemetry" | "cache" | "saga" | "kafka" | "outbox" | "auth"
-        | "web" | "ws" | "scheduling" => Ok(format_ident!("{name}")),
+        "log" | "db" | "redis" | "telemetry" | "cache" | "partition" | "grpc" | "saga"
+        | "kafka" | "outbox" | "auth" | "web" | "ws" | "scheduling" => Ok(format_ident!("{name}")),
         "nacos-config" => Ok(format_ident!("nacos_config")),
         "nacos-discovery" => Ok(format_ident!("nacos_discovery")),
         _ => Err(syn::Error::new(

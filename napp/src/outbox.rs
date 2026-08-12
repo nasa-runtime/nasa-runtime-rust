@@ -15,7 +15,7 @@ use std::{
 use naoutbox_core::{OutboxArchive, OutboxPublisher, OutboxRetentionPolicy};
 use naoutbox_mysql::MySqlOutbox;
 use serde::Deserialize;
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
 use crate::{
@@ -31,9 +31,231 @@ const DEFAULT_BATCH_SIZE: u32 = 100;
 const MAX_INTERVAL_MS: u64 = 60_000;
 const MAX_BATCH_SIZE: u32 = 10_000;
 const MAX_FAILURE_THRESHOLD: u32 = 100;
+/// 持久化积压指标的最短刷新间隔，避免高频出口按 lane 放大数据库全量计数负载。
+const OUTBOX_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// 持久化指标刷新失败后的重试间隔，避免瞬时故障让 last-good 快照长期停滞。
+const OUTBOX_METRICS_FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+macro_rules! outbox_metric {
+    ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr) => {
+        static $ident: nametrics_core::MetricDescriptor = nametrics_core::MetricDescriptor {
+            name: $name,
+            help: $help,
+            unit: "",
+            kind: $kind,
+            label_names: $labels,
+            histogram_bounds: &[],
+        };
+    };
+}
+
+outbox_metric!(
+    OUTBOX_ROUNDS,
+    "napp_outbox_rounds_total",
+    "Dispatcher completed rounds.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_PUBLISHED,
+    "napp_outbox_published_total",
+    "Events confirmed by the downstream publisher.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_FAILED_ROUNDS,
+    "napp_outbox_failed_rounds_total",
+    "Dispatcher rounds ending in storage, timeout, or publish failure.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_PENDING,
+    "napp_outbox_pending",
+    "Durable events waiting for downstream confirmation.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_DEAD,
+    "napp_outbox_dead",
+    "Durable events retained in the local dead-letter set.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_METRICS_SNAPSHOT_AGE,
+    "napp_outbox_metrics_snapshot_age_seconds",
+    "Age in seconds of the last complete durable metrics snapshot; zero before the first success.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_METRICS_REFRESH_FAILED,
+    "napp_outbox_metrics_refresh_failed",
+    "Whether the latest durable metrics refresh attempt failed.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_METRICS_REFRESH_FAILURES,
+    "napp_outbox_metrics_refresh_failures_total",
+    "Durable metrics refresh attempts ending in a storage query failure.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_QUOTA_REJECTIONS,
+    "napp_outbox_tenant_quota_rejections_total",
+    "Appends rejected by the per-tenant in-flight quota.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_ROUNDS,
+    "napp_outbox_retention_rounds_total",
+    "Retention rounds completed, including idle and contended rounds.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_ARCHIVED,
+    "napp_outbox_retention_archived_total",
+    "Events confirmed archived with a verifiable receipt.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_DELETED_DISPATCHED,
+    "napp_outbox_retention_deleted_dispatched_total",
+    "Dispatched rows deleted under the approved policy.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_DELETED_DEAD,
+    "napp_outbox_retention_deleted_dead_total",
+    "Dead-letter rows deleted under the approved dead policy.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_FAILED_ROUNDS,
+    "napp_outbox_retention_failed_rounds_total",
+    "Retention rounds ending in storage, archive, or timeout failure.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_CLAIM_CONTENDED,
+    "napp_outbox_retention_claim_contended_total",
+    "Retention rounds skipped because another owner held the claim.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_BUDGET_EXHAUSTED,
+    "napp_outbox_retention_budget_exhausted_total",
+    "Retention rounds ended by budget before candidates were fully processed.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_OLDEST_AGE,
+    "napp_outbox_retention_oldest_candidate_age_ms",
+    "Age of the oldest retention candidate observed in the latest round.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_LOCK_CONTENTION,
+    "napp_outbox_retention_lock_contention_total",
+    "Rounds yielded because disposal statements encountered row-lock contention.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_COMMIT_UNCERTAIN,
+    "napp_outbox_retention_commit_uncertain_total",
+    "Rounds whose deletion commit acknowledgement could not be confirmed.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_INTERVAL,
+    "napp_outbox_retention_interval_ms",
+    "Configured pause between retention rounds.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_RETENTION_LAST_SUCCESS,
+    "napp_outbox_retention_last_success_ms",
+    "Epoch milliseconds of the last successful retention round.",
+    nametrics_core::MetricKind::Gauge,
+    &[]
+);
+outbox_metric!(
+    OUTBOX_LANE_PUBLISHED,
+    "napp_outbox_lane_published_total",
+    "Events confirmed by the downstream publisher in one frozen channel lane.",
+    nametrics_core::MetricKind::Counter,
+    &["channel"]
+);
+outbox_metric!(
+    OUTBOX_LANE_FAILED,
+    "napp_outbox_lane_failed_rounds_total",
+    "Failed dispatcher rounds in one frozen channel lane.",
+    nametrics_core::MetricKind::Counter,
+    &["channel"]
+);
+outbox_metric!(
+    OUTBOX_LANE_HEALTHY,
+    "napp_outbox_lane_healthy",
+    "Whether the latest round in one frozen channel lane was healthy.",
+    nametrics_core::MetricKind::Gauge,
+    &["channel"]
+);
+outbox_metric!(
+    OUTBOX_LANE_PENDING,
+    "napp_outbox_lane_pending",
+    "Durable events waiting in one frozen channel lane.",
+    nametrics_core::MetricKind::Gauge,
+    &["channel"]
+);
+
+static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 25] = [
+    &OUTBOX_ROUNDS,
+    &OUTBOX_PUBLISHED,
+    &OUTBOX_FAILED_ROUNDS,
+    &OUTBOX_PENDING,
+    &OUTBOX_DEAD,
+    &OUTBOX_METRICS_SNAPSHOT_AGE,
+    &OUTBOX_METRICS_REFRESH_FAILED,
+    &OUTBOX_METRICS_REFRESH_FAILURES,
+    &OUTBOX_QUOTA_REJECTIONS,
+    &OUTBOX_RETENTION_ROUNDS,
+    &OUTBOX_RETENTION_ARCHIVED,
+    &OUTBOX_RETENTION_DELETED_DISPATCHED,
+    &OUTBOX_RETENTION_DELETED_DEAD,
+    &OUTBOX_RETENTION_FAILED_ROUNDS,
+    &OUTBOX_RETENTION_CLAIM_CONTENDED,
+    &OUTBOX_RETENTION_BUDGET_EXHAUSTED,
+    &OUTBOX_RETENTION_OLDEST_AGE,
+    &OUTBOX_RETENTION_LOCK_CONTENTION,
+    &OUTBOX_RETENTION_COMMIT_UNCERTAIN,
+    &OUTBOX_RETENTION_INTERVAL,
+    &OUTBOX_RETENTION_LAST_SUCCESS,
+    &OUTBOX_LANE_PUBLISHED,
+    &OUTBOX_LANE_FAILED,
+    &OUTBOX_LANE_HEALTHY,
+    &OUTBOX_LANE_PENDING,
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// 业务作用：承载 Outbox dispatcher 的轮询、退避、单轮预算、批次与摘流配置。
 struct OutboxSettings {
     poll_interval_ms: u64,
     error_backoff_ms: u64,
@@ -102,6 +324,7 @@ pub(crate) struct LaneRuntime {
     published: AtomicU64,
     failed_rounds: AtomicU64,
     healthy: AtomicBool,
+    pending: AtomicU64,
 }
 
 impl LaneRuntime {
@@ -139,6 +362,15 @@ impl LaneRuntime {
     /// 返回：最近一轮无失败返回真。
     pub(crate) fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// 业务作用：读取最近一次观测的 lane 持久化积压。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：指标出口最近一次查询到的未确认事件数。
+    fn pending_count(&self) -> u64 {
+        self.pending.load(Ordering::Relaxed)
     }
 }
 
@@ -534,28 +766,24 @@ impl OutboxHandle {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：组件 Ready 且数据库可读时返回无业务标签的 Prometheus 文本；停机或查询失败时返回统一错误，
-    /// 禁止以缺失指标伪装健康。
+    /// 返回：组件 Ready 时返回无业务标签的 Prometheus 文本；持久化查询失败时保留 last-good
+    /// 数据，并用刷新失败与快照年龄指标公开其可信边界；停机或尚未 Ready 时返回统一错误。
     pub async fn render_prometheus(&self) -> ApplicationResult<String> {
         let snapshot = self.snapshot()?;
-        let pending = self.pending_count().await?;
-        let dead = self.dead_count().await?;
+        // 单一持久化源不可决定整个指标出口的可用性；失败状态已进入同一快照供告警判断。
+        let _ = refresh_metrics(&self.state).await;
+        let pending = self.state.metrics_pending.load(Ordering::Relaxed);
+        let dead = self.state.metrics_dead.load(Ordering::Relaxed);
+        let snapshot_age = self.state.metrics_snapshot_age_seconds();
+        let refresh_failed = u8::from(self.state.metrics_refresh_failed.load(Ordering::Acquire));
+        let refresh_failures = self.state.metrics_refresh_failures.load(Ordering::Relaxed);
         // 拒绝计数来自 naoutbox-mysql 的进程内累计:低基数、不携带租户标签,
         // 精确租户用量只经受鉴权管理查询返回。
         let quota_rejections = naoutbox_mysql::outbox_quota_rejections_total();
         // lane 标签值来自 Ready 时冻结的 lane 集合,基数有界;未分片时不输出 lane 行。
         let mut lane_lines = String::new();
         for lane in self.state.lanes() {
-            let lane_pending = MySqlOutbox::new()
-                .pending_count_channel(lane.channel_name())
-                .await
-                .map_err(|error| {
-                    outbox_source_error(
-                        ApplicationPhase::Running,
-                        "outbox lane pending count failed",
-                        error,
-                    )
-                })?;
+            let lane_pending = lane.pending_count();
             lane_lines.push_str(&format!(
                 "napp_outbox_lane_published_total{{channel=\"{channel}\"}} {published}\n\
                  napp_outbox_lane_failed_rounds_total{{channel=\"{channel}\"}} {failed}\n\
@@ -583,6 +811,15 @@ impl OutboxHandle {
              # HELP napp_outbox_dead Durable events retained in the local dead-letter set.\n\
              # TYPE napp_outbox_dead gauge\n\
              napp_outbox_dead {dead}\n\
+             # HELP napp_outbox_metrics_snapshot_age_seconds Age in seconds of the last complete durable metrics snapshot (0 before the first success).\n\
+             # TYPE napp_outbox_metrics_snapshot_age_seconds gauge\n\
+             napp_outbox_metrics_snapshot_age_seconds {snapshot_age}\n\
+             # HELP napp_outbox_metrics_refresh_failed Whether the latest durable metrics refresh attempt failed.\n\
+             # TYPE napp_outbox_metrics_refresh_failed gauge\n\
+             napp_outbox_metrics_refresh_failed {refresh_failed}\n\
+             # HELP napp_outbox_metrics_refresh_failures_total Durable metrics refresh attempts ending in a storage query failure.\n\
+             # TYPE napp_outbox_metrics_refresh_failures_total counter\n\
+             napp_outbox_metrics_refresh_failures_total {refresh_failures}\n\
              # HELP napp_outbox_tenant_quota_rejections_total Appends rejected by the per-tenant in-flight quota (no tenant labels; exact usage is an authorized management query).\n\
              # TYPE napp_outbox_tenant_quota_rejections_total counter\n\
              napp_outbox_tenant_quota_rejections_total {quota_rejections}\n\
@@ -641,6 +878,7 @@ impl OutboxHandle {
     }
 }
 
+/// 业务作用：保存 Outbox 计划、生命周期门禁、累计计数和最近一份完整持久化指标快照。
 pub(crate) struct OutboxRuntimeState {
     pending: Mutex<Option<OutboxApplicationPlan>>,
     sealed: AtomicBool,
@@ -662,6 +900,20 @@ pub(crate) struct OutboxRuntimeState {
     /// 最近一轮成功清理的 epoch 毫秒；0 表示从未成功。长期不前进即"严格治理 degraded"
     /// 信号，但清理停摆绝不反向停止 dispatcher。
     retention_last_success_ms: AtomicU64,
+    /// 指标出口最近一次从已提交事实查询到的待投递数。
+    metrics_pending: AtomicU64,
+    /// 指标出口最近一次从已提交事实查询到的死信数。
+    metrics_dead: AtomicU64,
+    /// 持久化指标年龄使用的单调时钟起点，避免系统时间校准造成快照年龄跳变。
+    metrics_clock_started: Instant,
+    /// 最近一次完整持久化指标快照相对单调时钟起点的毫秒数加一；0 表示尚未成功。
+    metrics_last_success_tick: AtomicU64,
+    /// 持久化指标刷新失败累计值。
+    metrics_refresh_failures: AtomicU64,
+    /// 最近一次持久化指标刷新是否失败。
+    metrics_refresh_failed: AtomicBool,
+    /// 串行化持久化指标查询，并缓存最近一次尝试的时间与结果。
+    metrics_refresh: AsyncMutex<OutboxMetricsRefreshGate>,
     /// 分片模式下的 lane 观测状态;未分片时为空。Ready 时一次发布,此后只读。
     lanes: Mutex<Option<Vec<Arc<LaneRuntime>>>>,
 }
@@ -692,6 +944,13 @@ impl OutboxRuntimeState {
             retention_commit_uncertain: AtomicU64::new(0),
             retention_interval_ms: AtomicU64::new(0),
             retention_last_success_ms: AtomicU64::new(0),
+            metrics_pending: AtomicU64::new(0),
+            metrics_dead: AtomicU64::new(0),
+            metrics_clock_started: Instant::now(),
+            metrics_last_success_tick: AtomicU64::new(0),
+            metrics_refresh_failures: AtomicU64::new(0),
+            metrics_refresh_failed: AtomicBool::new(false),
+            metrics_refresh: AsyncMutex::new(OutboxMetricsRefreshGate::new()),
             lanes: Mutex::new(None),
         }
     }
@@ -720,6 +979,21 @@ impl OutboxRuntimeState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .unwrap_or_default()
+    }
+
+    /// 业务作用：计算最近完整持久化指标快照的非负年龄，供出口显式标识缓存边界。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：距最近成功刷新的秒数；尚无成功快照时返回 0，并由 refresh_failed 指标共同判定。
+    fn metrics_snapshot_age_seconds(&self) -> f64 {
+        let last_success_tick = self.metrics_last_success_tick.load(Ordering::Acquire);
+        if last_success_tick == 0 {
+            return 0.0;
+        }
+        let now_ms =
+            u64::try_from(self.metrics_clock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        now_ms.saturating_sub(last_success_tick - 1) as f64 / 1_000.0
     }
 
     /// 业务作用：线性化接收唯一发布计划，禁止多个 publisher 竞争同一数据库顺序通道。
@@ -841,6 +1115,316 @@ impl OutboxRuntimeState {
     }
 }
 
+/// 持久化指标刷新门禁；同一进程的 Prometheus 与 OTLP 出口共享该状态。
+struct OutboxMetricsRefreshGate {
+    last_attempt: Option<Instant>,
+    last_succeeded: bool,
+}
+
+impl OutboxMetricsRefreshGate {
+    /// 业务作用：创建尚未访问数据库的刷新门禁，确保第一次指标请求立即取得持久化事实。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：没有历史尝试且未发布成功结果的门禁。
+    fn new() -> Self {
+        Self {
+            last_attempt: None,
+            last_succeeded: false,
+        }
+    }
+}
+
+/// 将 Outbox 已提交事实与进程计数接入唯一指标目录的兼容源。
+struct OutboxMetricsSource {
+    state: Arc<OutboxRuntimeState>,
+}
+
+impl nametrics_core::LegacyMetricsSource for OutboxMetricsSource {
+    /// 业务作用：返回 Outbox 固定 family 与有界 channel label 目录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动期登记并用于结构化样本校验的全部 Outbox descriptor。
+    fn descriptors(&self) -> &'static [&'static nametrics_core::MetricDescriptor] {
+        &OUTBOX_DESCRIPTORS
+    }
+
+    /// 业务作用：读取 Outbox 当前进程计数与最近持久化快照，不清零任何值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：始终为 `Some`，其中是进程计数、完整持久化缓存与冻结 channel lane 的当前结构化样本。
+    fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
+        let snapshot = self.state.snapshot();
+        let mut samples = vec![
+            outbox_counter(OUTBOX_ROUNDS.name, snapshot.rounds),
+            outbox_counter(OUTBOX_PUBLISHED.name, snapshot.published),
+            outbox_counter(OUTBOX_FAILED_ROUNDS.name, snapshot.failed_rounds),
+            outbox_gauge(
+                OUTBOX_PENDING.name,
+                self.state.metrics_pending.load(Ordering::Relaxed),
+            ),
+            outbox_gauge(
+                OUTBOX_DEAD.name,
+                self.state.metrics_dead.load(Ordering::Relaxed),
+            ),
+            outbox_float_gauge(
+                OUTBOX_METRICS_SNAPSHOT_AGE.name,
+                self.state.metrics_snapshot_age_seconds(),
+            ),
+            outbox_gauge(
+                OUTBOX_METRICS_REFRESH_FAILED.name,
+                u64::from(self.state.metrics_refresh_failed.load(Ordering::Acquire)),
+            ),
+            outbox_counter(
+                OUTBOX_METRICS_REFRESH_FAILURES.name,
+                self.state.metrics_refresh_failures.load(Ordering::Relaxed),
+            ),
+            outbox_counter(
+                OUTBOX_QUOTA_REJECTIONS.name,
+                naoutbox_mysql::outbox_quota_rejections_total(),
+            ),
+            outbox_counter(OUTBOX_RETENTION_ROUNDS.name, snapshot.retention_rounds),
+            outbox_counter(OUTBOX_RETENTION_ARCHIVED.name, snapshot.retention_archived),
+            outbox_counter(
+                OUTBOX_RETENTION_DELETED_DISPATCHED.name,
+                snapshot.retention_deleted_dispatched,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_DELETED_DEAD.name,
+                snapshot.retention_deleted_dead,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_FAILED_ROUNDS.name,
+                snapshot.retention_failed_rounds,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_CLAIM_CONTENDED.name,
+                snapshot.retention_claim_contended,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_BUDGET_EXHAUSTED.name,
+                snapshot.retention_budget_exhausted,
+            ),
+            outbox_gauge(
+                OUTBOX_RETENTION_OLDEST_AGE.name,
+                snapshot.retention_oldest_candidate_age_ms,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_LOCK_CONTENTION.name,
+                snapshot.retention_lock_contention,
+            ),
+            outbox_counter(
+                OUTBOX_RETENTION_COMMIT_UNCERTAIN.name,
+                snapshot.retention_commit_uncertain,
+            ),
+            outbox_gauge(
+                OUTBOX_RETENTION_INTERVAL.name,
+                snapshot.retention_interval_ms,
+            ),
+            outbox_gauge(
+                OUTBOX_RETENTION_LAST_SUCCESS.name,
+                snapshot.retention_last_success_ms,
+            ),
+        ];
+        for lane in self.state.lanes() {
+            let labels = vec![("channel", lane.channel_name().to_owned())];
+            samples.push(nametrics_core::MetricSample {
+                name: OUTBOX_LANE_PUBLISHED.name,
+                labels: labels.clone(),
+                value: nametrics_core::MetricValue::Counter(lane.published_total()),
+            });
+            samples.push(nametrics_core::MetricSample {
+                name: OUTBOX_LANE_FAILED.name,
+                labels: labels.clone(),
+                value: nametrics_core::MetricValue::Counter(lane.failed_rounds_total()),
+            });
+            samples.push(nametrics_core::MetricSample {
+                name: OUTBOX_LANE_HEALTHY.name,
+                labels: labels.clone(),
+                value: nametrics_core::MetricValue::Gauge(f64::from(lane.is_healthy())),
+            });
+            samples.push(nametrics_core::MetricSample {
+                name: OUTBOX_LANE_PENDING.name,
+                labels,
+                value: nametrics_core::MetricValue::Gauge(lane.pending_count() as f64),
+            });
+        }
+        Some(samples)
+    }
+
+    /// 业务作用：保留旧 trait 入口；统一 hub 对本源始终使用非空结构化快照渲染。
+    ///
+    /// 参数说明：
+    /// - `_output`: 兼容 trait 的文本缓冲区；本源不直接写入。
+    ///
+    /// 返回：无；文本出口由统一 hub 使用 `snapshot()` 结果生成。
+    fn render_prometheus(&self, _output: &mut String) {}
+}
+
+/// 业务作用：构造无 label 的 Outbox 单调计数样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `value`: 当前累计值。
+///
+/// 返回：不含业务身份的 counter 样本。
+fn outbox_counter(name: &'static str, value: u64) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels: Vec::new(),
+        value: nametrics_core::MetricValue::Counter(value),
+    }
+}
+
+/// 业务作用：构造无 label 的 Outbox 当前状态样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `value`: 最近观测值。
+///
+/// 返回：不含业务身份的 gauge 样本。
+fn outbox_gauge(name: &'static str, value: u64) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels: Vec::new(),
+        value: nametrics_core::MetricValue::Gauge(value as f64),
+    }
+}
+
+/// 业务作用：构造保留小数精度的无 label Outbox gauge 样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `value`: 当前浮点状态值。
+///
+/// 返回：不含业务身份的 gauge 样本。
+fn outbox_float_gauge(name: &'static str, value: f64) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels: Vec::new(),
+        value: nametrics_core::MetricValue::Gauge(value),
+    }
+}
+
+/// 业务作用：按独立低频窗口从 Outbox 已提交持久化事实刷新 pending/dead gauge。
+///
+/// Prometheus 与 OTLP 共享一次串行刷新；窗口内直接复用缓存，避免导出周期和 lane 数量相乘形成
+/// 数据库查询风暴。全部查询成功后才一次发布新值，任一查询失败都保留上一份完整快照。
+///
+/// 参数说明：
+/// - `state`: 已冻结 lane 集合与快照原子单元。
+///
+/// 返回：缓存仍有效或全局和全部 lane 查询成功时返回成功；最近一次刷新失败且仍在短重试窗口时
+/// 返回稳定错误，数据库失败时保留上一份完整快照并更新失败观测值。
+pub(crate) async fn refresh_metrics(state: &Arc<OutboxRuntimeState>) -> ApplicationResult<()> {
+    refresh_metrics_with_policy(state, false).await
+}
+
+/// 业务作用：停机前忽略刷新窗口并读取最后一份持久化事实，供数据库释放后的最终导出使用。
+///
+/// 参数说明：
+/// - `state`: 已冻结 lane 集合与快照原子单元。
+///
+/// 返回：完整查询并发布成功时返回成功；数据库失败时保留上一份完整快照并返回统一错误。
+async fn force_refresh_metrics(state: &Arc<OutboxRuntimeState>) -> ApplicationResult<()> {
+    refresh_metrics_with_policy(state, true).await
+}
+
+/// 业务作用：串行裁决持久化指标应复用缓存还是访问数据库，并原子发布完整查询结果。
+///
+/// 参数说明：
+/// - `state`: 已冻结 lane 集合、缓存与刷新门禁。
+/// - `force`: 为真时忽略冷却窗口，用于依赖释放前的最终快照。
+///
+/// 返回：缓存可复用或新查询完整成功时返回成功；冷却中的失败状态或数据库查询失败返回统一错误。
+async fn refresh_metrics_with_policy(
+    state: &Arc<OutboxRuntimeState>,
+    force: bool,
+) -> ApplicationResult<()> {
+    let mut gate = state.metrics_refresh.lock().await;
+    let refresh_interval = if gate.last_succeeded {
+        OUTBOX_METRICS_REFRESH_INTERVAL
+    } else {
+        OUTBOX_METRICS_FAILURE_RETRY_INTERVAL
+    };
+    if !force
+        && gate
+            .last_attempt
+            .is_some_and(|last| last.elapsed() < refresh_interval)
+    {
+        return if gate.last_succeeded {
+            Ok(())
+        } else {
+            Err(outbox_error(
+                ApplicationPhase::Running,
+                "outbox metrics snapshot refresh remains unavailable during the retry interval",
+            ))
+        };
+    }
+
+    let result = query_and_publish_metrics(state).await;
+    gate.last_attempt = Some(Instant::now());
+    gate.last_succeeded = result.is_ok();
+    if result.is_ok() {
+        // 完整查询发布后再清除失败态，确保 age=0 与 last-good 数值来自同一成功批次。
+        let success_tick = u64::try_from(state.metrics_clock_started.elapsed().as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        state
+            .metrics_last_success_tick
+            .store(success_tick, Ordering::Release);
+        state.metrics_refresh_failed.store(false, Ordering::Release);
+    } else {
+        state
+            .metrics_refresh_failures
+            .fetch_add(1, Ordering::Relaxed);
+        state.metrics_refresh_failed.store(true, Ordering::Release);
+    }
+    result
+}
+
+/// 业务作用：查询全局与各 lane 的持久化计数，并仅在全部成功后发布同一批次快照。
+///
+/// 参数说明：
+/// - `state`: 已冻结 lane 集合与待更新的原子指标单元。
+///
+/// 返回：全部数据库计数成功时发布并返回成功；任一查询失败时不改变既有缓存。
+async fn query_and_publish_metrics(state: &Arc<OutboxRuntimeState>) -> ApplicationResult<()> {
+    let outbox = MySqlOutbox::new();
+    let (pending, dead) =
+        tokio::try_join!(outbox.pending_count(), outbox.dead_count()).map_err(|error| {
+            outbox_source_error(
+                ApplicationPhase::Running,
+                "outbox metrics snapshot query failed",
+                error,
+            )
+        })?;
+    let lanes = state.lanes();
+    let mut lane_pending = Vec::with_capacity(lanes.len());
+    for lane in &lanes {
+        let value = outbox
+            .pending_count_channel(lane.channel_name())
+            .await
+            .map_err(|error| {
+                outbox_source_error(
+                    ApplicationPhase::Running,
+                    "outbox lane metrics snapshot query failed",
+                    error,
+                )
+            })?;
+        lane_pending.push(value);
+    }
+    state.metrics_pending.store(pending, Ordering::Relaxed);
+    state.metrics_dead.store(dead, Ordering::Relaxed);
+    for (lane, value) in lanes.iter().zip(lane_pending) {
+        lane.pending.store(value, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// 业务作用：在 Application 生命周期内建立、监督并逆序关闭 Outbox dispatcher 与清理循环。
 pub(crate) struct OutboxComponent {
     settings: Option<OutboxSettings>,
     contributor: Option<ReadinessContributor>,
@@ -890,6 +1474,20 @@ impl ApplicationComponent for OutboxComponent {
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let settings = read_outbox_settings(context.application(), ApplicationPhase::Start)?;
+            let state = context.application().outbox_runtime();
+            context
+                .application()
+                .metrics_hub()
+                .register_legacy_source(Arc::new(OutboxMetricsSource { state }))
+                .map_err(|conflict| {
+                    outbox_error(
+                        ApplicationPhase::Start,
+                        format!(
+                            "outbox metric descriptor `{}` conflicts with an existing registration",
+                            conflict.name
+                        ),
+                    )
+                })?;
             let contributor = context.application().register_readiness(
                 ComponentId::Outbox,
                 Arc::<str>::from("outbox:dispatcher"),
@@ -1009,6 +1607,7 @@ impl ApplicationComponent for OutboxComponent {
                                 published: AtomicU64::new(0),
                                 failed_rounds: AtomicU64::new(0),
                                 healthy: AtomicBool::new(true),
+                                pending: AtomicU64::new(0),
                             })
                         })
                         .collect();
@@ -1086,6 +1685,7 @@ impl ApplicationComponent for OutboxComponent {
     }
 }
 
+/// 业务作用：在数据库释放前刷新最终事实并关闭新的 Outbox 投递轮次。
 struct OutboxShutdown {
     state: Arc<OutboxRuntimeState>,
 }
@@ -1100,14 +1700,20 @@ impl ShutdownAction for OutboxShutdown {
         "outbox-runtime"
     }
 
-    /// 业务作用：先关闭新投递轮次，再允许 transport 和数据库按反向顺序释放。
+    /// 业务作用：在数据库释放前保存最后一份完整持久化事实，再关闭新投递轮次。
     ///
     /// 参数说明：
-    /// - `_context`：Runner 共享停机预算；本动作只发布内存保护态。
+    /// - `_context`：Runner 共享停机预算；本动作不创建独立超时。
     ///
-    /// 返回：保护态发布后立即成功。
+    /// 返回：即使最终指标读取失败也发布保护态并成功；失败只保留上一份完整快照，不能阻断业务停机。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
+            // 先在数据库仍可用时发布最终缓存，使稍后执行的 telemetry flush 不依赖已释放连接。
+            if let Err(error) = force_refresh_metrics(&self.state).await {
+                tracing::warn!(
+                    "outbox final metric refresh failed; retaining the last complete snapshot: {error}"
+                );
+            }
             self.state.stop();
             Ok(())
         })

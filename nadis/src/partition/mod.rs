@@ -320,7 +320,7 @@ async fn build_group_layout(
 
 // ─────────────────────────────────────────────────────────────────────────
 // 三、事件信封(`Envelope` = **标准 serde JSON**,原实现↔Rust 双向互通的线格式)。
-// 产品决定(2026-06-14):**只支持标准 JSON,不支持 Jackson default-typing=true**(那套
+// 线格式只支持标准 JSON，不支持 Jackson default-typing=true（那套
 // `["类名",{}]` 多态字节 codec = codec-jackson-compat,已撤销不交付)。原实现 端关闭
 // default-typing(标准 JSON)即可:原实现 写 → Rust 消费、Rust 写 → 原实现 消费,均走本 Envelope。
 // 原实现V1 / RustV2 两 profile 的 partition **都用这同一套标准 JSON Envelope**(profile 只影响
@@ -360,7 +360,7 @@ pub struct Envelope {
     /// `serde_json::Value` 原生把 `null` 解成 `Value::Null`;`#[serde(default)]` 覆盖字段缺省。
     #[serde(default)]
     pub data: serde_json::Value,
-    /// 透传上下文(traceId 等)。**产品决定(2026-06-14):Rust 不做 原实现 的 thread-local/MDC 隐式
+    /// 透传上下文(traceId 等)。Rust 不做 原实现 的 thread-local/MDC 隐式
     /// 透传**——需要传上下文就**显式**放进业务的 `data` 或显式参数。本字段仅保留 **wire 兼容**(与
     /// 原实现 标准 JSON envelope 互通),框架**不自动捕获/注入**。
     /// Option 原生:缺省/null → None。
@@ -445,12 +445,12 @@ impl PreparedPartition {
     /// - `client`: 分区框架使用的 Redis 客户端。
     /// - `lock`: 分区 owner 竞争使用的分布式锁组件。
     pub async fn prepare(client: Arc<RedisClient>, lock: Arc<DistributedLock>) -> Result<Self> {
-        // 产品决定(2026-06-14):partition 的线格式是**标准 serde JSON**(`Envelope`),与 原实现
+        // partition 的线格式是**标准 serde JSON**(`Envelope`),与 原实现
         // (default-typing=false 标准 JSON)双向互通——原实现 写 Rust 消费、Rust 写 原实现 消费均可。
         // 故 原实现V1 / RustV2 **两 profile 的 partition 都支持**(不再因缺少 jackson-compat 而拒绝
         // 原实现V1);profile 仅影响 fencing:RustV2 用 V2 fence stamp(更强,对 原实现 不可见),原实现V1
         // 用 V1 holds 双检查 + 裸 XACK(与 原实现 锁层一致)。**不支持的只有 Jackson default-typing=true**
-        // 那套多态字节(已声明)。⚠ 跨语言共享 stream 前应做 golden-bytes 验证 原实现 标准 JSON
+        // 那套多态字节。跨语言共享 stream 前必须验证 原实现 标准 JSON
         // envelope 字段与本 `Envelope` 对齐(topic/event/data/passthrough + `data` field 名)。
         let cfg = client.config().partition.clone();
         // enabled 接线(此前 enabled=false 仍创建 stream/group

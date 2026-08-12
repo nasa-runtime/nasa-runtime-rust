@@ -29,6 +29,13 @@ let app = crate::__mvc::register_all(axum::Router::new());
 - 按 feature 提供 auth gate、请求/响应加解密、replay、密钥运行时和低基数安全指标；
 - 提升常用 Axum Web 类型，并通过 `__private` 为宏展开桥接依赖。
 
+启用安全能力后，`SecurityMetrics::render_prometheus()` 提供文本出口；需要接入统一 OTLP 或其它
+provider-neutral 出口时，`SecurityMetrics::structured_snapshot()` 返回同源的
+`SecurityMetricSample`。Counter、Gauge 与 Histogram 保留原 family、label 和累计语义，读取不会
+清零 registry；并发观测按 count 先于 bucket 的顺序发布，跨写入抓取会把尚未可见的有限 bucket
+暂归入 `+Inf`，bucket 总和始终与 count 一致并在下一次抓取自然收敛。调用方仍须对 descriptor
+冲突和 label 基数负责。
+
 端口监听、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，不属于 `naweb`。
 
 业务代码不要依赖 `naweb::__private`，它只服务于宏展开。
@@ -781,7 +788,7 @@ let health = runtime.health();
 
 - TLS 必须始终启用，应用层加密不替代 TLS、授权、限流和审计。
 - modern-v2 使用请求/响应方向隔离 key、12 字节随机 nonce、规范化 AAD 和共享重放存储。
-- legacy-v1 只用于迁移；RSA 私钥路径受未修复依赖风险影响，默认能力门关闭。
+- legacy-v1 只用于迁移；RSA 私钥路径的已知依赖风险尚未消除，默认能力门关闭。
 - CPU 密集工作经有界 blocking 执行器；超时或取消不会提前释放仍在运行闭包的 permit。
 - 请求和响应同时受单请求上限与全进程加权内存预算限制。
 - 错误、日志、指标和调试输出不得包含密钥、token、明文或完整密文。

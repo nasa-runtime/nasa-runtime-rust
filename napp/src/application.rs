@@ -196,6 +196,9 @@ pub(crate) struct ApplicationInner {
     /// 遥测组件 Start 发布的有界 span 导出器;span 生产者(如 Web trace 中间件)据此非阻塞入队。
     #[cfg(feature = "telemetry")]
     telemetry_exporter: OnceLock<std::sync::Arc<natelemetry::BoundedSpanExporter>>,
+    /// OTLP 指标出口的进程级统计；只在显式配置指标端点时发布。
+    #[cfg(feature = "telemetry")]
+    otlp_metrics_state: OnceLock<std::sync::Arc<crate::telemetry::OtlpMetricsState>>,
     web_addr: OnceLock<SocketAddr>,
     /// Web 组件一次写入、能力句柄只读访问的运行时元数据和请求计数器。
     #[cfg(feature = "web")]
@@ -236,6 +239,12 @@ pub(crate) struct ApplicationInner {
     /// 调度器启动结果和可选选主对象的只读发布状态。
     #[cfg(feature = "scheduling")]
     scheduling_runtime: Arc<crate::capabilities::SchedulingRuntimeState>,
+    /// UserHook 计划、Prepare 发布和运行期强类型访问共用的保序执行器状态。
+    #[cfg(feature = "partition")]
+    partition_runtime: Arc<crate::partition::PartitionRuntimeState>,
+    /// UserHook Router 计划、Ready listener 发布和运行期观察共用的 gRPC 状态。
+    #[cfg(feature = "grpc-experimental")]
+    grpc_runtime: Arc<crate::grpc::GrpcRuntimeState>,
     /// Kafka client 能力、UserHook consumer 定制和指标桥的受控发布状态。
     #[cfg(feature = "kafka")]
     kafka_runtime: Arc<crate::kafka::KafkaRuntimeState>,
@@ -310,6 +319,8 @@ impl Application {
                 migrations: StdMutex::new(Some(Vec::new())),
                 #[cfg(feature = "telemetry")]
                 telemetry_exporter: OnceLock::new(),
+                #[cfg(feature = "telemetry")]
+                otlp_metrics_state: OnceLock::new(),
                 web_addr: OnceLock::new(),
                 #[cfg(feature = "web")]
                 web_runtime: Arc::new(crate::web_handle::WebRuntimeState::new()),
@@ -335,6 +346,10 @@ impl Application {
                 ),
                 #[cfg(feature = "scheduling")]
                 scheduling_runtime: Arc::new(crate::capabilities::SchedulingRuntimeState::new()),
+                #[cfg(feature = "partition")]
+                partition_runtime: Arc::new(crate::partition::PartitionRuntimeState::new()),
+                #[cfg(feature = "grpc-experimental")]
+                grpc_runtime: Arc::new(crate::grpc::GrpcRuntimeState::new()),
                 #[cfg(feature = "kafka")]
                 kafka_runtime: Arc::new(crate::kafka::KafkaRuntimeState::new()),
                 #[cfg(feature = "saga")]
@@ -847,6 +862,26 @@ impl Application {
         })
     }
 
+    /// 业务作用：由遥测组件发布唯一 OTLP 指标出口状态，供管理面读取导出结果。
+    ///
+    /// 参数说明：
+    /// - `state`: 导出任务与 Application 共享的原子计数状态。
+    ///
+    /// 返回：首次发布成功；重复发布以 Telemetry Start 错误拒绝。
+    #[cfg(feature = "telemetry")]
+    pub(crate) fn publish_otlp_metrics_state(
+        &self,
+        state: std::sync::Arc<crate::telemetry::OtlpMetricsState>,
+    ) -> ApplicationResult<()> {
+        self.inner.otlp_metrics_state.set(state).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Telemetry,
+                ApplicationPhase::Start,
+                "OTLP metrics state was already published",
+            )
+        })
+    }
+
     /// 业务作用：获取遥测组件发布的有界 span 导出器;未声明遥测组件或未启用时返回 `None`。
     ///
     /// # 参数
@@ -876,6 +911,19 @@ impl Application {
             .telemetry_exporter
             .get()
             .map(|exporter| exporter.snapshot())
+    }
+
+    /// 业务作用：返回 OTLP 指标批次、样本与失败摘要，不暴露 endpoint 或 label 值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：显式配置 `telemetry.otlp_metrics_endpoint` 时返回当前累计值；未启用时返回 `None`。
+    #[cfg(feature = "telemetry")]
+    pub fn otlp_metrics_snapshot(&self) -> Option<crate::telemetry::OtlpMetricsSnapshot> {
+        self.inner
+            .otlp_metrics_state
+            .get()
+            .map(|state| state.snapshot())
     }
 
     /// 业务作用：显式记录一个业务子 span。
@@ -1263,6 +1311,138 @@ impl Application {
             Arc::clone(&self.inner.scheduling_runtime),
             Arc::clone(&self.inner.state),
         ))
+    }
+
+    /// 业务作用：在 Service UserHook 内提交本进程唯一的保序执行器容量计划。
+    ///
+    /// 本入口只移交纯参数，不创建 worker。组件会在 UserHook 成功结束后的 Prepare 阶段构造并
+    /// 发布执行器，因此 Hook 后续失败不会遗留脱离 Application 所有权的后台任务。
+    ///
+    /// 参数说明：
+    /// - `plan`: 已完成容量与停机预算校验的执行器计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `partition` 且首次提交时成功；重复、晚到或 Batch 调用返回
+    /// 阶段错误。
+    #[cfg(feature = "partition")]
+    pub fn configure_partition(
+        &self,
+        plan: crate::partition::PartitionApplicationPlan,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("partition plan configuration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::UserHook,
+                "partition plans are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::UserHook,
+            "partition plan configuration",
+        )?;
+        self.inner.partition_runtime.configure(plan)
+    }
+
+    /// 业务作用：取得由 Application 唯一拥有且仍开放准入的保序执行器业务句柄。
+    ///
+    /// Prepare 发布后即可调用，因此静态工厂与 initializer 三阶段能使用同一容器句柄；停机开始后
+    /// 新调用会被拒绝，已经取得的句柄仍由执行器自身的 ShuttingDown 错误阻止新任务。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件、Prepare 已完成且执行器仍接受任务时返回共享句柄；否则返回明确阶段错误。
+    #[cfg(feature = "partition")]
+    pub fn partition(&self) -> ApplicationResult<crate::partition::PartitionApplicationHandle> {
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::Running,
+            "partition executor access",
+        )?;
+        if matches!(
+            self.state(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::Running,
+                "partition executor access is closed during application shutdown",
+            ));
+        }
+        self.inner.partition_runtime.executor()
+    }
+
+    /// 业务作用：把保序执行器的计划与发布状态借给唯一生命周期组件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享状态所有权副本；仅组件内部用于 Prepare 线性化消费与发布。
+    #[cfg(feature = "partition")]
+    pub(crate) fn partition_runtime(&self) -> Arc<crate::partition::PartitionRuntimeState> {
+        Arc::clone(&self.inner.partition_runtime)
+    }
+
+    /// 业务作用：在 Service UserHook 内提交本进程唯一的 gRPC Router 装配计划。
+    ///
+    /// 本入口不构造 Router、不绑定端口。组件在 Prepare 封口计划，并在全部 initializer 成功后的
+    /// Ready 阶段执行工厂，因此业务初始化失败时不会产生提前接流的 listener。
+    ///
+    /// 参数说明：
+    /// - `plan`: 只持有一次性 Router 工厂、不含运行副作用的装配计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `grpc` 且首次提交时成功；重复、晚到或 Batch 调用返回阶段错误。
+    #[cfg(feature = "grpc-experimental")]
+    pub fn configure_grpc(&self, plan: crate::grpc::GrpcApplicationPlan) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("gRPC application plan configuration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Grpc,
+                ApplicationPhase::UserHook,
+                "gRPC application plans are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::Grpc,
+            ApplicationPhase::UserHook,
+            "gRPC application plan configuration",
+        )?;
+        self.inner.grpc_runtime.configure(plan)
+    }
+
+    /// 业务作用：取得已由 Ready 阶段发布且不含 shutdown 权限的 gRPC listener 观察句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件且 listener 已绑定时返回地址、状态、连接、accept 失败计数与持续时长视图；
+    /// 否则返回阶段错误。
+    #[cfg(feature = "grpc-experimental")]
+    pub fn grpc(&self) -> ApplicationResult<nagrpc::GrpcServerObserver> {
+        self.ensure_component_declared(
+            ComponentId::Grpc,
+            ApplicationPhase::Running,
+            "gRPC listener access",
+        )?;
+        self.inner.grpc_runtime.observer()
+    }
+
+    /// 业务作用：把 gRPC 计划与观察发布状态借给唯一生命周期组件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享状态所有权副本；仅用于 Prepare 线性消费和 Ready 发布。
+    #[cfg(feature = "grpc-experimental")]
+    pub(crate) fn grpc_runtime(&self) -> Arc<crate::grpc::GrpcRuntimeState> {
+        Arc::clone(&self.inner.grpc_runtime)
     }
 
     /// 业务作用：在 UserHook 内提交本进程唯一的 Saga 运行计划，交由组件执行 Ready 门禁和托管。
@@ -1844,7 +2024,9 @@ impl Application {
         feature = "web",
         feature = "ws",
         feature = "nacos-discovery",
-        feature = "scheduling"
+        feature = "scheduling",
+        feature = "partition",
+        feature = "grpc-experimental"
     ))]
     pub(crate) fn ensure_component_declared(
         &self,
@@ -2021,14 +2203,37 @@ impl Application {
         Arc::clone(&self.inner.metrics_hub)
     }
 
-    /// 业务作用：把一个兼容领域源(自持 registry、自渲染 Prometheus)并入进程级统一 hub。
+    /// 业务作用：在统一文本或 OTLP 快照前请求刷新已提交外部事实；各源按自身低频窗口复用缓存。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：所有已声明外部源的缓存可用或完整发布新快照时成功；查询失败时返回对应组件错误、
+    /// 保留上一份值并更新源级失败与快照年龄指标，调用出口不得据此丢弃无关指标族。
+    #[cfg(any(feature = "telemetry", feature = "web"))]
+    pub(crate) async fn refresh_metric_sources(&self) -> ApplicationResult<()> {
+        #[cfg(feature = "outbox")]
+        if self
+            .ensure_component_declared(
+                ComponentId::Outbox,
+                ApplicationPhase::Running,
+                "outbox metric refresh",
+            )
+            .is_ok()
+        {
+            crate::outbox::refresh_metrics(&self.outbox_runtime()).await?;
+        }
+        Ok(())
+    }
+
+    /// 业务作用：把一个自持 registry 的兼容领域源并入进程级统一 hub。
     ///
     /// 供 `nasa` 门面层把 **nafana** 等 napp 不直接依赖的领域接入同一 `/metrics`:门面构造领域源后
     /// 在业务 UserHook 调用本方法,其族即随框架 `/metrics` 一并渲染,并纳入 descriptor 冲突审计。
     ///
     /// # 参数
     ///
-    /// - `source`:领域自渲染源;其 descriptor 会并入统一 catalog,值仍由源自渲染。
+    /// - `source`: 领域指标源；descriptor 并入统一 catalog，结构化快照供 Prometheus 与 OTLP 共用，
+    ///   空快照旧源只回落到自身文本入口。
     ///
     /// # 错误
     ///
@@ -2778,6 +2983,8 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::Cache => 16,
         ComponentId::Saga => 17,
         ComponentId::Outbox => 18,
+        ComponentId::Partition => 19,
+        ComponentId::Grpc => 20,
     }
 }
 
@@ -2786,7 +2993,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 19] = [
+    const ALL: [ComponentId; 21] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
@@ -2806,6 +3013,8 @@ const _: () = {
         ComponentId::Cache,
         ComponentId::Saga,
         ComponentId::Outbox,
+        ComponentId::Partition,
+        ComponentId::Grpc,
     ];
     let mut i = 0;
     while i < ALL.len() {

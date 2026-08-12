@@ -32,6 +32,142 @@ const DEFAULT_TIMER_OPERATION_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMER_INTERVAL_MS: u64 = 60_000;
 const MAX_TIMER_FAILURE_THRESHOLD: u32 = 100;
 
+#[cfg(feature = "saga-redis-stream")]
+macro_rules! saga_stream_metric {
+    ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr) => {
+        static $ident: nametrics_core::MetricDescriptor = nametrics_core::MetricDescriptor {
+            name: $name,
+            help: $help,
+            unit: "",
+            kind: $kind,
+            label_names: $labels,
+            histogram_bounds: &[],
+        };
+    };
+}
+
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_ACKED,
+    "napp_saga_stream_acked_total",
+    "Redis Stream entries acknowledged after durable handling.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_DEAD_LETTERED,
+    "napp_saga_stream_dead_lettered_total",
+    "Redis Stream entries durably moved to the dead-letter destination.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_RETAINED,
+    "napp_saga_stream_retained_total",
+    "Redis Stream entries retained for a later retry.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_RECLAIMED,
+    "napp_saga_stream_reclaimed_total",
+    "Pending Redis Stream entries reclaimed by the managed consumer.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_DELETED_PENDING,
+    "napp_saga_stream_deleted_pending_total",
+    "Pending entries found deleted before acknowledgement.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_AUTH_REJECTED,
+    "napp_saga_stream_auth_rejected_total",
+    "Stream messages rejected by the transport authorization boundary.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_FAILED_ROUNDS,
+    "napp_saga_stream_failed_rounds_total",
+    "Managed Redis Stream polling rounds ending in failure.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_HANDLED,
+    "napp_saga_stream_handled_total",
+    "Redis Stream messages whose handler reached a classified result.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_HANDLER_MICROS,
+    "napp_saga_stream_handler_micros_sum",
+    "Cumulative handler duration in microseconds.",
+    nametrics_core::MetricKind::Counter,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_PENDING,
+    "napp_saga_stream_pending",
+    "Current pending-entry count for the managed consumer.",
+    nametrics_core::MetricKind::Gauge,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_OLDEST_PEL_AGE,
+    "napp_saga_stream_oldest_pel_age_ms",
+    "Age of the oldest pending entry in milliseconds.",
+    nametrics_core::MetricKind::Gauge,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_HEALTHY,
+    "napp_saga_stream_healthy",
+    "Whether the latest managed polling round was healthy.",
+    nametrics_core::MetricKind::Gauge,
+    &["stream", "group", "consumer"]
+);
+#[cfg(feature = "saga-redis-stream")]
+saga_stream_metric!(
+    STREAM_PUBLISHER_DUPLICATES,
+    "napp_saga_stream_publisher_duplicate_hints_total",
+    "Publisher responses classified as duplicate delivery hints.",
+    nametrics_core::MetricKind::Counter,
+    &[]
+);
+
+#[cfg(feature = "saga-redis-stream")]
+static SAGA_STREAM_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 13] = [
+    &STREAM_ACKED,
+    &STREAM_DEAD_LETTERED,
+    &STREAM_RETAINED,
+    &STREAM_RECLAIMED,
+    &STREAM_DELETED_PENDING,
+    &STREAM_AUTH_REJECTED,
+    &STREAM_FAILED_ROUNDS,
+    &STREAM_HANDLED,
+    &STREAM_HANDLER_MICROS,
+    &STREAM_PENDING,
+    &STREAM_OLDEST_PEL_AGE,
+    &STREAM_HEALTHY,
+    &STREAM_PUBLISHER_DUPLICATES,
+];
+
 /// 业务作用：选择 Saga 默认数据源在 Application 生命周期中的建立时机。
 ///
 /// 常规服务使用 `Application`，由 DB 组件在 Start 阶段按统一配置建池；需要先创建隔离库的工具型
@@ -48,6 +184,7 @@ pub(crate) enum SagaDatabaseBootstrap {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// 业务作用：承载 Saga 受管运行时的数据库引导、轮询、退避、超时与摘流配置。
 struct SagaSettings {
     database_bootstrap: SagaDatabaseBootstrap,
     timer_poll_interval_ms: u64,
@@ -87,6 +224,7 @@ pub(crate) fn database_bootstrap(
     Ok(read_saga_settings(application, phase)?.database_bootstrap)
 }
 
+/// 业务作用：把受管 Orchestrator 与 durable timer 的唯一所有者身份绑定为不可拆分计划。
 struct OrchestratorPlan {
     runtime: Arc<Orchestrator>,
     timer_owner: String,
@@ -498,6 +636,7 @@ impl SagaHandle {
     }
 }
 
+/// 业务作用：保存 Saga 计划、生命周期门禁和 Ready 后发布的只读运行时能力。
 pub(crate) struct SagaRuntimeState {
     pending: Mutex<Option<SagaApplicationPlan>>,
     sealed: AtomicBool,
@@ -636,6 +775,7 @@ impl SagaRuntimeState {
     }
 }
 
+/// 业务作用：在 Application 生命周期内建立、监督并逆序关闭 Saga 运行时。
 pub(crate) struct SagaComponent {
     settings: Option<SagaSettings>,
     contributor: Option<ReadinessContributor>,
@@ -704,6 +844,20 @@ impl ApplicationComponent for SagaComponent {
             // 一次性置绿中和,不影响未启用者。
             #[cfg(feature = "saga-redis-stream")]
             {
+                let state = context.application().saga_runtime();
+                context
+                    .application()
+                    .metrics_hub()
+                    .register_legacy_source(Arc::new(SagaStreamMetricsSource { state }))
+                    .map_err(|conflict| {
+                        saga_error(
+                            ApplicationPhase::Start,
+                            format!(
+                                "saga stream metric descriptor `{}` conflicts with an existing registration",
+                                conflict.name
+                            ),
+                        )
+                    })?;
                 self.stream_contributor = Some(context.application().register_readiness(
                     ComponentId::Saga,
                     Arc::<str>::from("saga:redis-stream"),
@@ -733,7 +887,7 @@ impl ApplicationComponent for SagaComponent {
             let state = application.saga_runtime();
             #[cfg_attr(not(feature = "saga-redis-stream"), allow(unused_mut))]
             let mut plan = state.take_plan()?;
-            // Redis transport 属组件生命周期资产,不随计划进入只读能力发布;必须在
+            // Redis transport 属组件生命周期所有权,不随计划进入只读能力发布;必须在
             // publish 前取走。
             #[cfg(feature = "saga-redis-stream")]
             let redis_transport = plan.redis_transport.take();
@@ -893,6 +1047,7 @@ impl ApplicationComponent for SagaComponent {
     }
 }
 
+/// 业务作用：在依赖资源释放前关闭新的 Saga 能力访问，维持逆序停机边界。
 struct SagaShutdown {
     state: Arc<SagaRuntimeState>,
 }
@@ -1013,6 +1168,138 @@ impl SagaRuntimeState {
             .get()
             .cloned()
             .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+}
+
+/// 将受管 Redis Streams 进程计数接入唯一指标目录的兼容源。
+#[cfg(feature = "saga-redis-stream")]
+struct SagaStreamMetricsSource {
+    state: Arc<SagaRuntimeState>,
+}
+
+#[cfg(feature = "saga-redis-stream")]
+impl nametrics_core::LegacyMetricsSource for SagaStreamMetricsSource {
+    /// 业务作用：返回 Saga Streams 固定 family 与冻结 transport label 目录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动期登记并用于结构化样本校验的全部 Streams descriptor。
+    fn descriptors(&self) -> &'static [&'static nametrics_core::MetricDescriptor] {
+        &SAGA_STREAM_DESCRIPTORS
+    }
+
+    /// 业务作用：读取每个冻结 consumer 的当前原子快照，不清零计数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：始终为 `Some`，其中是按 stream、group、consumer 标识的计数器与 gauge 当前值。
+    fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
+        let runtimes = self.state.stream_runtimes();
+        let mut samples =
+            Vec::with_capacity(runtimes.len() * 12 + usize::from(!runtimes.is_empty()));
+        for runtime in runtimes.iter() {
+            let labels = vec![
+                ("stream", runtime.stream.clone()),
+                ("group", runtime.group.clone()),
+                ("consumer", runtime.consumer.clone()),
+            ];
+            for (name, value) in [
+                (STREAM_ACKED.name, runtime.acked.load(Ordering::Relaxed)),
+                (
+                    STREAM_DEAD_LETTERED.name,
+                    runtime.dead_lettered.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_RETAINED.name,
+                    runtime.retained.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_RECLAIMED.name,
+                    runtime.reclaimed.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_DELETED_PENDING.name,
+                    runtime.deleted_pending.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_AUTH_REJECTED.name,
+                    runtime.auth_rejected.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_FAILED_ROUNDS.name,
+                    runtime.failed_rounds.load(Ordering::Relaxed),
+                ),
+                (STREAM_HANDLED.name, runtime.handled.load(Ordering::Relaxed)),
+                (
+                    STREAM_HANDLER_MICROS.name,
+                    runtime.handler_micros_sum.load(Ordering::Relaxed),
+                ),
+            ] {
+                samples.push(stream_metric_sample(
+                    name,
+                    labels.clone(),
+                    nametrics_core::MetricValue::Counter(value),
+                ));
+            }
+            for (name, value) in [
+                (STREAM_PENDING.name, runtime.pending.load(Ordering::Relaxed)),
+                (
+                    STREAM_OLDEST_PEL_AGE.name,
+                    runtime.oldest_pel_age_ms.load(Ordering::Relaxed),
+                ),
+                (
+                    STREAM_HEALTHY.name,
+                    u64::from(runtime.healthy.load(Ordering::Relaxed)),
+                ),
+            ] {
+                samples.push(stream_metric_sample(
+                    name,
+                    labels.clone(),
+                    nametrics_core::MetricValue::Gauge(value as f64),
+                ));
+            }
+        }
+        if !runtimes.is_empty() {
+            samples.push(stream_metric_sample(
+                STREAM_PUBLISHER_DUPLICATES.name,
+                Vec::new(),
+                nametrics_core::MetricValue::Counter(
+                    nasaga_runtime::publisher_duplicate_hints_total(),
+                ),
+            ));
+        }
+        Some(samples)
+    }
+
+    /// 业务作用：在尚未发布 stream 运行时保留空文本语义；非空快照由 hub 统一渲染。
+    ///
+    /// 参数说明：
+    /// - `output`: 接收旧空运行时兼容文本的缓冲区。
+    ///
+    /// 返回：无；存在结构化样本时统一 hub 不调用本入口。
+    fn render_prometheus(&self, output: &mut String) {
+        output.push_str(&render_stream_metrics(&self.state));
+    }
+}
+
+/// 业务作用：构造一个带冻结 transport label 的 Saga Stream 指标样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `labels`: 固定 stream、group 与 consumer 名值对，或进程级空 label。
+/// - `value`: counter 或 gauge 当前值。
+///
+/// 返回：可经唯一 descriptor 校验的结构化样本。
+#[cfg(feature = "saga-redis-stream")]
+fn stream_metric_sample(
+    name: &'static str,
+    labels: Vec<(&'static str, String)>,
+    value: nametrics_core::MetricValue,
+) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels,
+        value,
     }
 }
 

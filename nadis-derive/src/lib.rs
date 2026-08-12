@@ -32,7 +32,7 @@
 //   id()            —— @RsId 字段 to_string;
 //   to_fields()     —— **全部字段**(含未标注/占位符字段)→ (name, value) 字符串对
 //                      ——占位符字段值只存在 key 里且不可逆推,必须随 HASH 落盘
-//                      (对照 原实现 storedFields 修复);
+//                      (对照 原实现 storedFields 合同);
 //   from_fields()   —— 逐字段 FromStr 解析,缺字段取 Default(字段类型须
 //                      Display + FromStr + Default,String/数值天然满足);
 //   placeholder_parts() —— prefix 的 {name} 在**展开期**与结构体字段名匹配
@@ -122,9 +122,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ));
     }
 
-    // ── 运行时根路径发现(nasa-macro-support;消费侧冒烟实测抓出的真 bug):
+    // ── 运行时根路径发现(nasa-macro-support)：
     //    直接依赖 nadis → `::nadis`(含重命名);纯门面消费者 →
-    //    `::nasa::redis`;都没有 → 编译错并给修复指引。硬编码 ::nadis 在
+    //    `::nasa::redis`;都没有 → 编译错并给出依赖指引。硬编码 ::nadis 在
     //    门面工程解析不到(传递依赖不在 extern prelude)。
     let root = match nasa_macro_support::runtime_root("redis", "nadis") {
         Ok(r) => r,

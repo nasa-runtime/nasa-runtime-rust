@@ -43,7 +43,7 @@ async fn save_order() -> anyhow::Result<()> {
 ## 应用入口
 
 `application` feature 提供声明式入口。组件字符串可以任意书写；宏会拒绝未知项与重复项，再按唯一规范顺序
-`log -> nacos-config -> telemetry -> db -> redis -> cache -> saga -> kafka -> outbox -> auth -> web -> ws ->
+`log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> grpc -> auth -> web -> ws ->
 nacos-discovery -> scheduling` 启动，并严格反序停机。
 
 ```rust
@@ -122,10 +122,10 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 | `secret` | `nasa::secret` | secret 分片、快照和两阶段轮换 |
 | `secret-http` / `secret-vault` | `nasa::secret` | TLS client 和 KV v2 provider |
 | `object-store-experimental` | `nasa::object` | 实验性有界对象存储合同，不进入 `full` |
-| `grpc-experimental` | `nasa::grpc` | 实验性独立 gRPC listener，不进入 `full` |
+| `grpc-experimental` | `nasa::grpc`、`nasa::application` | 实验性独立或 `"grpc"` Application 受管 listener，含持续 accept 失败观测与摘流恢复，不进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
-| `partition` | `nasa::partition` | 保序任务窃取、同 key 严格 FIFO、有界背压与显式异步停机 |
+| `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()` | 保序任务窃取、同 key 严格 FIFO、有界背压，以及不向业务开放收口权的 Application 受管健康与停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
@@ -195,7 +195,7 @@ server:
 | `application` | `napp` |
 | `log` | `nalog` |
 | `nacos` | `config-boot` / `nanacos` |
-| `telemetry` | `napp` telemetry 组件 |
+| `telemetry` | `napp` telemetry 组件，含受管 OTLP trace 与可选 cumulative metrics 出口 |
 | `database` / `datasources` | `natx` / `namigrate` / `namapper` |
 | `redis` | `nadis` |
 | `cache` | `cacheable` 受管组件 |

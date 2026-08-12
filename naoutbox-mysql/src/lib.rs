@@ -177,7 +177,7 @@ fn tenant_quotas_enabled() -> bool {
 ///
 /// 参数说明: 无。
 ///
-/// 返回：列存在且宽度达标返回 `Ok`;缺列或宽度不足返回指向修复迁移的脱敏错误。
+/// 返回：列存在且宽度达标返回 `Ok`;缺列或宽度不足返回指向纠正迁移的脱敏错误。
 pub async fn verify_outbox_event_schema() -> Result<(), OutboxStoreError> {
     let mut conn = natx::conn().await.map_err(map_err)?;
     verify_outbox_event_schema_on(conn.as_mut()).await

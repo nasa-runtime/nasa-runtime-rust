@@ -122,9 +122,8 @@ pub(super) async fn poll_and_dispatch(
                     _permit: permit,
                 };
                 if let Err(e) = slot.work_tx.try_send(batch) {
-                    // mailbox 满/关闭 = 状态机 bug,但消息**已进 PEL**——翻回 Ready 会让
-                    // 它们永久滞留(Ready 只读 `>`;复审 修正,撤回原"自愈
-                    // Ready")。改:保留 ID 转 RetryBackoff,走 PEL 重投路径找回。
+                    // mailbox 满/关闭表示状态机不变量被破坏，但消息**已进 PEL**；翻回 Ready 会让
+                    // 它们永久滞留，因为 Ready 只读 `>`。保留 ID 转 RetryBackoff，由 PEL 重投路径找回。
                     let ids: Vec<String> = match e {
                         mpsc::error::TrySendError::Full(b)
                         | mpsc::error::TrySendError::Closed(b) => {
@@ -269,7 +268,7 @@ fn parse_one_stream(
             Some(d) => recs.push((id, d)),
             // data field 缺失 → 空 body tombstone(worker ACK 清 PEL)。区分两种成因——
             //   · fields 为空([])= 被 XDEL 半删的合法 tombstone(预期,debug);
-            //   · fields **非空但无 DATA_FIELD** = 可能是跨语言 publish 端写错 field 名的 bug → **warn 暴露**
+            //   · fields **非空但无 DATA_FIELD** = 跨语言 publish 端可能使用了错误 field 名 → **warn 暴露**
             //     (不再静默掩盖)。仍按 tombstone 清,避免无限重投;若要改成"留 PEL→走毒处置",
             //     需同步改造 poll/recover_pel/worker 并评估重复投递风险。
             None => {

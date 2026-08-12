@@ -13,6 +13,7 @@ const RESERVED_ROOTS: &[(&str, ComponentId)] = &[
     ("datasources", ComponentId::Db),
     ("redis", ComponentId::Redis),
     ("telemetry", ComponentId::Telemetry),
+    ("grpc", ComponentId::Grpc),
     ("cache", ComponentId::Cache),
     ("saga", ComponentId::Saga),
     ("outbox", ComponentId::Outbox),
@@ -78,6 +79,8 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Redis => crate::redis::validate_redis_section(tree, phase)?,
             #[cfg(feature = "telemetry")]
             ComponentId::Telemetry => crate::telemetry::validate_telemetry_section(tree, phase)?,
+            #[cfg(feature = "grpc-experimental")]
+            ComponentId::Grpc => crate::grpc::validate_grpc_section(tree, phase)?,
             #[cfg(feature = "cache")]
             ComponentId::Cache => crate::cache::validate_cache_section(tree, phase)?,
             #[cfg(feature = "saga")]

@@ -1,7 +1,7 @@
 # mapper —— 声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
 [package]
 name = "namapper"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Declarative mapper runtime for SQLx and ambient transactions"

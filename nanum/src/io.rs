@@ -42,7 +42,7 @@ pub fn to_fixed_str(val: &str, scale: u32) -> Result<i128> {
 /// 业务作用: 将有限 f64 转换为定点 i128，兼容原实现 `Numeric.toFixed(double,scale)` 的 `Math.round(val × 10^scale)` 规则，
 /// **ties 朝 +∞**(`floor(x+0.5)`,非远离零)。
 ///
-/// **NaN/Infinity 返 `Err`(有意安全偏离,非逐值复刻 bug)**——原实现 `Math.round(NaN)=0`、
+/// **NaN/Infinity 返 `Err`（明确的安全偏离）**——原实现 `Math.round(NaN)=0`、
 /// `Math.round(±Inf)=Long.MIN/MAX`,但金融/撮合库不应把非有限值悄悄当合法数,故 Rust 拒绝。
 ///
 /// # 参数

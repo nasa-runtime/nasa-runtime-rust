@@ -122,7 +122,7 @@ impl WsKafkaTopicContract {
 
     /// 业务作用：只读复核全部 topic，供运行期漂移监控使用。
     ///
-    /// 即使 management 为 CreateIfAbsent，本方法也绝不创建、修改或修复 topic；运行期删除和漂移必须
+    /// 即使 management 为 CreateIfAbsent，本方法也绝不创建或修改 topic；运行期删除和漂移必须
     /// 暴露为错误并由 runtime 关闭 ingress。
     ///
     /// # 参数

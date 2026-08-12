@@ -5,9 +5,10 @@
 //! - **nafka**(消除应用手工 sink):nafka 通过 `MetricsSink`(by-name)上报,
 //!   [`NafkaMetricSinkAdapter`] 把它桥接到 hub(by-descriptor),启动期用
 //!   [`register_nafka_descriptors`] 做冲突审计。nafka 是**原生**域(记录直接进 hub cells)。
-//! - **naweb**(安全端点指标):naweb 自持 `SecurityMetrics` registry 并能自渲染 Prometheus 文本,
-//!   [`NawebMetricsSource`] 把它包成 `LegacyMetricsSource`——descriptor 并入统一 catalog 供冲突审计,
-//!   值仍由 naweb 自渲染。这样一次 `hub.render_prometheus()` 同时得到 nafka(原生)+ naweb(兼容源)。
+//! - **naweb**(安全端点指标):naweb 自持 `SecurityMetrics` registry，
+//!   [`NawebMetricsSource`] 把它包成 `LegacyMetricsSource`——descriptor 并入统一 catalog，结构化
+//!   快照同时供 Prometheus 与 OTLP 使用。这样一次 `hub.render_prometheus()` 同时得到 nafka
+//!   (原生)+ naweb(兼容源)。
 //!
 //! nafana 迁移属 nasa 门面层增量(napp 不依赖 nafana,强接会倒置分层),此处不做。
 
@@ -188,7 +189,7 @@ impl nafka::MetricsSink for NafkaMetricSinkAdapter {
 #[cfg(feature = "web-security")]
 use nametrics_core::LegacyMetricsSource;
 
-/// naweb 安全端点指标的 descriptor manifest(仅供统一 catalog 冲突审计;值由 naweb 自渲染)。
+/// naweb 安全端点指标的 descriptor manifest，供统一 catalog 冲突审计、结构化样本校验与文本渲染。
 ///
 /// help/label 与 `naweb::SecurityMetrics::render_prometheus` 一致;histogram 桶边界与
 /// `naweb` 的 `DURATION_BUCKET_LABELS` 对齐(秒)。
@@ -282,8 +283,8 @@ static NAWEB_DESCRIPTORS: [&MetricDescriptor; 8] = [
 
 /// 把 naweb 的 `SecurityMetrics` registry 包成 `LegacyMetricsSource`。
 ///
-/// descriptor 并入统一 catalog 供冲突审计,值仍由 naweb 自渲染(它的 registry 拥有原子计数器)。
-/// hub 渲染时原生循环跳过这些族名,只由本源自渲染,避免重复 HELP/TYPE。
+/// descriptor 并入统一 catalog，值由 naweb registry 生成结构化快照后交给 hub 统一渲染；
+/// 本源始终返回 `Some`，当前无样本也不会回落到另一份文本数据路径。
 #[cfg(feature = "web-security")]
 pub struct NawebMetricsSource {
     metrics: Arc<naweb::SecurityMetrics>,
@@ -292,6 +293,11 @@ pub struct NawebMetricsSource {
 #[cfg(feature = "web-security")]
 impl NawebMetricsSource {
     /// 业务作用：用 Web Ready 后发布的 `SecurityMetrics` 句柄创建兼容源。
+    ///
+    /// 参数说明：
+    /// - `metrics`: naweb 安全 registry 的共享所有权。
+    ///
+    /// 返回：可登记到统一指标 hub 的兼容源。
     pub fn new(metrics: Arc<naweb::SecurityMetrics>) -> Self {
         Self { metrics }
     }
@@ -300,11 +306,56 @@ impl NawebMetricsSource {
 #[cfg(feature = "web-security")]
 impl LegacyMetricsSource for NawebMetricsSource {
     /// 业务作用：返回 naweb 兼容源拥有的静态指标族目录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动期冲突审计和结构化校验共用的全部 naweb descriptor。
     fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
         &NAWEB_DESCRIPTORS
     }
 
+    /// 业务作用：把 naweb 的结构化 registry 快照映射到统一指标样本。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：始终为 `Some`，其中保留 family、label、计数与直方图形状的 provider-neutral 样本。
+    fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
+        Some(
+            self.metrics
+                .structured_snapshot()
+                .into_iter()
+                .map(|sample| nametrics_core::MetricSample {
+                    name: sample.name,
+                    labels: sample.labels,
+                    value: match sample.value {
+                        naweb::SecurityMetricValue::Counter(value) => {
+                            nametrics_core::MetricValue::Counter(value)
+                        }
+                        naweb::SecurityMetricValue::Gauge(value) => {
+                            nametrics_core::MetricValue::Gauge(value)
+                        }
+                        naweb::SecurityMetricValue::Histogram {
+                            buckets,
+                            sum,
+                            count,
+                        } => nametrics_core::MetricValue::Histogram {
+                            bounds: MAPPING_CRYPTO_DURATION_SECONDS.histogram_bounds,
+                            buckets,
+                            sum,
+                            count,
+                        },
+                    },
+                })
+                .collect(),
+        )
+    }
+
     /// 业务作用：读取 naweb 当前 registry 快照并追加 Prometheus exposition。
+    ///
+    /// 参数说明：
+    /// - `output`: 接收旧源文本的缓冲区。
+    ///
+    /// 返回：无；该入口仅保留给显式选择文本旧源模式的兼容调用方。
     fn render_prometheus(&self, output: &mut String) {
         output.push_str(&self.metrics.render_prometheus());
     }

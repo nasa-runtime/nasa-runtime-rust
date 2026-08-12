@@ -6,7 +6,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
+use tokio::{
+    sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock},
+    time::timeout,
+};
 
 use crate::{
     ApplicationError, ApplicationFuture, ApplicationPhase, ApplicationResult, ComponentId,
@@ -19,11 +22,11 @@ type ErasedShutdown =
 
 /// 需要异步释放的业务资源。`Drop` 必须保持非阻塞；需要等待的清理由此方法完成。
 pub trait ManagedResource: Send + Sync + 'static {
-    /// 业务作用：在全局剩余预算内完成需要等待的资源清理。
+    /// 业务作用：在容器分配的剩余预算内完成需要等待的资源清理。
     ///
     /// # 参数
     ///
-    /// - `context`：携带首次停机原因和绝对 deadline 的清理上下文。
+    /// - `context`：携带首次停机原因和不晚于全局 deadline 的当前资源清理上下文。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a>;
 }
 
@@ -493,6 +496,8 @@ impl ResourceRegistry {
     ///
     /// - `owner`：本次 active step 负责清理的资源所有者。
     /// - `context`：所有条目共享的绝对清理预算。
+    ///
+    /// 返回：按逆序收集锁等待、显式清理失败和单项超时；一个条目失控不会阻断同批次后续条目。
     async fn shutdown_matching(
         &self,
         owner: ResourceOwner,
@@ -515,17 +520,52 @@ impl ResourceRegistry {
         };
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.registration_order));
 
+        let entry_count = entries.len();
         let mut failures = Vec::new();
-        for entry in entries {
-            let mut value = entry.value.clone().write_owned().await;
+        for (index, entry) in entries.into_iter().enumerate() {
+            // 每个资源都是公开扩展点；锁等待与显式清理必须共用提前截止的子上下文，
+            // 公平份额同时为同批次后续条目与后续 active step 保留实际执行机会。
+            let remaining_entries = entry_count.saturating_sub(index).max(1);
+            let fair_share =
+                context.remaining() / u32::try_from(remaining_entries).unwrap_or(u32::MAX);
+            let entry_context = context.child_context(fair_share);
+            let mut value =
+                match timeout(entry_context.remaining(), entry.value.clone().write_owned()).await {
+                    Ok(value) => value,
+                    Err(_) => {
+                        failures.push(ApplicationError::new(
+                            ComponentId::Resources,
+                            ApplicationPhase::Stopping,
+                            format!(
+                                "timed out waiting for outstanding borrows of resource `{}`",
+                                entry.type_name
+                            ),
+                        ));
+                        continue;
+                    }
+                };
             if let Some(shutdown) = entry.shutdown {
-                if let Err(error) = shutdown(&mut value, context).await {
-                    failures.push(ApplicationError::with_source(
+                match timeout(
+                    entry_context.remaining(),
+                    shutdown(&mut value, &entry_context),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => failures.push(ApplicationError::with_source(
                         ComponentId::Resources,
                         ApplicationPhase::Stopping,
                         format!("failed to stop resource `{}`", entry.type_name),
                         error,
-                    ));
+                    )),
+                    Err(_) => failures.push(ApplicationError::new(
+                        ComponentId::Resources,
+                        ApplicationPhase::Stopping,
+                        format!(
+                            "resource `{}` shutdown exceeded its derived deadline",
+                            entry.type_name
+                        ),
+                    )),
                 }
             }
         }

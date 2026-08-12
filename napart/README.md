@@ -75,6 +75,37 @@ napart = "1.1"
 
 必须在 Tokio 运行时内构造（内部启动常驻 worker）；`shutdown` 为 async。
 
+## Application 受管模式
+
+使用 `napp` / `nasa` 的服务可以在 `#[nasa::application("partition")]` 中把执行器交给
+`Application` 唯一管理。业务在 UserHook 只提交 `PartitionApplicationPlan`；容器在 Prepare
+阶段创建 worker，并通过 `app.partition()` 发布不含 `shutdown*` 的业务句柄。这样，后续
+initializer 失败仍会沿 Application 的 active stack 关闭执行器，业务代码也不能提前终止共享
+worker 或夺走停机证据。
+
+```rust
+use std::time::Duration;
+use nasa::application::PartitionApplicationPlan;
+
+#[nasa::application("partition", "web")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let plan = PartitionApplicationPlan::new(16, 1_024, 16_384)?
+        .with_max_lanes(4_096)?
+        .with_shutdown_timeout(Duration::from_secs(5))?;
+    app.configure_partition(plan)?;
+    Ok(())
+}
+```
+
+计划中的分区数、每 lane 深度、全局在飞量、lane 总数和停机预算都会在 UserHook 校验；未提交
+计划时应用会在开放业务监听前拒绝启动。worker 失权或 lane 冻结会使
+`partition:executor` readiness 进入 NotReady，并触发统一停机。反向停机先拒收，再取计划预算
+与 Application 全局剩余预算的较小值排空；`frozen` 或 `aborted` 非零时保留损耗证据并使停机
+结果失败。
+
+受管模式需要 `nasa` 的 `application` 与 `partition` feature。直接依赖 `napart` 的程序仍可采用
+下文的自管方式；两种模式不能共同拥有同一个执行器，受管句柄也不会暴露收口入口。
+
 ## 基本使用（同 key 串行）
 
 ```rust
@@ -219,6 +250,10 @@ if report.frozen > 0 || report.aborted > 0 {
 }
 ```
 
+容器已有更短的全局剩余预算时，使用 `shutdown_with_report_timeout(timeout).await` 为本次排空提供
+明确上限；实际停机仍沿用同一幂等终局报告，超时收口产生的 frozen/aborted 证据不会被调用方外层
+取消丢失。该参数不能延长构造执行器时设置的 `stop_timeout`。
+
 ## 观测
 
 `is_healthy()`（运行中且无 worker 死亡、无 lane 冻结）、`dead_partitions()`、`failed_lanes()`、
@@ -262,10 +297,11 @@ task_panics + 已受理延迟任务的到期或停机拒绝 + frozen + aborted`�
   存活到它下一个让出点，Drop 也不提供 join 退出证明与损耗报告。需要终局报告与退出证明必须
   显式 `shutdown().await`。
 
-## 应用配置映射
+## 自管模式的应用配置映射
 
 `napart` 不读取 YML，也不固定配置根节点。下面的 `partition_executor` 只是应用自有配置示例；
-应用应完成解析与校验，再在 Tokio 运行时内构造 `PartitionExecutor`。
+选择自管模式的应用应完成解析与校验，再在 Tokio 运行时内构造 `PartitionExecutor`。使用上文
+Application 受管模式时，应把等价容量提交给 `PartitionApplicationPlan`，不要自行创建第二个执行器。
 
 ```yaml
 partition_executor:

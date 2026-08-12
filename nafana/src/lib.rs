@@ -26,7 +26,10 @@ pub use fallback::{
     FallbackContext, FallbackDecision, GlobalFallbackHandler, GlobalFallbackInstallError,
 };
 pub use isolation::{dispatch, init_isolation, IsolationRule};
-pub use prometheus::{metrics, render_metrics};
+pub use prometheus::{
+    metrics, render_metrics, structured_metrics_snapshot, PrometheusMetricSample,
+    PrometheusMetricValue,
+};
 pub use registry::MonitorConflict;
 
 // ── re-export 过程宏 ──

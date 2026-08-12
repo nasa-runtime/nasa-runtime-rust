@@ -49,7 +49,7 @@ database:
 ## 主要边界
 
 - 生产常态使用 `validate`；`apply` 只用于单实例、本地环境或专门迁移任务。
-- dirty 代表 DDL 可能部分提交，运行时无法安全推断修复动作，必须人工检查。
+- dirty 代表 DDL 可能部分提交，运行时无法安全推断恢复动作，必须人工检查。
 - advisory lock、查询和执行绑定同一 MySQL session；取消时关闭 session 兜底释放锁。
 - `lock_timeout_ms` 是从获取池连接开始的端到端预算；`0` 明确表示不设置外层截止时间。
 - 公开错误只含版本和稳定分类，不包含 SQL、schema 正文或连接信息。

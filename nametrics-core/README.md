@@ -38,5 +38,13 @@ server:
 
 - 指标名和 label 名必须来自静态、低基数目录。
 - 用户 ID、对象 ID、URL 查询串、错误正文不能作为 label 值。
+- 单个 label 值最多 4096 个 UTF-8 字节；该资源上限允许包含完整路由模板和 handler 模块路径的
+  静态 `route_id`，但不能替代低基数要求。
 - Counter 只能单调增加；Gauge 和 Histogram 必须使用与 descriptor 一致的记录方法。
-- `LegacyMetricsSource` 是兼容桥，不允许绕过 descriptor 冲突审计。
+- `LegacyMetricsSource` 是兼容桥：领域源可直接返回结构化 `snapshot`，文本与 OTLP
+  由同一 descriptor 和值渲染。结构化源当前无样本时返回 `Some(Vec::new())`；只有返回 `None`
+  的旧源使用 Prometheus 自渲染，不会被反解析或猜测成非文本指标。
+- family、label 形状、单值资源上限、value kind 或 histogram 结构不满足目录合同时，两个结构化
+  出口一致拒绝该样本，并累计
+  `nametrics_samples_rejected_total{source="native|legacy",reason="..."}`；该诊断不携带被拒样本的
+  动态 label 内容。

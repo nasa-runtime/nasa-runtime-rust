@@ -306,7 +306,7 @@ impl ShutdownAction for WsShutdown {
         "ws-active"
     }
 
-    /// 业务作用：在自身子预算与全局剩余预算的较小值内排空长连接。
+    /// 业务作用：在自身子预算与全局提前截止预算内排空长连接，为后续逆序清理保留时间。
     ///
     /// 未排空不视为失败：底层已 cancel 全部任务，剩余连接会尽快退出；但必须如实记一条报告，
     /// 不把"到点仍有连接在跑"静默说成优雅停机。
@@ -319,7 +319,8 @@ impl ShutdownAction for WsShutdown {
             let Some(server) = self.server.take() else {
                 return Ok(());
             };
-            let budget = self.budget.min(context.remaining());
+            // 长连接排空必须早于全局 deadline 返回结构化结果，不能与 Runner 外层超时竞速。
+            let budget = context.child_budget(self.budget);
             if server.shutdown_graceful(budget).await {
                 return Ok(());
             }

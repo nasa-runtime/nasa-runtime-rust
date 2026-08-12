@@ -124,6 +124,8 @@ fn build_component(
         ComponentId::Db => build_db_component(),
         ComponentId::Redis => build_redis_component(),
         ComponentId::Telemetry => build_telemetry_component(),
+        ComponentId::Partition => build_partition_component(),
+        ComponentId::Grpc => build_grpc_component(),
         ComponentId::Cache => build_cache_component(),
         ComponentId::Saga => build_saga_component(),
         ComponentId::Kafka => build_kafka_component(),
@@ -137,6 +139,41 @@ fn build_component(
         | ComponentId::Resources
         | ComponentId::Supervisor
         | ComponentId::UserHook => Err(non_declarable_component_error(id)),
+    }
+}
+
+/// 业务作用：构造实验性受管 gRPC listener；能力未编入时拒绝退化为业务自管端口。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `grpc-experimental` 时返回受管组件，否则返回指向门面 feature 的启动错误。
+fn build_grpc_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "grpc-experimental")]
+    {
+        Ok(Box::new(crate::grpc::GrpcComponent::new()))
+    }
+    #[cfg(not(feature = "grpc-experimental"))]
+    {
+        Err(feature_missing_error(
+            ComponentId::Grpc,
+            "grpc-experimental",
+        ))
+    }
+}
+
+/// 业务作用：构造保序执行器组件；能力未编入时拒绝把生命周期声明降级为业务自管 worker。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `partition` 时返回受管组件，否则返回指向门面 feature 的启动错误。
+fn build_partition_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "partition")]
+    {
+        Ok(Box::new(crate::partition::PartitionComponent::new()))
+    }
+    #[cfg(not(feature = "partition"))]
+    {
+        Err(feature_missing_error(ComponentId::Partition, "partition"))
     }
 }
 

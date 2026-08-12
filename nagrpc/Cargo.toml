@@ -1,6 +1,6 @@
 [package]
 name = "nagrpc"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Experimental bounded tonic gRPC server lifecycle for NASA"
@@ -11,9 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+async-stream = "0.3"
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-health = "0.14"
 tonic-reflection = "0.14"
+tracing = "0.1"
