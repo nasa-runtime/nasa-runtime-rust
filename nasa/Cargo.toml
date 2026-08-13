@@ -45,8 +45,8 @@ audit = ["tx", "dep:audit_impl", "dep:audit_mysql_impl"]
 secret = ["dep:secret_impl"]
 secret-http = ["secret", "dep:secret_http_impl"]
 secret-vault = ["secret", "dep:secret_vault_impl"]
-# 实验性对象存储；不进入 full，待两个真实业务合同收敛后稳定。
-object-store-experimental = ["dep:object_impl"]
+# 实验性对象存储；凭据公共类型随本 feature 一并开放，不进入 full，待两个真实业务合同收敛后稳定。
+object-store-experimental = ["secret", "dep:object_impl"]
 # Saga 纯逻辑层（nasaga-core：身份派生/状态机/补偿计划，无 I/O）。
 saga = ["dep:saga_core_impl"]
 # Saga 运行时（Orchestrator/参与方 adapter/#[saga] 宏；MySQL store + Outbox/Inbox 通道）。
@@ -94,7 +94,8 @@ ws-kafka = ["ws", "kafka", "ws_impl/kafka"]
 
 # Kafka 运行时按需启用；安全和压缩能力继续向实现 crate 透传。
 kafka = ["dep:kafka_impl", "kafka_impl/macros", "application_impl?/kafka"]
-kafka-schema-registry = ["kafka", "kafka_impl/schema-registry"]
+# Schema Registry 的认证类型依赖 secret；门面 feature 必须让完整构造合同可直接命名。
+kafka-schema-registry = ["kafka", "secret", "kafka_impl/schema-registry"]
 kafka-tls = ["kafka", "kafka_impl/tls"]
 kafka-gssapi = ["kafka", "kafka_impl/gssapi"]
 kafka-zstd = ["kafka", "kafka_impl/zstd"]
@@ -248,7 +249,7 @@ audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.1", optional = tr
 secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
 secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
 secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
-object_impl = { package = "naobject", version = "1.0.0", optional = true }
+object_impl = { package = "naobject", version = "1.0.1", optional = true }
 saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
@@ -262,7 +263,7 @@ mapper_impl = { package = "namapper", version = "1.0.1", optional = true }
 namapper_macro = { package = "namapper-macro", version = "1.0.1", optional = true }
 partition_impl = { package = "napart", version = "1.1.2", optional = true }
 ws_impl = { package = "naws", version = "1.0.1", optional = true, default-features = false }
-kafka_impl = { package = "nafka", version = "1.0.2", optional = true, default-features = false }
+kafka_impl = { package = "nafka", version = "1.0.3", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "1.0.1", optional = true, default-features = false }
 crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "1.0.1", optional = true }

@@ -2227,18 +2227,16 @@ impl Application {
 
     /// 业务作用：把一个自持 registry 的兼容领域源并入进程级统一 hub。
     ///
-    /// 供 `nasa` 门面层把 **nafana** 等 napp 不直接依赖的领域接入同一 `/metrics`:门面构造领域源后
-    /// 在业务 UserHook 调用本方法,其族即随框架 `/metrics` 一并渲染,并纳入 descriptor 冲突审计。
+    /// 供 `nasa` 门面层把 **nafana**、对象存储等 napp 不直接依赖的领域接入同一指标目录：
+    /// 门面构造领域源后在业务 UserHook 调用本方法，其族即随 Prometheus 与 OTLP 一并发布，
+    /// 并纳入 descriptor 冲突审计。登记能力属于 Application 核心合同，不依赖 Web 或 Kafka feature。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `source`: 领域指标源；descriptor 并入统一 catalog，结构化快照供 Prometheus 与 OTLP 共用，
     ///   空快照旧源只回落到自身文本入口。
     ///
-    /// # 错误
-    ///
-    /// 源的任一 descriptor 与已注册项语义冲突时返回阶段错误。
-    #[cfg(any(feature = "kafka", feature = "web"))]
+    /// 返回：UserHook 仍开放且全部 descriptor 与既有目录兼容时成功；阶段已封口或任一族语义冲突时
+    /// 返回 Application 阶段错误。
     pub fn register_metrics_source(
         &self,
         source: Arc<dyn nametrics_core::LegacyMetricsSource>,
@@ -2249,7 +2247,7 @@ impl Application {
             .register_legacy_source(source)
             .map_err(|conflict| {
                 ApplicationError::new(
-                    ComponentId::Web,
+                    ComponentId::Application,
                     ApplicationPhase::UserHook,
                     format!(
                         "metric source descriptor `{}` conflicts with an existing registration",

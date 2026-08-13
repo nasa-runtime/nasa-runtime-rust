@@ -2,6 +2,14 @@
 //!
 //! 本 crate 只负责强制 HTTP/2 listener、边界配置、显式健康/反射 adapter 和有预算的 graceful drain。
 //! 业务 proto/generated service 仍归业务 crate；独立和 Application 受管入口都保持显式实验开关。
+//!
+//! 独立模式由 `GrpcServerHandle` 独占 shutdown；与 `nasa` 的 `application` 组合时，业务在 UserHook
+//! 提交 Router 工厂，Application 完成 initializer 后才绑定 listener，并独占 readiness、监督和排空。
+//! 两种模式都先取得连接 permit 再 accept，先停止准入再等待在途 RPC，排空超时会终止 serve task，
+//! 不遗留 detached listener。
+//!
+//! health/reflection、业务 service、proto 兼容、TLS 身份和方法级授权都需要业务显式装配；本 crate
+//! 不是 service mesh、API gateway、客户端连接池或负载均衡器。
 
 #![forbid(unsafe_code)]
 
@@ -9,7 +17,7 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -256,13 +264,55 @@ impl std::error::Error for GrpcServerError {}
 struct Inner {
     local_addr: SocketAddr,
     state: Arc<AtomicU8>,
-    active_connections: Arc<AtomicUsize>,
-    accept_failures_total: Arc<AtomicU64>,
-    consecutive_accept_failures: Arc<AtomicU64>,
-    accept_failure_since: Arc<StdMutex<Option<Instant>>>,
+    metrics: Arc<StdMutex<GrpcServerMetrics>>,
     shutdown: CancellationToken,
     join: Mutex<Option<JoinHandle<Result<(), GrpcServerError>>>>,
     drain_timeout: Duration,
+}
+
+/// listener 观测量的互斥状态；连接受理、释放与失败段更新在同一临界区提交。
+#[derive(Debug, Default)]
+struct GrpcServerMetrics {
+    active_connections: usize,
+    accepted_total: u64,
+    accept_failures_total: u64,
+    consecutive_accept_failures: u64,
+    accept_failure_since: Option<Instant>,
+}
+
+/// 业务作用：在观测状态临界区内发布 listener 生命周期状态，使状态与连接快照保持同一顺序边界。
+///
+/// 参数说明：
+/// - `state`: serve 与停机路径共享的原子状态槽。
+/// - `metrics`: 与快照读取共用的观测状态门。
+/// - `next`: 即将发布的生命周期状态。
+///
+/// 返回：无；状态在锁内以 Release 顺序发布，随后抓取不会混合迁移前后的业务事实。
+fn publish_state(state: &AtomicU8, metrics: &StdMutex<GrpcServerMetrics>, next: GrpcServerState) {
+    let _snapshot_gate = metrics
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.store(next.encode(), Ordering::Release);
+}
+
+/// listener 在某一时刻的完整受理与接流事实。
+///
+/// 逐个 getter 分别读取会得到互相矛盾的组合（例如已计入受理但在途尚未自增）；
+/// 导出面必须用一次 `snapshot()` 取同一时刻的整组值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcServerSnapshot {
+    /// 当前生命周期状态。
+    pub state: GrpcServerState,
+    /// 已交给 tonic 且尚未关闭的连接数。
+    pub active_connections: usize,
+    /// 自启动以来进入 listener 所有权的连接总数。
+    pub accepted_total: u64,
+    /// 自启动以来 `accept` 返回错误的累计次数。
+    pub accept_failures_total: u64,
+    /// 最近一次成功 accept 之后的连续失败次数；成功即归零。
+    pub consecutive_accept_failures: u64,
+    /// 当前连续失败已持续的毫秒数；没有进行中的失败段时为 0。
+    pub accept_stall_millis: u64,
 }
 
 /// 不含停机权的 gRPC listener 观察句柄。
@@ -270,10 +320,7 @@ struct Inner {
 pub struct GrpcServerObserver {
     local_addr: SocketAddr,
     state: Arc<AtomicU8>,
-    active_connections: Arc<AtomicUsize>,
-    accept_failures_total: Arc<AtomicU64>,
-    consecutive_accept_failures: Arc<AtomicU64>,
-    accept_failure_since: Arc<StdMutex<Option<Instant>>>,
+    metrics: Arc<StdMutex<GrpcServerMetrics>>,
 }
 
 impl GrpcServerObserver {
@@ -295,13 +342,58 @@ impl GrpcServerObserver {
         GrpcServerState::decode(self.state.load(Ordering::Acquire))
     }
 
+    /// 业务作用：一次取得受理、在途与失败的同时刻快照，供导出面生成互相自洽的指标样本。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：同一次读取得到的状态、在途连接、受理总数与失败计数；失败时长按单调时钟换算为毫秒。
+    pub fn snapshot(&self) -> GrpcServerSnapshot {
+        // 连接受理会同时改变累计与在途两个量，失败恢复会同时改变连续次数与起点；
+        // 必须在同一临界区读取，避免导出业务上不可能成立的组合。
+        let metrics = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        GrpcServerSnapshot {
+            state: self.state(),
+            active_connections: metrics.active_connections,
+            accepted_total: metrics.accepted_total,
+            accept_failures_total: metrics.accept_failures_total,
+            consecutive_accept_failures: metrics.consecutive_accept_failures,
+            accept_stall_millis: u64::try_from(
+                metrics
+                    .accept_failure_since
+                    .as_ref()
+                    .map(Instant::elapsed)
+                    .map(|elapsed| elapsed.as_millis())
+                    .unwrap_or(0),
+            )
+            .unwrap_or(u64::MAX),
+        }
+    }
+
+    /// 业务作用：读取进入 listener 所有权的连接总数，用于区分"没有流量"与"接不进来"。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：单调累计的受理连接数；socket 在受理前断开不计入。
+    pub fn accepted_total(&self) -> u64 {
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepted_total
+    }
+
     /// 业务作用：读取当前已交给 tonic 且尚未关闭的连接数。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：不超过配置 `max_connections` 的瞬时连接数。
     pub fn active_connections(&self) -> usize {
-        self.active_connections.load(Ordering::Acquire)
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_connections
     }
 
     /// 业务作用：读取 listener 生命周期内累计发生的 accept 失败次数，供趋势与告警观测。
@@ -310,7 +402,10 @@ impl GrpcServerObserver {
     ///
     /// 返回：单调饱和计数；瞬时和持续失败都会计入，成功接流不会清零。
     pub fn accept_failures_total(&self) -> u64 {
-        self.accept_failures_total.load(Ordering::Acquire)
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accept_failures_total
     }
 
     /// 业务作用：读取最近一次成功接流之后连续发生的 accept 失败次数，区分瞬时抖动与持续黑洞。
@@ -319,7 +414,10 @@ impl GrpcServerObserver {
     ///
     /// 返回：成功 accept 后归零；连续失败期间单调饱和增长。
     pub fn consecutive_accept_failures(&self) -> u64 {
-        self.consecutive_accept_failures.load(Ordering::Acquire)
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .consecutive_accept_failures
     }
 
     /// 业务作用：读取最近一次成功接流之前，当前连续 accept 失败已经持续的单调时长。
@@ -328,9 +426,10 @@ impl GrpcServerObserver {
     ///
     /// 返回：尚未发生失败或失败后已经成功 accept 时返回 `None`；否则返回从首次连续失败到现在的时长。
     pub fn accept_failure_duration(&self) -> Option<Duration> {
-        self.accept_failure_since
+        self.metrics
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accept_failure_since
             .as_ref()
             .map(Instant::elapsed)
     }
@@ -339,13 +438,11 @@ impl GrpcServerObserver {
 /// 业务作用：对长期运行的观测计数执行饱和递增，避免极端持续故障发生整数回绕。
 ///
 /// 参数说明：
-/// - `counter`: 需要递增的共享原子计数。
+/// - `counter`: 已在观测状态临界区内取得的累计值。
 ///
-/// 返回：无；并发更新按原子顺序合并，达到 `u64::MAX` 后保持不变。
-fn increment_saturating(counter: &AtomicU64) {
-    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-        Some(value.saturating_add(1))
-    });
+/// 返回：无；达到 `u64::MAX` 后保持不变。
+fn increment_saturating(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
 }
 
 /// 持有连接 permit 的 HTTP/2 I/O；只有连接真正关闭后才释放进程级容量。
@@ -353,7 +450,7 @@ struct LimitedConnection {
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     _permit: OwnedSemaphorePermit,
-    active_connections: Arc<AtomicUsize>,
+    metrics: Arc<StdMutex<GrpcServerMetrics>>,
 }
 
 impl LimitedConnection {
@@ -362,21 +459,29 @@ impl LimitedConnection {
     /// 参数说明：
     /// - `stream`: listener 已接受的 TCP 连接。
     /// - `permit`: 该连接独占的进程级容量凭证。
-    /// - `active_connections`: 观察面使用的在途连接计数。
+    /// - `metrics`: 观察面使用的受理与在途连接状态。
     ///
     /// 返回：直到 I/O 析构才释放凭证的连接包装。
     fn new(
         stream: tokio::net::TcpStream,
         permit: OwnedSemaphorePermit,
-        active_connections: Arc<AtomicUsize>,
+        metrics: Arc<StdMutex<GrpcServerMetrics>>,
     ) -> io::Result<Self> {
+        // peer_addr 失败表示对端在受理前已断开，该 socket 从未进入 listener 所有权，
+        // 因此受理计数只在构造成功后自增，与在途计数保持同一进出口径。
         let peer_addr = stream.peer_addr()?;
-        active_connections.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut snapshot = metrics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            increment_saturating(&mut snapshot.accepted_total);
+            snapshot.active_connections = snapshot.active_connections.saturating_add(1);
+        }
         Ok(Self {
             stream,
             peer_addr,
             _permit: permit,
-            active_connections,
+            metrics,
         })
     }
 }
@@ -482,7 +587,11 @@ impl Drop for LimitedConnection {
     ///
     /// 返回：无；计数只减去本实例构造时登记的一次。
     fn drop(&mut self) {
-        self.active_connections.fetch_sub(1, Ordering::AcqRel);
+        let mut metrics = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        metrics.active_connections = metrics.active_connections.saturating_sub(1);
     }
 }
 
@@ -543,14 +652,9 @@ impl GrpcServerHandle {
         let task_shutdown = shutdown.clone();
         let state = Arc::new(AtomicU8::new(GrpcServerState::Running.encode()));
         let task_state = Arc::clone(&state);
-        let active_connections = Arc::new(AtomicUsize::new(0));
-        let task_active_connections = Arc::clone(&active_connections);
-        let accept_failures_total = Arc::new(AtomicU64::new(0));
-        let task_accept_failures_total = Arc::clone(&accept_failures_total);
-        let consecutive_accept_failures = Arc::new(AtomicU64::new(0));
-        let task_consecutive_accept_failures = Arc::clone(&consecutive_accept_failures);
-        let accept_failure_since = Arc::new(StdMutex::new(None));
-        let task_accept_failure_since = Arc::clone(&accept_failure_since);
+        let metrics = Arc::new(StdMutex::new(GrpcServerMetrics::default()));
+        let task_metrics = Arc::clone(&metrics);
+        let serve_metrics = Arc::clone(&metrics);
         let connection_slots = Arc::new(Semaphore::new(max_connections));
         let incoming = async_stream::stream! {
             let mut accept_backoff = ACCEPT_RETRY_INITIAL_BACKOFF;
@@ -570,24 +674,26 @@ impl GrpcServerHandle {
                 let (stream, _) = match listener.accept().await {
                     Ok(accepted) => {
                         accept_backoff = ACCEPT_RETRY_INITIAL_BACKOFF;
-                        task_consecutive_accept_failures.store(0, Ordering::Release);
-                        *task_accept_failure_since
+                        let mut metrics = task_metrics
                             .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        metrics.consecutive_accept_failures = 0;
+                        metrics.accept_failure_since = None;
+                        drop(metrics);
                         accepted
                     }
                     Err(error) => {
                         // `EMFILE`、`ENFILE` 与连接建立期异常不会使 listener 本身失权。释放本轮
                         // permit 后有界退避并继续持有 socket，避免瞬时资源压力被误判为干净关闭。
                         drop(permit);
-                        increment_saturating(&task_accept_failures_total);
-                        increment_saturating(&task_consecutive_accept_failures);
                         {
-                            let mut failure_since = task_accept_failure_since
+                            let mut metrics = task_metrics
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if failure_since.is_none() {
-                                *failure_since = Some(Instant::now());
+                            increment_saturating(&mut metrics.accept_failures_total);
+                            increment_saturating(&mut metrics.consecutive_accept_failures);
+                            if metrics.accept_failure_since.is_none() {
+                                metrics.accept_failure_since = Some(Instant::now());
                             }
                         }
                         tracing::warn!(
@@ -605,7 +711,7 @@ impl GrpcServerHandle {
                 yield LimitedConnection::new(
                     stream,
                     permit,
-                    Arc::clone(&task_active_connections),
+                    Arc::clone(&task_metrics),
                 );
             }
         };
@@ -614,13 +720,14 @@ impl GrpcServerHandle {
                 .serve_with_incoming_shutdown(incoming, task_shutdown.cancelled_owned())
                 .await
                 .map_err(|_| GrpcServerError::ServeFailed);
-            task_state.store(
+            publish_state(
+                &task_state,
+                &serve_metrics,
                 if result.is_ok() {
-                    GrpcServerState::Closed.encode()
+                    GrpcServerState::Closed
                 } else {
-                    GrpcServerState::Failed.encode()
+                    GrpcServerState::Failed
                 },
-                Ordering::Release,
             );
             result
         });
@@ -628,10 +735,7 @@ impl GrpcServerHandle {
             inner: Arc::new(Inner {
                 local_addr,
                 state,
-                active_connections,
-                accept_failures_total,
-                consecutive_accept_failures,
-                accept_failure_since,
+                metrics,
                 shutdown,
                 join: Mutex::new(Some(join)),
                 drain_timeout,
@@ -666,10 +770,7 @@ impl GrpcServerHandle {
         GrpcServerObserver {
             local_addr: self.inner.local_addr,
             state: Arc::clone(&self.inner.state),
-            active_connections: Arc::clone(&self.inner.active_connections),
-            accept_failures_total: Arc::clone(&self.inner.accept_failures_total),
-            consecutive_accept_failures: Arc::clone(&self.inner.consecutive_accept_failures),
-            accept_failure_since: Arc::clone(&self.inner.accept_failure_since),
+            metrics: Arc::clone(&self.inner.metrics),
         }
     }
 
@@ -697,9 +798,11 @@ impl GrpcServerHandle {
         let Some(join) = guard.as_mut() else {
             return Err(GrpcServerError::AlreadyClosed);
         };
-        self.inner
-            .state
-            .store(GrpcServerState::Draining.encode(), Ordering::Release);
+        publish_state(
+            &self.inner.state,
+            &self.inner.metrics,
+            GrpcServerState::Draining,
+        );
         self.inner.shutdown.cancel();
         // JoinHandle 必须留在共享 slot 里直到 await 真正结束。若调用方的 shutdown future 被外层
         // deadline/cancellation 丢弃，MutexGuard 会释放但 slot 仍是 Some；后续 shutdown 可继续
@@ -707,23 +810,29 @@ impl GrpcServerHandle {
         match tokio::time::timeout(timeout.min(self.inner.drain_timeout), join).await {
             Ok(Ok(Ok(()))) => {
                 let _ = guard.take();
-                self.inner
-                    .state
-                    .store(GrpcServerState::Closed.encode(), Ordering::Release);
+                publish_state(
+                    &self.inner.state,
+                    &self.inner.metrics,
+                    GrpcServerState::Closed,
+                );
                 Ok(())
             }
             Ok(Ok(Err(error))) => {
                 let _ = guard.take();
-                self.inner
-                    .state
-                    .store(GrpcServerState::Failed.encode(), Ordering::Release);
+                publish_state(
+                    &self.inner.state,
+                    &self.inner.metrics,
+                    GrpcServerState::Failed,
+                );
                 Err(error)
             }
             Ok(Err(_join_error)) => {
                 let _ = guard.take();
-                self.inner
-                    .state
-                    .store(GrpcServerState::Failed.encode(), Ordering::Release);
+                publish_state(
+                    &self.inner.state,
+                    &self.inner.metrics,
+                    GrpcServerState::Failed,
+                );
                 Err(GrpcServerError::ServeFailed)
             }
             Err(_) => {
@@ -732,9 +841,11 @@ impl GrpcServerHandle {
                     .expect("gRPC join slot remains populated while shutdown holds its gate");
                 join.abort();
                 let _ = join.await;
-                self.inner
-                    .state
-                    .store(GrpcServerState::Failed.encode(), Ordering::Release);
+                publish_state(
+                    &self.inner.state,
+                    &self.inner.metrics,
+                    GrpcServerState::Failed,
+                );
                 Err(GrpcServerError::DrainTimeout)
             }
         }
@@ -757,9 +868,11 @@ impl Drop for GrpcServerHandle {
             }
         }
         if self.state() != GrpcServerState::Closed {
-            self.inner
-                .state
-                .store(GrpcServerState::Failed.encode(), Ordering::Release);
+            publish_state(
+                &self.inner.state,
+                &self.inner.metrics,
+                GrpcServerState::Failed,
+            );
         }
     }
 }

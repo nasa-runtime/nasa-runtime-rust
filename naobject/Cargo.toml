@@ -1,14 +1,14 @@
 [package]
 name = "naobject"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "Experimental provider-neutral bounded object store contract with S3-compatible SigV4 adapter"
+description = "Experimental bounded object storage contract with an S3-compatible SigV4 adapter and explicit integrity checks"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["object-storage", "s3", "sigv4", "storage", "async"]
+categories = ["asynchronous", "web-programming::http-client"]
 
 [dependencies]
 async-trait = "0.1"

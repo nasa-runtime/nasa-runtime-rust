@@ -2573,23 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "naobject"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "hmac 0.12.1",
- "nasecret 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "reqwest",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
-name = "naobject"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6168204f22d3bfade75476cb0dabcd750543c5347d40a1bc9cc4e80fea0bc730"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2742,7 +2726,7 @@ dependencies = [
  "naml",
  "nanacos",
  "nanum",
- "naobject 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naobject",
  "naopenapi 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-core",
  "naoutbox-mysql",

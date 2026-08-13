@@ -16,9 +16,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-description = "NASA Kafka 组件:发布/消费组/广播/assign/DLT/少拷贝 passthrough,业务经 nasa::kafka 使用"
+keywords = ["kafka", "schema-registry", "messaging", "runtime", "async"]
+categories = ["asynchronous", "network-programming"]
+description = "NASA Kafka runtime with bounded producers, consumers, DLT, and optional Confluent Schema Registry client"
 
 [dependencies]
 # tracing 是 rdkafka 的 optional 依赖生成的隐式 feature；

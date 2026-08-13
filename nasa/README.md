@@ -12,6 +12,10 @@
 `saga-runtime`，再显式选择 Kafka、Redis Streams、HTTP 或实验 gRPC transport；完整合同见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
+门面还提供三项显式实验基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter，
+以及可独立运行或交给 Application 托管的 gRPC listener。三者都必须按 feature 显式选择，不被
+`full` 带入；成熟度、所有权和非目标在下文单独说明。
+
 ```toml
 [dependencies]
 nasa = { version = "1", features = [
@@ -82,6 +86,26 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 完整元数据、`one-shot`/`hosted` 任务激活、指标与幂等边界见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务-initializer)。
 
+## 实验性基础设施合同
+
+这三项能力共享“资源有硬上限、错误不泄露敏感上下文、所有权必须唯一、观测事实可并入统一指标目录”
+的边界，但运行架构不同：
+
+| 能力 | feature 与入口 | 生命周期 owner | 核心安全合同 |
+| --- | --- | --- | --- |
+| Schema Registry | `kafka-schema-registry` → `nasa::kafka` | 业务持有 client；无组件字符串 | schema ID 白名单、有界正负缓存、默认禁止注册、凭据由 `SecretBytes` 承载 |
+| 对象存储 | `object-store-experimental` → `nasa::object` | 业务持有 adapter；无组件字符串 | 有界单对象、`CreateOnly` 条件写、默认 SHA-256 metadata 复核、SigV4 credential 脱敏 |
+| gRPC listener | `grpc-experimental` → `nasa::grpc` | 独立 `GrpcServerHandle` 或 Application `"grpc"` 二选一 | permit 先于 accept、generated service 消息上限、持续 accept 失败摘流、有预算排空 |
+
+Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构造，不会因为启用 `application`
+自动获得生命周期组件；需要统一 Prometheus/OTLP 出口时显式调用各自的 `metrics_source`，同一 family
+只能登记一个 owner，多实例使用 `metrics_source_many`。gRPC 只有在同时启用 `application` 并声明
+`"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。
+
+完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#schema-registry实验)、
+[naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naobject/README.md) 和
+[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)。
+
 ## Feature 总表
 
 默认 feature 为空。只开启业务实际使用的能力：
@@ -104,7 +128,7 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 | `cache` | `nasa::cache` | 两级缓存、失效广播和缓存宏 |
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |
 | `kafka-tls` / `kafka-gssapi` / `kafka-zstd` | `nasa::kafka` | Kafka 传输安全与压缩子能力 |
-| `kafka-schema-registry` | `nasa::kafka` | 实验性 schema adapter，不进入 `full` |
+| `kafka-schema-registry` | `nasa::kafka`、`nasa::secret` | 实验性 schema adapter；蕴含 `kafka` 与 `secret`，不进入 `full` |
 | `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
 | `saga-kafka` | `nasa::saga` | 受管 command/result Kafka transport |
@@ -121,7 +145,7 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 | `oauth` | `nasa::oauth` | JWT、JWKS 与授权服务器 metadata |
 | `secret` | `nasa::secret` | secret 分片、快照和两阶段轮换 |
 | `secret-http` / `secret-vault` | `nasa::secret` | TLS client 和 KV v2 provider |
-| `object-store-experimental` | `nasa::object` | 实验性有界对象存储合同，不进入 `full` |
+| `object-store-experimental` | `nasa::object`、`nasa::secret` | 实验性有界对象存储合同；蕴含 `secret`，不进入 `full` |
 | `grpc-experimental` | `nasa::grpc`、`nasa::application` | 实验性独立或 `"grpc"` Application 受管 listener，含持续 accept 失败观测与摘流恢复，不进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
@@ -202,11 +226,14 @@ server:
 | `saga` | Application Saga 组件 |
 | `outbox` | Application Outbox 组件；也由 Saga 隐式纳入 |
 | `kafka` / `kafkas` | `nafka` 受管组件 |
+| `grpc` | 实验性 Application gRPC listener；独立模式不读取此根 |
 | `auth` | OAuth/JWKS 认证组件 |
 | `server` | Web 组件 |
 | `ws` | `naws` |
 | `rest_discovery` | 注册发现组件 |
 | `scheduling` | `nasched` |
+
+Schema Registry 和对象存储没有固定配置根；README 中的 yml 仅是业务投影示例，门面不会隐式读取。
 
 ## 主要边界
 

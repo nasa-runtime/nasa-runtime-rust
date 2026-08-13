@@ -124,6 +124,8 @@ nasaga-runtime = { path = "nasaga-runtime" }
 nasaga-macro = { path = "nasaga-macro" }
 naoutbox-core = { path = "naoutbox-core" }
 naoutbox-mysql = { path = "naoutbox-mysql" }
+# 对象存储指标源在门面构造，adapter 与门面必须共享同一 naobject 类型身份。
+naobject = { path = "naobject" }
 # 门面与 Application 生命周期必须共享同一 napart 身份，否则受管句柄无法流经公开门面类型。
 napart = { path = "napart" }
 # 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。

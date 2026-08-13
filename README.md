@@ -26,6 +26,23 @@ Inbox + CAS/journal + timer        Inbox + gate + business fact
 业务资源竞争仍需唯一键、条件更新或语义锁。接入入口见 [Saga 快速开始](docs/quickstart.md#saga-最小接线)，
 完整架构、迁移、运维与恢复边界见 [Saga 生产运行指南](docs/saga-production.md)。
 
+## 实验基础设施的稳定运行合同
+
+Kafka Schema Registry、对象存储和 gRPC listener 以显式 feature 提供实验 API，不被 `full` 隐式
+启用。实验表示公共 API 仍需更多真实业务收敛，不表示运行边界可以含糊：三项能力都已经定义容量与
+超时上限、唯一所有权、敏感信息脱敏、失败语义和可观测事实。
+
+| 能力 | 解决的问题 | 运行架构 | 明确不负责 |
+| --- | --- | --- | --- |
+| [Schema Registry](nafka/README.md#schema-registry实验) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | Kafka codec 子能力；业务持有 client，无 Application 组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
+| [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；业务持有实例 | multipart、流式/range/list、STS 刷新、对象版本治理 |
+| [gRPC listener](nagrpc/README.md) | HTTP/2 listener 的连接/消息门禁、观察与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto/TLS/鉴权治理、service mesh、客户端负载均衡 |
+
+Schema Registry 和对象存储没有固定配置根，也不会因启用 Application 自动启动；业务从最终配置与
+secret 快照构造，并可把低基数累计事实登记到统一 Prometheus/OTLP 目录。gRPC 受管模式则由容器独占
+shutdown，在 initializer 全部完成前不会绑定端口。各组件 README 是默认值、观测判读和成熟度边界的
+完整合同。
+
 ## 使用
 
 ### 推荐入口
@@ -187,8 +204,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
 | OAuth/JWKS/Metadata | `oauth` | `nasa::oauth::{MetadataClient, JwksRegistry}` |
-| Schema Registry（实验） | `kafka-schema-registry` | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
-| 对象存储（实验） | `object-store-experimental` | `nasa::object::{ObjectStore, S3ObjectStore}` |
+| Schema Registry（实验） | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
+| 对象存储（实验） | `object-store-experimental`（蕴含 `secret`） | `nasa::object::{ObjectStore, S3ObjectStore}` |
 | gRPC listener（实验） | `grpc-experimental` | `nasa::grpc::{GrpcServerConfig, GrpcServerHandle, GrpcServerObserver}`、`nasa::application::GrpcApplicationPlan`、`#[application("grpc")]` |
 | Redis 命令、Stream、锁 | `redis` | `nasa::redis::RedisClient` |
 | 方法级 L1/L2 缓存 | `cache` | `nasa::cache::{cached, cache_invalidate}` |
@@ -365,7 +382,7 @@ scheduling:             # scheduling 组件
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
-| [nafka](nafka/README.md) | `kafka` | 发布、消费、路由、确认、健康与安全配置 | `kafka.*` / `kafkas.*` |
+| [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；Registry 由业务配置投影 |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
 | [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和历史兼容加解密 | `crypto.*`、环境变量承载密钥 |
 | [nanum](nanum/README.md) | `numeric` | 定点金额、价格、最小变动单位对齐、舍入 | `numeric.*` |

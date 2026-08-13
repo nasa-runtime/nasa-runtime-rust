@@ -3,6 +3,8 @@
 `nafka` 是 NASA Rust 运行时的 Kafka 实现组件，提供类型化发布与消费、属性宏消费者收集、
 Auto/Manual Ack、消费组控制、DLT、独立 producer lane，以及面向 `naws` 的借用式少拷贝
 passthrough。
+可选 Schema Registry 能力在同一门面下提供 Confluent wire envelope、schema ID 白名单、
+有界正负缓存以及显式兼容性检查/注册，把消息编解码所需的远端 schema 访问与 Kafka 生命周期解耦。
 
 业务项目统一通过 `nasa::kafka` 使用，不直接依赖实现 crate：
 
@@ -15,8 +17,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 相关文档：
 
-- [naws Kafka 集成](../naws/README.md)：WebSocket、socket.io 与 Kafka passthrough。
-- [napp 受管生命周期](../napp/README.md#kafka-受管模式)：组件配置、Ready、健康和两段停机。
+- [naws Kafka 集成](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naws/README.md)：WebSocket、socket.io 与 Kafka passthrough。
+- [napp 受管生命周期](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#kafka-受管模式)：组件配置、Ready、健康和两段停机。
+- [Schema Registry](#schema-registry实验)：wire、缓存、控制面、观测与成熟度边界。
 
 ## 能力概览
 
@@ -29,6 +32,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 - 默认 group、命名 group、进程实例广播 group和固定分区 assign。
 - 有界重试、DLT、控制命令、ready 门禁、健康状态和可注入指标出口。
 - `PassthroughConsumer` 同步借用 Kafka payload/header，支持 Kafka 到本地 socket outbox 的少拷贝路径。
+- 可选 Confluent-compatible Schema Registry client，默认只读、有界缓存并拒绝未批准 schema ID。
 - 公共 API 不暴露 `rdkafka` 类型。
 
 ## Feature
@@ -36,6 +40,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `nasa` feature | 用途 |
 |---|---|
 | `kafka` | 基础 Kafka 能力与 `#[kafka_consumer]` |
+| `kafka-schema-registry` | Schema Registry client、wire envelope 与其凭据类型；同时启用 `kafka` 和 `secret` |
 | `kafka-tls` | TLS、SASL_SSL、SCRAM；静态内嵌 OpenSSL |
 | `kafka-gssapi` | Kerberos/GSSAPI，同时包含 TLS 支持 |
 | `kafka-zstd` | Zstandard 压缩 |
@@ -159,7 +164,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 受管配置在数据面字段之外增加严格 `container` 段；单 client 使用 `kafka`，多 client 使用互斥的
-`kafkas.<name>`。完整字段、ReadyRule 和顺序见 [napp README](../napp/README.md)。属性 consumer 的
+`kafkas.<name>`。完整字段、ReadyRule 和顺序见
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md)。属性 consumer 的
 `client` 必须命中一个 `consumers: collected` client；容器在 UserHook 后一次性冻结 registry，并在对外
 Ready 前等待真实 join/assignment 或 producer metadata。
 
@@ -1175,7 +1181,7 @@ kafka:
 
 Kafka header 只表达逻辑路由和消息元数据，不能指定任意 IP、host 或端口。最终出站只能选择预注册的
 本地 `Sender`、session 和白名单 sink。完整的 control/data plane、header 契约和 frame 流程见
-[naws README](../naws/README.md#websocket--kafka-集群推送与少拷贝)。
+[naws README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naws/README.md#websocket--kafka-集群推送与少拷贝)。
 
 ## 安全配置
 
@@ -1198,6 +1204,139 @@ kafka:
 
 密码、token、JAAS 和 key material 在 `Debug` 与配置错误中必须保持脱敏。生产 topic、DLT、consumer group
 和 DescribeConfigs 权限应按 principal 分离；不要在配置文件中写固定明文口令。
+
+## Schema Registry（实验）
+
+`schema-registry` feature 提供 Confluent-compatible 的 registry client 与 wire envelope
+（`nasa` 门面对应 `kafka-schema-registry`）。它是 Kafka 的 codec 子能力：不启动 registry 服务端，
+不拥有 Application 生命周期，也不设 napp 组件；业务在 UserHook 从最终配置构造并自行持有。
+`kafka-schema-registry` 自带 `secret`，因此 `SchemaRegistryAuth` 的 token 与密码类型无需业务再补 feature。
+
+生产默认禁止自动注册。数据面只按已批准的 schema ID 拉取，命中结果进有界正缓存，确认不存在的 ID
+进有界负缓存，两者各有独立 TTL 与统一条目上限；`auto_register` 必须显式开启才允许写入新修订。
+
+### 运行架构与安全合同
+
+Schema Registry 不参与 Kafka consumer group、offset 或 producer 所有权。推荐的数据面路径是先用业务
+发布的 `ApprovedSchemaIds` 校验 Confluent envelope，再按其中的正 schema ID 查询 client：
+
+```text
+Kafka record bytes
+  -> magic byte / payload 上限 / schema ID 白名单
+  -> 正缓存或 404 负缓存
+  -> GET /schemas/ids/{id}（仅缓存未命中）
+  -> 有界 JSON 读取
+  -> RegisteredSchema + 借用原 record 的 payload
+```
+
+兼容性检查与注册是独立控制面，不会混入数据面缓存命中率。兼容性结论 `false` 是合法业务结果；注册
+还必须通过 `auto_register` 本地授权门禁。adapter 不决定 subject 命名、兼容级别、schema 演进或
+部署审批，业务应先完成这些治理，再把批准后的 ID 发布到数据面白名单。
+
+endpoint 只接受 HTTPS 或 loopback HTTP，拒绝 userinfo、query、fragment、重定向和不能作为 base URL
+的地址。HTTP body 同时受 `Content-Length` 和流式累计上限约束；认证信息、endpoint、subject 与 schema
+正文不会进入公开错误。Bearer token 和 Basic password 使用 `SecretBytes`，不应写入 yml。
+
+### 配置与使用
+
+本能力没有固定 yml 根，也没有 Application 组件。业务从最终配置与 secret 快照构造 client，并自行
+持有其生命周期：
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use nasa::kafka::{
+    ApprovedSchemaIds, ConfluentEnvelope, ConfluentRegistryOptions,
+    ConfluentSchemaRegistry, SchemaId, SchemaRegistryAuth, SchemaRegistryClient,
+};
+use nasa::secret::SecretBytes;
+
+let mut options = ConfluentRegistryOptions::new("https://registry.example.com");
+options.auth = Some(SchemaRegistryAuth::Bearer(SecretBytes::new(registry_token)));
+options.request_timeout = Duration::from_secs(3);
+options.cache_capacity = 256;
+options.cache_ttl = Duration::from_secs(300);
+options.negative_cache_ttl = Duration::from_secs(5);
+
+let registry = Arc::new(ConfluentSchemaRegistry::new(options)?);
+let approved_id = SchemaId::new(17)?;
+let mut approved = ApprovedSchemaIds::new();
+approved.insert(approved_id);
+
+let envelope = ConfluentEnvelope::decode(record_payload, 4 * 1024 * 1024, &approved)?;
+let schema = registry.schema_by_id(envelope.schema_id).await?;
+```
+
+| `ConfluentRegistryOptions` 字段 | 默认值 | 约束与用途 |
+| --- | --- | --- |
+| `auth` | 无 | `Bearer` 或 Basic；credential 由 `SecretBytes` 承载 |
+| `request_timeout` | 3 秒 | 大于 0，最长一年；覆盖单次 HTTP 总时长 |
+| `max_response_bytes` | 1 MiB | 大于 0，框架硬上限 16 MiB；也约束待提交 schema 文本 |
+| `cache_capacity` | 256 | 大于 0；正缓存与负缓存共享 LRU 容量 |
+| `cache_ttl` | 300 秒 | 成功 schema 的本地有效期 |
+| `negative_cache_ttl` | 5 秒 | Registry 明确 404 的短期负缓存；传输失败不会写入 |
+| `auto_register` | `false` | 只有显式授权的部署或管理路径才能注册新修订 |
+
+### 观测
+
+`metrics_snapshot()` 一次读取即得到全部当前事实，读取不清零。查询结局分六类分别记账，
+覆盖 `schema_by_id` 的全部返回路径：
+
+| family | 类型 | label | 含义 |
+| --- | --- | --- | --- |
+| `nafka_schema_lookups_total` | counter | `outcome` | 按缓存与拉取结局分类的累计查询次数 |
+| `nafka_schema_cache_entries` | gauge | 无 | 正负缓存合计占用的条目数 |
+| `nafka_schema_cache_capacity` | gauge | 无 | 已登记 client 的缓存配置条目上限总和 |
+| `nafka_schema_control_requests_total` | counter | `operation`、`outcome` | 兼容性检查与注册的累计请求数 |
+
+`outcome` 取 `cache_hit`（正缓存命中）、`negative_cache_hit`（负缓存命中）、`fetched`（拉取成功）、
+`fetched_missing`（registry 确认不存在）、`fetch_failed`（传输、状态码或应答格式失败）、
+`cancelled`（future 在返回结局前被业务超时、客户端断连或任务取消丢弃）。取消时远端是否收到或完成
+请求未知，但这次已经开始的查询仍计入调用总数。
+schema ID、subject 与远端状态码**不进 label**。
+
+分母非零时，容量判断使用完成查询的正命中率 `cache_hit / (cache_hit + fetched)`；`cancelled` 没有查询结论，
+`fetch_failed` 没有 schema 结果，负缓存两类表示不存在的 ID，均不进入该比率。正命中率偏低且
+`cache_entries` 接近 `cache_capacity` 时，说明数据面正在受容量驱逐影响；取消应通过
+`outcome="cancelled"` 单独观察。负命中率异常升高说明上游在按不存在的 ID 解码；
+`fetch_failed` 上升而缓存占用不变说明失败没有污染缓存——一次网络抖动不会把 schema 永久标记为不存在。
+`cache_entries` 贴近 `cache_capacity` 时，驱逐来自容量而非 TTL。
+
+控制面 `operation` 取 `compatibility`/`register`，`outcome` 取 `success`/`rejected`/`transport`/
+`remote_status`/`invalid_response`/`cancelled`。兼容性结论为 false 仍是成功应答；`rejected` 表示
+subject、容量或 `auto_register` 门禁在本地拒绝；`cancelled` 表示调用已经开始但没有返回业务结局。
+数据面查询与控制面请求分族，注册流量不会稀释缓存命中率。
+
+与 `nasa` 的 `application` 组合时一行接入统一指标目录，之后 Prometheus 文本端点与 OTLP 指标导出
+共用同一份快照：
+
+```rust
+let registry = std::sync::Arc::new(nasa::kafka::ConfluentSchemaRegistry::new(options)?);
+app.register_metrics_source(nasa::kafka::schema_metrics::metrics_source(registry.clone()))?;
+```
+
+同一进程连接多个 Registry 集群时，每个 family 仍只能登记一个 owner。使用聚合源按封闭操作与结局
+求和，并把各 client 的缓存占用和容量相加；endpoint 与 subject 不进入 label：
+
+```rust
+app.register_metrics_source(nasa::kafka::schema_metrics::metrics_source_many([
+    primary_registry.clone(),
+    archive_registry.clone(),
+]))?;
+```
+
+### 成熟度与边界
+
+- `kafka-schema-registry` 是实验 feature，不进入 `full`；稳定合同等待真实 producer、consumer 与
+  schema 治理流程形成共同约束。
+- 当前公开合同覆盖 Confluent 5 字节 envelope、Avro/Protobuf/JSON Schema 类型、按 ID 查询、
+  兼容性检查、显式注册、有界正负缓存和低基数观测；不提供 codec 代码生成或 payload 语义校验。
+- client 不启动后台刷新，不主动扫描 subject/version，也不把 Registry 健康伪装成 Kafka broker Ready。
+- 同一 ID 的并发冷缓存查询可能各自访问 Registry；缓存限制驻留内存，不承诺请求合并或全进程单飞。
+- schema 删除、引用解析、兼容级别修改、subject ACL、跨 Registry 复制和灾备切换不在本合同内。
+- 调用 future 取消后远端结果未知；注册重试必须依赖 Registry 的 schema 去重语义与业务发布流程，
+  不能把本地取消解释为远端未执行。
 
 ## 健康、指标与管理面
 

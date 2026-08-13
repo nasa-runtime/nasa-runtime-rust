@@ -14,6 +14,14 @@
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
 //! 才开放监听、消费与服务发现；依赖边优先于 `order`，失败会阻止 Ready 并进入逆序清理。
+//!
+//! # 实验基础设施
+//!
+//! `kafka-schema-registry` 提供有界 Schema Registry client 与批准 ID 门禁；
+//! `object-store-experimental` 提供有界单对象合同、SigV4 adapter 与内容完整性复核。二者由业务持有，
+//! 没有 Application 组件，可显式登记低基数指标源。`grpc-experimental` 提供连接/消息上限与有预算
+//! 排空，可由独立 handle 持有，也可在启用 `application` 后交给 `"grpc"` 组件托管。三项能力均不
+//! 进入 `full`，其非目标和成熟度边界见对应 crate README。
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //
@@ -352,10 +360,230 @@ pub mod secret {
 
 /// 实验性 provider-neutral 对象存储与 S3-compatible adapter。
 ///
-/// 此模块不进入 `full`；稳定公共合同需由多个真实上传、导出和归档项目形成共同约束。
+/// 当前合同只覆盖有界单对象缓冲、path-style SigV4、`CreateOnly` 条件写、幂等删除和默认
+/// SHA-256 metadata 复核；不提供 multipart、流式/range/list、STS 刷新或对象版本治理。
+/// adapter 由业务持有，不设 Application 组件。此模块不进入 `full`；稳定公共合同需由多个真实
+/// 上传、导出和归档项目形成共同约束。
 #[cfg(feature = "object-store-experimental")]
 pub mod object {
     pub use object_impl::*;
+
+    /// 把 adapter 的累计观测事实并入 Application 统一指标目录的兼容源。
+    ///
+    /// 对象存储没有独立后台所有权，也不设 napp 组件；业务在 UserHook 用
+    /// `app.register_metrics_source(nasa::object::metrics::metrics_source(store))?` 一行接入，
+    /// 多 adapter 进程改用 `metrics_source_many` 登记一个聚合源。Prometheus 文本端点与 OTLP
+    /// 指标导出共用同一份进程级快照，且不把 bucket 或 endpoint 引入 label。
+    #[cfg(feature = "application")]
+    pub mod metrics {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use application_impl::{
+            LegacyMetricsSource, MetricDescriptor, MetricKind, MetricSample, MetricValue,
+        };
+
+        use super::{
+            ObjectDurationSample, ObjectOperation, ObjectRequestCount, ObjectStoreSnapshot,
+            S3ObjectStore, OBJECT_DURATION_BOUNDS,
+        };
+
+        /// 对象存储请求结局计数；label 取值域由 adapter 的封闭枚举决定，不随 bucket 或 key 扩张。
+        static REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
+            name: "naobject_requests_total",
+            help: "对象存储操作按封闭结局分类的累计请求数。",
+            unit: "",
+            kind: MetricKind::Counter,
+            label_names: &["operation", "outcome"],
+            histogram_bounds: &[],
+        };
+        /// 成功传输字节数；只统计确认成功的载荷，失败与元数据操作不计入。
+        static BYTES_TOTAL: MetricDescriptor = MetricDescriptor {
+            name: "naobject_transferred_bytes_total",
+            help: "成功上传或下载的对象字节总数。",
+            unit: "",
+            kind: MetricKind::Counter,
+            label_names: &["direction"],
+            histogram_bounds: &[],
+        };
+        /// 完整返回操作的时延分布；边界与 adapter 常量同源，不在导出面另建一份。
+        static DURATION_SECONDS: MetricDescriptor = MetricDescriptor {
+            name: "naobject_request_duration_seconds",
+            help: "对象存储操作从进入 adapter 到返回业务结局的耗时秒数，不含调用方取消；取消需结合 naobject_requests_total 观察。",
+            unit: "seconds",
+            kind: MetricKind::Histogram,
+            label_names: &["operation"],
+            histogram_bounds: &OBJECT_DURATION_BOUNDS,
+        };
+
+        /// 对象存储全部指标族的静态 descriptor manifest。
+        static OBJECT_DESCRIPTORS: [&MetricDescriptor; 3] =
+            [&REQUESTS_TOTAL, &BYTES_TOTAL, &DURATION_SECONDS];
+
+        /// 持有同一业务进程内的 adapter 共享所有权、按需聚合其累计事实的兼容源。
+        struct ObjectStoreMetricsSource {
+            stores: Vec<Arc<S3ObjectStore>>,
+        }
+
+        impl LegacyMetricsSource for ObjectStoreMetricsSource {
+            /// 业务作用：返回对象存储兼容源拥有的静态指标族目录。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：启动期冲突审计与结构化样本校验共用的全部 descriptor。
+            fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
+                &OBJECT_DESCRIPTORS
+            }
+
+            /// 业务作用：把全部 adapter 的累计快照聚合为统一目录的进程级结构化样本。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：`Some` 表示本源支持结构化出口；即使尚无请求也返回上传、下载零值，
+            /// 多 adapter 的同类计数、字节与完整返回时延按饱和加法合并。
+            fn snapshot(&self) -> Option<Vec<MetricSample>> {
+                let snapshots: Vec<_> = self
+                    .stores
+                    .iter()
+                    .map(|store| store.metrics_snapshot())
+                    .collect();
+                Some(samples(&aggregate_snapshots(&snapshots)))
+            }
+
+            /// 业务作用：保留旧 trait 入口；本源始终提供结构化快照，文本由统一 hub 渲染。
+            ///
+            /// 参数说明：
+            /// - `_output`: 兼容 trait 的文本缓冲区；本源不直接写入。
+            ///
+            /// 返回：无；两个出口共用同一份 `snapshot()` 结果。
+            fn render_prometheus(&self, _output: &mut String) {}
+        }
+
+        /// 业务作用：把 adapter 快照展开成统一目录的样本序列。
+        ///
+        /// 参数说明：
+        /// - `snapshot`: adapter 一次读取得到的累计事实。
+        ///
+        /// 返回：只含有观测的组合；直方图桶为非累积形态，桶总和恒等于 count。
+        fn samples(snapshot: &ObjectStoreSnapshot) -> Vec<MetricSample> {
+            let mut out = Vec::new();
+            for count in &snapshot.requests {
+                out.push(MetricSample {
+                    name: REQUESTS_TOTAL.name,
+                    labels: vec![
+                        ("operation", count.operation.label().to_owned()),
+                        ("outcome", count.outcome.label().to_owned()),
+                    ],
+                    value: MetricValue::Counter(count.requests),
+                });
+            }
+            for (direction, value) in [
+                ("upload", snapshot.uploaded_bytes),
+                ("download", snapshot.downloaded_bytes),
+            ] {
+                out.push(MetricSample {
+                    name: BYTES_TOTAL.name,
+                    labels: vec![("direction", direction.to_owned())],
+                    value: MetricValue::Counter(value),
+                });
+            }
+            for duration in &snapshot.durations {
+                out.push(MetricSample {
+                    name: DURATION_SECONDS.name,
+                    labels: vec![("operation", duration.operation.label().to_owned())],
+                    value: MetricValue::Histogram {
+                        bounds: &OBJECT_DURATION_BOUNDS,
+                        buckets: duration.buckets.clone(),
+                        sum: duration.sum_seconds,
+                        count: duration.count,
+                    },
+                });
+            }
+            out
+        }
+
+        /// 业务作用：把多个 adapter 快照合并为一个进程级事实，维持每个指标族只有一个 owner。
+        ///
+        /// 参数说明：
+        /// - `snapshots`: 同一抓取轮次依次读取的 adapter 累计快照。
+        ///
+        /// 返回：相同操作与结局按饱和加法求和，直方图逐桶合并并从桶总和派生 count，字节数同样求和。
+        fn aggregate_snapshots(snapshots: &[ObjectStoreSnapshot]) -> ObjectStoreSnapshot {
+            let mut requests = BTreeMap::new();
+            let mut durations: BTreeMap<ObjectOperation, (Vec<u64>, f64)> = BTreeMap::new();
+            let mut uploaded_bytes = 0_u64;
+            let mut downloaded_bytes = 0_u64;
+
+            for snapshot in snapshots {
+                for count in &snapshot.requests {
+                    let total = requests
+                        .entry((count.operation, count.outcome))
+                        .or_insert(0_u64);
+                    *total = total.saturating_add(count.requests);
+                }
+                for duration in &snapshot.durations {
+                    let (buckets, sum_seconds) = durations
+                        .entry(duration.operation)
+                        .or_insert_with(|| (vec![0; OBJECT_DURATION_BOUNDS.len() + 1], 0.0));
+                    for (target, value) in buckets.iter_mut().zip(&duration.buckets) {
+                        *target = target.saturating_add(*value);
+                    }
+                    *sum_seconds += duration.sum_seconds;
+                }
+                uploaded_bytes = uploaded_bytes.saturating_add(snapshot.uploaded_bytes);
+                downloaded_bytes = downloaded_bytes.saturating_add(snapshot.downloaded_bytes);
+            }
+
+            ObjectStoreSnapshot {
+                requests: requests
+                    .into_iter()
+                    .map(|((operation, outcome), requests)| ObjectRequestCount {
+                        operation,
+                        outcome,
+                        requests,
+                    })
+                    .collect(),
+                durations: durations
+                    .into_iter()
+                    .map(|(operation, (buckets, sum_seconds))| ObjectDurationSample {
+                        operation,
+                        count: buckets.iter().copied().fold(0_u64, u64::saturating_add),
+                        buckets,
+                        sum_seconds,
+                    })
+                    .collect(),
+                uploaded_bytes,
+                downloaded_bytes,
+            }
+        }
+
+        /// 业务作用：返回可直接交给 `Application::register_metrics_source` 的对象存储兼容源。
+        ///
+        /// 参数说明：
+        /// - `store`: 业务自己构造并持有的 adapter；指标源共享其所有权，不改变其生命周期。
+        ///
+        /// 返回：每次抓取读取该 adapter 当前累计值的无状态源。
+        pub fn metrics_source(store: Arc<S3ObjectStore>) -> Arc<dyn LegacyMetricsSource> {
+            metrics_source_many([store])
+        }
+
+        /// 业务作用：为同一进程的多个对象存储 adapter 返回单一聚合指标源。
+        ///
+        /// 统一目录要求每个 family 只有一个 owner，因此多 bucket、多 endpoint 或多凭据域不能分别
+        /// 登记同名源；聚合源保持 label 低基数，同时让全部 adapter 进入文本与 OTLP 出口。
+        ///
+        /// 参数说明：
+        /// - `stores`: 由业务构造并持有的 adapter 集合；源共享所有权，不改变生命周期。
+        ///
+        /// 返回：每次抓取按操作和封闭结局聚合全部 adapter 当前累计值的无状态源。
+        pub fn metrics_source_many(
+            stores: impl IntoIterator<Item = Arc<S3ObjectStore>>,
+        ) -> Arc<dyn LegacyMetricsSource> {
+            Arc::new(ObjectStoreMetricsSource {
+                stores: stores.into_iter().collect(),
+            })
+        }
+    }
 }
 
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
@@ -373,8 +601,11 @@ pub mod saga {
     pub use saga_runtime_impl::*;
 }
 
-/// 实验性 gRPC transport、health/reflection、连接上限与 graceful drain；与 `application` 组合时
-/// 可通过 `GrpcApplicationPlan` 交给 `"grpc"` 组件托管。
+/// 实验性 gRPC transport、health/reflection、连接与消息上限、接流观测和 graceful drain。
+///
+/// 独立模式由 `GrpcServerHandle` 独占 shutdown；与 `application` 组合时可通过
+/// `GrpcApplicationPlan` 交给 `"grpc"` 组件托管，listener 只在全部 initializer 成功后的 Ready
+/// 阶段绑定。proto、TLS、鉴权、service 健康与 reflection 开放策略仍由业务负责。
 #[cfg(feature = "grpc-experimental")]
 pub mod grpc {
     pub use grpc_impl::*;
@@ -450,9 +681,227 @@ pub mod ws {
 }
 
 /// Kafka 发布、消费组、手动确认、管理端与同步借用式少拷贝入口。
+///
+/// `kafka-schema-registry` 额外开放 Confluent envelope、schema ID 白名单、有界正负缓存和显式
+/// 兼容性/注册控制面；Registry client 由业务持有，不参与 Kafka 组件的 Ready 或 shutdown。
 #[cfg(feature = "kafka")]
 pub mod kafka {
     pub use kafka_impl::*;
+
+    /// 把 Schema Registry client 的查询结局并入 Application 统一指标目录的兼容源。
+    ///
+    /// Schema Registry 是 Kafka codec 子能力，没有独立后台所有权，也不设 napp 组件；
+    /// 业务在 UserHook 用 `app.register_metrics_source(...)` 一行接入；多 Registry client 使用
+    /// `metrics_source_many` 登记一个聚合源。Prometheus 文本端点与 OTLP 指标导出共用同一份
+    /// 进程级快照，且不把 endpoint 或 subject 引入 label。
+    #[cfg(all(feature = "application", feature = "kafka-schema-registry"))]
+    pub mod schema_metrics {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use application_impl::{
+            LegacyMetricsSource, MetricDescriptor, MetricKind, MetricSample, MetricValue,
+        };
+
+        use super::{
+            ConfluentSchemaRegistry, SchemaControlCount, SchemaLookupCount, SchemaRegistrySnapshot,
+        };
+
+        /// 按封闭结局分类的 schema 查询计数；label 取值域固定，不随 schema ID 或 subject 扩张。
+        static LOOKUPS_TOTAL: MetricDescriptor = MetricDescriptor {
+            name: "nafka_schema_lookups_total",
+            help: "Schema Registry 按缓存、拉取与取消结局分类的累计查询次数。",
+            unit: "",
+            kind: MetricKind::Counter,
+            label_names: &["outcome"],
+            histogram_bounds: &[],
+        };
+        /// 当前缓存占用条目数。
+        static CACHE_ENTRIES: MetricDescriptor = MetricDescriptor {
+            name: "nafka_schema_cache_entries",
+            help: "Schema Registry 正负缓存合计占用的条目数。",
+            unit: "",
+            kind: MetricKind::Gauge,
+            label_names: &[],
+            histogram_bounds: &[],
+        };
+        /// 已登记 client 的缓存条目上限总和；与占用总数一起判断是否已被容量而非 TTL 驱逐。
+        static CACHE_CAPACITY: MetricDescriptor = MetricDescriptor {
+            name: "nafka_schema_cache_capacity",
+            help: "已登记 Schema Registry client 的缓存配置条目上限总和。",
+            unit: "",
+            kind: MetricKind::Gauge,
+            label_names: &[],
+            histogram_bounds: &[],
+        };
+        /// 兼容性检查与注册请求计数；数据面缓存命中率不会被控制面流量稀释。
+        static CONTROL_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
+            name: "nafka_schema_control_requests_total",
+            help: "Schema Registry 兼容性检查与注册按封闭结局分类的累计请求数。",
+            unit: "",
+            kind: MetricKind::Counter,
+            label_names: &["operation", "outcome"],
+            histogram_bounds: &[],
+        };
+
+        /// Schema Registry 全部指标族的静态 descriptor manifest。
+        static SCHEMA_DESCRIPTORS: [&MetricDescriptor; 4] = [
+            &LOOKUPS_TOTAL,
+            &CACHE_ENTRIES,
+            &CACHE_CAPACITY,
+            &CONTROL_REQUESTS_TOTAL,
+        ];
+
+        /// 持有同一业务进程内的 client 共享所有权、按需聚合其累计事实的兼容源。
+        struct SchemaRegistryMetricsSource {
+            clients: Vec<Arc<ConfluentSchemaRegistry>>,
+        }
+
+        impl LegacyMetricsSource for SchemaRegistryMetricsSource {
+            /// 业务作用：返回 Schema Registry 兼容源拥有的静态指标族目录。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：启动期冲突审计与结构化样本校验共用的全部 descriptor。
+            fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
+                &SCHEMA_DESCRIPTORS
+            }
+
+            /// 业务作用：把全部 client 的累计快照聚合为统一目录的进程级结构化样本。
+            ///
+            /// 参数说明: 无。
+            ///
+            /// 返回：`Some` 表示本源支持结构化出口；尚无查询时仍导出各 client 缓存容量与占用之和。
+            fn snapshot(&self) -> Option<Vec<MetricSample>> {
+                let snapshots: Vec<_> = self
+                    .clients
+                    .iter()
+                    .map(|client| client.metrics_snapshot())
+                    .collect();
+                Some(samples(&aggregate_snapshots(&snapshots)))
+            }
+
+            /// 业务作用：保留旧 trait 入口；本源始终提供结构化快照，文本由统一 hub 渲染。
+            ///
+            /// 参数说明：
+            /// - `_output`: 兼容 trait 的文本缓冲区；本源不直接写入。
+            ///
+            /// 返回：无；两个出口共用同一份 `snapshot()` 结果。
+            fn render_prometheus(&self, _output: &mut String) {}
+        }
+
+        /// 业务作用：把 client 快照展开成统一目录的样本序列。
+        ///
+        /// 参数说明：
+        /// - `snapshot`: client 一次读取得到的累计事实。
+        ///
+        /// 返回：非零结局的数据面与控制面计数，以及始终导出的缓存占用与容量。
+        fn samples(snapshot: &SchemaRegistrySnapshot) -> Vec<MetricSample> {
+            let mut out = Vec::new();
+            for count in &snapshot.lookups {
+                out.push(MetricSample {
+                    name: LOOKUPS_TOTAL.name,
+                    labels: vec![("outcome", count.outcome.label().to_owned())],
+                    value: MetricValue::Counter(count.lookups),
+                });
+            }
+            out.push(MetricSample {
+                name: CACHE_ENTRIES.name,
+                labels: Vec::new(),
+                value: MetricValue::Gauge(snapshot.cached_entries as f64),
+            });
+            out.push(MetricSample {
+                name: CACHE_CAPACITY.name,
+                labels: Vec::new(),
+                value: MetricValue::Gauge(snapshot.cache_capacity as f64),
+            });
+            for count in &snapshot.control_requests {
+                out.push(MetricSample {
+                    name: CONTROL_REQUESTS_TOTAL.name,
+                    labels: vec![
+                        ("operation", count.operation.label().to_owned()),
+                        ("outcome", count.outcome.label().to_owned()),
+                    ],
+                    value: MetricValue::Counter(count.requests),
+                });
+            }
+            out
+        }
+
+        /// 业务作用：把多个 Registry client 快照合并为一个进程级事实，维持每个指标族只有一个 owner。
+        ///
+        /// 参数说明：
+        /// - `snapshots`: 同一抓取轮次依次读取的 client 累计快照。
+        ///
+        /// 返回：相同操作与结局按饱和加法求和，缓存占用与容量按 client 求和。
+        fn aggregate_snapshots(snapshots: &[SchemaRegistrySnapshot]) -> SchemaRegistrySnapshot {
+            let mut lookups = BTreeMap::new();
+            let mut control_requests = BTreeMap::new();
+            let mut cached_entries = 0_u64;
+            let mut cache_capacity = 0_u64;
+
+            for snapshot in snapshots {
+                for count in &snapshot.lookups {
+                    let total = lookups.entry(count.outcome).or_insert(0_u64);
+                    *total = total.saturating_add(count.lookups);
+                }
+                for count in &snapshot.control_requests {
+                    let total = control_requests
+                        .entry((count.operation, count.outcome))
+                        .or_insert(0_u64);
+                    *total = total.saturating_add(count.requests);
+                }
+                cached_entries = cached_entries.saturating_add(snapshot.cached_entries);
+                cache_capacity = cache_capacity.saturating_add(snapshot.cache_capacity);
+            }
+
+            SchemaRegistrySnapshot {
+                lookups: lookups
+                    .into_iter()
+                    .map(|(outcome, lookups)| SchemaLookupCount { outcome, lookups })
+                    .collect(),
+                cached_entries,
+                cache_capacity,
+                control_requests: control_requests
+                    .into_iter()
+                    .map(|((operation, outcome), requests)| SchemaControlCount {
+                        operation,
+                        outcome,
+                        requests,
+                    })
+                    .collect(),
+            }
+        }
+
+        /// 业务作用：返回可直接交给 `Application::register_metrics_source` 的 Registry 兼容源。
+        ///
+        /// 参数说明：
+        /// - `client`: 业务自己构造并持有的 client；指标源共享其所有权，不改变其生命周期。
+        ///
+        /// 返回：每次抓取读取该 client 当前累计值的无状态源。
+        pub fn metrics_source(
+            client: Arc<ConfluentSchemaRegistry>,
+        ) -> Arc<dyn LegacyMetricsSource> {
+            metrics_source_many([client])
+        }
+
+        /// 业务作用：为同一进程的多个 Schema Registry client 返回单一聚合指标源。
+        ///
+        /// 统一目录要求每个 family 只有一个 owner，因此多集群 client 不能分别登记同名源；聚合源
+        /// 保持 label 低基数，同时让全部数据面与控制面请求进入文本和 OTLP 出口。
+        ///
+        /// 参数说明：
+        /// - `clients`: 由业务构造并持有的 client 集合；源共享所有权，不改变生命周期。
+        ///
+        /// 返回：每次抓取按封闭操作与结局聚合全部 client 当前累计值的无状态源。
+        pub fn metrics_source_many(
+            clients: impl IntoIterator<Item = Arc<ConfluentSchemaRegistry>>,
+        ) -> Arc<dyn LegacyMetricsSource> {
+            Arc::new(SchemaRegistryMetricsSource {
+                clients: clients.into_iter().collect(),
+            })
+        }
+    }
 }
 
 /// Redis 基础层，对齐既有 RedisProxy 五件套的公开语义：

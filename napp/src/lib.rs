@@ -14,6 +14,10 @@
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
 //! `nasaga-runtime` 的持久合同承担。
 //!
+//! 启用实验 gRPC 组件时，UserHook 只移交无副作用的 Router 工厂，Prepare 永久封口入口，全部
+//! initializer 成功后的 Ready 才构造并绑定 listener。组件独占 shutdown，持续 accept 失败会摘除
+//! readiness 并保持有界恢复，serve 所有权丢失则触发统一失败停机。
+//!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 
 #![forbid(unsafe_code)]
@@ -67,9 +71,10 @@ mod metrics;
 
 /// 统一指标接入所需的 nametrics-core 公共类型再导出。
 ///
-/// `nasa` 门面据此构造 nafana 等**领域兼容源**并经 [`Application::register_metrics_source`] 并入
-/// 进程级 hub,无需业务或门面直接依赖 `nametrics-core`。
-#[cfg(any(feature = "kafka", feature = "web"))]
+/// `nasa` 门面据此构造 nafana、对象存储等**领域兼容源**并经
+/// [`Application::register_metrics_source`] 并入进程级 hub,无需业务或门面直接依赖
+/// `nametrics-core`。该组类型是指标目录的公开合同，与具体领域无关，因此不随 kafka/web
+/// 能力开关变化；否则不启用这两项的领域将无法为统一目录贡献指标。
 pub use nametrics_core::{
     LegacyMetricsSource, MetricDescriptor, MetricFamilySnapshot, MetricKind, MetricSample,
     MetricValue,

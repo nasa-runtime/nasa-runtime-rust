@@ -167,6 +167,156 @@ impl GrpcSettings {
     }
 }
 
+/// 受管 listener 指标族；全部无 label，基数与监听数一致，不随连接或对端增长。
+macro_rules! grpc_metric {
+    ($ident:ident, $name:literal, $help:literal, $kind:expr) => {
+        static $ident: nametrics_core::MetricDescriptor = nametrics_core::MetricDescriptor {
+            name: $name,
+            help: $help,
+            unit: "",
+            kind: $kind,
+            label_names: &[],
+            histogram_bounds: &[],
+        };
+    };
+}
+
+grpc_metric!(
+    GRPC_SERVING,
+    "napp_grpc_serving",
+    "受管 gRPC listener 当前是否处于 Running 并对新连接开放准入。",
+    nametrics_core::MetricKind::Gauge
+);
+grpc_metric!(
+    GRPC_CONNECTIONS_ACTIVE,
+    "napp_grpc_connections_active",
+    "已交给 tonic 且尚未关闭的连接数。",
+    nametrics_core::MetricKind::Gauge
+);
+grpc_metric!(
+    GRPC_CONNECTIONS_ACCEPTED,
+    "napp_grpc_connections_accepted_total",
+    "进入 listener 所有权的连接总数。",
+    nametrics_core::MetricKind::Counter
+);
+grpc_metric!(
+    GRPC_ACCEPT_FAILURES,
+    "napp_grpc_accept_failures_total",
+    "accept 返回错误的累计次数。",
+    nametrics_core::MetricKind::Counter
+);
+grpc_metric!(
+    GRPC_ACCEPT_CONSECUTIVE_FAILURES,
+    "napp_grpc_accept_consecutive_failures",
+    "最近一次成功 accept 之后的连续失败次数。",
+    nametrics_core::MetricKind::Gauge
+);
+grpc_metric!(
+    GRPC_ACCEPT_STALL_SECONDS,
+    "napp_grpc_accept_stall_seconds",
+    "当前连续 accept 失败已持续的秒数；没有进行中的失败段时为 0。",
+    nametrics_core::MetricKind::Gauge
+);
+
+/// 受管 listener 的全部 descriptor；启动期一次性登记，避免 Ready 后再扩张观测面。
+static GRPC_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 6] = [
+    &GRPC_SERVING,
+    &GRPC_CONNECTIONS_ACTIVE,
+    &GRPC_CONNECTIONS_ACCEPTED,
+    &GRPC_ACCEPT_FAILURES,
+    &GRPC_ACCEPT_CONSECUTIVE_FAILURES,
+    &GRPC_ACCEPT_STALL_SECONDS,
+];
+
+/// 把受管 listener 的接流事实接入唯一指标目录的兼容源。
+struct GrpcMetricsSource {
+    state: Arc<GrpcRuntimeState>,
+}
+
+impl nametrics_core::LegacyMetricsSource for GrpcMetricsSource {
+    /// 业务作用：返回受管 listener 固定 family 目录。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动期登记并用于结构化样本校验的全部 listener descriptor。
+    fn descriptors(&self) -> &'static [&'static nametrics_core::MetricDescriptor] {
+        &GRPC_DESCRIPTORS
+    }
+
+    /// 业务作用：读取同一时刻的 listener 快照并映射为结构化样本。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：listener 已在 Ready 发布时返回六条样本；尚未绑定时返回空样本集，
+    /// 表示本源支持结构化出口但当前无数据，不回落到自渲染。
+    fn snapshot(&self) -> Option<Vec<nametrics_core::MetricSample>> {
+        let Some(observer) = self.state.observer_if_published() else {
+            return Some(Vec::new());
+        };
+        // 六个值必须来自同一次快照：分别读取会导出"受理数已增、在途仍为旧值"这类
+        // 不存在的组合，运维按它做容量判断会得到错误结论。
+        let snapshot = observer.snapshot();
+        Some(vec![
+            grpc_gauge(
+                GRPC_SERVING.name,
+                f64::from(u8::from(snapshot.state == nagrpc::GrpcServerState::Running)),
+            ),
+            grpc_gauge(
+                GRPC_CONNECTIONS_ACTIVE.name,
+                snapshot.active_connections as f64,
+            ),
+            grpc_counter(GRPC_CONNECTIONS_ACCEPTED.name, snapshot.accepted_total),
+            grpc_counter(GRPC_ACCEPT_FAILURES.name, snapshot.accept_failures_total),
+            grpc_gauge(
+                GRPC_ACCEPT_CONSECUTIVE_FAILURES.name,
+                snapshot.consecutive_accept_failures as f64,
+            ),
+            grpc_gauge(
+                GRPC_ACCEPT_STALL_SECONDS.name,
+                snapshot.accept_stall_millis as f64 / 1_000_f64,
+            ),
+        ])
+    }
+
+    /// 业务作用：保留旧 trait 入口；本源始终提供结构化快照，文本出口由统一 hub 渲染。
+    ///
+    /// 参数说明：
+    /// - `_output`: 兼容 trait 的文本缓冲区；本源不直接写入。
+    ///
+    /// 返回：无；两个出口共用同一份 `snapshot()` 结果。
+    fn render_prometheus(&self, _output: &mut String) {}
+}
+
+/// 业务作用：构造一个无 label 的 listener 当前状态样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `value`: 当前状态值。
+///
+/// 返回：不含地址、对端或业务 service 名的 gauge 样本。
+fn grpc_gauge(name: &'static str, value: f64) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels: Vec::new(),
+        value: nametrics_core::MetricValue::Gauge(value),
+    }
+}
+
+/// 业务作用：构造一个无 label 的 listener 单调计数样本。
+///
+/// 参数说明：
+/// - `name`: 已登记 family 名。
+/// - `value`: 当前累计值。
+///
+/// 返回：不含地址、对端或业务 service 名的 counter 样本。
+fn grpc_counter(name: &'static str, value: u64) -> nametrics_core::MetricSample {
+    nametrics_core::MetricSample {
+        name,
+        labels: Vec::new(),
+        value: nametrics_core::MetricValue::Counter(value),
+    }
+}
+
 /// UserHook 计划、Ready 发布与运行期观察共用的单实例状态。
 pub(crate) struct GrpcRuntimeState {
     plan: Mutex<GrpcPlanState>,
@@ -257,6 +407,15 @@ impl GrpcRuntimeState {
         })
     }
 
+    /// 业务作用：仅在 Ready 已发布 listener 时返回观察句柄，供指标源区分"未绑定"与"零流量"。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已发布时返回克隆句柄；尚未绑定时返回 `None`，调用方应导出空样本集而不是零值。
+    fn observer_if_published(&self) -> Option<nagrpc::GrpcServerObserver> {
+        self.observer.get().cloned()
+    }
+
     /// 业务作用：取得已由 Ready 阶段发布且不含停机权限的 listener 观察句柄。
     ///
     /// 参数说明: 无。
@@ -318,6 +477,22 @@ impl ApplicationComponent for GrpcComponent {
         Box::pin(async move {
             let root: GrpcConfigRoot = context.application().config_as()?;
             let (bind, config) = root.grpc.validate(ApplicationPhase::Start)?;
+            // 与其它受管组件同一时机登记：descriptor 在 Seal 前全部就位，Ready 之后
+            // 不再扩张观测面；源持有运行期状态句柄，listener 绑定后自然开始产出样本。
+            let state = context.application().grpc_runtime();
+            context
+                .application()
+                .metrics_hub()
+                .register_legacy_source(Arc::new(GrpcMetricsSource { state }))
+                .map_err(|conflict| {
+                    grpc_error(
+                        ApplicationPhase::Start,
+                        format!(
+                            "gRPC metric descriptor `{}` conflicts with an existing registration",
+                            conflict.name
+                        ),
+                    )
+                })?;
             self.contributor = Some(context.application().register_readiness(
                 ComponentId::Grpc,
                 Arc::<str>::from("grpc:listener"),

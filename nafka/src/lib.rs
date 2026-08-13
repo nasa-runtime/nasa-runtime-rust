@@ -2,6 +2,10 @@
 //!
 //! 本 crate 负责配置校验、发布 lane、消费者注册、确认语义、控制面与少拷贝借用入口。
 //! 底层客户端类型全部限制在 `rd` 模块，业务代码应经统一门面使用这里的自有类型。
+//!
+//! `schema-registry` feature 额外提供 Confluent wire envelope、批准 ID 门禁、有界正负缓存和
+//! 兼容性/注册控制面。Registry client 不参与 consumer group、offset 或 producer 生命周期，也不
+//! 启动后台刷新；业务经 `nasa::kafka` 构造并持有实例。
 
 #![forbid(unsafe_code)]
 #![allow(async_fn_in_trait)]

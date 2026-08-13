@@ -3,12 +3,12 @@ name = "nagrpc"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Experimental bounded tonic gRPC server lifecycle for NASA"
+description = "Experimental bounded tonic gRPC listener with independent and NASA Application-managed lifecycle"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["grpc", "tonic", "server", "lifecycle", "async"]
+categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 async-stream = "0.3"
