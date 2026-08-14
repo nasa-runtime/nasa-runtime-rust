@@ -1177,6 +1177,86 @@ pub struct NacosDiscoveryHandle {
     application_state: Arc<StateCell>,
 }
 
+/// 服务发现中由框架验证并选出的原生 gRPC endpoint。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcDiscoveredEndpoint {
+    host: String,
+    port: u16,
+    tls_mode: GrpcDiscoveredTlsMode,
+    authority: String,
+}
+
+/// 发现端点声明的 TLS 合同；调用方必须按该模式提供匹配的 client 身份与信任根。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcDiscoveredTlsMode {
+    /// 明文原生 gRPC，仅适用于部署明确允许的网络边界。
+    Disabled,
+    /// 服务端 TLS，客户端必须验证 authority。
+    Server,
+    /// 双向 TLS，客户端还必须提供受信身份。
+    Mutual,
+}
+
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+impl GrpcDiscoveredEndpoint {
+    /// 业务作用：返回 provider 给出的可拨号主机或 IP。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：经过 provider 健康过滤且非空的实例地址。
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// 业务作用：返回 gRPC metadata 中声明的独立端口，不复用 REST 主端口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非零的实际 gRPC listener 端口。
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// 业务作用：返回 endpoint 的 TLS 模式，供 client 装配匹配的身份与信任根。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Disabled、Server 或 Mutual 中的一个封闭值。
+    pub fn tls_mode(&self) -> GrpcDiscoveredTlsMode {
+        self.tls_mode
+    }
+
+    /// 业务作用：返回 TLS SNI/证书校验使用的 authority；元数据未覆盖时使用注册 IP。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不含 scheme、端口和路径的 authority。
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    /// 业务作用：构造 generated client 可直接交给 `nasa::grpc::Endpoint` 的基础 URI。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 TLS 模式选择 `http` 或 `https`，IPv6 地址自动加方括号。
+    pub fn uri(&self) -> String {
+        let scheme = if self.tls_mode == GrpcDiscoveredTlsMode::Disabled {
+            "http"
+        } else {
+            "https"
+        };
+        let host = if self.host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{scheme}://{host}:{}", self.port)
+    }
+}
+
 #[cfg(feature = "nacos-discovery")]
 impl NacosDiscoveryHandle {
     /// 业务作用：从容器共享状态创建服务发现能力句柄。
@@ -1236,6 +1316,41 @@ impl NacosDiscoveryHandle {
         Ok(wants_registration)
     }
 
+    /// 业务作用：从注册中心选择一条声明原生 gRPC 协议且 endpoint 合同完整的健康实例。
+    ///
+    /// 参数说明：
+    /// - `service`: 注册中心内的服务名，不是 protobuf service full name。
+    ///
+    /// 返回：至少存在一条合法 gRPC endpoint 时返回其地址、端口、TLS 与 authority；查询失败或没有
+    /// 合格实例时返回服务发现错误，绝不把 REST 主端口猜成 gRPC 端口。
+    #[cfg(feature = "grpc")]
+    pub async fn grpc_endpoint(&self, service: &str) -> ApplicationResult<GrpcDiscoveredEndpoint> {
+        let session = self.session()?;
+        let instances = session
+            .lock()
+            .await
+            .discover_instances(service)
+            .await
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "cannot resolve a gRPC service endpoint",
+                    error,
+                )
+            })?;
+        instances
+            .into_iter()
+            .find_map(parse_grpc_endpoint)
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "no healthy instance publishes a valid gRPC endpoint",
+                )
+            })
+    }
+
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
@@ -1265,6 +1380,64 @@ impl NacosDiscoveryHandle {
                 )
             })
     }
+}
+
+/// 业务作用：把 provider 的固定 metadata 映射为 typed gRPC endpoint，并拒绝不完整或开放式值域。
+///
+/// 参数说明：
+/// - `instance`: 已通过 provider 健康过滤的服务实例。
+///
+/// 返回：协议、端口、TLS 模式与 authority 均合法时返回 typed endpoint，否则跳过该实例。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+fn parse_grpc_endpoint(instance: rest_discovery_nacos::Instance) -> Option<GrpcDiscoveredEndpoint> {
+    if instance.metadata.get("nasa.grpc.protocol")?.as_str() != "grpc" {
+        return None;
+    }
+    let port = instance.metadata.get("nasa.grpc.port")?.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    let tls_mode = match instance.metadata.get("nasa.grpc.tls_mode")?.as_str() {
+        "disabled" => GrpcDiscoveredTlsMode::Disabled,
+        "server" => GrpcDiscoveredTlsMode::Server,
+        "mutual" => GrpcDiscoveredTlsMode::Mutual,
+        _ => return None,
+    };
+    let authority = instance
+        .metadata
+        .get("nasa.grpc.authority")
+        .map(String::as_str)
+        .filter(|value| valid_grpc_authority(value))
+        .unwrap_or(&instance.ip)
+        .to_owned();
+    if !valid_grpc_authority(&authority) {
+        return None;
+    }
+    Some(GrpcDiscoveredEndpoint {
+        host: instance.ip,
+        port,
+        tls_mode,
+        authority,
+    })
+}
+
+/// 业务作用：限制发现 authority 为单一 DNS/IP 身份，阻止 metadata 注入 scheme、端口或路径。
+///
+/// 参数说明：
+/// - `value`: provider metadata 或实例 IP 中取得的候选 authority。
+///
+/// 返回：长度有界、无首尾空白且不含 URI 分隔符时为 `true`。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+fn valid_grpc_authority(value: &str) -> bool {
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !value.is_empty()
+        && value.len() <= 253
+        && value == value.trim()
+        && !value
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b':' | b'?' | b'#' | b'@'))
 }
 
 /// 服务发现组件发布会话但不转移关闭所有权的内部状态。

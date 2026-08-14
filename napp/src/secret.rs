@@ -180,13 +180,18 @@ fn parse_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolveError> {
     Ok(specs)
 }
 
-/// 业务作用：将 secret ID 限制为短 ASCII 标识，避免路径歧义、控制字符与无界诊断字段。
+/// 业务作用：将 secret ID 限制为有界 ASCII 层级标识，避免空分段、路径穿越与控制字符。
 fn valid_secret_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && value.len() <= 128
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 /// 业务作用：按点分路径在树中取**标量字符串**;非字符串或不存在返回 `None`(禁止引用子树/递归 spec)。

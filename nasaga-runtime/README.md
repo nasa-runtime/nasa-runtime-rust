@@ -7,10 +7,10 @@ adapter、管理与恢复入口、运行指标以及可选 transport connector�
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["saga-runtime"] }
+nasa = { version = "2", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
-# gRPC 收据裁决仍为实验能力：features = ["saga-grpc-experimental"]
+# gRPC 收据裁决：features = ["saga-grpc"]
 ```
 
 ## 运行架构
@@ -70,7 +70,7 @@ ACK/收据、重领和 DLT 安全语义。
 | `kafka` / 门面 `saga-kafka` | command/result 托管 consumer、手动 ACK、分区退避、durability-first DLT | 稳定；topic owner、group 与 ACL 由部署显式配置 |
 | `redis-stream` / 门面 `saga-redis-stream` | XREADGROUP、XAUTOCLAIM、显式 ACK、原子 DLT、签名、积压与安全清剪 | 稳定；Application 托管时还要声明 `redis` 组件 |
 | provider-neutral HTTP 认证类型 | canonical HMAC、显式 producer、replay 与容量观测 | 只提供认证和裁决构件；listener、共享 nonce store 与路由由宿主持有 |
-| `grpc-transport` / 门面 `saga-grpc-experimental` | command/result 服务端裁决器和封闭收据 | 实验；不生成 service，也不拥有 listener、mTLS、deadline 或 drain |
+| `grpc-transport` / 门面 `saga-grpc` | command/result 服务端裁决器和封闭收据 | 不生成业务 proto；listener、mTLS、deadline 与 drain 由 `grpc` 组件承担 |
 
 不使用 Application 组件的宿主仍需自行拥有消息消费循环、timer 轮询循环和停机顺序；本 crate
 不自行启动无限后台任务。

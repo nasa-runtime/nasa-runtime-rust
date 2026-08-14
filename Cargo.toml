@@ -46,6 +46,7 @@ members = [
     "nadate",
     "nametrics-core",
     "nagrpc",
+    "nagrpc-build",
     "naobject",
     "nasecret",
     "nasecret-http",
@@ -130,10 +131,13 @@ naobject = { path = "naobject" }
 napart = { path = "napart" }
 # 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
 nagrpc = { path = "nagrpc" }
+nagrpc-build = { path = "nagrpc-build" }
 # 指标统一目录与领域结构化快照必须共享同一类型身份，才能由 Application 完成文本与 OTLP 双出口。
 nametrics-core = { path = "nametrics-core" }
 natelemetry = { path = "natelemetry" }
 nanacos = { path = "nanacos" }
+rest-discovery-nacos = { path = "rest-discovery-nacos" }
+nasecret = { path = "nasecret" }
 config-boot = { path = "config-boot" }
 naweb = { path = "naweb" }
 nafana = { path = "nafana" }

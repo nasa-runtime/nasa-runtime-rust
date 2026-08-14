@@ -8,20 +8,19 @@
 //! `saga-runtime` 将本地 ACID、Outbox 至少一次、Inbox 幂等、持久化状态机与显式补偿组合为
 //! 最终一致性流程。稳定 `effect_id`、定义摘要、取消/裁决屏障、冻结补偿计划与 timer fencing
 //! 让重复投递、Unknown 结果、进程崩溃和多副本竞争从已提交事实收敛。Kafka 和 Redis Streams
-//! 提供受管 connector；HTTP 使用显式认证构件；gRPC 收据 connector 为实验能力。Saga 不提供
+//! 提供受管 connector；HTTP 使用显式认证构件；gRPC 使用封闭收据裁决。Saga 不提供
 //! 跨服务 ACID、物理 exactly-once 或并发隔离。
 //!
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
 //! 才开放监听、消费与服务发现；依赖边优先于 `order`，失败会阻止 Ready 并进入逆序清理。
 //!
-//! # 实验基础设施
+//! # 受管基础设施
 //!
 //! `kafka-schema-registry` 提供有界 Schema Registry client 与批准 ID 门禁；
-//! `object-store-experimental` 提供有界单对象合同、SigV4 adapter 与内容完整性复核。二者由业务持有，
-//! 没有 Application 组件，可显式登记低基数指标源。`grpc-experimental` 提供连接/消息上限与有预算
-//! 排空，可由独立 handle 持有，也可在启用 `application` 后交给 `"grpc"` 组件托管。三项能力均不
-//! 进入 `full`，其非目标和成熟度边界见对应 crate README。
+//! `object-store` 提供有界单对象合同、SigV4 adapter 与内容完整性复核；`grpc` 提供统一
+//! codegen、service registry、TLS/mTLS、HTTP/2 资源门禁和有预算排空。它们都进入 `full`，
+//! 业务只通过本门面使用公开合同。
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //
@@ -358,13 +357,13 @@ pub mod secret {
     pub use secret_vault_impl::{VaultConfigError, VaultKvV2Provider, VaultOptions};
 }
 
-/// 实验性 provider-neutral 对象存储与 S3-compatible adapter。
+/// provider-neutral 有界对象存储与 S3-compatible adapter。
 ///
 /// 当前合同只覆盖有界单对象缓冲、path-style SigV4、`CreateOnly` 条件写、幂等删除和默认
 /// SHA-256 metadata 复核；不提供 multipart、流式/range/list、STS 刷新或对象版本治理。
-/// adapter 由业务持有，不设 Application 组件。此模块不进入 `full`；稳定公共合同需由多个真实
-/// 上传、导出和归档项目形成共同约束。
-#[cfg(feature = "object-store-experimental")]
+/// adapter 由业务持有，不设 Application 组件；`full` 只负责开放构造入口，不替业务推断 bucket、
+/// credential 或数据保留策略。
+#[cfg(feature = "object-store")]
 pub mod object {
     pub use object_impl::*;
 
@@ -589,8 +588,8 @@ pub mod object {
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
 /// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
 ///
-/// `full` 会编入运行时与 Kafka adapter；Redis Streams 替代通道和实验 gRPC 收据 connector 仍需
-/// 显式 feature。业务必须声明 Application 的 `"saga"` 组件并提交流程定义、参与方信任关系和
+/// `full` 会编入运行时以及 Kafka、gRPC adapter；Redis Streams 替代通道仍需显式 feature。
+/// 业务必须声明 Application 的 `"saga"` 组件并提交流程定义、参与方信任关系和
 /// 发布端。DB 与 Outbox 由 Saga 声明隐式纳入，未装配计划时启动会 fail-closed。
 #[cfg(feature = "saga")]
 pub mod saga {
@@ -601,14 +600,26 @@ pub mod saga {
     pub use saga_runtime_impl::*;
 }
 
-/// 实验性 gRPC transport、health/reflection、连接与消息上限、接流观测和 graceful drain。
+/// 稳定 gRPC codegen 门面、generated service registry、独立/Application listener 与有界排空。
 ///
-/// 独立模式由 `GrpcServerHandle` 独占 shutdown；与 `application` 组合时可通过
-/// `GrpcApplicationPlan` 交给 `"grpc"` 组件托管，listener 只在全部 initializer 成功后的 Ready
-/// 阶段绑定。proto、TLS、鉴权、service 健康与 reflection 开放策略仍由业务负责。
-#[cfg(feature = "grpc-experimental")]
+/// 业务实现 generated trait 后只登记 server；health、reflection、消息/stream/RPC 预算、listener
+/// readiness 与 shutdown owner 由框架统一装配。独立进程通过 `ServerPlan` 使用同一运行合同。
+#[cfg(feature = "grpc")]
 pub mod grpc {
-    pub use grpc_impl::*;
+    pub use grpc_impl::{
+        async_trait, health, include_proto, propagate_deadline_from, reflection, Certificate,
+        Channel, ClientTlsConfig, Code, Deadline, DeadlineSource, Endpoint, GrpcMessageLimits,
+        GrpcMethodDescriptor, GrpcMethodPolicy, GrpcMethodType, GrpcRpcMethodSnapshot,
+        GrpcRpcOutcome, GrpcServerConfig, GrpcServerError, GrpcServerHandle, GrpcServerObserver,
+        GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity, Identity, ManagedGrpcService,
+        ManagedService, PeerIdentity, Request, Response, ServerPlan, Status, Streaming,
+    };
+
+    #[doc(hidden)]
+    pub use grpc_impl::{codegen, GrpcServicePolicy, CODEGEN_ABI};
+
+    #[cfg(all(feature = "application", feature = "rest-discovery-nacos"))]
+    pub use application_impl::{GrpcDiscoveredEndpoint, GrpcDiscoveredTlsMode};
 }
 
 /// OAuth Resource Server 的 JWT/JWKS 与 RFC 8414 metadata adapter。

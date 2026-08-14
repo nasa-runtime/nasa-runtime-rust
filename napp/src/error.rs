@@ -19,7 +19,7 @@ pub enum ComponentId {
     Telemetry,
     /// 保序分 lane 任务执行器。
     Partition,
-    /// 实验性受管 gRPC listener。
+    /// 受管 gRPC service registry 与 listener。
     Grpc,
     /// 进程内及分布式缓存。
     Cache,

@@ -6,7 +6,7 @@
 登记项的 `before -> initialize -> after` 三轮，全部成功前不开放监听、消费或服务发现。
 
 ```toml
-nasa = { version = "1", features = [
+nasa = { version = "2", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -46,7 +46,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)` |
 | `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
-| `"grpc"` | `grpc-experimental` | `grpc` | initializer 后构造 Router、绑定 listener、关键监督、有界排空与 `napp_grpc_*` 接流指标 | `app.grpc()` |
+| `"grpc"` | `grpc` | `grpc` | initializer 后自动装配 registered service、health、可选 reflection、TLS、listener、方法指标与有界排空 | `app.grpc()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、探针、监听与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
@@ -150,11 +150,10 @@ Saga 之前建立、在其之后释放;Ready 前用真实客户端统一探测 P
 消息留 PEL 交重启后重领。按冻结 (stream, group) 导出 `napp_saga_stream_*` 低基数指标
 (`Application::saga_stream_metrics_prometheus`),其中 `deleted_pending_total` 非零必须告警。
 
-gRPC request/response connector 通过门面 `saga-grpc-experimental` 启用，只提供封闭收据裁决，不会
-隐式声明 listener。业务可显式声明实验性 `"grpc"` 组件并通过 `GrpcApplicationPlan` 提交 Router；
-Application 在 initializer 之后绑定、监督 listener，并在全局预算内停止准入和排空。mTLS/签名
-principal 映射仍由业务 service 完成；回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按
-确定失败消耗死信预算。
+gRPC request/response connector 通过门面 `saga-grpc` 启用，只提供封闭收据裁决，不会隐式声明
+listener。业务显式声明 `"grpc"` 组件并登记 generated service 后，Application 在 initializer 之后
+自动装配、绑定和监督 listener，并在全局预算内停止准入和排空。mTLS/签名 principal 的业务信任映射
+仍由 service 完成；回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按确定失败消耗死信预算。
 
 为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
 `#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
@@ -352,63 +351,54 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 
 ## gRPC listener 受管模式
 
-`grpc-experimental` 把单个 tonic listener 纳入 Application 的 Ready、关键任务监督和反向停机，但不
-接管业务 proto、generated service、TLS 身份或方法级授权。业务在 UserHook 只提交无网络副作用的
-`GrpcApplicationPlan`；组件随后按固定顺序取得所有权：
+`grpc` 把 generated service registry、单个 HTTP/2 listener、TLS、健康、反射、固定方法指标、服务
+发现 metadata 与反向停机纳入 Application 的唯一所有权。业务保留 proto 与 handler 语义，在
+UserHook 只登记统一 codegen 生成的 server；组件随后按固定顺序取得运行资源：
 
 ```text
-UserHook 提交 Router 工厂
-  -> Prepare 永久封口计划入口
+UserHook 登记 generated service
+  -> Prepare 永久封口 registry
   -> 全部 initializer 成功
-  -> Ready 用最终配置构造 Router 并预绑定 listener
-  -> 发布只读 observer 与 grpc:listener readiness
-  -> 停机先摘 Ready，再停止准入并在全局剩余预算内排空
+  -> Ready 校验 descriptor 和方法策略
+  -> 自动装配 Router、health、可选 reflection 与 TLS
+  -> 预绑定 listener，发布 observer、readiness 和发现 metadata
+  -> 停机先注销发现实例，再停止准入并在全局剩余预算内排空
 ```
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "grpc-experimental"] }
+nasa = { version = "2", features = ["application", "grpc"] }
+
+[build-dependencies]
+nagrpc-build = "2"
 ```
 
 ```rust
-use nasa::application::{
-    ApplicationError, ApplicationPhase, ComponentId, GrpcApplicationPlan,
-};
-
 #[nasa::application("grpc")]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    app.configure_grpc(GrpcApplicationPlan::new(|config| {
-        let (_reporter, health_service) = nasa::grpc::health::server::health_reporter();
-        config
-            .server_builder()
-            .map_err(|error| ApplicationError::with_source(
-                ComponentId::Grpc,
-                ApplicationPhase::Ready,
-                "gRPC Router configuration was rejected",
-                error,
-            ))
-            .map(|builder| builder.add_service(nasa::grpc::apply_message_limits!(
-                config.message_limits,
-                health_service
-            )))
-    }))?;
+    app.register_grpc_service(
+        proto::order_service_server::OrderServiceServer::new(OrderApi),
+    )?;
     Ok(())
 }
 ```
 
 受管模式读取固定 `grpc` 根；字段、默认值和硬上限见
 [nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md#application-受管模式)。
-缺少计划、重复提交、晚于 UserHook 提交、非法配置、Router 工厂 panic 或端口绑定失败都会阻止 Ready，
-且不会留下监听任务。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。
+缺少业务 service、重复或晚到登记、ABI/descriptor 冲突、未知方法策略、非法 TLS/容量配置或端口绑定
+失败都会阻止 Ready，且不会留下监听任务。显式 `grpc.health_only: true` 可启动只有标准 health 的
+基础设施 listener。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。
 
-listener 成功发布后，Application 指标目录提供 `napp_grpc_serving`、连接当前值/累计值与 accept 失败
-事实。持续 accept 失败会先把 `grpc:listener` 摘为 NotReady，serve task 仍持有 socket、有界退避并做
-本机恢复探测；成功重新接流后恢复 Ready。serve 所有权丢失或进入 `Failed` 会作为关键任务失败触发
-统一停机，不能仅靠业务 health service 的状态替代 listener readiness。
+listener 成功发布后，Application 指标目录提供 `napp_grpc_serving`、连接/TLS 事实，以及由 sealed
+descriptor 固定 label 的 active、started、rejected、completed RPC 指标。持续 accept 失败会先把
+`grpc:listener` 摘为 NotReady，serve task 仍持有 socket、有界退避并做本机恢复探测；成功重新接流后
+恢复 Ready。serve 所有权丢失或进入 `Failed` 会作为关键任务失败触发统一停机，不能仅靠业务 health
+service 的状态替代 listener readiness。
 
-该组件只托管一个 listener。多 listener、证书轮换、reflection 开放策略、业务 service 健康、客户端
-连接池和负载均衡不属于 Application gRPC 组件；需要独立所有权时使用
-`nasa::grpc::GrpcServerHandle`，不要同时声明 `"grpc"` 组件。
+非 loopback 明文默认拒绝；TLS/mTLS 只从 `secret://` locator 读取同代材料，证书与密钥在 bind 前
+复验。`methods.<完整RPC路径>` 可要求验证过的 `PeerIdentity`，并设置方法并发与 token bucket；策略
+只能收紧全局上限，未知路径直接阻止启动。该组件只托管一个 listener，不提供证书进程内热切、客户端
+连接池或负载均衡；需要独立所有权时使用 `nasa::grpc::ServerPlan`，不要同时声明 `"grpc"` 组件。
 
 ## 业务 initializer
 

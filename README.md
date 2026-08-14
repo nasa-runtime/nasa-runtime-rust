@@ -22,21 +22,21 @@ Inbox + CAS/journal + timer        Inbox + gate + business fact
 
 流程定义摘要、稳定 `effect_id`、取消/裁决屏障、冻结补偿计划和 timer fencing 共同阻止定义漂移、重复
 副作用、未知结果误补偿与失权副本继续写入。Kafka 和 Redis Streams 提供受管消费接入；HTTP 可复用认证
-构件；gRPC 收据 connector 仍为实验能力。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离，
+构件；gRPC 提供封闭收据 connector。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离，
 业务资源竞争仍需唯一键、条件更新或语义锁。接入入口见 [Saga 快速开始](docs/quickstart.md#saga-最小接线)，
 完整架构、迁移、运维与恢复边界见 [Saga 生产运行指南](docs/saga-production.md)。
 
-## 实验基础设施的稳定运行合同
+## 稳定基础设施运行合同
 
-Kafka Schema Registry、对象存储和 gRPC listener 以显式 feature 提供实验 API，不被 `full` 隐式
-启用。实验表示公共 API 仍需更多真实业务收敛，不表示运行边界可以含糊：三项能力都已经定义容量与
-超时上限、唯一所有权、敏感信息脱敏、失败语义和可观测事实。
+Kafka Schema Registry、对象存储和 gRPC listener 已形成稳定公共合同，并继续用独立 feature 控制
+依赖面；`full` 会显式纳入三项能力。它们都定义容量与超时上限、唯一所有权、敏感信息脱敏、失败语义
+和可观测事实。
 
 | 能力 | 解决的问题 | 运行架构 | 明确不负责 |
 | --- | --- | --- | --- |
-| [Schema Registry](nafka/README.md#schema-registry实验) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | Kafka codec 子能力；业务持有 client，无 Application 组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
+| [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | Kafka codec 子能力；业务持有 client，无 Application 组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
 | [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；业务持有实例 | multipart、流式/range/list、STS 刷新、对象版本治理 |
-| [gRPC listener](nagrpc/README.md) | HTTP/2 listener 的连接/消息门禁、观察与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto/TLS/鉴权治理、service mesh、客户端负载均衡 |
+| [gRPC listener](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、观测与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto 业务语义、service mesh、客户端负载均衡 |
 
 Schema Registry 和对象存储没有固定配置根，也不会因启用 Application 自动启动；业务从最终配置与
 secret 快照构造，并可把低基数累计事实登记到统一 Prometheus/OTLP 目录。gRPC 受管模式则由容器独占
@@ -197,16 +197,16 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
 | Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
 | Saga Redis Streams command/result 托管 | `saga-redis-stream` | `SagaRedisStreamPublisher`、`SagaRedisStreamCommandConsumer`、`SagaRedisStreamResultConsumer` |
-| Saga gRPC 收据 connector（实验） | `saga-grpc-experimental` | `SagaGrpcCommandServer`、`SagaGrpcResultServer`、`SagaGrpcReceipt` |
+| Saga gRPC 收据 connector | `saga-grpc` | `SagaGrpcCommandServer`、`SagaGrpcResultServer`、`SagaGrpcReceipt` |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
 | OAuth/JWKS/Metadata | `oauth` | `nasa::oauth::{MetadataClient, JwksRegistry}` |
-| Schema Registry（实验） | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
-| 对象存储（实验） | `object-store-experimental`（蕴含 `secret`） | `nasa::object::{ObjectStore, S3ObjectStore}` |
-| gRPC listener（实验） | `grpc-experimental` | `nasa::grpc::{GrpcServerConfig, GrpcServerHandle, GrpcServerObserver}`、`nasa::application::GrpcApplicationPlan`、`#[application("grpc")]` |
+| Schema Registry | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
+| 对象存储 | `object-store`（蕴含 `secret`） | `nasa::object::{ObjectStore, S3ObjectStore}` |
+| gRPC listener | `grpc` | `nasa::grpc::{ServerPlan, GrpcServerConfig, GrpcServerHandle}`、`Application::register_grpc_service`、`#[application("grpc")]` |
 | Redis 命令、Stream、锁 | `redis` | `nasa::redis::RedisClient` |
 | 方法级 L1/L2 缓存 | `cache` | `nasa::cache::{cached, cache_invalidate}` |
 | 接口保护与 Prometheus/Grafana 面板 | `grafana` | `nasa::grafana::{grafana, Command, metrics}` |
@@ -219,8 +219,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 加密、金额、日期、图片 | `crypto`、`numeric`、`date`、`image` | `nasa::crypto` 等模块 |
 | 定时和异步任务 | `scheduling`、`scheduling-cluster` | `nasa::scheduling::{Async, scheduled}` |
 
-标为“实验”的能力不会被 `full` 隐式启用。它们已经具备有界 I/O、脱敏错误和独立生命周期，
-但在两个真实业务项目形成共同合同之前不承诺稳定 API。
+`full` 用于完整能力构建，不是生产服务的默认选择；生产项目仍应只启用实际使用的 feature，以免扩大
+依赖、安全和运行责任。
 
 ### GitHub 仓库依赖
 
@@ -245,7 +245,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`nadate`、`naimg`、`naws`。
@@ -355,7 +355,7 @@ scheduling:             # scheduling 组件
 | [natx-macro](natx-macro/README.md) | `tx` | `#[transactional]` 事务宏 | 由 `natx` 运行时读取 |
 | [nasaga-core](nasaga-core/README.md) | `saga` | Saga 身份、definition、状态机、结果与补偿计划合同 | 无 I/O；definition 由业务注册 |
 | [nasaga-mysql](nasaga-mysql/README.md) | runtime 内部 store | Saga journal、CAS、timer fencing、参与方 gate 与 migration | 复用 `natx` MySQL pool |
-| [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略；gRPC connector 为实验能力 |
+| [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` / `saga-grpc` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
 | [nadis](nadis/README.md) | `redis` | Redis 单点或集群、流水线、数据流、锁 | `redis.*` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
@@ -398,8 +398,9 @@ scheduling:             # scheduling 组件
 | [nasecret](nasecret/README.md) | `secret` | 分片解析、脱敏快照与两阶段轮换 | `secrets.*` |
 | [nasecret-http](nasecret-http/README.md) | `secret-http` | 随 secret 代际轮换的 TLS/mTLS HTTP client | 引用 `secrets.*` ID |
 | [nasecret-vault](nasecret-vault/README.md) | `secret-vault` | 有界 KV v2 secret provider | provider 配置由业务投影 |
-| [naobject](naobject/README.md) | `object-store-experimental` | 有界对象合同与 S3-compatible adapter | 无受管组件配置；业务显式构造 |
-| [nagrpc](nagrpc/README.md) | `grpc-experimental` | HTTP/2 listener、连接上限、健康、反射与排空 | `grpc.*`；可独立构造或交给 Application 托管 |
+| [naobject](naobject/README.md) | `object-store` | 有界对象合同与 S3-compatible adapter | 无受管组件配置；业务显式构造 |
+| [nagrpc](nagrpc/README.md) | `grpc` | 统一 codegen/service registry、HTTP/2/TLS、健康、反射、方法策略、观测与排空 | `grpc.*`；可独立构造或交给 Application 托管 |
+| [nagrpc-build](nagrpc-build/README.md) | `grpc` 的 build dependency | vendored protoc、descriptor/摘要、受管 server adapter 与兼容门禁 | 只写 Cargo `OUT_DIR` |
 | [macro-support](macro-support/README.md) | 宏内部依赖 | 过程宏路径解析 | 无运行时 yml |
 
 ## 安全说明(务必阅读)

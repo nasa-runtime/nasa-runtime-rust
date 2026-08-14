@@ -1,4 +1,4 @@
-//! 实验性 Confluent-compatible Schema Registry client 与 wire envelope。
+//! 有界 Confluent-compatible Schema Registry client 与 wire envelope。
 //!
 //! 该模块是 Kafka codec 子能力，不拥有 Application 生命周期，也不启动 registry 服务端。生产默认禁止
 //! 自动注册；业务数据面只按已批准 schema ID 拉取并使用有界正/负缓存。

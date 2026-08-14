@@ -51,7 +51,7 @@ pub mod reason {
         feature = "redis",
         feature = "cache",
         feature = "partition",
-        feature = "grpc-experimental",
+        feature = "grpc",
         feature = "nacos-config",
         feature = "nacos-discovery",
         feature = "web"
@@ -61,11 +61,17 @@ pub mod reason {
     #[cfg(feature = "partition")]
     pub const PARTITION_UNHEALTHY: &str = "partition_unhealthy";
     /// gRPC listener 在运行期失去 serve 所有权。
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     pub const GRPC_LISTENER_UNAVAILABLE: &str = "grpc_listener_unavailable";
     /// gRPC listener 仍持有 socket，但连续 accept 失败已超过受管摘流阈值。
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     pub const GRPC_ACCEPT_STALLED: &str = "grpc_accept_stalled";
+    /// gRPC TLS server identity 已进入配置的到期告警窗口。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_TLS_CERTIFICATE_EXPIRING: &str = "grpc_tls_certificate_expiring";
+    /// gRPC TLS server identity 已到期，listener 不得继续接收新流量。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_TLS_CERTIFICATE_EXPIRED: &str = "grpc_tls_certificate_expired";
     /// 依赖可服务但发生可恢复降级。
     #[cfg(any(
         feature = "redis",

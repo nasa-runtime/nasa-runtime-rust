@@ -46,7 +46,7 @@
 - [ ] 每个 Orchestrator 副本使用唯一且重启稳定的 owner；timer 副作用前重新核对租约、token、
       generation 与实例版本。
 - [ ] Kafka、Redis Streams、HTTP 或 gRPC 的实际选择与 feature、Application 组件、发布端、消费端、
-      身份来源和 DLT/收据合同逐项一致；实验 gRPC 不被描述为完整受管服务。
+      身份来源和 DLT/收据合同逐项一致；gRPC 收据 connector 与 listener 生命周期的责任分界准确。
 - [ ] Redis Streams 的 `(stream, group, consumer)` 唯一，Cluster key 同槽，PEL/XAUTOCLAIM、消息签名、
       原子 DLT 与安全清剪告警已经批准。
 - [ ] trace 只从已验证显式上下文传播；缺失 trace 不阻断投递，日志和 span 不携带 payload、完整业务键

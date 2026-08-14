@@ -31,8 +31,8 @@ rate-limit = ["redis", "dep:async-trait"]
 telemetry = ["dep:reqwest"]
 # partition：UserHook 提交纯参数计划，Prepare 创建保序执行器并纳入 readiness 与反向停机。
 partition = ["dep:napart"]
-# 实验性 gRPC listener：业务提交 Router 工厂，Application 在 Ready 绑定并监督、停机排空。
-grpc-experimental = ["dep:nagrpc"]
+# 稳定 gRPC listener：业务登记 generated service，Application 自动装配协议能力并托管生命周期。
+grpc = ["dep:nagrpc"]
 # cache：两级缓存组件；cacheable 提供 L2 与失效广播，napp 托管 CacheRuntimeGuard 生命周期。
 cache = ["dep:cacheable", "dep:async-trait"]
 # Kafka：受管 producer/consumer、broker Ready、动态健康和两段停机由 napp 编排。
@@ -74,12 +74,12 @@ matchit = { version = "0.8", optional = true }
 naml = { version = "1.0.3" }
 nametrics-core = { version = "1.0.2" }
 nabudget = { version = "1.0.1" }
-nasecret = { version = "1.0.0" }
+nasecret = { version = "1.0.1" }
 naidempotency = { version = "1.0.1" }
 naauthz = { version = "1.0.1" }
 natelemetry = { version = "1.0.1" }
 napart = { version = "1.1.2", optional = true }
-nagrpc = { version = "1.0.2", optional = true }
+nagrpc = { version = "2.0.0", optional = true }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
 nauth-oauth = { version = "1.0.0", optional = true }
 naopenapi = { version = "1.0.1", optional = true }
@@ -100,7 +100,7 @@ nasaga-runtime = { version = "1.0.2", optional = true }
 nanacos = { version = "1.0.2", optional = true, default-features = false }
 nasched = { version = "1.0.1", optional = true }
 naws = { version = "1.0.1", optional = true, default-features = false }
-rest-discovery-nacos = { version = "1.0.1", optional = true, default-features = false }
+rest-discovery-nacos = { version = "1.0.2", optional = true, default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

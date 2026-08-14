@@ -143,14 +143,24 @@ impl ApplicationComponent for NacosDiscoveryComponent {
 
             let application = context.application();
             let port = registration_port(application, &config)?;
-            let info = AppRegistrationInfo::new(
+            let mut info = AppRegistrationInfo::new(
                 application.info().name(),
-                application
-                    .web_addr()
-                    .map(|address| address.ip().to_string())
-                    .unwrap_or_default(),
+                registration_bind_ip(application),
                 port,
             );
+            #[cfg(feature = "grpc")]
+            if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+                // endpoint 只在 listener 已实际接流后发布；provider 元数据由框架封闭生成，业务不能
+                // 注入任意端口或 TLS 模式把客户端导向另一条未受管路径。
+                info = info
+                    .with_metadata("nasa.grpc.protocol", "grpc")
+                    .with_metadata("nasa.grpc.port", endpoint.port.to_string())
+                    .with_metadata("nasa.grpc.tls_mode", endpoint.tls_mode)
+                    .with_metadata(
+                        "nasa.grpc.authority",
+                        endpoint.authority.unwrap_or_default(),
+                    );
+            }
             session.lock().await.register(info).await.map_err(|error| {
                 discovery_error_src(
                     ApplicationPhase::Ready,
@@ -401,8 +411,7 @@ impl Drop for NacosDiscoveryMonitorShutdown {
 
 /// 业务作用：解析注册使用的端口。
 ///
-/// 有 Web 时必须用 `web_addr()` 的真实端口——`server.port=0` 场景下配置里的 0 不是可拨号端口；
-/// 无 Web 时只能由配置显式给出非 0 端口，否则给定向错误而不是注册一个不可达实例。
+/// Web 与 gRPC 共存时保留 Web 主端口；纯 gRPC 进程使用 listener 实际端口；其它进程才读取显式端口。
 ///
 /// # 参数
 ///
@@ -415,14 +424,35 @@ fn registration_port(
     if let Some(address) = application.web_addr() {
         return Ok(address.port());
     }
+    #[cfg(feature = "grpc")]
+    if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+        return Ok(endpoint.port);
+    }
     if config.registration.port != 0 {
         return Ok(config.registration.port);
     }
     Err(discovery_error(
         ApplicationPhase::Ready,
-        "cannot register without a port: declare the `web` component, \
+        "cannot register without a port: declare `web` or `grpc`, \
          set an explicit `rest_discovery.registration.port`, or disable registration",
     ))
+}
+
+/// 业务作用：选择仅用于兼容展示的监听 IP，不参与 provider 的注册 IP 优先级。
+///
+/// 参数说明：
+/// - `application`: 提供 Web 与 gRPC 已发布 listener 的共享上下文。
+///
+/// 返回：优先返回 Web 绑定 IP；纯 gRPC 返回其绑定 IP；均不存在时返回空串。
+fn registration_bind_ip(application: &Application) -> String {
+    if let Some(address) = application.web_addr() {
+        return address.ip().to_string();
+    }
+    #[cfg(feature = "grpc")]
+    if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+        return endpoint.authority.unwrap_or_default();
+    }
+    String::new()
 }
 
 /// 业务作用：从最终配置读取 `rest_discovery` 段；段缺失时使用禁用的缺省配置。

@@ -243,7 +243,7 @@ pub(crate) struct ApplicationInner {
     #[cfg(feature = "partition")]
     partition_runtime: Arc<crate::partition::PartitionRuntimeState>,
     /// UserHook Router 计划、Ready listener 发布和运行期观察共用的 gRPC 状态。
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     grpc_runtime: Arc<crate::grpc::GrpcRuntimeState>,
     /// Kafka client 能力、UserHook consumer 定制和指标桥的受控发布状态。
     #[cfg(feature = "kafka")]
@@ -348,7 +348,7 @@ impl Application {
                 scheduling_runtime: Arc::new(crate::capabilities::SchedulingRuntimeState::new()),
                 #[cfg(feature = "partition")]
                 partition_runtime: Arc::new(crate::partition::PartitionRuntimeState::new()),
-                #[cfg(feature = "grpc-experimental")]
+                #[cfg(feature = "grpc")]
                 grpc_runtime: Arc::new(crate::grpc::GrpcRuntimeState::new()),
                 #[cfg(feature = "kafka")]
                 kafka_runtime: Arc::new(crate::kafka::KafkaRuntimeState::new()),
@@ -1387,36 +1387,39 @@ impl Application {
         Arc::clone(&self.inner.partition_runtime)
     }
 
-    /// 业务作用：在 Service UserHook 内提交本进程唯一的 gRPC Router 装配计划。
+    /// 业务作用：在 Service UserHook 内登记一个 generated gRPC server，由 Application 统一装配。
     ///
-    /// 本入口不构造 Router、不绑定端口。组件在 Prepare 封口计划，并在全部 initializer 成功后的
-    /// Ready 阶段执行工厂，因此业务初始化失败时不会产生提前接流的 listener。
+    /// 本入口不构造 Router、不绑定端口。组件在 Prepare 封口 registry，并在全部 initializer 成功后的
+    /// Ready 阶段自动加入 health/reflection 和消息边界，因此业务初始化失败时不会提前接流。
     ///
     /// 参数说明：
-    /// - `plan`: 只持有一次性 Router 工厂、不含运行副作用的装配计划。
+    /// - `service`: `nagrpc-build` 生成且尚未加入其它 Router 的 server。
     ///
-    /// 返回：UserHook 开放、已声明 `grpc` 且首次提交时成功；重复、晚到或 Batch 调用返回阶段错误。
-    #[cfg(feature = "grpc-experimental")]
-    pub fn configure_grpc(&self, plan: crate::grpc::GrpcApplicationPlan) -> ApplicationResult<()> {
+    /// 返回：UserHook 开放、已声明 `grpc` 且 service 身份唯一时成功；晚到、重复或 Batch 调用返回错误。
+    #[cfg(feature = "grpc")]
+    pub fn register_grpc_service<S>(&self, service: S) -> ApplicationResult<()>
+    where
+        S: nagrpc::ManagedGrpcService,
+    {
         let _gate = self
             .inner
             .user_registration_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.ensure_user_hook_open("gRPC application plan configuration")?;
+        self.ensure_user_hook_open("gRPC service registration")?;
         if self.info().mode() != ApplicationMode::Service {
             return Err(ApplicationError::new(
                 ComponentId::Grpc,
                 ApplicationPhase::UserHook,
-                "gRPC application plans are only accepted during the Service user hook",
+                "gRPC services are only accepted during the Service user hook",
             ));
         }
         self.ensure_component_declared(
             ComponentId::Grpc,
             ApplicationPhase::UserHook,
-            "gRPC application plan configuration",
+            "gRPC service registration",
         )?;
-        self.inner.grpc_runtime.configure(plan)
+        self.inner.grpc_runtime.register(service)
     }
 
     /// 业务作用：取得已由 Ready 阶段发布且不含 shutdown 权限的 gRPC listener 观察句柄。
@@ -1425,7 +1428,7 @@ impl Application {
     ///
     /// 返回：已声明组件且 listener 已绑定时返回地址、状态、连接、accept 失败计数与持续时长视图；
     /// 否则返回阶段错误。
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     pub fn grpc(&self) -> ApplicationResult<nagrpc::GrpcServerObserver> {
         self.ensure_component_declared(
             ComponentId::Grpc,
@@ -1435,12 +1438,12 @@ impl Application {
         self.inner.grpc_runtime.observer()
     }
 
-    /// 业务作用：把 gRPC 计划与观察发布状态借给唯一生命周期组件。
+    /// 业务作用：把 gRPC registry 与观察发布状态借给唯一生命周期组件。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：共享状态所有权副本；仅用于 Prepare 线性消费和 Ready 发布。
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     pub(crate) fn grpc_runtime(&self) -> Arc<crate::grpc::GrpcRuntimeState> {
         Arc::clone(&self.inner.grpc_runtime)
     }
@@ -2026,7 +2029,7 @@ impl Application {
         feature = "nacos-discovery",
         feature = "scheduling",
         feature = "partition",
-        feature = "grpc-experimental"
+        feature = "grpc"
     ))]
     pub(crate) fn ensure_component_declared(
         &self,

@@ -1,174 +1,278 @@
 # nagrpc
 
-`nagrpc` 是实验性 gRPC listener 生命周期层。它提供只接受 HTTP/2 的有界 server builder、严格
-连接 permit、预绑定 listener、health/reflection 门面、只读观察句柄和有预算的 graceful drain；
-业务 proto 和 generated service 仍归业务项目。与 `nasa` 的 `application` 组合时，listener 可由
-`#[nasa::application("grpc")]` 统一托管。
+`nagrpc` 把 tonic 的 codegen 身份、service 装配、HTTP/2 listener、安全边界、健康、反射、指标和停机
+收进一个稳定合同。业务只定义 proto、实现生成的 trait，并把生成的 server 登记给
+`#[nasa::application("grpc")]`；业务不构造 tonic Router，不逐个 service 套消息限制，也不直接选择
+`tonic`、`prost`、codec 或 build crate 的版本。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["grpc-experimental"] }
+nasa = { version = "2", features = ["application", "grpc"] }
+
+[build-dependencies]
+nagrpc-build = "2"
 ```
 
-## 运行架构与所有权
+## 核心价值
 
-listener 有两种互斥的所有权模式，二者共用同一份 `GrpcServerConfig`、连接准入与排空合同：
+直接使用 tonic 时，业务项目通常要同时维护 protobuf 编译器、tonic/prost 版本对齐、Router、health、
+reflection、每个 generated service 的消息上限、TLS、listener、readiness、指标和 graceful shutdown。
+这些工作一旦分散到每个服务，遗漏一个步骤就会形成不同的运行合同。
 
-| 模式 | 唯一 shutdown owner | 启动顺序 | 观测入口 |
-| --- | --- | --- | --- |
-| 独立模式 | 业务持有的 `GrpcServerHandle` | 校验配置 → 构造 Router → 预绑定 → 启动 serve | `GrpcServerObserver::snapshot()` |
-| Application 受管模式 | `"grpc"` 组件 | UserHook 提交工厂 → Prepare 封口 → initializer 完成 → Ready 构造并绑定 | `Application::grpc()` 与 `napp_grpc_*` |
+稳定接入把责任划分为：
 
-连接 permit 必须在 `accept()` 之前取得，因此配置的 `max_connections` 同时约束已经受理和等待交给
-tonic 的连接，不会先接受 socket 再等待容量。每个 generated service 仍必须显式应用消息编解码上限；
-tonic 的 codec 位于 service 内，transport builder 无法替业务隐式补上这条门禁。
+| 业务负责 | `nagrpc` / `napp` 负责 |
+| --- | --- |
+| `.proto`、兼容基线和 RPC 业务语义 | vendored HOST `protoc`、tonic/prost/codec 单一身份、descriptor 与摘要 |
+| 实现 generated service trait | Router、消息/连接/RPC/stream/HTTP/2 资源边界 |
+| 在 UserHook 登记 generated server | health、可选 reflection、TLS/mTLS、readiness、发现 metadata、指标 |
+| 决定方法授权和容量策略 | 在 handler 前执行身份、并发和速率门禁 |
+| 独立模式下持有唯一 handle | Application 模式的绑定、监督、摘流、排空和反向停机 |
 
-独立模式和受管模式都先停止新连接准入，再等待 tonic 处理中的 RPC 排空。排空超时会终止 serve task
-并发布 `Failed`，不会遗留 detached listener；同步 `Drop` 只承担异常兜底，正常停机必须等待异步
-shutdown。health 与 reflection 只是显式可装配的 adapter，不会默认开放，业务 service、proto 兼容、
-TLS 身份和方法级授权仍由应用负责。
+`nagrpc` 不替业务设计 proto，也不替代 service mesh、API gateway、Schema Registry、客户端负载均衡或
+业务权限模型。它解决的是同一进程内 gRPC transport 与 generated service 的一致装配和唯一生命周期。
 
-## 初始化与使用
+## 最小业务接入
+
+协议文件仍属于业务项目：
+
+```proto
+syntax = "proto3";
+package order.v1;
+
+service OrderService {
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+}
+
+message GetOrderRequest { string order_id = 1; }
+message GetOrderResponse { string order_id = 1; string status = 2; }
+```
+
+`build.rs` 只有统一生成入口：
 
 ```rust
-use std::net::SocketAddr;
-use nasa::grpc::{health, reflection, GrpcServerConfig};
-
-let config = GrpcServerConfig::default();
-let (_reporter, health_service) = health::server::health_reporter();
-let reflection_service = reflection::server::Builder::configure()
-    .build_v1()?;
-
-let router = config
-    .server_builder()?
-    .add_service(nasa::grpc::apply_message_limits!(
-        config.message_limits,
-        health_service
-    ))
-    .add_service(nasa::grpc::apply_message_limits!(
-        config.message_limits,
-        reflection_service
-    ))
-    .add_service(nasa::grpc::apply_message_limits!(
-        config.message_limits,
-        my_service
-    ));
-
-let handle = config
-    .start(router, "127.0.0.1:50051".parse::<SocketAddr>()?)
-    .await?;
-
-// 停机 owner：
-handle.shutdown().await?;
+fn main() {
+    nagrpc_build::compile("proto/order.proto").expect("订单 gRPC 协议必须生成成功");
+}
 ```
 
-generated service 必须通过 `apply_message_limits!` 同时应用 `config.message_limits` 的编码/解码
-上限；漏掉这一步属于装配错误。tonic 把 codec 放在 generated service 内，server transport 没有
-等价的全局消息上限开关。
-
-## Application 受管模式
-
-启用 `application` 与 `grpc-experimental` 后，业务在 UserHook 提交只含 Router 工厂的计划。工厂
-直到全部 initializer 成功后的 Ready 阶段才执行；Application 负责绑定、关键任务监督、readiness、
-反向停机和全局预算。工厂必须使用收到的同一份配置建立 builder 并应用消息上限。
-
-```toml
-[dependencies]
-nasa = { version = "1", features = ["application", "grpc-experimental"] }
-```
+业务模块包含生成代码并实现 trait：
 
 ```rust
-use nasa::application::{
-    ApplicationError, ApplicationPhase, ComponentId, GrpcApplicationPlan,
-};
+pub mod proto {
+    nasa::grpc::include_proto!("order.v1");
+}
 
+#[derive(Default)]
+struct OrderApi;
+
+#[nasa::grpc::async_trait]
+impl proto::order_service_server::OrderService for OrderApi {
+    async fn get_order(
+        &self,
+        request: nasa::grpc::Request<proto::GetOrderRequest>,
+    ) -> Result<nasa::grpc::Response<proto::GetOrderResponse>, nasa::grpc::Status> {
+        let order_id = request.into_inner().order_id;
+        Ok(nasa::grpc::Response::new(proto::GetOrderResponse {
+            order_id,
+            status: "created".to_owned(),
+        }))
+    }
+}
+```
+
+`main.rs` 的 UserHook 只登记 service：
+
+```rust
 #[nasa::application("grpc")]
-async fn main(application: nasa::Application) -> anyhow::Result<()> {
-    application.configure_grpc(GrpcApplicationPlan::new(|config| {
-        let (_reporter, health_service) = nasa::grpc::health::server::health_reporter();
-        let router = config
-            .server_builder()
-            .map_err(|error| ApplicationError::with_source(
-                ComponentId::Grpc,
-                ApplicationPhase::Ready,
-                "gRPC Router configuration was rejected",
-                error,
-            ))?
-            .add_service(nasa::grpc::apply_message_limits!(
-                config.message_limits,
-                health_service
-            ));
-        Ok(router)
-    }))?;
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    app.register_grpc_service(
+        proto::order_service_server::OrderServiceServer::new(OrderApi),
+    )?;
     Ok(())
 }
 ```
 
-受管组件读取固定 `grpc` 配置根：
+登记动作没有网络副作用。Application 在 Prepare 封口 registry，等全部 initializer 成功后才在 Ready
+阶段校验 descriptor 与方法策略、装配 health/reflection、绑定 listener 并开放 readiness。缺少业务
+service、重复 service、codegen ABI 不一致、descriptor 冲突、未知方法策略或端口绑定失败都会在接流前
+拒绝启动。`grpc.health_only: true` 是显式允许没有业务 service 的唯一例外。
+
+### 为什么使用 `nasa::grpc::include_proto!`
+
+`tonic::include_proto!` 只把一个生成的 `.rs` 文件包含进当前模块；它不知道 NASA 的 descriptor、摘要、
+codegen ABI 和运行时门面。`nasa::grpc::include_proto!` 同时包含：
+
+- 归一化到 `nasa::grpc::codegen` 的生成代码，业务无需直接依赖 tonic/prost；
+- 与生成代码同一次构建得到的 `FILE_DESCRIPTOR_SET`；
+- descriptor 的 `FILE_DESCRIPTOR_SHA256`；
+- `nagrpc-build` 为 generated server 生成的 `ManagedGrpcService` 适配。
+
+这些元数据让 registry 能在 listener 开放前验证 service 名、完整方法路径、四种 streaming 形态、
+descriptor 冲突和 ABI，并让 reflection、方法指标和方法策略使用同一份固定目录。因此它不是对 tonic
+宏的无意义包裹；改回 `tonic::include_proto!` 会绕过受管 codegen 合同，而且业务又必须自行维护第三方
+依赖和装配步骤。
+
+## Application 受管模式
+
+受管模式的唯一 owner 是 `"grpc"` 组件：
+
+```text
+UserHook 登记 generated service
+  -> Prepare 封口 registry
+  -> initializer 全部成功
+  -> Ready 校验 descriptor/策略并装配 health、reflection、TLS
+  -> 预绑定 listener，发布 readiness、observer 与发现 metadata
+  -> 停机先从发现中心注销，再关闭新连接准入
+  -> 两阶段 GOAWAY 排空，超时后终止 serve task
+```
+
+最小配置只需绑定地址；其它字段都有有界默认值：
+
+```yaml
+application:
+  name: order-service
+
+grpc:
+  bind: 127.0.0.1:50051
+  reflection:
+    enabled: false
+```
+
+非 loopback 明文默认拒绝。仅在明确接受网络风险时设置 `allow_insecure_remote: true`；生产网络应使用
+TLS 或 mTLS。Application 从同一代 secret 快照取得 PEM，普通配置只保存 locator：
 
 ```yaml
 grpc:
-  bind: 127.0.0.1:50051
-  max_connections: 1024
-  concurrency_limit_per_connection: 256
-  request_timeout_ms: 30000
-  keepalive_interval_ms: 30000
-  keepalive_timeout_ms: 10000
-  max_concurrent_streams: 256
-  drain_timeout_ms: 20000
-  max_decoding_bytes: 4194304
-  max_encoding_bytes: 4194304
+  bind: 0.0.0.0:50051
+  authority: grpc.order.internal
+  tls:
+    mode: mutual
+    certificate: secret://grpc/server-cert
+    private_key: secret://grpc/server-key
+    client_ca: secret://grpc/client-ca
+    certificate_warning_window_ms: 2592000000
+    certificate_minimum_remaining_ms: 86400000
+    clock_skew_ms: 300000
 ```
 
-| 键 | `GrpcServerConfig` 默认值 | 约束 |
+`authority` 是服务发现发布给 generated client 的 TLS DNS/IP identity，不含 scheme、端口或路径；省略时
+resolver 回退到注册 IP。`mode` 只能是 `disabled`、`server` 或 `mutual`。private key 进入清零容器且不会出现在 Debug 或错误文本；
+证书链、密钥匹配、serverAuth、有效期和 ALPN h2 在 bind 前校验。mTLS 验证通过后，请求 extension 中的
+`PeerIdentity` 来自 client leaf certificate 的 SHA-256 指纹，不信任客户端自报 metadata。
+
+### 方法级策略
+
+方法键必须是 descriptor 中的完整路径。策略只能收紧全局边界，且在 handler 前执行：
+
+```yaml
+grpc:
+  methods:
+    /order.v1.OrderService/GetOrder:
+      require_peer_identity: true
+      max_inflight_rpcs: 64
+      requests_per_second: 500
+      burst: 1000
+```
+
+`require_peer_identity` 应与 `tls.mode: mutual` 组合。速率与 burst 必须同时配置，容量不足返回
+`ResourceExhausted`，身份缺失返回 `Unauthenticated`；两者都不进入业务 handler。未知方法不会被静默
+忽略，而是在端口绑定前阻止 Ready。
+
+### 配置边界
+
+`grpc` 根使用 `deny_unknown_fields`。常用配置分为：
+
+| 类别 | 配置键 | 默认语义 |
 | --- | --- | --- |
-| `bind` | `127.0.0.1:50051` | IP socket 地址；域名解析不属于启动期隐式行为 |
-| `max_connections` | `1024` | `1..=1000000`，先取 permit 再 accept |
-| `concurrency_limit_per_connection` | `256` | `1..=65535` |
-| `request_timeout_ms` | `30000` | 大于 0，最长一年 |
-| `keepalive_interval_ms` | `30000` | 大于 0，最长一年 |
-| `keepalive_timeout_ms` | `10000` | 大于 0，最长一年 |
-| `max_concurrent_streams` | `256` | 大于 0 |
-| `drain_timeout_ms` | `20000` | 大于 0，最长一年 |
-| `max_decoding_bytes` | `4194304` | `1..=67108864` |
-| `max_encoding_bytes` | `4194304` | `1..=67108864` |
+| listener | `bind`、`authority`、`allow_insecure_remote`、`max_connections` | loopback `127.0.0.1:50051`，最多 256 条受管连接 |
+| RPC | `concurrency_limit_per_connection`、`unary_timeout_ms`、`max_inflight_rpcs` | 每连接 128，并按进程共享 1024 个 RPC permit |
+| 消息 | `max_decoding_bytes`、`max_encoding_bytes`、`max_inflight_message_bytes` | 单消息 4 MiB，请求与响应共享 128 MiB permit |
+| streaming | `stream_idle_timeout_ms`、`max_stream_duration_ms`、`max_*_messages_per_stream`、`max_*_stream_bytes` | 空闲、总时长、消息数和双向累计字节都有限 |
+| HTTP/2 | `initial_*_window_size`、`max_frame_size`、`http2_*` | 限制窗口、header、HPACK、发送缓冲、reset 与控制帧速率 |
+| TCP/连接 | `connection_handshake_timeout_ms`、`first_request_timeout_ms`、`idle_connection_timeout_ms`、`tcp_*` | 慢握手、空闲连接与失效对端不能无限占用资源 |
+| 轮转/停机 | `max_connection_age_ms`、`connection_eviction_grace_ms`、`drain_timeout_ms` | 可选连接轮转；默认 drain 20 秒并保留 Application 收尾预算 |
+| 内存 | `managed_memory_budget_bytes` | 连接、stream、RPC 与消息预算必须共同落在受管内存门禁内 |
+| 协议能力 | `health_only`、`reflection.enabled`、`methods` | health 自动装配；reflection 默认关闭；策略目录启动期固定 |
 
-## 观测
+零值、超过硬上限、内存预算不自洽或字段组合不合法都会在 bind 前失败。显式设置
+`application.shutdown_timeout_ms` 时，它必须覆盖发现注销预留、gRPC drain 和 Application 收尾；省略时
+容器会自动提高到最低安全预算。
 
-受管模式下 listener 的接流事实进入 Application 的唯一指标目录，随 Prometheus 文本端点与 OTLP
-指标导出同时发布，无需业务另接观测面。全部为无 label 族，基数与监听数一致，不随连接数或对端增长：
+## 服务发现
 
-| family | 类型 | 含义 |
+同时声明 `"nacos-discovery"` 时，gRPC listener 必须先 Ready，随后注册组件才发布实际端口。Web 与
+gRPC 共存时，实例主端口保持 Web 端口，gRPC 端点只通过固定 metadata 发布：
+
+| metadata | 含义 |
+| --- | --- |
+| `nasa.grpc.protocol` | 固定为 `grpc` |
+| `nasa.grpc.port` | listener 实际端口，支持 `bind: ...:0` |
+| `nasa.grpc.tls_mode` | `disabled`、`server` 或 `mutual` |
+| `nasa.grpc.authority` | TLS authority；没有显式 authority 时为空 |
+
+调用方使用 `NacosDiscoveryHandle::grpc_endpoint(service)` 取得
+`GrpcDiscoveredEndpoint`，不要把 REST 主端口猜成 gRPC 端口。停机顺序先注销发现实例，再停止 gRPC
+准入，避免把新流量导向正在排空的 listener。
+
+## 指标与结局
+
+Application 把固定 descriptor 目录写入统一 Prometheus/OTLP 指标中心：
+
+| family | labels | 含义 |
 | --- | --- | --- |
-| `napp_grpc_serving` | gauge | listener 是否处于 `Running` 并对新连接开放准入（1/0） |
-| `napp_grpc_connections_active` | gauge | 已交给 tonic 且尚未关闭的连接数 |
-| `napp_grpc_connections_accepted_total` | counter | 进入 listener 所有权的连接总数 |
-| `napp_grpc_accept_failures_total` | counter | `accept` 返回错误的累计次数 |
-| `napp_grpc_accept_consecutive_failures` | gauge | 最近一次成功 accept 之后的连续失败次数 |
-| `napp_grpc_accept_stall_seconds` | gauge | 当前连续失败已持续的秒数，无失败段时为 0 |
+| `napp_grpc_serving` | 无 | listener 是否 Running 并开放准入 |
+| `napp_grpc_connections_active` | 无 | 当前受管连接数 |
+| `napp_grpc_connections_accepted_total` | 无 | listener 累计受理连接数 |
+| `napp_grpc_accept_failures_total` | 无 | accept 累计失败数 |
+| `napp_grpc_accept_consecutive_failures` | 无 | 最近成功 accept 后的连续失败数 |
+| `napp_grpc_accept_stall_seconds` | 无 | 当前连续失败持续时间 |
+| `napp_grpc_tls_certificate_expiry_timestamp_seconds` | 无 | 已发布证书链最早到期时间；明文模式不产生样本 |
+| `napp_grpc_rpcs_active` | `service,method,rpc_type` | 当前在途 RPC |
+| `napp_grpc_rpcs_started_total` | `service,method,rpc_type` | 已接纳 RPC 总数 |
+| `napp_grpc_rpcs_rejected_total` | `service,method,rpc_type` | handler 前被容量、速率或身份门禁拒绝的总数 |
+| `napp_grpc_rpcs_completed_total` | `service,method,rpc_type,outcome` | 每个已接纳 RPC 的唯一最终结局 |
 
-`accepted_total` 与 `connections_active` 一起区分"没有流量"和"接不进来"：前者不动而后者为零
-表示外部没有建连，两者都不动但 `accept_failures_total` 在涨则表示本机资源不足以受理。
-`accept_stall_seconds` 越过受管摘流阈值时 `grpc:listener` readiness 会进入 NotReady，但 serve
-任务仍持有 listener 并继续退避重试，资源恢复后自行回到 Ready。
+`rpc_type` 是 `unary`、`client_streaming`、`server_streaming` 或 `bidirectional_streaming`。
+`outcome` 使用固定集合：`ok`、标准 gRPC code、`cancelled`、`client_deadline_exceeded`、
+`server_timeout`、`transport_lost`。客户端放弃 response body 也会由 Drop 守卫归还 permit、递减 active
+并记录取消，因此每个 started 调用最终只进入一个完成结局。
 
-独立模式（不声明 `"grpc"` 组件）没有容器指标目录，同一组事实由
-`GrpcServerObserver::snapshot()` 一次性返回，调用方自行接入自己的观测面；逐个 getter 分别读取
-会得到互相矛盾的组合，导出面必须使用单次快照。
+持续 accept 失败会把 `grpc:listener` 摘为 NotReady，但 serve task 继续持有 socket 并有界退避；资源
+恢复并成功 accept 后自动恢复 Ready。证书进入 warning window 时 readiness 为 Degraded，到期后为
+NotReady。serve 所有权丢失或生命周期进入 Failed 会触发 Application 统一停机。
 
-## 成熟度与边界
+独立模式没有 Application 指标目录，调用方应以一次 `GrpcServerObserver::snapshot()` 读取连接事实，并
+用 `rpc_snapshot()` 读取固定方法目录；分别读取多个 getter 可能跨越状态迁移。
 
-- 本能力和 `"grpc"` 组件字符串都是实验 API，不进入 `full`；稳定合同等待真实业务使用收敛。
-- 当前合同稳定覆盖单 listener、HTTP/2、连接/stream/RPC/消息上限、health/reflection 显式装配、
-  accept 失败恢复与有预算排空；它不是 service mesh、API gateway 或 proto registry。
-- 受管模式由 Application 独占 shutdown；独立模式由 `GrpcServerHandle` 独占 shutdown。
-- drain 超时会 abort serve task，不遗留 detached listener。
-- `accept()` 遇到文件描述符压力或连接建立期瞬态错误时会释放本轮 permit、有界退避并继续持有
-  listener；资源恢复后自动接流，不把瞬时错误记成干净关闭。
-- `Drop` 只能执行取消和 abort 兜底，不能替代显式的异步排空。
-- `GrpcServerObserver` 只暴露地址、状态、在途连接数、累计/连续 accept 失败数和连续失败时长，
-  不开放取消权。生命周期 `Running` 表示 serve 任务仍持有 listener；持续接流健康应结合
-  `accept_failure_duration()` 判断，成功 accept 后连续计数与时长归零。
-- reflection 是否开放、业务 service 健康状态、TLS 和 proto 兼容门禁由业务负责。
-- 多 listener 编排、证书热轮换、客户端连接池、负载均衡、限流策略和方法级鉴权不在本 crate 合同内。
-- 连接、单消息、每连接并发、stream 数和所有 duration 都有硬上限，零值或越界配置会被拒绝。
+## 独立 listener
+
+不使用 `#[nasa::application]` 的程序可显式持有唯一 handle：
+
+```rust
+use std::net::SocketAddr;
+
+let handle = nasa::grpc::ServerPlan::new()
+    .add_service(proto::order_service_server::OrderServiceServer::new(OrderApi))?
+    .reflection(false)
+    .start("127.0.0.1:50051".parse::<SocketAddr>()?)
+    .await?;
+
+let observer = handle.observer();
+// 进程收到自己的停机信号后：
+handle.shutdown().await?;
+```
+
+独立 TLS 通过 `GrpcTlsIdentity::server(...)` 或 `GrpcTlsIdentity::mutual(...)` 提交已解析 PEM；调用方负责
+secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同步 Drop 只负责停止准入和终止任务的
+异常兜底。独立模式和 Application 模式不能共同拥有同一个 listener。
+
+## 明确边界
+
+- 单个 Application 组件只拥有一个 listener；一个 listener 可登记最多 64 个业务 service、256 个方法。
+- gRPC-Web、HTTP/1.1 fallback、多 listener、客户端连接池、客户端负载均衡和 service mesh 不在本合同内。
+- reflection 默认关闭；开启后会公开 registry 中的 descriptor，必须按部署暴露面决定。
+- health 自动提供 transport 存活与 service 名目录，不替业务判断数据库、下游或业务数据是否健康。
+- Application 启动期冻结 TLS 材料，不提供进程内证书热切；轮换通过新实例 Ready 后切流完成。
+- 兼容门禁保护 protobuf wire 与 RPC cardinality，不替业务判断字段语义、授权范围或数据保留政策。
+- drain 先关闭新准入，再发送两阶段 GOAWAY 并等待在途调用；预算耗尽会终止 serve task，不遗留 detached listener。

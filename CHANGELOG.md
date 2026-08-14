@@ -5,7 +5,7 @@
 ## Saga
 
 - 新增 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime` 与 `nasaga-macro`，通过门面 feature 提供流程
-  定义、持久化 Orchestrator、参与方事务 adapter、Kafka/Redis Streams 受管 transport 和实验 gRPC
+  定义、持久化 Orchestrator、参与方事务 adapter、Kafka/Redis Streams 受管 transport 和 gRPC
   收据 connector。
 - 建立 `effect_id`、`command_id`、目标业务效果身份与定义摘要的确定性派生，阻止身份漂移造成重复
   外部副作用。

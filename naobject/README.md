@@ -1,13 +1,13 @@
 # naobject
 
-`naobject` 是实验性 provider-neutral 对象存储合同，并提供 path-style S3-compatible SigV4 adapter。
+`naobject` 是稳定的 provider-neutral 对象存储合同，并提供 path-style S3-compatible SigV4 adapter。
 当前实现只处理有硬上限的单对象缓冲，不伪装成 multipart 或无限流式上传。
 它面向报表导出、审计归档和附件等“单对象可完整装入内存”的业务，把 key 校验、条件创建、内容完整性、
 错误脱敏和容量门禁收敛为同一合同，避免每个业务分别拼接 S3 请求与失败语义。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["object-store-experimental"] }
+nasa = { version = "2", features = ["object-store"] }
 ```
 
 ## 运行架构与安全合同
@@ -167,10 +167,10 @@ app.register_metrics_source(nasa::object::metrics::metrics_source_many([
 对象存储没有独立后台所有权，因此不设 Application 组件；adapter 的生命周期由业务自行持有，
 需要显式关闭的资源可登记为 managed resource。
 
-## 成熟度与边界
+## 能力边界
 
-- 本能力是实验 API，不进入 `full`；稳定合同等待两个真实上传、导出或归档项目收敛。
-- 当前稳定使用范围是有界 `put/get/head/delete`、`Overwrite/CreateOnly`、path-style SigV4 与
+- 本能力进入 `full`，但没有 Application 组件；业务仍须显式构造 adapter、持有生命周期并决定数据政策。
+- 稳定使用范围是有界 `put/get/head/delete`、`Overwrite/CreateOnly`、path-style SigV4 与
   SHA-256 metadata 完整性；provider-neutral trait 不表示所有对象存储的高级语义已经统一。
 - key 拒绝绝对路径、空段、`.`、`..`、控制字符和超长输入。
 - 非 loopback 明文 HTTP、重定向、userinfo 和非法 endpoint 会被拒绝。

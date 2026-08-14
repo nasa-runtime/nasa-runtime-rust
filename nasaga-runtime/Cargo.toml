@@ -47,5 +47,5 @@ default = []
 kafka = ["dep:nafka"]
 # 真实 Redis Streams hosted transport:XREADGROUP 显式循环、XAUTOCLAIM 重领、Lua 原子 DLT+XACK。
 redis-stream = ["dep:nadis", "dep:redis", "dep:tokio"]
-# gRPC request/response transport 的封闭收据裁决(实验;listener 上限与 drain 由 nagrpc 承担)。
+# gRPC request/response transport 的封闭收据裁决；listener 上限与 drain 由 nagrpc 承担。
 grpc-transport = []

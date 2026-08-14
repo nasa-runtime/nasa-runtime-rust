@@ -79,7 +79,7 @@ Saga 依赖顺序为：先发布并回读 `nasaga-core`，再发布 `nasaga-mysq
 ## 门面要求
 
 - `nasa` feature 与组件 README、根索引和实际依赖一致；
-- 稳定能力的组合由 `full` 显式列出；实验能力不进入 `full`；
+- 稳定能力的组合由 `full` 显式列出；生产服务仍只选择实际使用的 feature；
 - 宏生成代码通过门面路径引用运行时，不要求业务直接依赖宏实现 crate；
 - yml 键、公开 API 或 feature 行为变化时同步提供迁移说明；
 - 包名占用、owner 权限和 registry 状态在实际上传窗口确认，不依赖历史结论。

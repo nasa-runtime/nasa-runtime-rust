@@ -29,8 +29,8 @@ use syn::{
 /// - `"telemetry"`：启用有界 OpenTelemetry span 管道与受管停机 flush；需要 `telemetry` feature。
 /// - `"partition"`：启用保序分 lane 执行器。业务在 UserHook 提交有界计划，容器在 Prepare
 ///   创建执行器、发布强类型句柄并监督动态健康与停机排空；需要 `partition` feature。
-/// - `"grpc"`：启用实验性受管 gRPC listener。业务在 UserHook 提交 Router 工厂，容器在 Ready
-///   绑定端口、监督 serve 所有权并在停机时排空；需要 `grpc-experimental` feature。
+/// - `"grpc"`：启用受管 gRPC service registry 与 listener。业务在 UserHook 登记 generated server，
+///   容器在 Ready 自动装配、绑定端口、监督 serve 所有权并在停机时排空；需要 `grpc` feature。
 /// - `"db"`：启用 MySQL 数据源。启动时校验并探测地址、鉴权和数据库，创建连接池、注册应用资源，
 ///   同时注入 `#[transactional]` 和 Mapper 使用的事务运行时；需要 `tx` feature。
 /// - `"redis"`：启用 Redis 客户端。启动时校验配置、探测 standalone/cluster 拓扑并建立受管客户端，

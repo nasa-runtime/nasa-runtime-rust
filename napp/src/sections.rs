@@ -79,7 +79,7 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Redis => crate::redis::validate_redis_section(tree, phase)?,
             #[cfg(feature = "telemetry")]
             ComponentId::Telemetry => crate::telemetry::validate_telemetry_section(tree, phase)?,
-            #[cfg(feature = "grpc-experimental")]
+            #[cfg(feature = "grpc")]
             ComponentId::Grpc => crate::grpc::validate_grpc_section(tree, phase)?,
             #[cfg(feature = "cache")]
             ComponentId::Cache => crate::cache::validate_cache_section(tree, phase)?,

@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = [
+nasa = { version = "2", features = [
     "application",
     "config-boot",
     "log",
@@ -49,12 +49,12 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## Saga 最小接线
 
-Orchestrator 服务启用 Application 与 MySQL Saga runtime；Kafka、Redis Streams、HTTP 或实验 gRPC
+Orchestrator 服务启用 Application 与 MySQL Saga runtime；Kafka、Redis Streams、HTTP 或 gRPC
 按真实链路另选，不能只配置地址就假定已经具备消费、确认和 DLT 闭环：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "saga-runtime", "web"] }
+nasa = { version = "2", features = ["application", "saga-runtime", "web"] }
 ```
 
 ```rust
@@ -95,7 +95,7 @@ Ready 前校验定义、descriptor、历史非终态实例、数据库结构、�
 | Kafka | `saga-kafka` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
 | Redis Streams | `saga-redis-stream` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
 | HTTP | `saga-runtime` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
-| gRPC（实验） | `saga-grpc-experimental` + `grpc-experimental` | 按宿主 listener | generated service、mTLS、deadline、资源上限与 drain |
+| gRPC | `saga-grpc` + `grpc` | Application `"grpc"` 或独立 `ServerPlan` | generated service registry、mTLS、deadline、资源上限与 drain |
 
 ## 配置
 

@@ -14,9 +14,10 @@
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
 //! `nasaga-runtime` 的持久合同承担。
 //!
-//! 启用实验 gRPC 组件时，UserHook 只移交无副作用的 Router 工厂，Prepare 永久封口入口，全部
-//! initializer 成功后的 Ready 才构造并绑定 listener。组件独占 shutdown，持续 accept 失败会摘除
-//! readiness 并保持有界恢复，serve 所有权丢失则触发统一失败停机。
+//! 启用 gRPC 组件时，UserHook 只登记统一 codegen 生成的业务 service，Prepare 永久封口 registry，
+//! 全部 initializer 成功后的 Ready 才自动装配 Router、health、可选 reflection 并绑定 listener。
+//! 组件独占 shutdown，持续 accept 失败会摘除 readiness 并保持有界恢复，serve 所有权丢失则触发
+//! 统一失败停机。
 //!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 
@@ -31,8 +32,8 @@ mod component;
 mod config;
 #[cfg(feature = "db")]
 mod db;
-/// 实验性 gRPC listener：UserHook Router 计划、Ready 绑定、关键监督与有界排空。
-#[cfg(feature = "grpc-experimental")]
+/// 稳定 gRPC listener：UserHook service registry、Ready 绑定、关键监督与有界排空。
+#[cfg(feature = "grpc")]
 mod grpc;
 /// 保序分 lane 执行器组件：UserHook 计划、Prepare 发布、动态健康与有界停机。
 #[cfg(feature = "partition")]
@@ -214,6 +215,8 @@ pub use capabilities::NacosDiscoveryHandle;
 pub use capabilities::SchedulingHandle;
 #[cfg(feature = "ws")]
 pub use capabilities::WsHandle;
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+pub use capabilities::{GrpcDiscoveredEndpoint, GrpcDiscoveredTlsMode};
 #[cfg(feature = "kafka")]
 pub use capabilities::{KafkaHandle, KafkaReadinessSnapshot};
 pub use component::{
@@ -226,8 +229,6 @@ pub use config::{
 };
 pub use error::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 pub use future::ApplicationFuture;
-#[cfg(feature = "grpc-experimental")]
-pub use grpc::GrpcApplicationPlan;
 pub use initialization::{
     Initialization, InitializationContext, InitializerDescriptor, InitializerFailure,
     InitializerFailureKind, InitializerKind, InitializerSpec, InitializerStage,
@@ -321,8 +322,8 @@ pub mod components {
         pub const FEATURE_CHECK: () = ();
     }
 
-    /// 实验性受管 gRPC listener 的编译期能力探测点。
-    #[cfg(feature = "grpc-experimental")]
+    /// 受管 gRPC listener 的编译期能力探测点。
+    #[cfg(feature = "grpc")]
     pub mod grpc {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();

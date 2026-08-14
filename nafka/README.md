@@ -10,7 +10,7 @@ passthrough。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["kafka"] }
+nasa = { version = "2", features = ["kafka"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 - [naws Kafka 集成](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naws/README.md)：WebSocket、socket.io 与 Kafka passthrough。
 - [napp 受管生命周期](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#kafka-受管模式)：组件配置、Ready、健康和两段停机。
-- [Schema Registry](#schema-registry实验)：wire、缓存、控制面、观测与成熟度边界。
+- [Schema Registry](#schema-registry)：wire、缓存、控制面、观测与能力边界。
 
 ## 能力概览
 
@@ -150,7 +150,7 @@ Service 同时开启 `application` 与 `kafka` 后，可以把 Kafka 声明成�
 `connect`、registry start、broker Ready 或 shutdown：
 
 ```toml
-nasa = { version = "1", features = ["application", "kafka", "web"] }
+nasa = { version = "2", features = ["application", "kafka", "web"] }
 ```
 
 ```rust
@@ -1188,7 +1188,7 @@ Kafka header 只表达逻辑路由和消息元数据，不能指定任意 IP、h
 TLS/SCRAM 使用 `nasa` 的 `kafka-tls` feature：
 
 ```toml
-nasa = { version = "1", features = ["kafka-tls"] }
+nasa = { version = "2", features = ["kafka-tls"] }
 ```
 
 ```yaml
@@ -1205,7 +1205,7 @@ kafka:
 密码、token、JAAS 和 key material 在 `Debug` 与配置错误中必须保持脱敏。生产 topic、DLT、consumer group
 和 DescribeConfigs 权限应按 principal 分离；不要在配置文件中写固定明文口令。
 
-## Schema Registry（实验）
+## Schema Registry
 
 `schema-registry` feature 提供 Confluent-compatible 的 registry client 与 wire envelope
 （`nasa` 门面对应 `kafka-schema-registry`）。它是 Kafka 的 codec 子能力：不启动 registry 服务端，
@@ -1326,11 +1326,11 @@ app.register_metrics_source(nasa::kafka::schema_metrics::metrics_source_many([
 ]))?;
 ```
 
-### 成熟度与边界
+### 能力边界
 
-- `kafka-schema-registry` 是实验 feature，不进入 `full`；稳定合同等待真实 producer、consumer 与
-  schema 治理流程形成共同约束。
-- 当前公开合同覆盖 Confluent 5 字节 envelope、Avro/Protobuf/JSON Schema 类型、按 ID 查询、
+- `kafka-schema-registry` 保持显式 feature 并进入 `full`；它只开放 client/codec 合同，不创建
+  Application 组件或隐式启动后台任务。
+- 稳定公开合同覆盖 Confluent 5 字节 envelope、Avro/Protobuf/JSON Schema 类型、按 ID 查询、
   兼容性检查、显式注册、有界正负缓存和低基数观测；不提供 codec 代码生成或 payload 语义校验。
 - client 不启动后台刷新，不主动扫描 subject/version，也不把 Registry 健康伪装成 Kafka broker Ready。
 - 同一 ID 的并发冷缓存查询可能各自访问 Registry；缓存限制驻留内存，不承诺请求合并或全进程单飞。

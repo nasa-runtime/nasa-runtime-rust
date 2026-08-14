@@ -52,5 +52,5 @@ tls = ["rdkafka/ssl-vendored"]
 # librdkafka 构建阶段丢失目标系统的 GSS/Kerberos 链接依赖。
 gssapi = ["rdkafka/gssapi", "rdkafka/ssl-vendored"]
 zstd = ["rdkafka/zstd"]
-# 实验性 Confluent-compatible Schema Registry adapter；不进入默认/full，待真实业务合同收敛后再稳定。
+# Confluent-compatible Schema Registry adapter；保持显式 feature，并纳入门面的完整能力组合。
 schema-registry = ["dep:async-trait", "dep:base64", "dep:nasecret", "dep:reqwest", "dep:zeroize"]

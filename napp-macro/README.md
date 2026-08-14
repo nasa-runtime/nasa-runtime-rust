@@ -16,10 +16,11 @@
 
 编译期校验（与运行期同口径，先在宏上失败）：
 
-- 组件白名单：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`saga`、`kafka`、
-  `outbox`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`；未知或重复组件拒绝。
+- 组件白名单：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、
+  `kafka`、`outbox`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`；未知或重复组件拒绝。
 - 业务可按任意顺序书写；宏固定规范为 `log -> nacos-config -> telemetry -> db -> redis ->
-  cache -> saga -> kafka -> outbox -> auth -> web -> ws -> nacos-discovery -> scheduling`。
+  cache -> partition -> saga -> kafka -> outbox -> grpc -> auth -> web -> ws -> nacos-discovery ->
+  scheduling`。
 - `saga` 隐式加入 DB 与 Outbox；独立 `outbox` 隐式加入 DB。Inbox 是事务内原语，没有组件字符串；
   Kafka 或其它 transport 不由 Saga 推断。
 - 隐式依赖只补齐缺项；显式同时声明 `saga`、`db`、`outbox` 与只声明 `saga` 生成同一组件图。
@@ -39,7 +40,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "log", "redis", "cache", "web"] }
+nasa = { version = "2", features = ["application", "log", "redis", "cache", "web"] }
 ```
 
 ```rust

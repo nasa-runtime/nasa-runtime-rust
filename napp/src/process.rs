@@ -142,22 +142,19 @@ fn build_component(
     }
 }
 
-/// 业务作用：构造实验性受管 gRPC listener；能力未编入时拒绝退化为业务自管端口。
+/// 业务作用：构造稳定受管 gRPC listener；能力未编入时拒绝退化为业务自管端口。
 ///
 /// 参数说明: 无。
 ///
-/// 返回：启用 `grpc-experimental` 时返回受管组件，否则返回指向门面 feature 的启动错误。
+/// 返回：启用 `grpc` 时返回受管组件，否则返回指向门面 feature 的启动错误。
 fn build_grpc_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "grpc-experimental")]
+    #[cfg(feature = "grpc")]
     {
         Ok(Box::new(crate::grpc::GrpcComponent::new()))
     }
-    #[cfg(not(feature = "grpc-experimental"))]
+    #[cfg(not(feature = "grpc"))]
     {
-        Err(feature_missing_error(
-            ComponentId::Grpc,
-            "grpc-experimental",
-        ))
+        Err(feature_missing_error(ComponentId::Grpc, "grpc"))
     }
 }
 

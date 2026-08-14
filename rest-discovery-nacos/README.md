@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["nacos-sdk", "rest-discovery-nacos"] }
+nasa = { version = "2", features = ["nacos-sdk", "rest-discovery-nacos"] }
 rest-discovery-nacos = { version = "1", features = ["nacos-sdk"] }
 ```
 
@@ -70,6 +70,26 @@ session.shutdown_runtime().await?;
 ```
 
 `#[application]` 的 `nacos-discovery` 组件即按这三段编排（Start 装 runtime / Ready 注册 / 停机反序）；`init_from_config` 保留给不使用应用运行时的项目。
+
+## 协议端点元数据
+
+一个实例同时开放 HTTP 与 gRPC 等多个端口时，`registration.port` 继续表示主服务端口；其它协议通过
+`AppRegistrationInfo::with_metadata` 随同一次实例注册发布，不能把 gRPC 端口冒充 HTTP 端口。Application
+的受管 gRPC 组件使用固定键 `nasa.grpc.protocol`、`nasa.grpc.port`、`nasa.grpc.tls_mode` 和
+`nasa.grpc.authority`，并保证 listener 接流后才注册、停机先注销再排空。
+
+```rust
+let app = AppRegistrationInfo::new("order-service", "10.0.0.10", 8080)
+    .with_metadata("nasa.grpc.protocol", "grpc")
+    .with_metadata("nasa.grpc.port", "50051")
+    .with_metadata("nasa.grpc.tls_mode", "server")
+    .with_metadata("nasa.grpc.authority", "grpc.order.internal");
+session.register(app).await?;
+```
+
+框架集成层可用 `DiscoverySession::discover_instances(service)` 读取经过 provider 健康过滤的实例与原始
+metadata，再投影成自己的 typed endpoint。业务不应把 credential、token、证书内容、租户或任意请求
+属性放入实例 metadata；未知协议键不能被解释成可拨号端点。
 
 ## 自定义负载均衡
 
@@ -193,4 +213,5 @@ let handle = nasa::discovery::init_from_config(&cfg.rest_discovery, app).await?;
 - 注册 IP 缺失或不安全时拒绝启动，不自动选择不可审计的网卡地址。
 - `registration.enabled=false` 只安装出站 runtime，不注册当前实例。
 - 分段生命周期必须保持“装出站 -> listener Ready -> 注册 -> 摘流 -> drain -> 关 runtime”的顺序。
+- 多协议端点必须使用受控 metadata，注册主端口与协议端口不能互相替代。
 - provider 异常时 watch 保留 last-good 的时长由 `rest.watch.stale_if_error_ms` 限定。
