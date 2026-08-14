@@ -1,8 +1,19 @@
 //! NASA Rust gRPC 的唯一 protobuf/codegen 构建入口。
 //!
-//! 默认生成 client、server、descriptor set 与 managed service adapter，并把生成代码中的 tonic/prost
-//! 身份固定到 `nasa::grpc::codegen`。构建工具使用 HOST 对应的 vendored `protoc`，不要求业务安装或
-//! 直接选择 tonic/prost 版本。
+//! # 核心价值
+//!
+//! 业务只拥有 proto、兼容 baseline 和一次 `compile` 调用；本 crate 统一冻结 HOST vendored
+//! `protoc`、tonic/prost/codec 类型身份、descriptor、SHA-256 摘要与 managed service adapter。
+//! 生成代码只引用 `nasa::grpc::codegen`，业务不安装系统 `protoc`，也不直接选择底层 codegen 版本。
+//!
+//! # 构建架构
+//!
+//! 一次构建先校验输入与规模，再生成完整 descriptor 和 Rust 源码，随后执行兼容检查并按规范
+//! protobuf package 树输出 wrapper。WKT 或 `extern_path` package 继续留在 descriptor 中，但不会被
+//! 误当成本地 `.rs`；跨 package 相对路径在同一模块树内保持唯一 Rust 类型身份。任一阶段失败都不会
+//! 形成可由运行时登记的半份协议产物。
+//!
+//! 本 crate 不判断字段业务语义，不提供远端 proto registry、breaking-change 审批或发布编排。
 
 #![forbid(unsafe_code)]
 
@@ -608,7 +619,81 @@ fn valid_proto_name(name: &str) -> bool {
     })
 }
 
-/// 业务作用：按 package 汇总 service，并为每个生成文件写入门面路径和 managed adapter。
+/// generated package 的规范 Rust 模块树节点。
+#[derive(Default)]
+struct GeneratedPackageNode {
+    package: Option<String>,
+    children: BTreeMap<String, GeneratedPackageNode>,
+}
+
+impl GeneratedPackageNode {
+    /// 业务作用：把一个实际生成 Rust 源码的 protobuf package 插入规范模块树。
+    ///
+    /// 参数说明：
+    /// - `module`: prost-build 对 protobuf package 完成转义和 snake_case 后的模块路径。
+    /// - `package`: descriptor 中保持原样的 protobuf package 名称。
+    ///
+    /// 返回：无；同一模块路径只记录一个 package，重复写入保持最后一次等价值。
+    fn insert(&mut self, module: &prost_build::Module, package: &str) {
+        let mut current = self;
+        for part in module.parts() {
+            current = current.children.entry(part.to_owned()).or_default();
+        }
+        current.package = Some(package.to_owned());
+    }
+
+    /// 业务作用：生成与 prost-build 相对类型路径一致的嵌套模块，使跨 package 引用共享同一类型身份。
+    ///
+    /// 参数说明：
+    /// - `output`: 接收 Rust 模块源码的缓冲区。
+    /// - `depth`: 当前节点的缩进深度。
+    ///
+    /// 返回：无；每个叶节点包含自身 descriptor 常量和归一化 generated source。
+    fn render(&self, output: &mut String, depth: usize) {
+        use std::fmt::Write as _;
+
+        let indent = "    ".repeat(depth);
+        if let Some(package) = &self.package {
+            let _ = writeln!(
+                output,
+                "{indent}/// 当前 protobuf package 所属构建的完整 descriptor set。"
+            );
+            let _ = writeln!(
+                output,
+                "{indent}pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{package}.descriptor.bin\"));"
+            );
+            let _ = writeln!(
+                output,
+                "{indent}/// 当前 protobuf package descriptor set 的小写 SHA-256 摘要。"
+            );
+            let _ = writeln!(
+                output,
+                "{indent}pub const FILE_DESCRIPTOR_SHA256: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/{package}.descriptor.sha256\"));"
+            );
+            let _ = writeln!(
+                output,
+                "{indent}include!(concat!(env!(\"OUT_DIR\"), \"/{package}.generated.rs\"));"
+            );
+        }
+        for (module, child) in &self.children {
+            let _ = writeln!(output, "{indent}pub mod {module} {{");
+            child.render(output, depth + 1);
+            let _ = writeln!(output, "{indent}}}");
+        }
+    }
+}
+
+/// 业务作用：按 package 汇总 service，并为每个本地生成 package 写入规范模块树、门面路径和 managed adapter。
+///
+/// 参数说明：
+/// - `out_dir`: Cargo 为本次构建分配的受管输出目录。
+/// - `descriptor`: protoc 生成并通过规模校验的完整 descriptor set。
+/// - `descriptor_bytes`: reflection 与内容摘要共用的原始 descriptor bytes。
+/// - `runtime_path`: generated code 唯一允许引用的运行时门面绝对路径。
+/// - `build_server`: 是否为生成的 server 追加 managed registry 适配。
+///
+/// 返回：所有实际生成 Rust 源码的 package 均完成归一化时成功；WKT 或 extern_path 映射的 package
+/// 没有本地 `.rs` 时跳过，任何已存在输出的读写失败返回稳定生成错误。
 fn write_package_outputs(
     out_dir: &Path,
     descriptor: &FileDescriptorSet,
@@ -632,12 +717,20 @@ fn write_package_outputs(
         let _ = write!(&mut digest_hex, "{byte:02x}");
     }
 
+    let mut generated = Vec::new();
+    let mut module_tree = GeneratedPackageNode::default();
     for (package, files) in packages {
+        let module = prost_build::Module::from_protobuf_package_name(package);
+        let generated_file = out_dir.join(module.to_file_name_or("_.default"));
+        // WKT 和显式 extern_path package 只存在于 descriptor 中，其 Rust 类型由稳定外部映射提供。
+        // 它们没有本地源码，不能据此判定业务 package 生成失败，也不能制造不可包含的空产物。
+        if !generated_file.is_file() {
+            continue;
+        }
         let descriptor_file = out_dir.join(format!("{package}.descriptor.bin"));
-        fs::write(descriptor_file, descriptor_bytes).map_err(Error::GeneratedOutput)?;
+        fs::write(&descriptor_file, descriptor_bytes).map_err(Error::GeneratedOutput)?;
         let digest_file = out_dir.join(format!("{package}.descriptor.sha256"));
         fs::write(digest_file, &digest_hex).map_err(Error::GeneratedOutput)?;
-        let generated_file = out_dir.join(format!("{package}.rs"));
         let source = fs::read_to_string(&generated_file).map_err(Error::GeneratedOutput)?;
         // prost-build 已经通过 `prost_path`/`prost_types_path` 直接生成稳定门面路径；这里只归一化
         // tonic-prost-build 尚未提供配置入口的 tonic crate 身份，避免二次替换门面内部路径。
@@ -646,7 +739,32 @@ fn write_package_outputs(
         if build_server {
             normalized.push_str(&managed_adapters(files, runtime_path));
         }
-        fs::write(generated_file, normalized).map_err(Error::GeneratedOutput)?;
+        fs::write(out_dir.join(format!("{package}.generated.rs")), normalized)
+            .map_err(Error::GeneratedOutput)?;
+        module_tree.insert(&module, package);
+        generated.push((package.to_owned(), module));
+    }
+
+    for (package, module) in generated {
+        let mut wrapper = String::new();
+        wrapper.push_str(
+            "/// 同一次 codegen 的规范 package 模块树；跨 package 字段由该树保持唯一 Rust 类型身份。\n\
+             #[doc(hidden)]\n\
+             #[allow(dead_code)]\n\
+             pub mod __nagrpc_packages {\n",
+        );
+        module_tree.render(&mut wrapper, 1);
+        wrapper.push_str("}\n");
+        let selected = module.parts().collect::<Vec<_>>().join("::");
+        writeln!(
+            &mut wrapper,
+            "pub use self::__nagrpc_packages::{selected}::*;"
+        )
+        .map_err(|_| {
+            Error::GeneratedOutput(io::Error::other("generated wrapper formatting failed"))
+        })?;
+        fs::write(out_dir.join(format!("{package}.rs")), wrapper)
+            .map_err(Error::GeneratedOutput)?;
     }
     Ok(())
 }

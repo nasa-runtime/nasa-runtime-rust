@@ -680,16 +680,16 @@ static GRPC_RPCS_STARTED_TOTAL: nametrics_core::MetricDescriptor =
 static GRPC_RPCS_REJECTED_TOTAL: nametrics_core::MetricDescriptor =
     nametrics_core::MetricDescriptor {
         name: "napp_grpc_rpcs_rejected_total",
-        help: "在 handler 前因进程容量、方法身份、方法并发或方法速率门禁拒绝的调用总数。",
+        help: "在 handler 前按连接容量、进程容量、方法并发、方法速率或身份门禁分类的拒绝总数。",
         unit: "",
         kind: nametrics_core::MetricKind::Counter,
-        label_names: &["service", "method", "rpc_type"],
+        label_names: &["service", "method", "rpc_type", "reason"],
         histogram_bounds: &[],
     };
 static GRPC_RPCS_COMPLETED_TOTAL: nametrics_core::MetricDescriptor =
     nametrics_core::MetricDescriptor {
         name: "napp_grpc_rpcs_completed_total",
-        help: "按固定 gRPC code 与框架取消、deadline、服务端超时、传输丢失结局统计的完成总数。",
+        help: "按固定 gRPC code 与框架取消、deadline、流式持续/空闲/方向累计边界、传输丢失结局统计的完成总数。",
         unit: "",
         kind: nametrics_core::MetricKind::Counter,
         label_names: &["service", "method", "rpc_type", "outcome"],
@@ -746,6 +746,65 @@ static GRPC_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 11] = [
     &GRPC_RPCS_REJECTED_TOTAL,
     &GRPC_RPCS_COMPLETED_TOTAL,
 ];
+
+/// 单个 gRPC 组件允许占用的公开序列子预算；进程总预算仍由 nametrics-core 原子复验。
+const GRPC_METRIC_SERIES_BUDGET: usize = 20_000;
+/// 明文 listener 必然出现的无 label 序列数；TLS 到期序列只在 TLS 模式另加一项。
+const GRPC_FIXED_METRIC_SERIES: usize = 6;
+/// health service 固定 Check/Watch 两个方法；reflection 开启时再增加一个双向流方法。
+const GRPC_HEALTH_METHODS: usize = 2;
+const GRPC_REFLECTION_METHODS: usize = 1;
+
+/// 业务作用：按 sealed method 目录与全部封闭 label domain 计算 gRPC 指标最坏公开序列数。
+///
+/// 参数说明：
+/// - `registry`: UserHook 已封口且尚未移交 listener 的业务 service registry。
+/// - `reflection`: 是否启用标准 reflection service。
+/// - `tls`: 是否启用会产生证书到期序列的 TLS 模式。
+///
+/// 返回：计算结果不溢出且不超过 gRPC 子预算时返回精确上界；否则在绑定 listener 前拒绝 Prepare。
+fn grpc_worst_case_metric_series(
+    registry: &nagrpc::ManagedServiceRegistry,
+    reflection: bool,
+    tls: bool,
+) -> ApplicationResult<usize> {
+    let methods = registry
+        .method_count()
+        .checked_add(GRPC_HEALTH_METHODS)
+        .and_then(|count| count.checked_add(usize::from(reflection) * GRPC_REFLECTION_METHODS))
+        .ok_or_else(|| {
+            grpc_error(
+                ApplicationPhase::Prepare,
+                "gRPC metric series calculation overflowed",
+            )
+        })?;
+    let per_method = 2_usize
+        .checked_add(nagrpc::GRPC_RPC_REJECTION_REASON_CARDINALITY)
+        .and_then(|count| count.checked_add(nagrpc::GRPC_RPC_OUTCOME_CARDINALITY))
+        .ok_or_else(|| {
+            grpc_error(
+                ApplicationPhase::Prepare,
+                "gRPC metric series calculation overflowed",
+            )
+        })?;
+    let fixed = GRPC_FIXED_METRIC_SERIES + usize::from(tls);
+    let total = methods
+        .checked_mul(per_method)
+        .and_then(|count| count.checked_add(fixed))
+        .ok_or_else(|| {
+            grpc_error(
+                ApplicationPhase::Prepare,
+                "gRPC metric series calculation overflowed",
+            )
+        })?;
+    if total > GRPC_METRIC_SERIES_BUDGET {
+        return Err(grpc_error(
+            ApplicationPhase::Prepare,
+            "gRPC metric series budget is exceeded",
+        ));
+    }
+    Ok(total)
+}
 
 /// 把受管 listener 的接流事实接入唯一指标目录的兼容源。
 struct GrpcMetricsSource {
@@ -817,11 +876,15 @@ impl nametrics_core::LegacyMetricsSource for GrpcMetricsSource {
                 labels.clone(),
                 rpc.started_total,
             ));
-            samples.push(grpc_labeled_counter(
-                GRPC_RPCS_REJECTED_TOTAL.name,
-                labels.clone(),
-                rpc.rejected_total,
-            ));
+            for (reason, count) in rpc.rejections {
+                let mut rejection_labels = labels.clone();
+                rejection_labels.push(("reason", reason.label().to_owned()));
+                samples.push(grpc_labeled_counter(
+                    GRPC_RPCS_REJECTED_TOTAL.name,
+                    rejection_labels,
+                    count,
+                ));
+            }
             for (outcome, count) in rpc.outcomes {
                 let mut outcome_labels = labels.clone();
                 outcome_labels.push(("outcome", outcome.label().to_owned()));
@@ -983,6 +1046,38 @@ impl GrpcRuntimeState {
                     error,
                 )
             }),
+            GrpcRegistryState::Taken => Err(grpc_error(
+                ApplicationPhase::Prepare,
+                "gRPC service registration is closed",
+            )),
+        }
+    }
+
+    /// 业务作用：接收组合计划已经类型擦除的 generated service，使 Saga 等组件复用同一 registry。
+    ///
+    /// 参数说明：
+    /// - `service`: 仍由 UserHook 独占、尚未加入 Router 的 boxed managed service。
+    ///
+    /// 返回：登记窗口开放且 service 身份唯一时成功；晚到、重复或 descriptor 不合法时返回阶段错误。
+    #[cfg(feature = "saga-grpc")]
+    pub(crate) fn register_boxed(
+        &self,
+        service: Box<dyn nagrpc::ManagedGrpcService>,
+    ) -> ApplicationResult<()> {
+        let mut state = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &mut *state {
+            GrpcRegistryState::Open(registry) => {
+                registry.register_boxed(service).map_err(|error| {
+                    grpc_error_src(
+                        ApplicationPhase::UserHook,
+                        "gRPC service does not satisfy the managed registry contract",
+                        error,
+                    )
+                })
+            }
             GrpcRegistryState::Taken => Err(grpc_error(
                 ApplicationPhase::Prepare,
                 "gRPC service registration is closed",
@@ -1158,22 +1253,6 @@ impl ApplicationComponent for GrpcComponent {
         Box::pin(async move {
             let root: GrpcConfigRoot = context.application().config_as()?;
             let validated = root.grpc.validate(ApplicationPhase::Start)?;
-            // 与其它受管组件同一时机登记：descriptor 在 Seal 前全部就位，Ready 之后
-            // 不再扩张观测面；源持有运行期状态句柄，listener 绑定后自然开始产出样本。
-            let state = context.application().grpc_runtime();
-            context
-                .application()
-                .metrics_hub()
-                .register_legacy_source(Arc::new(GrpcMetricsSource { state }))
-                .map_err(|conflict| {
-                    grpc_error(
-                        ApplicationPhase::Start,
-                        format!(
-                            "gRPC metric descriptor `{}` conflicts with an existing registration",
-                            conflict.name
-                        ),
-                    )
-                })?;
             self.contributor = Some(context.application().register_readiness(
                 ComponentId::Grpc,
                 Arc::<str>::from("grpc:listener"),
@@ -1214,7 +1293,30 @@ impl ApplicationComponent for GrpcComponent {
     /// 返回：首次取得完整 registry 时成功；重复消费时禁止进入业务初始化。
     fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
-            self.registry = Some(context.application().grpc_runtime().take_registry()?);
+            let state = context.application().grpc_runtime();
+            let registry = state.take_registry()?;
+            let series =
+                grpc_worst_case_metric_series(&registry, self.reflection, self.tls.is_some())?;
+            context
+                .application()
+                .metrics_hub()
+                .register_legacy_source_reserved(Arc::new(GrpcMetricsSource { state }), series)
+                .map_err(|error| match error {
+                    nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => {
+                        let message = format!(
+                            "gRPC metric descriptor `{}` conflicts with an existing registration",
+                            conflict.name
+                        );
+                        grpc_error(ApplicationPhase::Prepare, message)
+                    }
+                    nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                        grpc_error(
+                            ApplicationPhase::Prepare,
+                            "gRPC metric series reservation exceeds the process budget",
+                        )
+                    }
+                })?;
+            self.registry = Some(registry);
             Ok(())
         })
     }

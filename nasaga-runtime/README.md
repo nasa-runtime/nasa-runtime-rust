@@ -1,16 +1,20 @@
 # nasaga-runtime
 
 `nasaga-runtime` 将 `nasaga-core` 合同与 MySQL store 组装为持久化 Orchestrator、参与方事务
-adapter、管理与恢复入口、运行指标以及可选 transport connector。它的核心价值是让分布式步骤在
-进程崩溃、至少一次重投和多副本竞争下仍由已提交事实继续推进，并在无法确定结果时停在可裁决状态，
-而不是猜测成功或失败。业务通过 `nasa` 门面启用：
+adapter、管理与恢复入口、运行指标以及可选 transport connector。业务通过 `nasa` 门面启用。
+
+## 核心价值
+
+本 crate 让分布式步骤在进程崩溃、至少一次重投和多副本竞争下仍由已提交事实继续推进，并在无法确定
+结果时停在可裁决状态，而不是猜测成功或失败。业务获得的是可恢复、可审计的最终一致性运行时，不是
+跨服务 ACID、物理 exactly-once 或并发隔离。
 
 ```toml
 [dependencies]
 nasa = { version = "2", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
-# gRPC 收据裁决：features = ["saga-grpc"]
+# gRPC generated service/client 与封闭收据：features = ["saga-grpc"]
 ```
 
 ## 运行架构
@@ -70,7 +74,47 @@ ACK/收据、重领和 DLT 安全语义。
 | `kafka` / 门面 `saga-kafka` | command/result 托管 consumer、手动 ACK、分区退避、durability-first DLT | 稳定；topic owner、group 与 ACL 由部署显式配置 |
 | `redis-stream` / 门面 `saga-redis-stream` | XREADGROUP、XAUTOCLAIM、显式 ACK、原子 DLT、签名、积压与安全清剪 | 稳定；Application 托管时还要声明 `redis` 组件 |
 | provider-neutral HTTP 认证类型 | canonical HMAC、显式 producer、replay 与容量观测 | 只提供认证和裁决构件；listener、共享 nonce store 与路由由宿主持有 |
-| `grpc-transport` / 门面 `saga-grpc` | command/result 服务端裁决器和封闭收据 | 不生成业务 proto；listener、mTLS、deadline 与 drain 由 `grpc` 组件承担 |
+| `grpc-transport` / 门面 `saga-grpc` | 框架 generated command/result service、client、mTLS principal 绑定和封闭收据 | Application 入站模式自动登记到 `grpc` 唯一 registry；出站单独使用时不启动 listener |
+
+### gRPC command/result transport
+
+框架协议固定为 `nasa.saga.transport.v1.SagaCommandTransport` 与 `SagaResultTransport`，请求只携带
+envelope JSON bytes，响应只含 `Committed`、`Duplicate`、`DeterministicReject`、`Retryable` 四种
+收据。`traceparent` 从 gRPC metadata 显式解析；metadata 自报 producer 永远不参与授权。
+
+Application 宿主同时声明 `"saga"` 与 `"grpc"` 后，通过
+`SagaApplicationPlan::with_grpc_command_service` 提交 `#[saga]` Service 与获准 client leaf SHA-256
+principal；计划从 Participant runtime 已冻结的单一 producer 信任投影自动构造 handler。Orchestrator
+对称使用 `with_grpc_result_service`，只额外声明无法从多参与方 definition 唯一推断的 producer/principal
+绑定。Application 自动生成并登记 service，业务不创建 `Arc` handler、generated server、Router、
+reflection、health、身份解析器或 listener handle。mTLS 指纹不匹配在进入 Saga handler 前返回
+`Unauthenticated`；回包缺失、deadline、断连和显式 `Retryable` 都保留发布端 Outbox 行，并以同一
+`event_id`/`command_id` 重投。
+
+```rust
+use nasa::application::SagaApplicationPlan;
+
+#[nasa::application("saga", "grpc")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let plan = SagaApplicationPlan::participant("payment", participant_runtime()?)?
+        .with_grpc_command_service(PaymentService, load_approved_client_leaf_principal()?)?
+        .with_event_publisher(result_publisher()?)?;
+    app.configure_saga(plan)?;
+    Ok(())
+}
+```
+
+示例中的 `participant_runtime()` 已包含 workflow/version/digest 对应的可信 Orchestrator 投影，
+`result_publisher()` 返回受 `Arc` 共享的受管 Outbox publisher。若同一进程承载多个参与方或接受多个
+producer，Application 不会猜测路由；这类高级拓扑才使用 `with_grpc_command_transport` 显式提交自定义
+handler。
+
+`saga-grpc` 已包含 `nasa::grpc` 类型门面。纯出站 publisher 可直接使用
+`nasa::saga::grpc_proto::{saga_command_transport_client, saga_result_transport_client}` 与
+`nasa::grpc::Endpoint`，无需启用 `application` 或声明 `"grpc"` 组件；此时调用方必须拥有 channel、
+deadline、重试和四类收据到 Outbox disposition 的映射。入站模式必须声明 `"grpc"`，配置
+`grpc.tls.mode: mutual`，并让方法进入 verified peer identity 门禁；只有 listener TLS driver 写入的
+`PeerIdentity` 能通过框架 service，metadata 自报 producer 不可信。
 
 不使用 Application 组件的宿主仍需自行拥有消息消费循环、timer 轮询循环和停机顺序；本 crate
 不自行启动无限后台任务。
@@ -150,7 +194,7 @@ reason 与唯一 `operation_id`。人工关闭只能把 `MANUAL_INTERVENTION` �
 `nasaga_conflict_total`、`nasaga_quota_rejections_total`、`nasaga_action_rate_rejections_total`，再叠加
 所选 transport 与受管 Outbox 的 ACK、重试、DLT、积压、保留清理和提交不确定指标。
 
-## 主要边界
+## 明确边界
 
 - 公开保证是本地 ACID、Outbox 至少一次、Inbox 幂等、持久化状态机和显式补偿组成的最终一致性。
 - 不承诺物理 exactly-once、跨服务 ACID 或并发 Saga 隔离。
@@ -158,8 +202,8 @@ reason 与唯一 `operation_id`。人工关闭只能把 `MANUAL_INTERVENTION` �
 - 远端定义摘要无法仅凭参与方本地投影推断；要求启动期拒绝漂移时，所有服务必须读取同一份受信、
   不可变定义快照。
 - timer、dispatcher 和 consumer 的生命周期由宿主拥有，停机时应先关入口，再排空已接管工作。
-- gRPC connector 不等于 gRPC 服务端；没有受管 listener、已验证 peer identity 和有界 deadline/drain
-  时，不构成可投产链路。
+- gRPC generated service 只有进入受管 listener、取得已验证 peer identity，并配置有界 deadline/drain
+  后才构成完整入站链路；单独使用裁决器或 generated client 不会自行创建这些运行边界。
 
 部署、恢复和容量边界见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

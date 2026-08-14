@@ -6,6 +6,26 @@
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
 
+## 核心价值与门面架构
+
+业务 manifest 只选择 `nasa` feature，业务代码只使用 `nasa::<module>`；门面负责把实现 crate、过程宏、
+codegen ABI 和可选 Application 组件接成一张一致的依赖图。这样业务不会直接锁定内部 crate 名称，也
+不会因为 tonic/prost、事务上下文或生命周期实现出现两份 package 身份。
+
+```text
+业务 feature 与 #[nasa::application(...)]
+                 │
+                 v
+        nasa 稳定模块与类型门面
+                 │
+                 v
+实现 crate / 宏 crate / Application 唯一组件 owner
+```
+
+门面只组织公开类型和 feature，不持有额外运行状态，也不自动启动未在属性中声明的 listener 或消费端。
+业务仍负责协议与领域语义、实际容量、路由、凭据来源和外部系统治理；Application 负责已声明组件的
+Ready 门禁、监督和反向停机。
+
 其中的 Saga 能力用本地事务、Outbox/Inbox、持久化状态机、稳定效果身份和显式补偿组成最终一致性
 闭环；进程崩溃、重复投递、Unknown 结果和 timer 多副本竞争均从已提交事实恢复。它不把远端调用
 伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。业务通常启用 `application` +
@@ -162,7 +182,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
 | `saga-kafka` | `nasa::saga` | 受管 command/result Kafka transport |
 | `saga-redis-stream` | `nasa::saga`、`nasa::application` | 受管 Redis Streams 发布、消费、重领、原子 DLT 与积压观测 |
-| `saga-grpc` | `nasa::saga` | gRPC command/result 封闭收据裁决；不包含 listener |
+| `saga-grpc` | `nasa::saga`、`nasa::grpc`、`nasa::application` | 已包含 `grpc` 类型门面；generated command/result service、mTLS principal 绑定与封闭收据，入站计划复用 `"grpc"` listener，纯出站不启动 listener |
 | `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |

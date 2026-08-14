@@ -240,6 +240,8 @@ pub struct SagaApplicationPlan {
     outbox: Option<crate::outbox::OutboxApplicationPlan>,
     #[cfg(feature = "saga-redis-stream")]
     redis_transport: Option<SagaRedisTransportPlan>,
+    #[cfg(feature = "saga-grpc")]
+    grpc_services: Vec<Box<dyn nagrpc::ManagedGrpcService>>,
 }
 
 /// 业务作用：Saga 的 Redis Streams 受管消费子计划——把已构造的 result/command 消费者
@@ -393,6 +395,8 @@ impl SagaApplicationPlan {
             outbox: None,
             #[cfg(feature = "saga-redis-stream")]
             redis_transport: None,
+            #[cfg(feature = "saga-grpc")]
+            grpc_services: Vec::new(),
         }
     }
 
@@ -562,6 +566,189 @@ impl SagaApplicationPlan {
         transport.validate()?;
         self.redis_transport = Some(transport);
         Ok(self)
+    }
+
+    /// 业务作用：从计划中的唯一参与方与单一受信 producer 自动生成 Saga command gRPC service。
+    ///
+    /// 业务只提交 `#[saga]` Service 实例与获准 client leaf principal；Application 复用计划中的
+    /// Participant runtime，自动构造 handler、generated server 并登记到唯一 registry。多参与方或
+    /// 多 producer 进程不能安全推断映射，必须使用自定义 handler 入口显式路由。
+    ///
+    /// 参数说明：
+    /// - `service`: 实现宏生成 `SagaCommandService` 的本地业务 Service。
+    /// - `peer_principal`: nagrpc 从该 Orchestrator client leaf certificate 派生的 SHA-256 指纹。
+    ///
+    /// 返回：角色、单一 producer 与身份绑定都明确时返回自身；多角色、多 producer、重复 service 或
+    /// 非法指纹返回 UserHook 错误。
+    #[cfg(feature = "saga-grpc")]
+    pub fn with_grpc_command_service<S>(
+        self,
+        service: S,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self>
+    where
+        S: nasaga_runtime::SagaCommandService,
+    {
+        if self.participants.len() != 1 {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "automatic Saga gRPC command service requires exactly one participant",
+            ));
+        }
+        let runtime = self.participants.values().next().cloned().ok_or_else(|| {
+            saga_error(
+                ApplicationPhase::UserHook,
+                "automatic Saga gRPC command service requires a participant",
+            )
+        })?;
+        let trusted_producer = runtime.single_trusted_command_producer().map_err(|error| {
+            saga_source_error(
+                ApplicationPhase::UserHook,
+                "automatic Saga gRPC command producer is ambiguous",
+                error,
+            )
+        })?;
+        let handler = Arc::new(nasaga_runtime::ParticipantCommandHandler::new(
+            runtime,
+            Arc::new(service),
+        ));
+        self.with_grpc_command_transport(handler, trusted_producer, peer_principal)
+    }
+
+    /// 业务作用：从计划中的唯一 Orchestrator 自动生成 Saga result gRPC service。
+    ///
+    /// Application 复用计划已经持有的 Orchestrator，不要求业务再构造 handler 或 generated server；
+    /// producer 与证书 principal 的授权映射仍必须显式给出，避免多参与方身份被容器猜测。
+    ///
+    /// 参数说明：
+    /// - `trusted_producer`: 获准向本 Orchestrator 投递结果的参与方逻辑身份。
+    /// - `peer_principal`: nagrpc 从该参与方 client leaf certificate 派生的 SHA-256 指纹。
+    ///
+    /// 返回：计划含唯一 Orchestrator 且身份绑定合法时返回自身；缺少角色、重复 service 或非法指纹
+    /// 返回 UserHook 错误。
+    #[cfg(feature = "saga-grpc")]
+    pub fn with_grpc_result_service(
+        self,
+        trusted_producer: nasaga_runtime::ServiceIdentity,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self> {
+        let handler = self
+            .orchestrator
+            .as_ref()
+            .map(|plan| Arc::clone(&plan.runtime))
+            .ok_or_else(|| {
+                saga_error(
+                    ApplicationPhase::UserHook,
+                    "automatic Saga gRPC result service requires an orchestrator",
+                )
+            })?;
+        self.with_grpc_result_transport(handler, trusted_producer, peer_principal)
+    }
+
+    /// 业务作用：为参与方加入自定义 Saga command handler 的框架 generated gRPC service。
+    ///
+    /// 常规单参与方服务应优先使用 [`Self::with_grpc_command_service`]，由 Application 从既有计划生成
+    /// handler。本入口只用于一个进程内多参与方路由或其它自定义提交边界。
+    ///
+    /// 参数说明：
+    /// - `handler`: 本地事务提交成功后才返回可确认结果的 command handler。
+    /// - `trusted_producer`: 唯一获准向该参与方投递命令的 Orchestrator 逻辑身份。
+    /// - `peer_principal`: nagrpc 从该 Orchestrator client leaf certificate 派生的 SHA-256 指纹。
+    ///
+    /// 返回：身份绑定合法且 command service 尚未加入时返回自身；重复或非法指纹返回 UserHook 错误。
+    #[cfg(feature = "saga-grpc")]
+    pub fn with_grpc_command_transport<H>(
+        mut self,
+        handler: Arc<H>,
+        trusted_producer: nasaga_runtime::ServiceIdentity,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self>
+    where
+        H: nasaga_runtime::SagaCommandHandler,
+    {
+        if self
+            .grpc_services
+            .iter()
+            .any(|service| service.service_name() == "nasa.saga.transport.v1.SagaCommandTransport")
+        {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga gRPC command transport can be configured only once",
+            ));
+        }
+        let peer = nasaga_runtime::SagaGrpcPeerBinding::new(peer_principal, trusted_producer)
+            .map_err(|error| {
+                saga_source_error(
+                    ApplicationPhase::UserHook,
+                    "saga gRPC command peer binding is invalid",
+                    error,
+                )
+            })?;
+        let service = nasaga_runtime::SagaGrpcCommandTransportService::new(handler, peer);
+        self.grpc_services.push(Box::new(
+            nasaga_runtime::grpc_proto::saga_command_transport_server::SagaCommandTransportServer::new(
+                service,
+            ),
+        ));
+        Ok(self)
+    }
+
+    /// 业务作用：为自定义 result handler 加入框架 generated Saga result gRPC service。
+    ///
+    /// 常规 Orchestrator 应优先使用 [`Self::with_grpc_result_service`]，复用计划中已提交的 runtime。
+    /// 本入口只用于替代本地结果提交边界的高级场景。
+    ///
+    /// 参数说明：
+    /// - `handler`: 在本地事务中吸收并推进 result 的 Orchestrator handler。
+    /// - `trusted_producer`: 唯一获准向本 Orchestrator 投递结果的参与方逻辑身份。
+    /// - `peer_principal`: nagrpc 从该参与方 client leaf certificate 派生的 SHA-256 指纹。
+    ///
+    /// 返回：身份绑定合法且 result service 尚未加入时返回自身；重复或非法指纹返回 UserHook 错误。
+    #[cfg(feature = "saga-grpc")]
+    pub fn with_grpc_result_transport<H>(
+        mut self,
+        handler: Arc<H>,
+        trusted_producer: nasaga_runtime::ServiceIdentity,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self>
+    where
+        H: nasaga_runtime::SagaResultHandler,
+    {
+        if self
+            .grpc_services
+            .iter()
+            .any(|service| service.service_name() == "nasa.saga.transport.v1.SagaResultTransport")
+        {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga gRPC result transport can be configured only once",
+            ));
+        }
+        let peer = nasaga_runtime::SagaGrpcPeerBinding::new(peer_principal, trusted_producer)
+            .map_err(|error| {
+                saga_source_error(
+                    ApplicationPhase::UserHook,
+                    "saga gRPC result peer binding is invalid",
+                    error,
+                )
+            })?;
+        let service = nasaga_runtime::SagaGrpcResultTransportService::new(handler, peer);
+        self.grpc_services.push(Box::new(
+            nasaga_runtime::grpc_proto::saga_result_transport_server::SagaResultTransportServer::new(
+                service,
+            ),
+        ));
+        Ok(self)
+    }
+
+    /// 业务作用：把已冻结的 Saga gRPC generated service 线性移交给 Application 唯一 registry。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：command/result service 的唯一所有权；未启用入站 gRPC transport 时为空集合。
+    #[cfg(feature = "saga-grpc")]
+    pub(crate) fn take_grpc_services(&mut self) -> Vec<Box<dyn nagrpc::ManagedGrpcService>> {
+        std::mem::take(&mut self.grpc_services)
     }
 
     /// 业务作用：把 Saga 组合声明内的发布计划移交给隐式 Outbox 组件。

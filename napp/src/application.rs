@@ -1481,6 +1481,22 @@ impl Application {
         // 先验证角色拓扑，再把 publisher 移交给 Outbox；否则空计划失败会留下无法由调用方重试
         // 覆盖的半配置 Outbox，破坏 UserHook 内一次纠错的原子性。
         plan.validate()?;
+        #[cfg(feature = "saga-grpc")]
+        {
+            let grpc_services = plan.take_grpc_services();
+            if !grpc_services.is_empty() {
+                self.ensure_component_declared(
+                    ComponentId::Grpc,
+                    ApplicationPhase::UserHook,
+                    "saga gRPC transport registration",
+                )?;
+            }
+            // Saga transport 与普通业务 service 必须在 Prepare 封口前进入同一个 registry；任何
+            // 重名或 descriptor 冲突在此拒绝，不能到 listener 绑定后再形成第二套路由。
+            for service in grpc_services {
+                self.inner.grpc_runtime.register_boxed(service)?;
+            }
+        }
         let outbox = plan.take_outbox_plan()?;
         self.inner.outbox_runtime.configure(outbox)?;
         self.inner.saga_runtime.configure(plan)

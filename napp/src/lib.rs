@@ -17,7 +17,8 @@
 //! 启用 gRPC 组件时，UserHook 只登记统一 codegen 生成的业务 service，Prepare 永久封口 registry，
 //! 全部 initializer 成功后的 Ready 才自动装配 Router、health、可选 reflection 并绑定 listener。
 //! 组件独占 shutdown，持续 accept 失败会摘除 readiness 并保持有界恢复，serve 所有权丢失则触发
-//! 统一失败停机。
+//! 统一失败停机。启用 Saga gRPC 入站计划时，generated command/result service 也在同一封口前自动
+//! 登记，不建立第二个 Router、身份解析或停机 owner。
 //!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 

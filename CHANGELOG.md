@@ -6,7 +6,7 @@
 
 - 新增 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime` 与 `nasaga-macro`，通过门面 feature 提供流程
   定义、持久化 Orchestrator、参与方事务 adapter、Kafka/Redis Streams 受管 transport 和 gRPC
-  收据 connector。
+  generated command/result transport。
 - 建立 `effect_id`、`command_id`、目标业务效果身份与定义摘要的确定性派生，阻止身份漂移造成重复
   外部副作用。
 - Orchestrator 将 Inbox、状态 CAS、attempt、迁移事实、下一 command Outbox 和 timer 放入同一本地
@@ -23,7 +23,8 @@
 - W3C trace 上下文随实例、command 与 result 的已提交因果链显式传播；缺少 trace 不阻断投递。
 - 增加非终态分页检索、人工关闭终态与滚动升级门禁、调度批次幂等发起、租户在飞实例配额和管理动作速率。
 - Redis Streams connector 提供消息签名、显式 ACK、XAUTOCLAIM、原子 DLT、安全清剪与 Application
-  生命周期；gRPC connector 使用封闭收据表达提交、重复、确定性拒绝与结果不确定。
+  生命周期；gRPC transport 自动登记框架 service，以 mTLS leaf principal 绑定逻辑 producer，并使用
+  封闭收据表达提交、重复、确定性拒绝与结果不确定。
 
 ## 应用运行时
 

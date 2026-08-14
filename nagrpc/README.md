@@ -106,7 +106,9 @@ codegen ABI 和运行时门面。`nasa::grpc::include_proto!` 同时包含：
 - 归一化到 `nasa::grpc::codegen` 的生成代码，业务无需直接依赖 tonic/prost；
 - 与生成代码同一次构建得到的 `FILE_DESCRIPTOR_SET`；
 - descriptor 的 `FILE_DESCRIPTOR_SHA256`；
-- `nagrpc-build` 为 generated server 生成的 `ManagedGrpcService` 适配。
+- `nagrpc-build` 为 generated server 生成的 `ManagedGrpcService` 适配；
+- 同次构建的规范 protobuf package 模块树；跨 package import 不要求业务手写嵌套 `mod`，well-known
+  types 统一使用门面重导出的 `prost_types`。
 
 这些元数据让 registry 能在 listener 开放前验证 service 名、完整方法路径、四种 streaming 形态、
 descriptor 冲突和 ABI，并让 reflection、方法指标和方法策略使用同一份固定目录。因此它不是对 tonic
@@ -187,13 +189,13 @@ grpc:
 | --- | --- | --- |
 | listener | `bind`、`authority`、`allow_insecure_remote`、`max_connections` | loopback `127.0.0.1:50051`，最多 256 条受管连接 |
 | RPC | `concurrency_limit_per_connection`、`unary_timeout_ms`、`max_inflight_rpcs` | 每连接 128，并按进程共享 1024 个 RPC permit |
-| 消息 | `max_decoding_bytes`、`max_encoding_bytes`、`max_inflight_message_bytes` | 单消息 4 MiB，请求与响应共享 128 MiB permit |
+| 消息 | `max_decoding_bytes`、`max_encoding_bytes`、`max_inflight_message_bytes` | 单消息 4 MiB，请求与响应共享 128 MiB 实际在途 permit；未发送的声明长度不预扣 |
 | streaming | `stream_idle_timeout_ms`、`max_stream_duration_ms`、`max_*_messages_per_stream`、`max_*_stream_bytes` | 空闲、总时长、消息数和双向累计字节都有限 |
 | HTTP/2 | `initial_*_window_size`、`max_frame_size`、`http2_*` | 限制窗口、header、HPACK、发送缓冲、reset 与控制帧速率 |
 | TCP/连接 | `connection_handshake_timeout_ms`、`first_request_timeout_ms`、`idle_connection_timeout_ms`、`tcp_*` | 慢握手、空闲连接与失效对端不能无限占用资源 |
-| 轮转/停机 | `max_connection_age_ms`、`connection_eviction_grace_ms`、`drain_timeout_ms` | 可选连接轮转；默认 drain 20 秒并保留 Application 收尾预算 |
+| 轮转/停机 | `max_connection_age_ms`、`connection_eviction_grace_ms`、`drain_timeout_ms` | 首请求/空闲/年龄驱逐使用逐连接 grace；停机把整个 drain 预算交给已接纳 RPC |
 | 内存 | `managed_memory_budget_bytes` | 连接、stream、RPC 与消息预算必须共同落在受管内存门禁内 |
-| 协议能力 | `health_only`、`reflection.enabled`、`methods` | health 自动装配；reflection 默认关闭；策略目录启动期固定 |
+| 协议能力 | `health_only`、`reflection.enabled`、`methods` | health 自动装配；reflection 默认关闭；`health_only + reflection` 在 bind 前拒绝 |
 
 零值、超过硬上限、内存预算不自洽或字段组合不合法都会在 bind 前失败。显式设置
 `application.shutdown_timeout_ms` 时，它必须覆盖发现注销预留、gRPC drain 和 Application 收尾；省略时
@@ -230,13 +232,25 @@ Application 把固定 descriptor 目录写入统一 Prometheus/OTLP 指标中心
 | `napp_grpc_tls_certificate_expiry_timestamp_seconds` | 无 | 已发布证书链最早到期时间；明文模式不产生样本 |
 | `napp_grpc_rpcs_active` | `service,method,rpc_type` | 当前在途 RPC |
 | `napp_grpc_rpcs_started_total` | `service,method,rpc_type` | 已接纳 RPC 总数 |
-| `napp_grpc_rpcs_rejected_total` | `service,method,rpc_type` | handler 前被容量、速率或身份门禁拒绝的总数 |
+| `napp_grpc_rpcs_rejected_total` | `service,method,rpc_type,reason` | handler 前按连接/进程/方法容量、方法速率或身份门禁分类的拒绝总数 |
 | `napp_grpc_rpcs_completed_total` | `service,method,rpc_type,outcome` | 每个已接纳 RPC 的唯一最终结局 |
 
 `rpc_type` 是 `unary`、`client_streaming`、`server_streaming` 或 `bidirectional_streaming`。
-`outcome` 使用固定集合：`ok`、标准 gRPC code、`cancelled`、`client_deadline_exceeded`、
-`server_timeout`、`transport_lost`。客户端放弃 response body 也会由 Drop 守卫归还 permit、递减 active
-并记录取消，因此每个 started 调用最终只进入一个完成结局。
+`reason` 使用固定集合：`connection_concurrency`、`process_concurrency`、`method_concurrency`、
+`method_rate`、`peer_identity`。`outcome` 使用固定集合：`ok`、标准 gRPC code、`cancelled`、
+`client_deadline_exceeded`、`server_timeout`、`server_stream_duration`、`server_stream_idle`、
+`stream_received_messages`、`stream_sent_messages`、`stream_received_bytes`、`stream_sent_bytes`、
+`transport_lost`。请求与响应 body 共享首个结局槽，请求方向越界不会被响应侧通用 status 覆盖；只有
+响应 owner 归还 RPC permit、递减 active，因此每个 started 调用最终只进入一个完成结局。
+
+Application 在 bind 前按 sealed service/method 目录、五类拒绝原因和全部完成结局计算最坏公开序列数。
+gRPC 最多预留 20,000 条序列，并与 `nametrics-core` 的进程级 100,000 条预算原子登记；容量不足时
+descriptor、指标源和预留计数都保持原状，listener 不会启动。
+
+`max_inflight_message_bytes` 约束进程内实际进入 body、跨 frame 拼接或等待下游消费的消息字节，不是
+单条 stream 的累计流量上限。未发送 payload 的 length prefix 不预留整条消息；完整消息被下游消费后
+释放 permit，长流累计流量只受双方向 `max_*_messages_per_stream` 与 `max_*_stream_bytes` 约束。压缩消息
+在完整到达、即将交给 codec 前按解压上限取得保守权重。
 
 持续 accept 失败会把 `grpc:listener` 摘为 NotReady，但 serve task 继续持有 socket 并有界退避；资源
 恢复并成功 accept 后自动恢复 Ready。证书进入 warning window 时 readiness 为 Degraded，到期后为
@@ -271,8 +285,11 @@ secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同
 
 - 单个 Application 组件只拥有一个 listener；一个 listener 可登记最多 64 个业务 service、256 个方法。
 - gRPC-Web、HTTP/1.1 fallback、多 listener、客户端连接池、客户端负载均衡和 service mesh 不在本合同内。
-- reflection 默认关闭；开启后会公开 registry 中的 descriptor，必须按部署暴露面决定。
+- reflection 默认关闭；开启后以 sealed generated service registry 作为编译期 full-name allowlist。
+  `ListServices` 只列出实际装配的业务 service，descriptor 中未登记的相邻 service 也不能通过 symbol
+  查询旁路暴露；业务不手工登记 descriptor。
 - health 自动提供 transport 存活与 service 名目录，不替业务判断数据库、下游或业务数据是否健康。
 - Application 启动期冻结 TLS 材料，不提供进程内证书热切；轮换通过新实例 Ready 后切流完成。
 - 兼容门禁保护 protobuf wire 与 RPC cardinality，不替业务判断字段语义、授权范围或数据保留政策。
-- drain 先关闭新准入，再发送两阶段 GOAWAY 并等待在途调用；预算耗尽会终止 serve task，不遗留 detached listener。
+- drain 先关闭新准入，再发送两阶段 GOAWAY，并让已接纳调用使用整个 `drain_timeout_ms`；首请求、空闲
+  和连接年龄驱逐才使用 `connection_eviction_grace_ms`。预算耗尽会终止 serve task，不遗留 detached listener。

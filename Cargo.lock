@@ -2889,6 +2889,8 @@ dependencies = [
  "linkme",
  "nadis",
  "nafka",
+ "nagrpc",
+ "nagrpc-build",
  "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-mysql",
  "naoutbox-core",

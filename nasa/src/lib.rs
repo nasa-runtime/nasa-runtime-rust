@@ -8,8 +8,8 @@
 //! `saga-runtime` 将本地 ACID、Outbox 至少一次、Inbox 幂等、持久化状态机与显式补偿组合为
 //! 最终一致性流程。稳定 `effect_id`、定义摘要、取消/裁决屏障、冻结补偿计划与 timer fencing
 //! 让重复投递、Unknown 结果、进程崩溃和多副本竞争从已提交事实收敛。Kafka 和 Redis Streams
-//! 提供受管 connector；HTTP 使用显式认证构件；gRPC 使用封闭收据裁决。Saga 不提供
-//! 跨服务 ACID、物理 exactly-once 或并发隔离。
+//! 提供受管 connector；HTTP 使用显式认证构件；gRPC 提供框架 generated command/result service、
+//! mTLS principal 绑定和封闭收据。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离。
 //!
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
@@ -588,7 +588,9 @@ pub mod object {
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
 /// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
 ///
-/// `full` 会编入运行时以及 Kafka、gRPC adapter；Redis Streams 替代通道仍需显式 feature。
+/// `saga-grpc` 会同时打开稳定 `grpc` 门面；纯出站调用无需声明 Application 的 `"grpc"` 组件，
+/// 入站计划则必须声明它以取得唯一受管 listener。`full` 会编入运行时以及 Kafka、gRPC adapter；
+/// Redis Streams 替代通道仍需显式 feature。
 /// 业务必须声明 Application 的 `"saga"` 组件并提交流程定义、参与方信任关系和
 /// 发布端。DB 与 Outbox 由 Saga 声明隐式纳入，未装配计划时启动会 fail-closed。
 #[cfg(feature = "saga")]
@@ -610,9 +612,10 @@ pub mod grpc {
         async_trait, health, include_proto, propagate_deadline_from, reflection, Certificate,
         Channel, ClientTlsConfig, Code, Deadline, DeadlineSource, Endpoint, GrpcMessageLimits,
         GrpcMethodDescriptor, GrpcMethodPolicy, GrpcMethodType, GrpcRpcMethodSnapshot,
-        GrpcRpcOutcome, GrpcServerConfig, GrpcServerError, GrpcServerHandle, GrpcServerObserver,
-        GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity, Identity, ManagedGrpcService,
-        ManagedService, PeerIdentity, Request, Response, ServerPlan, Status, Streaming,
+        GrpcRpcOutcome, GrpcRpcRejectionReason, GrpcServerConfig, GrpcServerError,
+        GrpcServerHandle, GrpcServerObserver, GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity,
+        Identity, ManagedGrpcService, ManagedService, PeerIdentity, Request, Response, ServerPlan,
+        Status, Streaming,
     };
 
     #[doc(hidden)]

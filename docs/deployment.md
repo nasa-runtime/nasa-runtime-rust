@@ -79,9 +79,9 @@ readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中
 
 `#[nasa::application("saga")]` 会隐式纳入 DB 与受管 Outbox；业务只提交 Saga 运行计划和发布端。
 Kafka 仅在选用 Kafka 托管消息适配器时声明 `"kafka"`；Redis Streams 托管模式声明 `"redis"` 并
-提交 `SagaRedisTransportPlan`。HTTP listener 由宿主拥有；gRPC listener 可由 `grpc` Application 组件
-统一拥有。transport 不是 Saga 的隐式
-依赖，发布和消费两端必须成对具备确认、重领、认证与 durable DLT 语义。
+提交 `SagaRedisTransportPlan`。HTTP listener 由宿主拥有；Saga gRPC 入站通过计划自动把框架 generated
+service 登记到 `"grpc"` Application 组件的唯一 listener，纯出站 client 不声明该组件。transport 不是
+Saga 的隐式运行时 owner，发布和消费两端必须成对具备确认、重领、认证与 durable DLT/收据语义。
 
 Saga 采用 expand-first，部署顺序固定为：
 
@@ -106,5 +106,6 @@ descriptor 漂移都拒绝接流。
 记录制造“已排空”。
 
 本地容器能够确认 MySQL 提升、Kafka 多 broker、ACL、消息重投和故障恢复语义，但不能替代生产网络、
-Redis Cluster 槽迁移、磁盘、容量和灾难恢复批准。gRPC connector 还必须由具体服务证明 listener
-资源上限、已验证 peer identity、deadline 与 drain。完整边界见 [Saga 生产运行指南](saga-production.md)。
+Redis Cluster 槽迁移、磁盘、容量和灾难恢复批准。gRPC 业务链路还必须由具体服务证明 listener 与方法
+资源上限、已验证 peer identity、deadline、证书轮换和 drain。完整边界见
+[Saga 生产运行指南](saga-production.md)。

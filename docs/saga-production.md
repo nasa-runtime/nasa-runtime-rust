@@ -14,7 +14,7 @@ Saga 面向“一个业务意图需要跨多个本地事务完成”的场景。
 | --- | --- | --- |
 | `nasaga-core` | definition、摘要、身份、typed outcome、封闭状态机、冻结补偿计划 | I/O、线程、连接、重试循环 |
 | `nasaga-mysql` | 实例/attempt/journal/timer/gate/审计/配额事实、CAS 与 fencing | 跨库事务、transport、业务裁决 |
-| `nasaga-runtime` | Orchestrator、参与方事务 wrapper、恢复管理、trace、调度批次和 connector 裁决 | Application listener、部署 ACL、业务资源并发控制 |
+| `nasaga-runtime` | Orchestrator、参与方事务 wrapper、恢复管理、trace、调度批次和 transport 裁决；可生成 Saga gRPC service/client | listener 生命周期、部署 ACL、业务资源并发控制 |
 | `nasaga-macro` | `#[saga]` 声明检查、descriptor 收集、类型化 adapter | 全局流程定义、运行期状态推进 |
 | `napp` / `nasa` | Ready 门禁、组件所有权、timer/consumer/Outbox 监督与门面重导出 | 替代本地事务或自动选择 transport |
 
@@ -54,10 +54,10 @@ Saga 核心不依赖 Kafka。Outbox 发布端是 provider-neutral 接口，HTTP�
 
 | transport | 发布确认 | 重投/重领权威 | 确定性拒绝 | 产品状态 |
 | --- | --- | --- | --- | --- |
-| Kafka | broker 确认 + consumer 手动 ACK | partition offset 与 Inbox | 先持久化 DLT，再提交 offset | 稳定受管 connector |
-| Redis Streams | XADD 确认 + XACK | PEL、XAUTOCLAIM 与 Inbox | Lua 先写 DLT，再 marker，最后 XACK | 稳定受管 connector |
+| Kafka | broker 确认 + consumer 手动 ACK | partition offset 与 Inbox | 先持久化 DLT，再提交 offset | 稳定受管 transport |
+| Redis Streams | XADD 确认 + XACK | PEL、XAUTOCLAIM 与 Inbox | Lua 先写 DLT，再 marker，最后 XACK | 稳定受管 transport |
 | HTTP | 业务定义的明确收据 | 发布端 Outbox 与共享 nonce/Inbox | 必须有 durable DLT；认证构件由 runtime 提供 | 宿主自行拥有 listener 与循环 |
-| gRPC | `Committed` / `Duplicate` 封闭收据 | 发布端 Outbox 与 Inbox | `DeterministicReject` 交发布策略裁决 | connector 与 listener 分层；listener 可由 Application 托管 |
+| gRPC | `Committed` / `Duplicate` 封闭收据 | 发布端 Outbox 与 Inbox | `DeterministicReject` 交发布策略裁决 | 框架生成 service/client；入站 listener 可由 Application 托管 |
 
 ## 启动顺序
 
@@ -259,19 +259,31 @@ PEL 非空而最小 pending id 不可读同样零删除,原子性使"快照与�
 缺失与空值):持有流写权限但没有密钥的主体无法通过替换 trace 伪造因果链。DLT 脚本按
 "先落死信、再置 marker、最后 XACK"排列:死信未持久化前源消息绝不确认。
 
-## gRPC 收据 connector
+## gRPC command/result transport
 
-`saga-grpc` 提供 `SagaGrpcCommandServer`、`SagaGrpcResultServer`、
-`SagaGrpcPeerIdentity`、`SagaGrpcReceipt` 与发布端收据映射；它不生成 protobuf service，也不启动
-listener。业务 generated service 必须先从已验证 mTLS 证书或端到端签名得到 peer identity，再把原始
-envelope 与显式 trace 交给裁决器。metadata 中自报的服务名不可信。
+`saga-grpc` 公开固定协议 `nasa.saga.transport.v1.SagaCommandTransport` 与
+`SagaResultTransport`，同时提供 generated client/server、框架 service、mTLS peer binding 和发布端
+收据映射。请求只携带 envelope JSON bytes；响应只有 `Committed`、`Duplicate`、
+`DeterministicReject`、`Retryable` 四类。`traceparent` 从 metadata 显式解析，但 metadata 自报的
+producer 永远不参与授权。
 
-收据只有四类：`Committed`、`Duplicate`、`DeterministicReject`、`Retryable`。deadline、断连、回包
-丢失和显式 `Retryable` 都是结果不确定，发布端保留 Outbox 行并以同一 `event_id` 重投；只有前两类
-允许标记已投递。确定性拒绝能否越过由发布端已经批准的 Block/DLT 策略决定，connector 本身不删除
-Outbox 行。只有同时具备受管 listener、有界并发/payload/deadline、mTLS 或等价签名、优雅 drain 与
-真实下游门禁后，具体业务链路才能申请生产批准；稳定 transport 合同本身不代表具体业务链路已经完成
-容量、安全和灾难恢复批准。
+入站 Application 同时声明 `"saga"` 与 `"grpc"`，再通过
+`SagaApplicationPlan::with_grpc_command_service` 提交 `#[saga]` Service 与获准的 client leaf SHA-256
+principal；单参与方计划从 Participant runtime 的冻结信任投影自动取得逻辑 producer 并生成 handler。
+Orchestrator 使用 `with_grpc_result_service`，显式绑定参与方 producer/principal。计划把框架 generated
+service 自动登记到 Application 唯一 gRPC registry；业务不创建 `Arc` handler、generated server、第二个
+Router、listener、health/reflection builder 或身份解析器。listener 必须使用 mTLS，TLS driver 验证证书
+后写入 `PeerIdentity`；缺少身份或 principal 不匹配会在 Saga handler 前以 `Unauthenticated` 拒绝。
+
+纯出站 publisher 只使用 generated client 时不声明 Application `"grpc"` 组件，也不会启动 listener。
+发布端拥有 channel、deadline、重试和 Outbox 裁决：deadline、断连、回包丢失和显式 `Retryable` 都是
+结果不确定，保留 Outbox 行并以同一 `event_id`/`command_id` 重投；`Committed` 与 `Duplicate` 才允许
+标记已投递。`DeterministicReject` 是否进入 durable DLT 由已批准的发布策略决定，transport 自身不删除
+Outbox 行。
+
+完整入站链路必须同时具备有界连接/方法并发、payload、deadline、stream 时长、mTLS、方法身份门禁和
+优雅 drain。稳定 transport 合同不替代具体业务链路的容量、安全、证书轮换、下游 readiness 与灾难
+恢复批准。
 
 ## 多租户配额
 

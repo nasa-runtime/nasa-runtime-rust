@@ -85,7 +85,9 @@ NotReady / 摘流
 `napp_outbox_failed_rounds_total`、`napp_outbox_retention_commit_uncertain_total`、
 `nasaga_quota_rejections_total`、`nasaga_action_rate_rejections_total`，再关联 Kafka 的
 `nasaga_kafka_command_*` / `nasaga_kafka_result_*`、Redis Streams 的 `napp_saga_stream_*` 或具体
-HTTP/gRPC connector 的 retry、DLT 与收据指标。
+HTTP transport 的认证/replay/DLT 指标。gRPC 受管 listener 使用 `napp_grpc_*` 观察连接、TLS、方法准入
+与最终结局；四类 Saga 收据及其 Outbox/DLT 裁决由具体 publisher 的低基数业务指标补充，不能从
+transport `ok` 推断 Saga 已提交。
 
 - `nasaga_http_*_replay_authentication_failed_total` 上升：核对凭据、时钟和报文完整性；
 - `nasaga_http_*_replay_rejected_total` 上升：追踪重复来源，不清空仍有效 nonce；
@@ -99,6 +101,10 @@ HTTP/gRPC connector 的 retry、DLT 与收据指标。
   group 的 PEL/frontier；不得用空 PEL 推断业务已处理；
 - `napp_saga_stream_oldest_pel_age_ms` 持续增长：检查 consumer 存活、XAUTOCLAIM、handler 预算、
   DLT/marker 同槽与 Redis ACL；不要直接 XACK；
+- `napp_grpc_rpcs_rejected_total` 上升：按固定 `reason` 区分连接/进程/方法并发、方法速率和 peer identity，
+  先核对 listener 容量与 mTLS principal 绑定，不把准入拒绝当作业务确定性拒绝；
+- `napp_grpc_rpcs_completed_total` 中 deadline、transport 或 stream 结局上升：关联同一时段 Outbox 积压
+  与 publisher 收据指标；回包缺失和 `Retryable` 必须保留原事件重投；
 - `nasaga_quota_rejections_total` 上升：区分正常租户上限和账本未初始化；精确用量只经受权管理查询，
   不给 Prometheus 增加 tenant label；
 - `nasaga_action_rate_rejections_total` 上升：核对单租户恢复动作流量、数据库窗口和审批；只读检索不应

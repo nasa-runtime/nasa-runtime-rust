@@ -1,9 +1,15 @@
 //! tonic gRPC 的受管 service、运行时边界与独立 listener 生命周期。
 //!
+//! # 核心价值与运行架构
+//!
 //! generated server 通过 [`ManagedGrpcService`] 把消息上限、descriptor、方法形态和 codegen ABI
 //! 交给唯一 registry。`ServerPlan` 自动装配 health、可选 reflection、HTTP/2 安全参数和有预算的 drain；
 //! 业务不构造 Router，也不直接选择 tonic/prost 版本。Application 组合入口由 `napp` 持有同一 registry
 //! 与 shutdown owner，独立入口只把最终 owner 交给调用方。
+//!
+//! listener 在 bind 前冻结 service/method 目录、TLS 与容量；运行期按连接、RPC、stream 和消息分别
+//! 执行有界准入，并以固定原因和结局导出观测事实。停机先停止新准入，再发送 HTTP/2 GOAWAY 并在
+//! `drain_timeout` 内等待已接纳调用。它不提供 service mesh、客户端负载均衡或业务授权模型。
 
 #![forbid(unsafe_code)]
 
@@ -93,7 +99,6 @@ struct TcpSocketConfig {
 struct ConnectionRuntimeConfig {
     tcp: TcpSocketConfig,
     handshake_timeout: Duration,
-    first_request_timeout: Duration,
     max_frame_size: u32,
     control_frames_per_second: u32,
     control_frames_burst: u32,
@@ -114,7 +119,6 @@ impl From<&GrpcServerConfig> for ConnectionRuntimeConfig {
         Self {
             tcp: TcpSocketConfig::from(config),
             handshake_timeout: config.connection_handshake_timeout,
-            first_request_timeout: config.first_request_timeout,
             max_frame_size: config.max_frame_size,
             control_frames_per_second: config.control_frames_per_second,
             control_frames_burst: config.control_frames_burst,
@@ -630,9 +634,24 @@ pub enum GrpcRpcOutcome {
     ClientDeadlineExceeded,
     /// 服务端 unary 或 streaming 安全时间边界先耗尽。
     ServerTimeout,
+    /// 服务端允许的 streaming 总持续时间先耗尽。
+    ServerStreamDuration,
+    /// streaming 在规定时间内没有完成任何业务消息。
+    ServerStreamIdle,
+    /// 接收方向累计完整消息数达到单流上限。
+    StreamReceivedMessages,
+    /// 发送方向累计完整消息数达到单流上限。
+    StreamSentMessages,
+    /// 接收方向累计 protobuf payload 字节数达到单流上限。
+    StreamReceivedBytes,
+    /// 发送方向累计 protobuf payload 字节数达到单流上限。
+    StreamSentBytes,
     /// 已接纳 RPC 因连接或响应传输失败而未形成完整结果。
     TransportLost,
 }
+
+/// `GrpcRpcOutcome` 在指标中可能形成的稳定 label 总数；`Ok` 与 `Code(Ok)` 共用一个 label。
+pub const GRPC_RPC_OUTCOME_CARDINALITY: usize = 27;
 
 impl PartialOrd for GrpcRpcOutcome {
     /// 业务作用：按公开稳定 label 排序完成结局，使快照与导出顺序可重复。
@@ -687,10 +706,59 @@ impl GrpcRpcOutcome {
             Self::Cancelled => "cancelled",
             Self::ClientDeadlineExceeded => "client_deadline_exceeded",
             Self::ServerTimeout => "server_timeout",
+            Self::ServerStreamDuration => "server_stream_duration",
+            Self::ServerStreamIdle => "server_stream_idle",
+            Self::StreamReceivedMessages => "stream_received_messages",
+            Self::StreamSentMessages => "stream_sent_messages",
+            Self::StreamReceivedBytes => "stream_received_bytes",
+            Self::StreamSentBytes => "stream_sent_bytes",
             Self::TransportLost => "transport_lost",
         }
     }
 }
+
+/// handler 前拒绝 RPC 的封闭原因；值域只描述框架门禁，不包含动态方法或对端数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GrpcRpcRejectionReason {
+    /// 单条 HTTP/2 连接的并发 RPC permit 已耗尽。
+    ConnectionConcurrency,
+    /// listener 进程级 RPC permit 已耗尽。
+    ProcessConcurrency,
+    /// descriptor 方法的独立并发 permit 已耗尽。
+    MethodConcurrency,
+    /// descriptor 方法的 token bucket 已耗尽。
+    MethodRate,
+    /// 方法要求 mTLS peer identity，但当前连接没有验证身份。
+    PeerIdentity,
+}
+
+/// handler 前框架拒绝原因的稳定 label 总数。
+pub const GRPC_RPC_REJECTION_REASON_CARDINALITY: usize = 5;
+
+impl GrpcRpcRejectionReason {
+    /// 业务作用：返回指标使用的封闭低基数拒绝原因。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只可能是连接、进程、方法容量、方法速率或身份门禁的稳定 label。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ConnectionConcurrency => "connection_concurrency",
+            Self::ProcessConcurrency => "process_concurrency",
+            Self::MethodConcurrency => "method_concurrency",
+            Self::MethodRate => "method_rate",
+            Self::PeerIdentity => "peer_identity",
+        }
+    }
+}
+
+const GRPC_RPC_REJECTION_REASONS: [GrpcRpcRejectionReason; GRPC_RPC_REJECTION_REASON_CARDINALITY] = [
+    GrpcRpcRejectionReason::ConnectionConcurrency,
+    GrpcRpcRejectionReason::ProcessConcurrency,
+    GrpcRpcRejectionReason::MethodConcurrency,
+    GrpcRpcRejectionReason::MethodRate,
+    GrpcRpcRejectionReason::PeerIdentity,
+];
 
 /// 单个 descriptor 固定方法的一次请求会计快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -705,8 +773,10 @@ pub struct GrpcRpcMethodSnapshot {
     pub active: u64,
     /// 自 listener 启动以来已接纳的 RPC 总数。
     pub started_total: u64,
-    /// 因进程级容量、方法身份、方法并发或方法速率门禁在 handler 前拒绝的总数。
+    /// 因连接/进程容量、方法身份、方法并发或方法速率门禁在 handler 前拒绝的总数。
     pub rejected_total: u64,
+    /// handler 前拒绝按封闭原因拆分的单调计数；各项之和等于 `rejected_total`。
+    pub rejections: Vec<(GrpcRpcRejectionReason, u64)>,
     /// 已结束 RPC 按封闭结局聚合的单调计数。
     pub outcomes: Vec<(GrpcRpcOutcome, u64)>,
 }
@@ -716,7 +786,7 @@ pub struct GrpcRpcMethodSnapshot {
 struct RpcMethodMetrics {
     active: u64,
     started_total: u64,
-    rejected_total: u64,
+    rejections: BTreeMap<GrpcRpcRejectionReason, u64>,
     outcomes: BTreeMap<GrpcRpcOutcome, u64>,
 }
 
@@ -739,7 +809,16 @@ impl RpcMetrics {
         for descriptor in methods {
             if let Some((service, method)) = split_method_name(descriptor.full_name) {
                 directory.insert(descriptor.full_name, (service, method, descriptor.rpc_type));
-                values.insert(descriptor.full_name, RpcMethodMetrics::default());
+                values.insert(
+                    descriptor.full_name,
+                    RpcMethodMetrics {
+                        rejections: GRPC_RPC_REJECTION_REASONS
+                            .into_iter()
+                            .map(|reason| (reason, 0))
+                            .collect(),
+                        ..RpcMethodMetrics::default()
+                    },
+                );
             }
         }
         Self {
@@ -748,20 +827,37 @@ impl RpcMetrics {
         }
     }
 
-    /// 业务作用：记录 handler 前的进程容量、方法身份、方法并发或速率拒绝，不增加 started 或 active。
+    /// 业务作用：记录 handler 前的连接/进程容量、方法身份、方法并发或速率拒绝，不增加 started 或 active。
     ///
     /// 参数说明：
     /// - `method`: descriptor 中已封口的完整方法路径。
+    /// - `reason`: 触发拒绝的框架门禁。
     ///
     /// 返回：无；未知路径不创建动态记录。
-    fn reject(&self, method: &'static str) {
+    fn reject(&self, method: &'static str, reason: GrpcRpcRejectionReason) {
         let mut values = self
             .values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(value) = values.get_mut(method) {
-            increment_saturating(&mut value.rejected_total);
+            let count = value.rejections.entry(reason).or_default();
+            increment_saturating(count);
         }
+    }
+
+    /// 业务作用：按请求路径定位 sealed descriptor 方法并记录连接层拒绝，避免动态路径进入指标键空间。
+    ///
+    /// 参数说明：
+    /// - `path`: hyper 已解析的请求 URI path。
+    /// - `reason`: 连接 driver 已确定的封闭拒绝原因。
+    ///
+    /// 返回：路径属于已登记方法时记录一次并返回 `true`；未知路径不创建指标并返回 `false`。
+    fn reject_path(&self, path: &str, reason: GrpcRpcRejectionReason) -> bool {
+        let Some(method) = self.methods.keys().copied().find(|method| *method == path) else {
+            return false;
+        };
+        self.reject(method, reason);
+        true
     }
 
     /// 业务作用：接纳一条 RPC 并建立唯一完成守卫，使任何 future/body 丢弃路径都能归还会计。
@@ -794,7 +890,10 @@ impl RpcMetrics {
             method,
             _permit: Some(permit),
             _method_permit: method_permit,
-            outcome: None,
+            state: Arc::new(RpcCompletionState {
+                outcome: StdMutex::new(None),
+                finalized: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -818,7 +917,12 @@ impl RpcMetrics {
                     rpc_type: *rpc_type,
                     active: value.active,
                     started_total: value.started_total,
-                    rejected_total: value.rejected_total,
+                    rejected_total: value.rejections.values().copied().sum(),
+                    rejections: value
+                        .rejections
+                        .iter()
+                        .map(|(reason, count)| (*reason, *count))
+                        .collect(),
                     outcomes: value
                         .outcomes
                         .iter()
@@ -855,13 +959,47 @@ fn split_owned_method_name(full_name: &str) -> Option<(&str, &str)> {
         .then_some((service, method))
 }
 
-/// 已接纳 RPC 的唯一会计责任；正常完成显式设置结局，其余 drop 统一归类为取消。
+/// 请求与响应 body 共用的完成结局槽；owner 析构后拒绝迟到写入。
+struct RpcCompletionState {
+    outcome: StdMutex<Option<GrpcRpcOutcome>>,
+    finalized: AtomicBool,
+}
+
+/// 请求方向使用的完成结局报告句柄；它不拥有 active 或 permit 的最终释放责任。
+#[derive(Clone)]
+struct RpcCompletionReporter {
+    state: Arc<RpcCompletionState>,
+}
+
+impl RpcCompletionReporter {
+    /// 业务作用：提交请求或响应方向观察到的首个终止结局，供唯一 owner 在同一边界结算。
+    ///
+    /// 参数说明：
+    /// - `outcome`: 从方向性累计边界、deadline、trailers 或传输状态派生的封闭结局。
+    ///
+    /// 返回：owner 尚未结算且此前没有结局时写入；迟到或重复报告保持首次事实。
+    fn finish(&self, outcome: GrpcRpcOutcome) {
+        if self.state.finalized.load(Ordering::Acquire) {
+            return;
+        }
+        let mut current = self
+            .state
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.state.finalized.load(Ordering::Acquire) && current.is_none() {
+            *current = Some(outcome);
+        }
+    }
+}
+
+/// 已接纳 RPC 的唯一会计 owner；请求方向只报告结局，active 与 permit 仅由本 guard 释放。
 struct RpcCompletionGuard {
     owner: Arc<RpcMetrics>,
     method: &'static str,
     _permit: Option<OwnedSemaphorePermit>,
     _method_permit: Option<OwnedSemaphorePermit>,
-    outcome: Option<GrpcRpcOutcome>,
+    state: Arc<RpcCompletionState>,
 }
 
 impl RpcCompletionGuard {
@@ -871,17 +1009,36 @@ impl RpcCompletionGuard {
     /// - `outcome`: 从固定 gRPC code 或框架边界派生的封闭结局。
     ///
     /// 返回：无；重复调用保留首次结局。
-    fn finish(&mut self, outcome: GrpcRpcOutcome) {
-        if self.outcome.is_none() {
-            self.outcome = Some(outcome);
+    fn finish(&self, outcome: GrpcRpcOutcome) {
+        self.reporter().finish(outcome);
+    }
+
+    /// 业务作用：为请求 body 派生不拥有资源释放权的结局报告句柄，使接收方向越界能结算同一 RPC。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与唯一 owner 共用首个结局槽的克隆句柄。
+    fn reporter(&self) -> RpcCompletionReporter {
+        RpcCompletionReporter {
+            state: Arc::clone(&self.state),
         }
     }
 }
 
 impl Drop for RpcCompletionGuard {
     /// 业务作用：在 handler、response body、取消或断连任一路径退出时恰好结算一次并归还 permit。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；首个已报告结局被提交，未报告结局按 `cancelled` 结算，active 与两级 permit 同步释放。
     fn drop(&mut self) {
-        let outcome = self.outcome.unwrap_or(GrpcRpcOutcome::Cancelled);
+        self.state.finalized.store(true, Ordering::Release);
+        let outcome = self
+            .state
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or(GrpcRpcOutcome::Cancelled);
         let mut values = self
             .owner
             .values
@@ -980,6 +1137,19 @@ impl ManagedServiceRegistry {
     where
         S: ManagedGrpcService,
     {
+        self.register_boxed(Box::new(service))
+    }
+
+    /// 业务作用：登记已经由组合计划完成类型擦除的 generated service，复用与普通登记相同的原子门禁。
+    ///
+    /// 参数说明：
+    /// - `service`: 尚未加入任何 Router、仍由调用方独占的 boxed generated server。
+    ///
+    /// 返回：ABI、descriptor、名称与规模合法且未重复时成功；失败时 registry 保持原状。
+    pub fn register_boxed(
+        &mut self,
+        service: Box<dyn ManagedGrpcService>,
+    ) -> Result<(), GrpcServerError> {
         if service.codegen_abi() != CODEGEN_ABI {
             return Err(GrpcServerError::CodegenAbiMismatch);
         }
@@ -994,7 +1164,7 @@ impl ManagedServiceRegistry {
         if self.names.contains(name) {
             return Err(GrpcServerError::DuplicateService);
         }
-        let descriptor = self.validate_descriptor(&service)?;
+        let descriptor = self.validate_descriptor(service.as_ref())?;
         let next_methods = self
             .method_count
             .checked_add(service.methods().len())
@@ -1017,7 +1187,7 @@ impl ManagedServiceRegistry {
         self.descriptor_files.extend(descriptor.files);
         self.descriptor_symbols.extend(descriptor.symbols);
         self.method_count = next_methods;
-        self.services.push(Box::new(service));
+        self.services.push(service);
         Ok(())
     }
 
@@ -1039,6 +1209,15 @@ impl ManagedServiceRegistry {
         self.services.is_empty()
     }
 
+    /// 业务作用：返回 sealed registry 的业务 RPC method 数，供 listener 绑定前计算固定观测基数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不包含自动 health 与可选 reflection 方法，且不超过受管 method 硬上限。
+    pub fn method_count(&self) -> usize {
+        self.method_count
+    }
+
     /// 业务作用：把启动前冻结的 service、名称与 descriptor 线性移交给唯一 `ServerPlan`。
     ///
     /// 参数说明: 无。
@@ -1056,7 +1235,7 @@ impl ManagedServiceRegistry {
     /// 返回：可在其它门禁通过后原子提交的新文件与 symbol；解析、身份或冲突不合法时返回错误。
     fn validate_descriptor<S>(&self, service: &S) -> Result<DescriptorValidation, GrpcServerError>
     where
-        S: ManagedGrpcService,
+        S: ManagedGrpcService + ?Sized,
     {
         let descriptor = prost_types::FileDescriptorSet::decode(service.descriptor_set())
             .map_err(|_| GrpcServerError::InvalidServiceMetadata)?;
@@ -1216,6 +1395,45 @@ struct MethodPolicyRuntime {
     rate: Option<(u32, u32, StdMutex<TokenBucket>)>,
 }
 
+/// 方法级准入失败的内部分类；调用层将其同时映射为稳定 status 与指标 reason。
+enum MethodAdmissionError {
+    PeerIdentity,
+    Concurrency,
+    Rate,
+}
+
+impl MethodAdmissionError {
+    /// 业务作用：把方法级准入失败映射为客户端可见的稳定 gRPC status。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：身份缺失为 `Unauthenticated`，容量与速率耗尽为 `ResourceExhausted`。
+    fn status(&self) -> tonic::Status {
+        match self {
+            Self::PeerIdentity => {
+                tonic::Status::unauthenticated("verified gRPC peer identity is required")
+            }
+            Self::Concurrency => {
+                tonic::Status::resource_exhausted("gRPC method concurrency exhausted")
+            }
+            Self::Rate => tonic::Status::resource_exhausted("gRPC method rate exhausted"),
+        }
+    }
+
+    /// 业务作用：把方法级失败映射为封闭指标原因，保持 status 文本不进入标签。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与当前门禁一一对应的稳定拒绝原因。
+    fn reason(&self) -> GrpcRpcRejectionReason {
+        match self {
+            Self::PeerIdentity => GrpcRpcRejectionReason::PeerIdentity,
+            Self::Concurrency => GrpcRpcRejectionReason::MethodConcurrency,
+            Self::Rate => GrpcRpcRejectionReason::MethodRate,
+        }
+    }
+}
+
 impl MethodPolicyRuntime {
     /// 业务作用：从已校验的配置创建固定容量 permit 与 token bucket，不在请求路径动态建表。
     ///
@@ -1239,23 +1457,21 @@ impl MethodPolicyRuntime {
     /// 参数说明：
     /// - `has_peer_identity`: TLS driver 是否发布了已验证 mTLS leaf 身份。
     ///
-    /// 返回：授权与容量均满足时返回方法 permit；否则返回稳定 gRPC status。
+    /// 返回：授权与容量均满足时返回方法 permit；否则返回可同时生成 status 与指标 reason 的封闭分类。
     fn admit(
         &self,
         has_peer_identity: bool,
-    ) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
+    ) -> Result<Option<OwnedSemaphorePermit>, MethodAdmissionError> {
         if self.require_peer_identity && !has_peer_identity {
-            return Err(tonic::Status::unauthenticated(
-                "verified gRPC peer identity is required",
-            ));
+            return Err(MethodAdmissionError::PeerIdentity);
         }
         let permit = self
             .inflight
             .as_ref()
             .map(|slots| {
-                Arc::clone(slots).try_acquire_owned().map_err(|_| {
-                    tonic::Status::resource_exhausted("gRPC method concurrency exhausted")
-                })
+                Arc::clone(slots)
+                    .try_acquire_owned()
+                    .map_err(|_| MethodAdmissionError::Concurrency)
             })
             .transpose()?;
         if let Some((rate, burst, bucket)) = &self.rate {
@@ -1264,9 +1480,7 @@ impl MethodPolicyRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .try_take(*rate, *burst, Instant::now());
             if !allowed {
-                return Err(tonic::Status::resource_exhausted(
-                    "gRPC method rate exhausted",
-                ));
+                return Err(MethodAdmissionError::Rate);
             }
         }
         Ok(permit)
@@ -1328,10 +1542,9 @@ where
     const NAME: &'static str = S::NAME;
 }
 
-/// 单条 RPC 入站与出站共同持有的消息字节 permit；直到响应 body 结束才整体归还。
+/// listener 全部请求与响应 body 共用的消息字节 permit 池。
 struct MessagePermits {
     semaphore: Arc<Semaphore>,
-    held: StdMutex<Vec<OwnedSemaphorePermit>>,
 }
 
 impl MessagePermits {
@@ -1340,32 +1553,55 @@ impl MessagePermits {
     /// 参数说明：
     /// - `semaphore`: listener 全局消息字节 permit 池。
     ///
-    /// 返回：可由请求和响应 body 同时追加 permit 的状态。
+    /// 返回：可由请求和响应 body 同时申请实际在途字节的状态。
     fn new(semaphore: Arc<Semaphore>) -> Self {
-        Self {
-            semaphore,
-            held: StdMutex::new(Vec::new()),
-        }
+        Self { semaphore }
     }
 
-    /// 业务作用：在接受完整 gRPC frame 声明前取得对应字节 permit，避免并发消息越过进程预算。
+    /// 业务作用：为已经实际读入或即将交给 transport 的消息字节取得 permit，避免声明长度预扣整份预算。
     ///
     /// 参数说明：
-    /// - `bytes`: frame header 声明的 protobuf payload 字节数。
+    /// - `bytes`: 当前已经进入 body 的 protobuf payload 或压缩展开保守权重。
     ///
-    /// 返回：容量可立即取得时保存 permit；不足时返回 `ResourceExhausted`，不继续接收该消息。
-    fn acquire(&self, bytes: u32) -> Result<(), tonic::Status> {
+    /// 返回：容量可立即取得时返回由当前消息持有的 permit；零字节返回 `None`；不足时返回
+    /// `ResourceExhausted`，不继续接收该消息。
+    fn acquire(&self, bytes: u32) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
         if bytes == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let permit = Arc::clone(&self.semaphore)
             .try_acquire_many_owned(bytes)
             .map_err(|_| tonic::Status::resource_exhausted("gRPC message budget exhausted"))?;
-        self.held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(permit);
-        Ok(())
+        Ok(Some(permit))
+    }
+}
+
+/// gRPC frame 会计失败的封闭内部分类；方向由 body policy 映射为公开完成结局。
+enum GrpcFrameAccountingFailure {
+    InvalidCompressionFlag,
+    MessageLimit,
+    ByteLimit,
+    InflightBudget,
+}
+
+impl GrpcFrameAccountingFailure {
+    /// 业务作用：把 frame 会计失败映射为稳定客户端 status，不暴露动态 payload 数据。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：格式异常为 `Internal`，累计或进程容量越界为 `ResourceExhausted`。
+    fn status(&self) -> tonic::Status {
+        match self {
+            Self::InvalidCompressionFlag => {
+                tonic::Status::internal("invalid gRPC compression flag")
+            }
+            Self::MessageLimit | Self::ByteLimit => {
+                tonic::Status::resource_exhausted("gRPC stream message boundary exceeded")
+            }
+            Self::InflightBudget => {
+                tonic::Status::resource_exhausted("gRPC message budget exhausted")
+            }
+        }
     }
 }
 
@@ -1377,6 +1613,9 @@ struct GrpcFrameAccounting {
     payload_remaining: u32,
     messages: u64,
     payload_bytes: u64,
+    current_compressed: bool,
+    current_payload_bytes: u32,
+    current_permits: Vec<OwnedSemaphorePermit>,
 }
 
 impl GrpcFrameAccounting {
@@ -1389,8 +1628,11 @@ impl GrpcFrameAccounting {
     /// - `compressed_message_bytes`: 压缩帧在解压或编码期间按单消息硬上限预留的保守字节权重。
     /// - `permits`: 本 RPC 入站与出站共享的进程级字节 permit owner。
     ///
-    /// 返回：所有新 frame 都取得预算时返回本轮是否完成至少一条业务消息；格式、数量、字节或
-    /// 进程容量越界时返回 gRPC status。
+    /// - `release_after_frame`: 已完成消息的 permit 移交位置；调用方在下次 body poll 时释放，确保
+    ///   当前 DATA frame 被下游消费前仍计入在途。
+    ///
+    /// 返回：所有实际读入字节都取得预算时返回本轮是否完成至少一条业务消息；格式、数量、字节或
+    /// 进程容量越界时返回封闭失败分类。
     fn account(
         &mut self,
         data: &[u8],
@@ -1398,7 +1640,8 @@ impl GrpcFrameAccounting {
         max_bytes: u64,
         compressed_message_bytes: u32,
         permits: &MessagePermits,
-    ) -> Result<bool, tonic::Status> {
+        release_after_frame: &mut Vec<OwnedSemaphorePermit>,
+    ) -> Result<bool, GrpcFrameAccountingFailure> {
         let mut offset = 0_usize;
         let mut message_completed = false;
         while offset < data.len() {
@@ -1406,9 +1649,28 @@ impl GrpcFrameAccounting {
                 let consumed = usize::try_from(self.payload_remaining)
                     .unwrap_or(usize::MAX)
                     .min(data.len() - offset);
+                let consumed_u32 = u32::try_from(consumed)
+                    .map_err(|_| GrpcFrameAccountingFailure::InflightBudget)?;
+                if let Some(permit) = permits
+                    .acquire(consumed_u32)
+                    .map_err(|_| GrpcFrameAccountingFailure::InflightBudget)?
+                {
+                    self.current_permits.push(permit);
+                }
                 self.payload_remaining -= consumed as u32;
                 offset += consumed;
                 if self.payload_remaining == 0 {
+                    if self.current_compressed {
+                        let expansion =
+                            compressed_message_bytes.saturating_sub(self.current_payload_bytes);
+                        if let Some(permit) = permits
+                            .acquire(expansion)
+                            .map_err(|_| GrpcFrameAccountingFailure::InflightBudget)?
+                        {
+                            self.current_permits.push(permit);
+                        }
+                    }
+                    release_after_frame.append(&mut self.current_permits);
                     message_completed = true;
                 }
                 continue;
@@ -1423,7 +1685,7 @@ impl GrpcFrameAccounting {
                 continue;
             }
             if self.header[0] > 1 {
-                return Err(tonic::Status::internal("invalid gRPC compression flag"));
+                return Err(GrpcFrameAccountingFailure::InvalidCompressionFlag);
             }
             let payload = u32::from_be_bytes([
                 self.header[1],
@@ -1433,24 +1695,28 @@ impl GrpcFrameAccounting {
             ]);
             let next_messages = self.messages.saturating_add(1);
             let next_bytes = self.payload_bytes.saturating_add(u64::from(payload));
-            if next_messages > max_messages || next_bytes > max_bytes {
-                return Err(tonic::Status::resource_exhausted(
-                    "gRPC stream message boundary exceeded",
-                ));
+            if next_messages > max_messages {
+                return Err(GrpcFrameAccountingFailure::MessageLimit);
             }
-            // 压缩帧的 wire 长度不能代表解压后的驻留内存；按 generated codec 的单消息硬上限
-            // 预留预算，避免小型压缩正文并发膨胀后越过进程级消息容量。
-            let permit_bytes = if self.header[0] == 1 {
-                compressed_message_bytes
-            } else {
-                payload
-            };
-            permits.acquire(permit_bytes)?;
+            if next_bytes > max_bytes {
+                return Err(GrpcFrameAccountingFailure::ByteLimit);
+            }
             self.messages = next_messages;
             self.payload_bytes = next_bytes;
             self.payload_remaining = payload;
+            self.current_compressed = self.header[0] == 1;
+            self.current_payload_bytes = payload;
             self.header_len = 0;
             if payload == 0 {
+                if self.current_compressed {
+                    if let Some(permit) = permits
+                        .acquire(compressed_message_bytes)
+                        .map_err(|_| GrpcFrameAccountingFailure::InflightBudget)?
+                    {
+                        self.current_permits.push(permit);
+                    }
+                }
+                release_after_frame.append(&mut self.current_permits);
                 message_completed = true;
             }
         }
@@ -1469,9 +1735,13 @@ struct ManagedBody<B> {
     deadline: Pin<Box<tokio::time::Sleep>>,
     idle: Option<Pin<Box<tokio::time::Sleep>>>,
     idle_timeout: Option<Duration>,
-    completion: Option<RpcCompletionGuard>,
+    completion_owner: Option<RpcCompletionGuard>,
+    completion_reporter: RpcCompletionReporter,
     completion_outcome: Option<GrpcRpcOutcome>,
-    deadline_source: DeadlineSource,
+    deadline_outcome: GrpcRpcOutcome,
+    message_limit_outcome: GrpcRpcOutcome,
+    byte_limit_outcome: GrpcRpcOutcome,
+    release_after_frame: Vec<OwnedSemaphorePermit>,
     ended: bool,
 }
 
@@ -1483,7 +1753,9 @@ struct ManagedBodyPolicy {
     compressed_message_bytes: u32,
     deadline: tokio::time::Instant,
     idle_timeout: Option<Duration>,
-    deadline_source: DeadlineSource,
+    deadline_outcome: GrpcRpcOutcome,
+    message_limit_outcome: GrpcRpcOutcome,
+    byte_limit_outcome: GrpcRpcOutcome,
 }
 
 impl<B> ManagedBody<B> {
@@ -1493,7 +1765,8 @@ impl<B> ManagedBody<B> {
     /// - `inner`: tonic 即将读取或写出的底层 body。
     /// - `permits`: 请求与响应共同持有的消息字节 permit owner。
     /// - `policy`: 本方向已冻结的 frame 数、字节、压缩权重和时间边界。
-    /// - `completion`: 只由响应 body 持有的唯一 RPC 会计守卫。
+    /// - `completion_reporter`: 请求与响应方向共用的首个终止结局报告句柄。
+    /// - `completion_owner`: 只由响应 body 持有的唯一 RPC 会计 owner。
     /// - `completion_outcome`: response headers 已携带最终 grpc-status 时的预解析结局。
     ///
     /// 返回：尚未轮询底层 body 的受管包装。
@@ -1501,7 +1774,8 @@ impl<B> ManagedBody<B> {
         inner: B,
         permits: Arc<MessagePermits>,
         policy: ManagedBodyPolicy,
-        completion: Option<RpcCompletionGuard>,
+        completion_reporter: RpcCompletionReporter,
+        completion_owner: Option<RpcCompletionGuard>,
         completion_outcome: Option<GrpcRpcOutcome>,
     ) -> Self {
         Self {
@@ -1516,9 +1790,13 @@ impl<B> ManagedBody<B> {
                 .idle_timeout
                 .map(|duration| Box::pin(tokio::time::sleep(duration))),
             idle_timeout: policy.idle_timeout,
-            completion,
+            completion_owner,
+            completion_reporter,
             completion_outcome,
-            deadline_source: policy.deadline_source,
+            deadline_outcome: policy.deadline_outcome,
+            message_limit_outcome: policy.message_limit_outcome,
+            byte_limit_outcome: policy.byte_limit_outcome,
+            release_after_frame: Vec::new(),
             ended: false,
         }
     }
@@ -1528,34 +1806,36 @@ impl<B> ManagedBody<B> {
     /// 参数说明：
     /// - `outcome`: 当前 frame、trailers 或时间边界确定的封闭结局。
     ///
-    /// 返回：无；请求方向没有完成守卫时保持 no-op。
-    fn finish(&mut self, outcome: GrpcRpcOutcome) {
-        if let Some(completion) = &mut self.completion {
-            completion.finish(outcome);
-        }
+    /// 返回：无；请求与响应方向竞争同一个首次结局槽，资源仍只由响应 owner 释放。
+    fn finish(&self, outcome: GrpcRpcOutcome) {
+        self.completion_reporter.finish(outcome);
     }
 
     /// 业务作用：在任一运行边界越界后形成一次终止 frame，并停止继续轮询业务 body。
     ///
     /// 参数说明：
     /// - `status`: 需要返回给 tonic codec 或远端的稳定 gRPC 错误。
+    /// - `outcome`: 与当前方向、deadline 或容量边界一一对应的封闭完成结局。
     ///
-    /// 返回：包含一次错误 frame 的 Ready 结果。
+    /// 返回：响应方向生成标准 `grpc-status` trailers，使客户端观察准确 code；请求方向返回 body error，
+    /// 由 generated server 转成同一 status 响应。
     fn terminate(
         &mut self,
         status: tonic::Status,
+        outcome: GrpcRpcOutcome,
     ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, tonic::Status>>> {
-        let outcome = if status.code() == tonic::Code::DeadlineExceeded {
-            match self.deadline_source {
-                DeadlineSource::Client => GrpcRpcOutcome::ClientDeadlineExceeded,
-                DeadlineSource::Server => GrpcRpcOutcome::ServerTimeout,
-            }
-        } else {
-            GrpcRpcOutcome::Code(status.code())
-        };
         self.finish(outcome);
         self.ended = true;
-        Poll::Ready(Some(Err(status)))
+        if self.completion_owner.is_some() {
+            let mut trailers = tonic::codegen::http::HeaderMap::new();
+            let code =
+                tonic::codegen::http::HeaderValue::from_str(&(status.code() as i32).to_string())
+                    .expect("tonic Code decimal representation is always a valid header value");
+            trailers.insert("grpc-status", code);
+            Poll::Ready(Some(Ok(http_body::Frame::trailers(trailers))))
+        } else {
+            Poll::Ready(Some(Err(status)))
+        }
     }
 }
 
@@ -1579,41 +1859,69 @@ where
         if self.ended {
             return Poll::Ready(None);
         }
+        // 上一 DATA frame 只有在下游再次轮询 body 时才可视为已经消费；在此释放可避免把长流
+        // 累计字节误当在途，同时仍覆盖跨 poll 拼接的半条消息。
+        self.release_after_frame.clear();
         if self.deadline.as_mut().poll(context).is_ready() {
-            return self.terminate(tonic::Status::deadline_exceeded(
-                "gRPC stream duration exceeded",
-            ));
+            let outcome = self.deadline_outcome;
+            return self.terminate(
+                tonic::Status::deadline_exceeded("gRPC stream duration exceeded"),
+                outcome,
+            );
         }
         if self
             .idle
             .as_mut()
             .is_some_and(|idle| idle.as_mut().poll(context).is_ready())
         {
-            return self.terminate(tonic::Status::deadline_exceeded(
-                "gRPC stream idle timeout exceeded",
-            ));
+            let outcome = GrpcRpcOutcome::ServerStreamIdle;
+            return self.terminate(
+                tonic::Status::deadline_exceeded("gRPC stream idle timeout exceeded"),
+                outcome,
+            );
         }
         match Pin::new(&mut self.inner).poll_frame(context) {
             Poll::Ready(Some(Ok(frame))) => {
-                if let Some(trailers) = frame.trailers_ref() {
-                    let outcome = grpc_outcome_from_headers(trailers).unwrap_or(GrpcRpcOutcome::Ok);
-                    self.finish(outcome);
+                if self.completion_owner.is_some() {
+                    if let Some(trailers) = frame.trailers_ref() {
+                        let outcome =
+                            grpc_outcome_from_headers(trailers).unwrap_or(GrpcRpcOutcome::Ok);
+                        self.finish(outcome);
+                    }
                 }
                 if let Some(data) = frame.data_ref() {
                     let max_messages = self.max_messages;
                     let max_bytes = self.max_bytes;
                     let compressed_message_bytes = self.compressed_message_bytes;
                     let permits = Arc::clone(&self.permits);
+                    let mut release_after_frame = std::mem::take(&mut self.release_after_frame);
                     let message_completed = match self.accounting.account(
                         data,
                         max_messages,
                         max_bytes,
                         compressed_message_bytes,
                         &permits,
+                        &mut release_after_frame,
                     ) {
                         Ok(completed) => completed,
-                        Err(status) => return self.terminate(status),
+                        Err(failure) => {
+                            self.release_after_frame = release_after_frame;
+                            let outcome = match failure {
+                                GrpcFrameAccountingFailure::MessageLimit => {
+                                    self.message_limit_outcome
+                                }
+                                GrpcFrameAccountingFailure::ByteLimit => self.byte_limit_outcome,
+                                GrpcFrameAccountingFailure::InvalidCompressionFlag => {
+                                    GrpcRpcOutcome::Code(tonic::Code::Internal)
+                                }
+                                GrpcFrameAccountingFailure::InflightBudget => {
+                                    GrpcRpcOutcome::Code(tonic::Code::ResourceExhausted)
+                                }
+                            };
+                            return self.terminate(failure.status(), outcome);
+                        }
                     };
+                    self.release_after_frame = release_after_frame;
                     if message_completed {
                         let idle_timeout = self.idle_timeout;
                         if let (Some(idle), Some(duration)) = (self.idle.as_mut(), idle_timeout) {
@@ -1624,8 +1932,10 @@ where
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(None) => {
-                let outcome = self.completion_outcome.unwrap_or(GrpcRpcOutcome::Ok);
-                self.finish(outcome);
+                if self.completion_owner.is_some() {
+                    let outcome = self.completion_outcome.unwrap_or(GrpcRpcOutcome::Ok);
+                    self.finish(outcome);
+                }
                 self.ended = true;
                 Poll::Ready(None)
             }
@@ -1654,6 +1964,21 @@ where
     /// 返回：不再可能产生 frame 时为 `true`。
     fn is_end_stream(&self) -> bool {
         self.ended || self.inner.is_end_stream()
+    }
+}
+
+impl<B> Drop for ManagedBody<B> {
+    /// 业务作用：响应 body 未被轮询但 headers 已含最终 status 时仍提交该结局，再由 owner 完成唯一结算。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；没有最终 headers 的提前析构仍由 owner 归类为 `cancelled`。
+    fn drop(&mut self) {
+        if self.completion_owner.is_some() {
+            if let Some(outcome) = self.completion_outcome {
+                self.completion_reporter.finish(outcome);
+            }
+        }
     }
 }
 
@@ -1781,7 +2106,9 @@ where
             Ok(permit) => permit,
             Err(_) => {
                 if let Some(method) = descriptor {
-                    self.policy.rpc_metrics.reject(method.full_name);
+                    self.policy
+                        .rpc_metrics
+                        .reject(method.full_name, GrpcRpcRejectionReason::ProcessConcurrency);
                 }
                 return Box::pin(async {
                     Ok(tonic::Status::resource_exhausted("gRPC RPC budget exhausted").into_http())
@@ -1794,10 +2121,13 @@ where
             .transpose()
         {
             Ok(permit) => permit.flatten(),
-            Err(status) => {
+            Err(admission) => {
                 if let Some(method) = descriptor {
-                    self.policy.rpc_metrics.reject(method.full_name);
+                    self.policy
+                        .rpc_metrics
+                        .reject(method.full_name, admission.reason());
                 }
+                let status = admission.status();
                 return Box::pin(async move { Ok(status.into_http()) });
             }
         };
@@ -1830,8 +2160,14 @@ where
             self.policy.max_sent_stream_bytes.min(u64::from(u32::MAX))
         };
         let idle_timeout = streaming.then_some(self.policy.stream_idle_timeout);
+        let deadline_outcome = match (deadline_source, streaming) {
+            (DeadlineSource::Client, _) => GrpcRpcOutcome::ClientDeadlineExceeded,
+            (DeadlineSource::Server, true) => GrpcRpcOutcome::ServerStreamDuration,
+            (DeadlineSource::Server, false) => GrpcRpcOutcome::ServerTimeout,
+        };
         let max_encoded_message_bytes = self.policy.message_limits.max_encoding_bytes as u32;
         let permits = Arc::new(MessagePermits::new(Arc::clone(&self.policy.message_slots)));
+        let request_completion = completion.reporter();
         let request = request.map(|body| {
             ManagedBody::new(
                 body,
@@ -1842,15 +2178,18 @@ where
                     compressed_message_bytes: self.policy.message_limits.max_decoding_bytes as u32,
                     deadline,
                     idle_timeout,
-                    deadline_source,
+                    deadline_outcome,
+                    message_limit_outcome: GrpcRpcOutcome::StreamReceivedMessages,
+                    byte_limit_outcome: GrpcRpcOutcome::StreamReceivedBytes,
                 },
+                request_completion,
                 None,
                 None,
             )
         });
         let future = self.inner.call(request);
         Box::pin(async move {
-            let mut completion = completion;
+            let completion = completion;
             let mut response = match tokio::time::timeout_at(deadline, future).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(never)) => match never {},
@@ -1867,6 +2206,7 @@ where
             };
             let completion_outcome = grpc_outcome_from_headers(response.headers());
             let body = std::mem::take(response.body_mut());
+            let response_completion = completion.reporter();
             *response.body_mut() = tonic::body::Body::new(ManagedBody::new(
                 body,
                 permits,
@@ -1876,8 +2216,11 @@ where
                     compressed_message_bytes: max_encoded_message_bytes,
                     deadline,
                     idle_timeout,
-                    deadline_source,
+                    deadline_outcome,
+                    message_limit_outcome: GrpcRpcOutcome::StreamSentMessages,
+                    byte_limit_outcome: GrpcRpcOutcome::StreamSentBytes,
                 },
+                response_completion,
                 Some(completion),
                 completion_outcome,
             ));
@@ -1959,7 +2302,7 @@ pub struct GrpcServerConfig {
     pub drain_timeout: Duration,
     /// 进程内受理的 RPC 总并发上限。
     pub max_inflight_rpcs: usize,
-    /// 进程内解码请求和待编码响应共同使用的字节 permit 上限。
+    /// 进程内实际读入请求、压缩展开权重和待发送响应共同使用的在途字节 permit 上限。
     pub max_inflight_message_bytes: usize,
     /// 框架受管连接、stream、RPC 与消息状态的会计预算。
     pub managed_memory_budget_bytes: usize,
@@ -2349,6 +2692,36 @@ const REFLECTION_METHODS: [GrpcMethodDescriptor; 1] = [GrpcMethodDescriptor {
     rpc_type: GrpcMethodType::BidirectionalStreaming,
 }];
 
+/// 业务作用：把 generated descriptor 中的 service 定义收敛到 sealed registry allowlist，同时保留消息与依赖。
+///
+/// 参数说明：
+/// - `encoded`: codegen 产出的完整 descriptor set。
+/// - `allowed_services`: 当前 listener 实际登记的编译期完整 service name 集合。
+///
+/// 返回：只含 allowlist service 定义的 owned descriptor set；输入无法解码时拒绝开放 reflection。
+fn reflection_descriptor_set(
+    encoded: &'static [u8],
+    allowed_services: &BTreeSet<&'static str>,
+) -> Result<prost_types::FileDescriptorSet, GrpcServerError> {
+    let mut descriptor = prost_types::FileDescriptorSet::decode(encoded)
+        .map_err(|_| GrpcServerError::InvalidServiceMetadata)?;
+    for file in &mut descriptor.file {
+        let package = file.package.as_deref().unwrap_or_default();
+        file.service.retain(|service| {
+            let Some(name) = service.name.as_deref() else {
+                return false;
+            };
+            let full_name = if package.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{package}.{name}")
+            };
+            allowed_services.contains(full_name.as_str())
+        });
+    }
+    Ok(descriptor)
+}
+
 impl Default for ServerPlan {
     /// 业务作用：创建自动 health、默认关闭 reflection 且要求至少一个业务 service 的装配计划。
     ///
@@ -2417,9 +2790,9 @@ impl ServerPlan {
     /// 业务作用：显式控制是否开放 server reflection；默认关闭以避免暴露协议目录。
     ///
     /// 参数说明：
-    /// - `enabled`: 是否把受管 descriptor 交给 reflection v1 service。
+    /// - `enabled`: 是否把 sealed registry allowlist 内的受管 descriptor 交给 reflection v1 service。
     ///
-    /// 返回：更新 reflection 选择后的计划。
+    /// 返回：更新 reflection 选择后的计划；开启后业务 service full name 自动取自 generated registry。
     pub fn reflection(mut self, enabled: bool) -> Self {
         self.reflection_enabled = enabled;
         self
@@ -2461,6 +2834,9 @@ impl ServerPlan {
         if !self.registry.is_empty() && self.health_only {
             return Err(GrpcServerError::InvalidConfiguration);
         }
+        if self.health_only && self.reflection_enabled {
+            return Err(GrpcServerError::InvalidConfiguration);
+        }
 
         let services = self.registry.into_services();
         let service_names = services
@@ -2491,7 +2867,7 @@ impl ServerPlan {
         let (reporter, health_service) = tonic_health::server::health_reporter();
         let health = ManagedHealth {
             reporter,
-            service_names,
+            service_names: service_names.clone(),
         };
         // listener 尚未绑定时先发布不可服务，避免 health watch 在路由开放前观察到 Serving。
         health.mark_not_serving().await;
@@ -2510,12 +2886,21 @@ impl ServerPlan {
             service.add_to_routes(&mut routes, limits, policy.clone());
         }
         if self.reflection_enabled {
+            // sealed registry 的 generated service name 是唯一 allowlist；业务无需再手工登记 descriptor，
+            // descriptor 内未实际装配的相邻 service 会在 bind 前移除，不能通过 symbol 查询旁路暴露。
+            let allowed_services = service_names.iter().copied().collect::<BTreeSet<_>>();
             let mut reflection = tonic_reflection::server::Builder::configure()
                 .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
                 .with_service_name("grpc.health.v1.Health")
                 .with_service_name("grpc.reflection.v1.ServerReflection");
+            for service_name in &service_names {
+                reflection = reflection.with_service_name(*service_name);
+            }
             for descriptor in descriptors {
-                reflection = reflection.register_encoded_file_descriptor_set(descriptor);
+                reflection = reflection.register_file_descriptor_set(reflection_descriptor_set(
+                    descriptor,
+                    &allowed_services,
+                )?);
             }
             let reflection = reflection
                 .build_v1()
@@ -2740,12 +3125,9 @@ fn increment_saturating(counter: &mut u64) {
 
 const HTTP2_CLIENT_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const HTTP2_FRAME_HEADER_BYTES: usize = 9;
-const HTTP2_FRAME_HEADERS: u8 = 0x1;
 const HTTP2_FRAME_RST_STREAM: u8 = 0x3;
 const HTTP2_FRAME_SETTINGS: u8 = 0x4;
 const HTTP2_FRAME_PING: u8 = 0x6;
-const HTTP2_FRAME_CONTINUATION: u8 = 0x9;
-const HTTP2_FLAG_END_HEADERS: u8 = 0x4;
 
 /// 入站 HTTP/2 frame 的有界解析状态，只识别建立边界与控制帧类型，不解码 HPACK 或业务正文。
 struct Http2InboundGuard {
@@ -2754,15 +3136,10 @@ struct Http2InboundGuard {
     frame_header_read: usize,
     frame_payload_remaining: usize,
     current_frame_type: u8,
-    current_frame_flags: u8,
-    current_frame_stream_id: u32,
-    header_block_stream: Option<u32>,
     first_frame: bool,
     handshake_complete: bool,
-    first_request_seen: bool,
     handshake_deadline: Pin<Box<tokio::time::Sleep>>,
-    first_request_timeout: Duration,
-    first_request_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    activity: Arc<ConnectionActivity>,
     max_frame_size: u32,
     control_frames_per_second: u32,
     control_frames_burst: u32,
@@ -2777,26 +3154,27 @@ impl Http2InboundGuard {
     ///
     /// 参数说明：
     /// - `config`: listener 已冻结并由全部连接共享的协议运行配置。
+    /// - `accepted_at`: socket 进入 listener 所有权的单调时刻。
+    /// - `activity`: connection driver 与请求准入共用的协议建立、首请求和活动 RPC 状态。
     ///
     /// 返回：尚未读入 client preface 的解析状态。
-    fn new(config: &ConnectionRuntimeConfig, accepted_at: tokio::time::Instant) -> Self {
+    fn new(
+        config: &ConnectionRuntimeConfig,
+        accepted_at: tokio::time::Instant,
+        activity: Arc<ConnectionActivity>,
+    ) -> Self {
         Self {
             preface_read: 0,
             frame_header: [0; HTTP2_FRAME_HEADER_BYTES],
             frame_header_read: 0,
             frame_payload_remaining: 0,
             current_frame_type: 0,
-            current_frame_flags: 0,
-            current_frame_stream_id: 0,
-            header_block_stream: None,
             first_frame: true,
             handshake_complete: false,
-            first_request_seen: false,
             handshake_deadline: Box::pin(tokio::time::sleep_until(
                 accepted_at + config.handshake_timeout,
             )),
-            first_request_timeout: config.first_request_timeout,
-            first_request_deadline: None,
+            activity,
             max_frame_size: config.max_frame_size,
             control_frames_per_second: config.control_frames_per_second,
             control_frames_burst: config.control_frames_burst,
@@ -2807,28 +3185,18 @@ impl Http2InboundGuard {
         }
     }
 
-    /// 业务作用：在继续读取网络数据前强制执行握手和首请求预算，防止零字节连接长期占槽。
+    /// 业务作用：在继续读取网络数据前强制执行 HTTP/2 建立预算，防止零字节连接长期占槽。
     ///
     /// 参数说明：
     /// - `context`: 连接读取任务的异步唤醒上下文。
     ///
-    /// 返回：预算仍有效时成功；对应计时器到期时返回连接级超时错误。
+    /// 返回：HTTP/2 尚在建立预算内时成功；preface/SETTINGS 超时时返回连接级错误。首请求预算由
+    /// connection driver 在 HTTP/2 建立后以 GOAWAY 路径执行。
     fn poll_deadlines(&mut self, context: &mut Context<'_>) -> io::Result<()> {
         if !self.handshake_complete && self.handshake_deadline.as_mut().poll(context).is_ready() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "gRPC HTTP/2 handshake timed out",
-            ));
-        }
-        if !self.first_request_seen
-            && self
-                .first_request_deadline
-                .as_mut()
-                .is_some_and(|deadline| deadline.as_mut().poll(context).is_ready())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "gRPC first request timed out",
             ));
         }
         Ok(())
@@ -2911,8 +3279,6 @@ impl Http2InboundGuard {
                 self.admit_control_frame()?;
             }
             self.current_frame_type = frame_type;
-            self.current_frame_flags = flags;
-            self.current_frame_stream_id = stream_id;
             self.frame_payload_remaining = payload_len;
             self.frame_header_read = 0;
             if payload_len == 0 {
@@ -2965,34 +3331,15 @@ impl Http2InboundGuard {
         if self.first_frame {
             self.first_frame = false;
             self.handshake_complete = true;
-            self.first_request_deadline =
-                Some(Box::pin(tokio::time::sleep(self.first_request_timeout)));
-        }
-        if !self.first_request_seen {
-            if self.current_frame_type == HTTP2_FRAME_HEADERS && self.current_frame_stream_id != 0 {
-                if self.current_frame_flags & HTTP2_FLAG_END_HEADERS != 0 {
-                    self.first_request_seen = true;
-                    self.first_request_deadline = None;
-                } else {
-                    self.header_block_stream = Some(self.current_frame_stream_id);
-                }
-            } else if self.current_frame_type == HTTP2_FRAME_CONTINUATION
-                && self.header_block_stream == Some(self.current_frame_stream_id)
-                && self.current_frame_flags & HTTP2_FLAG_END_HEADERS != 0
-            {
-                self.first_request_seen = true;
-                self.first_request_deadline = None;
-                self.header_block_stream = None;
-            }
+            self.activity.mark_http2_established();
         }
         self.current_frame_type = 0;
-        self.current_frame_flags = 0;
-        self.current_frame_stream_id = 0;
     }
 }
 
 /// 单条 HTTP/2 连接的首请求与活动 RPC 状态；driver 与 service wrapper 共用同一事实。
 struct ConnectionActivity {
+    http2_established: AtomicBool,
     first_request_seen: AtomicBool,
     active_rpcs: AtomicUsize,
     changed: Notify,
@@ -3006,9 +3353,51 @@ impl ConnectionActivity {
     /// 返回：可由每连接 service 和 driver 共享的空状态。
     fn new() -> Self {
         Self {
+            http2_established: AtomicBool::new(false),
             first_request_seen: AtomicBool::new(false),
             active_rpcs: AtomicUsize::new(0),
             changed: Notify::new(),
+        }
+    }
+
+    /// 业务作用：在 client preface 与首个 SETTINGS 完整通过后发布 HTTP/2 已建立事实，启动首请求预算。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；重复发布保持幂等并唤醒 connection driver。
+    fn mark_http2_established(&self) {
+        self.http2_established.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    /// 业务作用：从 HTTP/2 建立时刻等待首个业务请求，超时后让 driver 经 GOAWAY 驱逐连接。
+    ///
+    /// 参数说明：
+    /// - `timeout`: HTTP/2 建立后允许客户端发送首个业务 HEADERS 的最长时长。
+    ///
+    /// 返回：预算耗尽且仍没有请求时完成；首请求到达后永久等待，不误触后续 idle 路径。
+    async fn wait_for_first_request_timeout(&self, timeout: Duration) {
+        loop {
+            let changed = self.changed.notified();
+            if self.http2_established.load(Ordering::Acquire) {
+                break;
+            }
+            changed.await;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.first_request_seen.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            let changed = self.changed.notified();
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    if !self.first_request_seen.load(Ordering::Acquire) {
+                        return;
+                    }
+                }
+                _ = changed => {}
+            }
         }
     }
 
@@ -3142,6 +3531,7 @@ struct ManagedConnectionService {
     routes: tonic::service::Routes,
     connection_slots: Arc<Semaphore>,
     activity: Arc<ConnectionActivity>,
+    rpc_metrics: Arc<RpcMetrics>,
     peer_addr: SocketAddr,
     peer_identity: Option<PeerIdentity>,
 }
@@ -3162,6 +3552,10 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ManagedC
         let permit = match Arc::clone(&self.connection_slots).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                self.rpc_metrics.reject_path(
+                    request.uri().path(),
+                    GrpcRpcRejectionReason::ConnectionConcurrency,
+                );
                 return Box::pin(async {
                     let response =
                         tonic::Status::resource_exhausted("gRPC connection concurrency exhausted")
@@ -3226,6 +3620,7 @@ impl Drop for ConnectionOwnership {
 struct LimitedConnection {
     stream: ConnectionIo,
     ownership: ConnectionOwnership,
+    activity: Arc<ConnectionActivity>,
     protocol: Http2InboundGuard,
 }
 
@@ -3236,7 +3631,7 @@ impl LimitedConnection {
     /// - `stream`: listener 已接受的 TCP 连接。
     /// - `permit`: 该连接独占的进程级容量凭证。
     /// - `metrics`: 观察面使用的受理与在途连接状态。
-    /// - `runtime`: TCP、握手、首请求与控制帧的最终运行边界。
+    /// - `runtime`: TCP、HTTP/2 建立与控制帧的最终运行边界。
     ///
     /// 返回：直到 I/O 析构才释放凭证的连接包装。
     async fn new(
@@ -3282,10 +3677,12 @@ impl LimitedConnection {
             (ConnectionIo::Plain(stream), None)
         };
         ownership.peer_identity = peer_identity;
+        let activity = Arc::new(ConnectionActivity::new());
         Ok(Self {
             stream,
             ownership,
-            protocol: Http2InboundGuard::new(runtime, accepted_at),
+            protocol: Http2InboundGuard::new(runtime, accepted_at, Arc::clone(&activity)),
+            activity,
         })
     }
 }
@@ -3520,13 +3917,14 @@ fn jittered_connection_age(age: Duration, peer: SocketAddr) -> Duration {
     )
 }
 
-/// 业务作用：用受管 hyper HTTP/2 driver 执行一条连接，并在停机、空闲或年龄边界触发两阶段 GOAWAY。
+/// 业务作用：用受管 hyper HTTP/2 driver 执行一条连接，并在停机、首请求、空闲或年龄边界触发两阶段 GOAWAY。
 ///
 /// 参数说明：
 /// - `connection`: 已应用 TCP、握手和控制帧门禁且持有容量 permit 的 I/O。
 /// - `routes`: Prepare 封口并自动包含 health/reflection 的唯一路由表。
 /// - `config`: 已校验且在该连接生命周期内冻结的 transport 配置。
 /// - `shutdown`: listener owner 的全局停机信号。
+/// - `rpc_metrics`: sealed 方法目录与拒绝会计；连接层容量拒绝也必须进入同一固定键空间。
 ///
 /// 返回：连接正常结束或受管驱逐完成时成功；hyper driver 无法建立/维持协议时返回连接级失败。
 async fn drive_managed_connection(
@@ -3534,13 +3932,15 @@ async fn drive_managed_connection(
     routes: tonic::service::Routes,
     config: GrpcServerConfig,
     shutdown: CancellationToken,
+    rpc_metrics: Arc<RpcMetrics>,
 ) -> Result<(), GrpcServerError> {
     let peer_addr = connection.ownership.peer_addr;
-    let activity = Arc::new(ConnectionActivity::new());
+    let activity = Arc::clone(&connection.activity);
     let service = ManagedConnectionService {
         routes,
         connection_slots: Arc::new(Semaphore::new(config.concurrency_limit_per_connection)),
         activity: Arc::clone(&activity),
+        rpc_metrics,
         peer_addr,
         peer_identity: connection.ownership.peer_identity.clone(),
     };
@@ -3565,6 +3965,8 @@ async fn drive_managed_connection(
     tokio::pin!(connection);
     let idle = activity.wait_until_idle(config.idle_connection_timeout);
     tokio::pin!(idle);
+    let first_request = activity.wait_for_first_request_timeout(config.first_request_timeout);
+    tokio::pin!(first_request);
     let max_age = async {
         match config.max_connection_age {
             Some(age) => tokio::time::sleep(jittered_connection_age(age, peer_addr)).await,
@@ -3573,19 +3975,26 @@ async fn drive_managed_connection(
     };
     tokio::pin!(max_age);
 
-    tokio::select! {
+    let shutdown_drain = tokio::select! {
         result = &mut connection => {
             return result.map_err(|_| GrpcServerError::ServeFailed);
         }
-        _ = shutdown.cancelled() => {}
-        _ = &mut idle => {}
-        _ = &mut max_age => {}
-    }
+        _ = shutdown.cancelled() => true,
+        _ = &mut first_request => false,
+        _ = &mut idle => false,
+        _ = &mut max_age => false,
+    };
 
     // HTTP/2 已建立后不能直接关闭 socket。hyper/h2 在这里先发初始 GOAWAY 与 shutdown PING，
-    // 再按已处理 stream high-water mark 发最终 GOAWAY；总 grace 到期后才由 drop 强制收口。
+    // 再按已处理 stream high-water mark 发最终 GOAWAY。停机必须把整个 listener drain 预算交给
+    // 已接纳 RPC；只有首请求、空闲和连接年龄驱逐使用较短的逐连接 grace。
     connection.as_mut().graceful_shutdown();
-    match tokio::time::timeout(config.connection_eviction_grace, &mut connection).await {
+    let grace = if shutdown_drain {
+        config.drain_timeout
+    } else {
+        config.connection_eviction_grace
+    };
+    match tokio::time::timeout(grace, &mut connection).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => Err(GrpcServerError::ServeFailed),
         Err(_) => Ok(()),
@@ -3633,6 +4042,7 @@ impl GrpcServerHandle {
         let metrics = Arc::new(StdMutex::new(GrpcServerMetrics::default()));
         let task_metrics = Arc::clone(&metrics);
         let serve_metrics = Arc::clone(&metrics);
+        let task_rpc_metrics = Arc::clone(&rpc_metrics);
         let connection_slots = Arc::new(Semaphore::new(config.max_connections));
         let drain_timeout = config.drain_timeout;
         let join = tokio::spawn(async move {
@@ -3711,12 +4121,14 @@ impl GrpcServerHandle {
                 let connection_routes = routes.clone();
                 let connection_config = config.clone();
                 let connection_shutdown = task_shutdown.clone();
+                let connection_rpc_metrics = Arc::clone(&task_rpc_metrics);
                 connections.spawn(async move {
                     drive_managed_connection(
                         connection,
                         connection_routes,
                         connection_config,
                         connection_shutdown,
+                        connection_rpc_metrics,
                     )
                     .await
                 });
@@ -3916,20 +4328,11 @@ impl Drop for GrpcServerHandle {
 
 /// 在业务模块内包含统一 codegen 生成的 Rust 类型与同一次构建产生的 descriptor set。
 ///
-/// package 必须与 `.proto` 的 `package` 完整一致；生成文件只从 Cargo `OUT_DIR` 读取。
+/// package 必须与 `.proto` 的入口 `package` 完整一致；生成文件只从 Cargo `OUT_DIR` 读取。宏包含
+/// codegen 自动建立的规范 package 模块树，因此跨 package import 与入口类型保持同一 Rust 身份。
 #[macro_export]
 macro_rules! include_proto {
     ($package:literal) => {
-        /// 当前 protobuf package 的完整 descriptor set。
-        pub const FILE_DESCRIPTOR_SET: &[u8] =
-            include_bytes!(concat!(env!("OUT_DIR"), "/", $package, ".descriptor.bin"));
-        /// 当前 protobuf package descriptor set 的小写 SHA-256 摘要。
-        pub const FILE_DESCRIPTOR_SHA256: &str = include_str!(concat!(
-            env!("OUT_DIR"),
-            "/",
-            $package,
-            ".descriptor.sha256"
-        ));
         include!(concat!(env!("OUT_DIR"), "/", $package, ".rs"));
     };
 }

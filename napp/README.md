@@ -2,8 +2,28 @@
 
 `napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、组件启动/停机编排、任务监督、信号处理与退出码。业务项目**不要直接依赖本 crate**，经 `nasa` 门面开启 `application` feature 使用；使用入口与生命周期约束见仓库的快速开始和运维指南。
 
-其中的业务 initializer 是 Ready 前的初始化屏障：migration 与出站依赖完成后统一执行静态宏和运行时
-登记项的 `before -> initialize -> after` 三轮，全部成功前不开放监听、消费或服务发现。
+## 核心价值与生命周期架构
+
+业务入口只声明组件并在 UserHook 提交不可推断的业务计划；`napp` 负责把配置、migration、出站资源、
+initializer、listener、消费循环、readiness、关键任务和停机编排成一个唯一所有者。业务不需要为每个
+组件另写启动顺序、信号处理、后台任务脱离检测或 shutdown glue。
+
+```text
+配置装载 → Start 出站资源 → UserHook 提交计划 → Prepare / initializer 屏障
+         → Ready 绑定入站与发布发现 → Running 监督关键任务
+         → NotReady / 摘流 → 反向有界排空 → Stopped
+```
+
+initializer 是 Ready 前的初始化屏障：migration 与出站依赖完成后统一执行静态宏和运行时登记项的
+`before -> initialize -> after` 三轮。任何阶段失败都不会开放监听、消费或服务发现，已经启动的资源按
+active stack 反向释放。Application 只拥有业务显式声明的组件，不猜测外部 transport，也不替业务决定
+事务边界、路由、鉴权主体、容量值或重试/DLT 策略。
+
+gRPC 入站同样遵守这个模型：业务登记 generated service 或提交 Saga gRPC handler，Application 在
+同一个 sealed registry 中完成 Router、TLS、health、reflection、容量、指标、listener 和 drain，不会
+产生第二个 tonic Router 或第二套生命周期。
+
+## 最小入口
 
 ```toml
 nasa = { version = "2", features = [
@@ -150,10 +170,13 @@ Saga 之前建立、在其之后释放;Ready 前用真实客户端统一探测 P
 消息留 PEL 交重启后重领。按冻结 (stream, group) 导出 `napp_saga_stream_*` 低基数指标
 (`Application::saga_stream_metrics_prometheus`),其中 `deleted_pending_total` 非零必须告警。
 
-gRPC request/response connector 通过门面 `saga-grpc` 启用，只提供封闭收据裁决，不会隐式声明
-listener。业务显式声明 `"grpc"` 组件并登记 generated service 后，Application 在 initializer 之后
-自动装配、绑定和监督 listener，并在全局预算内停止准入和排空。mTLS/签名 principal 的业务信任映射
-仍由 service 完成；回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按确定失败消耗死信预算。
+Saga gRPC command/result transport 通过门面 `saga-grpc` 启用；该 feature 已包含 gRPC 类型门面，但
+不会因只使用出站 client 而隐式声明 listener。入站宿主显式声明 `"grpc"`，再由
+`SagaApplicationPlan::with_grpc_command_service` 提交 `#[saga]` Service 与 mTLS leaf 指纹；Application
+从单参与方计划冻结的信任投影生成 handler。Orchestrator 使用 `with_grpc_result_service`，只声明无法从
+多参与方定义推断的 producer/principal 绑定。Application 自动把框架 generated service 登记到唯一
+gRPC registry。业务不创建 `Arc` handler、generated server、第二个 Router、listener 或身份解析器。
+回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按确定失败消耗死信预算。
 
 为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
 `#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
@@ -238,7 +261,7 @@ Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确
 永不删除；已投递行达到最小保留期才可归档/删除；死信默认保留，只有独立批准标识、最小年龄与
 归档收据齐备才逐批清理。清理使用与 dispatcher 分离的 session-bound retention claim（同库同刻
 仅一个清理 owner，竞争即让路），按主键集合逐批独立提交删除，受批大小与单轮时间预算约束；
-若启用归档，先按 `event_id` 幂等写入并取得可复验收据才删源行，回包不确定用收据重查恢复。
+若启用归档，先按 `event_id` 幂等写入并取得可重新验证的收据才删源行，回包不确定用收据重查恢复。
 清理停摆只体现在 `napp_outbox_retention_*` 指标与"最后成功时刻"上（严格治理 degraded 信号），
 绝不反向停止 dispatcher 投递。删除 `COMMIT` 的应答不确定会单独增加
 `napp_outbox_retention_commit_uncertain_total`，不虚增已确认删除数，也不刷新最近成功时刻；下一轮
@@ -390,10 +413,21 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 基础设施 listener。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。
 
 listener 成功发布后，Application 指标目录提供 `napp_grpc_serving`、连接/TLS 事实，以及由 sealed
-descriptor 固定 label 的 active、started、rejected、completed RPC 指标。持续 accept 失败会先把
+descriptor 固定 label 的 active、started、rejected、completed RPC 指标。`rejected` 以封闭 `reason`
+区分连接并发、进程并发、方法并发、方法速率和身份门禁；stream idle、总时长与双方向累计上限也使用
+各自完成结局，不与 unary timeout 或通用 `ResourceExhausted` 混合。持续 accept 失败会先把
 `grpc:listener` 摘为 NotReady，serve task 仍持有 socket、有界退避并做本机恢复探测；成功重新接流后
 恢复 Ready。serve 所有权丢失或进入 `Failed` 会作为关键任务失败触发统一停机，不能仅靠业务 health
 service 的状态替代 listener readiness。
+
+reflection 默认关闭；显式开启时由 sealed generated service registry 自动形成 full-name allowlist，
+业务不配置 reflection builder 或重复登记 descriptor。`ListServices`、symbol 查询和实际 Router 使用同一
+service 集合；`health_only + reflection` 在绑定端口前拒绝。停机连接使用整个 gRPC drain 预算，首请求、
+空闲与连接年龄驱逐才使用较短的逐连接 grace。
+
+Prepare 会按实际业务方法、自动 health/reflection 方法、五种拒绝原因和 27 种完成结局计算最坏公开
+序列数。gRPC 子预算为 20,000，并通过 `nametrics-core` 与全进程 100,000 序列预算原子提交；任一预算
+不足时在 bind 前失败，descriptor、指标源和预留计数都不产生半份状态。
 
 非 loopback 明文默认拒绝；TLS/mTLS 只从 `secret://` locator 读取同代材料，证书与密钥在 bind 前
 复验。`methods.<完整RPC路径>` 可要求验证过的 `PeerIdentity`，并设置方法并发与 token bucket；策略

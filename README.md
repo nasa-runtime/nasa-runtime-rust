@@ -22,7 +22,8 @@ Inbox + CAS/journal + timer        Inbox + gate + business fact
 
 流程定义摘要、稳定 `effect_id`、取消/裁决屏障、冻结补偿计划和 timer fencing 共同阻止定义漂移、重复
 副作用、未知结果误补偿与失权副本继续写入。Kafka 和 Redis Streams 提供受管消费接入；HTTP 可复用认证
-构件；gRPC 提供封闭收据 connector。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离，
+构件；gRPC 提供框架 generated command/result service、mTLS 身份绑定与封闭收据。Saga 不提供跨服务
+ACID、物理 exactly-once 或并发隔离，
 业务资源竞争仍需唯一键、条件更新或语义锁。接入入口见 [Saga 快速开始](docs/quickstart.md#saga-最小接线)，
 完整架构、迁移、运维与恢复边界见 [Saga 生产运行指南](docs/saga-production.md)。
 
@@ -197,7 +198,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
 | Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
 | Saga Redis Streams command/result 托管 | `saga-redis-stream` | `SagaRedisStreamPublisher`、`SagaRedisStreamCommandConsumer`、`SagaRedisStreamResultConsumer` |
-| Saga gRPC 收据 connector | `saga-grpc` | `SagaGrpcCommandServer`、`SagaGrpcResultServer`、`SagaGrpcReceipt` |
+| Saga gRPC command/result transport | `saga-grpc` | `SagaApplicationPlan::with_grpc_command_service` / `with_grpc_result_service`、generated client、mTLS 身份绑定与封闭收据 |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |

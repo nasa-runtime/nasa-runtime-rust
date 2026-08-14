@@ -8,12 +8,13 @@ name = "nametrics-core"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 进程级 provider-neutral 指标核心:descriptor catalog + 冲突审计 + 进程内记录 + 结构化/Prometheus 导出(不依赖 OTel/Prometheus/Axum/napp)"
+description = "Provider-neutral metric catalog with atomic series budgets and shared structured/Prometheus snapshots"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["metrics", "prometheus", "observability", "telemetry", "monitoring"]
+categories = ["development-tools::profiling"]
 
 [lib]
 name = "nametrics_core"

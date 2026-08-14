@@ -95,7 +95,13 @@ Ready 前校验定义、descriptor、历史非终态实例、数据库结构、�
 | Kafka | `saga-kafka` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
 | Redis Streams | `saga-redis-stream` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
 | HTTP | `saga-runtime` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
-| gRPC | `saga-grpc` + `grpc` | Application `"grpc"` 或独立 `ServerPlan` | generated service registry、mTLS、deadline、资源上限与 drain |
+| gRPC | `saga-grpc`（已包含 `grpc` 类型门面） | 入站增加 Application `"grpc"`；纯出站 client 不声明组件 | 框架 generated service/client、mTLS principal、deadline、资源上限、封闭收据与 drain |
+
+gRPC 入站不手工创建 tonic Router、generated server 或 `Arc` handler。单参与方在计划上调用
+`with_grpc_command_service(service, peer_principal)`，Application 从 Participant runtime 的冻结信任投影
+取得 producer；Orchestrator 调用 `with_grpc_result_service(producer, peer_principal)`。框架 service 自动
+进入唯一受管 listener。纯出站发布端使用 `nasa::saga::grpc_proto` 的 generated client，并自行拥有
+channel、deadline、重试和 Outbox 收据裁决。
 
 ## 配置
 

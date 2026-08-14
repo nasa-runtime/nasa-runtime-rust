@@ -5,17 +5,142 @@
 //! 策略裁决行的去留。deadline 超时、连接中断或回包丢失都按**结果不确定**处理:行保留在
 //! Outbox,以同 `event_id` 重投,由参与方 Inbox 幂等吸收。
 //!
-//! 本模块不绑定具体 tonic generated service:业务的 generated service 把已鉴权的请求
-//! 字节与显式 metadata(principal/trace)交给这里的裁决器,并把封闭收据映射回自己的
-//! 响应类型;transport 上限与 drain 由 `nagrpc` 的 listener 配置承担。
+//! 本模块提供框架自带的 generated command/result service 与底层裁决器。常规 Application 宿主只
+//! 提交 `#[saga]` Service 和不可推断的 mTLS leaf 授权映射；`napp` 从既有 Saga 计划生成 handler，
+//! 协议、身份解析与 service 登记由框架完成，transport 上限与 drain 统一由 `nagrpc` listener 承担。
+//! 多参与方高级路由和独立宿主仍可直接复用裁决器或 generated client/server。
 
+use std::fmt;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nasaga_core::ServiceIdentity;
 use natelemetry::TraceContext;
 
 use crate::transport_shared::{SagaCommandHandler, SagaResultHandler};
 use crate::{HandleOutcome, ParticipantHandled, SagaCommandEnvelope, SagaResultEnvelope};
+
+/// 框架统一生成的 Saga command/result gRPC 协议、client、server 与 descriptor。
+pub mod proto {
+    nagrpc::include_proto!("nasa.saga.transport.v1");
+}
+
+/// mTLS leaf 指纹到 Saga 逻辑 producer 的绑定配置错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SagaGrpcBindingError {
+    /// principal 不是 nagrpc 发布的 `sha256:<64 lowercase hex>` 身份。
+    InvalidPeerPrincipal,
+}
+
+impl fmt::Display for SagaGrpcBindingError {
+    /// 业务作用：返回不包含证书、principal 或业务身份内容的稳定配置错误。
+    ///
+    /// 参数说明：
+    /// - `formatter`: 接收稳定错误文本的格式化目标。
+    ///
+    /// 返回：文本写入成功时完成，否则透传格式化失败。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Saga gRPC peer principal is invalid")
+    }
+}
+
+impl std::error::Error for SagaGrpcBindingError {}
+
+/// 已验证 mTLS leaf 指纹与 Saga 逻辑 producer 的启动期冻结绑定。
+#[derive(Clone)]
+pub struct SagaGrpcPeerBinding {
+    peer_principal: Arc<str>,
+    producer: ServiceIdentity,
+}
+
+impl SagaGrpcPeerBinding {
+    /// 业务作用：建立不可由 metadata 自报绕过的 mTLS principal 到 Saga producer 映射。
+    ///
+    /// 参数说明：
+    /// - `peer_principal`: nagrpc 从已验证 client leaf certificate 派生的 SHA-256 指纹。
+    /// - `producer`: 该证书唯一获准代表的 Saga 逻辑服务身份。
+    ///
+    /// 返回：principal 形态合法时返回冻结绑定；其它输入返回脱敏配置错误。
+    pub fn new(
+        peer_principal: impl Into<Arc<str>>,
+        producer: ServiceIdentity,
+    ) -> Result<Self, SagaGrpcBindingError> {
+        let peer_principal = peer_principal.into();
+        let digest = peer_principal.strip_prefix("sha256:").unwrap_or_default();
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(SagaGrpcBindingError::InvalidPeerPrincipal);
+        }
+        Ok(Self {
+            peer_principal,
+            producer,
+        })
+    }
+
+    /// 业务作用：只接受 listener TLS driver 写入且与冻结指纹相同的 PeerIdentity。
+    ///
+    /// 参数说明：
+    /// - `request`: 当前 generated gRPC 请求，extensions 由 nagrpc 在进入 handler 前建立。
+    ///
+    /// 返回：指纹匹配时返回可交给 Saga 裁决器的可信身份；缺失或不匹配返回 `Unauthenticated`。
+    fn authenticate<T>(
+        &self,
+        request: &nagrpc::Request<T>,
+    ) -> Result<SagaGrpcPeerIdentity, nagrpc::Status> {
+        let authenticated = request
+            .extensions()
+            .get::<nagrpc::PeerIdentity>()
+            .is_some_and(|peer| peer.principal() == self.peer_principal.as_ref());
+        if !authenticated {
+            return Err(nagrpc::Status::unauthenticated(
+                "verified Saga gRPC peer identity is required",
+            ));
+        }
+        Ok(SagaGrpcPeerIdentity::MtlsPrincipal(self.producer.clone()))
+    }
+}
+
+/// 业务作用：从唯一合法的 gRPC metadata `traceparent` 解析显式收据因果上下文。
+///
+/// 参数说明：
+/// - `request`: 当前 generated gRPC 请求。
+///
+/// 返回：恰有一个且格式合法时返回上下文；缺失、重复或非法输入不进入业务因果链。
+fn receipt_trace<T>(request: &nagrpc::Request<T>) -> Option<TraceContext> {
+    let mut values = request.metadata().get_all("traceparent").iter();
+    match (values.next(), values.next()) {
+        (Some(value), None) => value
+            .to_str()
+            .ok()
+            .and_then(TraceContext::parse_traceparent),
+        _ => None,
+    }
+}
+
+/// 业务作用：把内部封闭收据稳定映射为 protobuf enum 与可选确定性原因。
+///
+/// 参数说明：
+/// - `receipt`: command 或 result 裁决器形成的最终收据。
+///
+/// 返回：客户端无需解析 status 文本即可裁决 Outbox 行的协议响应。
+fn delivery_receipt(receipt: SagaGrpcReceipt) -> proto::SagaDeliveryReceipt {
+    let (kind, reason) = match receipt {
+        SagaGrpcReceipt::Committed => (proto::SagaReceiptKind::Committed, String::new()),
+        SagaGrpcReceipt::Duplicate => (proto::SagaReceiptKind::Duplicate, String::new()),
+        SagaGrpcReceipt::DeterministicReject { reason } => (
+            proto::SagaReceiptKind::DeterministicReject,
+            reason.to_owned(),
+        ),
+        SagaGrpcReceipt::Retryable => (proto::SagaReceiptKind::Retryable, String::new()),
+    };
+    proto::SagaDeliveryReceipt {
+        kind: kind as i32,
+        reason,
+    }
+}
 
 /// 业务作用：gRPC 投递的封闭收据——发布端与服务端共同的全部合法结论。
 ///
@@ -46,7 +171,7 @@ pub enum SagaGrpcReceipt {
 /// HMAC + 重放守卫)的结论。两者都由宿主在调用裁决器之前完成。
 #[derive(Debug, Clone)]
 pub enum SagaGrpcPeerIdentity {
-    /// TLS 层验证过的对端 principal(证书 CN/SAN 映射出的逻辑服务身份)。
+    /// TLS 层验证 leaf 指纹后，经启动期冻结绑定映射出的逻辑服务身份。
     MtlsPrincipal(ServiceIdentity),
     /// 端到端签名校验通过后映射出的逻辑服务身份。
     VerifiedSignature(ServiceIdentity),
@@ -75,6 +200,50 @@ pub struct SagaGrpcCommandServer<H> {
     trusted_producer: ServiceIdentity,
 }
 
+/// generated `SagaCommandTransport` 的框架实现；业务只提供本地 handler 与启动期 mTLS 绑定。
+pub struct SagaGrpcCommandTransportService<H> {
+    adjudicator: SagaGrpcCommandServer<H>,
+    peer: SagaGrpcPeerBinding,
+}
+
+impl<H: SagaCommandHandler> SagaGrpcCommandTransportService<H> {
+    /// 业务作用：把 command 裁决器与唯一可信 client certificate 绑定为可登记的 generated service。
+    ///
+    /// 参数说明：
+    /// - `handler`: 提交本地参与方事务的 command handler。
+    /// - `peer`: mTLS leaf 指纹与可信 Orchestrator 逻辑身份的冻结绑定。
+    ///
+    /// 返回：尚未加入 listener、可由 `SagaApplicationPlan` 自动登记的 service 实现。
+    pub fn new(handler: Arc<H>, peer: SagaGrpcPeerBinding) -> Self {
+        let adjudicator = SagaGrpcCommandServer::new(handler, peer.producer.clone());
+        Self { adjudicator, peer }
+    }
+}
+
+#[nagrpc::async_trait]
+impl<H: SagaCommandHandler> proto::saga_command_transport_server::SagaCommandTransport
+    for SagaGrpcCommandTransportService<H>
+{
+    /// 业务作用：验证 mTLS 身份并把 command envelope 交给本地事务裁决器，最终只返回封闭收据。
+    ///
+    /// 参数说明：
+    /// - `request`: protobuf envelope bytes 与受管连接 extensions/metadata。
+    ///
+    /// 返回：身份通过时始终返回四值收据；PeerIdentity 缺失或不匹配时返回 `Unauthenticated`。
+    async fn deliver(
+        &self,
+        request: nagrpc::Request<proto::SagaDeliveryRequest>,
+    ) -> Result<nagrpc::Response<proto::SagaDeliveryReceipt>, nagrpc::Status> {
+        let peer = self.peer.authenticate(&request)?;
+        let trace = receipt_trace(&request);
+        let receipt = self
+            .adjudicator
+            .adjudicate(&peer, &request.get_ref().envelope_json, trace.as_ref())
+            .await;
+        Ok(nagrpc::Response::new(delivery_receipt(receipt)))
+    }
+}
+
 impl<H: SagaCommandHandler> SagaGrpcCommandServer<H> {
     /// 业务作用：构造绑定唯一可信 Orchestrator 的 command 裁决器。
     ///
@@ -96,7 +265,7 @@ impl<H: SagaCommandHandler> SagaGrpcCommandServer<H> {
     /// 参数说明：
     /// - `peer`: TLS/签名层已验证的对端身份。
     /// - `payload`: command envelope JSON 字节。
-    /// - `receipt_trace`: gRPC metadata 中显式解析出的 `traceparent`（与 16.8 同边界）。
+    /// - `receipt_trace`: gRPC metadata 中显式解析出的 `traceparent`。
     ///
     /// 返回：封闭收据;调用方(generated service)据此构造响应,不解析错误文本。
     pub async fn adjudicate(
@@ -142,6 +311,61 @@ impl<H: SagaCommandHandler> SagaGrpcCommandServer<H> {
 pub struct SagaGrpcResultServer<H> {
     handler: Arc<H>,
     trusted_producer: ServiceIdentity,
+}
+
+/// generated `SagaResultTransport` 的框架实现；Orchestrator 与参与方共用同一身份和收据合同。
+pub struct SagaGrpcResultTransportService<H> {
+    adjudicator: SagaGrpcResultServer<H>,
+    peer: SagaGrpcPeerBinding,
+}
+
+impl<H: SagaResultHandler> SagaGrpcResultTransportService<H> {
+    /// 业务作用：把 result 裁决器与唯一可信参与方 client certificate 绑定为 generated service。
+    ///
+    /// 参数说明：
+    /// - `handler`: 提交 Orchestrator 结果推进事务的 handler。
+    /// - `peer`: mTLS leaf 指纹与可信参与方逻辑身份的冻结绑定。
+    ///
+    /// 返回：尚未加入 listener、可由 `SagaApplicationPlan` 自动登记的 service 实现。
+    pub fn new(handler: Arc<H>, peer: SagaGrpcPeerBinding) -> Self {
+        let adjudicator = SagaGrpcResultServer::new(handler, peer.producer.clone());
+        Self { adjudicator, peer }
+    }
+}
+
+#[nagrpc::async_trait]
+impl<H: SagaResultHandler> proto::saga_result_transport_server::SagaResultTransport
+    for SagaGrpcResultTransportService<H>
+{
+    /// 业务作用：验证 mTLS 身份并把 result envelope 交给 Orchestrator 事务裁决器。
+    ///
+    /// 参数说明：
+    /// - `request`: protobuf envelope bytes 与受管连接 extensions/metadata。
+    ///
+    /// 返回：身份与时钟可用时返回四值收据；身份失败返回 `Unauthenticated`，系统时钟不可用返回
+    /// `Internal` 且不调用结果 handler。
+    async fn deliver(
+        &self,
+        request: nagrpc::Request<proto::SagaDeliveryRequest>,
+    ) -> Result<nagrpc::Response<proto::SagaDeliveryReceipt>, nagrpc::Status> {
+        let peer = self.peer.authenticate(&request)?;
+        let trace = receipt_trace(&request);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+            .ok_or_else(|| nagrpc::Status::internal("Saga gRPC clock is unavailable"))?;
+        let receipt = self
+            .adjudicator
+            .adjudicate(
+                &peer,
+                &request.get_ref().envelope_json,
+                trace.as_ref(),
+                now_ms,
+            )
+            .await;
+        Ok(nagrpc::Response::new(delivery_receipt(receipt)))
+    }
 }
 
 impl<H: SagaResultHandler> SagaGrpcResultServer<H> {

@@ -14,8 +14,9 @@
 //! 目标业务幂等键吸收。进程崩溃后由数据库事实恢复，不依赖内存队列续跑。
 //!
 //! Kafka 与 Redis Streams feature 提供完整消费裁决；HTTP 入口提供认证/重放构件；gRPC feature
-//! 只提供封闭收据与服务端裁决器，listener、mTLS 身份、deadline 和 drain 仍由宿主显式拥有。
-//! `TraceContext` 只作为已验证的显式输入传播，不读取 ambient 状态，也不是投递前置条件。
+//! 提供框架 generated command/result client/server、mTLS leaf principal 绑定与封闭收据。Application
+//! 入站计划把 service 自动登记进唯一 `nagrpc` registry；独立宿主仍显式拥有 listener、deadline 与
+//! drain。`TraceContext` 只作为已验证的显式输入传播，不读取 ambient 状态，也不是投递前置条件。
 //!
 //! # 能力范围与明确不承诺
 //!
@@ -390,6 +391,7 @@ pub use nasaga_mysql::{
 };
 // 链路上下文的公开类型:发起入口与 transport 收据以它显式传递 trace,宏展开也经本
 // 重导出引用,避免业务/宏直接依赖 natelemetry 坐标。
+pub use nasaga_core::ServiceIdentity;
 pub use natelemetry::TraceContext;
 pub use participant::{
     AuthenticatedParticipantRuntime, ParticipantCommandTrust, ParticipantHandled,
@@ -412,8 +414,9 @@ pub use transport::{
 };
 #[cfg(feature = "grpc-transport")]
 pub use transport_grpc::{
-    outbox_disposition_of, SagaGrpcCommandServer, SagaGrpcPeerIdentity, SagaGrpcReceipt,
-    SagaGrpcResultServer,
+    outbox_disposition_of, proto as grpc_proto, SagaGrpcBindingError, SagaGrpcCommandServer,
+    SagaGrpcCommandTransportService, SagaGrpcPeerBinding, SagaGrpcPeerIdentity, SagaGrpcReceipt,
+    SagaGrpcResultServer, SagaGrpcResultTransportService,
 };
 #[cfg(feature = "redis-stream")]
 pub use transport_redis::{

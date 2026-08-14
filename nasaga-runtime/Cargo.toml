@@ -40,6 +40,10 @@ nadis = { version = "1.0.1", optional = true }
 redis = { version = "1", optional = true, features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", optional = true, features = ["time"] }
 tracing = "0.1"
+nagrpc = { version = "2.0.0", optional = true }
+
+[build-dependencies]
+nagrpc-build = "2.0.0"
 
 [features]
 default = []
@@ -47,5 +51,5 @@ default = []
 kafka = ["dep:nafka"]
 # 真实 Redis Streams hosted transport:XREADGROUP 显式循环、XAUTOCLAIM 重领、Lua 原子 DLT+XACK。
 redis-stream = ["dep:nadis", "dep:redis", "dep:tokio"]
-# gRPC request/response transport 的封闭收据裁决；listener 上限与 drain 由 nagrpc 承担。
-grpc-transport = []
+# gRPC request/response transport：框架 generated service/client、mTLS 身份绑定与封闭收据。
+grpc-transport = ["dep:nagrpc"]

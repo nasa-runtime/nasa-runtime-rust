@@ -7,12 +7,12 @@ name = "nasa"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed lifecycle, durable Saga orchestration, messaging and web services"
+description = "NASA Rust facade for managed lifecycle, durable Saga orchestration, gRPC, messaging, and web services"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "saga", "lifecycle", "microservices", "async"]
+keywords = ["runtime", "saga", "grpc", "lifecycle", "microservices"]
 categories.workspace = true
 
 [features]
@@ -56,8 +56,8 @@ saga-runtime = ["saga", "inbox", "outbox", "dep:saga_runtime_impl", "dep:nasaga_
 saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
 # Saga Redis Streams hosted transport：显式 ACK 裁决、pending reclaim、原子 DLT 与消息签名。
 saga-redis-stream = ["saga-runtime", "redis", "saga_runtime_impl/redis-stream", "application_impl?/saga-redis-stream"]
-# Saga gRPC request/response transport 的封闭收据裁决；listener 上限与 drain 由 grpc 组件承担。
-saga-grpc = ["saga-runtime", "saga_runtime_impl/grpc-transport"]
+# Saga gRPC request/response transport：入站 generated service 自动复用 grpc 组件的 listener 与 drain。
+saga-grpc = ["saga-runtime", "grpc", "saga_runtime_impl/grpc-transport", "application_impl?/saga-grpc"]
 # 统一 codegen 合同、独立 listener 与 Application 受管生命周期。
 grpc = ["dep:grpc_impl", "application_impl?/grpc"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。

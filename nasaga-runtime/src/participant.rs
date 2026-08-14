@@ -231,6 +231,27 @@ impl ParticipantRuntime {
         })
     }
 
+    /// 业务作用：读取单一受信 command producer，供 Application 自动装配单参与方 transport 身份绑定。
+    ///
+    /// 该入口只在全部 workflow projection 都归属于同一逻辑 Orchestrator 时成立；多 producer 参与方
+    /// 必须由业务显式选择当前 listener principal 对应的 producer，不能由容器猜测授权边。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：恰有一个受信 producer 时返回其稳定逻辑身份；存在多个 producer 时返回配置错误。
+    pub fn single_trusted_command_producer(&self) -> anyhow::Result<ServiceIdentity> {
+        if self.trusted_command_producers.len() != 1 {
+            anyhow::bail!(
+                "participant transport requires an explicit producer when trust contains multiple producers"
+            );
+        }
+        self.trusted_command_producers
+            .iter()
+            .next()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("participant command trust must not be empty"))
+    }
+
     /// 业务作用：为自定义 connector 预检 command envelope 与 producer 的精确授权投影。
     ///
     /// 该预检不替代 phase handler 内的强制复验；它用于在解析业务 payload、获取连接或触碰 Inbox
