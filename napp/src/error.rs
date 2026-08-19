@@ -15,6 +15,8 @@ pub enum ComponentId {
     Db,
     /// Redis 连接和协议能力。
     Redis,
+    /// RedisJob 调度、执行、Fanout 与停机生命周期。
+    RedisJob,
     /// Trace 生产、导出和停机刷新。
     Telemetry,
     /// 保序分 lane 任务执行器。
@@ -62,6 +64,7 @@ impl fmt::Display for ComponentId {
             Self::NacosConfig => "nacos-config",
             Self::Db => "db",
             Self::Redis => "redis",
+            Self::RedisJob => "redis-job",
             Self::Telemetry => "telemetry",
             Self::Partition => "partition",
             Self::Grpc => "grpc",

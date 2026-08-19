@@ -50,7 +50,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## `application` 支持的组件字符串
 
-属性当前只接受下面 16 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
+属性当前只接受下面 17 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
 未知名称和重复名称，再按唯一规范顺序生成组件列表。字符串对应的门面 feature 没有启用时会在编译期
 拒绝，不会静默跳过。
 
@@ -66,6 +66,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)` |
 | `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
+| `"redis-job"` | `redis-job`；隐式纳入 `redis` | `redis.job` 与 `redis.properties.<source>` | 冻结多 source 计划、布局与能力门禁，Ready 后启动扫描、租约、Fanout、逐源监督和有界停机 | `app.redis_job()`、`app.redis_job_control(source)`、`app.redis_job_query(source)` |
 | `"grpc"` | `grpc` | `grpc` | initializer 后自动装配 registered service、health、可选 reflection、TLS、listener、方法指标与有界排空 | `app.grpc()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、探针、监听与排空；定制经 `configure_router` | `app.web()` |
@@ -81,9 +82,71 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
 
-规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox ->
+规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job ->
 grpc -> auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
 `auth` 缺少 `web` 会被拒绝，`cache.redis_ref` 指向受管 Redis 时还必须声明 `"redis"`。
+
+## RedisJob 受管模式
+
+`"redis-job"` 隐式纳入 `"redis"`，但仍是独立的长生命周期组件。业务只声明定义与 Handler；Application
+在 Prepare 阶段按 `qualifier` 精确绑定受管 Redis source，完成布局、ACL、脚本、定义和指标容量门禁，
+全部 initializer 成功后才启动领取。停机时先关闭所有 source 的新控制动作和领取，再按稳定逆序排空
+Handler、注销执行器并关闭专用连接。一个 source 的健康、监督代次和停机结果不会被另一个 source 覆盖。
+
+Ready 后的运行路径由 `nadis::job` 执行：计划按 source 冻结，执行器发布能力快照，Dispatcher 投递并由目标持久确认，Handler 取得带 lease 和 fencing 的 attempt 后执行，receipt、ready、lease 和 root 扫描器分别完成恢复与聚合。Fanout 容量背压使用独立窗口和路由预算；`capacityRouteTotal` 保留历史容量迁移次数，便于 source 级运维审计。
+
+静态任务使用 `#[nasa::redis_job]`，无需在 `main` 中手工建立 plan：
+
+```rust
+use nasa::redis::job::{JobContext, JobResult};
+
+#[nasa::redis_job(
+    name = "wallet-sweep",
+    qualifier = "match",
+    fixed_rate_ms = 30_000,
+    timeout_ms = 20_000
+)]
+async fn wallet_sweep(ctx: JobContext) -> anyhow::Result<JobResult> {
+    // 外部副作用前复验当前 attempt 仍持有执行权；下游写入还应携带 attempt token 做 fencing。
+    ctx.checkpoint()?;
+    Ok(JobResult::success())
+}
+
+#[nasa::application("redis-job")]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
+    Ok(())
+}
+```
+
+动态定义通过 `app.configure_redis_jobs(plan)` 在 UserHook 一次性移交，并与静态 descriptor 合并后共同
+冻结。该入口不接触 Redis；重复提交、静态/动态重名或 Prepare 后提交都会被拒绝。业务控制器只能在
+Application 已 Ready 时调用 `app.redis_job_control("match")`、`app.redis_job_query("match")` 或
+`app.redis_job()`；所有入口都要求显式 source，不按唯一成员、任务名或 `run_id` 猜测数据源，也不开放
+运行时 shutdown 权限。控制 API 只负责 Redis 状态权限，HTTP/RPC 调用者身份和 requestId 授权仍由业务
+入口校验。
+
+```yaml
+redis:
+  properties:
+    primary:
+      url: ${APP_PRIMARY_REDIS_URL}
+      namespace: order-primary
+      profile: LegacyV1
+    match:
+      url: ${APP_MATCH_REDIS_URL}
+      namespace: order-match
+      profile: LegacyV1
+  job:
+    instance_identity: order-service-0
+    sources:
+      match:
+        namespace: order-match-jobs
+```
+
+`redis.job` 根字段是所有被引用 source 的默认值，`sources.<qualifier>` 只是稀疏覆盖；没有覆盖块的已托管
+source 仍可被任务使用。定义引用未知 source 或 `enabled: false` 的覆盖时启动失败，不会回退到
+`primary`。完整协议、独立 `RedisJobPlan`、Fanout、Cron 和观测合同见
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob-分布式任务运行时)。
 
 ## Partition 受管模式
 
@@ -520,7 +583,9 @@ initializer 失败、panic、超时或取消都会停止后续阶段，不发布
 | `app.configure_outbox(plan)` | 启动 Hook | 为脱离 Saga 的事件流提交唯一受管发布计划 |
 | `app.configure_kafka(name, ...)` | 启动 Hook | 在自动收集项之后追加有状态 consumer；Ready 取走后入口永久封口 |
 | `app.configure_kafka_metrics(name, sink)` | 启动 Hook | 为指定 client 安装一次无阻塞指标出口；未设置时为 Noop |
+| `app.configure_redis_jobs(plan)` | 启动 Hook | 把唯一拥有式 RedisJob plan 交给独立组件；Prepare 后入口永久封口 |
 | `app.datasource(name) / redis(name)` | Start 完成后 | 直接取得共享语义明确、且能被容器显式关闭的数据源池与缓存客户端 |
+| `app.redis_job() / redis_job_control(source) / redis_job_query(source)` | RedisJob Ready 后至清理 | 取得无停机权的业务门面，或显式选择 source 的结构化控制、查询、健康与指标；未知 source 不回退 |
 | `app.kafka(name)` | Start 完成后至清理 | 受控发布、只读 metadata、健康快照和 consumer 控制命令；不暴露 connect/registry/shutdown |
 | `app.saga()` | Saga Ready 完成后至清理 | 取得已校验 Orchestrator 或命名参与方；停机保护态拒绝新工作 |
 | `app.outbox()` | Outbox Ready 完成后至清理 | 读取持久化积压、死信累计与低基数投递快照 |

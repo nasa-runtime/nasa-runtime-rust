@@ -129,6 +129,8 @@ pub struct PipelineSession {
     /// 已 seal 各段的后台 flush 链尾(每段 await 前一段 → 跨段保序;任务返回值携带**该链第一个批级传输错误**,
     /// 供 `execute()` 聚合上抛——)。
     flush_chain: Option<JoinHandle<Result<()>>>,
+    /// `false` 表示 `execute()` 是唯一提交点，达到会话上限时在入队前拒绝，不产生后台写出。
+    auto_flush: bool,
     executed: bool,
 }
 
@@ -142,8 +144,20 @@ impl RedisClient {
             cmds: Vec::new(),
             bytes: 0,
             flush_chain: None,
+            auto_flush: true,
             executed: false,
         }
+    }
+
+    /// 业务作用：创建以 `execute()` 为唯一提交点的有界 Pipeline，供需要“未提交即确定未发送”语义的上层 API 使用。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：沿用公开会话条数、字节与专用连接配置，但达到上限时拒绝继续入队且不会滚动写出。
+    pub(crate) fn deferred_pipeline(self: &Arc<Self>) -> PipelineSession {
+        let mut session = self.pipeline();
+        session.auto_flush = false;
+        session
     }
 }
 
@@ -166,17 +180,29 @@ impl PipelineSession {
                 _ => 8,
             })
             .sum();
+        if !self.auto_flush
+            && (self.cmds.len() >= self.cfg.session_max_commands
+                || self
+                    .bytes
+                    .checked_add(sz)
+                    .is_none_or(|total| total > self.cfg.session_max_bytes))
+        {
+            return Err(NasaRedisError::SessionLimit(
+                "延迟提交会话已达到 session_max_commands 或 session_max_bytes，尚未发送任何命令"
+                    .to_owned(),
+            ));
+        }
         // rx 先建,push 后即使 seal_and_flush 把 batch `mem::take` 走,本 ticket 仍正常返回(tx 在 batch 内,
         // 由后台 dispatch 回填)。
         let (tx, rx) = oneshot::channel();
         self.bytes += sz;
         self.cmds.push((cmd, tx));
         // 滚动自动 flush(对齐 原实现 pipelineAutoFlush;**不报错**):**push 后**判断——第 1000 条入队后
-        // `len==session_max_commands` 立即 seal 后台发出(exact-1000 即提交,对齐 原实现 line 1540;复审
-        // off-by-one 修正:此前 push 前判断,要等第 1001 条才 seal 前 1000)。字节阈值同样 push 后判断
+        // `len==session_max_commands` 立即 seal 后台发出。字节阈值同样 push 后判断
         // (`bytes >= max_bytes`),单条命令本身超限时它自己一段发出,不死循环。
-        if self.cmds.len() >= self.cfg.session_max_commands
-            || self.bytes >= self.cfg.session_max_bytes
+        if self.auto_flush
+            && (self.cmds.len() >= self.cfg.session_max_commands
+                || self.bytes >= self.cfg.session_max_bytes)
         {
             self.seal_and_flush();
         }

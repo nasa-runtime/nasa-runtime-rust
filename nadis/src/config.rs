@@ -31,6 +31,15 @@ pub(crate) const MAX_PARTITION_TOPICS: usize = 4_096;
 /// Tokio 定时器驱动的 Redis 运行参数统一使用工作区的一年上限。
 pub(crate) const MAX_REDIS_RUNTIME_DURATION_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
+/// 业务作用：提供跨语言固定的默认 Redis source id，避免本地资源名进入持久协议。
+///
+/// 参数说明: 无。
+///
+/// 返回：默认 source id `primary`。
+fn default_redis_qualifier() -> String {
+    "primary".to_owned()
+}
+
 /// 兼容性 profile:决定 key 布局/心跳时钟/锁协议/ACK 协议/Stream 事件编码,
 /// 业务只能整体选择,不能拼出半兼容组合。**无 Default,必须显式指定。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +54,7 @@ pub enum CompatibilityProfile {
     ///   · 原实现V1/原实现 = 本地墙钟(与 原实现 节点逐字节互通必须同时基)。
     /// ⚠ **RustV2 节点不得与墙钟(原实现V1/原实现)节点共享同一 group 的 `nodes` ZSET**——两类用不同
     /// 时基写分数 + 各用自己的 now_ms 驱逐,时钟差几秒即互相误判过期 ZREM → 虚假 owner 抖动/双 claim
-    /// 窗口。(1 把本注释误改为"两 profile 同墙钟"与代码相反,本轮据实复原。)
+    /// 窗口；部署时必须为两类时钟协议使用不同 group。
     RustV2,
 }
 
@@ -67,11 +76,15 @@ impl CompatibilityProfile {
 /// `Debug` 手写脱敏:`url` 内可能内嵌密码(`redis://:pass@host`),打印时去掉 userinfo,
 /// 避免下游 `tracing::debug!(?cfg)` / `{:?}` 把连接串密码泄漏进日志(公共库默认防御)。
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedisConfig {
     /// Redis 连接串,格式如 `redis://[:password@]host:port[/db]`。
     pub url: String,
     /// 协议命名空间(协议标记 key 的作用域;通常 = 业务系统名)。
     pub namespace: String,
+    /// 语言无关的逻辑数据源标识；默认源固定为 `primary`。
+    #[serde(default = "default_redis_qualifier")]
+    pub qualifier: String,
     /// 兼容性 profile,无默认值。
     pub profile: CompatibilityProfile,
     #[serde(default)]
@@ -89,6 +102,9 @@ pub struct RedisConfig {
     #[serde(default)]
     /// 分区消费配置。
     pub partition: PartitionCfg,
+    #[serde(default)]
+    /// nonce 幂等计数账本布局；缺席时首次调用按默认值惰性解析，显式配置时受管生命周期会在 Ready 前准备。
+    pub idempotent_counter: Option<crate::idempotent::IdempotentCounterCfg>,
 }
 
 /// 业务作用：去掉 redis 连接串里的 userinfo(`scheme://[user][:password]@` → `scheme://***@`),用于脱敏日志。
@@ -113,12 +129,14 @@ impl std::fmt::Debug for RedisConfig {
         f.debug_struct("RedisConfig")
             .field("url", &redact_url(&self.url))
             .field("namespace", &self.namespace)
+            .field("qualifier", &self.qualifier)
             .field("profile", &self.profile)
             .field("command", &self.command)
             .field("pipeline", &self.pipeline)
             .field("lock", &self.lock)
             .field("stream", &self.stream)
             .field("partition", &self.partition)
+            .field("idempotent_counter", &self.idempotent_counter)
             .finish()
     }
 }
@@ -138,12 +156,14 @@ impl RedisConfig {
         Self {
             url: url.into(),
             namespace: namespace.into(),
+            qualifier: default_redis_qualifier(),
             profile,
             command: CommandCfg::default(),
             pipeline: PipelineCfg::default(),
             lock: LockCfg::default(),
             stream: StreamCfg::default(),
             partition: PartitionCfg::default(),
+            idempotent_counter: None,
         }
     }
 
@@ -193,6 +213,23 @@ impl RedisConfig {
             return Err(crate::error::NasaRedisError::Config(format!(
                 "namespace 必须为无首尾空白的非空名称，且不超过 {MAX_REDIS_NAME_BYTES} 字节"
             )));
+        }
+        if self.qualifier.trim().is_empty()
+            || self.qualifier != self.qualifier.trim()
+            || self.qualifier.len() > MAX_REDIS_NAME_BYTES
+            || self.qualifier.contains([':', '{', '}'])
+            || !self
+                .qualifier
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+        {
+            return Err(crate::error::NasaRedisError::Config(format!(
+                "qualifier 必须为无首尾空白的非空 ASCII 名称，只能包含字母数字与 '.' '_' '-'，且不超过 {MAX_REDIS_NAME_BYTES} 字节"
+            )));
+        }
+        // 显式配置在建连前先做纯本地校验；缺省路径保留惰性默认，不能仅因普通 Redis 用法触发能力探测。
+        if let Some(idempotent_counter) = &self.idempotent_counter {
+            idempotent_counter.snapshot(self.profile)?;
         }
         if self.lock.lease_ms < 3_000 {
             return Err(crate::error::NasaRedisError::Config(

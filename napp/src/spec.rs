@@ -258,6 +258,7 @@ impl ApplicationSpec {
                 matches!(
                     component,
                     ComponentId::Saga
+                        | ComponentId::RedisJob
                         | ComponentId::Kafka
                         | ComponentId::Outbox
                         | ComponentId::Web
@@ -292,6 +293,7 @@ impl ApplicationSpec {
                 matches!(
                     component,
                     ComponentId::Saga
+                        | ComponentId::RedisJob
                         | ComponentId::Kafka
                         | ComponentId::Outbox
                         | ComponentId::Web
@@ -347,10 +349,16 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
             "component `outbox` requires managed `db` to be declared",
         ));
     }
+    if components.contains(&ComponentId::RedisJob) && !components.contains(&ComponentId::Redis) {
+        return Err(spec_error(
+            "component `redis-job` requires managed `redis` to be declared",
+        ));
+    }
 
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Db)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Redis)?;
+    ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Web)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Ws)?;
@@ -370,6 +378,7 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     // Saga 的 Redis Streams 受管 transport 在 Saga Ready 阶段需要已建立的 Redis 客户端;
     // 反向顺序会让 Ready 探测拿不到连接。停机按逆序执行,消费停止后 Redis 才释放。
     ensure_before_if_both(components, ComponentId::Redis, ComponentId::Saga)?;
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Outbox)?;
@@ -382,6 +391,22 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Scheduling)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Cache, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Kafka, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Auth)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Ws)?;
+    ensure_before_if_both(
+        components,
+        ComponentId::RedisJob,
+        ComponentId::NacosDiscovery,
+    )?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Scheduling)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Scheduling)?;
@@ -391,6 +416,7 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Db)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Redis)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Web)?;

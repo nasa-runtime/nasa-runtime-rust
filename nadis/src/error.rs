@@ -27,6 +27,29 @@ pub enum NasaRedisError {
     #[error("redis 错误: {0}")]
     Redis(#[from] redis::RedisError),
 
+    /// nonce 幂等计数的结构化拒绝(账本类型/操作/命令);业务按封闭原因分支,不匹配 Redis 错误文本。
+    #[error("{0}")]
+    Idempotent(#[from] crate::idempotent::IdempotentCounterError),
+
+    /// 幂等计数脚本返回结构、类型或账本 slot 不满足协议合同——发命令前或结果解析时 fail-closed,
+    /// 不当作成功或空记录。
+    #[error("幂等计数协议错误: {0}")]
+    IdempotentProtocol(String),
+
+    /// Job 状态脚本返回结构、返回码、字段或 KEYS slot 不满足协议合同——发命令前或结果解析时 fail-closed,
+    /// 不把未知返回码当作 OK 或空记录。
+    #[error("job 协议错误: {0}")]
+    JobProtocol(String),
+
+    /// RedisJob 公开结构化错误；业务按封闭类别处理，不解析摘要文本。
+    #[cfg(feature = "job")]
+    #[error(transparent)]
+    Job(#[from] crate::job::JobError),
+
+    /// Handler 的当前 attempt 已取消、失权或超过本地保守持权截止；业务必须停止外部副作用。
+    #[error("job 执行已停止: {0}")]
+    JobExecutionStopped(String),
+
     /// **启动建连探针失败**:保留失败**阶段**(`connect`=DNS/TCP/ConnectionManager;
     /// `topology`=`INFO cluster`;`cluster-discovery`=Cluster slot/topology;`protocol-marker`=协议标记
     /// SET/GET)、**脱敏 endpoint**(`scheme://host:port/db`,不含凭据)与**底层 redis 错误链**——供上层启动
@@ -111,9 +134,7 @@ impl NasaRedisError {
     /// 终态、不得 ACK+XDEL command——保留 PEL 交下一轮或新 owner 重试;反之**确定性失败**
     /// (WRONGTYPE / 语法 ERR / NOPERM / EXECABORT / 解析等)立即 Rejected,绝不空转重试。
     ///
-    /// 修正:此前把整个 `Redis(_)` 与 `Parsing(_)` 一律当可重试——WRONGTYPE 这类
-    /// 确定性错误会一直留 Executing 空转到 deadline 才转 Rejected,诊断延迟且浪费 Redis。
-    /// 现按 `redis::RedisError` 的 IO/超时/断连判定 + 服务端 code 分类。
+    /// 按 `redis::RedisError` 的 IO/超时/断连判定与服务端 code 分类；WRONGTYPE 等确定性错误不进入重试。
     pub fn is_infra_retryable(&self) -> bool {
         match self {
             NasaRedisError::Redis(e) => redis_is_transient(e),
@@ -139,7 +160,7 @@ impl NasaRedisError {
 ///
 /// # 参数
 /// - `e`: 错误对象或外部错误值。
-fn redis_is_transient(e: &redis::RedisError) -> bool {
+pub(crate) fn redis_is_transient(e: &redis::RedisError) -> bool {
     if e.is_io_error() || e.is_timeout() || e.is_connection_dropped() {
         return true;
     }

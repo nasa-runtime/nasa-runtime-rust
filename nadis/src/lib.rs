@@ -36,6 +36,11 @@ pub mod commands;
 pub mod config;
 /// Redis 组件统一错误类型。
 pub mod error;
+/// nonce 幂等计数：String/Hash/ZSet 计数的 nonce 窗口幂等，账本身份为稳定线协议。
+pub mod idempotent;
+/// RedisJob 分布式任务运行时(feature "job")：调度、执行器注册、租约、Fanout 与有预算停机。
+#[cfg(feature = "job")]
+pub mod job;
 /// Redis Cluster hash tag 与 slot 计算工具。
 pub mod keytag;
 /// 基于分布式锁的 leader 选举辅助。
@@ -64,6 +69,10 @@ pub use codec::Json;
 pub use commands::KeyTtl;
 pub use config::{CompatibilityProfile, PartitionGroupCfg, RedisConfig};
 pub use error::NasaRedisError;
+pub use idempotent::{
+    IdempotentCounterCfg, IdempotentCounterError, IdempotentCounterSnapshot,
+    IdempotentPipelineSession, IdempotentRejection, IdempotentTicket, IdempotentTtlMode,
+};
 // crate 根导出统一 Result:README/业务惯用 `nadis::Result<T>`,免去 `nadis::error::Result` 长路径。
 pub use error::Result;
 pub use keytag::{effective_tag, redis_slot, synthetic_tag};

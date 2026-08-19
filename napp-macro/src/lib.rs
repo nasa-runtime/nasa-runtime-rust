@@ -20,7 +20,7 @@ use syn::{
 ///
 /// # 支持的组件字符串
 ///
-/// `attr` 可以为空；非空时只接受下面 16 个区分大小写的精确字符串，不支持别名：
+/// `attr` 可以为空；非空时只接受下面 17 个区分大小写的精确字符串，不支持别名：
 ///
 /// - `"log"`：启用两阶段日志。Bootstrap 先建立早期控制台日志，最终配置就绪后再安装文件日志，
 ///   并支持运行期日志级别热更新；需要 `nasa` 的 `log` feature。
@@ -35,6 +35,8 @@ use syn::{
 ///   同时注入 `#[transactional]` 和 Mapper 使用的事务运行时；需要 `tx` feature。
 /// - `"redis"`：启用 Redis 客户端。启动时校验配置、探测 standalone/cluster 拓扑并建立受管客户端，
 ///   停机时由容器显式关闭；需要 `redis` feature。
+/// - `"redis-job"`：启用多 source RedisJob 长生命周期运行时，并隐式加入 Redis；需要
+///   `redis-job` feature。
 /// - `"cache"`：启用由容器拥有的两级缓存运行时与可选跨节点失效广播；需要 `cache` feature。
 /// - `"saga"`：启用 Saga Ready 门禁、只读能力发布与 durable timer 监督，并隐式加入 DB 与
 ///   Outbox。业务在 UserHook 通过 `configure_saga` 提交 Orchestrator 或参与方计划；需要
@@ -65,7 +67,7 @@ use syn::{
 ///
 /// **业务侧不需要按启动顺序书写组件字符串**：宏接受任意顺序,内部按唯一的规范启动顺序
 /// （`CANONICAL_COMPONENT_ORDER`：log → nacos-config → telemetry → db → redis → cache →
-/// partition → saga → kafka → outbox → grpc → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
+/// partition → saga → kafka → outbox → redis-job → grpc → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
 /// `#[application("web", "log", "kafka")]` 与 `#[application("log", "kafka", "web")]` 完全等价,
 /// 都按 log → kafka → web 启动、严格反序停机。宏仍会拒绝未知组件名和重复声明。
 ///
@@ -173,6 +175,686 @@ pub fn initializer(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(expanded) => expanded.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// 业务作用：把异步业务函数转换为静态 RedisJob 定义与 Handler descriptor，受管组件会自动收集。
+///
+/// 参数说明：`attr` 为调度、source 与 Worker 合同，`item` 为无 receiver、无泛型的异步函数。
+///
+/// 返回：声明与函数签名合法时生成静态登记项；未知属性、冲突调度或重复注入返回编译错误。
+#[proc_macro_attribute]
+pub fn redis_job(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
+    let function = parse_macro_input!(item as ItemFn);
+    match expand_redis_job(metas, function) {
+        Ok(expanded) => expanded.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// RedisJob 属性解析后的封闭宏期表示。
+#[derive(Default)]
+struct RedisJobArgs {
+    name: Option<LitStr>,
+    qualifier: Option<LitStr>,
+    worker: Option<LitStr>,
+    trigger: Option<LitStr>,
+    cron: Option<LitStr>,
+    zone: Option<LitStr>,
+    fixed_rate_ms: Option<syn::LitInt>,
+    fixed_delay_ms: Option<syn::LitInt>,
+    concurrency: Option<LitStr>,
+    misfire: Option<LitStr>,
+    timeout_ms: Option<syn::LitInt>,
+    max_attempts: Option<syn::LitInt>,
+    retry_delay_ms: Option<syn::LitInt>,
+    contract_revision: Option<syn::LitInt>,
+    schema: Option<LitStr>,
+    codecs: Option<Vec<LitStr>>,
+    fanout_receipt_timeout_ms: Option<syn::LitInt>,
+    fanout_receipt_max_retries: Option<syn::LitInt>,
+    fanout_failure_policy: Option<LitStr>,
+    definition_revision: Option<syn::LitInt>,
+}
+
+/// RedisJob 函数参数的宏期注入类别。
+enum RedisJobParameter {
+    Application,
+    Context,
+    Payload(Box<Type>),
+}
+
+/// 业务作用：校验 RedisJob 函数并生成与编程式 plan 共用的静态 descriptor。
+///
+/// 参数说明：`metas` 为属性项，`function` 为业务异步函数语法树。
+///
+/// 返回：合同合法时返回函数、Handler 适配器与 linkme 描述；否则返回定位到声明处的错误。
+fn expand_redis_job(
+    metas: Punctuated<Meta, Token![,]>,
+    function: ItemFn,
+) -> syn::Result<TokenStream2> {
+    if function.sig.asyncness.is_none() {
+        return Err(syn::Error::new_spanned(
+            function.sig.fn_token,
+            "redis_job function must be async",
+        ));
+    }
+    if function.sig.receiver().is_some() || !function.sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &function.sig,
+            "redis_job function cannot have a receiver or generic parameters",
+        ));
+    }
+    if function.sig.inputs.len() > 3 {
+        return Err(syn::Error::new_spanned(
+            &function.sig.inputs,
+            "redis_job function accepts at most Application, JobContext, and one payload",
+        ));
+    }
+    let args = parse_redis_job_args(&metas)?;
+    validate_redis_job_args(&args)?;
+    let runtime = runtime_root("application", "napp")
+        .map_err(|message| syn::Error::new_spanned(&function.sig.ident, message))?;
+    let mut parameters = Vec::new();
+    let mut has_application = false;
+    let mut has_context = false;
+    let mut has_payload = false;
+    for input in &function.sig.inputs {
+        let FnArg::Typed(argument) = input else {
+            return Err(syn::Error::new_spanned(
+                input,
+                "redis_job does not accept self",
+            ));
+        };
+        if matches!(argument.ty.as_ref(), Type::Reference(_)) {
+            return Err(syn::Error::new_spanned(
+                &argument.ty,
+                "redis_job parameters must be owned values",
+            ));
+        }
+        let kind = classify_redis_job_parameter(&argument.ty);
+        match &kind {
+            RedisJobParameter::Application if has_application => {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "Application can only be injected once",
+                ));
+            }
+            RedisJobParameter::Context if has_context => {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "JobContext can only be injected once",
+                ));
+            }
+            RedisJobParameter::Payload(_) if has_payload => {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "redis_job accepts only one payload",
+                ));
+            }
+            RedisJobParameter::Application => has_application = true,
+            RedisJobParameter::Context => has_context = true,
+            RedisJobParameter::Payload(_) => has_payload = true,
+        }
+        parameters.push(kind);
+    }
+    let function_name = &function.sig.ident;
+    let derived_name = function_name.to_string();
+    let name = args.name.clone().unwrap_or_else(|| {
+        LitStr::new(
+            derived_name.strip_prefix("r#").unwrap_or(&derived_name),
+            function_name.span(),
+        )
+    });
+    let builder_steps = redis_job_builder_steps(&args, &runtime)?;
+    let handler_field = has_application.then(|| quote!(application: #runtime::WeakApplication,));
+    let handler_value = if has_application {
+        quote!(__NasaRedisJobHandler {
+            application: application.downgrade()
+        })
+    } else {
+        quote!({
+            let _ = application;
+            __NasaRedisJobHandler {}
+        })
+    };
+    let application_clone = has_application.then(|| {
+        quote! {
+            let application = match self.application.upgrade() {
+                ::std::option::Option::Some(application) => application,
+                ::std::option::Option::None => {
+                    return ::std::boxed::Box::pin(async {
+                        #runtime::__private::nadis::job::JobOutcome::retry(
+                            "Application lifecycle ended before RedisJob invocation"
+                        )
+                    });
+                }
+            };
+        }
+    });
+    let declared_codecs = args
+        .codecs
+        .clone()
+        .unwrap_or_else(|| vec![LitStr::new("json", proc_macro2::Span::call_site())]);
+    let codec_wires = declared_codecs
+        .iter()
+        .map(|codec| match codec.value().to_ascii_lowercase().as_str() {
+            "json" => Ok(LitStr::new("JSON", codec.span())),
+            "protobuf" => Ok(LitStr::new("PROTOBUF", codec.span())),
+            "raw" => Ok(LitStr::new("RAW", codec.span())),
+            _ => Err(syn::Error::new_spanned(codec, "redis_job codec is unknown")),
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    let codec_guard = quote! {
+        if !matches!(context.wire_codec.as_str(), #(#codec_wires)|*) {
+            return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                "payload codec is outside the static Worker contract"
+            );
+        }
+    };
+    let mut call_arguments = Vec::new();
+    let mut payload_decode = TokenStream2::new();
+    for parameter in parameters {
+        match parameter {
+            RedisJobParameter::Application => call_arguments.push(quote!(application)),
+            RedisJobParameter::Context => call_arguments.push(quote!(context.clone())),
+            RedisJobParameter::Payload(payload_type) => {
+                payload_decode = if declared_codecs.len() == 1 {
+                    match declared_codecs[0].value().to_ascii_lowercase().as_str() {
+                        "json" => quote! {
+                            let payload: #payload_type = match #runtime::__private::nadis::job::decode_json_payload(context.payload()) {
+                                ::std::result::Result::Ok(value) => value,
+                                ::std::result::Result::Err(error) => {
+                                    return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                        ::std::format!("payload JSON decode rejected: {error}")
+                                    );
+                                }
+                            };
+                        },
+                        "protobuf" => quote! {
+                            let payload: #payload_type = match
+                                <#payload_type as #runtime::__private::prost::Message>::decode(context.payload())
+                            {
+                                ::std::result::Result::Ok(value) => value,
+                                ::std::result::Result::Err(error) => {
+                                    return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                        ::std::format!("payload Protobuf decode rejected: {error}")
+                                    );
+                                }
+                            };
+                        },
+                        "raw" => quote! {
+                            let payload: #payload_type = match
+                                <#payload_type as ::std::convert::TryFrom<::std::vec::Vec<u8>>>::try_from(
+                                    context.payload().to_vec()
+                                )
+                            {
+                                ::std::result::Result::Ok(value) => value,
+                                ::std::result::Result::Err(error) => {
+                                    return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                        ::std::format!("payload RAW decode rejected: {error}")
+                                    );
+                                }
+                            };
+                        },
+                        _ => unreachable!("codec 已在宏期校验"),
+                    }
+                } else {
+                    quote! {
+                        let codec = match #runtime::__private::nadis::job::JobWireCodec::parse(
+                            context.wire_codec.as_str()
+                        ) {
+                            ::std::option::Option::Some(codec) => codec,
+                            ::std::option::Option::None => {
+                                return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                    "payload codec is not a known wire value"
+                                );
+                            }
+                        };
+                        if codec == #runtime::__private::nadis::job::JobWireCodec::Json {
+                            if let ::std::result::Result::Err(error) =
+                                #runtime::__private::nadis::job::validate_json_payload(context.payload())
+                            {
+                                return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                    ::std::format!("payload JSON validation rejected: {error}")
+                                );
+                            }
+                        }
+                        let payload: #payload_type = match
+                            <#payload_type as #runtime::__private::nadis::job::JobParameter>::decode(
+                                codec,
+                                context.payload(),
+                            )
+                        {
+                            ::std::result::Result::Ok(value) => value,
+                            ::std::result::Result::Err(error) => {
+                                return #runtime::__private::nadis::job::JobOutcome::fail_permanent(
+                                    ::std::format!("payload decode rejected: {error}")
+                                );
+                            }
+                        };
+                    }
+                };
+                call_arguments.push(quote!(payload));
+            }
+        }
+    }
+
+    Ok(quote! {
+        #function
+
+        const _: () = {
+            struct __NasaRedisJobHandler { #handler_field }
+
+            impl #runtime::__private::nadis::job::JobHandler for __NasaRedisJobHandler {
+                /// 业务作用：把已取得执行权的冻结上下文适配到静态业务函数，并统一归一化返回值。
+                ///
+                /// 参数说明：`execution` 为当前 attempt 的身份、payload 与副作用门禁。
+                ///
+                /// 返回：业务 future 完成后得到可提交的封闭 Job 结果。
+                fn handle<'a>(
+                    &'a self,
+                    execution: &'a #runtime::__private::nadis::job::JobExecution,
+                ) -> #runtime::__private::nadis::job::JobHandlerFuture<'a> {
+                    use #runtime::__private::nadis::job::IntoJobHandlerResult as _;
+                    let context = execution.clone();
+                    #application_clone
+                    ::std::boxed::Box::pin(async move {
+                        #codec_guard
+                        #payload_decode
+                        #function_name(#(#call_arguments),*)
+                            .await
+                            .into_job_handler_result()
+                    })
+                }
+            }
+
+            /// 业务作用：构造静态任务定义与 Handler，使宏声明进入核心 plan 的同一冻结门禁。
+            ///
+            /// 参数说明：`application` 仅在业务签名声明 Application 时注入。
+            ///
+            /// 返回：定义合法时返回类型擦除登记；合同字段非法时拒绝 Prepare。
+            fn __nasa_redis_job_factory(
+                application: #runtime::Application,
+            ) -> #runtime::ApplicationResult<(
+                #runtime::__private::nadis::job::JobDefinition,
+                ::std::sync::Arc<dyn #runtime::__private::nadis::job::JobHandler>,
+            )> {
+                let mut builder = #runtime::__private::nadis::job::JobDefinition::builder(#name);
+                #(#builder_steps)*
+                let definition = builder.build().map_err(|error| {
+                    #runtime::ApplicationError::with_source(
+                        #runtime::ComponentId::RedisJob,
+                        #runtime::ApplicationPhase::Prepare,
+                        "invalid #[redis_job] definition",
+                        error,
+                    )
+                })?;
+                let handler: ::std::sync::Arc<dyn #runtime::__private::nadis::job::JobHandler> =
+                    ::std::sync::Arc::new(#handler_value);
+                ::std::result::Result::Ok((definition, handler))
+            }
+
+            #[#runtime::__private::linkme::distributed_slice(#runtime::COLLECTED_REDIS_JOBS)]
+            #[linkme(crate = #runtime::__private::linkme)]
+            static __NASA_REDIS_JOB_DESCRIPTOR: #runtime::RedisJobDescriptor =
+                #runtime::RedisJobDescriptor::__new(
+                    __nasa_redis_job_factory,
+                    concat!(module_path!(), ":", file!(), ":", line!()),
+                );
+        };
+    })
+}
+
+/// 业务作用：只按无歧义的框架类型路径识别注入，其余唯一类型作为业务 payload。
+///
+/// 参数说明：`ty` 为业务函数的拥有式参数类型。
+///
+/// 返回：Application、JobContext 或 payload 三类之一。
+fn classify_redis_job_parameter(ty: &Type) -> RedisJobParameter {
+    if let Type::Path(path) = ty {
+        let segments: Vec<String> = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        let unqualified = segments.len() == 1;
+        if let Some(name) = segments.last() {
+            if name == "Application"
+                && (unqualified
+                    || matches!(segments.as_slice(), [root, value] if matches!(root.as_str(), "nasa" | "napp") && value == "Application"))
+            {
+                return RedisJobParameter::Application;
+            }
+            let framework_job_path = segments.len() >= 2
+                && segments
+                    .get(segments.len() - 2)
+                    .is_some_and(|segment| segment == "job");
+            if matches!(name.as_str(), "JobContext" | "JobExecution")
+                && (unqualified || framework_job_path)
+            {
+                return RedisJobParameter::Context;
+            }
+        }
+    }
+    RedisJobParameter::Payload(Box::new(ty.clone()))
+}
+
+/// 业务作用：解析 RedisJob 属性键并拒绝重复、未知或非字面量输入。
+///
+/// 参数说明：`metas` 为属性内按源码顺序出现的项。
+///
+/// 返回：完整宏期参数；合同非法时返回编译错误。
+fn parse_redis_job_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<RedisJobArgs> {
+    let mut result = RedisJobArgs::default();
+    let mut seen = HashSet::new();
+    for meta in metas {
+        let Meta::NameValue(value) = meta else {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "redis_job attributes must use `key = value`",
+            ));
+        };
+        let key = value
+            .path
+            .get_ident()
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &value.path,
+                    "redis_job attribute key must be an identifier",
+                )
+            })?;
+        if !seen.insert(key.clone()) {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "redis_job attribute key is repeated",
+            ));
+        }
+        macro_rules! string_field {
+            ($field:ident) => {{
+                result.$field = Some(parse_job_string(&value.value, &key)?);
+            }};
+        }
+        macro_rules! integer_field {
+            ($field:ident) => {{
+                result.$field = Some(parse_job_integer(&value.value, &key)?);
+            }};
+        }
+        match key.as_str() {
+            "name" => string_field!(name),
+            "qualifier" => string_field!(qualifier),
+            "worker" => string_field!(worker),
+            "trigger" => string_field!(trigger),
+            "cron" => string_field!(cron),
+            "zone" => string_field!(zone),
+            "fixed_rate_ms" => integer_field!(fixed_rate_ms),
+            "fixed_delay_ms" => integer_field!(fixed_delay_ms),
+            "concurrency" => string_field!(concurrency),
+            "misfire" => string_field!(misfire),
+            "timeout_ms" => integer_field!(timeout_ms),
+            "max_attempts" => integer_field!(max_attempts),
+            "retry_delay_ms" => integer_field!(retry_delay_ms),
+            "contract_revision" => integer_field!(contract_revision),
+            "schema" => string_field!(schema),
+            "fanout_receipt_timeout_ms" => integer_field!(fanout_receipt_timeout_ms),
+            "fanout_receipt_max_retries" => integer_field!(fanout_receipt_max_retries),
+            "fanout_failure_policy" => string_field!(fanout_failure_policy),
+            "definition_revision" => integer_field!(definition_revision),
+            "codecs" => {
+                let Expr::Array(array) = &value.value else {
+                    return Err(syn::Error::new_spanned(
+                        &value.value,
+                        "redis_job codecs must be an array of strings",
+                    ));
+                };
+                result.codecs = Some(
+                    array
+                        .elems
+                        .iter()
+                        .map(|item| parse_job_string(item, "codecs"))
+                        .collect::<syn::Result<Vec<_>>>()?,
+                );
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &value.path,
+                    format!("unknown redis_job attribute `{key}`"),
+                ))
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// 业务作用：在生成 descriptor 前拒绝字面量可确定的 schedule、触发类型、codec 与正数边界冲突。
+///
+/// 参数说明：`args` 为已经完成类型解析的宏属性。
+///
+/// 返回：静态合同自洽时成功；需要运行期 Cron/名称语义的部分仍交核心 builder 复验。
+fn validate_redis_job_args(args: &RedisJobArgs) -> syn::Result<()> {
+    if args.codecs.as_ref().is_some_and(Vec::is_empty) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "redis_job codecs must not be empty",
+        ));
+    }
+    let schedule_count = usize::from(args.cron.is_some())
+        + usize::from(args.fixed_rate_ms.is_some())
+        + usize::from(args.fixed_delay_ms.is_some());
+    if schedule_count > 1 {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "redis_job cron, fixed_rate_ms, and fixed_delay_ms are mutually exclusive",
+        ));
+    }
+    if args
+        .trigger
+        .as_ref()
+        .is_some_and(|trigger| trigger.value().eq_ignore_ascii_case("fanout_only"))
+        && schedule_count != 0
+    {
+        return Err(syn::Error::new_spanned(
+            args.trigger.as_ref().expect("trigger 已确认存在"),
+            "redis_job fanout_only must not declare a schedule",
+        ));
+    }
+    for (field, value) in [
+        ("fixed_rate_ms", args.fixed_rate_ms.as_ref()),
+        ("fixed_delay_ms", args.fixed_delay_ms.as_ref()),
+        ("timeout_ms", args.timeout_ms.as_ref()),
+        ("max_attempts", args.max_attempts.as_ref()),
+        ("retry_delay_ms", args.retry_delay_ms.as_ref()),
+        ("contract_revision", args.contract_revision.as_ref()),
+        (
+            "fanout_receipt_timeout_ms",
+            args.fanout_receipt_timeout_ms.as_ref(),
+        ),
+        ("definition_revision", args.definition_revision.as_ref()),
+    ] {
+        if value.is_some_and(|literal| matches!(literal.base10_parse::<u64>(), Ok(0))) {
+            return Err(syn::Error::new_spanned(
+                value.expect("value 已确认存在"),
+                format!("redis_job {field} must be greater than zero"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 业务作用：读取 RedisJob 字符串字面量。
+///
+/// 参数说明：`expression` 为属性值，`field` 为诊断字段名。
+///
+/// 返回：字符串字面量；其它表达式返回编译错误。
+fn parse_job_string(expression: &Expr, field: &str) -> syn::Result<LitStr> {
+    match expression {
+        Expr::Lit(value) => match &value.lit {
+            Lit::Str(literal) => Ok(literal.clone()),
+            _ => Err(syn::Error::new_spanned(
+                expression,
+                format!("redis_job {field} must be a string literal"),
+            )),
+        },
+        _ => Err(syn::Error::new_spanned(
+            expression,
+            format!("redis_job {field} must be a string literal"),
+        )),
+    }
+}
+
+/// 业务作用：读取 RedisJob 非负整数字面量并保留原始跨度用于生成代码。
+///
+/// 参数说明：`expression` 为属性值，`field` 为诊断字段名。
+///
+/// 返回：整数字面量；负数或其它表达式返回编译错误。
+fn parse_job_integer(expression: &Expr, field: &str) -> syn::Result<syn::LitInt> {
+    match expression {
+        Expr::Lit(value) => match &value.lit {
+            Lit::Int(literal) => Ok(literal.clone()),
+            _ => Err(syn::Error::new_spanned(
+                expression,
+                format!("redis_job {field} must be a non-negative integer literal"),
+            )),
+        },
+        _ => Err(syn::Error::new_spanned(
+            expression,
+            format!("redis_job {field} must be a non-negative integer literal"),
+        )),
+    }
+}
+
+/// 业务作用：把已解析属性转换为 JobDefinitionBuilder 调用并校验封闭枚举文本。
+///
+/// 参数说明：`args` 为宏期完整属性。
+///
+/// 返回：按稳定顺序排列的 builder 语句；未知枚举值返回编译错误。
+fn redis_job_builder_steps(
+    args: &RedisJobArgs,
+    runtime: &TokenStream2,
+) -> syn::Result<Vec<TokenStream2>> {
+    let mut steps = Vec::new();
+    macro_rules! scalar_step {
+        ($field:ident, $method:ident) => { if let Some(value) = &args.$field { steps.push(quote!(builder = builder.$method(#value);)); } };
+    }
+    scalar_step!(qualifier, qualifier);
+    scalar_step!(worker, worker_name);
+    if let Some(trigger) = &args.trigger {
+        match trigger.value().to_ascii_lowercase().as_str() {
+            "scheduled" => {}
+            "fanout_only" => steps.push(quote!(builder = builder.fanout_only();)),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    trigger,
+                    "redis_job trigger must be `scheduled` or `fanout_only`",
+                ))
+            }
+        }
+    }
+    if let Some(cron) = &args.cron {
+        let zone = args
+            .zone
+            .clone()
+            .unwrap_or_else(|| LitStr::new("UTC", cron.span()));
+        steps.push(quote! {
+            builder = builder.cron(#cron, #zone).map_err(|error| {
+                #runtime::ApplicationError::with_source(
+                    #runtime::ComponentId::RedisJob,
+                    #runtime::ApplicationPhase::Prepare,
+                    "invalid #[redis_job] cron declaration",
+                    error,
+                )
+            })?;
+        });
+    } else if let Some(zone) = &args.zone {
+        return Err(syn::Error::new_spanned(
+            zone,
+            "redis_job zone requires cron",
+        ));
+    }
+    scalar_step!(fixed_rate_ms, fixed_rate_ms);
+    scalar_step!(fixed_delay_ms, fixed_delay_ms);
+    if let Some(value) = &args.concurrency {
+        let variant = match value.value().to_ascii_lowercase().as_str() {
+            "serial_queue" => quote!(#runtime::__private::nadis::job::JobConcurrency::SerialQueue),
+            "discard_if_running" => {
+                quote!(#runtime::__private::nadis::job::JobConcurrency::DiscardIfRunning)
+            }
+            "parallel" => quote!(#runtime::__private::nadis::job::JobConcurrency::Parallel),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    value,
+                    "redis_job concurrency is unknown",
+                ))
+            }
+        };
+        steps.push(quote!(builder = builder.concurrency(#variant);));
+    }
+    if let Some(value) = &args.misfire {
+        let variant = match value.value().to_ascii_lowercase().as_str() {
+            "do_nothing" => quote!(#runtime::__private::nadis::job::JobMisfire::DoNothing),
+            "fire_once_now" => quote!(#runtime::__private::nadis::job::JobMisfire::FireOnceNow),
+            "catch_up" => quote!(#runtime::__private::nadis::job::JobMisfire::CatchUp),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    value,
+                    "redis_job misfire is unknown",
+                ))
+            }
+        };
+        steps.push(quote!(builder = builder.misfire(#variant);));
+    }
+    scalar_step!(timeout_ms, timeout_ms);
+    scalar_step!(max_attempts, max_attempts);
+    scalar_step!(retry_delay_ms, retry_delay_ms);
+    scalar_step!(contract_revision, contract_revision);
+    scalar_step!(schema, schema_id);
+    if let Some(codecs) = &args.codecs {
+        let mut variants = Vec::new();
+        for codec in codecs {
+            variants.push(match codec.value().to_ascii_lowercase().as_str() {
+                "json" => quote!(#runtime::__private::nadis::job::JobWireCodec::Json),
+                "protobuf" => quote!(#runtime::__private::nadis::job::JobWireCodec::Protobuf),
+                "raw" => quote!(#runtime::__private::nadis::job::JobWireCodec::Raw),
+                _ => return Err(syn::Error::new_spanned(codec, "redis_job codec is unknown")),
+            });
+        }
+        steps.push(quote!(builder = builder.codecs([#(#variants),*]);));
+    }
+    if args.fanout_receipt_timeout_ms.is_some() || args.fanout_receipt_max_retries.is_some() {
+        let timeout = args
+            .fanout_receipt_timeout_ms
+            .clone()
+            .unwrap_or_else(|| syn::LitInt::new("2000", proc_macro2::Span::call_site()));
+        let retries = args
+            .fanout_receipt_max_retries
+            .clone()
+            .unwrap_or_else(|| syn::LitInt::new("3", proc_macro2::Span::call_site()));
+        steps.push(quote!(builder = builder.fanout_receipt(#timeout, #retries);));
+    }
+    if let Some(value) = &args.fanout_failure_policy {
+        let variant = match value.value().to_ascii_lowercase().as_str() {
+            "reassign_on_failure" => {
+                quote!(#runtime::__private::nadis::job::JobFanoutFailurePolicy::ReassignOnFailure)
+            }
+            "strict_snapshot" => {
+                quote!(#runtime::__private::nadis::job::JobFanoutFailurePolicy::StrictSnapshot)
+            }
+            "best_effort" => {
+                quote!(#runtime::__private::nadis::job::JobFanoutFailurePolicy::BestEffort)
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    value,
+                    "redis_job fanout_failure_policy is unknown",
+                ))
+            }
+        };
+        steps.push(quote!(builder = builder.fanout_failure_policy(#variant);));
+    }
+    scalar_step!(definition_revision, definition_revision);
+    Ok(steps)
 }
 
 /// initializer 属性完成字面量校验后的内部参数。
@@ -911,7 +1593,7 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
 ///
 /// 该数组既是合法组件白名单，也是唯一的规范启动顺序：配置先于资源，DB 先于 Saga/Outbox，
 /// transport 先于业务入口。新增组件时必须按依赖与反向停机关系插入。
-const CANONICAL_COMPONENT_ORDER: [&str; 16] = [
+const CANONICAL_COMPONENT_ORDER: [&str; 17] = [
     "log",
     "nacos-config",
     "telemetry",
@@ -922,6 +1604,7 @@ const CANONICAL_COMPONENT_ORDER: [&str; 16] = [
     "saga",
     "kafka",
     "outbox",
+    "redis-job",
     "grpc",
     "auth",
     "web",
@@ -967,6 +1650,10 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
     if seen.contains("outbox") && seen.insert("db".to_string()) {
         names.push("db".to_string());
     }
+    // RedisJob 的全部控制面都绑定受管 Redis source；显式声明上层能力即可形成完整组件图。
+    if seen.contains("redis-job") && seen.insert("redis".to_string()) {
+        names.push("redis".to_string());
+    }
     // 顺序无关:按规范秩排序,业务书写顺序不再影响启动/停机顺序。
     names.sort_by_key(|name| {
         CANONICAL_COMPONENT_ORDER
@@ -989,6 +1676,7 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
         "nacos-config" => "NacosConfig",
         "db" => "Db",
         "redis" => "Redis",
+        "redis-job" => "RedisJob",
         "telemetry" => "Telemetry",
         "cache" => "Cache",
         "partition" => "Partition",
@@ -1021,6 +1709,7 @@ fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
     match name {
         "log" | "db" | "redis" | "telemetry" | "cache" | "partition" | "grpc" | "saga"
         | "kafka" | "outbox" | "auth" | "web" | "ws" | "scheduling" => Ok(format_ident!("{name}")),
+        "redis-job" => Ok(format_ident!("redis_job")),
         "nacos-config" => Ok(format_ident!("nacos_config")),
         "nacos-discovery" => Ok(format_ident!("nacos_discovery")),
         _ => Err(syn::Error::new(

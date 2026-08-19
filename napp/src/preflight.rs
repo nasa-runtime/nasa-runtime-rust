@@ -108,27 +108,31 @@ impl Preflight {
                 )
             })?;
         validate_settings(&settings)?;
-        let shutdown_timeout_explicit = pinned_application
-            .as_ref()
-            .and_then(Value::as_object)
-            .is_some_and(|section| section.contains_key("shutdown_timeout_ms"));
-        let mut shutdown_timeout = Duration::from_millis(settings.shutdown_timeout_ms);
+        let shutdown_timeout = Duration::from_millis(settings.shutdown_timeout_ms);
         #[cfg(feature = "grpc")]
-        if spec.components().contains(&ComponentId::Grpc) {
-            let minimum = crate::grpc::minimum_shutdown_timeout(
-                &tree,
-                spec.components().contains(&ComponentId::NacosDiscovery),
-            )?;
-            if shutdown_timeout_explicit && shutdown_timeout < minimum {
-                return Err(settings_error(format!(
-                    "application.shutdown_timeout_ms is below the declared component shutdown requirement of {} ms",
-                    minimum.as_millis()
-                )));
+        let shutdown_timeout = {
+            let shutdown_timeout_explicit = pinned_application
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|section| section.contains_key("shutdown_timeout_ms"));
+            let mut resolved = shutdown_timeout;
+            if spec.components().contains(&ComponentId::Grpc) {
+                let minimum = crate::grpc::minimum_shutdown_timeout(
+                    &tree,
+                    spec.components().contains(&ComponentId::NacosDiscovery),
+                )?;
+                if shutdown_timeout_explicit && resolved < minimum {
+                    return Err(settings_error(format!(
+                        "application.shutdown_timeout_ms is below the declared component shutdown requirement of {} ms",
+                        minimum.as_millis()
+                    )));
+                }
+                if !shutdown_timeout_explicit {
+                    resolved = resolved.max(minimum);
+                }
             }
-            if !shutdown_timeout_explicit {
-                shutdown_timeout = shutdown_timeout.max(minimum);
-            }
-        }
+            resolved
+        };
 
         let mode = match settings.mode {
             ApplicationModeSetting::Auto => spec.resolve_auto_mode(),

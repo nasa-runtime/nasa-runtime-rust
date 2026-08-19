@@ -67,7 +67,7 @@ async fn save_order() -> anyhow::Result<()> {
 ## 应用入口
 
 `application` feature 提供声明式入口。组件字符串可以任意书写；宏会拒绝未知项与重复项，再按唯一规范顺序
-`log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> grpc -> auth -> web -> ws ->
+`log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job -> grpc -> auth -> web -> ws ->
 nacos-discovery -> scheduling` 启动，并严格反序停机。
 
 ```rust
@@ -86,6 +86,39 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `#[nasa::application("outbox")]` 可脱离 Saga 独立运行，并隐式纳入 DB。Inbox 是事务内原语，没有独立
 组件字符串。Kafka、Redis Streams 或 HTTP 等 transport 不由 Saga 猜测，业务必须按发布端和消费端的
 真实实现显式选择。显式同时写出 `"saga"`、`"db"` 与 `"outbox"` 也合法，并与只声明 `"saga"` 等价。
+
+## RedisJob 门面
+
+启用 `redis-job` 后，业务从 `nasa::redis::job` 使用定义、上下文、结果、控制和查询类型，并用
+`#[nasa::redis_job]` 静态登记 Handler。`#[nasa::application("redis-job")]` 会隐式纳入 Redis transport；
+宏 descriptor 与 UserHook 中通过 `app.configure_redis_jobs(plan)` 提交的动态定义进入同一冻结计划，
+无需业务拼接 Lua、管理扫描器、续租、Fanout 订阅或停机任务。
+
+Fanout 遇到本地槽位不足时会在有界容量窗口内等待，超窗优先切换兼容执行器，无候选时继续保留当前 assignment；容量迁移次数可通过 shard 的 `capacityRouteTotal` 审计。该字段是持久状态，进程指标不跨重启累计。
+
+Handler 可使用 `JobContext::parameter::<T>()` 读取复杂 JSON 参数，`T` 支持集合、映射和嵌套结构；框架会先执行重复键、深度和节点数门禁。Protobuf/RAW 参数通过 `payload()` 按定义 codec 解码，不根据内容猜测类型。
+
+```rust
+use nasa::redis::job::{JobContext, JobResult};
+
+#[nasa::redis_job(name = "ledger-close", qualifier = "primary", fixed_rate_ms = 60_000)]
+async fn ledger_close(ctx: JobContext) -> anyhow::Result<JobResult> {
+    ctx.checkpoint()?;
+    Ok(JobResult::success())
+}
+
+#[nasa::application("redis-job")]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
+    Ok(())
+}
+```
+
+Application Ready 后，业务控制面通过 `app.redis_job_control(qualifier)` 和
+`app.redis_job_query(qualifier)` 显式选 source；未知或已停止准入的 source 返回结构化错误，不会回退到
+`primary`。取得的门面不拥有 shutdown 权限，停机仍由 Application 唯一编排。多 source 配置、独立
+`RedisJobPlan` 与完整运行边界见
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redisjob-受管模式) 和
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob-分布式任务运行时)。
 
 ## 业务初始化屏障
 
@@ -173,6 +206,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `audit` | `nasa::audit` | 与业务写同事务的 Outbox 审计 |
 | `openapi` | `nasa::openapi` | 确定性 OpenAPI 3.1 合同 |
 | `redis` | `nasa::redis` | Redis 命令、pipeline、stream、lock |
+| `redis-job` | `nasa::redis::job`、`nasa::redis_job` | 多 source RedisJob 状态机、`#[redis_job]` 与受管生命周期；蕴含 `application` 和 `redis` |
 | `redis-search` / `redis-derive` | `nasa::redis` | 搜索封装和文档派生 |
 | `cache` | `nasa::cache` | 两级缓存、失效广播和缓存宏 |
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |

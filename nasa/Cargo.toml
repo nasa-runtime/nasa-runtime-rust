@@ -7,7 +7,7 @@ name = "nasa"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed lifecycle, durable Saga orchestration, gRPC, messaging, and web services"
+description = "NASA Rust facade for lifecycle, RedisJob, durable Saga, gRPC, messaging, and web services"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -102,6 +102,8 @@ kafka-zstd = ["kafka", "kafka_impl/zstd"]
 
 # 弱依赖桥：同时启用 application 时，把 napp 的 redis 组件编入。
 redis = ["dep:redis_impl", "application_impl?/redis"]
+# RedisJob 同时需要受管应用、Redis 多实例资源、核心状态机与属性声明入口。
+redis-job = ["application", "redis", "redis_impl/job", "application_impl?/redis-job"]
 # rate-limit：跨副本分布式业务配额，由 RateLimitProvider 与 nadis Redis 后端实现并经 nasa::application 暴露。
 rate-limit = ["redis", "application_impl?/rate-limit"]
 # telemetry：OpenTelemetry traces 组件。启用后可声明 #[application("telemetry")]；
@@ -187,6 +189,7 @@ image = ["dep:image_impl"]
 # 仅用于完整能力构建、示例或确实需要所有能力的服务；不要设为默认。
 full = [
     "application",
+    "redis-job",
     "hystrix",
     "grafana",
     "cache",

@@ -123,6 +123,7 @@ fn build_component(
         ComponentId::NacosConfig => build_nacos_config_component(spec, pinned_application),
         ComponentId::Db => build_db_component(),
         ComponentId::Redis => build_redis_component(),
+        ComponentId::RedisJob => build_redis_job_component(),
         ComponentId::Telemetry => build_telemetry_component(),
         ComponentId::Partition => build_partition_component(),
         ComponentId::Grpc => build_grpc_component(),
@@ -346,6 +347,22 @@ fn build_redis_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
     #[cfg(not(feature = "redis"))]
     {
         Err(feature_missing_error(ComponentId::Redis, "redis"))
+    }
+}
+
+/// 业务作用：构造独立 RedisJob 组件；能力未编入时定向提示 `redis-job` feature。
+///
+/// 参数说明: 无。
+///
+/// 返回：已编入时返回组件；否则在任何 Job 副作用前返回 feature 错误。
+fn build_redis_job_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "redis-job")]
+    {
+        Ok(Box::new(crate::redis_job::RedisJobComponent::new()))
+    }
+    #[cfg(not(feature = "redis-job"))]
+    {
+        Err(feature_missing_error(ComponentId::RedisJob, "redis-job"))
     }
 }
 

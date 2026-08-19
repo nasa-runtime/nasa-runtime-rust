@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+#[cfg(feature = "job")]
+use redis::IntoConnectionInfo;
 
 use crate::config::{CompatibilityProfile, RedisConfig};
 use crate::error::{NasaRedisError, Result};
@@ -279,6 +281,16 @@ pub struct RedisClient {
     /// **pipeline 专用 lane**:独立多路复用连接,与 direct/control/lock 隔离,
     /// 防大批量 pipeline 头阻塞共享连接。**惰性**——首次 pipeline 才建连(`pipeline.dedicated_conn=true` 时)。
     pipe_cell: tokio::sync::OnceCell<Conn>,
+    /// Job 状态脚本专用 lane：与普通命令、Pipeline 和阻塞读取隔离，避免业务流量阻塞租约与完成提交。
+    #[cfg(feature = "job")]
+    job_control_cell: tokio::sync::OnceCell<Conn>,
+    /// 当前 Job source generation 的本地指标弱引用；运行时换代可替换，客户端不会反向延长其生命周期。
+    #[cfg(feature = "job")]
+    job_metrics: RwLock<Option<std::sync::Weak<crate::job::metrics::JobMetrics>>>,
+    /// nonce 幂等计数运行时:惰性构造,只用基础命令的应用不承担布局解析与能力探测成本;
+    /// 首次 `*_idempotent` 调用才解析共享 marker(见连接角色表的幂等计数零成本不变量)。
+    pub(crate) idempotent:
+        std::sync::OnceLock<crate::idempotent::runtime::IdempotentCounterRuntime>,
 }
 
 /// 业务作用：给建连 future 套整体 deadline(`ms=0` 不限)。超时返回 IoError(Redis 不可达
@@ -471,6 +483,11 @@ impl RedisClient {
             raw,
             is_cluster,
             pipe_cell: tokio::sync::OnceCell::new(),
+            #[cfg(feature = "job")]
+            job_control_cell: tokio::sync::OnceCell::new(),
+            #[cfg(feature = "job")]
+            job_metrics: RwLock::new(None),
+            idempotent: std::sync::OnceLock::new(),
         }))
     }
 
@@ -482,6 +499,15 @@ impl RedisClient {
     /// 业务作用：返回当前连接使用的兼容性 profile。
     pub fn profile(&self) -> CompatibilityProfile {
         self.cfg.profile
+    }
+
+    /// 业务作用：返回语言无关的逻辑数据源标识；持久键、任务身份和指标维度均使用该值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：启动期已规范化并冻结的 source id，默认值为 `primary`。
+    pub fn qualifier(&self) -> &str {
+        &self.cfg.qualifier
     }
 
     /// 业务作用：返回当前客户端的冻结配置。
@@ -507,6 +533,86 @@ impl RedisClient {
             .get_or_try_init(|| self.build_transport("pipeline 专用"))
             .await?;
         Ok(c.clone())
+    }
+
+    /// 业务作用：为单个 Job source 建立启用 RESP3 Push 的独占 Pub/Sub lane，通知断线与重订不影响控制命令。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：支持普通或 Sharded 订阅的连接与 Push 接收端；握手或拓扑建立失败时拒绝 source 启动。
+    #[cfg(feature = "job")]
+    pub(crate) async fn job_pubsub_conn(
+        &self,
+        push_sender: Arc<dyn redis::aio::AsyncPushSender>,
+    ) -> Result<Conn> {
+        let timeout_ms = self.cfg.command.response_timeout_ms;
+        let conn = if self.is_cluster {
+            let mut builder = redis::cluster::ClusterClient::builder(vec![self.cfg.url.as_str()])
+                .use_protocol(redis::ProtocolVersion::RESP3)
+                .push_sender(push_sender.clone());
+            if timeout_ms > 0 {
+                let timeout = Duration::from_millis(timeout_ms);
+                builder = builder
+                    .response_timeout(timeout)
+                    .connection_timeout(timeout);
+            }
+            let client = builder.build().map_err(NasaRedisError::Redis)?;
+            Conn::Cluster(
+                await_with_deadline(
+                    client.get_async_connection(),
+                    timeout_ms,
+                    "Job RESP3 Cluster lane 建连",
+                )
+                .await
+                .map_err(NasaRedisError::Redis)?,
+            )
+        } else {
+            let mut info = self
+                .cfg
+                .url
+                .as_str()
+                .into_connection_info()
+                .map_err(NasaRedisError::Redis)?;
+            let redis_settings = info
+                .redis_settings()
+                .clone()
+                .set_protocol(redis::ProtocolVersion::RESP3);
+            info = info.set_redis_settings(redis_settings);
+            let client = redis::Client::open(info).map_err(NasaRedisError::Redis)?;
+            let mut manager = redis::aio::ConnectionManagerConfig::new()
+                .set_push_sender(push_sender)
+                .set_automatic_resubscription();
+            if timeout_ms > 0 {
+                let timeout = Duration::from_millis(timeout_ms);
+                manager = manager
+                    .set_response_timeout(Some(timeout))
+                    .set_connection_timeout(Some(timeout));
+            }
+            Conn::Single(
+                await_with_deadline(
+                    ConnectionManager::new_with_config(client, manager),
+                    timeout_ms,
+                    "Job RESP3 lane 建连",
+                )
+                .await
+                .map_err(NasaRedisError::Redis)?,
+            )
+        };
+        Ok(conn)
+    }
+
+    /// 业务作用：返回 Job 状态脚本独占的惰性连接，隔离租约、领取和完成提交与业务命令流量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：首次调用建立独立 transport，后续复用其可克隆句柄；建连失败返回脱敏后的连接错误。
+    #[cfg(feature = "job")]
+    pub(crate) async fn job_control_conn(&self) -> Result<Conn> {
+        let conn = self
+            .job_control_cell
+            .get_or_try_init(|| self.build_transport("Job control lane"))
+            .await?;
+        Ok(conn.clone())
     }
 
     /// 业务作用：新建一条独立 transport(与 connect() 的主连接同款建法;供 pipeline lane 惰性建连)。
@@ -561,6 +667,37 @@ impl RedisClient {
         self.build_transport(what).await
     }
 
+    /// 业务作用：把客户端状态脚本事件绑定到当前 source generation 的固定指标容器。
+    ///
+    /// 参数说明：`metrics` 必须与本客户端对应的 canonical source 一致。
+    ///
+    /// 返回：无；新 generation 原子替换旧弱引用，客户端不拥有运行时生命周期。
+    #[cfg(feature = "job")]
+    pub(crate) fn attach_job_metrics(&self, metrics: &Arc<crate::job::metrics::JobMetrics>) {
+        *self
+            .job_metrics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(metrics));
+    }
+
+    /// 业务作用：记录控制面因目标 Redis 未缓存脚本而执行整文本回退，供 source 观测脚本缓存换代。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；运行时尚未绑定或已经结束时不建立游离指标。
+    #[cfg(feature = "job")]
+    pub(crate) fn record_job_script_reload(&self) {
+        let metrics = self
+            .job_metrics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(metrics) = metrics {
+            metrics.add("redis_job_script_reload_total", 1);
+        }
+    }
+
     /// 业务作用：受控原始入口:不暴露 ConnectionManager 等底层类型,
     /// 调用方组装 redis::Cmd,本方法执行——逃生舱,非常规路径。
     /// 同样受 `command.timeout_ms` 约束，确保单命令逃生路径不会无限等待。
@@ -613,6 +750,12 @@ impl RedisRegistry {
     /// - `qualifier`: 客户端在注册表中的唯一业务名。
     /// - `client`: 要注册的 Redis 客户端共享句柄。
     pub fn register(&self, qualifier: &str, client: Arc<RedisClient>) -> Result<()> {
+        if qualifier != client.qualifier() {
+            return Err(NasaRedisError::Config(format!(
+                "注册表 key {qualifier} 与 RedisClient qualifier {} 不一致",
+                client.qualifier()
+            )));
+        }
         let mut m = self.map.write().unwrap_or_else(|e| e.into_inner());
         if m.contains_key(qualifier) {
             return Err(NasaRedisError::Config(format!(

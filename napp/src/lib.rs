@@ -178,6 +178,10 @@ pub use readiness::{
 
 #[cfg(feature = "redis")]
 mod redis;
+#[cfg(feature = "redis-job")]
+mod redis_job;
+#[cfg(feature = "redis-job")]
+pub use redis_job::{RedisJobDescriptor, COLLECTED_REDIS_JOBS};
 #[cfg(any(feature = "log", feature = "nacos-config"))]
 mod reload;
 mod report;
@@ -202,7 +206,7 @@ mod ws;
 
 #[cfg(feature = "ws")]
 pub use application::WsCustomization;
-pub use application::{Application, ApplicationInfo};
+pub use application::{Application, ApplicationInfo, WeakApplication};
 #[cfg(feature = "web")]
 pub use application::{MappingTransform, RouterTransform};
 pub use capabilities::ComponentLifecycleState;
@@ -291,6 +295,13 @@ pub mod components {
     /// Redis 组件的编译期能力探测点。
     #[cfg(feature = "redis")]
     pub mod redis {
+        /// 组件能力已编入时可被属性展开代码引用的零大小标记。
+        pub const FEATURE_CHECK: () = ();
+    }
+
+    /// RedisJob 长生命周期组件的编译期能力探测点。
+    #[cfg(feature = "redis-job")]
+    pub mod redis_job {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();
     }
@@ -387,6 +398,12 @@ pub mod __private {
     #[cfg(feature = "web")]
     pub use axum;
     pub use linkme;
+    #[cfg(feature = "redis-job")]
+    pub use nadis;
     #[cfg(feature = "web")]
     pub use naweb;
+    #[cfg(feature = "redis-job")]
+    pub use prost;
+    #[cfg(feature = "redis-job")]
+    pub use serde_json;
 }

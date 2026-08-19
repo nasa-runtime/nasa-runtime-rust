@@ -1,7 +1,7 @@
 # nasa-runtime-rust
 
 NASA Rust 共享库是一组按特性组合的基础设施包。
-**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、WebSocket、配置、服务发现等特性。
+**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、RedisJob、WebSocket、配置、服务发现等特性。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
@@ -45,6 +45,10 @@ shutdown，在 initializer 全部完成前不会绑定端口。各组件 README 
 完整合同。
 
 ## 使用
+
+### RedisJob Fanout 背压与观测
+
+启用 `redis-job` 后，运行时按“计划冻结 → 能力快照 → 调度投递 → receipt/租约 → Handler 执行 → CAS 对账”的路径工作。Fanout 在目标节点持久确认接收后再申请本地执行槽。槽位不足时使用有界容量窗口和独立容量路由预算：超窗优先切换兼容执行器，无候选时继续保留当前 assignment，不把健康满载节点判为失联。shard 的 `capacityRouteTotal` 持久记录历史容量迁移次数，`capacityRouteCount` 只表示当前路由预算；实时指标用于告警，不跨进程重启累计。`JobContext::parameter::<T>()` 支持集合、映射和嵌套 JSON 参数，并执行结构安全门禁；非 JSON 参数由业务按声明 codec 从 `payload()` 解码。完整配置、边界和查询方式见 [nadis README](nadis/README.md#redisjob)。
 
 ### 推荐入口
 
@@ -109,7 +113,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、`kafka`、
-`outbox`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
+`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
 启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。`saga` 会隐式加入 `db` 与
 `outbox`，业务入口无需重复声明这两个组件；为兼容显式依赖，三者同时写出也合法且语义相同。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
@@ -358,7 +362,7 @@ scheduling:             # scheduling 组件
 | [nasaga-mysql](nasaga-mysql/README.md) | runtime 内部 store | Saga journal、CAS、timer fencing、参与方 gate 与 migration | 复用 `natx` MySQL pool |
 | [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` / `saga-grpc` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
-| [nadis](nadis/README.md) | `redis` | Redis 单点或集群、流水线、数据流、锁 | `redis.*` |
+| [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、流水线、数据流、锁与分布式任务 | `redis.*`、`redis.job.*` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
 | [cacheable](cacheable/README.md) | `cache` | L1/L2 缓存、刷新保护、失效广播 | `cache.*`、`redis.*` |
 | [nacache-macro](nacache-macro/README.md) | `cache` | `#[cached]`、`#[cache_invalidate]` | 由 `cacheable` 运行时读取 |

@@ -57,6 +57,8 @@ pub mod application {
 
 #[cfg(feature = "application")]
 pub use application_impl::Application;
+#[cfg(feature = "redis-job")]
+pub use application_macro::redis_job;
 #[cfg(feature = "application")]
 pub use application_macro::{application, initializer};
 

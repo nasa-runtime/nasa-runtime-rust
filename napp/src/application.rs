@@ -2,7 +2,7 @@ use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex as StdMutex, OnceLock,
+        Arc, Mutex as StdMutex, OnceLock, Weak,
     },
     time::{Instant, SystemTime},
 };
@@ -193,6 +193,9 @@ pub(crate) struct ApplicationInner {
     /// push/take,不跨 await 持有。
     #[cfg(feature = "db")]
     migrations: StdMutex<Option<Vec<MigrationRegistration>>>,
+    /// UserHook 移交、Prepare 消费的唯一 RedisJob 核心计划。
+    #[cfg(feature = "redis-job")]
+    redis_job_runtime: crate::redis_job::RedisJobRuntimeState,
     /// 遥测组件 Start 发布的有界 span 导出器;span 生产者(如 Web trace 中间件)据此非阻塞入队。
     #[cfg(feature = "telemetry")]
     telemetry_exporter: OnceLock<std::sync::Arc<natelemetry::BoundedSpanExporter>>,
@@ -285,7 +288,35 @@ pub struct Application {
     pub(crate) inner: Arc<ApplicationInner>,
 }
 
+/// 不延长应用生命周期的弱句柄；长生命周期业务适配器用它避免形成 Application 资源所有权环。
+#[derive(Clone)]
+pub struct WeakApplication {
+    inner: Weak<ApplicationInner>,
+}
+
+impl WeakApplication {
+    /// 业务作用：仅在应用仍存活时取得本次调用所需的强句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：应用仍存活时返回共享上下文；生命周期已经结束时返回 `None`。
+    pub fn upgrade(&self) -> Option<Application> {
+        self.inner.upgrade().map(|inner| Application { inner })
+    }
+}
+
 impl Application {
+    /// 业务作用：创建不延长 Application 生命周期的弱句柄，供受管 Handler 和回调安全保存。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可在每次业务调用时尝试升级的弱句柄。
+    pub fn downgrade(&self) -> WeakApplication {
+        WeakApplication {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
     /// 业务作用：创建 Application、全部受管组件共享状态与唯一 TaskSupervisor 所有者。
     ///
     /// 参数说明：
@@ -317,6 +348,8 @@ impl Application {
                 readiness: Arc::new(crate::readiness::ReadinessRegistry::new()),
                 #[cfg(feature = "db")]
                 migrations: StdMutex::new(Some(Vec::new())),
+                #[cfg(feature = "redis-job")]
+                redis_job_runtime: crate::redis_job::RedisJobRuntimeState::new(),
                 #[cfg(feature = "telemetry")]
                 telemetry_exporter: OnceLock::new(),
                 #[cfg(feature = "telemetry")]
@@ -1349,6 +1382,110 @@ impl Application {
         self.inner.partition_runtime.configure(plan)
     }
 
+    /// 业务作用：在 Service UserHook 内把本进程唯一 RedisJob 计划移交给独立生命周期组件。
+    ///
+    /// 该入口只冻结定义与 Handler，不接触 Redis；组件在 Prepare 精确绑定 source 并执行外部门禁，
+    /// Ready 才开放消费，因此 Hook 或 initializer 失败不会留下脱管执行器。
+    ///
+    /// 参数说明：
+    /// - `plan`: 尚未 prepare 的拥有式核心计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `redis-job` 且首次提交时成功；重复或晚到提交返回阶段错误。
+    #[cfg(feature = "redis-job")]
+    pub fn configure_redis_jobs(&self, plan: nadis::job::RedisJobPlan) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("RedisJob plan configuration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::UserHook,
+                "RedisJob plans are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::RedisJob,
+            ApplicationPhase::UserHook,
+            "RedisJob plan configuration",
+        )?;
+        self.inner.redis_job_runtime.configure(plan)
+    }
+
+    /// 业务作用：取得 Ready 后发布的多 source RedisJob 业务门面，不取得后台任务或停机所有权。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件且应用处于 Ready 时返回门面；启动中、停机中或未声明时返回阶段错误。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job(&self) -> ApplicationResult<nadis::job::JobRuntimeHandle> {
+        self.ensure_component_declared(
+            ComponentId::RedisJob,
+            ApplicationPhase::Running,
+            "RedisJob capability access",
+        )?;
+        if self.state() != ApplicationState::Ready {
+            return Err(ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob capability is available only while the application is Ready",
+            ));
+        }
+        self.inner.redis_job_runtime.handle().ok_or_else(|| {
+            ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob runtime handle is not published",
+            )
+        })
+    }
+
+    /// 业务作用：显式选择 source 并取得结构化 RedisJob 控制 API，业务不接触 Lua 或裸返回码。
+    ///
+    /// 参数说明：`qualifier` 为冻结计划中的 canonical source id。
+    ///
+    /// 返回：应用 Ready 且 source 存在并接受准入时返回控制门面；否则保留结构化根因。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job_control(&self, qualifier: &str) -> ApplicationResult<nadis::job::JobControl> {
+        self.redis_job()?.control(qualifier).map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob control source is unavailable",
+                error,
+            )
+        })
+    }
+
+    /// 业务作用：显式选择 source 并取得 RedisJob 查询、健康与指标 API。
+    ///
+    /// 参数说明：`qualifier` 为冻结计划中的 canonical source id。
+    ///
+    /// 返回：应用 Ready 且 source 存在时返回查询门面；未知 source 保留结构化根因。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job_query(&self, qualifier: &str) -> ApplicationResult<nadis::job::JobQuery> {
+        self.redis_job()?.query(qualifier).map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob query source is unavailable",
+                error,
+            )
+        })
+    }
+
+    /// 业务作用：向独立 RedisJob 生命周期组件提供私有的一次性计划槽，不向业务侧暴露阶段绕行入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与当前 Application 绑定的计划状态容器。
+    #[cfg(feature = "redis-job")]
+    pub(crate) fn redis_job_runtime_state(&self) -> &crate::redis_job::RedisJobRuntimeState {
+        &self.inner.redis_job_runtime
+    }
+
     /// 业务作用：取得由 Application 唯一拥有且仍开放准入的保序执行器业务句柄。
     ///
     /// Prepare 发布后即可调用，因此静态工厂与 initializer 三阶段能使用同一容器句柄；停机开始后
@@ -2036,6 +2173,7 @@ impl Application {
         feature = "nacos-config",
         feature = "db",
         feature = "redis",
+        feature = "redis-job",
         feature = "cache",
         feature = "saga",
         feature = "outbox",
@@ -2987,6 +3125,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::NacosConfig => 3,
         ComponentId::Db => 4,
         ComponentId::Redis => 5,
+        ComponentId::RedisJob => 21,
         ComponentId::Web => 6,
         ComponentId::Ws => 7,
         ComponentId::NacosDiscovery => 8,
@@ -3010,13 +3149,14 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 21] = [
+    const ALL: [ComponentId; 22] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
         ComponentId::NacosConfig,
         ComponentId::Db,
         ComponentId::Redis,
+        ComponentId::RedisJob,
         ComponentId::Web,
         ComponentId::Ws,
         ComponentId::NacosDiscovery,

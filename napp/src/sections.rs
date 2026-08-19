@@ -2,16 +2,17 @@ use serde_json::Value;
 
 use crate::{ApplicationPhase, ApplicationResult, ComponentId};
 
-/// 保留配置根与其负责组件的固定映射。
+/// 保留配置路径与其负责组件的固定映射。
 ///
 /// 该表同时服务三处：未声明组件的配置段告警、热刷新前的内置组件段校验，以及“该组件相关配置
 /// 是否变化”的重启判定。新增内置组件时必须同步更新本表，否则相关配置会被静默忽略。
-const RESERVED_ROOTS: &[(&str, ComponentId)] = &[
+const RESERVED_SECTIONS: &[(&str, ComponentId)] = &[
     ("log", ComponentId::Log),
     ("nacos", ComponentId::NacosConfig),
     ("database", ComponentId::Db),
     ("datasources", ComponentId::Db),
     ("redis", ComponentId::Redis),
+    ("redis.job", ComponentId::RedisJob),
     ("telemetry", ComponentId::Telemetry),
     ("grpc", ComponentId::Grpc),
     ("cache", ComponentId::Cache),
@@ -36,12 +37,12 @@ const RESERVED_ROOTS: &[(&str, ComponentId)] = &[
 /// - `components`：属性入口按源码顺序声明的组件列表。
 /// - `tree`：需要检查的完整配置树；调用点使用最终树，从而同时覆盖本地与远端 overlay 引入的段。
 pub(crate) fn warn_undeclared_sections(components: &[ComponentId], tree: &Value) {
-    for (root, owner) in RESERVED_ROOTS {
-        if tree.get(root).is_none() || components.contains(owner) {
+    for (path, owner) in RESERVED_SECTIONS {
+        if section_at(tree, path).is_none() || components.contains(owner) {
             continue;
         }
         tracing::warn!(
-            "config section `{root}` is present but component `{owner}` is not declared; \
+            "config section `{path}` is present but component `{owner}` is not declared; \
              the framework component will not apply it (business code may still read the raw config snapshot)"
         );
     }
@@ -77,6 +78,8 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Db => crate::db::validate_datasource_sections(tree, phase)?,
             #[cfg(feature = "redis")]
             ComponentId::Redis => crate::redis::validate_redis_section(tree, phase)?,
+            #[cfg(feature = "redis-job")]
+            ComponentId::RedisJob => crate::redis_job::validate_redis_job_section(tree, phase)?,
             #[cfg(feature = "telemetry")]
             ComponentId::Telemetry => crate::telemetry::validate_telemetry_section(tree, phase)?,
             #[cfg(feature = "grpc")]
@@ -118,8 +121,18 @@ pub(crate) fn validate_declared_sections(
 /// - `candidate`：尚未发布的候选配置树。
 #[cfg(feature = "nacos-config")]
 pub(crate) fn sections_changed(component: ComponentId, current: &Value, candidate: &Value) -> bool {
-    RESERVED_ROOTS
+    RESERVED_SECTIONS
         .iter()
         .filter(|(_, owner)| *owner == component)
-        .any(|(root, _)| current.get(root) != candidate.get(root))
+        .any(|(path, _)| section_at(current, path) != section_at(candidate, path))
+}
+
+/// 业务作用：按点分隔的固定配置路径读取子树，使独立组件可以只拥有共享根下的一个明确子段。
+///
+/// 参数说明：`tree` 为完整配置树，`path` 为编译期固定路径。
+///
+/// 返回：路径全部存在时返回对应子树；任一层缺失或不是对象时返回 `None`。
+fn section_at<'a>(tree: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.')
+        .try_fold(tree, |value, segment| value.get(segment))
 }
