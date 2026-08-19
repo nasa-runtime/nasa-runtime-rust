@@ -260,7 +260,7 @@ object_impl = { package = "naobject", version = "1.0.1", optional = true }
 saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
-grpc_impl = { package = "nagrpc", version = "2.0.0", optional = true }
+grpc_impl = { package = "nagrpc", version = "1.1.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.1", optional = true }
 async_macro = { package = "async-macro", version = "1.0.1", optional = true }

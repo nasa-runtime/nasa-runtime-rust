@@ -83,7 +83,7 @@ naidempotency = { version = "1.0.1" }
 naauthz = { version = "1.0.1" }
 natelemetry = { version = "1.0.1" }
 napart = { version = "1.1.2", optional = true }
-nagrpc = { version = "2.0.0", optional = true }
+nagrpc = { version = "1.1.0", optional = true }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
 nauth-oauth = { version = "1.0.0", optional = true }
 naopenapi = { version = "1.0.1", optional = true }
