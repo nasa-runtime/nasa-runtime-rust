@@ -10,7 +10,7 @@ passthrough。
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["kafka"] }
+nasa = { version = "1.0.3", features = ["kafka"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -150,7 +150,7 @@ Service 同时开启 `application` 与 `kafka` 后，可以把 Kafka 声明成�
 `connect`、registry start、broker Ready 或 shutdown：
 
 ```toml
-nasa = { version = "2", features = ["application", "kafka", "web"] }
+nasa = { version = "1.0.3", features = ["application", "kafka", "web"] }
 ```
 
 ```rust
@@ -1188,7 +1188,7 @@ Kafka header 只表达逻辑路由和消息元数据，不能指定任意 IP、h
 TLS/SCRAM 使用 `nasa` 的 `kafka-tls` feature：
 
 ```toml
-nasa = { version = "2", features = ["kafka-tls"] }
+nasa = { version = "1.0.3", features = ["kafka-tls"] }
 ```
 
 ```yaml

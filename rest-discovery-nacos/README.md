@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["nacos-sdk", "rest-discovery-nacos"] }
+nasa = { version = "1.0.3", features = ["nacos-sdk", "rest-discovery-nacos"] }
 rest-discovery-nacos = { version = "1", features = ["nacos-sdk"] }
 ```
 

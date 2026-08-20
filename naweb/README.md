@@ -5,11 +5,11 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["web"] }
+nasa = { version = "1.0.3", features = ["web"] }
 ```
 
 ```rust
-use nasa::web::{get_mapping, mvc_router};
+use nasa::web::{get_mapping, mvc_router, Router};
 
 #[get_mapping("/health")]
 async fn health() -> &'static str {
@@ -19,7 +19,7 @@ async fn health() -> &'static str {
 // crate 根声明一次,生成 crate::__mvc 收集模块
 mvc_router!(());
 
-let app = crate::__mvc::register_all(axum::Router::new());
+let app = crate::__mvc::register_all(Router::new());
 ```
 
 本 crate 的稳定职责是：
@@ -36,17 +36,20 @@ provider-neutral 出口时，`SecurityMetrics::structured_snapshot()` 返回同�
 暂归入 `+Inf`，bucket 总和始终与 count 一致并在下一次抓取自然收敛。调用方仍须对 descriptor
 冲突和 label 基数负责。
 
-端口监听、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，不属于 `naweb`。
+端口监听、HTTP/1/h2c 协议选择、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，
+不属于 `naweb`。
 
 业务代码不要依赖 `naweb::__private`，它只服务于宏展开。
 
-`#[application("web")]` 的项目**不要**再手写 `mvc_router!`：属性入口会在 crate 根自动生成收集端（再手写会因 `crate::__mvc` 重复定义而编译失败），路由装配、监听与优雅停机由应用运行时接管，业务定制经 `app.configure_router(...)` 注入。
+`#[nasa::application("web")]` 的项目**不要**再手写 `mvc_router!`：属性入口会在 crate 根自动生成收集端（再手写会因 `crate::__mvc` 重复定义而编译失败），路由装配、监听与优雅停机由应用运行时接管，业务定制经 `app.configure_router(...)` 注入。
 
 `nasa::web` 直接提供稳定 Web 类型：`Json` / `Form` / `Path` / `Query` / `State` / `HeaderMap` / `StatusCode` / `Router` / `get`…`delete` / `from_fn` / `from_fn_with_state` / `Request` / `Next` 等，业务写 handler 与中间件不必直连 Axum 内部路径。
 
 ## YML 配置与使用
 
-`naweb` 不读取 yml。路由路径、HTTP 方法、`produces`、`consumes` 都写在属性宏上；服务监听地址、context path 和中间件开关由业务应用配置。
+`naweb` 不读取 yml。路由路径、HTTP 方法、`produces`、`consumes` 都写在属性宏上；服务监听地址、
+context path 和中间件开关由业务应用配置。下面的 `server` 配置只有在同时启用 `application,web` 并
+声明 `#[nasa::application("web")]` 时才由 `napp` 读取；单独启用 `web` 不会创建 listener。
 
 推荐应用配置：
 
@@ -56,22 +59,25 @@ server:
   port: 8080
   context_path: /order
   request_body_limit_bytes: 10485760
+  http2:
+    enabled: false
 ```
 
 字段说明：
 
 | 键 | 说明 |
 | --- | --- |
-| `server.host` | axum 监听 host。 |
-| `server.port` | axum 监听端口。 |
-| `server.context_path` | 应用统一前缀；可在业务装配 Router 时 nest。 |
-| `request_body_limit_bytes` | 请求体大小上限；由业务中间件配置。 |
+| `server.host` | 受管 Web listener 的监听 host。 |
+| `server.port` | 受管 Web listener 的监听端口。 |
+| `server.context_path` | 应用统一前缀；受管模式自动 nest，手工装配时由业务处理。 |
+| `server.request_body_limit_bytes` | 请求体大小上限；由受管 Web 中间件配置。 |
+| `server.http2.enabled` | 由 `napp` 解释；默认只接受 HTTP/1，开启后同一明文端口接受 h2c prior knowledge。 |
 
-使用代码：
+不使用 Application 受管模式时，业务自行装配 Router：
 
 ```rust
-let router = crate::__mvc::register_all(axum::Router::new());
-let app = axum::Router::new().nest(&cfg.server.context_path, router);
+let router = crate::__mvc::register_all(nasa::web::Router::new());
+let app = nasa::web::Router::new().nest(&cfg.server.context_path, router);
 ```
 
 路由本身继续写在函数属性上，例如 `#[get_mapping("/health")]`。
@@ -100,7 +106,7 @@ let app = axum::Router::new().nest(&cfg.server.context_path, router);
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["web-security"] }
+nasa = { version = "1.0.3", features = ["web-security"] }
 ```
 
 `web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需历史 RSA
@@ -112,9 +118,9 @@ nasa = { version = "1", features = ["web-security"] }
 ```rust
 let runtime = std::sync::Arc::new(mapping_runtime);
 let router = crate::__mvc::try_register_all(
-    axum::Router::new(),
+    nasa::web::Router::new(),
     runtime,
-    naweb::MappingPlan::new(),
+    nasa::web::MappingPlan::new(),
     state.clone(),
 )?;
 ```
@@ -189,7 +195,7 @@ async fn manual_audit(request: Request, next: Next) -> Response {
     audit(request, next).await
 }
 
-let plan = naweb::MappingPlan::new().global(manual_audit::binding());
+let plan = nasa::web::MappingPlan::new().global(manual_audit::binding());
 ```
 
 ```rust
@@ -208,11 +214,11 @@ async fn automatic_audit(request: Request, next: Next) -> Response {
 静态路径 scope 的手动写法如下：
 
 ```rust
-let plan = naweb::MappingPlan::new()
+let plan = nasa::web::MappingPlan::new()
     .scope("/account", account_scope::binding())?;
 
 let router = crate::__mvc::try_register_all(
-    axum::Router::new(),
+    nasa::web::Router::new(),
     plan.runtime_or_default(),
     plan,
     state.clone(),

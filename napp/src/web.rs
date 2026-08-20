@@ -1,23 +1,30 @@
 use std::{
     collections::HashMap,
+    io,
     net::SocketAddr,
     panic::{catch_unwind, AssertUnwindSafe},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use axum::{
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{connect_info::ConnectInfo, DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{from_fn, from_fn_with_state, Next},
     response::Response,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use serde::Deserialize;
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
+    net::{TcpListener, TcpStream},
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
@@ -123,6 +130,192 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// 明文 Web listener 的 HTTP/2 安全边界。
+///
+/// `enabled=false` 时 listener 只接受 HTTP/1；启用后同一明文端口按连接前言区分 HTTP/1 与 h2c。
+/// 所有容量值在 Start 阶段校验并在连接创建时冻结，避免依赖其它 Cargo feature 改变协议行为。
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Http2Config {
+    /// 是否接受 h2c prior knowledge；不实现 `Upgrade: h2c` 协商。
+    enabled: bool,
+    /// listener 同时持有的 TCP 连接上限；同时约束 HTTP/1 与 h2c。
+    max_connections: usize,
+    /// 协议前言最多允许等待的毫秒数。
+    connection_handshake_timeout_ms: u64,
+    /// 主动轮转连接的毫秒数；`None` 表示不主动轮转。
+    max_connection_age_ms: Option<u64>,
+    /// 单条 HTTP/2 连接允许同时处理的 stream 上限。
+    max_concurrent_streams: u32,
+    /// HTTP/2 单 stream 初始流控窗口。
+    initial_stream_window_size: u32,
+    /// HTTP/2 单连接初始流控窗口。
+    initial_connection_window_size: u32,
+    /// HTTP/2 frame 最大字节数。
+    max_frame_size: u32,
+    /// 单次 HTTP/2 请求头列表最大字节数。
+    max_header_list_size: u32,
+    /// HTTP/2 HPACK 动态表最大字节数。
+    header_table_size: u32,
+    /// 单条 HTTP/2 stream 的发送缓冲上限。
+    max_send_buffer_size: usize,
+    /// 对端尚未确认的 reset stream 上限。
+    max_pending_accept_reset_streams: usize,
+    /// 本端因协议错误产生的 reset stream 上限。
+    max_local_error_reset_streams: usize,
+    /// HTTP/2 PING 探活周期毫秒数。
+    keep_alive_interval_ms: u64,
+    /// 等待 HTTP/2 PING ACK 的毫秒数。
+    keep_alive_timeout_ms: u64,
+}
+
+impl Default for Http2Config {
+    /// 业务作用：提供默认关闭 h2c、启用后连接与 stream 均有界的保守配置。
+    ///
+    /// # 参数
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回：可直接通过启动校验的 HTTP/2 配置；开启前不会接受 h2c。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_connections: 256,
+            connection_handshake_timeout_ms: 10_000,
+            max_connection_age_ms: None,
+            max_concurrent_streams: 128,
+            initial_stream_window_size: 64 * 1024,
+            initial_connection_window_size: 1024 * 1024,
+            max_frame_size: 16 * 1024,
+            max_header_list_size: 16 * 1024,
+            header_table_size: 4 * 1024,
+            max_send_buffer_size: 64 * 1024,
+            max_pending_accept_reset_streams: 20,
+            max_local_error_reset_streams: 20,
+            keep_alive_interval_ms: 30_000,
+            keep_alive_timeout_ms: 10_000,
+        }
+    }
+}
+
+impl Http2Config {
+    /// 业务作用：校验 Web 连接容量与 HTTP/2 transport 上界，阻止无界或底层不接受的配置进入监听阶段。
+    ///
+    /// # 参数
+    ///
+    /// - `phase`：配置校验所属的 Application 生命周期阶段。
+    ///
+    /// # 返回
+    ///
+    /// 返回：全部字段处于受管范围内时成功，否则返回稳定的 Web 配置错误。
+    fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
+        if self.max_connections == 0 || self.max_connections > 4_096 {
+            return Err(web_error(
+                phase,
+                "server.http2.max_connections must be between 1 and 4096",
+            ));
+        }
+        if self.connection_handshake_timeout_ms == 0
+            || self.connection_handshake_timeout_ms > 60_000
+        {
+            return Err(web_error(
+                phase,
+                "server.http2.connection_handshake_timeout_ms must be between 1 and 60000",
+            ));
+        }
+        if self.max_connection_age_ms.is_some_and(|age| {
+            !(Duration::from_secs(60)..=Duration::from_secs(24 * 60 * 60))
+                .contains(&Duration::from_millis(age))
+        }) {
+            return Err(web_error(
+                phase,
+                "server.http2.max_connection_age_ms must be between 60000 and 86400000",
+            ));
+        }
+        if self.max_concurrent_streams == 0 || self.max_concurrent_streams > 65_535 {
+            return Err(web_error(
+                phase,
+                "server.http2.max_concurrent_streams must be between 1 and 65535",
+            ));
+        }
+        if self.initial_stream_window_size == 0 || self.initial_stream_window_size > 1024 * 1024 {
+            return Err(web_error(
+                phase,
+                "server.http2.initial_stream_window_size must be between 1 and 1048576",
+            ));
+        }
+        if self.initial_connection_window_size == 0
+            || self.initial_connection_window_size > 16 * 1024 * 1024
+        {
+            return Err(web_error(
+                phase,
+                "server.http2.initial_connection_window_size must be between 1 and 16777216",
+            ));
+        }
+        if !(16_384..=65_535).contains(&self.max_frame_size) {
+            return Err(web_error(
+                phase,
+                "server.http2.max_frame_size must be between 16384 and 65535",
+            ));
+        }
+        if self.max_header_list_size == 0 || self.max_header_list_size > 64 * 1024 {
+            return Err(web_error(
+                phase,
+                "server.http2.max_header_list_size must be between 1 and 65536",
+            ));
+        }
+        if self.header_table_size == 0 || self.header_table_size > 16 * 1024 {
+            return Err(web_error(
+                phase,
+                "server.http2.header_table_size must be between 1 and 16384",
+            ));
+        }
+        if self.max_send_buffer_size == 0 || self.max_send_buffer_size > 1024 * 1024 {
+            return Err(web_error(
+                phase,
+                "server.http2.max_send_buffer_size must be between 1 and 1048576",
+            ));
+        }
+        for (field, value) in [
+            (
+                "server.http2.max_pending_accept_reset_streams",
+                self.max_pending_accept_reset_streams,
+            ),
+            (
+                "server.http2.max_local_error_reset_streams",
+                self.max_local_error_reset_streams,
+            ),
+        ] {
+            if value == 0 || value > 1_024 {
+                return Err(web_error(
+                    phase,
+                    format!("{field} must be between 1 and 1024"),
+                ));
+            }
+        }
+        for (field, value) in [
+            (
+                "server.http2.keep_alive_interval_ms",
+                self.keep_alive_interval_ms,
+            ),
+            (
+                "server.http2.keep_alive_timeout_ms",
+                self.keep_alive_timeout_ms,
+            ),
+        ] {
+            if value == 0 || Duration::from_millis(value) > crate::runner::MAX_LIFECYCLE_TIMEOUT {
+                return Err(web_error(
+                    phase,
+                    format!("{field} must be greater than zero and cannot exceed 365 days"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Web 监听、路径前缀、探针和请求跟踪的初始配置。
 ///
 /// 默认值保证必需配置文件内容为 `{}` 时仍可启动最小本地服务。
@@ -155,6 +348,8 @@ struct ServerConfig {
     compression: CompressionConfig,
     /// 单实例每客户端限流策略;默认关闭。
     rate_limit: RateLimitConfig,
+    /// 明文 HTTP/2 与共享 TCP 连接容量策略；默认只接受 HTTP/1。
+    http2: Http2Config,
     /// mapping/安全运行时就绪失败(route audit 漂移 / active 签名 key 缺失 / required-replay 后端不可用)是否
     /// 升级为**关键**就绪:默认 `false` = 非关键,monitor 复审失败只 Degraded
     /// (last-good 路由/interceptor 合同仍服务、`/readyz` 保持 200,不把可恢复后端抖动升级成整实例摘流);
@@ -168,6 +363,10 @@ impl Default for ServerConfig {
     /// # 参数
     ///
     /// 本方法无参数；监听范围只包含本机回环地址。
+    ///
+    /// # 返回
+    ///
+    /// 返回：HTTP/1 可直接启动、h2c 默认关闭且高级 transport 字段均有界的配置。
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_owned(),
@@ -184,6 +383,7 @@ impl Default for ServerConfig {
             trusted_proxies: Vec::new(),
             compression: CompressionConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            http2: Http2Config::default(),
             mapping_readiness_critical: false,
         }
     }
@@ -195,6 +395,10 @@ impl ServerConfig {
     /// # 参数
     ///
     /// - `phase`：配置被校验时所属的生命周期阶段。
+    ///
+    /// # 返回
+    ///
+    /// 返回：Web、治理与 HTTP transport 字段全部合法时成功，否则返回所属阶段的配置错误。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
         if self.host.trim().is_empty() {
             return Err(web_error(phase, "server.host cannot be empty"));
@@ -283,6 +487,7 @@ impl ServerConfig {
                 "server.rate_limit.requests_per_second and burst must be greater than zero when enabled",
             ));
         }
+        self.http2.validate(phase)?;
         Ok(())
     }
 }
@@ -372,6 +577,10 @@ impl ApplicationComponent for WebComponent {
     /// # 参数
     ///
     /// - `context`：提供统一 Application 状态和 active stack 写入口的 Ready 上下文。
+    ///
+    /// # 返回
+    ///
+    /// 返回：路由、指标源、listener 与受监督 accept 任务成组建立后成功；任一步失败都阻止接流。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = self.config.clone().ok_or_else(|| {
@@ -696,6 +905,25 @@ impl ApplicationComponent for WebComponent {
                     error,
                 )
             })?;
+            let web_runtime = application.web_runtime();
+            application
+                .metrics_hub()
+                .register_legacy_source_reserved(web_runtime.clone(), 8)
+                .map_err(|error| match error {
+                    nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => web_error(
+                        ApplicationPhase::Ready,
+                        format!(
+                            "web metric descriptor `{}` conflicts with an existing registration",
+                            conflict.name
+                        ),
+                    ),
+                    nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                        web_error(
+                            ApplicationPhase::Ready,
+                            "web metric series reservation exceeds the process limit",
+                        )
+                    }
+                })?;
             application.publish_web_runtime(address, route_manifest)?;
             // 监听地址与 context path 是启动完成的关键可观测信号；
             // 无 log 组件时由 run() 安装的兜底 subscriber 承接。
@@ -713,37 +941,17 @@ impl ApplicationComponent for WebComponent {
             let drain_budget = config
                 .graceful_shutdown_timeout_ms
                 .map(std::time::Duration::from_millis);
+            let transport = config.http2.clone();
             self.critical_task = Some(Box::pin(async move {
-                // 带 connect-info 的 make-service:让治理层拿到直连对端地址(真实客户端 IP 解析所需)。
-                let serve = std::future::IntoFuture::into_future(
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(task_stop.clone().cancelled_owned()),
-                );
-                tokio::pin!(serve);
-                let Some(budget) = drain_budget else {
-                    return serve.await.map_err(web_serve_error);
-                };
-                // server 子预算只在摘流开始后计时；全局停机预算仍由 Runner 的 join timeout 兜住，
-                // 两者取较小值即 要求的 min(server graceful, remaining budget)。
-                tokio::select! {
-                    result = &mut serve => result.map_err(web_serve_error),
-                    _ = task_stop.cancelled() => {
-                        match tokio::time::timeout(budget, serve).await {
-                            Ok(result) => result.map_err(web_serve_error),
-                            Err(_) => {
-                                // 预算耗尽即放弃剩余在途请求；这一步是可预期的停机行为而非故障，
-                                // 因此返回 Ok，由 Runner 按任务组状态归类。
-                                tracing::warn!(
-                                    "web drain budget exhausted; remaining in-flight requests were abandoned"
-                                );
-                                Ok(())
-                            }
-                        }
-                    }
-                }
+                run_web_listener(
+                    listener,
+                    router,
+                    transport,
+                    task_stop,
+                    drain_budget,
+                    web_runtime,
+                )
+                .await
             }));
             // 地址发布和任务构造均成功后再压栈；从这一点起任何退出路径都能先停止接收新请求。
             context.activate(Box::new(WebShutdown { stop }));
@@ -1080,29 +1288,478 @@ async fn metrics_endpoint(State(application): State<Application>) -> axum::respo
 /// - `runtime`：只包含 Web 元数据和原子计数器的共享运行时状态。
 /// - `request`：即将进入后续中间件和路由服务的请求。
 /// - `next`：当前中间件之后的完整请求处理链。
+///
+/// # 返回
+///
+/// 返回：后续处理链生成的响应，并在形成响应前完成协议与状态会计。
 async fn observe_web_request(
     State(runtime): State<Arc<WebRuntimeState>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let guard = WebRuntimeState::begin_request(&runtime);
+    let version = request.version();
+    let guard = WebRuntimeState::begin_request(&runtime, version == axum::http::Version::HTTP_2);
     let response = next.run(request).await;
     guard.complete(response.status().as_u16());
     response
 }
 
-/// 业务作用：把底层服务循环错误包装为带组件和阶段的框架错误。
+/// Web listener 在协议判定后使用的有限协议集合。
+#[derive(Clone, Copy)]
+enum WebConnectionProtocol {
+    /// HTTP/1.0 或 HTTP/1.1，由 hyper 的 HTTP/1 driver 继续精确解析。
+    Http1,
+    /// 明文 prior knowledge HTTP/2。
+    Http2,
+}
+
+/// 在协议判定前暂存已读取字节，并在 hyper driver 首次读取时原样回放。
+struct RewindTcpStream {
+    stream: TcpStream,
+    prefix: Vec<u8>,
+    offset: usize,
+}
+
+impl RewindTcpStream {
+    /// 业务作用：把协议判定期间读取的前言与原 TCP stream 重新组合为无损字节流。
+    ///
+    /// # 参数
+    ///
+    /// - `stream`：已经建立、尚未交给 HTTP driver 的 TCP 连接。
+    /// - `prefix`：协议判定期间按网络顺序读出的字节。
+    ///
+    /// # 返回
+    ///
+    /// 返回：先回放 `prefix`、再继续读取原连接的异步 I/O 对象。
+    fn new(stream: TcpStream, prefix: Vec<u8>) -> Self {
+        Self {
+            stream,
+            prefix,
+            offset: 0,
+        }
+    }
+}
+
+impl AsyncRead for RewindTcpStream {
+    /// 业务作用：保证协议判定消耗的字节先于后续网络字节交给 HTTP driver。
+    ///
+    /// # 参数
+    ///
+    /// - `self`：当前回放位置与底层连接。
+    /// - `context`：异步读取任务上下文。
+    /// - `buffer`：接收字节的目标缓冲区。
+    ///
+    /// # 返回
+    ///
+    /// 返回：已有前言立即写入；前言耗尽后透传底层 TCP 读取结果。
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.offset < self.prefix.len() && buffer.remaining() > 0 {
+            let available = &self.prefix[self.offset..];
+            let copied = available.len().min(buffer.remaining());
+            buffer.put_slice(&available[..copied]);
+            self.offset += copied;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for RewindTcpStream {
+    /// 业务作用：把 HTTP driver 的响应字节直接写入原 TCP 连接。
+    ///
+    /// # 参数
+    ///
+    /// - `self`：持有底层连接的回放对象。
+    /// - `context`：异步写入任务上下文。
+    /// - `buffer`：待发送的响应字节。
+    ///
+    /// # 返回
+    ///
+    /// 返回：底层 TCP 写入的进度或 I/O 错误。
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    /// 业务作用：把 HTTP driver 的刷新要求传递给原 TCP 连接。
+    ///
+    /// # 参数
+    ///
+    /// - `self`：持有底层连接的回放对象。
+    /// - `context`：异步刷新任务上下文。
+    ///
+    /// # 返回
+    ///
+    /// 返回：底层 TCP 刷新完成状态或 I/O 错误。
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    /// 业务作用：在 HTTP driver 结束连接时关闭原 TCP 写方向。
+    ///
+    /// # 参数
+    ///
+    /// - `self`：持有底层连接的回放对象。
+    /// - `context`：异步关闭任务上下文。
+    ///
+    /// # 返回
+    ///
+    /// 返回：底层 TCP 关闭完成状态或 I/O 错误。
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+
+    /// 业务作用：透传分段写入，保持 upgrade 与普通响应的写入语义一致。
+    ///
+    /// # 参数
+    ///
+    /// - `self`：持有底层连接的回放对象。
+    /// - `context`：异步写入任务上下文。
+    /// - `buffers`：按顺序发送的响应字节片段。
+    ///
+    /// # 返回
+    ///
+    /// 返回：底层 TCP 分段写入的进度或 I/O 错误。
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
+    }
+
+    /// 业务作用：报告底层 TCP 是否支持有效的分段写入。
+    ///
+    /// # 参数
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回：底层连接对 vectored write 的能力标志。
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+}
+
+/// 业务作用：在明文连接上以 HTTP/2 固定前言判定 h2c，并完整保留已读取字节供后续 driver 使用。
+///
+/// 逐字节比较可让普通 HTTP/1 请求在首个不匹配字节立即分流，避免为短请求等待完整前言。
 ///
 /// # 参数
 ///
-/// - `error`：accept 循环返回的底层 IO 错误。
-fn web_serve_error(error: std::io::Error) -> ApplicationError {
-    ApplicationError::with_source(
-        ComponentId::Web,
-        ApplicationPhase::Running,
-        "web listener exited with an error",
-        error,
-    )
+/// - `stream`：新接受且尚未交给 HTTP driver 的明文 TCP 连接。
+/// - `timeout`：慢速前言占用连接容量的最长时间。
+///
+/// # 返回
+///
+/// 返回：可无损回放前言的连接及协议；超时或连接提前关闭时返回 I/O 错误。
+async fn detect_web_protocol(
+    mut stream: TcpStream,
+    timeout: Duration,
+) -> io::Result<(RewindTcpStream, WebConnectionProtocol)> {
+    const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    let mut prefix = Vec::with_capacity(H2_PREFACE.len());
+    let detect = async {
+        for expected in H2_PREFACE {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).await?;
+            prefix.push(byte[0]);
+            if byte[0] != *expected {
+                return Ok::<WebConnectionProtocol, io::Error>(WebConnectionProtocol::Http1);
+            }
+        }
+        Ok::<WebConnectionProtocol, io::Error>(WebConnectionProtocol::Http2)
+    };
+    let protocol = tokio::time::timeout(timeout, detect)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "web protocol preface timed out"))??;
+    Ok((RewindTcpStream::new(stream, prefix), protocol))
+}
+
+/// 业务作用：运行受管 Web accept 循环，并把连接容量、停机信号和排空预算统一交给同一所有者。
+///
+/// # 参数
+///
+/// - `listener`：Ready 阶段已绑定并发布地址的 TCP listener。
+/// - `router`：已经封口且包含治理中间件的 Axum 路由图。
+/// - `config`：本次进程冻结的连接与 HTTP/2 transport 配置。
+/// - `stop`：停止接收新连接并通知存量连接 graceful shutdown 的令牌。
+/// - `drain_budget`：摘流后等待连接结束的可选组件子预算。
+/// - `runtime`：Web 能力句柄和指标端点共用的原子观测状态。
+///
+/// # 返回
+///
+/// 返回：收到停机信号并按预算完成或放弃排空后成功；单连接协议错误不会结束整个 listener。
+async fn run_web_listener(
+    listener: TcpListener,
+    router: Router,
+    config: Http2Config,
+    stop: CancellationToken,
+    drain_budget: Option<Duration>,
+    runtime: Arc<WebRuntimeState>,
+) -> ApplicationResult<()> {
+    let permits = Arc::new(Semaphore::new(config.max_connections));
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => {
+                // 停机令牌先关闭 accept 入口，确保排空阶段不会继续接纳新的业务连接。
+                break;
+            },
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    tracing::warn!(error = %error, "web connection task ended unexpectedly");
+                }
+            }
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, peer_addr)) => {
+                        WebRuntimeState::accept_connection(&runtime);
+                        let permit = match Arc::clone(&permits).try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                // 容量耗尽时在协议解析前拒绝，避免额外连接继续占用内存和任务槽。
+                                WebRuntimeState::reject_connection(&runtime);
+                                drop(stream);
+                                continue;
+                            }
+                        };
+                        connections.spawn(drive_web_connection(
+                            stream,
+                            peer_addr,
+                            router.clone(),
+                            config.clone(),
+                            stop.clone(),
+                            permit,
+                            Arc::clone(&runtime),
+                        ));
+                    }
+                    Err(error) => {
+                        WebRuntimeState::record_accept_error(&runtime);
+                        if !matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionRefused
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        ) {
+                            tracing::error!(error = %error, "web listener accept failed; retrying");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(listener);
+
+    let drain = async {
+        while let Some(joined) = connections.join_next().await {
+            if let Err(error) = joined {
+                tracing::warn!(error = %error, "web connection task ended unexpectedly");
+            }
+        }
+    };
+    match drain_budget {
+        Some(budget) => {
+            if tokio::time::timeout(budget, drain).await.is_err() {
+                // 组件子预算耗尽后终止剩余任务；Runner 的全局预算仍负责监督关键任务本身。
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                tracing::warn!(
+                    "web drain budget exhausted; remaining in-flight requests were abandoned"
+                );
+            }
+        }
+        None => drain.await,
+    }
+    Ok(())
+}
+
+/// 业务作用：为单条连接完成协议判定、注入直连对端身份并运行对应的受管 HTTP driver。
+///
+/// # 参数
+///
+/// - `stream`：accept 循环接纳的新 TCP 连接。
+/// - `peer_addr`：真实直连对端地址，供可信代理与客户端 IP 解析使用。
+/// - `router`：本次 listener 冻结的路由服务图。
+/// - `config`：连接与 HTTP/2 transport 配置。
+/// - `stop`：listener 级停机令牌。
+/// - `_permit`：连接容量所有权，函数结束时自动归还。
+/// - `runtime`：连接与请求观测使用的共享原子状态。
+///
+/// # 返回
+///
+/// 返回：无；连接错误被记录并隔离，不传播为整个 Web listener 的退出。
+async fn drive_web_connection(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    router: Router,
+    config: Http2Config,
+    stop: CancellationToken,
+    _permit: OwnedSemaphorePermit,
+    runtime: Arc<WebRuntimeState>,
+) {
+    let _active = WebRuntimeState::track_connection(&runtime);
+    let selected = if config.enabled {
+        detect_web_protocol(
+            stream,
+            Duration::from_millis(config.connection_handshake_timeout_ms),
+        )
+        .await
+    } else {
+        Ok((
+            RewindTcpStream::new(stream, Vec::new()),
+            WebConnectionProtocol::Http1,
+        ))
+    };
+    let (stream, protocol) = match selected {
+        Ok(selected) => selected,
+        Err(error) => {
+            WebRuntimeState::record_connection_error(&runtime);
+            tracing::debug!(peer = %peer_addr, error = %error, "web connection protocol detection failed");
+            return;
+        }
+    };
+    let result = match protocol {
+        WebConnectionProtocol::Http1 => {
+            drive_http1_connection(stream, peer_addr, router, &config, stop).await
+        }
+        WebConnectionProtocol::Http2 => {
+            drive_http2_connection(stream, peer_addr, router, &config, stop).await
+        }
+    };
+    if let Err(error) = result {
+        WebRuntimeState::record_connection_error(&runtime);
+        tracing::debug!(peer = %peer_addr, error = %error, "web connection ended with a protocol error");
+    }
+}
+
+/// 业务作用：运行保留 upgrade 能力的 HTTP/1 连接，并在停机或连接年龄到达时关闭 keep-alive。
+///
+/// # 参数
+///
+/// - `stream`：已判定为 HTTP/1 且可回放全部已读字节的连接。
+/// - `peer_addr`：写入 `ConnectInfo` 的直连对端地址。
+/// - `router`：本次 listener 冻结的路由服务图。
+/// - `config`：连接年龄配置。
+/// - `stop`：listener 级停机令牌。
+///
+/// # 返回
+///
+/// 返回：连接正常结束或完成 graceful shutdown 时成功，协议或 I/O 失败时返回 hyper 错误。
+async fn drive_http1_connection(
+    stream: RewindTcpStream,
+    peer_addr: SocketAddr,
+    router: Router,
+    config: &Http2Config,
+    stop: CancellationToken,
+) -> Result<(), hyper::Error> {
+    let service = hyper_util::service::TowerToHyperService::new(
+        router.layer(Extension(ConnectInfo(peer_addr))),
+    );
+    let connection = hyper::server::conn::http1::Builder::new()
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .with_upgrades();
+    tokio::pin!(connection);
+    let age = wait_for_connection_age(config.max_connection_age_ms);
+    tokio::pin!(age);
+    tokio::select! {
+        result = &mut connection => result,
+        _ = stop.cancelled() => {
+            // 停机先禁止 HTTP/1 keep-alive 复用，再等待当前请求或 upgrade 所有权自然结束。
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+        _ = &mut age => {
+            // 年龄轮转只关闭 keep-alive 复用，避免中断已经接纳的请求或 upgrade 所有权。
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    }
+}
+
+/// 业务作用：按已校验限额运行 h2c 连接，并在停机或连接年龄到达时以 GOAWAY 收口新 stream。
+///
+/// # 参数
+///
+/// - `stream`：已确认带 HTTP/2 prior knowledge 前言且可回放全部已读字节的连接。
+/// - `peer_addr`：写入 `ConnectInfo` 的直连对端地址。
+/// - `router`：本次 listener 冻结的路由服务图。
+/// - `config`：已校验并冻结的 HTTP/2 transport 配置。
+/// - `stop`：listener 级停机令牌。
+///
+/// # 返回
+///
+/// 返回：连接正常结束或完成 GOAWAY 排空时成功，协议或 I/O 失败时返回 hyper 错误。
+async fn drive_http2_connection(
+    stream: RewindTcpStream,
+    peer_addr: SocketAddr,
+    router: Router,
+    config: &Http2Config,
+    stop: CancellationToken,
+) -> Result<(), hyper::Error> {
+    let service = hyper_util::service::TowerToHyperService::new(
+        router.layer(Extension(ConnectInfo(peer_addr))),
+    );
+    let mut builder =
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .timer(hyper_util::rt::TokioTimer::new())
+        .adaptive_window(false)
+        .initial_stream_window_size(Some(config.initial_stream_window_size))
+        .initial_connection_window_size(Some(config.initial_connection_window_size))
+        .max_concurrent_streams(Some(config.max_concurrent_streams))
+        .keep_alive_interval(Some(Duration::from_millis(config.keep_alive_interval_ms)))
+        .keep_alive_timeout(Duration::from_millis(config.keep_alive_timeout_ms))
+        .max_pending_accept_reset_streams(Some(config.max_pending_accept_reset_streams))
+        .max_local_error_reset_streams(Some(config.max_local_error_reset_streams))
+        .max_frame_size(Some(config.max_frame_size))
+        .max_header_list_size(config.max_header_list_size)
+        .header_table_size(Some(config.header_table_size))
+        .max_send_buf_size(config.max_send_buffer_size)
+        .enable_connect_protocol();
+    let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    let age = wait_for_connection_age(config.max_connection_age_ms);
+    tokio::pin!(age);
+    tokio::select! {
+        result = &mut connection => result,
+        _ = stop.cancelled() => {
+            // HTTP/2 必须先发送 GOAWAY 阻止新 stream，再等待已接纳请求完成。
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+        _ = &mut age => {
+            // 年龄轮转先发送 GOAWAY，确保新 stream 转移到其它连接且存量 stream 可继续排空。
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    }
+}
+
+/// 业务作用：把可选连接年龄转换为可参与 `select` 的单次到期信号。
+///
+/// # 参数
+///
+/// - `max_connection_age_ms`：主动轮转时长；`None` 表示永久等待外部停机或连接自行结束。
+///
+/// # 返回
+///
+/// 返回：配置时长到达后完成；未配置时保持 pending。
+async fn wait_for_connection_age(max_connection_age_ms: Option<u64>) {
+    match max_connection_age_ms {
+        Some(age) => tokio::time::sleep(Duration::from_millis(age)).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// 业务作用：在不产生任何副作用的前提下校验候选配置树中的 `server` 段。

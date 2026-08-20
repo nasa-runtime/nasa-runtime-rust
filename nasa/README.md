@@ -32,13 +32,16 @@ Ready 门禁、监督和反向停机。
 `saga-runtime`，再显式选择 Kafka、Redis Streams、HTTP 或 gRPC transport；完整合同见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
-门面还提供三项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter，
-以及可独立运行或交给 Application 托管的 gRPC listener。三者保持独立 feature 以控制依赖面，同时
-纳入 `full`；所有权、运行边界和非目标在下文单独说明。
+门面还提供四项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter、
+可独立运行或交给 Application 托管的 gRPC listener，以及由 Application 独占的受管 Web listener。
+同时启用 `application,web` 并声明 `#[nasa::application("web")]` 后，Web 默认只接受 HTTP/1；在最终
+YAML 中设置 `server.http2.enabled=true`，同一明文端口即接受 h2c prior knowledge 并继续兼容
+HTTP/1，其它 transport 参数均可省略并采用受校验默认值。四项能力保持独立 feature 以控制依赖面，
+同时纳入 `full`；所有权、运行边界和非目标在下文单独说明。
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = [
+nasa = { version = "1.0.3", features = [
     "application",
     "tx",
     "mapper",
@@ -164,7 +167,7 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 
 ## 稳定基础设施合同
 
-这三项能力共享“资源有硬上限、错误不泄露敏感上下文、所有权必须唯一、观测事实可并入统一指标目录”
+这四项能力共享“资源有硬上限、错误不泄露敏感上下文、所有权必须唯一、观测事实可并入统一指标目录”
 的边界，但运行架构不同：
 
 | 能力 | feature 与入口 | 生命周期 owner | 核心安全合同 |
@@ -172,15 +175,18 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 | Schema Registry | `kafka-schema-registry` → `nasa::kafka` | 业务持有 client；无组件字符串 | schema ID 白名单、有界正负缓存、默认禁止注册、凭据由 `SecretBytes` 承载 |
 | 对象存储 | `object-store` → `nasa::object` | 业务持有 adapter；无组件字符串 | 有界单对象、`CreateOnly` 条件写、默认 SHA-256 metadata 复核、SigV4 credential 脱敏 |
 | gRPC listener | `grpc` → `nasa::grpc` | 独立 `GrpcServerHandle` 或 Application `"grpc"` 二选一 | 统一 codegen/service registry、permit 先于 accept、TLS/mTLS、固定方法指标与有预算排空 |
+| Web listener | `application,web` → `#[nasa::application("web")]` | Application 独占明文 listener；不提供脱离 Application 的 listener 模式 | HTTP/1/h2c 确定选择、连接与 stream 上界、固定协议指标与有预算排空；不终止 TLS |
 
 Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构造，不会因为启用 `application`
 自动获得生命周期组件；需要统一 Prometheus/OTLP 出口时显式调用各自的 `metrics_source`，同一 family
 只能登记一个 owner，多实例使用 `metrics_source_many`。gRPC 只有在同时启用 `application` 并声明
-`"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。
+`"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。Web 只有在同时启用 `application,web`
+并声明 `"web"` 时才读取 `server` 配置和创建 listener；单独启用 `web` 只提供路由与安全门面。
 
 完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#schema-registry)、
 [naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naobject/README.md) 和
-[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)。
+[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)，以及
+[napp Web listener](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#web-http-listener-受管模式)。
 
 ### gRPC 完整接入
 
@@ -188,10 +194,10 @@ Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构�
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["application", "grpc"] }
+nasa = { version = "1.0.3", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "2"
+nagrpc-build = "1.0.0"
 ```
 
 1. 在 `build.rs` 调用 `nagrpc_build::compile("proto/order.proto")`；
@@ -243,7 +249,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |
-| `web` | `nasa::web` | 路由宏、interceptor 和 HTTP 运行时 |
+| `web` | `nasa::web` | 路由宏与 interceptor；和 `application` 组合并声明 `"web"` 时提供受管 HTTP/1/h2c listener |
 | `web-auth` | `nasa::web::auth` | 路由身份合同 |
 | `web-crypto` | `nasa::web::crypto` | 双协议密码处理和重放保护 |
 | `web-crypto-legacy-rsa` | `nasa::web::crypto` | 受控迁移的 legacy RSA 私钥路径，不进入 `full` |
@@ -269,7 +275,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `rest-client` / `rest-client-nacos` | `nasa::discovery::rest` | 声明式 REST client |
 | `base` / `crypto` / `numeric` / `date` / `image` | 对应同名模块 | 基础类型和纯工具 |
 | `crypto-legacy-rsa` | `nasa::crypto` | 受控迁移的 RSA 私钥兼容入口，不进入 `full` |
-| `full` | 上述稳定能力的组合 | 非默认；包含 Schema Registry、对象存储、Saga gRPC 和 gRPC listener |
+| `full` | 上述稳定能力的组合 | 非默认；包含 Schema Registry、对象存储、Saga gRPC、gRPC listener 和受管 Web listener |
 
 `kafka-gssapi` 使用目标系统的 Cyrus SASL。macOS 无需额外安装；Linux 构建环境需提供
 `libsasl2-dev` 或 `cyrus-sasl-devel`，具体包名由发行版决定。
@@ -319,6 +325,8 @@ cache:
 server:
   host: 0.0.0.0
   port: 8080
+  http2:
+    enabled: false
 ```
 
 | 根节点 | 负责组件 |

@@ -1,6 +1,6 @@
 # napp
 
-`napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、组件启动/停机编排、任务监督、信号处理与退出码。业务项目**不要直接依赖本 crate**，经 `nasa` 门面开启 `application` feature 使用；使用入口与生命周期约束见仓库的快速开始和运维指南。
+`napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、组件启动/停机编排、任务监督、信号处理与退出码；声明 `"web"` 时还独占具备确定 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目**不要直接依赖本 crate**，经 `nasa` 门面开启 `application` feature 使用；使用入口与生命周期约束见仓库的快速开始和运维指南。
 
 ## 核心价值与生命周期架构
 
@@ -26,7 +26,7 @@ gRPC 入站同样遵守这个模型：业务登记 generated service 或提交 S
 ## 最小入口
 
 ```toml
-nasa = { version = "2", features = [
+nasa = { version = "1.0.3", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -68,7 +68,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"redis-job"` | `redis-job`；隐式纳入 `redis` | `redis.job` 与 `redis.properties.<source>` | 冻结多 source 计划、布局与能力门禁，Ready 后启动扫描、租约、Fanout、逐源监督和有界停机 | `app.redis_job()`、`app.redis_job_control(source)`、`app.redis_job_query(source)` |
 | `"grpc"` | `grpc` | `grpc` | initializer 后自动装配 registered service、health、可选 reflection、TLS、listener、方法指标与有界排空 | `app.grpc()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
-| `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、探针、监听与排空；定制经 `configure_router` | `app.web()` |
+| `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、HTTP/1/h2c 监听、探针与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
 | `"nacos-discovery"` | `nacos-discovery`；真实 provider 再加 `nacos-sdk` | `rest_discovery` | Start 装出站客户端、Ready 注册、停机先摘流后关客户端 | `app.nacos_discovery()` |
 | `"scheduling"` | `scheduling`；选主模式使用 `scheduling-cluster` | `scheduling` | Ready 末尾启动已收集任务；选主模式复用已声明的 Redis 客户端 | `app.scheduling()` |
@@ -626,6 +626,76 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 安全协议、用户名、密码、证书路径和原生 properties 仍使用 `KafkaConfig` 对应字段；这些值不要写进示例、
 日志或管理端点。运行期配置变更只报告 `RestartRequired`，必须通过应用重启生效。
 
+## Web HTTP listener 受管模式
+
+同时启用 `application,web` feature 并声明 `#[nasa::application("web")]` 后，`"web"` 组件独占明文
+TCP listener、协议判定、连接容量、路由服务图与停机排空。在这些前提成立时，业务只需设置
+`server.http2.enabled=true` 即可接受 h2c，其余 HTTP/2 transport 字段均可省略。HTTP/2 不依赖
+`grpc` 或其它 feature 的传递依赖：`enabled=false` 时只接受 HTTP/1.0/1.1；显式开启后，同一端口按
+HTTP/2 固定前言接受 h2c prior knowledge，并继续兼容 HTTP/1。该 listener 不实现 `Upgrade: h2c`，
+也不终止 TLS；需要 h2 over TLS 时应由具有明确证书和 ALPN 合同的上游代理终止 TLS，再按已配置协议
+连接本 listener。
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8080
+  graceful_shutdown_timeout_ms: 10000
+  max_inflight_requests: 1024
+  http2:
+    enabled: true
+```
+
+业务通常只配置 `enabled`。以下高级参数全部可省略，框架会采用已经过边界校验的固定默认值；只有连接
+容量、报文规模或网络时延的实测结果要求不同边界时才覆盖：
+
+| 可选字段 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `max_connections` | `256` | 共享 listener 的 HTTP/1 与 h2c 连接总上限 |
+| `connection_handshake_timeout_ms` | `10000` | 等待 h2c 固定前言的最长时间 |
+| `max_connection_age_ms` | 未启用 | 主动连接轮转时长 |
+| `max_concurrent_streams` | `128` | 单条 HTTP/2 连接的并发 stream 上限 |
+| `initial_stream_window_size` | `65536` | 单 stream 初始流控窗口 |
+| `initial_connection_window_size` | `1048576` | 单连接初始流控窗口 |
+| `max_frame_size` | `16384` | HTTP/2 frame 最大字节数 |
+| `max_header_list_size` | `16384` | 单次请求头列表最大字节数 |
+| `header_table_size` | `4096` | HPACK 动态表最大字节数 |
+| `max_send_buffer_size` | `65536` | 单 stream 发送缓冲上限 |
+| `max_pending_accept_reset_streams` | `20` | 对端尚未确认的 reset stream 上限 |
+| `max_local_error_reset_streams` | `20` | 本端因协议错误产生的 reset stream 上限 |
+| `keep_alive_interval_ms` | `30000` | HTTP/2 PING 周期 |
+| `keep_alive_timeout_ms` | `10000` | 等待 PING ACK 的时限 |
+
+`max_connections` 在 HTTP/2 关闭时仍约束 HTTP/1 连接；容量耗尽的新连接在读取请求前关闭。HTTP/2 开启
+后，stream、流控、frame/header/HPACK、发送缓冲、reset 和 PING 边界全部显式交给 hyper driver，
+不采用随依赖组合变化的隐式默认值。`max_inflight_requests` 继续作为跨连接、跨协议的请求级总门禁，
+两者不能互相替代。
+
+启动校验采用与受管 gRPC listener 对齐的边界：连接数为 `1..=4096`，协议前言等待为
+`1..=60000` 毫秒，并发 stream 为 `1..=65535`，stream 窗口为 `1..=1 MiB`，连接窗口为
+`1..=16 MiB`，header list 为 `1..=64 KiB`，HPACK 表为 `1..=16 KiB`，发送缓冲为
+`1..=1 MiB`，两类 reset 上限均为 `1..=1024`；`max_frame_size` 必须在 `16384..=65535`。
+连接年龄若配置，必须在 1 分钟到 24 小时之间；两个 PING 时长必须大于零且不超过 365 天。协议和容量
+设置在 Start 阶段冻结，运行期配置变化需要重启才能作用于新 listener。开启 HTTP/2 后，前言超时或
+对端在判定完成前关闭会终止该连接，并累计连接级错误。
+
+停机先关闭 accept，再通知存量 HTTP/1 连接停止 keep-alive、HTTP/2 连接发送 GOAWAY；两者共同消费
+`graceful_shutdown_timeout_ms` 子预算，未配置时由 Application 全局停机预算兜底。子预算耗尽会终止
+剩余连接任务，尚未完成的请求不再等待。
+
+`server.health=true`（默认值）时，`<context_path>/metrics` 公开以下 transport 指标；标签取值固定，
+不包含地址、路由或客户端输入：
+
+| 指标 | 语义 |
+| --- | --- |
+| `napp_web_requests_by_protocol_total{protocol="http1"}` / `napp_web_requests_by_protocol_total{protocol="http2"}` | 按实际请求版本累计进入路由的请求 |
+| `napp_web_http2_requests_in_flight` | 当前仍在路由或响应 future 中的 HTTP/2 请求 |
+| `napp_web_connections_accepted_total` | TCP accept 成功次数，包含随后因容量被拒的连接 |
+| `napp_web_connections_rejected_total{reason="capacity"}` | 在协议判定前因连接容量耗尽而拒绝的连接 |
+| `napp_web_connections_active` | 当前仍由 listener 管理的连接 |
+| `napp_web_accept_errors_total` | 可恢复的 TCP accept 错误 |
+| `napp_web_connection_errors_total` | 协议判定或 HTTP driver 的连接级错误 |
+
 ## gRPC listener 受管模式
 
 `grpc` 把 generated service registry、单个 HTTP/2 listener、TLS、健康、反射、固定方法指标、服务
@@ -644,10 +714,10 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["application", "grpc"] }
+nasa = { version = "1.0.3", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "2"
+nagrpc-build = "1.0.0"
 ```
 
 ```rust

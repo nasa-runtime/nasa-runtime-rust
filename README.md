@@ -74,20 +74,22 @@ ACID、物理 exactly-once 或并发隔离，
 
 ## 稳定基础设施运行合同
 
-Kafka Schema Registry、对象存储和 gRPC listener 已形成稳定公共合同，并继续用独立 feature 控制
-依赖面；`full` 会显式纳入三项能力。它们都定义容量与超时上限、唯一所有权、敏感信息脱敏、失败语义
-和可观测事实。
+Kafka Schema Registry、对象存储、gRPC listener 和受管 Web listener 已形成稳定公共合同，并继续用
+独立 feature 控制依赖面；`full` 会显式纳入这些能力。它们都定义容量与超时上限、唯一所有权、
+敏感信息脱敏、失败语义和可观测事实。
 
 | 能力 | 解决的问题 | 运行架构 | 明确不负责 |
 | --- | --- | --- | --- |
 | [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | Kafka codec 子能力；业务持有 client，无 Application 组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
 | [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；业务持有实例 | multipart、流式/range/list、STS 刷新、对象版本治理 |
 | [gRPC listener](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、观测与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto 业务语义、service mesh、客户端负载均衡 |
+| [Web listener](napp/README.md#web-http-listener-受管模式) | 确定的 HTTP/1/h2c 选择、连接与 stream 上界、协议观测和有预算排空 | Application `"web"` 组件独占明文 TCP listener 与路由服务图 | TLS 终止、h2c Upgrade 协商、服务间协议选择 |
 
 Schema Registry 和对象存储没有固定配置根，也不会因启用 Application 自动启动；业务从最终配置与
 secret 快照构造，并可把低基数累计事实登记到统一 Prometheus/OTLP 目录。gRPC 受管模式则由容器独占
-shutdown，在 initializer 全部完成前不会绑定端口。各组件 README 是默认值、观测判读和成熟度边界的
-完整合同。
+shutdown，在 initializer 全部完成前不会绑定端口。Web listener 只有在同时启用 `application,web`
+feature 并声明 `#[nasa::application("web")]` 时才由容器创建；满足这些前提后，最终 YAML 的
+`server.http2.enabled` 决定是否接受 h2c。各组件 README 是默认值、观测判读和成熟度边界的完整合同。
 
 ## 使用
 
@@ -295,7 +297,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "1.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`nadate`、`naimg`、`naws`。
@@ -364,6 +366,8 @@ server:                 # web 组件
   host: 0.0.0.0
   port: 8080
   context_path: /app
+  http2:
+    enabled: false      # 显式开启后，同一明文端口接受 HTTP/1 与 h2c prior knowledge
 
 ws:                     # ws 组件，独立于 server
   addr: 0.0.0.0:9000
@@ -381,10 +385,12 @@ rest_discovery:         # nacos-discovery 组件
 3. `nadis`、`natx` 初始化 Redis 和 MySQL pool。
 4. `namapper`、`cacheable` 注入缓存和数据源。
 5. `nanacos`、`rest-discovery` 初始化注册发现和 REST 负载均衡。
-6. `napp` Web 组件装配 naweb 路由并启动 HTTP 服务,`naws` 启动长连接服务,`nasched` 启动调度器。
+6. `naweb` 装配路由，业务自行拥有 HTTP listener、协议选择与排空；`naws` 启动长连接服务，`nasched`
+   启动调度器。
 
 `#[nasa::application]` 按规范组件顺序自动完成上述全部步骤，并补齐手工装配普遍缺失的部分：
-信号处理、启动失败反向回滚、统一停机预算与配置热刷新。
+信号处理、启动失败反向回滚、统一停机预算与配置热刷新；声明 `"web"` 时由 `napp` Web 组件启动受管
+HTTP/1/h2c listener。
 
 ## 组件 README 索引
 

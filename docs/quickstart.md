@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = [
+nasa = { version = "1.0.3", features = [
     "application",
     "config-boot",
     "log",
@@ -54,7 +54,7 @@ Orchestrator 服务启用 Application 与 MySQL Saga runtime；Kafka、Redis Str
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["application", "saga-runtime", "web"] }
+nasa = { version = "1.0.3", features = ["application", "saga-runtime", "web"] }
 ```
 
 ```rust
@@ -136,9 +136,14 @@ server:
   host: 0.0.0.0
   port: 8080
   context_path: /orders
+  http2:
+    enabled: false
 ```
 
 配置默认拒绝未知字段。数据库、Redis 和其它外部凭据通过环境变量或部署平台 secret 注入，不写入仓库。
+本示例已经启用 `application,web` 并声明 `"web"` 组件，因此受管 Web listener 默认只接受 HTTP/1；
+业务需要 h2c prior knowledge 时只需把 `server.http2.enabled` 改为 `true`，高级 transport 字段可以
+省略。该开关不提供 TLS 终止或 `Upgrade: h2c`。
 
 ## Mapper 与事务
 

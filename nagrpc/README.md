@@ -7,10 +7,10 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["application", "grpc"] }
+nasa = { version = "1.0.3", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "2"
+nagrpc-build = "1.0.0"
 ```
 
 ## 核心价值

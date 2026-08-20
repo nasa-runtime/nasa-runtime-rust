@@ -17,10 +17,14 @@
 //!
 //! # 受管基础设施
 //!
-//! `kafka-schema-registry` 提供有界 Schema Registry client 与批准 ID 门禁；
-//! `object-store` 提供有界单对象合同、SigV4 adapter 与内容完整性复核；`grpc` 提供统一
-//! codegen、service registry、TLS/mTLS、HTTP/2 资源门禁和有预算排空。它们都进入 `full`，
-//! 业务只通过本门面使用公开合同。
+//! `kafka-schema-registry` 提供有界 Schema Registry client 与批准 ID 门禁；`object-store` 提供有界
+//! 单对象合同、SigV4 adapter 与内容完整性复核；`grpc` 提供统一 codegen、service registry、
+//! TLS/mTLS、HTTP/2 资源门禁和有预算排空；`web` 与 `application` 同时启用后，
+//! `#[nasa::application("web")]` 托管唯一明文 listener。这四项能力都进入 `full`，业务只通过本门面
+//! 使用公开合同。
+//!
+//! 默认只接受 HTTP/1；最终 YAML 设置 `server.http2.enabled=true` 即可在同一端口接受 h2c prior
+//! knowledge，高级 transport 字段可省略。该入口不终止 TLS，也不实现 `Upgrade: h2c`。
 // ============================================================================
 // nasa —— nasa-runtime-rust 唯一对外门面。
 //

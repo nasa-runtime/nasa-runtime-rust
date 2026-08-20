@@ -5,6 +5,4 @@ node_modules/
 .idea/
 **/tests/
 tests/*
-scripts/
-!/.github/scripts/
-!/.github/scripts/*.sh
+/scripts/

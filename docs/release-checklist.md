@@ -28,6 +28,9 @@
 - [ ] 配置未知字段、非法零值、冲突配置和缺少凭据均在开放流量前失败。
 - [ ] MySQL 写路径的事务归属、提交结果不确定处理和回滚语义明确。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] 受管 Web listener 的启用前提、HTTP/1/h2c 开关、连接与 stream 上限、GOAWAY 排空、
+      `<context_path>/metrics` 暴露条件、协议指标及 TLS 非目标与最终 YAML、README、rustdoc 和 manifest
+      定位一致。
 - [ ] 认证、授权、重放保护、密钥轮换和敏感信息脱敏符合 `SECURITY.md`。
 - [ ] 指标 label 维持低基数，日志不暴露凭据、payload 或完整业务身份。
 

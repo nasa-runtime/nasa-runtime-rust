@@ -11,7 +11,7 @@ adapter、管理与恢复入口、运行指标以及可选 transport connector�
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["saga-runtime"] }
+nasa = { version = "1.0.3", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
 # gRPC generated service/client 与封闭收据：features = ["saga-grpc"]

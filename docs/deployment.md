@@ -65,6 +65,24 @@ readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中
 `server.port: 0` 的真实端口在 bind 后产生，可通过应用运行时的监听地址能力读取；需要固定服务端口的
 部署不应使用该设置。
 
+## Web 协议与排空
+
+声明 `#[nasa::application("web")]` 且编译 `application,web` feature 后，Application 独占 Web TCP
+listener。默认只接受 HTTP/1；需要同一明文端口接受 h2c prior knowledge 时配置：
+
+```yaml
+server:
+  http2:
+    enabled: true
+```
+
+连接、stream、流控、header/frame、发送缓冲、reset 与 PING 参数均有受校验默认值，业务通常无需配置。
+该 listener 不实现 `Upgrade: h2c`，也不终止 TLS；h2 over TLS 由具备证书与 ALPN 合同的上游代理终止。
+停机先停止 accept，再对 HTTP/1 关闭 keep-alive、对 HTTP/2 发送 GOAWAY，并在组件与 Application 共享的
+预算内等待已接纳请求结束。滚动部署必须给该预算预留足够的强制终止宽限期。`server.health=true`
+时，协议、连接、容量拒绝和连接错误指标由 `<context_path>/metrics` 暴露；完整字段、范围和指标合同见
+[napp Web listener 受管模式](../napp/README.md#web-http-listener-受管模式)。
+
 ## 部署顺序
 
 1. 使用锁文件在受控依赖源中完成构建。

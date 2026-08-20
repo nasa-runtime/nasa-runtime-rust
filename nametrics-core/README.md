@@ -32,7 +32,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["application", "grafana", "web"] }
+nasa = { version = "1.0.3", features = ["application", "grafana", "web"] }
 ```
 
 ```rust

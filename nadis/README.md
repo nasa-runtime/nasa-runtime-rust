@@ -10,7 +10,7 @@ Handler 通过 `JobContext::parameter::<T>()` 获取 JSON 参数，`T` 可以是
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["redis"] }
+nasa = { version = "1.0.3", features = ["redis"] }
 ```
 
 ## 连接 Redis

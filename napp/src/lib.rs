@@ -20,6 +20,11 @@
 //! 统一失败停机。启用 Saga gRPC 入站计划时，generated command/result service 也在同一封口前自动
 //! 登记，不建立第二个 Router、身份解析或停机 owner。
 //!
+//! 启用 Web 组件时，Application 在 Ready 阶段独占明文 TCP listener 与路由服务图。默认只接受
+//! HTTP/1；`server.http2.enabled=true` 后同一端口按固定前言接受 h2c prior knowledge，并继续兼容
+//! HTTP/1。连接、stream、流控与报文边界在启动期冻结；停机先关闭 accept，再分别关闭 HTTP/1
+//! keep-alive 或向 HTTP/2 发送 GOAWAY。该 listener 不实现 `Upgrade: h2c`，也不终止 TLS。
+//!
 //! 本 crate 由 `nasa` 门面重导出；业务应用不应直接依赖实现 crate。
 
 #![forbid(unsafe_code)]

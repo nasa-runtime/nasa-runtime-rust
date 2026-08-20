@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "nagrpc-build"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "heck",
  "prost",
@@ -2734,6 +2734,8 @@ dependencies = [
  "config-boot",
  "futures",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "linkme",
  "matchit",
@@ -2789,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "nasa"
-version = "2.0.0"
+version = "1.0.3"
 dependencies = [
  "async-macro",
  "cacheable",

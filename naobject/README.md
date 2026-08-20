@@ -7,7 +7,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2", features = ["object-store"] }
+nasa = { version = "1.0.3", features = ["object-store"] }
 ```
 
 ## 运行架构与安全合同

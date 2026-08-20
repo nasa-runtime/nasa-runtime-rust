@@ -34,7 +34,7 @@ license = "MIT OR Apache-2.0"
 2. 对照独立架构章节、crate rustdoc、manifest description、keywords/categories，确认定位一致。
 3. 检查示例只依赖归档外真实可访问的公开链接；crate README 不引用归档中不存在的 `../docs`。
 4. 对照实际 feature 和公开 API 检查配置、初始化、失败语义、观测、停机与恢复边界。
-5. 核对规范化 manifest、许可证、迁移 SQL和最终文件清单，再给出文档验收结论。
+5. 核对规范化 manifest、许可证、迁移 SQL 和最终文件清单，确认归档中的文档合同完整。
 
 Saga 发布至少覆盖 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime`、`nasaga-macro`、`napp`、`nasa`，
 并同步检查根 README、Saga 生产指南、迁移指南、运维指南、告警规则以及 Inbox/Outbox 交叉合同。
@@ -70,8 +70,9 @@ registry 尚不可用的事实。
 
 gRPC、Saga 与指标组件的依赖顺序为：先发布并回读 `nagrpc-build`、`nagrpc` 与 `nametrics-core`；Saga 主链
 先回读 `nasaga-core`，再回读 `nasaga-mysql` 与 `nasaga-macro`，随后发布 `nasaga-runtime`；`napp` 还
-必须等待它引用的 `config-boot` 等全部前置版本可从 registry 解析；最后才发布 `nasa`。每一步都要从
-不带本地 patch 的隔离解析图取得前置版本，不能因为工作区能构建就越过 registry 拓扑。
+必须等待它引用的 `cacheable`、`config-boot` 等全部前置版本可从 registry 解析；最后才发布 `nasa`。
+具体顺序以仓库发布计划为唯一来源。每一步都要从不带本地 patch 的隔离解析图取得前置版本，不能因为
+工作区能构建就越过 registry 拓扑。
 
 默认发布流程是完成提交、推送目标分支、远端 CI 全绿、核对远端 SHA、取得明确发布授权、上传 registry、
 回读 registry 元数据与 README。dry-run 或本地归档通过不构成上传授权；公开版本不可原地替换，发现归档

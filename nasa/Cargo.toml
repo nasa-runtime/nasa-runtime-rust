@@ -4,15 +4,15 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "2.0.0"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed multi-source lifecycle, durable Saga, RedisJob, gRPC, messaging, and web services"
+description = "NASA Rust facade for managed multi-source lifecycle, durable Saga, RedisJob, gRPC, messaging, and HTTP/1/h2c web services"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "saga", "grpc", "lifecycle", "microservices"]
+keywords = ["runtime", "saga", "grpc", "lifecycle", "http2"]
 categories.workspace = true
 
 [features]
@@ -67,6 +67,7 @@ scheduling = ["dep:scheduling_impl", "dep:async_macro", "application_impl?/sched
 # 集群定时:打开 scheduling 的 nadis adapter(NadisLeaderGate / start_scheduled_clustered*)并拉起 redis,
 # 业务可从 nasa::redis 构造 Leader；cluster="leader" 配合自定义 LeaderGate 时只需开启 scheduling。
 scheduling-cluster = ["scheduling", "scheduling_impl/cluster", "redis", "application_impl?/scheduling-cluster"]
+# Web 路由门面；与 application 同时启用时纳入确定的 HTTP/1/h2c 受管 listener。
 web = ["dep:web_impl", "dep:web_macro", "application_impl?/web"]
 # Web 身份运行时；普通 Web 用户不会因此引入异步身份组件。
 web-auth = ["web", "web_impl/auth"]
