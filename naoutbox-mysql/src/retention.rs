@@ -280,7 +280,7 @@ impl MySqlOutbox {
         // 也不允许把发布/归档网络 I/O 圈进业务长事务。
         let connection = match tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
-            natx::conn(),
+            natx::conn_for(&self.datasource),
         )
         .await
         {

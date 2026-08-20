@@ -150,7 +150,19 @@ impl MySqlSagaStore {
     ///
     /// 返回：建表成功返回 `Ok`；连接不可用或 DDL 失败返回脱敏错误。
     pub async fn ensure_participant_schema() -> Result<(), SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        Self::ensure_participant_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上创建并复验参与方 gate 结构。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：结构完整时成功；名称、连接、DDL 或历史摘要门禁失败时返回脱敏错误。
+    pub async fn ensure_participant_schema_for(
+        datasource: impl AsRef<str>,
+    ) -> Result<(), SagaStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
+        let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
         sqlx::query(CREATE_PARTICIPANT_SQL)
             .execute(connection.as_mut())
             .await
@@ -253,7 +265,9 @@ impl MySqlSagaStore {
         // gate 与业务写、结果 Outbox 必须同一事务:准入提交而业务效果丢失(或反之)
         // 都会让 Orchestrator 记到与本地事实相反的账。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // FOR UPDATE 行锁是 execute 与 cancel 的唯一串行化点;无行时锁间隙,
         // 与并发 INSERT 由唯一键仲裁。
         let existing = sqlx::query(
@@ -350,7 +364,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET forward_status = ? \
              WHERE saga_id = ? AND step_name = ? AND forward_status = ?",
@@ -390,7 +406,9 @@ impl MySqlSagaStore {
         // 取消裁决与 CancelConfirmed Outbox 必须同事务:fence 建立而取消事实丢失,
         // Orchestrator 将永远等不到裁决;反之则谎报了并未建立的屏障。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, \
              forward_status, cancel_status, execute_effect_id, cancel_effect_id \
@@ -517,7 +535,9 @@ impl MySqlSagaStore {
         cancel_effect: &EffectId,
     ) -> Result<ExternalCancelAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // gate 行锁在外部 cancel 调用期间保持到 COMMIT；否则并发 execute 可能在取消尚未
         // 裁决时提交外部 intent，最终同时出现 CancelConfirmed 与真实成功效果。
         let existing = sqlx::query(
@@ -702,7 +722,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET forward_status = ?, cancel_status = ? \
              WHERE saga_id = ? AND step_name = ? AND cancel_status = ? \
@@ -743,7 +765,9 @@ impl MySqlSagaStore {
         cancel_effect: &EffectId,
         status: StepCancelStatus,
     ) -> Result<(), SagaStoreError> {
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET cancel_status = ?, cancel_effect_id = ? \
              WHERE saga_id = ? AND step_name = ? AND cancel_status = ?",
@@ -784,7 +808,9 @@ impl MySqlSagaStore {
         recovery_operation_id: Option<&str>,
     ) -> Result<CompensationAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, \
              forward_status, compensation_status \
@@ -918,7 +944,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET compensation_status = ? \
              WHERE saga_id = ? AND step_name = ? AND compensation_status = ?",
@@ -958,7 +986,9 @@ impl MySqlSagaStore {
         recovery_operation_id: Option<&str>,
     ) -> Result<ResolutionAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, forward_status, \
              compensation_status, resolution_status, resolve_effect_id \
@@ -1091,7 +1121,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let (forward, compensation) = match (target, status) {
             (ResolutionTarget::Forward, StepResolutionStatus::Succeeded) => {
                 (Some(StepForwardStatus::Succeeded), None)

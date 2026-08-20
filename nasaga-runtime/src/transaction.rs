@@ -56,21 +56,18 @@ impl std::fmt::Display for SagaTransactionError {
 
 impl std::error::Error for SagaTransactionError {}
 
-/// 业务作用：在默认 datasource 上执行 Saga 原子步骤，并保留 COMMIT 不确定与回滚失败分类。
-///
-/// Saga 的 Inbox、业务事实、状态迁移和 Outbox 必须共享此边界。普通领域错误会显式选择
-/// `Rollback`；只有完整得到可提交结果才选择 `Commit`，避免依赖错误类型 downcast 决定事务。
+/// 业务作用：在指定 datasource 上执行 Saga 原子步骤，并保留 COMMIT 不确定与回滚失败分类。
 ///
 /// 参数说明：
-/// - `body`: 在 ambient transaction 内执行并返回领域结果的 Future。
+/// - `datasource`: Saga store、Inbox 与 Outbox 共同绑定的数据源身份。
+/// - `body`: 在同源 ambient transaction 内执行并返回领域结果的 Future。
 ///
-/// 返回：数据库确认提交后返回领域值；领域失败保留原始错误；提交拒绝、提交不确定、
-/// rollback-only、回滚失败和事务基础设施失败返回带稳定分类前缀的错误，调用方不得 ACK。
-pub(crate) async fn run<T, F>(body: F) -> anyhow::Result<T>
+/// 返回：数据库确认提交后返回领域值；跨源、回滚、提交不确定或基础设施失败返回封闭分类。
+pub(crate) async fn run_for<T, F>(datasource: natx::DatasourceRef, body: F) -> anyhow::Result<T>
 where
     F: Future<Output = anyhow::Result<T>>,
 {
-    natx::run_decided(async move {
+    natx::run_decided_for(&datasource, async move {
         match body.await {
             Ok(value) => TxDecision::Commit(value),
             Err(error) => TxDecision::Rollback(error),

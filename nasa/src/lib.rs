@@ -49,6 +49,52 @@
 /// `#[nasa::initializer]` 静态项与 Service 启动 Hook 动态登记项合并后，在组件 `Prepare` 与
 /// `Seal` 之间执行全部 `before -> initialize -> after`。全部成功前不发布 Ready；外部已提交事实
 /// 不会被本地逆序清理撤销，业务实现必须使用事务或稳定幂等键保证可安全重跑。
+///
+/// # 单源与多源 YAML
+///
+/// 基础设施 source 由最终 YAML 创建，不在 `main` 中手工建池或建连。MySQL 单源使用 `database`，
+/// 多源使用 `datasources.<name>`；Redis 单源使用扁平 `redis`，多源使用
+/// `redis.properties.<qualifier>`；Kafka 单 client 使用 `kafka`，多 client 使用
+/// `kafkas.<client>`。同一种资源的单源根与多源根互斥，任一实例失败都会阻止完整命名表进入 Ready。
+///
+/// ```yaml
+/// datasources:
+///   default:
+///     url: ${APP_PRIMARY_DB_URL}
+///   reporting:
+///     url: ${APP_REPORTING_DB_URL}
+/// outbox:
+///   datasource_ref: reporting
+/// saga:
+///   database_bootstrap: application
+///   datasource_ref: reporting
+///
+/// redis:
+///   properties:
+///     primary:
+///       url: ${APP_PRIMARY_REDIS_URL}
+///       namespace: orders
+///       profile: RustV2
+///     sessions:
+///       url: ${APP_SESSION_REDIS_URL}
+///       namespace: sessions
+///       profile: RustV2
+///
+/// kafkas:
+///   default:
+///     bootstrap_servers: ${APP_PRIMARY_KAFKA_BOOTSTRAP_SERVERS}
+///   audit:
+///     bootstrap_servers: ${APP_AUDIT_KAFKA_BOOTSTRAP_SERVERS}
+/// ```
+///
+/// 单源 MySQL 固定为 `default`；单源 Redis 的持久身份为 `primary`，并提供 `default` 查询别名；
+/// 单 client Kafka 省略 `client_name` 时默认为 `default`。业务通过 `default_datasource`/
+/// `datasource(name)`、`default_redis`/`redis(name)`、`default_kafka`/`kafka(name)` 取得受管句柄。
+/// Outbox 与 Saga 用 `datasource_ref`，Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
+/// 引用不存在时在建连前拒绝，不会猜测唯一实例或回退默认源。
+/// `partition` 的 `partitions`、`queue_capacity`、`global_inflight`、`max_lanes` 与
+/// `shutdown_timeout_ms` 也可直接写入同名 YAML 根；仅在需要按本机条件计算容量时才使用
+/// `configure_partition`，两种入口不能同时声明。
 #[cfg(feature = "application")]
 pub mod application {
     pub use application_impl::*;

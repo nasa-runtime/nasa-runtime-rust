@@ -1,9 +1,9 @@
 [package]
 name = "nainbox-mysql"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Inbox MySQL backend using the ambient natx transaction"
+description = "NASA Inbox MySQL backend with named natx datasource binding and ambient transaction deduplication"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -13,5 +13,5 @@ categories.workspace = true
 [dependencies]
 anyhow = "1"
 nainbox-core = { version = "1.0.0" }
-natx = { version = "1.0.1" }
+natx = { version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

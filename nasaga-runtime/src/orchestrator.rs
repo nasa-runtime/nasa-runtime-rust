@@ -414,15 +414,41 @@ impl Orchestrator {
     ///
     /// 返回：配置预算全部为正时返回 Orchestrator；零/负预算返回错误并拒绝启动。
     pub fn new(registry: DefinitionRegistry, config: OrchestratorConfig) -> anyhow::Result<Self> {
+        Self::with_datasource(registry, config, natx::DEFAULT_DATASOURCE)
+    }
+
+    /// 业务作用：构造绑定命名 datasource 的 Orchestrator，使状态、Inbox、Outbox、timer 与审计共享一次本地提交。
+    ///
+    /// 参数说明：
+    /// - `registry`: 启动期已冻结的 definition 注册表。
+    /// - `config`: Orchestrator 运行预算与租户门禁。
+    /// - `datasource`: 所有 Saga 本地持久与事务边界共用的数据源。
+    ///
+    /// 返回：配置与 datasource 合法时返回同源 Orchestrator；否则在任何数据库 I/O 前拒绝。
+    pub fn with_datasource(
+        registry: DefinitionRegistry,
+        config: OrchestratorConfig,
+        datasource: impl AsRef<str>,
+    ) -> anyhow::Result<Self> {
         validate_config(&config)?;
+        let datasource = natx::DatasourceRef::new(datasource)?;
         Ok(Self {
-            store: MySqlSagaStore::new(),
-            inbox: MySqlInbox::new(),
-            outbox: MySqlOutbox::new(),
+            store: MySqlSagaStore::with_datasource(&datasource)?,
+            inbox: MySqlInbox::with_datasource(&datasource)?,
+            outbox: MySqlOutbox::with_datasource(&datasource)?,
             registry,
             config,
             fencing_tokens: TimerFencingTokenIssuer::new(),
         })
+    }
+
+    /// 业务作用：读取 Orchestrator 全部本地持久与事务链绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：store、Inbox、Outbox 与 timer 共用的不可变 qualifier。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        self.store.datasource_ref()
     }
 
     /// 业务作用：启动预检——非终态实例引用的 definition 必须可用且摘要一致，否则拒绝 Ready。
@@ -746,7 +772,7 @@ impl Orchestrator {
         let start_request_digest = derive_start_request_digest(request, &digest, first_step.name());
         let canonical_trace = trace.map(TraceContext::to_traceparent);
 
-        let outcome = crate::transaction::run(async {
+        let outcome = crate::transaction::run_for(self.datasource_ref().clone(), async {
             let creation = self
                 .store
                 .create_instance(&NewSagaInstance {
@@ -864,7 +890,7 @@ impl Orchestrator {
             .parsed_terminal()
             .map_err(|_| crate::SagaResultProcessingError::ContractInvalid)?;
 
-        let outcome = crate::transaction::run(async {
+        let outcome = crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.config.inbox_consumer, &envelope.event_id)
@@ -1124,7 +1150,7 @@ impl Orchestrator {
         claimed_at: Option<Instant>,
     ) -> anyhow::Result<TimerOutcome> {
         let step_scope = parse_step_scope(&timer.scope_kind, &timer.scope_key)?;
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             let Some(instance) = self.store.load_instance(&timer.saga_id).await? else {
                 // 实例已被归档清理的孤儿 timer:消费吸收,不再触发。
                 let fencing_now = match claimed_at {
@@ -1282,7 +1308,7 @@ impl Orchestrator {
     ) -> anyhow::Result<()> {
         // 权限门禁必须早于实例查询，避免无权主体利用存在性与租户错误枚举 saga_id。
         management.require(SagaManagementPermission::Pause)?;
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
             // 实例数据也不泄漏存在性。
             self.reserve_action_rate_budget(tenant).await?;
@@ -1343,7 +1369,7 @@ impl Orchestrator {
     ) -> anyhow::Result<()> {
         // 与 pause 相同，先鉴权再读实例，防止管理读侧成为跨租户枚举 oracle。
         management.require(SagaManagementPermission::Resume)?;
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
             // 实例数据也不泄漏存在性。
             self.reserve_action_rate_budget(tenant).await?;
@@ -1415,7 +1441,7 @@ impl Orchestrator {
     ) -> anyhow::Result<SagaStatus> {
         // 人工恢复会再次发布外部补偿命令，必须先做最小权限校验，再接触实例数据。
         management.require(SagaManagementPermission::RetryCompensation)?;
-        let status = crate::transaction::run(async {
+        let status = crate::transaction::run_for(self.datasource_ref().clone(), async {
             // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
             // 实例数据也不泄漏存在性。
             self.reserve_action_rate_budget(tenant).await?;
@@ -1557,7 +1583,7 @@ impl Orchestrator {
         now_ms: i64,
     ) -> anyhow::Result<SagaStatus> {
         management.require(SagaManagementPermission::RetryResolution)?;
-        let status = crate::transaction::run(async {
+        let status = crate::transaction::run_for(self.datasource_ref().clone(), async {
             // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
             // 实例数据也不泄漏存在性。
             self.reserve_action_rate_budget(tenant).await?;
@@ -1708,7 +1734,7 @@ impl Orchestrator {
                 "manual close is disabled: deploy MANUALLY_CLOSED-aware readers to every replica, then enable it explicitly"
             );
         }
-        let status = crate::transaction::run(async {
+        let status = crate::transaction::run_for(self.datasource_ref().clone(), async {
             // 速率预算先于实例读写:预算按提交的动作调用计,幂等重放同样提交并计数;
             // 动作失败回滚时预算同事务退还。
             self.reserve_action_rate_budget(tenant).await?;

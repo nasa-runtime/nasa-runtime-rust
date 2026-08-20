@@ -170,6 +170,22 @@ impl ParticipantRuntime {
         consumer: impl Into<String>,
         command_trust: impl IntoIterator<Item = ParticipantCommandTrust>,
     ) -> anyhow::Result<Self> {
+        Self::with_datasource(consumer, command_trust, natx::DEFAULT_DATASOURCE)
+    }
+
+    /// 业务作用：构造绑定命名 datasource 的参与方运行时。
+    ///
+    /// 参数说明：
+    /// - `consumer`: 本服务的 canonical Inbox consumer 名称。
+    /// - `command_trust`: 从受信 definition/deployment 投影得到的 Orchestrator 授权边。
+    /// - `datasource`: Inbox、gate、业务事实与 result Outbox 共享的数据源。
+    ///
+    /// 返回：身份、信任投影与 datasource 合法时返回同源 runtime；任一边界不成立时在 I/O 前拒绝。
+    pub fn with_datasource(
+        consumer: impl Into<String>,
+        command_trust: impl IntoIterator<Item = ParticipantCommandTrust>,
+        datasource: impl AsRef<str>,
+    ) -> anyhow::Result<Self> {
         let consumer = consumer.into();
         if consumer.is_empty()
             || consumer.trim() != consumer
@@ -201,14 +217,24 @@ impl ParticipantRuntime {
         if projected_trust.is_empty() {
             anyhow::bail!("participant requires at least one command trust projection");
         }
+        let datasource = natx::DatasourceRef::new(datasource)?;
         Ok(Self {
-            store: MySqlSagaStore::new(),
-            inbox: MySqlInbox::new(),
-            outbox: MySqlOutbox::new(),
+            store: MySqlSagaStore::with_datasource(&datasource)?,
+            inbox: MySqlInbox::with_datasource(&datasource)?,
+            outbox: MySqlOutbox::with_datasource(&datasource)?,
             consumer,
             trusted_command_producers,
             command_trust: projected_trust,
         })
+    }
+
+    /// 业务作用：读取参与方原子处理链绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Inbox、Saga gate 与 Outbox 共用的不可变 qualifier。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        self.store.datasource_ref()
     }
 
     /// 业务作用：把 transport 已认证 producer 收窄成只能调用 authenticated phase API 的能力视图。
@@ -324,7 +350,7 @@ impl ParticipantRuntime {
         if identity.phase != StepPhase::Execute {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.consumer, &envelope.command_id)
@@ -500,7 +526,7 @@ impl ParticipantRuntime {
         if identity.phase != StepPhase::Cancel {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.consumer, &envelope.command_id)
@@ -597,7 +623,7 @@ impl ParticipantRuntime {
         if identity.phase != StepPhase::Cancel {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.consumer, &envelope.command_id)
@@ -723,7 +749,7 @@ impl ParticipantRuntime {
         if identity.phase != StepPhase::Compensate {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.consumer, &envelope.command_id)
@@ -899,7 +925,7 @@ impl ParticipantRuntime {
         if identity.phase != StepPhase::Resolve {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
-        crate::transaction::run(async {
+        crate::transaction::run_for(self.datasource_ref().clone(), async {
             if matches!(
                 self.inbox
                     .claim(&self.consumer, &envelope.command_id)

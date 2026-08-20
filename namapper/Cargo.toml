@@ -21,7 +21,7 @@ redis-cache = ["dep:redis"]
 
 [dependencies]
 namapper-macro = { package = "namapper-macro", version = "1.0.1" }
-natx = { package = "natx", version = "1.0.2" }
+natx = { package = "natx", version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"
 anyhow = "1"

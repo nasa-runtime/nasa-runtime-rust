@@ -47,9 +47,17 @@ use nasa::saga::{DefinitionRegistry, Orchestrator, OrchestratorConfig};
 let mut registry = DefinitionRegistry::new();
 registry.register(checkout_definition)?;
 
-let orchestrator = Orchestrator::new(registry, OrchestratorConfig::default())?;
+let orchestrator = Orchestrator::with_datasource(
+    registry,
+    OrchestratorConfig::default(),
+    "workflow",
+)?;
 orchestrator.verify_startup().await?;
 ```
+
+`Orchestrator::with_datasource` 会让 store、Inbox、Outbox、timer 与审计固定使用同一个 qualifier；参与方
+用 `ParticipantRuntime::with_datasource` 对称绑定 gate、业务事实、Inbox 与 result Outbox。默认构造器
+仍选择 `default`，不会根据唯一实例猜测命名库。
 
 使用 `#[nasa::application("saga")]` 时，将运行时提交给 Application，合同校验、历史实例门禁、timer
 轮询和停机保护态由组件统一执行：
@@ -135,20 +143,24 @@ producer/path 信任边分配独立容量。
 投影如下：
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  max_connections: 32
-
-kafka:
-  brokers: ${APP_KAFKA_BROKERS}
-  security_protocol: SASL_SSL
+datasources:
+  workflow:
+    url: ${APP_WORKFLOW_MYSQL_URL}
+    max_connections: 32
 
 saga:
   database_bootstrap: application
+  datasource_ref: workflow
   timer_poll_interval_ms: 500
   timer_error_backoff_ms: 1000
   timer_operation_timeout_ms: 5000
   timer_failure_threshold: 3
+
+outbox:
+  datasource_ref: workflow
+
+kafka:
+  bootstrap_servers: ${APP_KAFKA_BOOTSTRAP_SERVERS}
 ```
 
 timer owner 通过 `SagaApplicationPlan::orchestrator` 提交，需要逐副本唯一且重启稳定，用于租约归属

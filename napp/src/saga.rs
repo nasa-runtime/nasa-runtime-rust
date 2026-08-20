@@ -187,6 +187,7 @@ pub(crate) enum SagaDatabaseBootstrap {
 /// 业务作用：承载 Saga 受管运行时的数据库引导、轮询、退避、超时与摘流配置。
 struct SagaSettings {
     database_bootstrap: SagaDatabaseBootstrap,
+    datasource_ref: String,
     timer_poll_interval_ms: u64,
     timer_error_backoff_ms: u64,
     timer_operation_timeout_ms: u64,
@@ -202,6 +203,7 @@ impl Default for SagaSettings {
     fn default() -> Self {
         Self {
             database_bootstrap: SagaDatabaseBootstrap::Application,
+            datasource_ref: natx::DEFAULT_DATASOURCE.to_owned(),
             timer_poll_interval_ms: DEFAULT_TIMER_POLL_INTERVAL_MS,
             timer_error_backoff_ms: DEFAULT_TIMER_ERROR_BACKOFF_MS,
             timer_operation_timeout_ms: DEFAULT_TIMER_OPERATION_TIMEOUT_MS,
@@ -345,10 +347,10 @@ impl SagaRedisTransportPlan {
     ///
     /// 返回：客户端名与消费者集合合法返回 `Ok`。
     fn validate(&self) -> ApplicationResult<()> {
-        if self.client_name.is_empty() || self.client_name.len() > 128 {
+        if !crate::redis::is_canonical_redis_qualifier(&self.client_name) {
             return Err(saga_error(
                 ApplicationPhase::UserHook,
-                "saga redis transport requires a bounded client name",
+                "saga redis transport requires a canonical Redis qualifier",
             ));
         }
         if self.pollers.is_empty() {
@@ -528,17 +530,43 @@ impl SagaApplicationPlan {
         Ok(self)
     }
 
-    /// 业务作用：确认计划至少托管一个可对外提供的 Saga 角色。
+    /// 业务作用：确认计划至少托管一个 Saga 角色，且全部角色共享同一 datasource 原子边界。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：含 Orchestrator 或参与方时成功；空计划返回错误并阻止无行为组件进入 Ready。
+    /// 返回：含角色且 datasource 一致时成功；空计划或跨源组合在 UserHook 阶段返回错误。
     pub(crate) fn validate(&self) -> ApplicationResult<()> {
         if self.orchestrator.is_none() && self.participants.is_empty() {
             return Err(saga_error(
                 ApplicationPhase::UserHook,
                 "saga plan must contain an orchestrator or at least one participant",
             ));
+        }
+        let expected = self
+            .orchestrator
+            .as_ref()
+            .map(|plan| plan.runtime.datasource_ref())
+            .or_else(|| {
+                self.participants
+                    .values()
+                    .next()
+                    .map(|runtime| runtime.datasource_ref())
+            });
+        if let Some(expected) = expected {
+            if self
+                .orchestrator
+                .as_ref()
+                .is_some_and(|plan| plan.runtime.datasource_ref() != expected)
+                || self
+                    .participants
+                    .values()
+                    .any(|runtime| runtime.datasource_ref() != expected)
+            {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "saga runtimes in one managed plan must bind the same datasource",
+                ));
+            }
         }
         Ok(())
     }
@@ -1074,6 +1102,43 @@ impl ApplicationComponent for SagaComponent {
             let state = application.saga_runtime();
             #[cfg_attr(not(feature = "saga-redis-stream"), allow(unused_mut))]
             let mut plan = state.take_plan()?;
+            let settings = self
+                .settings
+                .clone()
+                .ok_or_else(|| saga_error(ApplicationPhase::Ready, "saga settings are missing"))?;
+            // 配置引用先命中当前 Application 的受管 pool，再复验 UserHook 提交的全部 runtime；
+            // 任一不同源都在 descriptor 扫描或首条 SQL 前拒绝，不得自动切库。
+            let _pool = application.datasource(&settings.datasource_ref).await?;
+            let configured_datasource = natx::DatasourceRef::new(&settings.datasource_ref)
+                .map_err(|error| {
+                    saga_source_error(
+                        ApplicationPhase::Ready,
+                        "saga datasource_ref is invalid",
+                        error,
+                    )
+                })?;
+            if plan
+                .orchestrator
+                .as_ref()
+                .is_some_and(|entry| entry.runtime.datasource_ref() != &configured_datasource)
+                || plan
+                    .participants
+                    .values()
+                    .any(|runtime| runtime.datasource_ref() != &configured_datasource)
+            {
+                return Err(saga_error(
+                    ApplicationPhase::Ready,
+                    "saga runtime datasource does not match saga.datasource_ref",
+                ));
+            }
+            if crate::outbox::datasource_ref(&application, ApplicationPhase::Ready)?
+                != settings.datasource_ref
+            {
+                return Err(saga_error(
+                    ApplicationPhase::Ready,
+                    "saga.datasource_ref must match outbox.datasource_ref for the atomic event chain",
+                ));
+            }
             // Redis transport 属组件生命周期所有权,不随计划进入只读能力发布;必须在
             // publish 前取走。
             #[cfg(feature = "saga-redis-stream")]
@@ -1123,9 +1188,6 @@ impl ApplicationComponent for SagaComponent {
 
             let timer_task: Option<ApplicationFuture<'static>> =
                 if let Some(orchestrator) = orchestrator {
-                    let settings = self.settings.clone().ok_or_else(|| {
-                        saga_error(ApplicationPhase::Ready, "saga settings are missing")
-                    })?;
                     Some(Box::pin(run_timer_loop(
                         application.clone(),
                         orchestrator.runtime,
@@ -1499,7 +1561,11 @@ fn stream_metric_sample(
 /// 返回：按 stream 分组的指标文本;未启用 transport 时为空串。
 #[cfg(feature = "saga-redis-stream")]
 pub(crate) fn render_stream_metrics(state: &SagaRuntimeState) -> String {
-    /// Prometheus label 值转义:合法配置里的反斜线、引号与换行不允许破坏 exposition。
+    /// 业务作用：转义 Prometheus label 值，阻止冻结配置中的特殊字符破坏 exposition 边界。
+    ///
+    /// 参数说明：`value` 是已经过配置门禁的 stream、group 或 consumer 标签值。
+    ///
+    /// 返回：反斜线、引号与换行均已转义的标签文本。
     fn escape_label(value: &str) -> String {
         value
             .replace('\\', "\\\\")
@@ -1800,6 +1866,21 @@ pub(crate) fn validate_saga_section(
 ///
 /// 返回：所有值位于封闭范围时成功，否则返回不含配置原值的错误。
 fn validate_settings(settings: &SagaSettings, phase: ApplicationPhase) -> ApplicationResult<()> {
+    natx::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
+        saga_source_error(
+            phase,
+            "saga.datasource_ref is not a canonical datasource qualifier",
+            error,
+        )
+    })?;
+    if settings.database_bootstrap == SagaDatabaseBootstrap::UserHook
+        && settings.datasource_ref != natx::DEFAULT_DATASOURCE
+    {
+        return Err(saga_error(
+            phase,
+            "saga.database_bootstrap=user_hook supports only datasource_ref=default",
+        ));
+    }
     if !(10..=MAX_TIMER_INTERVAL_MS).contains(&settings.timer_poll_interval_ms) {
         return Err(saga_error(
             phase,

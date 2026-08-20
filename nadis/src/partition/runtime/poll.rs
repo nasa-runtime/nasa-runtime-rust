@@ -273,7 +273,7 @@ fn parse_one_stream(
             //     需同步改造 poll/recover_pel/worker 并评估重复投递风险。
             None => {
                 if !fields_empty {
-                    tracing::warn!(p, id, "entry 有 fields 但缺 data field(疑似 publish 端字段名 bug),按 tombstone 清");
+                    tracing::warn!(p, id, "entry 有 fields 但缺 data field(疑似 publish 端字段名不一致),按 tombstone 清");
                 }
                 recs.push((id, Vec::new()));
             }

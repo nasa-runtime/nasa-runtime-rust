@@ -355,7 +355,9 @@ impl MySqlSagaStore {
         validate_saga_version(spec.expected_saga_version)?;
         // timer 与写命令 Outbox 的迁移同事务:命令发出而超时保护缺席,步骤将可能无限滞留。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let inserted = sqlx::query(
             "INSERT INTO saga_timer (saga_id, scope_kind, scope_key, kind, attempt_no, \
              timer_id, due_at, available_at, state, expected_saga_version, generation) \
@@ -430,7 +432,9 @@ impl MySqlSagaStore {
         }
         // 作废必须与离开该步骤的迁移同事务:旧 timer 存活到新状态会触发过期语义的超时。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let result = match kind {
             Some(kind) => {
                 sqlx::query(
@@ -500,7 +504,9 @@ impl MySqlSagaStore {
         // 重排与产生新 deadline 的业务裁决同事务：裁决提交而重排丢失，会让新期限
         // 永远不再被检查。普通 pause/resume 只改 available_at，不得调用本方法顺延 due_at。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_timer SET due_at = ?, available_at = ?, expected_saga_version = ?, \
              generation = generation + 1, state = ?, owner = NULL, fencing_token = NULL, \
@@ -567,7 +573,9 @@ impl MySqlSagaStore {
         let claimed_until = now_ms
             .checked_add(lease_ms)
             .ok_or_else(|| SagaStoreError::new("timer claim lease deadline overflow"))?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // claim 结果若在网络层不确定，token 会随本次调用销毁；禁止把字符串抄出重试，
         // 否则两个调用可能同时回读同一批权威。可能已提交的租约只能按过期接管路径恢复。
         sqlx::query(
@@ -632,7 +640,9 @@ impl MySqlSagaStore {
         // 消费必须与它触发的迁移同事务:迁移提交而 timer 未标 FIRED 会重复触发,
         // 反之超时事实丢失。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_timer SET state = ?, owner = NULL, fencing_token = NULL, \
              claimed_until = NULL WHERE timer_id = ? AND state = ? AND fencing_token = ? \
@@ -679,7 +689,9 @@ impl MySqlSagaStore {
                 "timer release cannot run inside an ambient transaction",
             ));
         }
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_timer AS timer JOIN saga_instance AS instance \
              ON instance.saga_id = timer.saga_id \
@@ -718,7 +730,9 @@ impl MySqlSagaStore {
         // 控制态恢复与 timer 唤醒必须同事务：若只提交 ACTIVE 而唤醒丢失，业务 deadline
         // 会被暂停退避悄悄顺延；反之则会在仍 PAUSED 时制造热轮询。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_timer SET available_at = due_at WHERE saga_id = ? AND state = ? \
              AND available_at <> due_at",

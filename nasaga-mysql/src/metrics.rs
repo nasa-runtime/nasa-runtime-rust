@@ -60,7 +60,9 @@ impl MySqlSagaStore {
                 "Saga metrics time must be non-negative",
             ));
         }
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(
             "SELECT \
              CAST((SELECT COUNT(*) FROM saga_instance) AS SIGNED) AS started_total, \

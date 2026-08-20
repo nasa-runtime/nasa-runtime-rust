@@ -144,7 +144,9 @@ impl MySqlSagaStore {
         }
         validate_event_id(fact.incoming_event_id)?;
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         sqlx::query(
             "INSERT INTO saga_conflict_fact \
              (saga_id, incoming_event_id, step_name, phase, attempt_no, existing_status, \
@@ -171,7 +173,9 @@ impl MySqlSagaStore {
         limit: u32,
     ) -> Result<Vec<SagaStepAttemptRow>, SagaStoreError> {
         validate_limit(limit)?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT step_name, phase, attempt_no, effect_id, command_id, status, outcome_event_id \
              FROM saga_step_attempt WHERE saga_id = ? \
@@ -193,7 +197,9 @@ impl MySqlSagaStore {
         limit: u32,
     ) -> Result<Vec<SagaTransitionAuditRow>, SagaStoreError> {
         validate_limit(limit)?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT transition_seq, from_state, to_state, trigger_kind, trigger_id, \
              definition_version, DATE_FORMAT(occurred_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS occurred_at \
@@ -217,7 +223,9 @@ impl MySqlSagaStore {
         limit: u32,
     ) -> Result<Vec<SagaControlAuditRow>, SagaStoreError> {
         validate_limit(limit)?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT control_seq, from_state, to_state, operation_id, actor, reason, \
              DATE_FORMAT(occurred_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS occurred_at \
@@ -240,7 +248,9 @@ impl MySqlSagaStore {
         limit: u32,
     ) -> Result<Vec<SagaManagementAuditRow>, SagaStoreError> {
         validate_limit(limit)?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT operation_id, action, actor, reason, \
              DATE_FORMAT(occurred_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS occurred_at \
@@ -261,7 +271,9 @@ impl MySqlSagaStore {
         limit: u32,
     ) -> Result<Vec<SagaConflictFactRow>, SagaStoreError> {
         validate_limit(limit)?;
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT incoming_event_id, step_name, phase, attempt_no, existing_status, \
              incoming_status, conflict_kind, \

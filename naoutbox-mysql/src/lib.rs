@@ -1,7 +1,8 @@
 //! Outbox 的 MySQL 后端。
 //!
-//! **写侧**:`append` 经 [`natx::conn`]——在 `natx::run`/`#[transactional]` 事务内调用则
-//! 事件 INSERT 与业务写**同一事务原子提交/回滚**,消除“业务已提交但事件丢失”窗口;事务外则走连接池。
+//! **写侧**：`append` 经 [`natx::conn_for`] 选择句柄绑定的数据源——在同源
+//! `natx::run_for`/带 datasource 的 `#[transactional]` 事务内调用时，事件 INSERT 与业务写
+//! **同一事务原子提交/回滚**，消除“业务已提交但事件丢失”窗口；事务外则走所选连接池。
 //!
 //! **投递侧(dispatcher)**:`dispatch_batch` 轮询未投递行(按 `id` 升序保序)→ 复用
 //! [`naoutbox_core::dispatch_in_order`] 保序至少一次投递 → 把成功前缀 `mark_dispatched`。投递失败的行
@@ -179,7 +180,19 @@ fn tenant_quotas_enabled() -> bool {
 ///
 /// 返回：列存在且宽度达标返回 `Ok`;缺列或宽度不足返回指向纠正迁移的脱敏错误。
 pub async fn verify_outbox_event_schema() -> Result<(), OutboxStoreError> {
-    let mut conn = natx::conn().await.map_err(map_err)?;
+    verify_outbox_event_schema_for(natx::DEFAULT_DATASOURCE).await
+}
+
+/// 业务作用：在指定 datasource 上校验 Outbox 通用事件表合同。
+///
+/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+///
+/// 返回：租户列存在且宽度达标时成功；名称、连接或结构不满足时返回脱敏错误。
+pub async fn verify_outbox_event_schema_for(
+    datasource: impl AsRef<str>,
+) -> Result<(), OutboxStoreError> {
+    let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+    let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
     verify_outbox_event_schema_on(conn.as_mut()).await
 }
 
@@ -226,10 +239,22 @@ const TENANT_COLUMN_MIN_WIDTH: i64 = 256;
 ///
 /// 返回：未启用或结构齐备返回 `Ok`;缺列/缺表返回指明缺失项的脱敏错误。
 pub async fn verify_outbox_tenant_quota_schema() -> Result<(), OutboxStoreError> {
+    verify_outbox_tenant_quota_schema_for(natx::DEFAULT_DATASOURCE).await
+}
+
+/// 业务作用：在指定 datasource 上复验 Outbox 租户配额账本与通用事件表。
+///
+/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+///
+/// 返回：未启用配额或结构齐备时成功；名称、连接或账本合同缺失时失败。
+pub async fn verify_outbox_tenant_quota_schema_for(
+    datasource: impl AsRef<str>,
+) -> Result<(), OutboxStoreError> {
     if !tenant_quotas_enabled() {
         return Ok(());
     }
-    let mut conn = natx::conn().await.map_err(map_err)?;
+    let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+    let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
     // 配额校验复用当前会话执行通用合同，合法的单连接池不会因验表内部再次取连接而
     // 自我等待；独立调用本入口时仍完整覆盖 tenant 列存在性与宽度。
     verify_outbox_event_schema_on(conn.as_mut()).await?;
@@ -478,18 +503,69 @@ impl Drop for DispatchClaim {
     }
 }
 
-/// MySQL outbox。无自身状态:每次操作经 `natx::conn()` 取连接,自动感知 ambient 事务。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MySqlOutbox;
+/// MySQL outbox；句柄固定 datasource，避免多库部署隐式落到默认池。
+#[derive(Debug, Clone)]
+pub struct MySqlOutbox {
+    datasource: natx::DatasourceRef,
+}
+
+impl Default for MySqlOutbox {
+    /// 业务作用：以兼容语义构造绑定默认 datasource 的 Outbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 [`MySqlOutbox::new`] 相同的轻量句柄。
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MySqlOutbox {
-    /// 业务作用：创建无状态 Outbox 入口，不提前建连或取得 dispatcher claim。
+    /// 业务作用：创建绑定默认 datasource 的轻量 Outbox 入口，不提前建连或取得 dispatcher claim。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：可在事务写侧或独立投递侧复用的轻量句柄。
     pub fn new() -> Self {
-        Self
+        Self {
+            datasource: natx::DatasourceRef::default(),
+        }
+    }
+
+    /// 业务作用：创建绑定命名 datasource 的 Outbox 入口。
+    ///
+    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    ///
+    /// 返回：写入、查询与投递操作固定使用该 datasource；名称非法时在 I/O 前失败。
+    pub fn with_datasource(datasource: impl AsRef<str>) -> Result<Self, OutboxStoreError> {
+        Ok(Self {
+            datasource: natx::DatasourceRef::new(datasource)
+                .map_err(|_| OutboxStoreError::new("invalid outbox datasource name"))?,
+        })
+    }
+
+    /// 业务作用：读取该 Outbox 全部持久、claim 与治理操作绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不可变、不含连接信息的 qualifier 引用。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        &self.datasource
+    }
+
+    /// 业务作用：在任何事务写 SQL 前复验 ambient transaction 与 Outbox 绑定到同一 datasource。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：事务存在且身份一致时成功；缺少事务或跨 datasource 时返回稳定脱敏分类。
+    fn require_ambient_datasource(&self) -> Result<(), OutboxStoreError> {
+        match natx::current_datasource() {
+            Some(current) if current == self.datasource => Ok(()),
+            Some(_) => Err(OutboxStoreError::new(
+                "ambient transaction datasource mismatch",
+            )),
+            None => Err(OutboxStoreError::new("ambient transaction is required")),
+        }
     }
 
     /// 业务作用：为受控自举环境创建 Outbox 表，并把历史演示表补齐稳定身份、死信字段和投递索引。
@@ -498,7 +574,17 @@ impl MySqlOutbox {
     ///
     /// 返回：表结构达到当前运行合同后成功；建表、历史回填或强制约束失败时返回脱敏存储错误。
     pub async fn ensure_schema() -> Result<(), OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        Self::ensure_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上建立受控自举所需的 Outbox 结构。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：结构完整时成功；名称、连接或 DDL 失败时返回脱敏错误。
+    pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), OutboxStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+        let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
         sqlx::query(CREATE_TABLE_SQL)
             .execute(conn.as_mut())
             .await
@@ -590,7 +676,11 @@ impl MySqlOutbox {
     /// 脱敏存储错误。事务回滚时不会发送唤醒。
     pub async fn append(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
         let transactional = natx::in_transaction();
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        if transactional {
+            // 跨 datasource 必须在取连接和执行 INSERT 前拒绝，避免脱敏映射把路由错误混成普通数据库失败。
+            self.require_ambient_datasource()?;
+        }
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
         if transactional {
@@ -611,7 +701,11 @@ impl MySqlOutbox {
     /// 返回：INSERT 与提交后唤醒均成功登记时完成；缺少事务或写入失败返回脱敏存储错误。回滚、
     /// rollback-only 与提交失败都不会唤醒 dispatcher。
     pub async fn append_transactional(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
-        let mut conn = natx::mandatory_conn().await.map_err(map_err)?;
+        // 先复验事务身份再获取连接，保证跨库调用没有任何 SQL 或提交后唤醒副作用。
+        self.require_ambient_datasource()?;
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
         register_commit_notification()?;
@@ -637,7 +731,11 @@ impl MySqlOutbox {
         context: &OutboxWriteContext,
         event: &OutboxEvent,
     ) -> Result<(), OutboxStoreError> {
-        let mut conn = natx::mandatory_conn().await.map_err(map_err)?;
+        // 配额预留同样属于关键事务写，必须在任何账本 SQL 前拒绝跨 datasource。
+        self.require_ambient_datasource()?;
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
         if let Some(cap) = outbox_tenant_quota_of(context.tenant()) {
             // 预留先于写行:两步都持有该租户账本行锁,并发 append 在行锁上串行化,
             // 上限不可能被无锁计数穿透;拒绝时事件行从未写入,无需补偿。
@@ -691,7 +789,7 @@ impl MySqlOutbox {
     ///
     /// 返回：账本记录的在飞事件数;无记录返回 0。
     pub async fn outbox_tenant_quota_usage(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row = sqlx::query("SELECT in_flight FROM outbox_tenant_quota WHERE tenant_id = ?")
             .bind(tenant)
             .fetch_optional(conn.as_mut())
@@ -720,7 +818,9 @@ impl MySqlOutbox {
         &self,
         tenant: &str,
     ) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::mandatory_conn().await.map_err(map_err)?;
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
         sqlx::query("INSERT IGNORE INTO outbox_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
             .bind(tenant)
             .execute(conn.as_mut())
@@ -821,7 +921,7 @@ impl MySqlOutbox {
     ///
     /// 返回：基于 `(dispatched, dead, id)` 覆盖索引返回非死信积压；数据库失败返回脱敏错误。
     pub async fn pending_count(&self) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row =
             sqlx::query("SELECT COUNT(*) AS n FROM outbox_event WHERE dispatched = 0 AND dead = 0")
                 .fetch_one(conn.as_mut())
@@ -930,7 +1030,7 @@ impl MySqlOutbox {
     ///
     /// 返回：基于 `(dead, id)` 覆盖索引返回死信总数；数据库失败返回脱敏错误。
     pub async fn dead_count(&self) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row = sqlx::query("SELECT COUNT(*) AS n FROM outbox_event WHERE dead = 1")
             .fetch_one(conn.as_mut())
             .await
@@ -1161,7 +1261,7 @@ impl MySqlOutbox {
     /// 返回：取得锁时返回 armed guard，锁已被其它进程持有时返回 `None`；事务上下文或数据库失败
     /// 返回脱敏错误。
     async fn try_claim_dispatcher(&self) -> Result<Option<DispatchClaim>, OutboxStoreError> {
-        let conn = natx::conn().await.map_err(map_err)?;
+        let conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let natx::Conn::Pool(conn) = conn else {
             return Err(OutboxStoreError::new(
                 "dispatcher cannot run inside an ambient transaction",
@@ -1194,7 +1294,7 @@ impl MySqlOutbox {
         &self,
         channel: &str,
     ) -> Result<Option<DispatchClaim>, OutboxStoreError> {
-        let conn = natx::conn().await.map_err(map_err)?;
+        let conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let natx::Conn::Pool(conn) = conn else {
             return Err(OutboxStoreError::new(
                 "dispatcher cannot run inside an ambient transaction",
@@ -1325,7 +1425,7 @@ impl MySqlOutbox {
         if !valid_channel_name(channel) {
             return Err(OutboxStoreError::new("invalid outbox channel name"));
         }
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row = sqlx::query(
             "SELECT COUNT(*) AS n FROM outbox_event \
              WHERE channel = ? AND dispatched = 0 AND dead = 0",

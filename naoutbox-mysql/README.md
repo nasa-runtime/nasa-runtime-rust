@@ -16,10 +16,10 @@ nasa = { version = "1", features = ["application", "outbox"] }
 use nasa::outbox::{MySqlOutbox, OutboxEvent};
 use nasa::tx::transactional;
 
-#[transactional]
+#[transactional(datasource = "orders")]
 async fn create_order(order_id: i64) -> anyhow::Result<()> {
     insert_order(order_id).await?;
-    MySqlOutbox::new()
+    MySqlOutbox::with_datasource("orders")?
         .append_transactional(&OutboxEvent::new(
             "Order",
             order_id.to_string(),
@@ -52,13 +52,17 @@ Inbox 收敛。
 ## YML 配置
 
 持久化复用 `database:` / `datasources:`；Application dispatcher 使用独立 `outbox:` 预算段。
+`datasource_ref` 默认为 `default`，并在 Ready 前复验；probe、dispatcher、lane、配额、retention 和指标
+查询始终复用同一个绑定句柄。
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  max_connections: 16
+datasources:
+  orders:
+    url: ${APP_ORDERS_MYSQL_URL}
+    max_connections: 16
 
 outbox:
+  datasource_ref: orders
   poll_interval_ms: 500
   error_backoff_ms: 1000
   operation_timeout_ms: 5000
@@ -86,6 +90,7 @@ outbox:
 ## 主要边界
 
 - 关键双写使用 `append_transactional`；普通 `append` 在事务外会走独立提交。
+- `new()` 绑定 `default`，`with_datasource(name)` 绑定命名库；ambient 事务来自其它库时在 SQL 前失败。
 - 提交通知只在最外层事务确认成功后产生；回滚、rollback-only 和提交失败不会唤醒投递。
 - 进程内通知不替代数据库事实，dispatcher 即使漏通知也会在下一轮重新读取待投递行。
 - dispatcher 不能在业务 ambient 事务内运行。

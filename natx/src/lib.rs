@@ -41,11 +41,11 @@
 //   综上,task_local 存的是:Arc<tokio::sync::Mutex<Option<Transaction<'static, MySql>>>>。
 // ============================================================================
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 
 use sqlx::{MySql, MySqlConnection, Transaction};
 
@@ -77,7 +77,7 @@ struct TxContext {
     /// 当前事务连接槽。
     tx: TxSlot,
     /// 当前事务所属 datasource。
-    datasource: &'static str,
+    datasource: DatasourceRef,
     /// 嵌套层失败后置位，要求最外层整体回滚。
     rollback_only: AtomicBool,
     // 记录首个置位原因(内层 Err 的 Display),最外层报错时给线索。std Mutex:临界区不跨 await。
@@ -96,10 +96,154 @@ tokio::task_local! {
 }
 
 // ── 全局连接池(不在事务里时,conn() 从这里取连接;run() 从这里 begin)──
-//   main 启动建好池后调 natx::init(pool) 注入一次(和 hystrix REGISTRY、cacheable L2 同套路)。
-static POOL: OnceLock<MySqlPool> = OnceLock::new();
+//   独立程序可在启动时注入一次；Application 受管模式发布冻结 registry 并在停机时撤销。
+static POOL: OnceLock<StdMutex<Option<MySqlPool>>> = OnceLock::new();
 static DATASOURCE_POOLS: OnceLock<StdMutex<HashMap<String, MySqlPool>>> = OnceLock::new();
-const DEFAULT_DATASOURCE: &str = "default";
+static MANAGED_DATASOURCES: OnceLock<RwLock<Weak<DataSourceRegistry>>> = OnceLock::new();
+static DATASOURCE_REGISTRY_LOCK: StdMutex<()> = StdMutex::new(());
+pub const DEFAULT_DATASOURCE: &str = "default";
+pub const MAX_DATASOURCE_NAME_BYTES: usize = 128;
+pub const MAX_MANAGED_DATASOURCES: usize = 64;
+
+/// 业务作用：携带经过统一校验的 datasource 身份，使 store 与事务边界不依赖临时字符串。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DatasourceRef(Arc<str>);
+
+impl DatasourceRef {
+    /// 业务作用：校验并固定一个 datasource qualifier。
+    ///
+    /// 参数说明：`name` 是配置边界或业务计划给出的数据源名。
+    ///
+    /// 返回：名称符合有界 canonical 合同时返回拥有型引用；非法名称在任何数据库 I/O 前失败。
+    pub fn new(name: impl AsRef<str>) -> anyhow::Result<Self> {
+        let name = name.as_ref();
+        validate_datasource_name(name)?;
+        Ok(Self(Arc::from(name)))
+    }
+
+    /// 业务作用：返回默认 datasource 的规范化身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：名称固定为 `default` 的拥有型引用。
+    pub fn default_ref() -> Self {
+        Self(Arc::from(DEFAULT_DATASOURCE))
+    }
+
+    /// 业务作用：读取 datasource 的规范化 qualifier。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与该引用同生命周期的名称切片。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for DatasourceRef {
+    /// 业务作用：为兼容构造入口选择 `default` datasource。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：默认 datasource 引用。
+    fn default() -> Self {
+        Self::default_ref()
+    }
+}
+
+impl AsRef<str> for DatasourceRef {
+    /// 业务作用：让事务与连接 API 统一消费已校验身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：规范化 datasource 名称。
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for DatasourceRef {
+    /// 业务作用：输出不含连接信息的 datasource qualifier。
+    ///
+    /// 参数说明：`formatter` 是标准格式化输出目标。
+    ///
+    /// 返回：名称写入成功时返回 `Ok`，否则返回格式化错误。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// 业务作用：作为单个 Application 的冻结 datasource 表，统一事务、Mapper 与受管持久适配器的 pool 身份。
+pub struct DataSourceRegistry {
+    pools: BTreeMap<DatasourceRef, MySqlPool>,
+    accepting: AtomicBool,
+}
+
+impl DataSourceRegistry {
+    /// 业务作用：从启动期已建立的 pool 一次性构造冻结命名表。
+    ///
+    /// 参数说明：`pools` 为 qualifier 与已受管连接池的集合。
+    ///
+    /// 返回：名称全部合法、不重复且数量有界时返回 registry；失败时不发布部分表。
+    pub fn try_new(pools: impl IntoIterator<Item = (String, MySqlPool)>) -> anyhow::Result<Self> {
+        let mut registry = BTreeMap::new();
+        for (name, pool) in pools {
+            if registry.len() >= MAX_MANAGED_DATASOURCES {
+                anyhow::bail!(
+                    "managed datasource count exceeds the supported limit of {MAX_MANAGED_DATASOURCES}"
+                );
+            }
+            let reference = DatasourceRef::new(name)?;
+            if registry.insert(reference.clone(), pool).is_some() {
+                anyhow::bail!("datasource `{reference}` is configured more than once");
+            }
+        }
+        anyhow::ensure!(
+            !registry.is_empty(),
+            "managed datasource registry cannot be empty"
+        );
+        Ok(Self {
+            pools: registry,
+            accepting: AtomicBool::new(true),
+        })
+    }
+
+    /// 业务作用：在 registry 尚未停机时选择指定连接池。
+    ///
+    /// 参数说明：`datasource` 是已校验或配置边界传入的 qualifier。
+    ///
+    /// 返回：运行期内命中时返回同一 pool 的 clone；停机或名称缺失时失败且不回退默认库。
+    pub fn pool(&self, datasource: &str) -> anyhow::Result<MySqlPool> {
+        if !self.accepting.load(Ordering::Acquire) {
+            anyhow::bail!("managed datasource registry is closing");
+        }
+        let reference = DatasourceRef::new(datasource)?;
+        self.pools.get(&reference).cloned().ok_or_else(|| {
+            anyhow::anyhow!("datasource `{reference}` is not managed by this application")
+        })
+    }
+
+    /// 业务作用：确认命名 datasource 是否属于该冻结表。
+    ///
+    /// 参数说明：`datasource` 是待复验的 qualifier。
+    ///
+    /// 返回：registry 尚开放且名称存在时返回真。
+    pub fn contains(&self, datasource: &str) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && DatasourceRef::new(datasource)
+                .ok()
+                .is_some_and(|reference| self.pools.contains_key(&reference))
+    }
+
+    /// 业务作用：在连接池关闭前封口新的事务与连接选择。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；已借出的 pool 仍由 Application 停机预算排空。
+    pub fn stop_accepting(&self) {
+        self.accepting.store(false, Ordering::Release);
+    }
+}
 
 /// 事务被标记 rollback-only 时,最外层 `run()` 返回的具名错误(经 `anyhow::Error` 携带)。
 /// 上层可 `err.downcast_ref::<natx::RollbackOnly>()` 区分它与普通业务错误。
@@ -239,13 +383,24 @@ pub fn init(pool: MySqlPool) {
 /// **重复初始化返回 Err**，启动期推荐用它而不是只打日志。
 ///
 /// 参数说明：
-/// - `pool`: 应用启动时创建好的 MySQL 连接池,会写入全局 OnceLock 且不能被后续调用替换。
+/// - `pool`: 应用启动时创建好的 MySQL 连接池，作为独立模式的默认连接源。
 ///
-/// 返回：首次初始化返回 `Ok`；重复初始化返回错误且不替换已有 pool。
+/// 返回：当前无独立池且无受管 registry 时成功；重复或模式冲突时不替换已有 pool。
 pub fn try_init(pool: MySqlPool) -> anyhow::Result<()> {
-    POOL.set(pool).map_err(|_| {
-        anyhow::anyhow!("natx::init/try_init 重复调用:连接池已初始化,不能替换(OnceLock 只能设一次)")
-    })
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    ensure_no_managed_registry()?;
+    let mut current = POOL
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    anyhow::ensure!(
+        current.is_none(),
+        "natx::init/try_init 重复调用:连接池已初始化,不能替换"
+    );
+    *current = Some(pool);
+    Ok(())
 }
 
 /// 业务作用：注入命名 datasource，使显式多库业务能绑定到稳定且不可替换的连接源。
@@ -266,6 +421,10 @@ pub fn try_init_datasource(name: impl Into<String>, pool: MySqlPool) -> anyhow::
     if name == DEFAULT_DATASOURCE {
         return try_init(pool);
     }
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    ensure_no_managed_registry()?;
     let pools = DATASOURCE_POOLS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut pools = pools.lock().unwrap();
     if pools.contains_key(&name) {
@@ -302,10 +461,207 @@ fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("datasource 名称不能为空"));
     }
     if name.trim() != name {
+        return Err(anyhow::anyhow!("datasource 名称首尾不能包含空白"));
+    }
+    if name.len() > MAX_DATASOURCE_NAME_BYTES
+        || !name
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+    {
         return Err(anyhow::anyhow!(
-            "datasource `{name}` 不合法:首尾不能包含空白"
+            "datasource 名称只能包含 ASCII 字母、数字、'.'、'_'和'-'，且不超过 {MAX_DATASOURCE_NAME_BYTES} 字节"
         ));
     }
+    Ok(())
+}
+
+/// 业务作用：发布当前 Application 拥有的唯一 datasource registry。
+///
+/// 参数说明：`registry` 是 DB 组件在全部数据源建立成功后冻结的命名表。
+///
+/// 返回：当前进程没有独立注册表且没有其它 live Application 时成功；冲突时保留原权威并失败。
+pub fn install_managed_registry(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    install_managed_registry_locked(registry)
+}
+
+/// 业务作用：把 UserHook 以独立入口注入的默认连接池原子转交给 Application registry。
+///
+/// 参数说明: 无。
+///
+/// 返回：仅存在一个独立默认池、无命名独立池且无其它受管 registry 时完成所有权转移；
+/// 条件不成立时保留原有入口并失败。
+pub fn adopt_standalone_default_registry() -> anyhow::Result<Arc<DataSourceRegistry>> {
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    ensure_no_managed_registry()?;
+    anyhow::ensure!(
+        !DATASOURCE_POOLS.get().is_some_and(|pools| {
+            !pools
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        }),
+        "named standalone datasources cannot be adopted by the default-only managed registry"
+    );
+    let slot = POOL
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut slot = slot;
+    let pool = slot
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"))?;
+    let registry =
+        match DataSourceRegistry::try_new([(DEFAULT_DATASOURCE.to_owned(), pool.clone())]) {
+            Ok(registry) => Arc::new(registry),
+            Err(error) => {
+                *slot = Some(pool);
+                return Err(error);
+            }
+        };
+    drop(slot);
+    if let Err(error) = install_managed_registry_locked(&registry) {
+        // 发布失败时必须恢复独立入口，避免 UserHook 已建立的池变成无人持有的半完成状态。
+        *POOL
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(pool);
+        return Err(error);
+    }
+    Ok(registry)
+}
+
+/// 业务作用：在动态数据库 UserHook 开放前确认独立注册表不含历史资源。
+///
+/// 参数说明: 无。
+///
+/// 返回：无 standalone pool 且无 live 受管 registry 时成功；否则拒绝开放会混淆所有权的引导窗口。
+#[doc(hidden)]
+pub fn ensure_standalone_datasources_empty_for_managed_bootstrap() -> anyhow::Result<()> {
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    ensure_no_managed_registry()?;
+    let default_present = POOL.get().is_some_and(|pool| {
+        pool.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    });
+    let named_present = DATASOURCE_POOLS.get().is_some_and(|pools| {
+        !pools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    });
+    anyhow::ensure!(
+        !default_present && !named_present,
+        "standalone datasource registry must be empty before managed user-hook bootstrap"
+    );
+    Ok(())
+}
+
+/// 业务作用：在动态 UserHook 未完成接管就失败时，取回本轮引导窗口注入的全部池。
+///
+/// 参数说明: 无。
+///
+/// 返回：无 live 受管 registry 时返回已从全局入口撤销的有序 pool 列表；已存在受管权威时拒绝取回。
+#[doc(hidden)]
+pub fn take_standalone_datasources_for_managed_shutdown() -> anyhow::Result<Vec<(String, MySqlPool)>>
+{
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    ensure_no_managed_registry()?;
+    let mut pools = Vec::new();
+    if let Some(pool) = POOL.get().and_then(|pool| {
+        pool.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }) {
+        pools.push((DEFAULT_DATASOURCE.to_owned(), pool));
+    }
+    if let Some(named) = DATASOURCE_POOLS.get() {
+        pools.extend(std::mem::take(
+            &mut *named.lock().unwrap_or_else(|error| error.into_inner()),
+        ));
+    }
+    pools.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(pools)
+}
+
+/// 业务作用：在全局数据源协调锁内发布唯一受管 registry。
+///
+/// 参数说明：`registry` 是已冻结且由 Application 持有的资源表。
+///
+/// 返回：独立入口为空且无其它 live registry 时成功；冲突时不改变全局槽。
+fn install_managed_registry_locked(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
+    if POOL.get().is_some_and(|pool| {
+        pool.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }) || DATASOURCE_POOLS.get().is_some_and(|pools| {
+        !pools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }) {
+        anyhow::bail!(
+            "standalone datasource registry is already initialized and cannot be mixed with managed mode"
+        );
+    }
+    let slot = MANAGED_DATASOURCES.get_or_init(|| RwLock::new(Weak::new()));
+    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
+    if current.upgrade().is_some() {
+        anyhow::bail!("another managed datasource registry is already active");
+    }
+    *current = Arc::downgrade(registry);
+    Ok(())
+}
+
+/// 业务作用：仅在全局槽仍指向目标 Application registry 时封口并撤销发布。
+///
+/// 参数说明：`registry` 是正在进入逆序停机的资源表。
+///
+/// 返回：无；指针复验防止旧 Application 误清理后续实例的槽位。
+pub fn clear_managed_registry(registry: &Arc<DataSourceRegistry>) {
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry.stop_accepting();
+    let Some(slot) = MANAGED_DATASOURCES.get() else {
+        return;
+    };
+    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
+    if current
+        .upgrade()
+        .is_some_and(|active| Arc::ptr_eq(&active, registry))
+    {
+        *current = Weak::new();
+    }
+}
+
+/// 业务作用：阻止独立注册入口与 Application 受管 registry 在同一进程形成两张资源表。
+///
+/// 参数说明: 无。
+///
+/// 返回：没有 live 受管 registry 时成功；已进入受管模式时失败。
+fn ensure_no_managed_registry() -> anyhow::Result<()> {
+    let active = MANAGED_DATASOURCES
+        .get()
+        .and_then(|slot| {
+            slot.read()
+                .unwrap_or_else(|error| error.into_inner())
+                .upgrade()
+        })
+        .is_some();
+    anyhow::ensure!(
+        !active,
+        "managed datasource registry is active and rejects standalone initialization"
+    );
     Ok(())
 }
 
@@ -316,11 +672,25 @@ fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
 ///
 /// 返回：已初始化的连接池 clone；名称非法或未初始化返回错误。
 fn pool_for(datasource: &str) -> anyhow::Result<MySqlPool> {
+    let _coordinator = DATASOURCE_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     validate_datasource_name(datasource)?;
+    if let Some(registry) = MANAGED_DATASOURCES.get().and_then(|slot| {
+        slot.read()
+            .unwrap_or_else(|error| error.into_inner())
+            .upgrade()
+    }) {
+        return registry.pool(datasource);
+    }
     if datasource == DEFAULT_DATASOURCE {
         return POOL
             .get()
-            .cloned()
+            .and_then(|pool| {
+                pool.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            })
             .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"));
     }
     let pools = DATASOURCE_POOLS
@@ -363,8 +733,8 @@ pub fn in_transaction() -> bool {
 /// 参数说明: 无。
 ///
 /// 返回：事务内返回 datasource 名称；无 ambient transaction 返回 `None`。
-pub fn current_datasource() -> Option<&'static str> {
-    CUR_TX.try_with(|ctx| ctx.datasource).ok()
+pub fn current_datasource() -> Option<DatasourceRef> {
+    CUR_TX.try_with(|ctx| ctx.datasource.clone()).ok()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -410,10 +780,14 @@ where
 ///
 /// 返回：最外层提交确认后返回领域值；明确回滚、rollback-only、提交拒绝/不确定、
 /// 回滚失败或事务基础设施失败时返回对应分类。
-pub async fn run_decided_for<T, E, F>(datasource: &'static str, body: F) -> Result<T, TxRunError<E>>
+pub async fn run_decided_for<T, E, F, D>(datasource: D, body: F) -> Result<T, TxRunError<E>>
 where
     F: Future<Output = TxDecision<T, E>>,
+    D: AsRef<str>,
 {
+    let datasource = DatasourceRef::new(datasource).map_err(|_| TxRunError::Infrastructure {
+        reason: "invalid datasource name".to_string(),
+    })?;
     run_decision_kernel(datasource, body, |_| "nested explicit rollback".to_string()).await
 }
 
@@ -428,10 +802,12 @@ where
 ///
 /// 返回：提交确认返回业务值；业务错误、rollback-only 或数据库失败返回 `anyhow::Error`；
 /// 需要精确区分 commit uncertain/rollback failed 的调用方应使用 [`run_decided_for`]。
-pub async fn run_for<T, F>(datasource: &'static str, body: F) -> anyhow::Result<T>
+pub async fn run_for<T, F, D>(datasource: D, body: F) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
+    D: AsRef<str>,
 {
+    let datasource = DatasourceRef::new(datasource)?;
     let decision = async {
         match body.await {
             Ok(value) => TxDecision::Commit(value),
@@ -470,7 +846,7 @@ where
 ///
 /// 返回：提交确认时返回领域结果；其它阶段返回保持原始裁决的封闭错误分类。
 async fn run_decision_kernel<T, E, F, R>(
-    datasource: &'static str,
+    datasource: DatasourceRef,
     body: F,
     describe_rollback: R,
 ) -> Result<T, TxRunError<E>>
@@ -478,10 +854,6 @@ where
     F: Future<Output = TxDecision<T, E>>,
     R: Fn(&E) -> String,
 {
-    validate_datasource_name(datasource).map_err(|_| TxRunError::Infrastructure {
-        reason: "invalid datasource name".to_string(),
-    })?;
-
     // 嵌套调用只能加入相同 datasource；跨库写不能静默伪装成一个本地事务。
     if let Ok(ctx) = CUR_TX.try_with(Clone::clone) {
         if ctx.datasource != datasource {
@@ -503,7 +875,7 @@ where
         };
     }
 
-    let pool = pool_for(datasource).map_err(|_| TxRunError::Infrastructure {
+    let pool = pool_for(datasource.as_str()).map_err(|_| TxRunError::Infrastructure {
         reason: "transaction pool unavailable".to_string(),
     })?;
     let transaction = pool.begin().await.map_err(|_| TxRunError::Infrastructure {
@@ -669,9 +1041,9 @@ pub async fn conn() -> anyhow::Result<Conn> {
 /// - `datasource`: 本次 SQL 应使用的 datasource 名称。
 ///
 /// 返回：事务内返回同 datasource 的事务连接，事务外返回池连接；名称、归属或获取失败返回错误。
-pub async fn conn_for(datasource: &'static str) -> anyhow::Result<Conn> {
-    validate_datasource_name(datasource)?;
-    match CUR_TX.try_with(|ctx| (ctx.datasource, ctx.tx.clone())) {
+pub async fn conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
+    let datasource = DatasourceRef::new(datasource)?;
+    match CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())) {
         // 在事务里:锁住槽(OwnedMutexGuard 需要 Arc<Mutex>,故用 lock_owned),持有它到 query 跑完
         Ok((tx_datasource, slot)) => {
             if tx_datasource != datasource {
@@ -682,7 +1054,7 @@ pub async fn conn_for(datasource: &'static str) -> anyhow::Result<Conn> {
             Ok(Conn::Tx(slot.lock_owned().await))
         }
         // 不在事务里:从池取一条独立连接
-        Err(_) => Ok(Conn::Pool(pool_for(datasource)?.acquire().await?)),
+        Err(_) => Ok(Conn::Pool(pool_for(datasource.as_str())?.acquire().await?)),
     }
 }
 
@@ -706,9 +1078,9 @@ pub async fn mandatory_conn() -> anyhow::Result<Conn> {
 /// - `datasource`: 本次关键写 SQL 必须加入的 datasource 名称。
 ///
 /// 返回：ambient transaction 存在且 datasource 一致时返回连接；否则返回错误且绝不 fallback。
-pub async fn mandatory_conn_for(datasource: &'static str) -> anyhow::Result<Conn> {
-    validate_datasource_name(datasource)?;
-    let (tx_datasource, slot) = CUR_TX.try_with(|ctx| (ctx.datasource, ctx.tx.clone())).map_err(|_| {
+pub async fn mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
+    let datasource = DatasourceRef::new(datasource)?;
+    let (tx_datasource, slot) = CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())).map_err(|_| {
         anyhow::anyhow!("mandatory_conn_for({datasource}):当前不在 #[transactional] 事务中(关键写必须在事务内)")
     })?;
     if tx_datasource != datasource {

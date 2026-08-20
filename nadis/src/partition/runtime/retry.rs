@@ -68,7 +68,7 @@ pub(super) async fn retry_redeliver(
                         id = %it.id,
                         count,
                         desired = it.desired,
-                        "retry-op marker desired 损坏(count<desired-1),冻结分区(不 Drop/不处置,等修复)"
+                        "retry-op marker desired 损坏(count<desired-1),冻结分区(不 Drop/不处置,等待校正 marker 事实)"
                     );
                     corrupt += 1;
                 } else {

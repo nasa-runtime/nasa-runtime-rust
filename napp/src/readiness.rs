@@ -33,6 +33,23 @@ use std::{
 /// 稳定就绪原因码。只允许编译期常量,禁止把动态错误文本(地址、SQL、key、凭据)当 reason。
 pub mod reason {
     /// 依赖最近一次观测就绪且未过 stale 窗。
+    #[cfg_attr(
+        not(any(
+            feature = "redis",
+            feature = "kafka",
+            feature = "outbox",
+            feature = "db",
+            feature = "web",
+            feature = "grpc",
+            feature = "saga",
+            feature = "nacos-discovery",
+            feature = "partition",
+            feature = "nacos-config",
+            feature = "cache",
+            feature = "telemetry"
+        )),
+        allow(dead_code)
+    )]
     pub const HEALTHY: &str = "healthy";
     /// 贡献项已注册但尚无任何观测(初始 `Unknown`)。
     pub const UNOBSERVED: &str = "unobserved";

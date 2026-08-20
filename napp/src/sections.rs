@@ -1,3 +1,11 @@
+#[cfg(any(
+    feature = "outbox",
+    feature = "saga",
+    feature = "cache",
+    feature = "scheduling"
+))]
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::{ApplicationPhase, ApplicationResult, ComponentId};
@@ -16,6 +24,7 @@ const RESERVED_SECTIONS: &[(&str, ComponentId)] = &[
     ("telemetry", ComponentId::Telemetry),
     ("grpc", ComponentId::Grpc),
     ("cache", ComponentId::Cache),
+    ("partition", ComponentId::Partition),
     ("saga", ComponentId::Saga),
     ("outbox", ComponentId::Outbox),
     ("kafka", ComponentId::Kafka),
@@ -86,6 +95,8 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Grpc => crate::grpc::validate_grpc_section(tree, phase)?,
             #[cfg(feature = "cache")]
             ComponentId::Cache => crate::cache::validate_cache_section(tree, phase)?,
+            #[cfg(feature = "partition")]
+            ComponentId::Partition => crate::partition::validate_partition_section(tree, phase)?,
             #[cfg(feature = "saga")]
             ComponentId::Saga => crate::saga::validate_saga_section(tree, phase)?,
             #[cfg(feature = "outbox")]
@@ -106,7 +117,216 @@ pub(crate) fn validate_declared_sections(
             _ => {}
         }
     }
+    validate_managed_references(components, tree, phase)?;
     Ok(())
+}
+
+/// 业务作用：在任何组件产生网络副作用前复验内置计划引用的资源名称确实属于同一候选配置。
+///
+/// 单段反序列化只能证明 `datasource_ref`/`redis_ref` 语法合法，不能证明目标存在。本门禁在全部
+/// 声明段完成无副作用校验后统一比对候选资源集合，避免 DB、Redis 或 Kafka 已开始握手后才发现引用
+/// 指向不存在的实例。动态 UserHook 计划仍在其提交边界复验，因为此时尚未存在于配置树。
+///
+/// 参数说明：
+/// - `components`：当前 Application 的冻结组件集合。
+/// - `tree`：尚未触发建连的完整候选配置树。
+/// - `phase`：启动首帧或运行期候选校验阶段。
+///
+/// 返回：所有静态资源引用均可由同一候选解析时成功；未知引用返回归属于消费组件的类型化错误。
+fn validate_managed_references(
+    components: &[ComponentId],
+    tree: &Value,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    #[cfg(any(feature = "outbox", feature = "saga"))]
+    let datasource_names = configured_datasource_names(tree);
+    #[cfg(feature = "saga")]
+    let user_hook_database = components.contains(&ComponentId::Saga)
+        && tree
+            .get("saga")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("database_bootstrap"))
+            .and_then(Value::as_str)
+            == Some("user_hook");
+
+    #[cfg(feature = "outbox")]
+    if components.contains(&ComponentId::Outbox) {
+        let reference = string_setting(tree, "outbox", "datasource_ref").unwrap_or("default");
+        #[cfg(feature = "saga")]
+        let deferred_default = user_hook_database && reference == "default";
+        #[cfg(not(feature = "saga"))]
+        let deferred_default = false;
+        if !deferred_default && !datasource_names.contains(reference) {
+            return Err(crate::ApplicationError::new(
+                ComponentId::Outbox,
+                phase,
+                format!(
+                    "outbox.datasource_ref `{reference}` is not declared by database or datasources"
+                ),
+            ));
+        }
+    }
+
+    #[cfg(feature = "saga")]
+    if components.contains(&ComponentId::Saga) {
+        let reference = string_setting(tree, "saga", "datasource_ref").unwrap_or("default");
+        if !(datasource_names.contains(reference) || user_hook_database && reference == "default") {
+            return Err(crate::ApplicationError::new(
+                ComponentId::Saga,
+                phase,
+                format!(
+                    "saga.datasource_ref `{reference}` is not declared by database or datasources"
+                ),
+            ));
+        }
+    }
+
+    #[cfg(any(feature = "cache", feature = "scheduling"))]
+    let redis_names = configured_redis_names(tree);
+
+    #[cfg(feature = "cache")]
+    if components.contains(&ComponentId::Cache) {
+        if let Some(cache) = tree.get("cache").and_then(Value::as_object) {
+            if cache.get("mode").and_then(Value::as_str) == Some("two_level") {
+                if let Some(reference) = cache.get("redis_ref").and_then(Value::as_str) {
+                    ensure_redis_reference(
+                        &redis_names,
+                        components.contains(&ComponentId::Redis),
+                        reference,
+                        ComponentId::Cache,
+                        phase,
+                    )?;
+                }
+            }
+            if cache
+                .get("invalidation")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("enabled"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                if let Some(reference) = cache
+                    .get("invalidation")
+                    .and_then(Value::as_object)
+                    .and_then(|settings| settings.get("redis_ref"))
+                    .and_then(Value::as_str)
+                {
+                    ensure_redis_reference(
+                        &redis_names,
+                        components.contains(&ComponentId::Redis),
+                        reference,
+                        ComponentId::Cache,
+                        phase,
+                    )?;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "scheduling")]
+    if components.contains(&ComponentId::Scheduling)
+        && tree
+            .get("scheduling")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("cluster"))
+            .and_then(Value::as_str)
+            == Some("leader")
+    {
+        let reference = string_setting(tree, "scheduling", "redis_ref").unwrap_or("default");
+        ensure_redis_reference(
+            &redis_names,
+            components.contains(&ComponentId::Redis),
+            reference,
+            ComponentId::Scheduling,
+            phase,
+        )?;
+    }
+
+    let _ = (components, tree, phase);
+    Ok(())
+}
+
+/// 业务作用：从候选 MySQL 配置提取业务可引用的规范化 datasource 名称。
+///
+/// 参数说明：`tree` 是已经通过 DB 段结构校验的候选配置。
+///
+/// 返回：单库形态只含 `default`，多库形态包含 map 的全部权威键，缺段时为空。
+#[cfg(any(feature = "outbox", feature = "saga"))]
+fn configured_datasource_names(tree: &Value) -> BTreeSet<&str> {
+    if tree.get("database").is_some() {
+        return BTreeSet::from(["default"]);
+    }
+    tree.get("datasources")
+        .and_then(Value::as_object)
+        .map(|sources| sources.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// 业务作用：从候选 Redis 配置提取 Application 查询边界允许的 canonical 名称与默认别名。
+///
+/// 参数说明：`tree` 是已经通过 Redis 段结构与逐实例取值校验的候选配置。
+///
+/// 返回：扁平配置产生 `primary`/`default`，多实例配置保留命名键并为 `primary` 增加 `default`。
+#[cfg(any(feature = "cache", feature = "scheduling"))]
+fn configured_redis_names(tree: &Value) -> BTreeSet<String> {
+    let Some(redis) = tree.get("redis").and_then(Value::as_object) else {
+        return BTreeSet::new();
+    };
+    let mut names = BTreeSet::new();
+    if let Some(properties) = redis.get("properties").and_then(Value::as_object) {
+        for name in properties.keys() {
+            let canonical = if name == "default" { "primary" } else { name };
+            names.insert(canonical.to_owned());
+            if canonical == "primary" {
+                names.insert("default".to_owned());
+            }
+        }
+    } else {
+        names.insert("primary".to_owned());
+        names.insert("default".to_owned());
+    }
+    names
+}
+
+/// 业务作用：把 Redis 静态引用与同一候选的资源集合比对，阻止消费组件回退默认实例。
+///
+/// 参数说明：
+/// - `names`：候选 Redis 配置可发布的名称与兼容别名。
+/// - `redis_declared`：当前 Application 是否真正声明 Redis 生命周期组件。
+/// - `reference`：消费组件声明的显式资源引用。
+/// - `component`：错误应归属的消费组件。
+/// - `phase`：当前候选校验阶段。
+///
+/// 返回：引用存在时成功；未知名称返回不含 endpoint 或凭据的类型化错误。
+#[cfg(any(feature = "cache", feature = "scheduling"))]
+fn ensure_redis_reference(
+    names: &BTreeSet<String>,
+    redis_declared: bool,
+    reference: &str,
+    component: ComponentId,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    if redis_declared && names.contains(reference) {
+        return Ok(());
+    }
+    Err(crate::ApplicationError::new(
+        component,
+        phase,
+        format!("redis_ref `{reference}` is not declared by redis or redis.properties"),
+    ))
+}
+
+/// 业务作用：读取组件配置中的字符串引用，并让字段缺失继续采用各组件公开默认值。
+///
+/// 参数说明：`tree`、`section` 与 `field` 指向已完成结构校验的候选配置位置。
+///
+/// 返回：字段存在且为字符串时返回借用；缺失时返回 `None`。
+#[cfg(any(feature = "outbox", feature = "saga", feature = "scheduling"))]
+fn string_setting<'a>(tree: &'a Value, section: &str, field: &str) -> Option<&'a str> {
+    tree.get(section)
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get(field))
+        .and_then(Value::as_str)
 }
 
 /// 业务作用：判断某个组件负责的全部配置段在两棵树之间是否发生变化。

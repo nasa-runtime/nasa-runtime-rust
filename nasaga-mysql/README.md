@@ -22,13 +22,17 @@ natx = "1"
 受控自举环境可在连接池安装后创建表结构：
 
 ```rust
-natx::init(pool);
-nasaga_mysql::MySqlSagaStore::ensure_schema().await?;
-nasaga_mysql::MySqlSagaStore::ensure_participant_schema().await?;
+natx::try_init_datasource("workflow", pool)?;
+nasaga_mysql::MySqlSagaStore::ensure_schema_for("workflow").await?;
+nasaga_mysql::MySqlSagaStore::ensure_participant_schema_for("workflow").await?;
+let store = nasaga_mysql::MySqlSagaStore::with_datasource("workflow")?;
+assert_eq!(store.datasource_ref().as_str(), "workflow");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-生产环境使用 [迁移说明](migrations/README.md) 中的 SQL 顺序，不调用 `ensure_schema` 代替部署系统。
+默认入口 `new()`、`ensure_schema()` 与 `ensure_participant_schema()` 仍绑定 `default`。命名库必须使用
+`with_datasource(name)`、`ensure_schema_for(name)` 与 `ensure_participant_schema_for(name)`；生产环境使用
+[迁移说明](migrations/README.md) 中的 SQL 顺序，不调用 schema 自举入口代替部署系统。
 
 ## 数据模型与事务域
 
@@ -50,15 +54,24 @@ nasaga_mysql::MySqlSagaStore::ensure_participant_schema().await?;
 ambient datasource。
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  max_connections: 32
-  acquire_timeout_ms: 3000
-  migrations:
-    mode: validate
+datasources:
+  workflow:
+    url: ${APP_WORKFLOW_MYSQL_URL}
+    max_connections: 32
+    acquire_timeout_ms: 3000
+    migrations:
+      mode: validate
+
+saga:
+  database_bootstrap: application
+  datasource_ref: workflow
+outbox:
+  datasource_ref: workflow
 ```
 
-连接池容量需要同时覆盖业务请求、消息消费、Outbox 投递和 timer 领取，不能按单一路径估算。
+Application 的 `saga.datasource_ref`、`outbox.datasource_ref` 与 Orchestrator/Participant 构造参数必须
+一致；名称会在 Ready 前复验。连接池容量需要同时覆盖业务请求、消息消费、Outbox 投递和 timer 领取，
+不能按单一路径估算。
 
 ## 启动校验与滚动升级
 

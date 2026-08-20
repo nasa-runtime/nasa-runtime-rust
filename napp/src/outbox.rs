@@ -7,7 +7,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -257,6 +257,7 @@ static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 25] = [
 #[serde(default, deny_unknown_fields)]
 /// 业务作用：承载 Outbox dispatcher 的轮询、退避、单轮预算、批次与摘流配置。
 struct OutboxSettings {
+    datasource_ref: String,
     poll_interval_ms: u64,
     error_backoff_ms: u64,
     operation_timeout_ms: u64,
@@ -272,6 +273,7 @@ impl Default for OutboxSettings {
     /// 返回：500ms 轮询、1s 故障退避、5s 单轮预算、100 行批次和三次失败摘流。
     fn default() -> Self {
         Self {
+            datasource_ref: natx::DEFAULT_DATASOURCE.to_owned(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             error_backoff_ms: DEFAULT_ERROR_BACKOFF_MS,
             operation_timeout_ms: DEFAULT_OPERATION_TIMEOUT_MS,
@@ -731,7 +733,7 @@ impl OutboxHandle {
     /// 返回：组件 Ready 时返回持久化积压；停机或数据库失败返回统一错误。
     pub async fn pending_count(&self) -> ApplicationResult<u64> {
         self.state.ensure_ready()?;
-        MySqlOutbox::new().pending_count().await.map_err(|error| {
+        self.state.outbox()?.pending_count().await.map_err(|error| {
             outbox_source_error(
                 ApplicationPhase::Running,
                 "outbox pending count failed",
@@ -747,7 +749,7 @@ impl OutboxHandle {
     /// 返回：组件 Ready 时返回死信累计值；停机或数据库失败返回统一错误。
     pub async fn dead_count(&self) -> ApplicationResult<u64> {
         self.state.ensure_ready()?;
-        MySqlOutbox::new().dead_count().await.map_err(|error| {
+        self.state.outbox()?.dead_count().await.map_err(|error| {
             outbox_source_error(ApplicationPhase::Running, "outbox dead count failed", error)
         })
     }
@@ -883,6 +885,8 @@ pub(crate) struct OutboxRuntimeState {
     pending: Mutex<Option<OutboxApplicationPlan>>,
     sealed: AtomicBool,
     lifecycle: AtomicU8,
+    /// Ready 门禁、dispatcher、retention 与指标查询共用的命名 datasource Outbox。
+    outbox: OnceLock<MySqlOutbox>,
     rounds: AtomicU64,
     published: AtomicU64,
     failed_rounds: AtomicU64,
@@ -929,6 +933,7 @@ impl OutboxRuntimeState {
             pending: Mutex::new(None),
             sealed: AtomicBool::new(false),
             lifecycle: AtomicU8::new(0),
+            outbox: OnceLock::new(),
             rounds: AtomicU64::new(0),
             published: AtomicU64::new(0),
             failed_rounds: AtomicU64::new(0),
@@ -1057,6 +1062,34 @@ impl OutboxRuntimeState {
                     "outbox runtime was already published",
                 )
             })
+    }
+
+    /// 业务作用：在 Ready 前一次性发布受管 Outbox 的 datasource 绑定。
+    ///
+    /// 参数说明：`outbox` 是已经过资源存在性与数据库探针复验的句柄。
+    ///
+    /// 返回：首次发布成功；重复发布返回 Ready 阶段错误。
+    fn publish_outbox(&self, outbox: MySqlOutbox) -> ApplicationResult<()> {
+        self.outbox.set(outbox).map_err(|_| {
+            outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource binding was already published",
+            )
+        })
+    }
+
+    /// 业务作用：取得 Ready 时冻结的 Outbox datasource 句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已发布时返回同源句柄 clone；未发布时返回阶段错误。
+    fn outbox(&self) -> ApplicationResult<MySqlOutbox> {
+        self.outbox.get().cloned().ok_or_else(|| {
+            outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource binding has not been published",
+            )
+        })
     }
 
     /// 业务作用：确认 Outbox 能力仍处于 Ready，阻止停机后继续发起管理读取。
@@ -1392,7 +1425,7 @@ async fn refresh_metrics_with_policy(
 ///
 /// 返回：全部数据库计数成功时发布并返回成功；任一查询失败时不改变既有缓存。
 async fn query_and_publish_metrics(state: &Arc<OutboxRuntimeState>) -> ApplicationResult<()> {
-    let outbox = MySqlOutbox::new();
+    let outbox = state.outbox()?;
     let (pending, dead) =
         tokio::try_join!(outbox.pending_count(), outbox.dead_count()).map_err(|error| {
             outbox_source_error(
@@ -1518,10 +1551,20 @@ impl ApplicationComponent for OutboxComponent {
             let settings = self.settings.clone().ok_or_else(|| {
                 outbox_error(ApplicationPhase::Ready, "outbox settings are missing")
             })?;
+            // 计划引用必须先命中当前 Application 的受管 pool；缺失时不允许 store 回退到默认库。
+            let _pool = application.datasource(&settings.datasource_ref).await?;
+            let outbox =
+                MySqlOutbox::with_datasource(&settings.datasource_ref).map_err(|error| {
+                    outbox_source_error(
+                        ApplicationPhase::Ready,
+                        "outbox datasource_ref is invalid",
+                        error,
+                    )
+                })?;
             let probe_budget = context
                 .remaining()
                 .min(Duration::from_millis(settings.operation_timeout_ms));
-            tokio::time::timeout(probe_budget, MySqlOutbox::new().pending_count())
+            tokio::time::timeout(probe_budget, outbox.pending_count())
                 .await
                 .map_err(|error| {
                     outbox_source_error(
@@ -1538,23 +1581,16 @@ impl ApplicationComponent for OutboxComponent {
                     )
                 })?;
 
-            // 停机保护必须先于权限发布入栈；否则后续 Ready 失败时 dispatcher 状态可能游离于
-            // Application 反向清理之外，并在 transport 或数据库开始释放后继续投递。
-            context.activate(Box::new(OutboxShutdown {
-                state: Arc::clone(&state),
-            }));
-            state.publish_ready()?;
             let contributor = self.contributor.as_ref().cloned().ok_or_else(|| {
                 outbox_error(
                     ApplicationPhase::Ready,
                     "outbox readiness contributor is missing",
                 )
             })?;
-            contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
             // 通用结构合同:受信租户归因列是每笔 Outbox 写入都要落的列,其宽度上界由公开
             // 身份合同定义,与是否启用租户配额无关。存量窄列必须在 Ready 拒绝,否则
             // 191..=256 字节的合法租户要到第一笔业务写入才被数据库拒绝。
-            naoutbox_mysql::verify_outbox_event_schema()
+            naoutbox_mysql::verify_outbox_event_schema_for(outbox.datasource_ref())
                 .await
                 .map_err(|error| {
                     outbox_source_error(
@@ -1575,7 +1611,7 @@ impl ApplicationComponent for OutboxComponent {
                 })?;
                 // 配额依赖 tenant 归因列与账本表;迁移漏跑必须在 Ready 暴露,否则
                 // 第一轮投递才失败——那时业务写入已经在按配额受理了。
-                naoutbox_mysql::verify_outbox_tenant_quota_schema()
+                naoutbox_mysql::verify_outbox_tenant_quota_schema_for(outbox.datasource_ref())
                     .await
                     .map_err(|error| {
                         outbox_source_error(
@@ -1617,6 +1653,15 @@ impl ApplicationComponent for OutboxComponent {
                 None => None,
             };
 
+            state.publish_outbox(outbox.clone())?;
+            // 停机保护必须先于权限发布入栈；否则后续 Ready 失败时 dispatcher 状态可能游离于
+            // Application 反向清理之外，并在 transport 或数据库开始释放后继续投递。
+            context.activate(Box::new(OutboxShutdown {
+                state: Arc::clone(&state),
+            }));
+            state.publish_ready()?;
+            contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+
             // 保留清理与 dispatcher 在同一关键任务内并行:清理停摆只降级观测面,绝不
             // 反向终止投递;全部循环只在应用停机边界退出。启用分片时未分片 dispatcher
             // 被按 lane 循环整体取代,同进程不存在两种 claim 并行。
@@ -1631,6 +1676,7 @@ impl ApplicationComponent for OutboxComponent {
                             lane_tasks.spawn(run_lane_dispatch_loop(
                                 application.clone(),
                                 Arc::clone(&state),
+                                outbox.clone(),
                                 Arc::clone(&plan.publisher),
                                 plan.poison_policy,
                                 settings.clone(),
@@ -1654,6 +1700,7 @@ impl ApplicationComponent for OutboxComponent {
                     None => Box::pin(run_dispatch_loop(
                         application.clone(),
                         Arc::clone(&state),
+                        outbox.clone(),
                         plan,
                         settings,
                         contributor,
@@ -1661,7 +1708,8 @@ impl ApplicationComponent for OutboxComponent {
                 };
                 match retention {
                     Some(retention_plan) => {
-                        let retention = run_retention_loop(application, state, retention_plan);
+                        let retention =
+                            run_retention_loop(application, state, outbox, retention_plan);
                         let (dispatch_outcome, retention_outcome) =
                             tokio::join!(dispatch, retention);
                         dispatch_outcome.and(retention_outcome)
@@ -1725,6 +1773,7 @@ impl ShutdownAction for OutboxShutdown {
 /// 参数说明：
 /// - `application`：提供统一进程停机状态。
 /// - `state`：提供 Outbox 权限状态和低基数计数。
+/// - `outbox`：Ready 时冻结且绑定 `datasource_ref` 的持久句柄。
 /// - `plan`：冻结的 publisher 与毒丸策略。
 /// - `settings`：轮询、退避、单轮预算和批次上限。
 /// - `contributor`：Outbox 独占的 readiness 贡献项。
@@ -1733,11 +1782,11 @@ impl ShutdownAction for OutboxShutdown {
 async fn run_dispatch_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
+    outbox: MySqlOutbox,
     plan: OutboxApplicationPlan,
     settings: OutboxSettings,
     contributor: ReadinessContributor,
 ) -> ApplicationResult<()> {
-    let outbox = MySqlOutbox::new();
     let mut application_states = application.subscribe_state();
     let mut committed_appends = MySqlOutbox::subscribe_committed_appends();
     loop {
@@ -1823,6 +1872,7 @@ async fn run_dispatch_loop(
 /// 参数说明：
 /// - `application`：提供统一进程停机状态。
 /// - `state`：共享轮次计数(rounds/published/failed_rounds 聚合全部 lane)。
+/// - `outbox`：Ready 时冻结且绑定 `datasource_ref` 的持久句柄。
 /// - `publisher`：下游发布端。
 /// - `poison_policy`：本 lane 的毒丸策略。
 /// - `settings`：轮询、退避、单轮预算和批次上限。
@@ -1834,13 +1884,13 @@ async fn run_dispatch_loop(
 async fn run_lane_dispatch_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
+    outbox: MySqlOutbox,
     publisher: Arc<dyn OutboxPublisher + Send + Sync>,
     poison_policy: OutboxPoisonPolicy,
     settings: OutboxSettings,
     contributor: ReadinessContributor,
     lane: Arc<LaneRuntime>,
 ) -> ApplicationResult<()> {
-    let outbox = MySqlOutbox::new();
     let mut application_states = application.subscribe_state();
     let mut committed_appends = MySqlOutbox::subscribe_committed_appends();
     loop {
@@ -1943,15 +1993,16 @@ async fn run_lane_dispatch_loop(
 /// 参数说明：
 /// - `application`：提供统一进程停机状态。
 /// - `state`：观测计数累计目标。
+/// - `outbox`：Ready 时冻结且绑定 `datasource_ref` 的持久句柄。
 /// - `plan`：冻结的策略、归档端与轮询间隔。
 ///
 /// 返回：应用停机时正常退出。
 async fn run_retention_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
+    outbox: MySqlOutbox,
     plan: OutboxRetentionPlan,
 ) -> ApplicationResult<()> {
-    let outbox = MySqlOutbox::new();
     // 清理节奏是显式配置的固定间隔(失败不缩短):把它导出为 gauge,锁冲突/失败告警
     // 才能换算成"最长多久没有推进"。
     state
@@ -2109,6 +2160,20 @@ fn read_outbox_settings(
     Ok(settings)
 }
 
+/// 业务作用：读取受管 Outbox 冻结的 datasource 引用，供 Saga 组合在启动前复验同源性。
+///
+/// 参数说明：
+/// - `application`: 提供同一份最终配置快照。
+/// - `phase`: 读取失败应归属的生命周期阶段。
+///
+/// 返回：配置合法时返回 canonical datasource qualifier；结构或名称错误时阻止组合启动。
+pub(crate) fn datasource_ref(
+    application: &Application,
+    phase: ApplicationPhase,
+) -> ApplicationResult<String> {
+    Ok(read_outbox_settings(application, phase)?.datasource_ref)
+}
+
 /// 业务作用：在配置发布前验证 Outbox 段，阻止不可执行预算进入运行快照。
 ///
 /// 参数说明：
@@ -2137,6 +2202,13 @@ pub(crate) fn validate_outbox_section(
 ///
 /// 返回：全部字段处于封闭范围时成功，否则返回脱敏配置错误。
 fn validate_settings(settings: &OutboxSettings, phase: ApplicationPhase) -> ApplicationResult<()> {
+    natx::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
+        outbox_source_error(
+            phase,
+            "outbox.datasource_ref is not a canonical datasource qualifier",
+            error,
+        )
+    })?;
     for value in [
         settings.poll_interval_ms,
         settings.error_backoff_ms,

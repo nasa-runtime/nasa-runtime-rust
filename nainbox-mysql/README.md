@@ -11,7 +11,7 @@ nasa = { version = "1", features = ["inbox"] }
 ```rust
 use nasa::inbox::MySqlInbox;
 async fn consume(message_id: &str) -> anyhow::Result<()> {
-    match MySqlInbox::new()
+    match MySqlInbox::with_datasource("orders")?
         .process("order-projection", message_id, || async {
             update_projection().await
         })
@@ -26,13 +26,15 @@ async fn consume(message_id: &str) -> anyhow::Result<()> {
 
 ## YML 配置
 
-本 crate 不新增配置根，复用 `database:` / `datasources:` 和当前 ambient datasource。
+本 crate 不新增配置根，复用 `database:` / `datasources:`。`new()` 固定绑定 `default`；
+`with_datasource(name)` 固定绑定命名库，且必须与调用栈中的 ambient datasource 一致。
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  migrations:
-    mode: validate
+datasources:
+  orders:
+    url: ${APP_ORDERS_MYSQL_URL}
+    migrations:
+      mode: validate
 ```
 
 生产环境由 migration 创建 `inbox_message` 表；`ensure_schema` 只用于本地自举。
@@ -40,6 +42,7 @@ database:
 ## 主要边界
 
 - `claim` 在事务外明确失败，不会 autocommit。
+- `run_once`、`claim` 与 schema 自举都使用句柄绑定的 datasource；名称不一致时不会查询默认库。
 - 返回 `Claimed` 后必须在同一事务调用栈内完成业务 SQL。
 - `process` 统一执行 claim、业务闭包和提交，业务项目无需重复编写事务外壳；返回
   `CommitUncertain` 或 `RollbackFailed` 时必须保留原消息继续收敛。

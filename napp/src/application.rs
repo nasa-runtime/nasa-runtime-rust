@@ -771,9 +771,10 @@ impl Application {
     /// 返回 clone handle 是 `MySqlPool` 自身的共享语义（内部就是 `Arc` 池），不等于把资源移出容器；
     /// 单库配置 `database` 注册在 `default` 名下。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是数据源 qualifier；单库配置固定使用 `default`。
     ///
-    /// - `name`：数据源 qualifier；单库配置固定使用 `default`。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回共享 pool；停机、缺失或
+    /// 组件未声明时返回类型化错误。
     #[cfg(feature = "db")]
     pub async fn datasource(&self, name: &str) -> ApplicationResult<natx::MySqlPool> {
         self.ensure_component_declared(
@@ -781,7 +782,18 @@ impl Application {
             ApplicationPhase::Running,
             "datasource access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Db, "datasource access")?;
         crate::db::datasource_handle(self, name).await
+    }
+
+    /// 业务作用：获取规范化 `default` datasource，作为单库兼容配置与无参装载的唯一快捷入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`default` 已由当前 Application 发布时返回共享 pool；缺失时失败且不猜测其它实例。
+    #[cfg(feature = "db")]
+    pub async fn default_datasource(&self) -> ApplicationResult<natx::MySqlPool> {
+        self.datasource(crate::db::DEFAULT_DATASOURCE).await
     }
 
     /// 业务作用：为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
@@ -1015,9 +1027,10 @@ impl Application {
 
     /// 业务作用：按名称获取 Redis 客户端句柄。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是 Redis 实例 qualifier；单实例配置固定使用 `default`。
     ///
-    /// - `name`：Redis 实例 qualifier；单实例配置固定使用 `default`。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回同一受管客户端；停机、
+    /// 缺失或组件未声明时返回类型化错误。
     #[cfg(feature = "redis")]
     pub async fn redis(&self, name: &str) -> ApplicationResult<Arc<nadis::RedisClient>> {
         self.ensure_component_declared(
@@ -1025,7 +1038,18 @@ impl Application {
             ApplicationPhase::Running,
             "redis client access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Redis, "redis client access")?;
         crate::redis::redis_handle(self, name).await
+    }
+
+    /// 业务作用：获取 Redis 的规范化默认 source，对应无参资源装载语义。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`primary`/`default` 配置已发布时返回同一 `Arc<RedisClient>`；缺失时失败。
+    #[cfg(feature = "redis")]
+    pub async fn default_redis(&self) -> ApplicationResult<Arc<nadis::RedisClient>> {
+        self.redis(crate::redis::DEFAULT_REDIS).await
     }
 
     /// 业务作用：按 client name 获取 Kafka 的受控发布、健康和运行控制句柄。
@@ -1033,17 +1057,14 @@ impl Application {
     /// 句柄不会暴露 `KafkaProxy`、consumer registry 或 shutdown 权；最终关闭始终由
     /// Application active stack 执行。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是 `kafka.client_name` 或 `kafkas` map key；必须非空且已经在 Start 发布。
     ///
-    /// - `name`：`kafka.client_name` 或 `kafkas` map key；必须非空且已经在 Start 发布。
-    ///
-    /// # 返回
-    ///
-    /// 返回共享底层 client 的轻量受控句柄，克隆不会新建连接。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回共享底层 client 的轻量
+    /// 受控句柄，克隆不会新建连接。
     ///
     /// # 错误
     ///
-    /// 组件未声明、client 不存在或尚未完成 Start 发布时返回 Kafka 组件错误。
+    /// 组件未声明、Application 已进入停机、client 不存在或尚未完成 Start 发布时返回 Kafka 组件错误。
     #[cfg(feature = "kafka")]
     pub fn kafka(&self, name: &str) -> ApplicationResult<crate::capabilities::KafkaHandle> {
         self.ensure_component_declared(
@@ -1051,6 +1072,7 @@ impl Application {
             ApplicationPhase::Running,
             "kafka capability access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Kafka, "kafka capability access")?;
         let capability = self.inner.kafka_runtime.client(name).ok_or_else(|| {
             ApplicationError::new(
                 ComponentId::Kafka,
@@ -1062,6 +1084,16 @@ impl Application {
             capability,
             Arc::clone(&self.inner.state),
         ))
+    }
+
+    /// 业务作用：获取显式命名为 `default` 的 Kafka client，不猜测唯一 client 或第一个条目。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：完整受管 client 表中存在 `default` 时返回受控句柄；否则返回 Kafka 组件错误。
+    #[cfg(feature = "kafka")]
+    pub fn default_kafka(&self) -> ApplicationResult<crate::capabilities::KafkaHandle> {
+        self.kafka("default")
     }
 
     /// 业务作用：获取日志组件的只读运行时能力句柄。
@@ -1346,7 +1378,7 @@ impl Application {
         ))
     }
 
-    /// 业务作用：在 Service UserHook 内提交本进程唯一的保序执行器容量计划。
+    /// 业务作用：在 Service UserHook 内提交本进程唯一的保序执行器容量计划，作为 YAML `partition` 的动态替代入口。
     ///
     /// 本入口只移交纯参数，不创建 worker。组件会在 UserHook 成功结束后的 Prepare 阶段构造并
     /// 发布执行器，因此 Hook 后续失败不会遗留脱离 Application 所有权的后台任务。
@@ -1355,7 +1387,7 @@ impl Application {
     /// - `plan`: 已完成容量与停机预算校验的执行器计划。
     ///
     /// 返回：UserHook 开放、已声明 `partition` 且首次提交时成功；重复、晚到或 Batch 调用返回
-    /// 阶段错误。
+    /// 阶段错误；最终配置同时含 YAML 计划时在 Prepare 明确拒绝，两个入口不会合并。
     #[cfg(feature = "partition")]
     pub fn configure_partition(
         &self,
@@ -2204,6 +2236,38 @@ impl Application {
         ))
     }
 
+    /// 业务作用：在 Application 进入停机或终态后封口基础设施 getter，阻止新句柄越过资源所有权边界。
+    ///
+    /// Starting 仍允许 UserHook、Prepare 与 Ready 组件选择已经发布的受管资源；Stopping 之后只有此前
+    /// 已借出的句柄可以在全局预算内排空，新的 datasource、Redis 或 Kafka 句柄一律拒绝。
+    ///
+    /// 参数说明：
+    /// - `component`：拥有目标基础设施资源的组件。
+    /// - `capability`：不含 qualifier、endpoint 或凭据的稳定能力名称。
+    ///
+    /// 返回：Starting/Ready 时允许继续查找；Stopping、Stopped 或 Failed 时返回对应阶段的类型化错误。
+    #[cfg(any(feature = "db", feature = "redis", feature = "kafka"))]
+    fn ensure_infrastructure_lookup_open(
+        &self,
+        component: ComponentId,
+        capability: &'static str,
+    ) -> ApplicationResult<()> {
+        let state = self.state();
+        if matches!(state, ApplicationState::Starting | ApplicationState::Ready) {
+            return Ok(());
+        }
+        let phase = match state {
+            ApplicationState::Stopping => ApplicationPhase::Stopping,
+            ApplicationState::Stopped | ApplicationState::Failed => ApplicationPhase::Stopped,
+            ApplicationState::Starting | ApplicationState::Ready => unreachable!(),
+        };
+        Err(ApplicationError::new(
+            component,
+            phase,
+            format!("{capability} is unavailable while application state is {state:?}"),
+        ))
+    }
+
     /// 业务作用：取走全部路由定制并关闭登记入口。
     ///
     /// 取走即封口：这是"定制能否生效"的线性化点，之后的 `configure_router` 一律得到阶段错误。
@@ -2560,24 +2624,33 @@ impl Application {
 
     /// 业务作用：为一个运行依赖注册初始未就绪的动态贡献项。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `component`：贡献项归属的稳定组件身份，用于形成可定位错误。
+    /// - `name`：框架构造的非空稳定名称（如 `db:default`），不含地址、凭据或业务负载。
+    /// - `policy`：该依赖影响全局就绪的策略（关键/非关键、失败/恢复阈值、stale 窗）。
     ///
-    /// - `component`：负责更新该贡献项并承担错误归因的组件身份。
-    /// - `name`：框架生成的非空稳定名称，不得包含地址、凭据或业务负载。
-    ///
-    /// # 返回
-    ///
-    /// 首次注册成功时返回该组件独占的原子更新句柄。
-    ///
-    /// # 参数
-    ///
-    /// - `component`:贡献项归属的稳定组件身份,用于形成可定位错误。
-    /// - `name`:框架构造的非空稳定名称(如 `db:default`),不含配置秘密。
-    /// - `policy`:该依赖影响全局就绪的策略(关键/非关键、失败/恢复阈值、stale 窗)。
+    /// 返回：首次注册成功时返回该组件独占的原子更新句柄；名称、策略或阶段非法时失败。
     ///
     /// # 错误
     ///
     /// 名称为空、重名、封口后或阈值非法时返回 Start 阶段错误。
+    #[cfg_attr(
+        not(any(
+            feature = "redis",
+            feature = "kafka",
+            feature = "outbox",
+            feature = "db",
+            feature = "web",
+            feature = "grpc",
+            feature = "saga",
+            feature = "nacos-discovery",
+            feature = "partition",
+            feature = "nacos-config",
+            feature = "cache",
+            feature = "telemetry"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn register_readiness(
         &self,
         component: ComponentId,

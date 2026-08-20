@@ -9,8 +9,8 @@
 ## 核心价值与门面架构
 
 业务 manifest 只选择 `nasa` feature，业务代码只使用 `nasa::<module>`；门面负责把实现 crate、过程宏、
-codegen ABI 和可选 Application 组件接成一张一致的依赖图。这样业务不会直接锁定内部 crate 名称，也
-不会因为 tonic/prost、事务上下文或生命周期实现出现两份 package 身份。
+codegen ABI、受管多源 registry 和可选 Application 组件接成一张一致的依赖图。这样业务不会直接锁定
+内部 crate 名称，也不会因为 tonic/prost、事务上下文或生命周期实现出现两份 package 身份。
 
 ```text
 业务 feature 与 #[nasa::application(...)]
@@ -63,6 +63,29 @@ async fn save_order() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## 受管单源与多源
+
+启用 `application` 后，MySQL、Redis 与 Kafka 都由最终 YAML 创建，业务不在 `main` 中自行建池或维护
+第二张连接表。单源与多源配置根、默认身份及选择入口如下：
+
+| 资源 | 单源 | 多源 | 选择入口 |
+| --- | --- | --- | --- |
+| MySQL | `database` | `datasources.<name>` | `app.default_datasource().await` / `app.datasource(name).await` |
+| Redis | 扁平 `redis` | `redis.properties.<qualifier>` | `app.default_redis().await` / `app.redis(name).await` |
+| Kafka | `kafka` | `kafkas.<client>` | `app.default_kafka()` / `app.kafka(name)` |
+
+Application 先校验完整命名表，再按稳定名称逐源探测，全部成功后一次性发布。Outbox 与 Saga 通过
+`datasource_ref` 选择 MySQL；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
+consumer/producer 使用 client name。引用不存在时会在 Ready 前失败，不会回退默认源。
+
+MySQL 持久适配器同时提供显式绑定入口：`MySqlInbox::with_datasource`、
+`MySqlOutbox::with_datasource`、`MySqlIdempotencyStore::with_datasource`、
+`MySqlOutboxAuditSink::with_datasource`、`MySqlSagaStore::with_datasource`，以及
+`Orchestrator::with_datasource` 和 `ParticipantRuntime::with_datasource`。同一原子链必须使用相同
+qualifier；不同 datasource 之间不构成一个事务。source 集合、endpoint、凭据和身份字段在运行期
+保持冻结，变化后必须重启。完整 YAML 与生命周期合同见
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
 
 ## 应用入口
 
@@ -286,6 +309,8 @@ outbox:
 
 redis:
   url: ${APP_REDIS_URL}
+  namespace: order-service
+  profile: RustV2
 
 cache:
   mode: two_level

@@ -42,7 +42,6 @@ mod controller;
 )]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
     // 业务启动 Hook：注册资源、登记受监督任务、注入路由/长连接定制和运行时 initializer。
-    app.configure_partition(nasa::application::PartitionApplicationPlan::default())?;
     app.configure_router(|router| router)?;
     Ok(())
 }
@@ -59,12 +58,12 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"log"` | `log` | `log` | 两阶段日志：早期控制台 → 最终文件日志；运行期 `log` 段可热重应用 | `app.log()` |
 | `"nacos-config"` | `nacos-config`；真实远端连接再加 `nacos-sdk` | `nacos` | 远端 overlay 首拉与 watch 热刷新；`enabled=false` 走纯本地 | `app.nacos_config()` |
 | `"telemetry"` | `telemetry` | `telemetry` | 有界 span 管道、可选 OTLP trace/metrics、受管停机 flush | `app.telemetry_snapshot()` / `app.otlp_metrics_snapshot()` |
-| `"db"` | `tx` | `database` 或 `datasources.<name>` | 数据源探测、建池、资源注册和事务运行时注入 | `app.datasource(name).await` |
-| `"redis"` | `redis` | `redis` | 统一客户端建连与显式停机 | `app.redis(name).await` |
+| `"db"` | `tx` | `database` 或 `datasources.<name>` | 全表校验、逐源探测、冻结 registry 与显式停机 | `app.datasource(name).await`、`app.default_datasource().await` |
+| `"redis"` | `redis` | `redis` 或 `redis.properties.<qualifier>` | 多实例统一建连、逐源健康与显式停机 | `app.redis(name).await`、`app.default_redis().await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
-| `"partition"` | `partition` | 无固定配置根；UserHook 提交 `PartitionApplicationPlan` | Prepare 创建保序分 lane 执行器、动态健康与有界停机 | `app.partition()` |
+| `"partition"` | `partition` | `partition`，或 UserHook 提交 `PartitionApplicationPlan` | Prepare 创建保序分 lane 执行器、动态健康与有界停机 | `app.partition()` |
 | `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
-| `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)` |
+| `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)`、`app.default_kafka()` |
 | `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
 | `"redis-job"` | `redis-job`；隐式纳入 `redis` | `redis.job` 与 `redis.properties.<source>` | 冻结多 source 计划、布局与能力门禁，Ready 后启动扫描、租约、Fanout、逐源监督和有界停机 | `app.redis_job()`、`app.redis_job_control(source)`、`app.redis_job_query(source)` |
 | `"grpc"` | `grpc` | `grpc` | initializer 后自动装配 registered service、health、可选 reflection、TLS、listener、方法指标与有界排空 | `app.grpc()` |
@@ -85,6 +84,174 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job ->
 grpc -> auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
 `auth` 缺少 `web` 会被拒绝，`cache.redis_ref` 指向受管 Redis 时还必须声明 `"redis"`。
+
+## YAML 创建单源与多源
+
+MySQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数都属于 YAML。Application 在启动期读取最终
+配置并创建全部实例；业务 `main` 只提交 publisher、consumer、handler、Saga 定义等业务计划，再通过
+`app.datasource(...)`、`app.redis(...)` 或 `app.kafka(...)` 取得已经受管的句柄，不自行建池、建连或
+维护第二张 source 表。所有 source 先完成全表校验，再按名称稳定排序创建；任一项失败都会阻止 Ready。
+
+| 资源 | 单源 YAML | 多源 YAML | 默认身份 | 被其它组件引用的字段 |
+| --- | --- | --- | --- | --- |
+| MySQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.datasource_ref` |
+| Redis | 扁平 `redis` | `redis.properties.<qualifier>` | 持久身份 `primary`，查询兼容名 `default` | `cache.redis_ref`、`cache.invalidation.redis_ref`、`scheduling.redis_ref`、`redis.job.sources.<qualifier>` |
+| Kafka | `kafka` | `kafkas.<client>` | `client_name: default` | `configure_kafka(client, ...)`、`app.kafka(client)` 与 consumer 的 `client` |
+
+同一种资源的单源根和多源根互斥，不能在同一份配置中混用。显式 getter 只选择启动期已发布的句柄，
+不会在调用时建连；默认 getter 只查找上述默认身份，缺失时不会猜测唯一实例或第一个实例。运行期改变
+source 集合、endpoint、凭据、database、namespace、profile、group 或身份都会要求重启。
+
+### MySQL 单源
+
+单源使用 `database`，Application 将它发布为 `default`：
+
+```yaml
+database:
+  url: ${APP_DB_URL}
+  max_connections: 20
+  min_connections: 2
+  acquire_timeout_ms: 2000
+  connect_timeout_ms: 5000
+  probe_on_start: true
+  migrations:
+    mode: validate
+    lock_timeout_ms: 30000
+    allow_dirty: false
+
+# 只有声明了对应组件时才需要下面的段；省略 datasource_ref 也默认选择 default。
+outbox:
+  datasource_ref: default
+saga:
+  database_bootstrap: application
+  datasource_ref: default
+```
+
+业务使用 `app.default_datasource().await` 或 `app.datasource("default").await`。`database` 只表示一个
+source，不能在它下面再嵌套自定义名称。
+
+### MySQL 多源
+
+多源使用 `datasources` map；map key 是权威 qualifier，每个值都拥有完整且独立的连接池与 migration
+设置：
+
+```yaml
+datasources:
+  default:
+    url: ${APP_PRIMARY_DB_URL}
+    max_connections: 20
+    min_connections: 2
+    migrations:
+      mode: validate
+  reporting:
+    url: ${APP_REPORTING_DB_URL}
+    max_connections: 8
+    min_connections: 1
+    migrations:
+      mode: validate
+
+outbox:
+  datasource_ref: reporting
+saga:
+  database_bootstrap: application
+  datasource_ref: reporting
+```
+
+业务分别调用 `app.default_datasource().await` 与 `app.datasource("reporting").await`。如果多源 map 没有
+`default`，命名 getter 仍可用，但默认 getter 会明确失败。Outbox 与 Saga 的引用必须命中同一份
+`datasources`，两者共同形成原子事件链时必须使用相同的 `datasource_ref`；不存在的引用会在首次数据库
+握手前被拒绝。`database_bootstrap: user_hook` 只允许单个 `default`，命名库必须使用
+`database_bootstrap: application` 让容器从 YAML 创建。
+
+### Redis 单源
+
+单源使用扁平 `redis`。其持久 qualifier 固定为 `primary`，Application 同时提供 `default` 查询别名：
+
+```yaml
+redis:
+  url: ${APP_REDIS_URL}
+  namespace: orders
+  profile: RustV2
+
+cache:
+  mode: two_level
+  redis_ref: primary
+scheduling:
+  cluster: leader
+  leader_key: scheduled:leader
+  redis_ref: primary
+```
+
+`app.default_redis().await`、`app.redis("default").await` 与 `app.redis("primary").await` 返回同一个
+`Arc<RedisClient>`；协议 marker、key 空间和指标仍使用 `primary`，不会写入本地兼容别名。
+
+### Redis 多源
+
+多源把每个完整客户端配置放在 `redis.properties` 下；`primary` 是推荐的默认键，也可以只写
+`default` 作为配置边界同义名，但二者不能同时出现：
+
+```yaml
+redis:
+  properties:
+    primary:
+      url: ${APP_PRIMARY_REDIS_URL}
+      namespace: orders
+      profile: RustV2
+    sessions:
+      url: ${APP_SESSION_REDIS_URL}
+      namespace: order-sessions
+      profile: RustV2
+
+cache:
+  mode: two_level
+  redis_ref: sessions
+  invalidation:
+    enabled: true
+    redis_ref: sessions
+
+scheduling:
+  cluster: leader
+  leader_key: scheduled:leader
+  redis_ref: primary
+```
+
+`app.redis("sessions").await` 只返回 `sessions` 客户端。缓存失效广播的 `redis_ref` 复用所选受管客户端的
+命令连接，并从它派生专用订阅连接；兼容的 `redis_url` 独立路径仍可单独使用，但两个字段互斥。集群
+调度和 RedisJob 同样只使用显式 qualifier，不按唯一实例推断其它 source。
+
+### Kafka 单 client 与多 client
+
+单 client 使用 `kafka`；省略 `client_name` 时默认发布为 `default`，可通过
+`app.default_kafka()` 或 `app.kafka("default")` 获取：
+
+```yaml
+kafka:
+  bootstrap_servers: ${APP_KAFKA_BOOTSTRAP_SERVERS}
+  group_id: order-worker
+  producer:
+    acks: all
+  container:
+    consumers: collected
+```
+
+多 client 使用 `kafkas` map，map key 是权威 client name：
+
+```yaml
+kafkas:
+  default:
+    bootstrap_servers: ${APP_PRIMARY_KAFKA_BOOTSTRAP_SERVERS}
+    group_id: order-worker
+  audit:
+    bootstrap_servers: ${APP_AUDIT_KAFKA_BOOTSTRAP_SERVERS}
+    group_id: audit-worker
+```
+
+业务用 `configure_kafka("default", ...)`、`configure_kafka("audit", ...)` 登记各 client 的消费行为，
+并用对应名称取得 producer/admin/readiness 能力；这些入口不创建 Kafka source。单 client 也可以显式设置
+其它 `client_name`，此时必须使用命名入口，`default_kafka()` 不会猜测它。
+
+上方组件表列出的每个配置根都由 napp 直接解析和校验。Saga、Outbox、RedisJob 与 Kafka 的 UserHook
+入口只接收不可静态配置的业务定义或处理逻辑；连接地址、客户端参数和通用运行参数仍全部来自 YAML。
 
 ## RedisJob 受管模式
 
@@ -150,11 +317,25 @@ source 仍可被任务使用。定义引用未知 source 或 `enabled: false` �
 
 ## Partition 受管模式
 
-`"partition"` 把 `napart::PartitionExecutor` 纳入 Application 的唯一所有权。UserHook 只提交
-`PartitionApplicationPlan`，不自行创建 worker；组件在 UserHook 成功结束后的 Prepare 阶段创建执行器，
-登记到统一资源视图并发布 `app.partition()`。因此静态工厂与 initializer 三阶段可以使用同一句柄，
-但初始化后续失败仍会沿 active stack 停止 worker，不留下脱离容器的执行器。该业务句柄只开放提交与
-只读观测，不开放 `shutdown*`；完整执行器的收口权只属于 Application 生命周期 action。
+`"partition"` 把 `napart::PartitionExecutor` 纳入 Application 的唯一所有权。容量和停机预算推荐直接
+写在 YAML；组件在 UserHook 成功结束后的 Prepare 阶段创建执行器，登记到统一资源视图并发布
+`app.partition()`。因此静态工厂与 initializer 三阶段可以使用同一句柄，但初始化后续失败仍会沿
+active stack 停止 worker，不留下脱离容器的执行器。该业务句柄只开放提交与只读观测，不开放
+`shutdown*`；完整执行器的收口权只属于 Application 生命周期 action。
+
+```yaml
+partition:
+  partitions: 16
+  queue_capacity: 1024
+  global_inflight: 16384
+  max_lanes: 4096
+  shutdown_timeout_ms: 5000
+```
+
+`partitions`、`queue_capacity` 和 `global_inflight` 必填；`max_lanes` 省略时取 4096 与规范化分区数的
+较大值，`shutdown_timeout_ms` 默认 2000。运行期改变这些字段会报告 `RestartRequired`。
+
+需要由代码计算容量时仍可在 UserHook 提交同一份纯参数计划，但不能与 YAML `partition` 同时使用：
 
 ```rust
 use std::time::Duration;
@@ -170,8 +351,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-`partitions`、每 lane 深度、全局在飞量、lane 总数和停机排空预算都必须有界；计划非法或声明组件后
-漏交计划会在监听前拒绝启动。worker 异常死亡或 lane 冻结会使 `partition:executor` readiness 变为
+`partitions`、每 lane 深度、全局在飞量、lane 总数和停机排空预算都必须有界；YAML 与 UserHook
+计划冲突、计划非法或声明组件后没有任何计划会在监听前拒绝启动。worker 异常死亡或 lane 冻结会使
+`partition:executor` readiness 变为
 NotReady，并通过关键 monitor 触发应用统一停机。反向停机先拒绝新任务，再在计划预算与 Application
 全局剩余 deadline 派生的子预算内排空，并为损耗报告与后续逆序清理保留尾部预算；`frozen` 或
 `aborted` 非零会进入停机失败，同时证据仍可由业务句柄读取。`app.partition()` 返回的受管业务句柄
@@ -290,6 +472,7 @@ publisher 必须覆盖所有事件类型；否则应使用独立事务数据库�
 ```yaml
 saga:
   database_bootstrap: application
+  datasource_ref: workflow
   timer_poll_interval_ms: 500
   timer_error_backoff_ms: 1000
   timer_operation_timeout_ms: 5000
@@ -297,8 +480,11 @@ saga:
 ```
 
 `database_bootstrap` 默认为 `application`，DB 组件在 Start 阶段按 `database` 或 `datasources` 建池。
+`datasource_ref` 默认为 `default`，并必须与 UserHook 提交的全部 Orchestrator/Participant 以及
+`outbox.datasource_ref` 一致；Saga 的 Inbox、状态、timer、审计和 Outbox 只承诺该库内的本地事务。
 确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件会在 Prepare 接管并
-完成连接探针与 migration 门禁；关闭所有权在 Start 阶段预占，确保受监督任务退出后才释放连接。Ready 后
+完成连接探针与 migration 门禁；独立入口的 pool 所有权会原子转交给单源受管 registry，关闭所有权在
+Start 阶段预占，确保受监督任务退出后先撤销事务解析权威、再释放连接。Ready 后
 `app.datasource("default")` 返回同一受管池，停机态拒绝新的借用。该模式不读取
 `database`/`datasources` 的连接设置并会记录提示，不能用来绕过数据库门禁。
 
@@ -317,6 +503,9 @@ timer owner 不从共享配置推断，必须随计划提供逐副本唯一且�
 Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确认提交后会立即唤醒本进程 dispatcher；
 `outbox.poll_interval_ms` 是跨进程写入、进程重启和漏通知恢复的兜底上限，不会固定消耗每条 Saga
 步骤的执行预算。下游失败时提交通知不能绕过 `error_backoff_ms`。
+
+独立 Outbox 的 `outbox.datasource_ref` 同样默认为 `default`；配置命名库后，其启动探针、投递、保留
+清理、租户配额与指标查询不会回落到默认库。
 
 已投递行与死信的保留清理是显式子计划：`plan.with_retention(policy, interval_ms, archive)`。
 执行器绝不从"开启了 Outbox"推断保留期——未提交策略就没有任何删除；策略值不自洽、要求收据却
@@ -407,10 +596,12 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 `KafkaHandle` 提供 client lifecycle/readiness、`ProducerLane`、group health/assignment/position、
-pause/resume、seek、动态 subscribe/unsubscribe、人工 restart 和只读 topic metadata。它不会返回原始
-`KafkaProxy`，也没有 `connect`、`consumers`、admin 写操作或 `shutdown`。即使业务仍持有 handle，容器
-停机仍先在 Ready 层停止 consumer，再让 UserTask/业务资源利用仍开放的 producer 做退出收尾，最后在
-Start 层关闭发布准入、flush lane 和 admin；全部步骤共用一个绝对停机 deadline。
+pause/resume、seek、动态 subscribe/unsubscribe、人工 restart，以及受管 admin 的 topic metadata、
+`create_if_absent` 和显式删除能力；`KafkaAdmin::client_name()` 可复验管理操作的 client 归属。它不会
+返回原始 `KafkaProxy`、consumer registry、`connect` 或
+`shutdown`。即使业务仍持有 handle，容器停机仍先在 Ready 层停止 consumer，再让 UserTask/业务资源
+利用仍开放的 producer/admin 做退出收尾，最后在 Start 层关闭发布准入、flush lane 和 admin；全部步骤
+共用一个绝对停机 deadline。
 
 Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选帧仍先做完整无副作用校验，非法帧保留
 旧快照，合法但发生变化统一标记 `RestartRequired`，本版本不热切 broker、凭据、group 或 route。

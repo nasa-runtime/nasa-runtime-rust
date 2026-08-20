@@ -15,8 +15,14 @@ categories.workspace = true
 
 [lib]
 name = "cacheable"
+[features]
+default = []
+# managed-redis：允许宿主把已有 nadis 客户端交给失效广播，避免组件私自建立第二套命令连接。
+managed-redis = ["dep:nadis"]
+
 [dependencies]
 nacache-macro = { package = "nacache-macro", version = "1.0.1" }
+nadis = { version = "1.0.2", optional = true }
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 moka = { version = "0.12", features = ["future"] }
 dashmap = "6"

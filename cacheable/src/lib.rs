@@ -644,6 +644,30 @@ impl CacheRuntimeGuard {
         Ok(Self { broadcast, owner })
     }
 
+    /// 业务作用：以宿主受管的 `RedisClient` 装配 L2 后端和跨实例失效广播。
+    ///
+    /// 发布命令复用受管客户端；订阅仍由该客户端派生协议要求的专用连接，并由返回的 guard 负责停止。
+    ///
+    /// 参数说明：
+    /// - `layer`: 已建好的 L2 缓存层。
+    /// - `client`: 已由宿主完成配置、探测与生命周期托管的 Redis 客户端。
+    ///
+    /// 返回：发布和订阅路径均成功建立后返回拥有式句柄；订阅建立失败时不发布新一代缓存运行时。
+    #[cfg(feature = "managed-redis")]
+    pub async fn start_with_managed_redis(
+        layer: Arc<CacheLayer>,
+        client: Arc<nadis::RedisClient>,
+    ) -> anyhow::Result<Self> {
+        // 广播资源完整就绪后再替换运行时，避免订阅建立失败时覆盖仍可工作的上一代。
+        let broadcast = start_invalidate_broadcast_with_managed_redis(client).await?;
+        let publisher = Some(broadcast.publisher.clone());
+        let owner = CacheRuntime::install_owned(layer, publisher);
+        Ok(Self {
+            broadcast: Some(broadcast),
+            owner,
+        })
+    }
+
     /// 业务作用：停机:排空并停止失效广播(发布 drainer + 订阅循环)。消费 self,只能停一次。
     ///
     /// # 参数
@@ -744,6 +768,140 @@ pub async fn start_invalidate_broadcast(redis_url: &str) -> anyhow::Result<Inval
     })
 }
 
+/// 业务作用：使用宿主受管 Redis 客户端启动失效广播，并把派生订阅连接纳入可停止句柄。
+///
+/// 参数说明：
+/// - `client`: 已由宿主完成启动探测并负责最终释放的共享客户端。
+///
+/// 返回：首次订阅成功后返回广播生命周期句柄；首次订阅失败时不启动后台任务。
+#[cfg(feature = "managed-redis")]
+pub async fn start_invalidate_broadcast_with_managed_redis(
+    client: Arc<nadis::RedisClient>,
+) -> anyhow::Result<InvalidateBroadcast> {
+    // 首次订阅必须在返回前成功，保证组件 Ready 不会掩盖错误的实例引用或不可用的 Pub/Sub。
+    let initial_subscription = client.sub(&[INVALIDATE_CHANNEL]).await?;
+    let (publisher, mut receiver) = BoundedInvalidatePublisher::channel(INVALIDATE_QUEUE_CAPACITY);
+
+    let publisher_stop = Arc::new(tokio::sync::Notify::new());
+    let drainer_stop = publisher_stop.clone();
+    let publisher_client = client.clone();
+    let publisher_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = drainer_stop.notified() => {
+                    // 停机时尽力排空已接纳消息；外层预算耗尽会丢弃 guard 并中止本任务。
+                    while let Ok(message) = receiver.try_recv() {
+                        let payload = serde_json::to_string(&message)
+                            .unwrap_or_else(|_| "{\"scene\":\"\",\"key\":\"\"}".to_owned());
+                        let _ = publisher_client.r#pub(INVALIDATE_CHANNEL, payload).await;
+                    }
+                    return;
+                }
+                maybe = receiver.recv() => match maybe {
+                    Some(message) => {
+                        let payload = serde_json::to_string(&message)
+                            .unwrap_or_else(|_| "{\"scene\":\"\",\"key\":\"\"}".to_owned());
+                        // Pub/Sub 是尽力通道，发布失败不反向改变已经完成的本地失效。
+                        let _ = publisher_client.r#pub(INVALIDATE_CHANNEL, payload).await;
+                    }
+                    None => return,
+                },
+            }
+        }
+    });
+
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let task_stop = stop.clone();
+    let handle = tokio::spawn(run_managed_subscriber(
+        client,
+        initial_subscription,
+        task_stop,
+    ));
+    tracing::info!(
+        "cacheable 失效广播已通过受管 Redis 启动(频道 {})",
+        INVALIDATE_CHANNEL
+    );
+    Ok(InvalidateBroadcast {
+        stop,
+        handle,
+        publisher_stop,
+        publisher_handle,
+        publisher,
+    })
+}
+
+/// 业务作用：持续消费受管 Redis 订阅并在断线后重建专用连接，直至收到停机信号。
+///
+/// 参数说明：
+/// - `client`: 用于重新派生专用订阅连接的受管客户端。
+/// - `subscription`: 启动门禁阶段已经成功建立的首次订阅。
+/// - `stop`: 广播拥有者发出的停机信号。
+///
+/// 返回：收到停机信号后正常结束；运行期连接失败会记录并退避，不终止监督任务。
+#[cfg(feature = "managed-redis")]
+async fn run_managed_subscriber(
+    client: Arc<nadis::RedisClient>,
+    mut subscription: nadis::Subscription,
+    stop: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.notified() => return,
+                message = subscription.next_message() => match message {
+                    Some(message) => apply_invalidate_payload(message.as_str().as_ref()),
+                    None => break,
+                },
+            }
+        }
+        tracing::warn!("cacheable 受管 Redis 失效订阅中断,3s 后重连");
+        tokio::select! {
+            _ = stop.notified() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+        }
+        // 每次从受管客户端重新派生专用连接，避免断开的订阅对象残留旧连接状态。
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.notified() => return,
+                result = client.sub(&[INVALIDATE_CHANNEL]) => match result {
+                    Ok(next) => {
+                        subscription = next;
+                        break;
+                    }
+                    Err(_) => {
+                        // 连接错误可能携带 endpoint 或认证上下文；运行期日志只公开稳定状态，
+                        // 具体资源身份由 Application readiness 的有界 qualifier 负责归因。
+                        tracing::warn!("cacheable 受管 Redis 失效订阅重连失败");
+                    }
+                },
+            }
+            tokio::select! {
+                _ = stop.notified() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+            }
+        }
+    }
+}
+
+/// 业务作用：解析一条失效广播载荷并删除本节点对应的 L1 条目。
+///
+/// 参数说明：
+/// - `payload`: Redis Pub/Sub 收到的 UTF-8 JSON 载荷。
+///
+/// 返回：无返回值；无法解析的非协议载荷被忽略，不影响后续订阅消息。
+fn apply_invalidate_payload(payload: &str) {
+    if let Ok(message) = serde_json::from_str::<InvalidateMessage>(payload) {
+        local_cache::remove_any(&message.scene, &message.key);
+        tracing::debug!(
+            scene = %message.scene,
+            "cacheable 收到失效广播并已删本地 L1"
+        );
+    }
+}
+
 /// 业务作用：订阅循环:SUBSCRIBE 频道 → 每收到一条 {scene|key} → 删本节点 L1。正常不返回(除非连接断)。
 ///
 /// # 参数
@@ -759,14 +917,7 @@ async fn run_subscriber(redis_url: &str) -> anyhow::Result<()> {
             Ok(p) => p,
             Err(_) => continue, // 非字符串载荷,跳过
         };
-        if let Ok(message) = serde_json::from_str::<InvalidateMessage>(&payload) {
-            // 删【本节点】L1(非泛型,按 scene+key;见 local_cache::remove_any)
-            local_cache::remove_any(&message.scene, &message.key);
-            tracing::debug!(
-                scene = %message.scene,
-                "cacheable 收到失效广播并已删本地 L1"
-            );
-        }
+        apply_invalidate_payload(&payload);
     }
     // 流结束 = 连接断,返回 Err 触发上面的重连
     anyhow::bail!("pubsub 流结束(连接断开)")

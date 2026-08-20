@@ -45,9 +45,22 @@ impl std::fmt::Display for InboxStoreError {
 
 impl std::error::Error for InboxStoreError {}
 
-/// 无状态 MySQL Inbox。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MySqlInbox;
+/// 业务作用：以不可变 datasource 身份统一 Inbox claim 与本地业务事务。
+#[derive(Debug, Clone)]
+pub struct MySqlInbox {
+    datasource: natx::DatasourceRef,
+}
+
+impl Default for MySqlInbox {
+    /// 业务作用：以兼容语义构造绑定默认 datasource 的 Inbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 [`MySqlInbox::new`] 相同的轻量句柄。
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 业务作用：区分首次消息已经提交业务效果与重复消息被幂等吸收。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,13 +121,35 @@ impl std::fmt::Display for InboxTransactionError {
 impl std::error::Error for InboxTransactionError {}
 
 impl MySqlInbox {
-    /// 业务作用：创建无状态 Inbox 入口，不提前建立连接或持有消息身份。
+    /// 业务作用：创建绑定默认 datasource 的轻量 Inbox 入口，不提前建立连接或持有消息身份。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：可在任意事务调用栈内复用的轻量句柄。
     pub fn new() -> Self {
-        Self
+        Self {
+            datasource: natx::DatasourceRef::default(),
+        }
+    }
+
+    /// 业务作用：创建绑定命名 datasource 的 Inbox 入口。
+    ///
+    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    ///
+    /// 返回：claim、process 和 schema 操作固定使用该 datasource；名称非法时在 I/O 前失败。
+    pub fn with_datasource(datasource: impl AsRef<str>) -> anyhow::Result<Self> {
+        Ok(Self {
+            datasource: natx::DatasourceRef::new(datasource)?,
+        })
+    }
+
+    /// 业务作用：读取该 Inbox 全部持久操作绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不可变、不含连接信息的 qualifier 引用。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        &self.datasource
     }
 
     /// 业务作用：为本地自举创建 Inbox 表；生产结构仍由 migration 拥有。
@@ -123,14 +158,22 @@ impl MySqlInbox {
     ///
     /// 返回：表已经存在或创建成功时完成；连接与数据库错误返回脱敏失败。
     pub async fn ensure_schema() -> Result<(), InboxStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        Self::ensure_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上创建 Inbox 表。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：表已存在或创建成功时完成；名称、连接或 DDL 失败时返回脱敏错误。
+    pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), InboxStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
+        let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS inbox_message ( \
-             consumer_name VARCHAR(128) NOT NULL, \
-             message_id VARCHAR(190) NOT NULL, \
+             consumer_name VARCHAR(128) NOT NULL, message_id VARCHAR(190) NOT NULL, \
              processed_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
-             PRIMARY KEY (consumer_name, message_id) \
-             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+             PRIMARY KEY (consumer_name, message_id) ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         )
         .execute(connection.as_mut())
         .await
@@ -140,7 +183,8 @@ impl MySqlInbox {
 
     /// 业务作用：在当前 ambient 事务内竞争消息唯一标记，保证业务副作用与去重事实同提交。
     ///
-    /// 返回 `Claimed` 后，调用方必须在**同一 `natx::run`/`#[transactional]` 调用栈**内完成业务 SQL；
+    /// 返回 `Claimed` 后，调用方必须在**同源 `natx::run_for`/带 datasource 的
+    /// `#[transactional]` 调用栈**内完成业务 SQL；
     /// 返回 `Duplicate` 时必须跳过副作用并正常确认消息。
     ///
     /// 参数说明：
@@ -160,7 +204,9 @@ impl MySqlInbox {
                 "claim requires an ambient transaction; autocommit is forbidden",
             ));
         }
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let result = sqlx::query(
             "INSERT IGNORE INTO inbox_message (consumer_name, message_id) VALUES (?, ?)",
         )
@@ -178,7 +224,7 @@ impl MySqlInbox {
 
     /// 业务作用：统一执行 `Inbox claim → 业务处理 → COMMIT`，让消息入口不再重复手写事务模板。
     ///
-    /// 处理函数只在首次 claim 时调用，并且与唯一标记共享默认 datasource 的同一事务。返回
+    /// 处理函数只在首次 claim 时调用，并且与唯一标记共享句柄绑定 datasource 的同一事务。返回
     /// `Applied` 或 `Duplicate` 都表示数据库已经明确确认提交，transport 才能据此 ACK；任何错误都
     /// 必须保留原消息。
     ///
@@ -199,7 +245,7 @@ impl MySqlInbox {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
-        natx::run_decided(async move {
+        natx::run_decided_for(&self.datasource, async move {
             let claim = match self.claim(consumer_name, message_id).await {
                 Ok(claim) => claim,
                 Err(error) => return TxDecision::Rollback(anyhow::Error::new(error)),

@@ -13,6 +13,8 @@ use crate::{
 
 /// Redis 健康 monitor 的固定 PING 间隔。
 const REDIS_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_MANAGED_REDIS_SOURCES: usize = 64;
+pub(crate) const MAX_MANAGED_REDIS_NAME_BYTES: usize = 256;
 const IDEMPOTENT_METRIC_SERIES_PER_SOURCE: usize = 11;
 const IDEMPOTENT_METRIC_SERIES_BUDGET: usize = 10_000;
 
@@ -592,16 +594,27 @@ fn parse_redis_configs(
         if properties.is_empty() {
             return Err(redis_error(phase, "`redis.properties` must not be empty"));
         }
+        if properties.len() > MAX_MANAGED_REDIS_SOURCES {
+            return Err(redis_error(
+                phase,
+                "configured Redis source count exceeds the managed limit",
+            ));
+        }
         for (boundary_name, value) in properties {
             let qualifier = canonical_qualifier(boundary_name);
+            if !is_canonical_redis_qualifier(&qualifier) {
+                return Err(redis_error(
+                    phase,
+                    "redis.properties contains a non-canonical qualifier",
+                ));
+            }
             let mut config = decode_redis_config(value.clone(), phase, &qualifier)?;
             let explicit = value.get("qualifier").is_some();
-            if explicit && config.qualifier != qualifier {
+            if explicit && canonical_qualifier(&config.qualifier) != qualifier {
                 return Err(redis_error(
                     phase,
                     format!(
-                        "redis property key `{qualifier}` does not match its explicit qualifier `{}`",
-                        config.qualifier
+                        "redis property key `{qualifier}` conflicts with its explicit qualifier"
                     ),
                 ));
             }
@@ -620,10 +633,10 @@ fn parse_redis_configs(
             object.remove("job");
         }
         let mut config = decode_redis_config(flat, phase, "primary")?;
-        if config.qualifier != "primary" {
+        if canonical_qualifier(&config.qualifier) != "primary" {
             return Err(redis_error(
                 phase,
-                "flat `redis` configuration represents only qualifier `primary`",
+                "flat `redis` configuration represents only qualifier `primary` (`default` is its compatibility alias)",
             ));
         }
         config.qualifier = "primary".to_owned();
@@ -631,6 +644,20 @@ fn parse_redis_configs(
         configs.insert("primary".to_owned(), config);
     }
     Ok(configs.into_iter().collect())
+}
+
+/// 业务作用：统一受管 Redis source 与内置消费计划的 qualifier 字符集和长度边界。
+///
+/// 参数说明：`value` 是配置 map key、兼容别名或计划引用给出的 Redis 名称。
+///
+/// 返回：名称非空、无首尾空白、只含 ASCII 字母数字及 `.`、`_`、`-`，且长度有界时返回真。
+pub(crate) fn is_canonical_redis_qualifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= MAX_MANAGED_REDIS_NAME_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// 业务作用：反序列化一个 RedisClient 配置并保留 phase/source 上下文，不暴露连接凭据。

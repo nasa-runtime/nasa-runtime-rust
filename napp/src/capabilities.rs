@@ -256,8 +256,8 @@ impl KafkaClientCapability {
 
 /// Kafka 组件对业务开放的受控发布、健康和运行控制句柄。
 ///
-/// 句柄不公开原始 `KafkaProxy`、consumer registry、admin 写操作或 shutdown；即使业务长期
-/// 持有它，容器 action 仍能独立完成两段停机。
+/// 句柄不公开原始 `KafkaProxy`、consumer registry、连接入口或 shutdown；producer、admin 与消费
+/// 控制能力都派生自容器已创建的同一 client，即使业务长期持有句柄，容器 action 仍能独立完成两段停机。
 #[cfg(feature = "kafka")]
 #[derive(Clone)]
 pub struct KafkaHandle {

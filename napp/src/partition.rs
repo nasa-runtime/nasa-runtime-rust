@@ -1,6 +1,6 @@
 //! 保序分 lane 执行器的 Application 生命周期接入。
 //!
-//! 业务在 UserHook 只提交有界纯参数计划；组件在 Prepare 才创建 `PartitionExecutor`，因此
+//! 容量计划来自 YAML 或 UserHook 的有界纯参数；组件在 Prepare 才创建 `PartitionExecutor`，因此
 //! UserHook 失败不会遗留提前启动且无人拥有的 worker。句柄在 Prepare 发布，业务 initializer
 //! 可以取得同一实例；运行期 worker 或 lane 失去安全执行权会把 readiness 置为 NotReady，
 //! 同时让关键 monitor 退出以触发应用统一停机。
@@ -9,6 +9,8 @@ use std::future::Future;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+use serde::Deserialize;
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
 use crate::{
@@ -62,7 +64,7 @@ impl PartitionApplicationPlan {
             max_lanes: 4_096_usize.max(normalized_partitions(partitions)),
             shutdown_timeout: Duration::from_secs(2),
         };
-        plan.validate()?;
+        plan.validate_at(ApplicationPhase::UserHook)?;
         Ok(plan)
     }
 
@@ -74,7 +76,7 @@ impl PartitionApplicationPlan {
     /// 返回：新上限合法时返回更新后的计划，否则返回 UserHook 配置错误。
     pub fn with_max_lanes(mut self, max_lanes: usize) -> ApplicationResult<Self> {
         self.max_lanes = max_lanes;
-        self.validate()?;
+        self.validate_at(ApplicationPhase::UserHook)?;
         Ok(self)
     }
 
@@ -88,7 +90,7 @@ impl PartitionApplicationPlan {
     /// 返回：预算可表示时返回更新后的计划，否则返回 UserHook 配置错误。
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> ApplicationResult<Self> {
         self.shutdown_timeout = timeout;
-        self.validate()?;
+        self.validate_at(ApplicationPhase::UserHook)?;
         Ok(self)
     }
 
@@ -97,35 +99,35 @@ impl PartitionApplicationPlan {
     /// 参数说明: 无。
     ///
     /// 返回：全部容量与预算满足受管边界时成功，否则返回稳定配置错误。
-    fn validate(&self) -> ApplicationResult<()> {
+    fn validate_at(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
         if self.partitions == 0 || self.partitions > MAX_PARTITIONS {
             return Err(partition_error(
-                ApplicationPhase::UserHook,
+                phase,
                 format!("partition.partitions must be within 1..={MAX_PARTITIONS}"),
             ));
         }
         if self.queue_capacity == 0 || self.queue_capacity > u32::MAX as usize {
             return Err(partition_error(
-                ApplicationPhase::UserHook,
+                phase,
                 "partition.queue_capacity must be within 1..=4294967295",
             ));
         }
         if self.global_inflight == 0 || self.global_inflight > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(partition_error(
-                ApplicationPhase::UserHook,
+                phase,
                 "partition.global_inflight exceeds the Tokio semaphore capacity",
             ));
         }
         let minimum_lanes = normalized_partitions(self.partitions);
         if self.max_lanes < minimum_lanes || self.max_lanes > MAX_LANES {
             return Err(partition_error(
-                ApplicationPhase::UserHook,
+                phase,
                 format!("partition.max_lanes must be within {minimum_lanes}..={MAX_LANES}"),
             ));
         }
         if self.shutdown_timeout.is_zero() || self.shutdown_timeout > MAX_STOP_TIMEOUT {
             return Err(partition_error(
-                ApplicationPhase::UserHook,
+                phase,
                 "partition shutdown timeout must be within (0, 365 days]",
             ));
         }
@@ -148,6 +150,88 @@ impl PartitionApplicationPlan {
             .with_stop_timeout(self.shutdown_timeout),
         )
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// 业务作用：承载 YAML 中保序执行器的容量、lane 基数与停机预算。
+struct PartitionSettings {
+    partitions: usize,
+    queue_capacity: usize,
+    global_inflight: usize,
+    #[serde(default)]
+    max_lanes: Option<usize>,
+    #[serde(default = "default_partition_shutdown_timeout_ms")]
+    shutdown_timeout_ms: u64,
+}
+
+impl PartitionSettings {
+    /// 业务作用：把无副作用的 YAML 设置转换为与 UserHook API 共用的受管计划。
+    ///
+    /// 参数说明：`phase` 是配置错误应归属的生命周期阶段。
+    ///
+    /// 返回：字段完整且容量有界时返回计划；未知字段、零值或越界值会阻止候选配置发布。
+    fn into_plan(self, phase: ApplicationPhase) -> ApplicationResult<PartitionApplicationPlan> {
+        let plan = PartitionApplicationPlan {
+            partitions: self.partitions,
+            queue_capacity: self.queue_capacity,
+            global_inflight: self.global_inflight,
+            max_lanes: self
+                .max_lanes
+                .unwrap_or_else(|| 4_096_usize.max(normalized_partitions(self.partitions))),
+            shutdown_timeout: Duration::from_millis(self.shutdown_timeout_ms),
+        };
+        plan.validate_at(phase)?;
+        Ok(plan)
+    }
+}
+
+/// 业务作用：提供 YAML 未显式填写时的执行器排空预算。
+///
+/// 参数说明: 无。
+///
+/// 返回：与 `PartitionApplicationPlan::default` 一致的两秒毫秒值。
+fn default_partition_shutdown_timeout_ms() -> u64 {
+    2_000
+}
+
+/// 业务作用：在不创建 worker 的前提下校验候选配置中的 `partition` 容量合同。
+///
+/// 参数说明：
+/// - `tree`：合并、插值完成但尚未发布的候选配置树。
+/// - `phase`：启动首帧或运行期候选校验阶段。
+///
+/// 返回：配置段缺失或合法时成功；结构、未知字段或容量非法时返回 Partition 组件错误。
+pub(crate) fn validate_partition_section(
+    tree: &serde_json::Value,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    partition_plan_from_tree(tree, phase).map(|_| ())
+}
+
+/// 业务作用：从完整配置树读取可选的 YAML 执行器计划，并与动态入口共用同一校验规则。
+///
+/// 参数说明：
+/// - `tree`：最终或候选完整配置树。
+/// - `phase`：解析失败的生命周期归因。
+///
+/// 返回：未声明 `partition` 段时返回 `None`；存在且合法时返回计划；非法时拒绝。
+fn partition_plan_from_tree(
+    tree: &serde_json::Value,
+    phase: ApplicationPhase,
+) -> ApplicationResult<Option<PartitionApplicationPlan>> {
+    let Some(section) = tree.get("partition") else {
+        return Ok(None);
+    };
+    let settings: PartitionSettings = serde_json::from_value(section.clone()).map_err(|error| {
+        ApplicationError::with_source(
+            ComponentId::Partition,
+            phase,
+            "invalid `partition` configuration section",
+            error,
+        )
+    })?;
+    settings.into_plan(phase).map(Some)
 }
 
 impl Default for PartitionApplicationPlan {
@@ -396,7 +480,7 @@ fn normalized_partitions(partitions: usize) -> usize {
     partitions.max(1).next_power_of_two()
 }
 
-/// UserHook 计划与 Prepare 发布共用的单实例状态。
+/// YAML/UserHook 计划与 Prepare 发布共用的单实例状态。
 pub(crate) struct PartitionRuntimeState {
     plan: Mutex<PartitionPlanState>,
     executor: OnceLock<PartitionApplicationHandle>,
@@ -427,7 +511,7 @@ impl PartitionRuntimeState {
     ///
     /// 返回：首次登记成功；重复登记或 Prepare 已取走入口时返回阶段错误。
     pub(crate) fn configure(&self, plan: PartitionApplicationPlan) -> ApplicationResult<()> {
-        plan.validate()?;
+        plan.validate_at(ApplicationPhase::UserHook)?;
         let mut state = self
             .plan
             .lock()
@@ -450,22 +534,30 @@ impl PartitionRuntimeState {
 
     /// 业务作用：在 Prepare 原子关闭计划入口并取得唯一计划。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`configured_plan` 是从最终 YAML 解析出的可选计划。
     ///
-    /// 返回：UserHook 已提交计划时返回所有权；缺失计划时拒绝启动，且入口保持关闭。
-    fn take_plan(&self) -> ApplicationResult<PartitionApplicationPlan> {
+    /// 返回：YAML 或 UserHook 恰好提供一份计划时返回所有权；两者冲突或都缺失时拒绝启动，且入口保持关闭。
+    fn take_plan(
+        &self,
+        configured_plan: Option<PartitionApplicationPlan>,
+    ) -> ApplicationResult<PartitionApplicationPlan> {
         let mut state = self
             .plan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::mem::replace(&mut *state, PartitionPlanState::Taken);
-        match previous {
-            PartitionPlanState::Open(Some(plan)) => Ok(plan),
-            PartitionPlanState::Open(None) => Err(partition_error(
+        match (previous, configured_plan) {
+            (PartitionPlanState::Open(Some(_)), Some(_)) => Err(partition_error(
                 ApplicationPhase::Prepare,
-                "partition component requires configure_partition during the Service user hook",
+                "partition plan conflict: use either YAML `partition` or configure_partition, not both",
             )),
-            PartitionPlanState::Taken => Err(partition_error(
+            (PartitionPlanState::Open(Some(plan)), None)
+            | (PartitionPlanState::Open(None), Some(plan)) => Ok(plan),
+            (PartitionPlanState::Open(None), None) => Err(partition_error(
+                ApplicationPhase::Prepare,
+                "partition component requires YAML `partition` or configure_partition during the Service user hook",
+            )),
+            (PartitionPlanState::Taken, _) => Err(partition_error(
                 ApplicationPhase::Prepare,
                 "partition plan was already consumed",
             )),
@@ -573,7 +665,10 @@ impl ApplicationComponent for PartitionComponent {
     fn prepare<'a>(&'a mut self, context: &'a mut PrepareContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let runtime = context.application().partition_runtime();
-            let plan = runtime.take_plan()?;
+            let snapshot = context.application().config();
+            let configured_plan =
+                partition_plan_from_tree(snapshot.value(), ApplicationPhase::Prepare)?;
+            let plan = runtime.take_plan(configured_plan)?;
             let shutdown_timeout = plan.shutdown_timeout;
             let executor = plan.build();
             let business_handle = PartitionApplicationHandle::new(Arc::clone(&executor));

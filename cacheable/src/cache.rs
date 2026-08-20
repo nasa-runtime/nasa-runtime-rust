@@ -464,7 +464,7 @@ pub struct GroupedCache {
     // Redis 连接管理器（内部是可 clone 的句柄，自带断线重连）
     redis: ConnectionManager,
     // 【兜底 TTL】（毫秒，0 = 不设）。注意：它【不是】用来保证新鲜度的（新鲜度由显式 invalidate 负责），
-    // 而是纯【安全网】——只在"漏调 invalidate / 写-删竞态 / 进程崩在 del 前"等失效路径出问题时救命：
+    // 而是纯【安全网】——只在"漏调 invalidate / 写-删竞态 / 进程崩在 del 前"导致旧值残留时提供最终过期边界：
     //   · 防永久脏读：再脏也最多脏到这个 TTL 到点（建议设【小时/天级】，正常永远等不到它过期）
     //   · 防无界膨胀/OOM：无 TTL 的 hash 永不淘汰，堆积的 field（尤其负缓存）会撑爆内存
     // 关键：本 TTL 是【per-field】的（HPEXPIRE），从【该 field 首次创建】起算、不被后续写续命

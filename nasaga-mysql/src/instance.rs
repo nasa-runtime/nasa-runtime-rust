@@ -141,7 +141,7 @@ pub struct ControlTransitionSpec<'a> {
 /// 业务作用：区分 CAS 推进的三种结果，让调用方对"输掉竞争"与"重复触发"分别裁决。
 ///
 /// 分支说明：`Conflict` 与 `DuplicateTrigger` 都意味着**本 ambient 事务必须放弃提交**
-/// （向 `natx::run` 返回错误回滚）：`Conflict` 时实例行未被本事务修改，回滚后重新读取
+/// （向同源 `natx::run_for` 返回错误回滚）：`Conflict` 时实例行未被本事务修改，回滚后重新读取
 /// 再裁决；`DuplicateTrigger` 时实例行已在本事务内被 CAS 修改，只有回滚才能撤销它，
 /// 之后按"该触发已生效"确认消息即可。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,7 +217,9 @@ impl MySqlSagaStore {
         // 创建必须与首步命令 Outbox/timer/Audit 同一事务原子提交:事务外 autocommit 会打开
         // "实例已存在但首步命令永远丢失"的窗口。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
 
         let inserted = sqlx::query(
             "INSERT INTO saga_instance (saga_id, tenant_id, workflow_name, business_key, \
@@ -303,7 +305,9 @@ impl MySqlSagaStore {
         &self,
         saga_id: &SagaId,
     ) -> Result<Option<SagaInstanceRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(SELECT_INSTANCE_BY_ID_SQL)
             .bind(saga_id.as_str())
             .fetch_optional(connection.as_mut())
@@ -360,7 +364,9 @@ impl MySqlSagaStore {
                 .collect::<Vec<_>>()
                 .join(",")
         });
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
              status, control_state, direction, current_step, version, failure_code, \
@@ -407,7 +413,9 @@ impl MySqlSagaStore {
                 "non-terminal scan page size must be positive",
             ));
         }
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows =
             match after {
                 Some(after) => sqlx::query(
@@ -456,7 +464,9 @@ impl MySqlSagaStore {
         workflow: &nasaga_core::WorkflowName,
         business_key: &nasaga_core::BusinessKey,
     ) -> Result<Option<SagaInstanceRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(SELECT_INSTANCE_BY_BUSINESS_SQL)
             .bind(tenant.as_str())
             .bind(workflow.as_str())
@@ -488,7 +498,9 @@ impl MySqlSagaStore {
         // 因果上下文必须与触发它的结果推进同事务:事务外 autocommit 会让"上下文已换新
         // 但推进被回滚"的实例把后续命令挂到从未生效的 trace 上。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         sqlx::query("UPDATE saga_instance SET traceparent = ? WHERE saga_id = ?")
             .bind(traceparent)
             .bind(saga_id.as_str())
@@ -561,7 +573,9 @@ impl MySqlSagaStore {
             .checked_add(1)
             .ok_or_else(|| SagaStoreError::new("saga version overflow"))?;
 
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 暂停与业务推进必须争夺同一行级权威：即使 worker 先读到 ACTIVE，
         // 运维 pause 一旦先提交，这个 CAS 也必须失败，禁止在“暂停成功”后发新命令。
         let updated = sqlx::query(
@@ -654,7 +668,9 @@ impl MySqlSagaStore {
         // 暂停/恢复必须与 operation 审计同事务：没有审计的管理动作无法幂等重放，
         // 也无法在事故复盘时归因。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
 
         // 公开 API 会在每次调用时重载最新快照，仅靠 control_version 挡不住同一旧请求
         // 在一次完整 ABA 后再次执行。稳定 operation_id 命中时直接返回，禁止再触碰控制态。
@@ -754,7 +770,9 @@ impl MySqlSagaStore {
         validate_audit_text(reason, 512, "reason")?;
         // 审计必须与业务迁移、命令 Outbox 同事务；先落审计再失败也会整体回滚。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let prior = sqlx::query(
             "SELECT action, actor, reason FROM saga_management_audit \
              WHERE saga_id = ? AND operation_id = ? FOR UPDATE",

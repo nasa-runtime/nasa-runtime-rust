@@ -14,29 +14,37 @@ nasa = { version = "1", features = ["audit"] }
 use nasa::audit::{
     AuditEvent, AuditOutcome, MySqlOutboxAuditSink, TransactionalAuditSink,
 };
+use nasa::tx::transactional;
 
-let sink = MySqlOutboxAuditSink::new();
-sink.record_transactional(AuditEvent::new(
-    "subject:7",
-    "order.cancel",
-    "order:1001",
-    AuditOutcome::Success,
-    occurred_at_millis,
-))
-.await?;
+#[transactional(datasource = "orders")]
+async fn record_cancel(occurred_at_millis: u64) -> anyhow::Result<()> {
+    let sink = MySqlOutboxAuditSink::with_datasource("orders")?;
+    sink.record_transactional(AuditEvent::new(
+        "subject:7",
+        "order.cancel",
+        "order:1001",
+        AuditOutcome::Success,
+        occurred_at_millis,
+    ))
+    .await?;
+    Ok(())
+}
 ```
 
-调用点必须位于 `#[transactional]` 或 `nasa::tx::run` 内；否则返回脱敏的 `AuditWriteError`。
+调用点必须位于同一 datasource 的 `#[transactional]` 或 `nasa::tx::run_for` 内；否则返回脱敏的
+`AuditWriteError`。`new()` 保留默认库语义，`datasource_ref()` 可供启动计划复验绑定。
 
 ## YML 配置
 
-本 adapter 不新增配置根，复用 `database:` / `datasources:` 和 `natx` 默认 datasource。
+本 adapter 不新增配置根，复用 `database:` / `datasources:`；审计事件与该句柄绑定库中的业务写、
+Outbox 行共享同一个本地事务。
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  migrations:
-    mode: validate
+datasources:
+  orders:
+    url: ${APP_ORDERS_MYSQL_URL}
+    migrations:
+      mode: validate
 ```
 
 ## 主要边界

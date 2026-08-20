@@ -37,6 +37,8 @@ struct SchedulingConfig {
     leader_period_ms: u64,
     /// 写入运行记录的节点标识；留空表示不区分节点。
     node_id: String,
+    /// 集群选主必须复用的受管 Redis source；默认只指向 `default`。
+    redis_ref: String,
 }
 
 impl Default for SchedulingConfig {
@@ -51,6 +53,7 @@ impl Default for SchedulingConfig {
             leader_key: None,
             leader_period_ms: 1_000,
             node_id: String::new(),
+            redis_ref: "default".to_owned(),
         }
     }
 }
@@ -61,6 +64,8 @@ impl SchedulingConfig {
     /// # 参数
     ///
     /// - `phase`：配置被校验时所属的生命周期阶段。
+    ///
+    /// 返回：时序、leader key 与 Redis 引用均符合有界合同时成功；否则在启动副作用前失败。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
         if self.leader_period_ms == 0 {
             return Err(scheduling_error(
@@ -77,6 +82,19 @@ impl SchedulingConfig {
             return Err(scheduling_error(
                 phase,
                 "scheduling.cluster is `leader` but scheduling.leader_key is missing or empty",
+            ));
+        }
+        if self.redis_ref.trim().is_empty()
+            || self.redis_ref.trim() != self.redis_ref
+            || self.redis_ref.len() > 256
+            || !self
+                .redis_ref
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+        {
+            return Err(scheduling_error(
+                phase,
+                "scheduling.redis_ref must be a bounded canonical Redis qualifier",
             ));
         }
         Ok(())
@@ -178,6 +196,8 @@ impl SchedulingComponent {
     ///
     /// - `application`：提供已注册 Redis 资源的共享上下文。
     /// - `config`：已校验的调度配置。
+    ///
+    /// 返回：本地模式直接返回选项；leader 模式在 Redis gate 建立成功后返回集群选项。
     #[cfg_attr(not(feature = "scheduling-cluster"), allow(unused_variables))]
     async fn build_options(
         &mut self,
@@ -198,6 +218,8 @@ impl SchedulingComponent {
     ///
     /// - `application`：提供已注册 Redis 客户端资源的共享上下文。
     /// - `config`：已校验且 `cluster=leader` 的调度配置。
+    ///
+    /// 返回：选主句柄已由组件持有时返回集群选项；Redis 引用缺失或选主建立失败时返回错误。
     #[cfg(feature = "scheduling-cluster")]
     async fn build_clustered_options(
         &mut self,
@@ -211,12 +233,12 @@ impl SchedulingComponent {
             .clone()
             .unwrap_or_else(|| "scheduled:leader".to_owned());
         // Redis 组件必须先声明：这里只取已注册资源，不自行建连，避免出现第二条 Redis 生命周期。
-        let client = crate::redis::redis_handle(application, crate::redis::DEFAULT_REDIS)
+        let client = crate::redis::redis_handle(application, &config.redis_ref)
             .await
             .map_err(|error| {
                 scheduling_error_src(
                     ApplicationPhase::Ready,
-                    "scheduling.cluster=`leader` requires a redis client; \
+                    "scheduling.cluster=`leader` requires its configured redis_ref; \
                      declare the `redis` component before `scheduling`, or set scheduling.cluster=`local`",
                     error,
                 )
@@ -241,6 +263,8 @@ impl SchedulingComponent {
     ///
     /// - `application`：未使用；保持与集群实现相同的调用形态。
     /// - `config`：已校验且 `cluster=leader` 的调度配置。
+    ///
+    /// 返回：始终返回能力未编入的启动错误，不产生选主副作用。
     #[cfg(not(feature = "scheduling-cluster"))]
     async fn build_clustered_options(
         &mut self,

@@ -68,7 +68,7 @@ cargo publish --dry-run -p <crate> --locked
 上传后等待 registry 索引能够解析当前 crate，再推进依赖它的下游 crate。禁止用工作区 `[patch]` 掩盖
 registry 尚不可用的事实。
 
-本轮 gRPC/Saga/指标依赖顺序为：先发布并回读 `nagrpc-build`、`nagrpc` 与 `nametrics-core`；Saga 主链
+gRPC、Saga 与指标组件的依赖顺序为：先发布并回读 `nagrpc-build`、`nagrpc` 与 `nametrics-core`；Saga 主链
 先回读 `nasaga-core`，再回读 `nasaga-mysql` 与 `nasaga-macro`，随后发布 `nasaga-runtime`；`napp` 还
 必须等待它引用的 `config-boot` 等全部前置版本可从 registry 解析；最后才发布 `nasa`。每一步都要从
 不带本地 patch 的隔离解析图取得前置版本，不能因为工作区能构建就越过 registry 拓扑。

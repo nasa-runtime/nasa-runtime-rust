@@ -19,6 +19,10 @@ use crate::{
 ///
 /// 余量只用于让带 client/group/topic 的组件错误先于 Runner 通用超时完成，不会扩大全局预算。
 const STARTUP_DIAGNOSTIC_RESERVE: Duration = Duration::from_millis(50);
+/// 受管 Kafka client 数量上限，防止配置在启动期无界放大 native 资源。
+const MAX_MANAGED_KAFKA_CLIENTS: usize = 64;
+/// Kafka client name 长度上限，与其它受管 qualifier 共用有界诊断语义。
+const MAX_KAFKA_CLIENT_NAME_BYTES: usize = 128;
 
 /// 受管 client 是否启动 consumer registry。
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -1107,6 +1111,12 @@ fn parse_kafka_clients(
                     "config root `kafkas` must be a non-empty object",
                 ));
             }
+            if entries.len() > MAX_MANAGED_KAFKA_CLIENTS {
+                return Err(kafka_error(
+                    phase,
+                    "configured Kafka client count exceeds the managed limit",
+                ));
+            }
             let mut clients = BTreeMap::new();
             for (name, value) in entries {
                 if name.trim().is_empty() {
@@ -1165,13 +1175,13 @@ fn parse_kafka_client(
             Some(Value::String(_)) => {
                 return Err(kafka_error(
                     phase,
-                    format!("kafkas client `{name}` has a mismatched client_name"),
+                    "kafkas map key has a mismatched client_name",
                 ));
             }
             Some(_) => {
                 return Err(kafka_error(
                     phase,
-                    format!("kafkas client `{name}` has a non-string client_name"),
+                    "kafkas explicit client_name must be a string",
                 ));
             }
             None => {
@@ -1187,6 +1197,12 @@ fn parse_kafka_client(
     config.validate().map_err(|error| {
         kafka_source_error(phase, "managed kafka config validation failed", error)
     })?;
+    if config.client_name.len() > MAX_KAFKA_CLIENT_NAME_BYTES {
+        return Err(kafka_error(
+            phase,
+            "Kafka client name exceeds the managed length limit",
+        ));
+    }
     container
         .validate()
         .map_err(|message| kafka_error(phase, message))?;

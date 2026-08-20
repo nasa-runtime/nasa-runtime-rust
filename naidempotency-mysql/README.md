@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[nasa::application("db", "web")]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
     app.set_idempotency_store(Arc::new(
-        naidempotency_mysql::MySqlIdempotencyStore::new(),
+        naidempotency_mysql::MySqlIdempotencyStore::with_datasource("identity")?,
     ))?;
     Ok(())
 }
@@ -25,14 +25,16 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## YML 配置
 
-本 crate 不新增配置根，复用 `database:` / `datasources:` 和 `natx` 默认 datasource。
+本 crate 不新增配置根，复用 `database:` / `datasources:`。`new()` 绑定 `default`，
+`with_datasource(name)` 让事务内记录和事务外 response-cache 都固定使用同一个命名库。
 
 ```yaml
-database:
-  url: ${APP_MYSQL_URL}
-  max_connections: 16
-  migrations:
-    mode: validate
+datasources:
+  identity:
+    url: ${APP_IDENTITY_MYSQL_URL}
+    max_connections: 16
+    migrations:
+      mode: validate
 ```
 
 生产环境由 migration 创建 `idempotency_record_v2`；`ensure_schema` 只用于本地自举，不是发布期

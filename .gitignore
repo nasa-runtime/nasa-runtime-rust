@@ -6,3 +6,5 @@ node_modules/
 **/tests/
 tests/*
 scripts/
+!/.github/scripts/
+!/.github/scripts/*.sh

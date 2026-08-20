@@ -102,7 +102,9 @@ impl MySqlSagaStore {
     ) -> Result<(), SagaStoreError> {
         // 步骤骨架必须与实例创建同事务:实例可见但步骤缺行会让恢复扫描误判"无步骤可补偿"。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         for (index, step) in definition.steps().iter().enumerate() {
             sqlx::query(
                 "INSERT IGNORE INTO saga_step (saga_id, step_name, ordinal, forward_status, \
@@ -129,7 +131,9 @@ impl MySqlSagaStore {
     ///
     /// 返回：按定义顺序排列的投影行；读回列损坏或底层失败返回错误。
     pub async fn load_steps(&self, saga_id: &SagaId) -> Result<Vec<SagaStepRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT step_name, ordinal, forward_status, cancel_status, compensation_status, \
              resolution_status, execute_effect_id, execute_command_id, execute_attempt, \
@@ -156,7 +160,9 @@ impl MySqlSagaStore {
         &self,
         saga_id: &SagaId,
     ) -> Result<bool, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(
             "SELECT EXISTS(SELECT 1 FROM saga_step WHERE saga_id = ? \
              AND compensation_status = ?) AS present",
@@ -186,7 +192,9 @@ impl MySqlSagaStore {
         saga_id: &SagaId,
         operation_id: &str,
     ) -> Result<bool, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(
             "SELECT EXISTS(SELECT 1 FROM saga_management_audit WHERE saga_id = ? \
              AND operation_id = ? AND action = ?) AS present",
@@ -229,7 +237,9 @@ impl MySqlSagaStore {
         // attempt 登记必须与命令 Outbox 同事务:journal 有行而命令未发,重试会补发;
         // 命令已发而 journal 无行,结果事件将找不到去重锚点。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let effect_text = effect.to_string();
         let command_text = command.to_string();
 
@@ -333,7 +343,9 @@ impl MySqlSagaStore {
         }
         // 结果记账必须与 Inbox claim 及后续状态推进同事务,否则重复结果事件会二次记账。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_step_attempt SET status = ?, \
              outcome_event_id = COALESCE(?, outcome_event_id), \
@@ -395,7 +407,9 @@ impl MySqlSagaStore {
         saga_id: &SagaId,
         step: &StepName,
     ) -> Result<Vec<SagaStepAttemptRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT step_name, phase, attempt_no, effect_id, command_id, status, \
              outcome_event_id FROM saga_step_attempt \
@@ -426,7 +440,9 @@ impl MySqlSagaStore {
         step: &StepName,
         direction: nasaga_core::Direction,
     ) -> Result<u32, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let count: i64 = if direction == nasaga_core::Direction::Forward {
             // 尚未进入补偿时子查询为 NULL；此时全部 resolve 都属于正向预算。
             sqlx::query_scalar(
@@ -488,7 +504,9 @@ impl MySqlSagaStore {
         // 状态投影与触发它的结果记账/状态推进同事务,防止"attempt 已终态但步骤仍 PENDING"
         // 的持久化撕裂被恢复扫描读到。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_step SET \
              forward_status = COALESCE(?, forward_status), \
@@ -540,7 +558,9 @@ impl MySqlSagaStore {
         operation_id: &str,
     ) -> Result<(), SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 审计证据必须先存在于本事务；先改投影再补审计会留下可被崩溃窗口越权利用的
         // PENDING 补偿，并让自动 worker 在人工授权尚未成立时发出外部请求。
         let updated = sqlx::query(
@@ -585,7 +605,9 @@ impl MySqlSagaStore {
         operation_id: &str,
     ) -> Result<(), SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 只保留正向或补偿 Unknown 的行有资格重开；其它 HALTED 代表协议破坏，必须继续冻结。
         let updated = sqlx::query(
             "UPDATE saga_step AS step_row JOIN saga_management_audit AS audit_row \
@@ -634,7 +656,9 @@ impl MySqlSagaStore {
         // 计划标记与进入 COMPENSATING 的 CAS 必须同事务:只冻结实例摘要而不标记成员,
         // 恢复时将无法从持久化事实还原"哪些步骤在计划内"。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         for entry in plan.entries() {
             let updated = sqlx::query(
                 "UPDATE saga_step SET compensation_plan_version = ?, compensation_order = ?, \

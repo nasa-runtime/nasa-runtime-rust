@@ -112,6 +112,8 @@ naml = { path = "naml" }
 # 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
 natx = { path = "natx" }
 nainbox-mysql = { path = "nainbox-mysql" }
+naidempotency-mysql = { path = "naidempotency-mysql" }
+naaudit-mysql = { path = "naaudit-mysql" }
 # 同版本双身份消除:成员既按 path 直依赖、又经其它成员的公开坐标传递引用的 crate,
 # 必须统一来源,否则类型跨身份流动即编译失败或行为分裂。
 ncrypto = { path = "ncrypto" }

@@ -1852,7 +1852,11 @@ pub fn in_transaction() -> bool {
 }
 
 /// 业务作用：当前 ambient 事务所属 datasource；无事务时返回 `None`。
-pub fn current_datasource() -> Option<&'static str> {
+///
+/// 参数说明: 无。
+///
+/// 返回：事务内返回拥有型 datasource 引用，使运行期命名源不需要泄漏成静态字符串。
+pub fn current_datasource() -> Option<natx::DatasourceRef> {
     natx::current_datasource()
 }
 

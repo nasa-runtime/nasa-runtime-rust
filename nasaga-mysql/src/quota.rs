@@ -48,7 +48,9 @@ impl MySqlSagaStore {
     ) -> Result<QuotaReservation, SagaStoreError> {
         // 预留必须与实例创建同事务:创建回滚时名额一并回滚,不留幽灵占用。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         sqlx::query("INSERT IGNORE INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
             .bind(tenant.as_str())
             .execute(connection.as_mut())
@@ -109,7 +111,9 @@ impl MySqlSagaStore {
         saga_id: &nasaga_core::SagaId,
     ) -> Result<(), SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         sqlx::query(
             "UPDATE saga_tenant_quota quota \
              JOIN saga_instance instance ON instance.tenant_id = quota.tenant_id \
@@ -134,7 +138,9 @@ impl MySqlSagaStore {
         &self,
         tenant: &nasaga_core::TenantId,
     ) -> Result<bool, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let initialized: Option<i8> =
             sqlx::query_scalar("SELECT initialized FROM saga_tenant_quota WHERE tenant_id = ?")
                 .bind(tenant.as_str())
@@ -154,7 +160,9 @@ impl MySqlSagaStore {
         &self,
         tenant: &nasaga_core::TenantId,
     ) -> Result<u64, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query("SELECT in_flight FROM saga_tenant_quota WHERE tenant_id = ?")
             .bind(tenant.as_str())
             .fetch_optional(connection.as_mut())
@@ -188,7 +196,9 @@ impl MySqlSagaStore {
         // 对账与在线路径经账本行锁串行化,锁的生命周期必须覆盖"计数→覆盖"全程,
         // 因此强制运行在调用方事务内。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         sqlx::query("INSERT IGNORE INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
             .bind(tenant.as_str())
             .execute(connection.as_mut())

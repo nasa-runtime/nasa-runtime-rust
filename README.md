@@ -7,6 +7,51 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
 
+## 受管多源运行时
+
+Application 可从最终 YAML 同时创建多组 MySQL、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
+命名资源表。业务通过 qualifier 取得句柄；Inbox、Outbox、幂等、审计与 Saga 等持久适配器也把
+datasource 身份固化在自身句柄中，不需要各自维护连接池或依赖隐式默认库。
+
+```text
+最终 YAML → 全表校验与逐源探测 → 冻结命名 registry → Ready
+                                      │
+                                      ├─ Application getter
+                                      └─ 事务 / Mapper / 持久适配器
+停机信号  ←  撤销 registry 发布  ←  停止新事务并按生命周期反向排空
+```
+
+```yaml
+datasources:
+  default:
+    url: ${APP_PRIMARY_DB_URL}
+  workflow:
+    url: ${APP_WORKFLOW_DB_URL}
+
+outbox:
+  datasource_ref: workflow
+saga:
+  database_bootstrap: application
+  datasource_ref: workflow
+
+redis:
+  properties:
+    primary:
+      url: ${APP_PRIMARY_REDIS_URL}
+      namespace: orders
+      profile: RustV2
+    sessions:
+      url: ${APP_SESSION_REDIS_URL}
+      namespace: sessions
+      profile: RustV2
+```
+
+任一 source 无效都会在 Ready 前拒绝整张表；显式引用未知名称时不会猜测唯一实例，也不会回退到
+`default`。同一原子链中的业务写、Inbox、Outbox、审计与 Saga 必须绑定同一 datasource。本能力不提供
+跨数据库原子事务，也不热切换 endpoint、凭据或 source 集合；这些身份变化需要重启并重新完成启动
+门禁。完整配置、查询入口、失败语义和停机边界见
+[napp 的单源与多源章节](napp/README.md#yaml-创建单源与多源)。
+
 ## 持久化 Saga 编排
 
 本仓库提供面向生产故障语义的 Saga：用**本地 ACID + Outbox 至少一次 + Inbox 幂等 + 持久化状态机 +
@@ -283,12 +328,14 @@ database:               # db 组件，多库使用 datasources.<name>
 
 saga:                   # saga 组件；发布端由 SagaApplicationPlan 注入
   database_bootstrap: application
+  datasource_ref: default
   timer_poll_interval_ms: 500
   timer_error_backoff_ms: 1000
   timer_operation_timeout_ms: 5000
   timer_failure_threshold: 3
 
 outbox:                 # outbox 组件，也由 saga 隐式纳入
+  datasource_ref: default
   poll_interval_ms: 500
   error_backoff_ms: 1000
   operation_timeout_ms: 5000
@@ -307,7 +354,11 @@ cache:                  # cache 组件，通过 redis_ref 显式复用受管 Red
   null_ttl_secs: 30
   invalidation:
     enabled: false
-    redis_url: ""
+
+scheduling:             # scheduling 组件
+  cluster: leader       # 可填 local、leader；leader 模式需要声明 redis 组件
+  leader_key: scheduled:leader
+  redis_ref: default
 
 server:                 # web 组件
   host: 0.0.0.0
@@ -321,9 +372,6 @@ ws:                     # ws 组件，独立于 server
 rest_discovery:         # nacos-discovery 组件
   enabled: false
   provider: nacos
-
-scheduling:             # scheduling 组件
-  cluster: local        # 可填 local、leader；leader 模式需要声明 redis 组件
 ```
 
 手工装配（不使用应用运行时）的项目可自定根节点，启动顺序建议：

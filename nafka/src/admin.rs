@@ -81,6 +81,15 @@ impl KafkaAdmin {
         Self { proxy }
     }
 
+    /// 业务作用：返回创建本管理句柄的稳定 Kafka client 身份，供多 client 路由与审计归因。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：借用冻结配置中的 `client_name`；调用不会创建管理连接或访问 broker。
+    pub fn client_name(&self) -> &str {
+        &self.proxy.inner.config.client_name
+    }
+
     /// 业务作用：取得或并发安全地初始化共享管理客户端。
     ///
     /// 客户端延迟构造并可被 shutdown 丢弃，

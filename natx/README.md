@@ -21,7 +21,12 @@ async fn create_order() -> anyhow::Result<()> {
 }
 ```
 
-启动时必须先注入连接池。`#[application]` 运行时下声明 `db` 组件即可跳过手工注入：组件按 `database` / `datasources.<name>` 配置先用单连接探测真实连通性、再建池，并同时写入本运行时与应用资源容器。
+## 受管命名数据源架构
+
+启动时必须先注入连接池。`#[application]` 运行时下声明 `db` 组件即可跳过手工注入：组件按 `database` /
+`datasources.<name>` 配置先校验全部名称、逐项探测并建池，最后一次性发布由 Application 拥有的冻结
+`DataSourceRegistry`。`Application::datasource(name)`、事务、Mapper 和持久 adapter 都解析这张表，不再
+由 natx 的 standalone 静态表持有第二份受管 pool 所有权。
 
 手工建池推荐用 `nasa::tx::datasource` 模块（db 组件走的同一实现）：
 
@@ -45,7 +50,13 @@ let pool = sqlx::mysql::MySqlPoolOptions::new()
 nasa::tx::try_init(pool)?;
 ```
 
-命名 datasource 注册签名已放开为 `try_init_datasource(impl Into<String>, pool)`：运行期拼出的名称也能注册，原 `&'static str` 调用不受影响；`pool_for_datasource(&str)` 同步放开。`DataSourceConfig` 的 `Debug` 输出对连接串脱敏，可安全进日志。
+独立使用时，命名 datasource 注册入口是 `try_init_datasource(impl Into<String>, pool)`，
+`pool_for_datasource(&str)` 按同名选择。standalone 注册与 Application 受管 registry 严格互斥；同一进程
+不能同时维护两张 datasource 表。Saga 的 `database_bootstrap=user_hook` 是唯一接管边界：它把 standalone
+默认池从静态槽移入 Application 拥有的单源 registry，停机封口后不保留可被后续实例读取的强引用。
+如果 UserHook 在 Prepare 接管前失败，Application 的预压栈停机动作会先从 standalone 表撤销本轮注入，
+再显式关闭这些池。
+`DataSourceConfig` 的诊断格式会对连接串脱敏，可安全写入日志。
 
 关键规则：
 
@@ -53,6 +64,7 @@ nasa::tx::try_init(pool)?;
   `nasa::tx::mandatory_conn()` 取连接。
 - 使用 `&self.pool` 会绕过 ambient 事务，写入不会随事务 rollback。
 - 嵌套事务只支持同 datasource 复用外层事务，不支持 savepoint、独立子事务和跨 datasource 事务。
+- 具名 store 或 Mapper 与 ambient datasource 不一致时会在 SQL 前失败，不会回落到 `default`。
 - `after_commit` 只在最外层事务 commit 成功后执行，适合缓存失效和提交后通知。
 
 ## 事务语义
@@ -65,8 +77,9 @@ nasa::tx::try_init(pool)?;
 
 ## YML 配置与使用
 
-受管 `db` 组件读取 `database:` 或 `datasources:`，两者互斥。手工装配时也建议复用相同投影，再构造
-`sqlx::MySqlPool` 注入事务运行时。
+受管 `db` 组件读取 `database:` 或 `datasources:`，两者互斥。`database` 固定映射为 `default`；
+`datasources` 可以不含默认库，但此时无参事务、无参 store 与 `default_datasource()` 都会明确失败。
+名称只能包含 ASCII 字母、数字、`.`、`_`、`-`，单进程最多受管 64 个实例。
 
 单数据源示例：
 
@@ -76,8 +89,8 @@ database:
   max_connections: 16
   min_connections: 1
   acquire_timeout_ms: 3000
-  idle_timeout_ms: 600000
-  max_lifetime_ms: 1800000
+  connect_timeout_ms: 5000
+  probe_on_start: true
 ```
 
 多数据源示例：
@@ -100,8 +113,8 @@ datasources:
 | `max_connections` | pool 最大连接数。 |
 | `min_connections` | pool 最小连接数。 |
 | `acquire_timeout_ms` | 获取连接超时。 |
-| `idle_timeout_ms` | 空闲连接回收时间。 |
-| `max_lifetime_ms` | 单连接最大生命周期。 |
+| `connect_timeout_ms` | 建立单条连接及启动探测的超时。 |
+| `probe_on_start` | 是否在建池前探测地址、鉴权和目标数据库。 |
 
 启动代码：
 
@@ -116,12 +129,16 @@ let pool = sqlx::mysql::MySqlPoolOptions::new()
 nasa::tx::try_init(pool)?;
 ```
 
-多数据源需要按名称注册，mapper 和业务事务方法再用相同 datasource 名称：
+不使用 Application 的 standalone 模式需要按名称注册，Mapper 和业务事务方法再用相同 datasource 名称：
 
 ```rust
 nasa::tx::try_init(default_pool)?; // 默认数据源
 nasa::tx::try_init_datasource("report", report_pool)?;
 ```
 
-约束：所有需要参加事务的 DB 访问必须通过 `nasa::tx::conn()`、
-`nasa::tx::mandatory_conn()` 或 mapper 生成代码获取连接。
+Application 模式不调用这些注册函数；业务通过 `app.default_datasource().await?` 或
+`app.datasource("report").await?` 取得已经发布的 pool。运行期增删、改名或更换连接配置需要重启；
+本 crate 只保证单 datasource 的本地事务，不提供跨库原子提交。
+
+约束：所有需要参加事务的 DB 访问必须通过 `nasa::tx::conn()` / `conn_for()`、
+`nasa::tx::mandatory_conn()` / `mandatory_conn_for()` 或 Mapper 生成代码获取连接。

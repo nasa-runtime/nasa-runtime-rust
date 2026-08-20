@@ -135,7 +135,9 @@ struct CacheConfig {
 struct InvalidationConfig {
     /// 是否启用跨实例失效广播;缺省关(仅本地 L1 失效)。
     enabled: bool,
-    /// 广播用 Redis 连接串(pub/sub,单节点即可);启用时必填。空串=不广播。
+    /// 复用受管 Redis 实例的 qualifier；与 `redis_url` 互斥。
+    redis_ref: Option<String>,
+    /// 广播用 Redis 连接串(pub/sub,单节点即可)；未配 `redis_ref` 时使用。
     redis_url: String,
 }
 
@@ -155,12 +157,17 @@ impl CacheConfig {
     /// # 参数
     ///
     /// - `phase`:本次校验所属生命周期阶段,用于错误归因。
+    ///
+    /// 返回：两级缓存、广播连接来源与 TTL 合同均成立时成功；歧义或越界配置在网络 I/O 前失败。
     fn validate(&self, phase: ApplicationPhase) -> ApplicationResult<()> {
         let has_ref = self
             .redis_ref
             .as_deref()
             .is_some_and(|r| !r.trim().is_empty());
         let has_url = !self.redis_url.trim().is_empty();
+        if let Some(reference) = self.redis_ref.as_deref() {
+            validate_redis_reference(reference, "cache.redis_ref", phase)?;
+        }
         if self.mode == CacheMode::TwoLevel {
             // 二者必须给其一,且互斥(同时给无法确定用托管还是自建)。
             if !has_ref && !has_url {
@@ -186,14 +193,57 @@ impl CacheConfig {
                 ));
             }
         }
-        if self.invalidation.enabled && self.invalidation.redis_url.trim().is_empty() {
+        let invalidation_has_ref = self
+            .invalidation
+            .redis_ref
+            .as_deref()
+            .is_some_and(|reference| !reference.trim().is_empty());
+        let invalidation_has_url = !self.invalidation.redis_url.trim().is_empty();
+        if let Some(reference) = self.invalidation.redis_ref.as_deref() {
+            validate_redis_reference(reference, "cache.invalidation.redis_ref", phase)?;
+        }
+        if invalidation_has_ref && invalidation_has_url {
             return Err(cache_error(
                 phase,
-                "cache.invalidation.redis_url is required when invalidation is enabled",
+                "cache.invalidation.redis_ref and cache.invalidation.redis_url are mutually exclusive",
+            ));
+        }
+        if self.invalidation.enabled && !invalidation_has_ref && !invalidation_has_url {
+            return Err(cache_error(
+                phase,
+                "cache invalidation requires exactly one of cache.invalidation.redis_ref or cache.invalidation.redis_url",
             ));
         }
         Ok(())
     }
+}
+
+/// 业务作用：在任何缓存网络 I/O 前校验 Redis 资源引用可作为有界 qualifier。
+///
+/// 参数说明：
+/// - `reference`: 配置边界传入的受管 Redis 名称。
+/// - `field`: 用于脱敏定位的配置字段名。
+/// - `phase`: 校验所属生命周期阶段。
+///
+/// 返回：名称符合 Redis qualifier 合同时成功；空白、超长或非法字符返回组件错误。
+fn validate_redis_reference(
+    reference: &str,
+    field: &str,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    if reference.trim().is_empty()
+        || reference.trim() != reference
+        || reference.len() > 256
+        || !reference
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+    {
+        return Err(cache_error(
+            phase,
+            format!("{field} must be a bounded canonical Redis qualifier"),
+        ));
+    }
+    Ok(())
 }
 
 /// 缓存组件:Start 建两级缓存管道并装入进程级 runtime,停机排空失效广播。
@@ -272,6 +322,9 @@ impl ApplicationComponent for CacheComponent {
     /// # 参数
     ///
     /// - `context`:提供最终配置与 active stack 的 Start 上下文。
+    ///
+    /// 返回：禁用模式无副作用完成；两级缓存的 L2、广播与健康监督全部受管后成功，任一启动门禁
+    /// 失败时不发布半完成运行时。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = read_cache_config(context.application())?;
@@ -288,16 +341,9 @@ impl ApplicationComponent for CacheComponent {
                 return Ok(());
             }
 
-            // L2 后端:`redis_ref` 复用受管连接,否则自建集群连接。
-            let layer = build_cache_layer(context.application(), &config).await?;
-            let broadcast_url = if config.invalidation.enabled {
-                Some(config.invalidation.redis_url.as_str())
-            } else {
-                None
-            };
             // 装配 + 拥有:guard 把 backend 装进进程级 CacheRuntime(供 #[cached] 展开代码使用),
             // 并(可选)启动可 join 的失效广播;其停机由下面的 action 拥有。
-            let guard = cacheable::CacheRuntimeGuard::start(layer, broadcast_url)
+            let guard = build_cache_runtime(context.application(), &config)
                 .await
                 .map_err(|error| {
                     cache_error_src(
@@ -344,6 +390,54 @@ impl ApplicationComponent for CacheComponent {
     }
 }
 
+/// 业务作用：先复验广播的具名资源，再建立 L2 并装配缓存运行时。
+///
+/// 参数说明：
+/// - `application`: 提供具名 Redis 资源的应用容器。
+/// - `config`: 已完成无副作用校验的缓存配置。
+///
+/// 返回：缓存与可选广播均就绪时返回拥有式句柄；具名资源缺失或广播建连失败时返回启动错误。
+async fn build_cache_runtime(
+    application: &Application,
+    config: &CacheConfig,
+) -> anyhow::Result<cacheable::CacheRuntimeGuard> {
+    let managed_reference = config
+        .invalidation
+        .redis_ref
+        .as_deref()
+        .filter(|reference| !reference.trim().is_empty());
+    if config.invalidation.enabled {
+        if let Some(reference) = managed_reference {
+            #[cfg(feature = "redis")]
+            {
+                // 先复验引用再建立可能自有连接的 L2，未知 source 不产生任何缓存侧网络副作用。
+                let client = crate::redis::redis_handle(application, reference)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                let layer = build_cache_layer(application, config)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                return cacheable::CacheRuntimeGuard::start_with_managed_redis(layer, client).await;
+            }
+            #[cfg(not(feature = "redis"))]
+            {
+                let _ = application;
+                anyhow::bail!(
+                "cache.invalidation.redis_ref=`{reference}` requires the `redis` feature/component"
+            );
+            }
+        }
+    }
+    let layer = build_cache_layer(application, config)
+        .await
+        .map_err(anyhow::Error::new)?;
+    let broadcast_url = config
+        .invalidation
+        .enabled
+        .then_some(config.invalidation.redis_url.as_str());
+    cacheable::CacheRuntimeGuard::start(layer, broadcast_url).await
+}
+
 /// 停机 action:排空并停止失效广播(发布 drainer + 订阅循环),join 后退出。
 ///
 /// 等待上限由 Runner 对每个 action 施加的全局剩余停机预算 timeout 约束。
@@ -385,6 +479,8 @@ impl ShutdownAction for CacheShutdown {
 ///
 /// - `application`:Start 上下文的应用句柄,复用路径据此借出受管 Redis 客户端。
 /// - `config`:已校验的 `two_level` 缓存配置。
+///
+/// 返回：受管或自有 L2 建立成功时返回缓存层；资源缺失或连接失败时返回脱敏组件错误。
 async fn build_cache_layer(
     application: &Application,
     config: &CacheConfig,

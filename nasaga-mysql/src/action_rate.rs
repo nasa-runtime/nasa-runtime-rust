@@ -61,7 +61,9 @@ impl MySqlSagaStore {
         }
         // 预留必须与管理动作同事务:动作失败回滚时预算一并退还,失败尝试不烧预算。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 单次读取数据库时钟并在 Rust 侧对齐窗口:同一语句序列内窗口身份恒定,
         // 不会因两次 NOW() 跨越窗口边界而把自增打到不存在的行上。
         let now_ms: u64 =
@@ -123,7 +125,9 @@ impl MySqlSagaStore {
                 "action rate window_ms must be positive",
             ));
         }
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let now_ms: u64 =
             sqlx::query_scalar("SELECT CAST(ROUND(UNIX_TIMESTAMP(NOW(6)) * 1000) AS UNSIGNED)")
                 .fetch_one(connection.as_mut())

@@ -446,6 +446,7 @@ dependencies = [
  "linkme",
  "moka",
  "nacache-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nadis",
  "rand 0.8.6",
  "redis",
  "serde",
@@ -2134,22 +2135,12 @@ dependencies = [
 
 [[package]]
 name = "naaudit-mysql"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "naaudit",
  "naoutbox-mysql",
-]
-
-[[package]]
-name = "naaudit-mysql"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5590554ba6ed0269850ba141d8a9a749f359f5efaae88df6917162e813b85d"
-dependencies = [
- "async-trait",
- "naaudit",
- "naoutbox-mysql",
+ "natx",
 ]
 
 [[package]]
@@ -2482,20 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency-mysql"
-version = "1.0.1"
-dependencies = [
- "async-trait",
- "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "natx",
- "serde_json",
- "sqlx",
-]
-
-[[package]]
-name = "naidempotency-mysql"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f72c96f3c94989a95474aa817b166e00b1c110f1542caaf12b33eee667848d2"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2558,7 +2536,7 @@ checksum = "4b72f8d6a49faf40541ece6d7c300b1eed8849f66fc1395b3f9d000e5b004bd8"
 
 [[package]]
 name = "nainbox-mysql"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2819,7 +2797,7 @@ dependencies = [
  "hystrix",
  "hystrix-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit",
- "naaudit-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naaudit-mysql",
  "nabase 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nacache-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadate 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2830,7 +2808,7 @@ dependencies = [
  "nafka",
  "nagrpc",
  "naidempotency 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "naidempotency-mysql 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naidempotency-mysql",
  "naidempotency-redis 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "naimg 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3034,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "natx"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "natx-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",

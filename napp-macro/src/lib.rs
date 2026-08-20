@@ -27,8 +27,9 @@ use syn::{
 /// - `"nacos-config"`：启用 Nacos 配置中心。启动时拉取远端配置 overlay，运行期监听配置变化并按
 ///   last-known-good 规则热刷新；需要 `nacos-config` feature，真实连接 Nacos 还需要 `nacos-sdk`。
 /// - `"telemetry"`：启用有界 OpenTelemetry span 管道与受管停机 flush；需要 `telemetry` feature。
-/// - `"partition"`：启用保序分 lane 执行器。业务在 UserHook 提交有界计划，容器在 Prepare
-///   创建执行器、发布强类型句柄并监督动态健康与停机排空；需要 `partition` feature。
+/// - `"partition"`：启用保序分 lane 执行器。容量计划可由 YAML `partition` 提供，或在 UserHook
+///   提交；容器在 Prepare 创建执行器、发布强类型句柄并监督动态健康与停机排空；需要
+///   `partition` feature。
 /// - `"grpc"`：启用受管 gRPC service registry 与 listener。业务在 UserHook 登记 generated server，
 ///   容器在 Ready 自动装配、绑定端口、监督 serve 所有权并在停机时排空；需要 `grpc` feature。
 /// - `"db"`：启用 MySQL 数据源。启动时校验并探测地址、鉴权和数据库，创建连接池、注册应用资源，
@@ -62,6 +63,67 @@ use syn::{
 ///   停机时停止；需要 `scheduling` feature，Redis 选主的集群调度使用 `scheduling-cluster`。
 ///
 /// `"hystrix"`、`"grafana"`、`"mapper"` 等是门面 feature 或函数级能力，**不是**组件字符串。
+///
+/// # YAML 创建受管单源与多源
+///
+/// MySQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数必须来自最终 YAML；Application 在启动期
+/// 创建并冻结完整命名表，业务 `main` 只取得受管句柄，不自行建池或连接。三类资源的配置形态如下：
+///
+/// | 资源 | 单源 | 多源 | 默认入口 |
+/// | --- | --- | --- | --- |
+/// | MySQL | `database` | `datasources.<name>` | `app.default_datasource().await` |
+/// | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | `app.default_redis().await` |
+/// | Kafka | `kafka` | `kafkas.<client>` | `app.default_kafka()` |
+///
+/// 单源根与多源根互斥。MySQL 单源固定发布为 `default`；Redis 单源的持久身份是 `primary`，查询边界
+/// 同时接受 `default`；Kafka 单 client 省略 `client_name` 时默认为 `default`。多源示例：
+///
+/// ```yaml
+/// datasources:
+///   default:
+///     url: ${APP_PRIMARY_DB_URL}
+///   reporting:
+///     url: ${APP_REPORTING_DB_URL}
+/// outbox:
+///   datasource_ref: reporting
+/// saga:
+///   database_bootstrap: application
+///   datasource_ref: reporting
+///
+/// redis:
+///   properties:
+///     primary:
+///       url: ${APP_PRIMARY_REDIS_URL}
+///       namespace: orders
+///       profile: RustV2
+///     sessions:
+///       url: ${APP_SESSION_REDIS_URL}
+///       namespace: sessions
+///       profile: RustV2
+///
+/// kafkas:
+///   default:
+///     bootstrap_servers: ${APP_PRIMARY_KAFKA_BOOTSTRAP_SERVERS}
+///   audit:
+///     bootstrap_servers: ${APP_AUDIT_KAFKA_BOOTSTRAP_SERVERS}
+/// ```
+///
+/// `outbox.datasource_ref` 与 `saga.datasource_ref` 选择 `datasources`；Cache、缓存失效广播和 Scheduling
+/// 使用各自的 `redis_ref` 选择 `redis.properties`。Kafka consumer/producer 通过 client name 选择
+/// `kafkas`。这些引用在首次网络握手前复验，不存在时不会回退到默认或唯一实例。UserHook 中的
+/// `configure_saga`、`configure_kafka`、`configure_redis_jobs` 等入口只提交业务定义和处理逻辑，
+/// 不负责建立基础设施 source。完整字段与单源示例见 `napp` README。
+///
+/// 保序执行器的通用容量也可完全由 YAML 提供，不需要在 `main` 构造计划：
+///
+/// ```yaml
+/// partition:
+///   partitions: 16
+///   queue_capacity: 1024
+///   global_inflight: 16384
+///   max_lanes: 4096
+///   shutdown_timeout_ms: 5000
+/// ```
 ///
 /// # 声明顺序：与业务书写顺序无关
 ///

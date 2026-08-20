@@ -36,6 +36,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 redis:
   url: ${APP_REDIS_URL}
   namespace: order-service
+  profile: RustV2
 ```
 
 ## 主要边界

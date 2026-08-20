@@ -17,12 +17,13 @@
 编译期校验（与运行期同口径，先在宏上失败）：
 
 - 组件白名单：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、
-  `kafka`、`outbox`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`；未知或重复组件拒绝。
+  `kafka`、`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`；未知或
+  重复组件拒绝。
 - 业务可按任意顺序书写；宏固定规范为 `log -> nacos-config -> telemetry -> db -> redis ->
-  cache -> partition -> saga -> kafka -> outbox -> grpc -> auth -> web -> ws -> nacos-discovery ->
-  scheduling`。
+  cache -> partition -> saga -> kafka -> outbox -> redis-job -> grpc -> auth -> web -> ws ->
+  nacos-discovery -> scheduling`。
 - `saga` 隐式加入 DB 与 Outbox；独立 `outbox` 隐式加入 DB。Inbox 是事务内原语，没有组件字符串；
-  Kafka 或其它 transport 不由 Saga 推断。
+  `redis-job` 隐式加入 Redis；Kafka 或其它 transport 不由 Saga 推断。
 - 隐式依赖只补齐缺项；显式同时声明 `saga`、`db`、`outbox` 与只声明 `saga` 生成同一组件图。
 - 组合约束：`auth` 必须和 `web` 同时声明；其余依赖关系由运行期根据最终配置继续校验。
 - 每个声明组件都会生成 feature 探测常量引用，能力未启用时在业务 crate 编译阶段直接失败。
@@ -35,6 +36,22 @@
   `unsafe`、负向 impl 与其它 trait 都会在编译期拒绝。
 
 宏内路径解析复用 `macro-support`（直接依赖优先、门面回退、Cargo 重命名兼容）。
+
+## 受管单源与多源边界
+
+宏只声明生命周期组件，不解析连接参数。MySQL、Redis 与 Kafka 的单源或多源配置由 `napp` 在启动期
+从最终 YAML 创建并冻结；业务 Hook 只能取得受管句柄或提交 publisher、consumer、Handler 与 Saga
+定义等业务计划，不能借宏属性建立第二张连接表。
+
+| 资源 | 单源根 | 多源根 | 命名选择 |
+| --- | --- | --- | --- |
+| MySQL | `database` | `datasources.<name>` | Application getter、`datasource_ref` 与具名持久适配器 |
+| Redis | 扁平 `redis` | `redis.properties.<qualifier>` | Application getter 与 `redis_ref` |
+| Kafka | `kafka` | `kafkas.<client>` | Application getter、consumer/producer client name |
+
+同类资源的单源根与多源根互斥，引用未知名称会在 Ready 前拒绝，不会回退到默认或唯一实例。完整字段、
+同源事务要求和停机边界见
+[napp 的单源与多源章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
 
 ## 使用示例
 

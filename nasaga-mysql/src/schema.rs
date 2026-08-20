@@ -189,7 +189,17 @@ impl MySqlSagaStore {
     ///
     /// 返回：全部建表语句执行成功返回 `Ok`；连接不可用或 DDL 失败返回脱敏错误。
     pub async fn ensure_schema() -> Result<(), SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        Self::ensure_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上创建并复验全部 Saga 持久结构。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：结构完整时成功；名称、连接或结构升级失败时返回脱敏错误。
+    pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), SagaStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
+        let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
         for statement in [
             CREATE_INSTANCE_SQL,
             CREATE_STEP_SQL,

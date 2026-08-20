@@ -226,14 +226,61 @@ fn redact_path(redacted: &mut Value, path: &str) {
     }
 }
 
-/// 业务作用：对原始候选树求私有 fingerprint(canonical JSON 文本的 hash);仅供无变化判断,不对外。
+/// 业务作用：对原始候选树求与 JSON object 键顺序无关的私有 fingerprint，仅供无变化判断，不对外。
 ///
 /// reload 用它比较相邻两帧的**原始**候选,而不是拿原始树与上一帧 `<redacted>` 树直接比较——后者
 /// 因脱敏差异每次 watch 都会误判有变。
+///
+/// 参数说明：
+/// - `raw`：合并完成、尚未脱敏的完整候选树。
+///
+/// 返回：相同 JSON 语义生成相同的 SHA-256；object 的插入顺序不会改变结果，array 顺序仍保留业务语义。
 pub(crate) fn candidate_fingerprint(raw: &Value) -> [u8; 32] {
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
-    let _ = serde_json::to_writer(&mut *encoded, raw);
+    write_canonical_json(raw, &mut encoded);
     Sha256::digest(encoded.as_slice()).into()
+}
+
+/// 业务作用：把 JSON 值编码成键有序、类型边界明确的稳定字节序列，作为候选配置散列输入。
+///
+/// 参数说明：
+/// - `value`：当前递归编码的 JSON 节点。
+/// - `output`：只在当前调用链内存活并在散列后清零的字节缓冲区。
+///
+/// 返回：无返回值；object 按键字典序编码，array 保持原顺序，标量沿用 JSON 标准转义。
+fn write_canonical_json(value: &Value, output: &mut Vec<u8>) {
+    match value {
+        Value::Null => output.extend_from_slice(b"null"),
+        Value::Bool(value) => output.extend_from_slice(if *value { b"true" } else { b"false" }),
+        Value::Number(value) => output.extend_from_slice(value.to_string().as_bytes()),
+        Value::String(value) => {
+            let _ = serde_json::to_writer(output, value);
+        }
+        Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output);
+            }
+            output.push(b']');
+        }
+        Value::Object(values) => {
+            output.push(b'{');
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                let _ = serde_json::to_writer(&mut *output, key);
+                output.push(b':');
+                write_canonical_json(value, output);
+            }
+            output.push(b'}');
+        }
+    }
 }
 
 /// 业务作用：从原始候选树解析 secret、脱敏 fragment、求候选 fingerprint(同一 generation)。
