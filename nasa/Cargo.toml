@@ -82,7 +82,7 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 本地保序任务窃取执行器；同时启用 application 时纳入受管计划、readiness 与反向停机。
+# 命名分区 Runner；同时启用 application 时纳入逐域 readiness 与反序停机。
 partition = ["dep:partition_impl", "application_impl?/partition"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。

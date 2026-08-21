@@ -61,7 +61,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"db"` | `tx` | `database` 或 `datasources.<name>` | 全表校验、逐源探测、冻结 registry 与显式停机 | `app.datasource(name).await`、`app.default_datasource().await` |
 | `"redis"` | `redis` | `redis` 或 `redis.properties.<qualifier>` | 多实例统一建连、逐源健康与显式停机 | `app.redis(name).await`、`app.default_redis().await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
-| `"partition"` | `partition` | `partition`，或 UserHook 提交 `PartitionApplicationPlan` | Prepare 创建保序分 lane 执行器、动态健康与有界停机 | `app.partition()` |
+| `"partition"` | `partition` | `partition`，或 UserHook 提交 `PartitionApplicationPlan` | Prepare 启动命名 Runner、逐域健康与反序有界停机 | `app.partition()`、`app.partition_runner(name)` |
 | `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)`、`app.default_kafka()` |
 | `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
@@ -317,25 +317,68 @@ source 仍可被任务使用。定义引用未知 source 或 `enabled: false` �
 
 ## Partition 受管模式
 
-`"partition"` 把 `napart::PartitionExecutor` 纳入 Application 的唯一所有权。容量和停机预算推荐直接
-写在 YAML；组件在 UserHook 成功结束后的 Prepare 阶段创建执行器，登记到统一资源视图并发布
-`app.partition()`。因此静态工厂与 initializer 三阶段可以使用同一句柄，但初始化后续失败仍会沿
-active stack 停止 worker，不留下脱离容器的执行器。该业务句柄只开放提交与只读观测，不开放
-`shutdown*`；完整执行器的收口权只属于 Application 生命周期 action。
+`"partition"` 让 Application 显式拥有一个 `PartitionRunnerRegistry`。每个稳定名称对应独立的
+generation、slot 主队列、类型路由、盗洞、延迟索引、容量、指标和停机权威。Prepare 按名称启动全部
+Runner，全部成功后才发布业务句柄；任一启动失败都会反序收口已启动项。句柄只开放提交和只读观测，
+不开放 `start`、`stop` 或 `force_stop`。
+
+热点类型会通过盗洞交给空闲 slot 推进；严格类型跨迁移与归还保持同一受理序号，非严格类型可以使用
+多个租约盗洞并发消费。`submit_after` 登记成功只表示 Runner 已持有该延迟任务，到期时仍需竞争类型容量
+和当前路由；若门禁拒绝，`await_outcome` 返回稳定 `Rejected`。取消与到期竞争只形成一个终态，许可和
+拒绝指标不会重复结算。
 
 ```yaml
 partition:
-  partitions: 16
-  queue_capacity: 1024
-  global_inflight: 16384
-  max_lanes: 4096
-  shutdown_timeout_ms: 5000
+  default_runner: default
+  runners:
+    default: {}
+    settlement:
+      partitions: 8
+      queue_capacity_per_type: 2048
+      global_inflight: 8192
+      critical: false
+      force_on_timeout: false
 ```
 
-`partitions`、`queue_capacity` 和 `global_inflight` 必填；`max_lanes` 省略时取 4096 与规范化分区数的
-较大值，`shutdown_timeout_ms` 默认 2000。运行期改变这些字段会报告 `RestartRequired`。
+每个 Runner 的字段都可以省略，省略项逐字段使用 `RunnerConfig::default()`；`max_type_states` 还会
+自动覆盖规范化后的分区数，因此 `default: {}` 就是完整有效计划。配置项只覆盖显式给出的字段。
+单 Runner 也可使用扁平 `partition` 段，`queue_capacity` 与 `max_lanes` 分别作为
+`queue_capacity_per_type` 与 `max_type_states` 的兼容键，同一对键不能同时出现。运行期更改计划需要
+重启 Application。
 
-需要由代码计算容量时仍可在 UserHook 提交同一份纯参数计划，但不能与 YAML `partition` 同时使用：
+完整 YAML 属性如下。容量和时长必须为正数；所有 `*_ms` 都以毫秒为单位，最大值为 365 天。
+
+| 属性 | 默认值 | 作用与约束 |
+| --- | --- | --- |
+| `partition` | 无 | Partition 受管计划根；声明组件后必须提供该段或在 UserHook 提交至少一个计划 |
+| `partition.default_runner` | `default` | `app.partition()` 指向的稳定名称；必须存在于 `runners` |
+| `partition.runners` | 无 | 稳定名称到 Runner 计划的映射，命名形态至少包含一项，最多 4096 项 |
+| `partition.runners.<name>` | `{}` | 单个隔离执行域；名称非空、无首尾空格和控制字符，UTF-8 最多 128 字节 |
+| `partitions` | 可用并行度的两倍，再向上取 2 的幂 | slot 与 worker 数；输入范围 1..=65536，最终规范化为不小于输入的 2 的幂 |
+| `queue_capacity_per_type` | 65536 | 每个 `(home, TaskType)` 尚未进入 Running 的许可上限，覆盖入队、移动和 worker 暂存；最大为 Tokio `Semaphore::MAX_PERMITS` |
+| `queue_capacity` | 同上 | `queue_capacity_per_type` 的兼容键；两者同时出现会拒绝配置 |
+| `global_inflight` | 默认分区数 × 65537，并钳制到 Tokio semaphore 上限 | 当前 Runner 延迟、排队、移动和执行中任务总上限；显式覆盖 `partitions` 不会联动重算本字段 |
+| `max_type_states` | `max(RunnerConfig 默认值, 规范化分区数)` | 当前 Runner 全部 `(home, TaskType)` 状态及指标基数上限；`RunnerConfig` 默认值为 `max(4096, 默认分区数)`，该字段不得小于当前规范化分区数，不得超过 1048576 |
+| `max_lanes` | 同上 | `max_type_states` 的兼容键；两者同时出现会拒绝配置 |
+| `frozen_evidence_capacity` | 1024 | 最近失败证据环容量；覆盖旧样本时继续累计总数与覆盖数，不持有业务任务 |
+| `max_inbound_tunnels` | 64 | 单个目标 slot 同时登记的严格与非严格入站盗洞总上限 |
+| `idle_task_threshold` | 8 | 热点源选择、普通空闲目标和严格归还观察使用的逻辑任务阈值；已有同向借入可为后来出现的严格热点复用目标 |
+| `strict_opportunity_attempts` | 2 | 每轮观察独立保留给严格候选的安装机会数，非严格流量不能占用 |
+| `return_observations` | 3 | 严格盗洞发起归还前必须连续满足任务边界与低负载条件的观察次数 |
+| `tunnel_lease_ms` | 2000 | 非严格盗洞没有真实发布或消费进展时允许保持开放的最长时间 |
+| `load_observer_interval_ms` | 1000 | 集中 observer 扫描全部 slot 负载的间隔，不按类型数量全表扫描 |
+| `control_tick_ms` | 1 | 活动严格迁移、归还、Moving 审计和停止推进的快速控制间隔；完全空闲 slot 不按该间隔轮询 |
+| `transition_timeout_ms` | 5000 | 单笔物理移动允许保持 Moving 的最长时间；超时关闭最小故障域 |
+| `shutdown_timeout_ms` | 2000 | Application 为本 Runner 申请的总收口预算上限，仍受应用剩余绝对期限约束；前半尝试无损排空，允许升级时后半用于有损收口 |
+| `drain_batch` | 64 | worker 单轮从主队列、控制队列和各盗洞方向处理的最大批量，限制单方向垄断 |
+| `critical` | `true` | true 时该 Runner 的 `Degraded` 或 `Failed` 触发 Application 统一停机；false 时只影响自身 readiness |
+| `force_on_timeout` | `true` | true 时无损预算耗尽后显式升级 `force_stop`；false 时保留未收敛错误且不隐式中止任务 |
+
+扁平单 Runner 形态把上述 Runner 字段直接放在 `partition` 下，并固定名称为 `default`；它不能再包含
+`default_runner` 或 `runners`。未知属性、零容量、非法时长、名称不合法、default 缺失或兼容键冲突
+都会在创建 worker 之前拒绝候选配置。每个 Runner 的默认值彼此独立，覆盖一个名称不会改变其它名称。
+
+需要由代码计算容量时可在 UserHook 按名称提交计划；同一个名称只能由 YAML 或 UserHook 一方提供：
 
 ```rust
 use std::time::Duration;
@@ -343,22 +386,45 @@ use nasa::application::PartitionApplicationPlan;
 
 #[nasa::application("partition", "web")]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    let plan = PartitionApplicationPlan::new(16, 1_024, 16_384)?
+    let default = PartitionApplicationPlan::new(16, 1_024, 16_384)?
         .with_max_lanes(4_096)?
         .with_shutdown_timeout(Duration::from_secs(5))?;
-    app.configure_partition(plan)?;
+    app.configure_partition(default)?;
+
+    let settlement = PartitionApplicationPlan::new(8, 2_048, 8_192)?
+        .with_critical(false)
+        .with_force_on_timeout(false);
+    app.configure_partition_runner("settlement", settlement)?;
     Ok(())
 }
 ```
 
-`partitions`、每 lane 深度、全局在飞量、lane 总数和停机排空预算都必须有界；YAML 与 UserHook
-计划冲突、计划非法或声明组件后没有任何计划会在监听前拒绝启动。worker 异常死亡或 lane 冻结会使
-`partition:executor` readiness 变为
-NotReady，并通过关键 monitor 触发应用统一停机。反向停机先拒绝新任务，再在计划预算与 Application
-全局剩余 deadline 派生的子预算内排空，并为损耗报告与后续逆序清理保留尾部预算；`frozen` 或
-`aborted` 非零会进入停机失败，同时证据仍可由业务句柄读取。`app.partition()` 返回的受管业务句柄
-支持任务提交和只读观测，但不开放 `shutdown*`；执行器收口权只属于 Application 生命周期。
-直接依赖 `napart` 的调用方仍可自管执行器；只有声明 `"partition"` 才形成上述容器合同。
+`configure_partition*` 只登记纯参数。UserHook 返回后，Prepare 才创建、启动并发布 Runner，因此不能在
+同一 Hook 中立即调用 `app.partition()` 或 `app.partition_runner(name)`。Initializer 位于 Prepare 之后，
+可以通过 `InitializationContext::resource` 或 `named_resource` 取得已发布句柄；Ready 后的 handler、
+受监督任务和其它业务代码也可以查询：
+
+```rust
+async fn submit_settlement(order_id: u64) -> anyhow::Result<()> {
+    let app = nasa::Application::try_global()?;
+    let settlement = app.partition_runner("settlement")?;
+    settlement.submit(order_id, || async move {
+        // 该任务进入 settlement Runner 的独立容量与顺序域。
+    })?;
+    Ok(())
+}
+```
+
+受管模式要求全部 Runner 名称在 Service UserHook 结束前确定。若名称或容量只能在 Application Running
+期间根据租户注册、业务事件或请求参数决定，应直接使用 `napart::PartitionRunnerRegistry` 动态创建，
+并由业务保持单一进程级注册表、限制名称总数以及显式执行 `stop`、`force_stop` 或 `stop_all`。直接模式
+不会自动加入 Application 的 readiness 和停机链。
+
+每个 Runner 有独立 readiness。关键 Runner 进入 `Degraded` 或 `Failed` 会触发统一停机；非关键 Runner
+只把自己的 readiness 置为 NotReady，其它执行域继续服务。停机先同时关闭全部入口，再按启动反序共享
+Application 的绝对期限：计划允许时，无损预算耗尽后才显式升级有损收口。`frozen` 或 `aborted` 非零
+会进入停机失败并保留有界证据。业务句柄的 Drop 不代表退出证明；确定停机只属于 Application 的
+生命周期 action。
 
 ## OTLP trace 与指标
 

@@ -31,7 +31,7 @@ rate-limit = ["redis", "dep:async-trait"]
 # telemetry：OpenTelemetry traces 组件；natelemetry 是硬依赖，本 feature 只门控组件与声明字符串。
 # OTLP wire exporter 使用 reqwest 发送 OTLP/HTTP JSON。
 telemetry = ["dep:reqwest"]
-# partition：YAML 或 UserHook 提交纯参数计划，Prepare 创建保序执行器并纳入 readiness 与反向停机。
+# partition：Prepare 批量启动命名 Runner，逐域聚合 readiness，并在反向停机中取得退出证明。
 partition = ["dep:napart"]
 # 稳定 gRPC listener：业务登记 generated service，Application 自动装配协议能力并托管生命周期。
 grpc = ["dep:nagrpc"]

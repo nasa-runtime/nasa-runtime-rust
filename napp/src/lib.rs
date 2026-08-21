@@ -41,7 +41,7 @@ mod db;
 /// 稳定 gRPC listener：UserHook service registry、Ready 绑定、关键监督与有界排空。
 #[cfg(feature = "grpc")]
 mod grpc;
-/// 保序分 lane 执行器组件：UserHook 计划、Prepare 发布、动态健康与有界停机。
+/// 命名分区 Runner 组件：严格 FIFO 的保序任务窃取、独立容量、Prepare 原子发布、逐域健康与有界停机。
 #[cfg(feature = "partition")]
 mod partition;
 /// OpenTelemetry traces 组件:配置驱动的有界 span 导出管道 + 受管 drainer + 停机 flush。
@@ -332,7 +332,7 @@ pub mod components {
         pub const FEATURE_CHECK: () = ();
     }
 
-    /// 保序分 lane 执行器的编译期能力探测点。
+    /// 命名分区 Runner 的编译期能力探测点。
     #[cfg(feature = "partition")]
     pub mod partition {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。

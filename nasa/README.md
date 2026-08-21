@@ -261,7 +261,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `grpc` | `nasa::grpc`、`nasa::application` | 统一 codegen、独立或 `"grpc"` Application 受管 listener、TLS/mTLS、方法策略与观测，进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
-| `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()` | 保序任务窃取、同 key 严格 FIFO、有界背压，以及不向业务开放收口权的 Application 受管健康与停机 |
+| `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()`、`app.partition_runner(name)` | 直接 Registry 支持运行期动态 Runner 并由业务显式停机；Application 模式冻结启动期计划，提供命名隔离、严格 FIFO 保序任务窃取、逐域健康与统一停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |

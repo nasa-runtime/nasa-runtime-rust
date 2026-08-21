@@ -96,9 +96,11 @@
 /// `datasource(name)`、`default_redis`/`redis(name)`、`default_kafka`/`kafka(name)` 取得受管句柄。
 /// Outbox 与 Saga 用 `datasource_ref`，Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
 /// 引用不存在时在建连前拒绝，不会猜测唯一实例或回退默认源。
-/// `partition` 的 `partitions`、`queue_capacity`、`global_inflight`、`max_lanes` 与
-/// `shutdown_timeout_ms` 也可直接写入同名 YAML 根；仅在需要按本机条件计算容量时才使用
-/// `configure_partition`，两种入口不能同时声明。
+/// `partition.runners.<name>` 可以声明多个相互隔离的分区 Runner；每个字段都可省略并逐项使用
+/// 有界默认值，`default_runner` 决定 `app.partition()` 的业务投影。代码侧可用
+/// `configure_partition_runner` 在 Service UserHook 登记 YAML 未占用的启动期名称，同名不能由两个
+/// 入口重复声明；计划在 Hook 返回后的 Prepare 才启动，Running 阶段不追加受管 Runner。运行期间按
+/// 业务参数创建执行域时，直接使用 `nasa::partition::PartitionRunnerRegistry` 并显式管理停机。
 #[cfg(feature = "application")]
 pub mod application {
     pub use application_impl::*;
@@ -715,15 +717,21 @@ pub mod mapper {
     };
 }
 
-/// 本地有界分区执行器：空闲 worker 可在不移动队列数据的前提下保序接管其它分区的 lane；
-/// 同 key 严格按提交顺序串行，不同 key 按分区并发；提供非阻塞或等待型背压、任务 panic
-/// 隔离、健康观测与显式异步停机。
+/// 命名隔离、严格 FIFO 的本地有界保序任务窃取执行器：每个 Runner 独立拥有 generation、slot
+/// 主队列、类型路由、盗洞、延迟索引、容量和停机权威。热点任务会搬入空闲 slot 的盗洞；严格类型
+/// 在迁移与归还期间保持同一受理序号，并提供非阻塞或等待型背压、任务 panic 隔离、健康与显式异步停机。
+/// 已登记 delayed 任务到期时仍可能稳定拒绝；取消与到期竞争只发布一个终态并只结算一次许可。
+///
+/// 业务可以直接持有 `PartitionRunnerRegistry`，在 Tokio runtime 运行期间按稳定名称创建并启动 Runner；
+/// 同一名称只在同一个注册表内代表同一执行域，直接模式由调用方负责完整停机。声明 Application 的
+/// `"partition"` 组件则改由 YAML 或 Service UserHook 提交启动期计划，Prepare 统一启动并接管 readiness
+/// 与停机，但不会在 Running 阶段追加 Runner。
 ///
 /// 该模块与 `nasa::redis::partition` 的 `PollCoordinator` 含义不同：这里管理单进程任务执行，
-/// Redis 模块管理分布式分区消费。
+/// Redis 模块管理分布式分区消费。命名 Runner 共享进程内 Tokio runtime，不提供 CPU 或进程内存硬隔离。
 ///
 /// ```
-/// use nasa::partition::PartitionExecutor;
+/// use nasa::partition::{PartitionRunnerRegistry, RunnerConfig};
 /// ```
 #[cfg(feature = "partition")]
 pub mod partition {

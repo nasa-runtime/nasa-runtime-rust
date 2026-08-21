@@ -2717,7 +2717,8 @@ name = "napart"
 version = "1.1.2"
 dependencies = [
  "arc-swap",
- "crossbeam-queue",
+ "dashmap",
+ "futures-util",
  "tokio",
  "tracing",
 ]

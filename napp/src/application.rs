@@ -1378,7 +1378,7 @@ impl Application {
         ))
     }
 
-    /// 业务作用：在 Service UserHook 内提交本进程唯一的保序执行器容量计划，作为 YAML `partition` 的动态替代入口。
+    /// 业务作用：在 Service UserHook 内提交 default 保序执行器的启动期容量计划，作为同名 YAML 计划的代码入口。
     ///
     /// 本入口只移交纯参数，不创建 worker。组件会在 UserHook 成功结束后的 Prepare 阶段构造并
     /// 发布执行器，因此 Hook 后续失败不会遗留脱离 Application 所有权的后台任务。
@@ -1386,11 +1386,32 @@ impl Application {
     /// 参数说明：
     /// - `plan`: 已完成容量与停机预算校验的执行器计划。
     ///
-    /// 返回：UserHook 开放、已声明 `partition` 且首次提交时成功；重复、晚到或 Batch 调用返回
-    /// 阶段错误；最终配置同时含 YAML 计划时在 Prepare 明确拒绝，两个入口不会合并。
+    /// 返回：UserHook 开放、已声明 `partition` 且首次提交时成功；同名 YAML、重复、晚到或 Batch
+    /// 调用返回阶段错误，两个入口不会合并。Running 阶段需要新增执行域时，应由业务直接持有
+    /// napart 注册表，不能绕过受管集合的冻结边界。
     #[cfg(feature = "partition")]
     pub fn configure_partition(
         &self,
+        plan: crate::partition::PartitionApplicationPlan,
+    ) -> ApplicationResult<()> {
+        self.configure_partition_runner(napart::DEFAULT_RUNNER, plan)
+    }
+
+    /// 业务作用：在 Service UserHook 内为稳定名称提交一份分区 Runner 计划。
+    ///
+    /// 本入口只登记纯参数并注册独立 readiness；Runner 在 Prepare 按名称顺序启动。YAML 与
+    /// UserHook 可以配置不同名称，但同名配置必须拒绝，不能合并推断。调用成功不表示 Runner 已经
+    /// 发布，同一 UserHook 内不能立即通过 `partition_runner` 取得该句柄。
+    ///
+    /// 参数说明：
+    /// - `name`: 配置常量中的有界稳定 Runner 名称。
+    /// - `plan`: 已校验的独立容量、控制和停机计划。
+    ///
+    /// 返回：UserHook 开放、组件已声明且名称首次登记时成功；同名 YAML、重复或晚到返回错误。
+    #[cfg(feature = "partition")]
+    pub fn configure_partition_runner(
+        &self,
+        name: impl AsRef<str>,
         plan: crate::partition::PartitionApplicationPlan,
     ) -> ApplicationResult<()> {
         let _gate = self
@@ -1411,7 +1432,20 @@ impl Application {
             ApplicationPhase::UserHook,
             "partition plan configuration",
         )?;
-        self.inner.partition_runtime.configure(plan)
+        let name = crate::partition::runner_name(name.as_ref(), ApplicationPhase::UserHook)?;
+        if self.inner.partition_runtime.has_yaml_plan(&name) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::UserHook,
+                "partition plan conflict: use either YAML `partition` or configure_partition for the same Runner, not both",
+            ));
+        }
+        let critical = plan.critical();
+        self.inner.partition_runtime.configure(name.clone(), plan)?;
+        let contributor = crate::partition::register_runner_readiness(self, &name, critical)?;
+        self.inner
+            .partition_runtime
+            .install_contributor(name, contributor)
     }
 
     /// 业务作用：在 Service UserHook 内把本进程唯一 RedisJob 计划移交给独立生命周期组件。
@@ -1543,7 +1577,39 @@ impl Application {
                 "partition executor access is closed during application shutdown",
             ));
         }
-        self.inner.partition_runtime.executor()
+        self.inner.partition_runtime.default_runner()
+    }
+
+    /// 业务作用：按稳定名称取得由 Application 唯一管理的分区 Runner 业务句柄。
+    ///
+    /// 返回句柄不含启停权；停止、重启和损耗报告仍归 Application 生命周期 action。名称只允许
+    /// 来自 YAML 或 UserHook 冻结计划，不能用请求字段动态创建执行域。
+    ///
+    /// 参数说明：
+    /// - `name`: 已配置的稳定 Runner 名称。
+    ///
+    /// 返回：Prepare 已发布且该 Runner 仍接纳任务时返回句柄；未知、未就绪或停机中返回错误。
+    #[cfg(feature = "partition")]
+    pub fn partition_runner(
+        &self,
+        name: impl AsRef<str>,
+    ) -> ApplicationResult<crate::partition::PartitionApplicationHandle> {
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::Running,
+            "named partition Runner access",
+        )?;
+        if matches!(
+            self.state(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::Running,
+                "partition Runner access is closed during application shutdown",
+            ));
+        }
+        self.inner.partition_runtime.runner(name.as_ref())
     }
 
     /// 业务作用：把保序执行器的计划与发布状态借给唯一生命周期组件。

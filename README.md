@@ -166,6 +166,65 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
 详见 [napp](napp/README.md)。
 
+### Partition YAML 属性
+
+`partition` 支持命名 Runner 映射，也兼容把单个 default Runner 的字段直接写在根下。Runner 字段全部
+可省略：省略项逐字段采用有界默认值，显式配置只覆盖对应字段；不同 Runner 的默认值和覆盖值互不影响。
+
+```yaml
+partition:
+  default_runner: default
+  runners:
+    default: {}
+    settlement:
+      partitions: 8
+      global_inflight: 8192
+      critical: false
+```
+
+容量、次数和时长必须为正数；`*_ms` 均以毫秒为单位，合法范围为 1..=31536000000（365 天）。
+每个 Runner 先独立取得一份 `RunnerConfig::default()`，再用 YAML 中显式出现的属性逐项覆盖，因此业务侧
+可以只写需要调整的键。以下表格覆盖解析器接受的全部属性：
+
+| YAML 属性 | 类型 | 默认值 | 作用与约束 |
+| --- | --- | --- | --- |
+| `partition` | mapping | 无 | Partition 受管计划根；声明组件后必须提供该段，或在 UserHook 至少提交一个命名计划。`partition: {}` 是合法的扁平 default Runner 计划 |
+| `partition.default_runner` | string | `default` | `app.partition()` 选择的稳定名称；只能用于命名形态，且必须精确匹配 `partition.runners` 中的一项 |
+| `partition.runners` | mapping | 无 | 稳定名称到隔离执行域的映射；命名形态必须有 1..=4096 项，不能与任何扁平 Runner 属性混用 |
+| `partition.runners.<name>` | mapping | `{}` | 单个 Runner 的稀疏覆盖；名称不能为空、不能有首尾空格或控制字符，UTF-8 编码最多 128 字节 |
+| `partition.runners.<name>.partitions` | integer | 可用并行度的两倍，再向上取 2 的幂并封顶 65536 | slot 和唯一 worker 数；输入范围 1..=65536，非 2 的幂会向上规范化，因此其它下限校验使用规范化后的值 |
+| `partition.runners.<name>.queue_capacity_per_type` | integer | 65536 | 每个 `(home, TaskType)` 尚未进入 Running 的许可上限，覆盖入队、移动和 worker 暂存；范围为 1..=Tokio `Semaphore::MAX_PERMITS` |
+| `partition.runners.<name>.queue_capacity` | integer | 同上 | `queue_capacity_per_type` 的兼容键，语义和边界完全相同；同一 Runner 同时声明两个键会拒绝整份候选配置 |
+| `partition.runners.<name>.global_inflight` | integer | `min(默认分区数 × 65537, Semaphore::MAX_PERMITS)` | 当前 Runner 的延迟、排队、移动和执行中任务共享总上限；范围为 1..=Tokio `Semaphore::MAX_PERMITS`，不会被 `partitions` 的显式覆盖联动重算 |
+| `partition.runners.<name>.max_type_states` | integer | `max(4096, 默认分区数, 规范化后的 partitions)` | 当前 generation 全部 `(home, TaskType)` 状态与指标基数上限；必须不少于规范化分区数，且不超过 1048576 |
+| `partition.runners.<name>.max_lanes` | integer | 同上 | `max_type_states` 的兼容键，语义和边界完全相同；同一 Runner 同时声明两个键会拒绝整份候选配置 |
+| `partition.runners.<name>.frozen_evidence_capacity` | integer | 1024 | 最近失败证据环保留条数；必须大于零，满后覆盖最旧样本但继续累计总数与覆盖数，样本不持有业务任务 |
+| `partition.runners.<name>.max_inbound_tunnels` | integer | 64 | 单个目标 slot 同时登记的严格与非严格入站盗洞共享上限；必须大于零，登记名额通过原子门禁裁决 |
+| `partition.runners.<name>.idle_task_threshold` | integer | 8 | 选择热点源、普通空闲目标和观察严格归还时使用的逻辑任务阈值；必须大于零，已有同向借入可为后来出现的严格热点复用目标 |
+| `partition.runners.<name>.strict_opportunity_attempts` | integer | 2 | 每个已投递窃取请求独立保留给严格候选的最大安装次数；必须大于零，非严格候选不消耗这部分机会 |
+| `partition.runners.<name>.return_observations` | integer | 3 | 严格盗洞发起归还前，任务边界和低负载条件必须连续成立的观察次数；必须大于零，任一轮不满足会重新累计 |
+| `partition.runners.<name>.tunnel_lease_ms` | integer | 2000 | 非严格盗洞没有真实发布或消费进展时允许保持开放的最长时间；到期先停止新发布，再排空既有任务 |
+| `partition.runners.<name>.load_observer_interval_ms` | integer | 1000 | `Accepting` 期间集中 observer 扫描全部 slot 负载的间隔；每轮按 slot 数量扫描，不按类型数量扫描 |
+| `partition.runners.<name>.control_tick_ms` | integer | 1 | 活动严格迁移、归还、Moving 审计和停止推进的兜底间隔；完全空闲且没有控制责任时只等待事件，不按该值轮询 |
+| `partition.runners.<name>.transition_timeout_ms` | integer | 5000 | 单笔物理移动允许保持 Moving 的最长时间；超时后停止猜测位置并关闭能够证明的最小故障域 |
+| `partition.runners.<name>.shutdown_timeout_ms` | integer | 2000 | Application 为该 Runner 分配的总收口上限，仍受应用剩余绝对期限约束；受管停机先使用其中一半尝试无损排空，允许升级时剩余部分用于显式有损收口 |
+| `partition.runners.<name>.drain_batch` | integer | 64 | worker 每轮从主队列、控制队列和各盗洞方向处理的最大批量；必须大于零，用于限制单一方向长期占用 worker |
+| `partition.runners.<name>.critical` | boolean | `true` | `true` 时该 Runner 的 `Degraded` 或 `Failed` 会使整体 readiness 失败并触发统一停机；显式设为 `false` 时只更新自身 readiness，不影响其它 Runner |
+| `partition.runners.<name>.force_on_timeout` | boolean | `true` | `true` 时无损阶段未收敛会由 Application 显式调用 `force_stop`；显式设为 `false` 时保留未收敛错误，不隐式中止运行中任务 |
+
+扁平单 Runner 形态把表中 `partition.runners.<name>.` 后的字段直接放到 `partition.` 下，名称固定为
+`default`。未知字段、零值、非法时长、缺失 default、非法名称或兼容键冲突会在创建 worker 前拒绝。
+运行架构、UserHook 命名计划和停机语义见 [napp Partition 受管模式](napp/README.md#partition-受管模式)。
+`submit_after` 登记成功不保证未来一定执行：到期时仍会按当前类型容量和路由重新准入，稳定拒绝通过
+`Submission::await_outcome()` 与 reason 返回。取消和到期重新准入竞争时只形成一个稳定终态，许可与
+拒绝指标不会重复结算。
+
+Partition 有两种生命周期所有者。直接使用 `napart::PartitionRunnerRegistry` 时，业务可在 Tokio runtime
+运行期间按稳定名称动态 `get_or_create` 并 `start`，但必须共享同一个进程级注册表、限制名称总数并显式
+停机；不同注册表中的同名 Runner 不共享顺序或容量。声明 Application 的 `"partition"` 组件时，YAML
+和 Service UserHook 只负责提交启动期计划，全部名称在 Hook 结束时冻结，Prepare 统一启动并接管
+readiness 与停机，Running 阶段不再追加受管 Runner。
+
 ### 业务初始化屏障
 
 initializer 适合装配动态路由与注册表、恢复业务状态、回填或预热依赖。它不是新的组件字符串，而是
@@ -437,7 +496,7 @@ HTTP/1/h2c listener。
 | [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列，并由 `napp` 统一管理 OTLP trace/metrics 停机 flush | `telemetry.*` 由 `napp` 读取 |
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
-| [napart](napart/README.md) | `partition` | 保序任务窃取、同 key 严格 FIFO、类型化 lane、有界背压与可审计停机；可通过 `PartitionApplicationPlan` 纳入 Application | 无固定根；受管模式由 UserHook 提交纯参数计划 |
+| [napart](napart/README.md) | `partition` | 命名 Runner 隔离、严格 FIFO 的保序任务窃取、有界背压、延迟稳定终态与可证明停机 | 直接模式运行期动态创建并显式停机；Application 模式由 YAML/UserHook 提交启动期计划 |
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
@@ -480,8 +539,9 @@ HTTP/1/h2c listener。
   - `ws`:`ServerConfig.max_connections`(连接总数,accept 处背压)、`max_unauthenticated`
     (未认证连接数,防慢握手/慢鉴权占满连接池)、`max_inflight_handlers`(全局)
     与 `max_inflight_handlers_per_conn`(单连接配额,防单连接抢占全局池)。
-  - `partition`:有界队列(`with_partitions_and_capacity`);`submit` 返回 `Result<(), SubmitError>`,
-    满/停机/分区死对调用方**可见**(不静默丢),`submit_async` 提供等容量的真背压。
+  - `partition`:每个命名 Runner 独立限制类型排队、全局在飞、类型基数和入站盗洞；`submit` 的
+    满载、停机和隔离失败对调用方**可见**，`submit_async` 提供等待容量的真背压；已登记 delayed
+    任务到期拒绝同样形成可等待的稳定终态。
   - `image`:输出像素上限(`MAX_OUTPUT_PIXELS`)防解压炸弹式放大。
 
 ## 归档边界
