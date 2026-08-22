@@ -116,12 +116,20 @@ impl MySqlIdempotencyStore {
 #[async_trait]
 impl IdempotencyStore for MySqlIdempotencyStore {
     /// 业务作用：以唯一键 INSERT 竞争首次执行，并对冲突记录执行租约接管或已有状态裁决。
+    ///
+    /// 参数说明：
+    /// - `key`：tenant、subject、route 与 client key 组成的幂等身份。
+    /// - `fingerprint`：当前请求等价类指纹。
+    /// - `lease`：当前执行者的随机 fencing lease。
+    ///
+    /// 返回：首次或同指纹过期接管、重放、在途、指纹冲突裁决；输入或数据库失败返回脱敏错误。
     async fn begin(
         &self,
         key: &IdempotencyKey,
         fingerprint: RequestFingerprint,
         lease: ExecutionLease,
     ) -> Result<IdempotencyOutcome, IdempotencyError> {
+        validate_key(key)?;
         // 1) 竞态安全占位:INSERT in-flight。成功=首次;主键冲突转 2) 决策。
         //    单独作用域:query 跑完即释放 Conn(事务分支持锁,不可同时持两句柄)。
         let insert = {
@@ -144,15 +152,16 @@ impl IdempotencyStore for MySqlIdempotencyStore {
 
         match insert {
             Ok(_) => Ok(IdempotencyOutcome::FirstExecution),
-            Err(error) if is_unique_violation(&error) => {
-                // 崩溃遗留的租约可在 5 分钟后由新 owner 原子接管；未过期记录只读裁决。
+            Err(error) if is_target_primary_conflict(&error) => {
+                // 请求等价类不能因租约过期被改写；只有相同 fingerprint 可在 5 分钟后由新 owner 原子接管。
                 let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
                 let takeover = sqlx::query(
                     "UPDATE idempotency_record_v2 SET fingerprint = ?, lease = ?, \
                      lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 5 MINUTE), \
                      status = NULL, body = NULL, headers = NULL \
                      WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ? \
-                     AND state = ? AND lease_expires_at < CURRENT_TIMESTAMP(6)",
+                     AND state = ? AND fingerprint = ? \
+                     AND lease_expires_at < CURRENT_TIMESTAMP(6)",
                 )
                 .bind(fingerprint.0.as_slice())
                 .bind(lease.0.as_slice())
@@ -161,6 +170,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
                 .bind(&key.route_id)
                 .bind(&key.client_key)
                 .bind(STATE_IN_FLIGHT)
+                .bind(fingerprint.0.as_slice())
                 .execute(conn.as_mut())
                 .await
                 .map_err(map_err)?;
@@ -176,6 +186,14 @@ impl IdempotencyStore for MySqlIdempotencyStore {
     }
 
     /// 业务作用：在 fingerprint 与 lease 同时匹配时把记录原子转换为可重放完成态。
+    ///
+    /// 参数说明：
+    /// - `key`：目标幂等身份。
+    /// - `fingerprint`：首次执行建立的请求等价类指纹。
+    /// - `lease`：当前执行者持有的 fencing lease。
+    /// - `response`：需要持久化并供后续请求重放的响应。
+    ///
+    /// 返回：当前 owner 完成记录时为 `true`；失权或状态已变化时为 `false`；输入或数据库失败返回错误。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -183,6 +201,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
         lease: ExecutionLease,
         response: StoredResponse,
     ) -> Result<bool, IdempotencyError> {
+        validate_key(key)?;
         // 只更新仍 in-flight 的记录(state 谓词)防越权覆盖;非本记录/已完成 → 0 行影响,忽略。
         let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         sqlx::query(
@@ -208,13 +227,22 @@ impl IdempotencyStore for MySqlIdempotencyStore {
     }
 
     /// 业务作用：删除仍属于当前 owner 的在途记录，已完成或已换 owner 时返回 false。
+    ///
+    /// 参数说明：
+    /// - `key`：目标幂等身份。
+    /// - `fingerprint`：首次执行建立的请求等价类指纹。
+    /// - `lease`：当前执行者持有的 fencing lease。
+    ///
+    /// 返回：精确删除当前在途记录时为 `true`；失权或状态已变化时为 `false`；输入或数据库失败返回错误。
     async fn abort(
         &self,
         key: &IdempotencyKey,
         fingerprint: RequestFingerprint,
         lease: ExecutionLease,
     ) -> Result<bool, IdempotencyError> {
+        validate_key(key)?;
         let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        // 删除必须同时命中在途状态、fingerprint 与 lease，旧 owner 失权后不能清除新执行证据。
         sqlx::query(
             "DELETE FROM idempotency_record_v2 \
              WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ? \
@@ -291,15 +319,56 @@ impl MySqlIdempotencyStore {
     }
 }
 
+/// 业务作用：校验复合幂等身份可按 MySQL/PostgreSQL 公共字节边界无损持久化。
+///
+/// 参数说明：
+/// - `key`：待写入复合主键的业务身份。
+///
+/// 返回：全部分量非空、无 NUL 且不超过公共字节上限时成功；否则返回脱敏错误。
+fn validate_key(key: &IdempotencyKey) -> Result<(), IdempotencyError> {
+    for (value, max) in [
+        (key.tenant.as_str(), 128_usize),
+        (key.subject.as_str(), 190),
+        (key.route_id.as_str(), 190),
+        (key.client_key.as_str(), 190),
+    ] {
+        if value.is_empty() || value.len() > max || value.contains('\0') {
+            return Err(IdempotencyError::new("invalid idempotency key"));
+        }
+    }
+    Ok(())
+}
+
 /// 业务作用：把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显 SQL/凭据/请求体)。
 fn map_err<E>(_error: E) -> IdempotencyError {
     IdempotencyError::new("database error")
 }
 
-/// 业务作用：是否为唯一键冲突(主键已存在)。
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .map(|db| db.is_unique_violation())
+/// 业务作用：只把幂等复合主键冲突识别为既有请求，避免其它唯一约束被伪装成幂等竞争。
+///
+/// 参数说明：
+/// - `error`：首次占位 INSERT 返回的 MySQL 错误。
+///
+/// 返回：错误号为重复键且服务端索引名为 `PRIMARY` 时返回 `true`；无法结构化确认时返回 `false`。
+fn is_target_primary_conflict(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    let Some(mysql) = database.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() else {
+        return false;
+    };
+    if mysql.number() != 1062 {
+        return false;
+    }
+    mysql
+        .message()
+        .rsplit_once(" for key ")
+        .map(|(_, key)| {
+            key.trim_end_matches('.')
+                .trim_matches(['\'', '`'])
+                .rsplit('.')
+                .next()
+                == Some("PRIMARY")
+        })
         .unwrap_or(false)
 }

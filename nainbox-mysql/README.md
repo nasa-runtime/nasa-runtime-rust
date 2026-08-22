@@ -42,7 +42,8 @@ datasources:
 ## 主要边界
 
 - `claim` 在事务外明确失败，不会 autocommit。
-- `run_once`、`claim` 与 schema 自举都使用句柄绑定的 datasource；名称不一致时不会查询默认库。
+- `process`、`claim` 与 schema 自举都使用句柄绑定的 datasource；名称不一致时不会查询默认库。
+- `MySqlInbox` 同时实现后端中立 `nainbox_core::InboxStore`，既有 inherent methods 与类型路径保持不变。
 - 返回 `Claimed` 后必须在同一事务调用栈内完成业务 SQL。
 - `process` 统一执行 claim、业务闭包和提交，业务项目无需重复编写事务外壳；返回
   `CommitUncertain` 或 `RollbackFailed` 时必须保留原消息继续收敛。

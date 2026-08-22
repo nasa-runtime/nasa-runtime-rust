@@ -1,10 +1,11 @@
 //! 事务型 Outbox 的 Application 生命周期组件。
 //!
 //! 业务在 UserHook 只提交发布端和明确的毒丸策略；组件在 Ready 前验证数据库可达，随后持续执行
-//! MySQL dispatcher，并把连续失败映射到统一 readiness。停机顺序固定为先停止投递，再释放 transport
+//! 当前 datasource 对应的 dispatcher，并把连续失败映射到统一 readiness。停机顺序固定为先停止投递，再释放 transport
 //! 和数据库，避免发布中途失去下游或持久化连接。
 
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex, OnceLock,
@@ -12,8 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use naoutbox_core::{OutboxArchive, OutboxPublisher, OutboxRetentionPolicy};
-use naoutbox_mysql::MySqlOutbox;
+use naoutbox_core::{DurableOutbox, OutboxArchive, OutboxPublisher, OutboxRetentionPolicy};
 use serde::Deserialize;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
@@ -35,6 +35,199 @@ const MAX_FAILURE_THRESHOLD: u32 = 100;
 const OUTBOX_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// 持久化指标刷新失败后的重试间隔，避免瞬时故障让 last-good 快照长期停滞。
 const OUTBOX_METRICS_FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_CHANNEL: &str = "global";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboxBackend {
+    #[cfg(feature = "outbox")]
+    MySql,
+    #[cfg(feature = "outbox-pgsql")]
+    PostgreSql,
+}
+
+/// 业务作用：把受管 Outbox 的后端身份与后端中立能力绑定，避免运行循环按具体数据库复制。
+#[derive(Clone)]
+struct ManagedOutbox {
+    backend: OutboxBackend,
+    store: Arc<dyn DurableOutbox>,
+}
+
+impl std::ops::Deref for ManagedOutbox {
+    type Target = dyn DurableOutbox;
+
+    /// 业务作用：把 dispatcher、指标与 retention 调用统一委托给 Ready 时冻结的后端能力。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：同一 datasource 绑定的后端中立 Outbox 引用。
+    fn deref(&self) -> &Self::Target {
+        self.store.as_ref()
+    }
+}
+
+/// 业务作用：按当前编译能力校验 lane 名，保证配置在具体 adapter 安装前得到一致裁决。
+///
+/// 参数说明：`channel` 是待进入路由表与指标 label 的 lane 名。
+///
+/// 返回：任一已编入 adapter 接受该规范名称时返回真。
+fn valid_channel_name(channel: &str) -> bool {
+    #[cfg(feature = "outbox")]
+    return naoutbox_mysql::valid_channel_name(channel);
+    #[cfg(all(not(feature = "outbox"), feature = "outbox-pgsql"))]
+    return naoutbox_pgsql::valid_channel_name(channel);
+}
+
+/// 业务作用：从冻结 catalog 解析 datasource 后端，并构造对应的受管 Outbox 能力。
+///
+/// 参数说明：
+/// - `application`：提供当前 Application 的 catalog 与类型化 pool getter。
+/// - `datasource`：Outbox 配置绑定的规范名称。
+///
+/// 返回：名称、driver 与已编入能力一致时返回后端中立句柄；任何错配在 dispatcher 启动前失败。
+async fn create_managed_outbox(
+    application: &Application,
+    datasource: &str,
+) -> ApplicationResult<ManagedOutbox> {
+    #[cfg(all(feature = "outbox", feature = "outbox-pgsql"))]
+    let driver = {
+        let catalog = application
+            .resource::<Arc<natx_core::DataSourceCatalog>>()
+            .await?;
+        let reference = natx_core::DatasourceRef::new(datasource).map_err(|error| {
+            outbox_source_error(
+                ApplicationPhase::Ready,
+                "outbox datasource_ref is invalid",
+                error,
+            )
+        })?;
+        catalog
+            .entries()
+            .into_iter()
+            .find_map(|(candidate, driver)| (candidate == reference).then_some(driver))
+            .ok_or_else(|| {
+                outbox_error(
+                    ApplicationPhase::Ready,
+                    "outbox datasource_ref is not present in the managed catalog",
+                )
+            })?
+    };
+
+    #[cfg(all(feature = "outbox", not(feature = "outbox-pgsql")))]
+    let driver = natx_core::DatabaseDriver::MySql;
+    #[cfg(all(not(feature = "outbox"), feature = "outbox-pgsql"))]
+    let driver = natx_core::DatabaseDriver::PostgreSql;
+
+    match driver {
+        natx_core::DatabaseDriver::MySql => {
+            #[cfg(feature = "outbox")]
+            {
+                let _pool = application.datasource(datasource).await?;
+                let store =
+                    naoutbox_mysql::MySqlOutbox::with_datasource(datasource).map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Ready,
+                            "outbox MySQL datasource_ref is invalid",
+                            error,
+                        )
+                    })?;
+                Ok(ManagedOutbox {
+                    backend: OutboxBackend::MySql,
+                    store: Arc::new(store),
+                })
+            }
+            #[cfg(not(feature = "outbox"))]
+            Err(outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource requires the MySQL Outbox capability",
+            ))
+        }
+        natx_core::DatabaseDriver::PostgreSql => {
+            #[cfg(feature = "outbox-pgsql")]
+            {
+                let _pool = application.pg_datasource(datasource).await?;
+                let store =
+                    naoutbox_pgsql::PgOutbox::with_datasource(datasource).map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Ready,
+                            "outbox PostgreSQL datasource_ref is invalid",
+                            error,
+                        )
+                    })?;
+                Ok(ManagedOutbox {
+                    backend: OutboxBackend::PostgreSql,
+                    store: Arc::new(store),
+                })
+            }
+            #[cfg(not(feature = "outbox-pgsql"))]
+            Err(outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource requires the PostgreSQL Outbox capability",
+            ))
+        }
+    }
+}
+
+/// 业务作用：按冻结后端安装 Outbox 进程级租户配额，保持写侧与受管 dispatcher 口径一致。
+fn install_tenant_quotas(
+    backend: OutboxBackend,
+    quotas: BTreeMap<String, u64>,
+) -> Result<(), naoutbox_core::OutboxStoreError> {
+    match backend {
+        #[cfg(feature = "outbox")]
+        OutboxBackend::MySql => naoutbox_mysql::install_outbox_tenant_quotas(quotas),
+        #[cfg(feature = "outbox-pgsql")]
+        OutboxBackend::PostgreSql => naoutbox_pgsql::install_outbox_tenant_quotas(quotas),
+    }
+}
+
+/// 业务作用：按冻结后端安装 aggregate 到 lane 的唯一写侧路由。
+fn install_channel_routes(
+    backend: OutboxBackend,
+    routes: BTreeMap<String, String>,
+) -> Result<(), naoutbox_core::OutboxStoreError> {
+    match backend {
+        #[cfg(feature = "outbox")]
+        OutboxBackend::MySql => naoutbox_mysql::install_channel_routes(routes),
+        #[cfg(feature = "outbox-pgsql")]
+        OutboxBackend::PostgreSql => naoutbox_pgsql::install_channel_routes(routes),
+    }
+}
+
+/// 业务作用：在 Ready 前按实际后端复验 Outbox 事件表与可选配额账本。
+async fn verify_outbox_schema(
+    outbox: &ManagedOutbox,
+    datasource: &str,
+    quotas_enabled: bool,
+) -> Result<(), naoutbox_core::OutboxStoreError> {
+    match outbox.backend {
+        #[cfg(feature = "outbox")]
+        OutboxBackend::MySql => {
+            naoutbox_mysql::verify_outbox_event_schema_for(datasource).await?;
+            if quotas_enabled {
+                naoutbox_mysql::verify_outbox_tenant_quota_schema_for(datasource).await?;
+            }
+        }
+        #[cfg(feature = "outbox-pgsql")]
+        OutboxBackend::PostgreSql => {
+            naoutbox_pgsql::verify_outbox_event_schema_for(datasource).await?;
+            if quotas_enabled {
+                naoutbox_pgsql::verify_outbox_tenant_quota_schema_for(datasource).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 业务作用：读取当前受管 Outbox 后端的低基数配额拒绝累计值。
+fn quota_rejections_total(outbox: Option<&ManagedOutbox>) -> u64 {
+    match outbox.map(|outbox| outbox.backend) {
+        #[cfg(feature = "outbox")]
+        Some(OutboxBackend::MySql) => naoutbox_mysql::outbox_quota_rejections_total(),
+        #[cfg(feature = "outbox-pgsql")]
+        Some(OutboxBackend::PostgreSql) => naoutbox_pgsql::outbox_quota_rejections_total(),
+        None => 0,
+    }
+}
 
 macro_rules! outbox_metric {
     ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr) => {
@@ -273,7 +466,7 @@ impl Default for OutboxSettings {
     /// 返回：500ms 轮询、1s 故障退避、5s 单轮预算、100 行批次和三次失败摘流。
     fn default() -> Self {
         Self {
-            datasource_ref: natx::DEFAULT_DATASOURCE.to_owned(),
+            datasource_ref: crate::db::DEFAULT_DATASOURCE.to_owned(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             error_backoff_ms: DEFAULT_ERROR_BACKOFF_MS,
             operation_timeout_ms: DEFAULT_OPERATION_TIMEOUT_MS,
@@ -461,7 +654,7 @@ impl OutboxApplicationPlan {
         }
         let mut seen = std::collections::BTreeSet::new();
         for lane in &lanes {
-            if !naoutbox_mysql::valid_channel_name(lane) {
+            if !valid_channel_name(lane) {
                 return Err(outbox_error(
                     ApplicationPhase::UserHook,
                     "outbox lane names must be canonical identifiers",
@@ -474,7 +667,7 @@ impl OutboxApplicationPlan {
                 ));
             }
         }
-        if !seen.contains(naoutbox_mysql::DEFAULT_CHANNEL) {
+        if !seen.contains(DEFAULT_CHANNEL) {
             // 未路由类型都会落入默认 lane;不服务它就会留下永远无人投递的行。
             return Err(outbox_error(
                 ApplicationPhase::UserHook,
@@ -482,7 +675,7 @@ impl OutboxApplicationPlan {
             ));
         }
         for (aggregate_type, channel) in &routes {
-            if aggregate_type.is_empty() || !naoutbox_mysql::valid_channel_name(channel) {
+            if aggregate_type.is_empty() || !valid_channel_name(channel) {
                 return Err(outbox_error(
                     ApplicationPhase::UserHook,
                     "outbox channel routes must be canonical",
@@ -779,9 +972,9 @@ impl OutboxHandle {
         let snapshot_age = self.state.metrics_snapshot_age_seconds();
         let refresh_failed = u8::from(self.state.metrics_refresh_failed.load(Ordering::Acquire));
         let refresh_failures = self.state.metrics_refresh_failures.load(Ordering::Relaxed);
-        // 拒绝计数来自 naoutbox-mysql 的进程内累计:低基数、不携带租户标签,
+        // 拒绝计数来自当前后端 adapter 的进程内累计:低基数、不携带租户标签,
         // 精确租户用量只经受鉴权管理查询返回。
-        let quota_rejections = naoutbox_mysql::outbox_quota_rejections_total();
+        let quota_rejections = quota_rejections_total(self.state.outbox.get());
         // lane 标签值来自 Ready 时冻结的 lane 集合,基数有界;未分片时不输出 lane 行。
         let mut lane_lines = String::new();
         for lane in self.state.lanes() {
@@ -886,7 +1079,7 @@ pub(crate) struct OutboxRuntimeState {
     sealed: AtomicBool,
     lifecycle: AtomicU8,
     /// Ready 门禁、dispatcher、retention 与指标查询共用的命名 datasource Outbox。
-    outbox: OnceLock<MySqlOutbox>,
+    outbox: OnceLock<ManagedOutbox>,
     rounds: AtomicU64,
     published: AtomicU64,
     failed_rounds: AtomicU64,
@@ -1069,7 +1262,7 @@ impl OutboxRuntimeState {
     /// 参数说明：`outbox` 是已经过资源存在性与数据库探针复验的句柄。
     ///
     /// 返回：首次发布成功；重复发布返回 Ready 阶段错误。
-    fn publish_outbox(&self, outbox: MySqlOutbox) -> ApplicationResult<()> {
+    fn publish_outbox(&self, outbox: ManagedOutbox) -> ApplicationResult<()> {
         self.outbox.set(outbox).map_err(|_| {
             outbox_error(
                 ApplicationPhase::Ready,
@@ -1083,7 +1276,7 @@ impl OutboxRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：已发布时返回同源句柄 clone；未发布时返回阶段错误。
-    fn outbox(&self) -> ApplicationResult<MySqlOutbox> {
+    fn outbox(&self) -> ApplicationResult<ManagedOutbox> {
         self.outbox.get().cloned().ok_or_else(|| {
             outbox_error(
                 ApplicationPhase::Ready,
@@ -1216,7 +1409,7 @@ impl nametrics_core::LegacyMetricsSource for OutboxMetricsSource {
             ),
             outbox_counter(
                 OUTBOX_QUOTA_REJECTIONS.name,
-                naoutbox_mysql::outbox_quota_rejections_total(),
+                quota_rejections_total(self.state.outbox.get()),
             ),
             outbox_counter(OUTBOX_RETENTION_ROUNDS.name, snapshot.retention_rounds),
             outbox_counter(OUTBOX_RETENTION_ARCHIVED.name, snapshot.retention_archived),
@@ -1551,16 +1744,8 @@ impl ApplicationComponent for OutboxComponent {
             let settings = self.settings.clone().ok_or_else(|| {
                 outbox_error(ApplicationPhase::Ready, "outbox settings are missing")
             })?;
-            // 计划引用必须先命中当前 Application 的受管 pool；缺失时不允许 store 回退到默认库。
-            let _pool = application.datasource(&settings.datasource_ref).await?;
-            let outbox =
-                MySqlOutbox::with_datasource(&settings.datasource_ref).map_err(|error| {
-                    outbox_source_error(
-                        ApplicationPhase::Ready,
-                        "outbox datasource_ref is invalid",
-                        error,
-                    )
-                })?;
+            // catalog 是 datasource 与 driver 的唯一权威；先完成类型化 getter 复验，禁止 store 回退到其它默认库。
+            let outbox = create_managed_outbox(&application, &settings.datasource_ref).await?;
             let probe_budget = context
                 .remaining()
                 .min(Duration::from_millis(settings.operation_timeout_ms));
@@ -1590,7 +1775,7 @@ impl ApplicationComponent for OutboxComponent {
             // 通用结构合同:受信租户归因列是每笔 Outbox 写入都要落的列,其宽度上界由公开
             // 身份合同定义,与是否启用租户配额无关。存量窄列必须在 Ready 拒绝,否则
             // 191..=256 字节的合法租户要到第一笔业务写入才被数据库拒绝。
-            naoutbox_mysql::verify_outbox_event_schema_for(outbox.datasource_ref())
+            verify_outbox_schema(&outbox, &settings.datasource_ref, false)
                 .await
                 .map_err(|error| {
                     outbox_source_error(
@@ -1602,7 +1787,7 @@ impl ApplicationComponent for OutboxComponent {
             // 配额 opt-in:Ready 时安装进程级冻结配额——安装失败(与既有配额冲突)
             // 必须拒绝 Ready,否则写侧的预留口径会在同进程内分裂。
             if let Some(quotas) = plan.tenant_quotas.take() {
-                naoutbox_mysql::install_outbox_tenant_quotas(quotas).map_err(|error| {
+                install_tenant_quotas(outbox.backend, quotas).map_err(|error| {
                     outbox_source_error(
                         ApplicationPhase::Ready,
                         "outbox tenant quotas could not be installed",
@@ -1611,7 +1796,7 @@ impl ApplicationComponent for OutboxComponent {
                 })?;
                 // 配额依赖 tenant 归因列与账本表;迁移漏跑必须在 Ready 暴露,否则
                 // 第一轮投递才失败——那时业务写入已经在按配额受理了。
-                naoutbox_mysql::verify_outbox_tenant_quota_schema_for(outbox.datasource_ref())
+                verify_outbox_schema(&outbox, &settings.datasource_ref, true)
                     .await
                     .map_err(|error| {
                         outbox_source_error(
@@ -1625,7 +1810,7 @@ impl ApplicationComponent for OutboxComponent {
             // 必须拒绝 Ready,不能带着口径分裂的写侧继续启动。
             let lanes = match plan.channels.take() {
                 Some(channel_plan) => {
-                    naoutbox_mysql::install_channel_routes(channel_plan.routes.clone()).map_err(
+                    install_channel_routes(outbox.backend, channel_plan.routes.clone()).map_err(
                         |error| {
                             outbox_source_error(
                                 ApplicationPhase::Ready,
@@ -1782,13 +1967,13 @@ impl ShutdownAction for OutboxShutdown {
 async fn run_dispatch_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
-    outbox: MySqlOutbox,
+    outbox: ManagedOutbox,
     plan: OutboxApplicationPlan,
     settings: OutboxSettings,
     contributor: ReadinessContributor,
 ) -> ApplicationResult<()> {
     let mut application_states = application.subscribe_state();
-    let mut committed_appends = MySqlOutbox::subscribe_committed_appends();
+    let mut committed_appends = outbox.store.subscribe_committed_appends();
     loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
@@ -1884,7 +2069,7 @@ async fn run_dispatch_loop(
 async fn run_lane_dispatch_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
-    outbox: MySqlOutbox,
+    outbox: ManagedOutbox,
     publisher: Arc<dyn OutboxPublisher + Send + Sync>,
     poison_policy: OutboxPoisonPolicy,
     settings: OutboxSettings,
@@ -1892,7 +2077,7 @@ async fn run_lane_dispatch_loop(
     lane: Arc<LaneRuntime>,
 ) -> ApplicationResult<()> {
     let mut application_states = application.subscribe_state();
-    let mut committed_appends = MySqlOutbox::subscribe_committed_appends();
+    let mut committed_appends = outbox.store.subscribe_committed_appends();
     loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
@@ -2000,7 +2185,7 @@ async fn run_lane_dispatch_loop(
 async fn run_retention_loop(
     application: Application,
     state: Arc<OutboxRuntimeState>,
-    outbox: MySqlOutbox,
+    outbox: ManagedOutbox,
     plan: OutboxRetentionPlan,
 ) -> ApplicationResult<()> {
     // 清理节奏是显式配置的固定间隔(失败不缩短):把它导出为 gauge,锁冲突/失败告警
@@ -2024,9 +2209,11 @@ async fn run_retention_loop(
             // 执行器内部对连接、claim、会话配置、查询、归档和释放逐步应用统一 deadline；
             // 此处不能再包整体 timeout，否则可能在 COMMIT 已发出后丢弃 future，制造
             // “服务端已提交、进程却按超时记账”的不确定窗口。
-            let outcome = outbox
-                .retention_round(&plan.policy, plan.archive.as_deref(), now_ms)
-                .await;
+            let archive = plan
+                .archive
+                .as_deref()
+                .map(|archive| archive as &(dyn OutboxArchive + Sync));
+            let outcome = outbox.retention_round(&plan.policy, archive, now_ms).await;
             state.retention_rounds.fetch_add(1, Ordering::Relaxed);
             match outcome {
                 Ok(report) => {
@@ -2064,12 +2251,32 @@ async fn run_retention_loop(
                     // 锁竞争与归档/存储故障分开计数:行锁冲突是并发治理信号,折叠进
                     // 通用失败会掩盖"谁在和清理抢行"。候选保留等待下一轮;失败不缩短
                     // 间隔,清理不进入忙重试。
-                    if error.reason == naoutbox_mysql::RETENTION_LOCK_CONTENTION_REASON {
+                    let lock_contention = match outbox.backend {
+                        #[cfg(feature = "outbox")]
+                        OutboxBackend::MySql => {
+                            error.reason == naoutbox_mysql::RETENTION_LOCK_CONTENTION_REASON
+                        }
+                        #[cfg(feature = "outbox-pgsql")]
+                        OutboxBackend::PostgreSql => {
+                            error.reason == naoutbox_pgsql::RETENTION_LOCK_CONTENTION_REASON
+                        }
+                    };
+                    if lock_contention {
                         state
                             .retention_lock_contention
                             .fetch_add(1, Ordering::Relaxed);
                     } else {
-                        if error.reason == naoutbox_mysql::RETENTION_COMMIT_UNCERTAIN_REASON {
+                        let commit_uncertain = match outbox.backend {
+                            #[cfg(feature = "outbox")]
+                            OutboxBackend::MySql => {
+                                error.reason == naoutbox_mysql::RETENTION_COMMIT_UNCERTAIN_REASON
+                            }
+                            #[cfg(feature = "outbox-pgsql")]
+                            OutboxBackend::PostgreSql => {
+                                error.reason == naoutbox_pgsql::RETENTION_COMMIT_UNCERTAIN_REASON
+                            }
+                        };
+                        if commit_uncertain {
                             // 提交不确定必须单独告警，不能混入普通连接失败后让运维误以为
                             // 本批确定回滚；下一轮只依赖持久候选事实继续收敛。
                             state
@@ -2167,6 +2374,7 @@ fn read_outbox_settings(
 /// - `phase`: 读取失败应归属的生命周期阶段。
 ///
 /// 返回：配置合法时返回 canonical datasource qualifier；结构或名称错误时阻止组合启动。
+#[cfg(any(feature = "saga", feature = "saga-pgsql"))]
 pub(crate) fn datasource_ref(
     application: &Application,
     phase: ApplicationPhase,
@@ -2202,7 +2410,7 @@ pub(crate) fn validate_outbox_section(
 ///
 /// 返回：全部字段处于封闭范围时成功，否则返回脱敏配置错误。
 fn validate_settings(settings: &OutboxSettings, phase: ApplicationPhase) -> ApplicationResult<()> {
-    natx::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
+    natx_core::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
         outbox_source_error(
             phase,
             "outbox.datasource_ref is not a canonical datasource qualifier",

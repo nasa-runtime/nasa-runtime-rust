@@ -72,11 +72,43 @@ use syn::{parse_macro_input, ItemFn, LitStr};
 /// - `attr`: `#[transactional(...)]` 括号内的 token stream；为空表示默认 datasource,
 ///   也可写 `datasource = "reporting"`。
 /// - `item`: 被注解的 async 函数 token stream。
+///
+/// 返回：保持原签名并接入 MySQL ambient transaction 的展开结果；非法输入生成编译错误。
 #[proc_macro_attribute]
 pub fn transactional(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // ⓪ 运行时根路径发现:业务依赖 `nasa` → `::nasa::tx`(含重命名);
-    //    旧直接依赖 `tx` → `::tx`;都没有 → 编译错误。
-    let root = match nasa_macro_support::runtime_root("tx", "natx") {
+    expand_transactional(attr, item, nasa_macro_support::runtime_root("tx", "natx"))
+}
+
+/// 业务作用：为 PostgreSQL async 业务函数生成固定指向 `natx-pgsql` 或 `nasa::tx::pgsql` 的事务编排。
+///
+/// 参数说明：
+/// - `attr`：空参数或命名 datasource 参数。
+/// - `item`：被包装的 async 函数。
+///
+/// 返回：保持原签名、仅替换函数体的过程宏展开结果；依赖或参数非法时生成编译错误。
+#[proc_macro_attribute]
+pub fn transactional_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand_transactional(
+        attr,
+        item,
+        nasa_macro_support::runtime_root_nested(&["tx", "pgsql"], "tx-pgsql", "natx-pgsql"),
+    )
+}
+
+/// 业务作用：共享两种数据库事务宏的语法校验与函数体包装，确保差异只来自编译期运行时路径。
+///
+/// 参数说明：
+/// - `attr`：属性参数 token。
+/// - `item`：被包装函数 token。
+/// - `runtime_root`：对应 typed runtime 的已解析路径或依赖提示。
+///
+/// 返回：可由编译器继续处理的宏展开 token。
+fn expand_transactional(
+    attr: TokenStream,
+    item: TokenStream,
+    runtime_root: Result<proc_macro2::TokenStream, String>,
+) -> TokenStream {
+    let root = match runtime_root {
         Ok(r) => r,
         Err(msg) => return quote! { ::core::compile_error!(#msg); }.into(),
     };
@@ -132,6 +164,8 @@ pub fn transactional(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # 参数
 /// - `attr`: 属性括号内的 token stream。
+///
+/// 返回：默认 datasource 返回 `None`，命名 datasource 返回已校验字面量，非法语法返回编译错误。
 fn parse_transactional_attr(attr: TokenStream) -> Result<Option<LitStr>, proc_macro2::TokenStream> {
     if attr.is_empty() {
         return Ok(None);
@@ -170,6 +204,8 @@ fn parse_transactional_attr(attr: TokenStream) -> Result<Option<LitStr>, proc_ma
 ///
 /// # 参数
 /// - `lit`: 属性中解析出的 datasource 字符串字面量。
+///
+/// 返回：名称非空且无首尾空白时返回原字面量，否则返回编译错误。
 fn validate_datasource_lit(lit: LitStr) -> Result<LitStr, proc_macro2::TokenStream> {
     let value = lit.value();
     if value.trim().is_empty() || value.trim() != value {

@@ -1,0 +1,18 @@
+[package]
+name = "natx-core"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral datasource identity, ownership, and transaction outcome contracts"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["database", "transaction", "datasource", "runtime", "async"]
+categories = ["asynchronous", "database"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt"] }

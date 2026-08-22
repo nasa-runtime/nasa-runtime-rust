@@ -59,6 +59,11 @@ orchestrator.verify_startup().await?;
 用 `ParticipantRuntime::with_datasource` 对称绑定 gate、业务事实、Inbox 与 result Outbox。默认构造器
 仍选择 `default`，不会根据唯一实例猜测命名库。
 
+需要组合后端能力的宿主可使用 `MySqlSagaBackend::with_datasource`。该类型把 `MySqlSagaStore`、
+`MySqlInbox`、`MySqlOutbox` 和事务执行器冻结到同一 qualifier，并通过 `nasaga_backend::SagaBackend`
+暴露组合身份。事务执行器区分业务回滚、提交拒绝、提交结果不确定和回滚结果不确定；结果不确定时不得
+直接重执可能产生外部副作用的业务闭包。
+
 使用 `#[nasa::application("saga")]` 时，将运行时提交给 Application，合同校验、历史实例门禁、timer
 轮询和停机保护态由组件统一执行：
 
@@ -183,7 +188,9 @@ timer owner 通过 `SagaApplicationPlan::orchestrator` 提交，需要逐副本�
 暂停、恢复和人工重开均使用唯一 `operation_id`，并在状态改变前写入可归因审计事实。
 
 `SagaOperationalMetrics::render_prometheus` 输出固定、低基数指标，不包含 saga、租户、业务键、payload
-或错误原文。日志只记录必要身份摘要、阶段、attempt、状态和操作主体。
+或错误原文。数据库事实由当前 MySQL store 读取；配额、管理动作和 transport 的进程级计数来自
+`nasaga-runtime-core` 的单一共享快照，mixed backend 宿主不能为每个 wrapper 重复登记同名计数。日志只
+记录必要身份摘要、阶段、attempt、状态和操作主体。
 
 管理面把读写权限分离：`list_instances` 使用 `saga.instance.list`，审计和精确租户用量使用
 `saga.audit.read`；pause、resume、重开补偿、重开裁决和人工关闭分别要求对应写权限、已认证 actor、

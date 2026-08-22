@@ -321,6 +321,27 @@ macro_rules! lifecycle_context {
                     .register_component(self.component, qualifier, value)
             }
 
+            /// 业务作用：在单次资源表写锁内原子登记一组异类型组件资源。
+            ///
+            /// 参数说明：`build` 只向本地暂存批次加入资源，不得执行外部副作用。
+            ///
+            /// 返回：构造与全部 key 预检成功后整体发布；冲突时资源表保持原样。
+            #[allow(dead_code)]
+            pub(crate) fn register_resource_batch(
+                &mut self,
+                build: impl FnOnce(
+                    &mut crate::resources::StagedResourceBatch,
+                ) -> ApplicationResult<()>,
+            ) -> ApplicationResult<()> {
+                let mut batch = crate::resources::StagedResourceBatch::new();
+                build(&mut batch)?;
+                self.application
+                    .resources()
+                    .register_component_batch(self.component, batch)?;
+                self.active.ensure_component_resources(self.component);
+                Ok(())
+            }
+
             /// 业务作用：登记一个由当前组件拥有并需要显式异步 shutdown 的资源。
             ///
             /// # 参数

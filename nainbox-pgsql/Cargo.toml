@@ -1,0 +1,19 @@
+[package]
+name = "nainbox-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL Inbox backend with named ambient transactions and target-key deduplication"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postgresql", "inbox", "transaction", "messaging"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+nainbox-core = { version = "1.0.2" }
+natx-pgsql = { version = "1.0.0" }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }

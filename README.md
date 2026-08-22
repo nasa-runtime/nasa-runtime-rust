@@ -1,7 +1,7 @@
 # nasa-runtime-rust
 
 NASA Rust 共享库是一组按特性组合的基础设施包。
-**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、RedisJob、WebSocket、配置、服务发现等特性。
+**业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、RedisJob、跨副本业务配额、WebSocket、配置、服务发现等特性。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
@@ -9,7 +9,7 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 
 ## 受管多源运行时
 
-Application 可从最终 YAML 同时创建多组 MySQL、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
+Application 可从最终 YAML 同时创建多组 MySQL、PostgreSQL、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
 命名资源表。业务通过 qualifier 取得句柄；Inbox、Outbox、幂等、审计与 Saga 等持久适配器也把
 datasource 身份固化在自身句柄中，不需要各自维护连接池或依赖隐式默认库。
 
@@ -24,8 +24,10 @@ datasource 身份固化在自身句柄中，不需要各自维护连接池或依
 ```yaml
 datasources:
   default:
+    driver: mysql
     url: ${APP_PRIMARY_DB_URL}
   workflow:
+    driver: postgresql
     url: ${APP_WORKFLOW_DB_URL}
 
 outbox:
@@ -51,6 +53,50 @@ redis:
 跨数据库原子事务，也不热切换 endpoint、凭据或 source 集合；这些身份变化需要重启并重新完成启动
 门禁。完整配置、查询入口、失败语义和停机边界见
 [napp 的单源与多源章节](napp/README.md#yaml-创建单源与多源)。
+
+## 跨副本业务配额
+
+`rate-limit` feature 提供 `RateLimitProvider` 和共享 Redis 固定窗口实现，让所有副本对同一 tenant、
+subject、API key 或客户端 IP 合并计数，扩容不会成倍放大业务总配额。业务从 Application 取得受管
+Redis 客户端后显式构造 provider，并选择直接判定业务主体或安装 Web IP 中间件；它没有组件字符串和
+独立 YAML 根，也不会自动改变路由。
+
+Redis Lua 在服务端原子完成计数与首次过期设置。默认 Redis provider 在后端不可达、窗口非法或脚本
+失败时 fail-open 并记录告警，优先保持业务可用；要求配额基础设施失效时拒绝请求的场景必须提供自己的
+provider。该能力与 Web 的单实例令牌桶分层：前者约束跨副本总量，后者只保护当前进程。
+
+## PostgreSQL 受管与独立持久能力
+
+开启 `application` 与 PostgreSQL 对应 feature 后，`#[nasa::application("db")]` 会从 `database` 或
+`datasources` 建立 PostgreSQL pool；同一 `datasources` 表可以同时声明 MySQL 与 PostgreSQL。跨 driver
+名称空间由一个 catalog 冻结，业务分别使用 `app.datasource(name)` 与 `app.pg_datasource(name)` 取得
+typed pool。任一 datasource 建池、迁移或引用校验失败都会阻止整张表进入 Ready。
+
+不使用 Application 生命周期时，PostgreSQL 应用也可以直接组合命名事务、migration、Mapper 与
+持久 adapter。`natx-pgsql` 提供 default/命名 datasource registry 和 ambient transaction；
+`namigrate-pgsql`、`namapper-pgsql` 分别承载 schema 门禁与 SQL 映射；`naidempotency-pgsql`、
+`nainbox-pgsql`、`naoutbox-pgsql` 与 `naaudit-pgsql` 复用同一 datasource，不各自创建连接池。
+
+```text
+PgPool registry ── natx-pgsql ambient transaction
+       ├────────── migration / Mapper
+       └────────── idempotency / Inbox / Outbox / audit
+```
+
+事务内跨 datasource 调用会在 SQL 前拒绝。跨数据库副作用不属于本地原子事务：需要源库 Outbox、目标库
+Inbox 和稳定 `event_id` 收敛至少一次投递。PostgreSQL Outbox 以数据库 owner 租约和 fencing token
+限制投递权威，通过 `FOR UPDATE SKIP LOCKED` 领取稳定 `id` 前缀；只有明确成功前缀可以标记完成。
+
+受管 Outbox 与 Saga 根据 `datasource_ref` 的 driver 选择对应持久后端；二者形成同一原子链时必须指向
+同一个 datasource。`full-pgsql` 提供 PostgreSQL-only 的完整门面组合，不拉入 MySQL SQLx runtime；
+同时开启 `full` 与 `full-pgsql` 则允许两种 driver 在同一 Application 中共存。
+
+YAML 中的 `migrations` 只定义门禁策略；Service 仍需在 UserHook 用
+`app.configure_migrations(datasource, sqlx::migrate!("./migrations"))` 登记构建期嵌入的业务 SQL。
+门禁模式不是 `disabled` 时，PostgreSQL 事务级代理还需提供与业务池指向同一 database/schema 的
+`migrations.session_url`；Application
+会在 advisory lock 前复验目标身份。完整入口与 Batch 边界见
+[napp 的业务 migration 登记章节](napp/README.md#业务-migration-登记)。
 
 ## 持久化 Saga 编排
 
@@ -302,15 +348,24 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 历史 RSA 私钥协议迁移 | `web-crypto-legacy-rsa` | 编译期开关；仍需 provider 运行时显式允许 |
 | 完整端点安全流水线 | `web-security` | `try_register_all`、`MappingRuntime`、route policy |
 | SQL Mapper | `mapper` | `nasa::mapper::{Mapper, Query, Insert, Update, Delete}` |
+| PostgreSQL SQL Mapper | `mapper-pgsql` | `nasa::mapper::pgsql::{Mapper, Query, Insert, Update, Delete}`；与 `application` 组合时复用受管 PgPool |
 | Mapper L2 缓存 | `mapper-redis-cache` | `#[Query(..., cache = true)]` |
+| PostgreSQL Mapper L2 缓存 | `mapper-redis-cache-pgsql` | `nasa::mapper::pgsql::{RedisMapperL2Cache, MapperL2Cache}`；与 MySQL 共享合同和进程默认注册槽 |
 | MySQL 事务 | `tx` | `nasa::tx::{transactional, run}` |
+| PostgreSQL 事务 | `tx-pgsql` | `nasa::tx::pgsql::{transactional, run}`；与 `application` 组合时启用 PostgreSQL 数据源生命周期 |
 | Saga 纯合同 | `saga` | `nasa::saga::{WorkflowDefinition, SagaOutcome}` |
 | Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
+| Saga PostgreSQL Runtime | `saga-runtime-pgsql` | `nasa::saga::pgsql::{PgOrchestrator, PgParticipantRuntime, saga}`、同一 `SagaApplicationPlan` 生命周期 |
 | Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
+| Saga PostgreSQL Kafka 托管 | `saga-kafka-pgsql` | `nasa::saga::pgsql::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
 | Saga Redis Streams command/result 托管 | `saga-redis-stream` | `SagaRedisStreamPublisher`、`SagaRedisStreamCommandConsumer`、`SagaRedisStreamResultConsumer` |
+| Saga PostgreSQL Redis Streams 托管 | `saga-redis-stream-pgsql` | `nasa::saga::pgsql` 下相同 transport 类型 |
 | Saga gRPC command/result transport | `saga-grpc` | `SagaApplicationPlan::with_grpc_command_service` / `with_grpc_result_service`、generated client、mTLS 身份绑定与封闭收据 |
+| Saga PostgreSQL gRPC transport | `saga-grpc-pgsql` | `with_pgsql_grpc_command_service` / `with_pgsql_grpc_result_service` |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
+| PostgreSQL 消费去重 Inbox | `inbox-pgsql` | `nasa::inbox::pgsql::PgInbox` |
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
+| PostgreSQL 受管事务 Outbox | `outbox-pgsql` | 同一 `OutboxApplicationPlan` 与按 driver 选择的持久后端 |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
@@ -327,11 +382,11 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 静态/DNS 服务发现 | `discovery` | `nasa::discovery::{StaticDiscovery, DnsDiscovery}` |
 | REST 负载均衡 | `rest-discovery` / `rest-discovery-nacos` | `nasa::discovery::rest` |
 | 长连接 | `ws`、`ws-redis`、`ws-socketio` | `nasa::ws::Server` |
-| 加密、金额、日期、图片 | `crypto`、`numeric`、`date`、`image` | `nasa::crypto` 等模块 |
+| 基础工具、加密、金额、图片 | `base`、`crypto`、`numeric`、`image` | 日期能力位于 `nasa::base::date`，其余使用对应同名模块 |
 | 定时和异步任务 | `scheduling`、`scheduling-cluster` | `nasa::scheduling::{Async, scheduled}` |
 
-`full` 用于完整能力构建，不是生产服务的默认选择；生产项目仍应只启用实际使用的 feature，以免扩大
-依赖、安全和运行责任。
+`full` 用于现有完整能力构建，`full-pgsql` 用于不带 MySQL runtime 的 PostgreSQL 完整持久能力；两者都
+不是生产服务的默认选择。生产项目仍应只启用实际使用的 feature，以免扩大依赖、安全和运行责任。
 
 ### GitHub 仓库依赖
 
@@ -359,9 +414,9 @@ use nasa::ws::Server;                // WebSocket 服务端
 nasa = { version = "1.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
-内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`nadate`、`naimg`、`naws`。
+内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`naimg`、`naws`。
 包名可用性是发布时事实，正式发布前仍须按 [发布指南](docs/publishing.md) 实时复查 crates.io，不能依赖
-历史占用结论。Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
+本地缓存结论。Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
 `nasa::image` 等。
 
 ## YML 配置总览
@@ -441,7 +496,7 @@ rest_discovery:         # nacos-discovery 组件
 
 1. `naml` 加载本地 yml、profile、环境变量并解析 import 描述；`config-boot` 负责拉取远端配置并组装 overlay。
 2. `nalog` 初始化日志。
-3. `nadis`、`natx` 初始化 Redis 和 MySQL pool。
+3. `nadis` 初始化 Redis；`natx` / `natx-pgsql` 按实际 driver 初始化 MySQL/PostgreSQL pool。
 4. `namapper`、`cacheable` 注入缓存和数据源。
 5. `nanacos`、`rest-discovery` 初始化注册发现和 REST 负载均衡。
 6. `naweb` 装配路由，业务自行拥有 HTTP listener、协议选择与排空；`naws` 启动长连接服务，`nasched`
@@ -456,7 +511,7 @@ HTTP/1/h2c listener。
 | 组件 | 门面模块或特性 | 主要场景 | 配置入口 |
 | --- | --- | --- | --- |
 | [nasa](nasa/README.md) | 门面包 | 统一导出所有业务能力 | 不直接读取 yml，按组件配置 |
-| [napp](napp/README.md) | `application` | `#[nasa::application]` 应用生命周期运行时:组件编排、信号、优雅停机、配置热刷新 | `application.*` 及各组件配置根 |
+| [napp](napp/README.md) | `application` / `rate-limit` | `#[nasa::application]` 生命周期编排，以及显式装配的跨副本 Redis 业务配额 | `application.*` 及各组件配置根；配额参数由业务构造 |
 | [napp-macro](napp-macro/README.md) | `application` | `#[nasa::application(...)]` 属性宏与编译期校验 | 由 `napp` 运行时读取 |
 | [naml](naml/README.md) | `yml` / `yml-watch` | 分层配置、来源追踪、精确文件观察与本地/Nacos import 中性描述 | `yml.*`、业务自定义根节点 |
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
@@ -467,13 +522,21 @@ HTTP/1/h2c listener。
 | [rest-client-macro](rest-client-macro/README.md) | `rest-client` | 声明式 REST 客户端宏 | `rest_clients.*` |
 | [naweb](naweb/README.md) | `web` / `web-security` | Axum 路由、interceptor 与端点安全运行时 | `server.*` 由 napp 读取 |
 | [naweb-macro](naweb-macro/README.md) | `web` | MVC 风格路由注解和路由收集 | 编译期属性，无运行期配置 |
-| [namapper](namapper/README.md) | `mapper` / `mapper-redis-cache` | 声明式 SQL Mapper、动态 SQL、二级缓存 | `mysql.*`、`datasources.*`、`mapper.*`、`redis.*` |
+| [namapper](namapper/README.md) | `mapper` / `mapper-redis-cache` | MySQL 声明式 SQL Mapper、动态 SQL、二级缓存 | `mysql.*`、`datasources.*`、`mapper.*`、`redis.*` |
 | [namapper-macro](namapper-macro/README.md) | `mapper` | Mapper 派生和 SQL 注解宏 | 由 `namapper` 运行时读取 |
+| [namapper-core](namapper-core/README.md) | runtime 内部合同 | 后端中立分页、排序、缓存合同、共享缓存运行时与结构化 SQL 节点 | 不读取业务配置 |
+| [namapper-pgsql](namapper-pgsql/README.md) | `mapper-pgsql` / `mapper-redis-cache-pgsql` | PostgreSQL Mapper、`$n` bind、动态 SQL、流式结果与 Redis L2 | standalone 显式注册 pool；Application 模式复用受管 datasource |
 | [natx](natx/README.md) | `tx` | ambient MySQL 事务、after-commit 回调、多数据源 | `mysql.*`、`datasources.*` |
+| [natx-core](natx-core/README.md) | runtime 内部合同 | datasource/driver catalog、owner、事务结果分类 | 不读取业务配置 |
+| [natx-pgsql](natx-pgsql/README.md) | `tx-pgsql` | PostgreSQL ambient 事务、命名 pool、SQLSTATE 分类 | 可显式建池，也可由 `napp` 从 YAML 受管 |
 | [natx-macro](natx-macro/README.md) | `tx` | `#[transactional]` 事务宏 | 由 `natx` 运行时读取 |
 | [nasaga-core](nasaga-core/README.md) | `saga` | Saga 身份、definition、状态机、结果与补偿计划合同 | 无 I/O；definition 由业务注册 |
+| [nasaga-backend](nasaga-backend/README.md) | runtime adapter 内部合同 | 后端中立行模型、分组 store 能力、封闭错误与 Saga/Inbox/Outbox/事务组合身份 | 无 SQLx driver，不执行 schema 自举 |
 | [nasaga-mysql](nasaga-mysql/README.md) | runtime 内部 store | Saga journal、CAS、timer fencing、参与方 gate 与 migration | 复用 `natx` MySQL pool |
+| [nasaga-pgsql](nasaga-pgsql/README.md) | runtime 内部 store | PostgreSQL Saga journal、CAS、timer fencing、参与方 gate、治理与迁移资源 | 复用 `natx-pgsql` pool；原子写要求同源 ambient transaction |
+| [nasaga-runtime-core](nasaga-runtime-core/README.md) | backend wrapper 共享核心 | 唯一 Orchestrator/Participant 状态机、timer、恢复、transport 与治理计数 | 数据库事实由具体 store 提供 |
 | [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` / `saga-grpc` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略 |
+| [nasaga-runtime-pgsql](nasaga-runtime-pgsql/README.md) | `saga-runtime-pgsql` 及 PostgreSQL transport feature | 组合 PostgreSQL Store/Inbox/Outbox/事务并复用唯一 Saga 状态机 | 可独立运行，也可交给 Application 托管 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
 | [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、流水线、数据流、锁与分布式任务 | `redis.*`、`redis.job.*` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
@@ -481,13 +544,17 @@ HTTP/1/h2c listener。
 | [nacache-macro](nacache-macro/README.md) | `cache` | `#[cached]`、`#[cache_invalidate]` | 由 `cacheable` 运行时读取 |
 | [naidempotency](naidempotency/README.md) | `nasa::idempotency` | 幂等状态机、首次执行、重放与冲突裁决 | 无固定 yml；由业务注入 store |
 | [naidempotency-mysql](naidempotency-mysql/README.md) | `idempotency-mysql` | 与业务事务共享记录或提供持久响应重放 | 复用 `database.*` |
+| [naidempotency-pgsql](naidempotency-pgsql/README.md) | `idempotency-pgsql` | PostgreSQL 租约 fencing、持久重放与命名 datasource | 复用显式或受管 `natx-pgsql` pool |
 | [naidempotency-redis](naidempotency-redis/README.md) | `idempotency-redis` | 有 TTL 的跨副本响应重放 | 复用 `redis.*` |
-| [naoutbox-core](naoutbox-core/README.md) | `nasa::outbox` | Outbox 事件、发布端和保序投递 | 无运行期 yml |
+| [naoutbox-core](naoutbox-core/README.md) | `nasa::outbox` | Outbox 事件、发布端、保序投递与持久 adapter 角色合同 | 无运行期 yml |
 | [naoutbox-mysql](naoutbox-mysql/README.md) | `outbox` | 同事务写事件、单 owner dispatcher、可选死信 | 复用 `database.*` |
-| [nainbox-core](nainbox-core/README.md) | `inbox` 内部合同 | 消费去重裁决 | 无运行期 yml |
+| [naoutbox-pgsql](naoutbox-pgsql/README.md) | `outbox-pgsql` | PostgreSQL 同事务追加、fenced dispatcher、lane、配额与保留 | 可独立使用；Application 负责受管 dispatcher 生命周期 |
+| [nainbox-core](nainbox-core/README.md) | `inbox` 内部合同 | 后端中立消费去重与事务结果裁决 | 无运行期 yml |
 | [nainbox-mysql](nainbox-mysql/README.md) | `inbox` | Inbox 标记与业务副作用同事务 | 复用 `database.*` |
+| [nainbox-pgsql](nainbox-pgsql/README.md) | `inbox-pgsql` | PostgreSQL Inbox 标记与业务副作用同事务 | 复用显式或受管 `natx-pgsql` pool |
 | [naaudit](naaudit/README.md) | `audit` | 脱敏业务审计事件与事务型 sink 合同 | 无独立配置根 |
 | [naaudit-mysql](naaudit-mysql/README.md) | `audit` | 审计事件写入同事务 MySQL Outbox | 复用 `database.*` |
+| [naaudit-pgsql](naaudit-pgsql/README.md) | `audit-pgsql` | 审计事件写入同事务 PostgreSQL Outbox | 复用显式或受管 `natx-pgsql` pool |
 | [hystrix](hystrix/README.md) | `hystrix` | 熔断、隔离、超时、指标流 | `hystrix.*` |
 | [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 宏 | 由 `hystrix` 运行时读取 |
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
@@ -504,12 +571,13 @@ HTTP/1/h2c listener。
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
 | [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和历史兼容加解密 | `crypto.*`、环境变量承载密钥 |
 | [nanum](nanum/README.md) | `numeric` | 定点金额、价格、最小变动单位对齐、舍入 | `numeric.*` |
-| [nadate](nadate/README.md) | `date` | 日期解析、格式化、窗口计算 | `date.*` |
 | [naimg](naimg/README.md) | `image` | 图片压缩、尺寸裁剪、格式转换 | `image.*` |
 | [nalog](nalog/README.md) | `log` | 控制台和文件日志、级别热切换 | `log.*` |
-| [nabase](nabase/README.md) | `base` | BaseResponse、ByteSize、Snowflake | `base.*` |
+| [nabase](nabase/README.md) | `base` | BaseResponse、日期时间、ByteSize、Snowflake、字符串、环境变量和翻译抽象 | `base.*`；日期配置由业务投影 |
 | [nabudget](nabudget/README.md) | REST/Web 内部合同 | 绝对 deadline 与取消树 | 无运行期 yml |
 | [namigrate](namigrate/README.md) | `application` + `tx` | MySQL migration validate/apply 门禁 | `database.migrations` |
+| [namigrate-core](namigrate-core/README.md) | runtime 内部合同 | 后端中立 migration 状态比较与封闭失败分类 | 不读取业务配置 |
+| [namigrate-pgsql](namigrate-pgsql/README.md) | `tx-pgsql` 内部迁移门禁 | PostgreSQL migration validate/apply、session advisory lock 与非事务完成证据 | standalone 显式调用；Application 在 Prepare 执行 |
 | [naopenapi](naopenapi/README.md) | `openapi` | 从已审计路由事实生成确定性 OpenAPI 3.1 | `application.*` 文档信息 |
 | [naauthz](naauthz/README.md) | `application` + `web` 内部合同 | 路由 scope 与对象级授权 | 策略由代码或外部 provider 注入 |
 | [nauth-oauth](nauth-oauth/README.md) | `oauth` | JWT、JWKS 与授权服务器 metadata | `auth.*` 由 `napp` 读取 |

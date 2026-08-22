@@ -5,6 +5,7 @@
 //! 无锁 `COUNT(*)` 在并发创建下必然穿透上限。账本与事实漂移时由有界对账收敛回已提交事实,
 //! 不在请求路径扫描整表。
 
+use nasaga_backend::QuotaReservation;
 use sqlx::Row as _;
 
 use crate::error::{map_connection, map_database, SagaStoreError};
@@ -19,15 +20,6 @@ pub(crate) const CREATE_QUOTA_SQL: &str = "CREATE TABLE IF NOT EXISTS saga_tenan
      updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), \
      PRIMARY KEY (tenant_id) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
-
-/// 业务作用：区分配额预留的两种结论;拒绝携带稳定原因码,与系统故障可区分。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuotaReservation {
-    /// 预留成功,创建可以继续。
-    Reserved,
-    /// 该租户在飞实例已达上限;调用方必须回滚创建事务并返回稳定拒绝。
-    Exceeded,
-}
 
 impl MySqlSagaStore {
     /// 业务作用：在创建事务内为租户原子预留一个在飞名额。

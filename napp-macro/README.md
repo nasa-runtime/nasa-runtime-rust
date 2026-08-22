@@ -39,13 +39,14 @@
 
 ## 受管单源与多源边界
 
-宏只声明生命周期组件，不解析连接参数。MySQL、Redis 与 Kafka 的单源或多源配置由 `napp` 在启动期
+宏只声明生命周期组件，不解析连接参数。MySQL、PostgreSQL、Redis 与 Kafka 的单源或多源配置由 `napp` 在启动期
 从最终 YAML 创建并冻结；业务 Hook 只能取得受管句柄或提交 publisher、consumer、Handler 与 Saga
 定义等业务计划，不能借宏属性建立第二张连接表。
 
 | 资源 | 单源根 | 多源根 | 命名选择 |
 | --- | --- | --- | --- |
 | MySQL | `database` | `datasources.<name>` | Application getter、`datasource_ref` 与具名持久适配器 |
+| PostgreSQL | `database` | `datasources.<name>` | `pg_datasource` getter、`datasource_ref` 与 PostgreSQL 持久适配器 |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | Application getter 与 `redis_ref` |
 | Kafka | `kafka` | `kafkas.<client>` | Application getter、consumer/producer client name |
 

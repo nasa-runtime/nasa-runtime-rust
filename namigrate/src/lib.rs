@@ -14,11 +14,12 @@
 
 #![forbid(unsafe_code)]
 
-use serde::Deserialize;
 use sqlx::{pool::PoolConnection, MySql, MySqlConnection, MySqlPool, Row as _};
 
-/// 有界 advisory-lock 等待允许的最大毫秒数；`0` 仍保留显式无限等待合同。
-pub const MAX_MIGRATION_LOCK_TIMEOUT_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+pub use namigrate_core::{
+    AppliedMigration, EmbeddedMigration, MigrationComparison, MigrationError, MigrationMode,
+    MigrationReport, MigrationSettings, MAX_MIGRATION_LOCK_TIMEOUT_MS,
+};
 
 /// 业务嵌入式 migrator 类型(`sqlx::migrate::Migrator` 的重导出)。
 ///
@@ -27,156 +28,41 @@ pub const MAX_MIGRATION_LOCK_TIMEOUT_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 /// 与门面收敛穿透一次)。它是嵌入式常量数据,`Send + Sync + 'static`,可跨阶段存放。
 pub use sqlx::migrate::Migrator;
 
-/// migration 门禁模式(配置 `database.migrations.mode`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum MigrationMode {
-    /// 跳过(不校验不应用)。
-    Disabled,
-    /// 只读校验:嵌入 migration 必须已全部应用且 checksum 一致(生产默认)。
-    #[default]
-    Validate,
-    /// 应用未决 migration(本地/单实例/专门 Job)。
-    Apply,
-}
-
-/// migration 配置(`database.migrations`)。
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct MigrationSettings {
-    /// 门禁模式;默认 `validate`(生产安全)。
-    pub mode: MigrationMode,
-    /// 获取 migration 锁的等待上限毫秒(apply 时用;`0` 表示用底层默认)。
-    pub lock_timeout_ms: u64,
-    /// 是否允许在 dirty(上次 apply 中断)状态下继续;默认否。
-    pub allow_dirty: bool,
-}
-
-impl Default for MigrationSettings {
-    /// 业务作用: 使用生产保守的 validate 模式、30 秒锁预算并拒绝 dirty override。
-    fn default() -> Self {
-        Self {
-            mode: MigrationMode::default(),
-            lock_timeout_ms: 30_000,
-            allow_dirty: false,
-        }
-    }
-}
-
-impl MigrationSettings {
-    /// 业务作用: 校验安全合同。
-    ///
-    /// `allow_dirty=true` 不能通用地解释成“从失败处继续”：MySQL DDL 可能已经部分提交，runtime
-    /// 无法推断 schema 的安全恢复点。该旋钮保留用于给旧配置稳定报错，调用方必须先人工检查并删除
-    /// dirty 记录，而不是让框架盲目续跑。
-    ///
-    /// # 错误
-    ///
-    /// dirty override 或无法安全表示为绝对 deadline 的锁等待配置会被拒绝。
-    pub fn validate(&self) -> Result<(), MigrationError> {
-        if self.allow_dirty {
-            return Err(MigrationError::DirtyOverrideUnsupported);
-        }
-        if self.lock_timeout_ms > MAX_MIGRATION_LOCK_TIMEOUT_MS {
-            return Err(MigrationError::InvalidLockTimeout(self.lock_timeout_ms));
-        }
-        Ok(())
-    }
-}
-
-/// 门禁结果(稳定摘要,不含 SQL)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationReport {
-    /// 实际执行的模式。
-    pub mode: MigrationMode,
-    /// 嵌入的 up migration 总数。
-    pub embedded: usize,
-    /// 本次应用的 migration 数(apply 模式;validate/disabled 为 0)。
-    pub applied: usize,
-}
-
-/// migration 门禁失败(只含版本与稳定 reason,不含 SQL 正文)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MigrationError {
-    /// `validate`:存在未应用的 migration(附缺失版本号,升序)。
-    Pending(Vec<i64>),
-    /// `validate`/`apply`:某版本已应用记录的 checksum 与嵌入不符(schema 漂移)。
-    ChecksumMismatch(i64),
-    /// migration 表存在失败记录；必须先人工检查部分 DDL 及其实际状态。
-    Dirty(i64),
-    /// `apply` 未在配置上限内取得 SQLx 兼容的数据库 advisory lock。
-    LockTimeout(u64),
-    /// `allow_dirty=true` 不具备可通用证明的安全语义，明确拒绝而不是静默忽略。
-    DirtyOverrideUnsupported,
-    /// 有界锁等待超出框架可安全表示的 deadline。
-    InvalidLockTimeout(u64),
-    /// 底层 DB/migrator 错误(脱敏,不含 SQL)。
-    Backend(String),
-}
-
-impl std::fmt::Display for MigrationError {
-    /// 业务作用: 输出版本号与稳定失败分类，不包含 migration SQL 或数据库连接信息。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MigrationError::Pending(versions) => {
-                write!(
-                    formatter,
-                    "migrations not applied (validate): versions {versions:?}"
-                )
-            }
-            MigrationError::ChecksumMismatch(version) => write!(
-                formatter,
-                "migration checksum mismatch at version {version} (schema drift)"
-            ),
-            MigrationError::Dirty(version) => write!(
-                formatter,
-                "migration {version} is partially applied (dirty); repair it before startup"
-            ),
-            MigrationError::LockTimeout(timeout_ms) => write!(
-                formatter,
-                "migration lock was not acquired within {timeout_ms}ms"
-            ),
-            MigrationError::DirtyOverrideUnsupported => write!(
-                formatter,
-                "allow_dirty=true is unsafe and unsupported; repair the dirty migration explicitly"
-            ),
-            MigrationError::InvalidLockTimeout(timeout_ms) => write!(
-                formatter,
-                "migration lock timeout {timeout_ms}ms exceeds the framework hard limit"
-            ),
-            MigrationError::Backend(reason) => {
-                write!(formatter, "migration backend error: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for MigrationError {}
-
 /// 业务作用: 把任意数据库细节收敛为不泄露 SQL、schema 或凭据的稳定错误。
 fn backend<E>(_error: E) -> MigrationError {
     MigrationError::Backend("database error".to_owned())
 }
 
-/// 业务作用: 嵌入的 up migration:`(version, checksum)`,按 version 升序。
-fn embedded_ups(migrator: &Migrator) -> Vec<(i64, Vec<u8>)> {
-    let mut ups: Vec<(i64, Vec<u8>)> = migrator
+/// 业务作用: 提取不含 SQL 正文的 MySQL up migration 描述供 core 执行一致性比较。
+///
+/// # 参数
+/// - `migrator`: 当前业务嵌入式 migrator。
+///
+/// 返回: 按版本升序排列的版本、checksum、可逆性与事务属性。
+fn embedded_ups(migrator: &Migrator) -> Vec<EmbeddedMigration> {
+    let mut ups: Vec<EmbeddedMigration> = migrator
         .iter()
         .filter(|migration| !migration.migration_type.is_down_migration())
-        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .map(|migration| EmbeddedMigration {
+            version: migration.version,
+            checksum: migration.checksum.to_vec(),
+            reversible: migration.migration_type.is_reversible(),
+            transactional: !(migrator.no_tx || migration.no_tx),
+        })
         .collect();
-    ups.sort_by_key(|(version, _)| *version);
+    ups.sort_by_key(|migration| migration.version);
     ups
 }
 
-/// 数据库当前 migration 状态。
-struct AppliedState {
-    applied: std::collections::HashMap<i64, Vec<u8>>,
-    dirty: Option<i64>,
-}
-
-/// 业务作用: 查询已应用/dirty migration；`_sqlx_migrations` 不存在视为空。
-async fn applied_state(connection: &mut MySqlConnection) -> Result<AppliedState, MigrationError> {
+/// 业务作用: 查询 MySQL 已应用与未完成 migration；catalog 不存在时保持首次启动语义。
+///
+/// # 参数
+/// - `connection`: 当前 datasource 的专有 MySQL 连接。
+///
+/// 返回: 按版本排序的 catalog 记录；表不存在返回空集合，查询失败返回脱敏错误。
+async fn applied_state(
+    connection: &mut MySqlConnection,
+) -> Result<Vec<AppliedMigration>, MigrationError> {
     // 表不存在(从未 apply 过)→ 返回空表,交由上层按"全部未应用"处理。
     let exists: i64 = sqlx::query(
         "SELECT COUNT(*) AS n FROM information_schema.tables \
@@ -188,10 +74,7 @@ async fn applied_state(connection: &mut MySqlConnection) -> Result<AppliedState,
     .try_get("n")
     .map_err(backend)?;
     if exists == 0 {
-        return Ok(AppliedState {
-            applied: std::collections::HashMap::new(),
-            dirty: None,
-        });
+        return Ok(Vec::new());
     }
 
     let rows =
@@ -199,19 +82,18 @@ async fn applied_state(connection: &mut MySqlConnection) -> Result<AppliedState,
             .fetch_all(&mut *connection)
             .await
             .map_err(backend)?;
-    let mut applied = std::collections::HashMap::with_capacity(rows.len());
-    let mut dirty = None;
+    let mut applied = Vec::with_capacity(rows.len());
     for row in rows {
         let version: i64 = row.try_get("version").map_err(backend)?;
         let checksum: Vec<u8> = row.try_get("checksum").map_err(backend)?;
         let success: bool = row.try_get("success").map_err(backend)?;
-        if success {
-            applied.insert(version, checksum);
-        } else if dirty.is_none() {
-            dirty = Some(version);
-        }
+        applied.push(AppliedMigration {
+            version,
+            checksum,
+            success,
+        });
     }
-    Ok(AppliedState { applied, dirty })
+    Ok(applied)
 }
 
 /// 业务作用: 与 SQLx MySQL migrator 使用同一算法计算 advisory lock ID。
@@ -344,6 +226,8 @@ fn unlocked_migrator(migrator: &Migrator) -> Migrator {
 /// - `pool`:目标 datasource 连接池。
 /// - `migrator`:业务嵌入的 [`Migrator`]。
 /// - `settings`:门禁配置。
+///
+/// 返回: 状态与模式要求一致时返回摘要；差异、锁超时或数据库失败时返回稳定分类。
 pub async fn run_gate(
     pool: &MySqlPool,
     migrator: &Migrator,
@@ -360,41 +244,21 @@ pub async fn run_gate(
         MigrationMode::Validate => {
             let mut connection = pool.acquire().await.map_err(backend)?;
             let state = applied_state(&mut connection).await?;
-            if let Some(version) = state.dirty {
-                return Err(MigrationError::Dirty(version));
-            }
-            let mut pending = Vec::new();
-            for (version, checksum) in &ups {
-                match state.applied.get(version) {
-                    None => pending.push(*version),
-                    Some(existing) if existing != checksum => {
-                        return Err(MigrationError::ChecksumMismatch(*version));
-                    }
-                    Some(_) => {}
-                }
-            }
-            if pending.is_empty() {
-                Ok(MigrationReport {
-                    mode: MigrationMode::Validate,
-                    embedded: ups.len(),
-                    applied: 0,
-                })
-            } else {
-                pending.sort_unstable();
-                Err(MigrationError::Pending(pending))
-            }
+            namigrate_core::compare_migrations(&ups, &state)
+                .ensure_valid(migrator.ignore_missing)?;
+            Ok(MigrationReport {
+                mode: MigrationMode::Validate,
+                embedded: ups.len(),
+                applied: 0,
+            })
         }
         MigrationMode::Apply => {
             // 先取得 SQLx-compatible 有界 advisory lock；状态读取、apply 与记录都复用同一连接。
             let mut lock = MigrationLock::acquire(pool, settings.lock_timeout_ms).await?;
             let state = applied_state(lock.connection()).await?;
-            if let Some(version) = state.dirty {
-                return Err(MigrationError::Dirty(version));
-            }
-            let to_apply = ups
-                .iter()
-                .filter(|(version, _)| !state.applied.contains_key(version))
-                .count();
+            let comparison = namigrate_core::compare_migrations(&ups, &state);
+            comparison.ensure_applicable(migrator.ignore_missing)?;
+            let to_apply = comparison.pending.len();
             // 外层已锁，复制完整 migrator 设置后仅关闭 SQLx 内建的无限等待 lock。
             unlocked_migrator(migrator)
                 .run_direct(None, lock.connection(), false)

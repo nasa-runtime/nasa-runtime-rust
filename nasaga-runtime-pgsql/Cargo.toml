@@ -1,0 +1,29 @@
+[package]
+name = "nasaga-runtime-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL backend wrapper for the durable NASA Saga runtime"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["saga", "postgresql", "workflow", "compensation", "microservices"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+anyhow = "1"
+nainbox-pgsql = { version = "1.0.0" }
+naoutbox-pgsql = { version = "1.0.0" }
+nasaga-backend = { version = "1.0.0" }
+nasaga-core = { version = "1.0.1" }
+nasaga-pgsql = { version = "1.0.0" }
+nasaga-runtime-core = { version = "1.0.0" }
+natelemetry = { version = "1.0.1" }
+natx-pgsql = { version = "1.0.0" }
+
+[features]
+default = []
+kafka = ["nasaga-runtime-core/kafka"]
+redis-stream = ["nasaga-runtime-core/redis-stream"]
+grpc-transport = ["nasaga-runtime-core/grpc-transport"]

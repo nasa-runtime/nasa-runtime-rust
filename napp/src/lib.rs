@@ -12,7 +12,15 @@
 //! 启用 Saga 组件时，Application 隐式拥有 DB 与 Outbox 生命周期，在 Ready 前校验 definition、
 //! descriptor、历史非终态实例和参与方信任投影，再监督 durable timer 与所选受管消费循环。
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
-//! `nasaga-runtime` 的持久合同承担。
+//! 当前数据库对应的 `nasaga-runtime` 或 `nasaga-runtime-pgsql` 持久合同承担。
+//!
+//! 数据库 YAML 中的 migration 段只定义执行策略。Service UserHook 通过
+//! [`Application::configure_migrations`] 登记业务嵌入的 migrator，DB Prepare 在 initializer 和入站
+//! listener 之前执行门禁；PostgreSQL 独立 session endpoint 还会在 advisory lock 前复验目标身份。
+//!
+//! `rate-limit` 提供共享 Redis 原子计数的跨副本业务配额。业务显式从受管 Redis source 构造 provider；
+//! 本能力不增加组件字符串或配置根，默认后端错误采用 fail-open。与 `web` 组合时可安装 IP 中间件，
+//! tenant、subject 或 API key 配额则直接使用 provider 合同。
 //!
 //! 启用 gRPC 组件时，UserHook 只登记统一 codegen 生成的业务 service，Prepare 永久封口 registry，
 //! 全部 initializer 成功后的 Ready 才自动装配 Router、health、可选 reflection 并绑定 listener。
@@ -36,7 +44,10 @@ mod cache;
 mod capabilities;
 mod component;
 mod config;
-#[cfg(feature = "db")]
+#[cfg(all(feature = "db", not(feature = "db-pgsql")))]
+mod db;
+#[cfg(feature = "db-pgsql")]
+#[path = "db_multi.rs"]
 mod db;
 /// 稳定 gRPC listener：UserHook service registry、Ready 绑定、关键监督与有界排空。
 #[cfg(feature = "grpc")]
@@ -49,13 +60,18 @@ mod partition;
 mod telemetry;
 /// 业务构造迁移门禁所需的 `namigrate` 公共类型再导出;经 `nasa::application::*` 一并透出。
 ///
-/// 业务仍需自身直依赖 `sqlx` 以调用 `sqlx::migrate!("./migrations")` 生成 [`Migrator`]
+/// 业务仍需自身直依赖 `sqlx` 并启用 `macros,migrate`，以调用
+/// `sqlx::migrate!("./migrations")` 生成 [`Migrator`]
 /// (嵌入式 migration 与 sqlx 天然耦合,这是唯一被门面放行的第三方类型穿透点);本组再导出让
 /// 业务能命名门禁的配置/报告/错误类型,并在 `Application::configure_migrations` 登记后由 DB 组件
 /// 在 initializer 之前的 Prepare 阶段按 `database.migrations.mode` 执行门禁。
 #[cfg(feature = "db")]
 pub use namigrate::{
     run_gate, MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
+};
+#[cfg(all(not(feature = "db"), feature = "db-pgsql"))]
+pub use namigrate_pgsql::{
+    MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
 };
 #[cfg(feature = "telemetry")]
 pub use telemetry::OtlpMetricsSnapshot;
@@ -69,7 +85,7 @@ mod initialization;
 mod kafka;
 #[cfg(feature = "log")]
 mod log;
-#[cfg(feature = "mapper-cache")]
+#[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
 mod mapper_cache;
 #[cfg(feature = "web")]
 mod mapping_handle;
@@ -168,7 +184,7 @@ pub use trace::trace_context;
 
 #[cfg(feature = "nacos-config")]
 mod nacos_config;
-#[cfg(feature = "outbox")]
+#[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
 mod outbox;
 mod panic_hook;
 mod preflight;
@@ -192,7 +208,7 @@ mod reload;
 mod report;
 mod resources;
 mod runner;
-#[cfg(feature = "saga")]
+#[cfg(any(feature = "saga", feature = "saga-pgsql"))]
 mod saga;
 #[cfg(feature = "scheduling")]
 mod scheduling;
@@ -246,7 +262,7 @@ pub use initialization::{
 };
 #[cfg(feature = "web")]
 pub use mapping_handle::MappingHandle;
-#[cfg(feature = "outbox")]
+#[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
 pub use outbox::{
     OutboxApplicationPlan, OutboxChannelPlan, OutboxHandle, OutboxPoisonPolicy,
     OutboxRetentionPlan, OutboxSnapshot,
@@ -256,9 +272,9 @@ pub use partition::{PartitionApplicationHandle, PartitionApplicationPlan};
 pub use process::run;
 pub use resources::{ManagedResource, ResourcePhase, ResourceRef, ResourceRegistry};
 pub use runner::{ApplicationExit, ApplicationExitReason, ApplicationRunner};
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 pub use saga::SagaRedisTransportPlan;
-#[cfg(feature = "saga")]
+#[cfg(any(feature = "saga", feature = "saga-pgsql"))]
 pub use saga::{SagaApplicationPlan, SagaHandle};
 pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal};
 pub use spec::ApplicationSpec;
@@ -291,7 +307,7 @@ pub mod components {
     }
 
     /// 数据源组件的编译期能力探测点。
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     pub mod db {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();
@@ -361,14 +377,14 @@ pub mod components {
     }
 
     /// Outbox dispatcher 组件的编译期能力探测点。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub mod outbox {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();
     }
 
     /// Saga 生命周期组件的编译期能力探测点。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub mod saga {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();

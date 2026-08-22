@@ -81,6 +81,48 @@ struct ResourceEntry {
     shutdown: Option<ErasedShutdown>,
 }
 
+/// 业务作用：暂存一组异类型组件资源，全部 key 预检通过后再在单次写锁内发布。
+pub(crate) struct StagedResourceBatch {
+    entries: Vec<(ResourceKey, ResourceEntry)>,
+}
+
+impl StagedResourceBatch {
+    /// 业务作用：创建尚未包含任何公开资源的暂存批次。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可继续加入不同类型和 qualifier 的批次。
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// 业务作用：把普通组件资源加入本地暂存区，不触碰 Application 可见资源表。
+    ///
+    /// 参数说明：`qualifier` 是可选稳定名称，`value` 是待转交资源。
+    ///
+    /// 返回：名称合法时完成暂存；非法名称返回错误且批次尚未发布。
+    #[cfg(feature = "db-pgsql")]
+    pub(crate) fn push<T>(&mut self, qualifier: Option<&str>, value: T) -> ApplicationResult<()>
+    where
+        T: Send + Sync + 'static,
+    {
+        let qualifier = qualifier.map(normalize_qualifier).transpose()?;
+        self.entries.push((
+            ResourceKey::of::<T>(qualifier),
+            ResourceEntry {
+                type_name: type_name::<T>(),
+                value: Arc::new(AsyncRwLock::new(Box::new(value))),
+                registration_order: 0,
+                owner: ResourceOwner::Business,
+                shutdown: None,
+            },
+        ));
+        Ok(())
+    }
+}
+
 /// 在同一同步锁下维护资源阶段、顺序号和 key 集合的一致状态。
 struct RegistryState {
     phase: ResourcePhase,
@@ -270,6 +312,41 @@ impl ResourceRegistry {
             ResourceOwner::Component(component),
             Some(shutdown_managed::<T>),
         )
+    }
+
+    /// 业务作用：原子发布一组异类型组件资源，避免启动期观察到跨 driver 半张表。
+    ///
+    /// 参数说明：`component` 是统一所有者，`batch` 是尚未公开的完整资源集合。
+    ///
+    /// 返回：阶段开放且全部 key 唯一时一次性提交；任一冲突时不登记任何条目。
+    pub(crate) fn register_component_batch(
+        &self,
+        component: ComponentId,
+        mut batch: StagedResourceBatch,
+    ) -> ApplicationResult<()> {
+        let mut state = write_unpoisoned(&self.state);
+        if state.phase != ResourcePhase::Open {
+            return Err(resource_error(format!(
+                "resource registration is closed in {:?} phase",
+                state.phase
+            )));
+        }
+        let mut batch_keys = std::collections::HashSet::with_capacity(batch.entries.len());
+        for (key, entry) in &batch.entries {
+            if !batch_keys.insert(key.clone()) || state.entries.contains_key(key) {
+                return Err(resource_error(format!(
+                    "resource `{}` is already registered",
+                    entry.type_name
+                )));
+            }
+        }
+        for (key, mut entry) in batch.entries.drain(..) {
+            entry.registration_order = state.next_order;
+            entry.owner = ResourceOwner::Component(component);
+            state.next_order = state.next_order.saturating_add(1);
+            state.entries.insert(key, entry);
+        }
+        Ok(())
     }
 
     /// 业务作用：由受控上下文登记一个 initializer 拥有的普通资源。

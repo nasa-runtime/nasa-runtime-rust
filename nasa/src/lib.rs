@@ -1,11 +1,12 @@
 //! nasa-runtime-rust 的统一业务门面。
 //!
-//! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、事务、Inbox、Outbox、
-//! Saga、消息传输、缓存、路由、调度、配置、发现和工具模块。
+//! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL 事务、
+//! Inbox、Outbox、Saga、消息传输、缓存、跨副本业务配额、路由、调度、配置、发现和工具模块。
 //!
 //! # 持久化 Saga
 //!
-//! `saga-runtime` 将本地 ACID、Outbox 至少一次、Inbox 幂等、持久化状态机与显式补偿组合为
+//! `saga-runtime` / `saga-runtime-pgsql` 将所选数据库的本地 ACID、Outbox 至少一次、Inbox 幂等、
+//! 持久化状态机与显式补偿组合为
 //! 最终一致性流程。稳定 `effect_id`、定义摘要、取消/裁决屏障、冻结补偿计划与 timer fencing
 //! 让重复投递、Unknown 结果、进程崩溃和多副本竞争从已提交事实收敛。Kafka 和 Redis Streams
 //! 提供受管 connector；HTTP 使用显式认证构件；gRPC 提供框架 generated command/result service、
@@ -23,6 +24,10 @@
 //! `#[nasa::application("web")]` 托管唯一明文 listener。这四项能力都进入 `full`，业务只通过本门面
 //! 使用公开合同。
 //!
+//! `rate-limit` 通过 `nasa::application` 提供后端中立配额合同和共享 Redis 原子计数实现；业务必须
+//! 显式声明 Redis 组件并决定主体身份或路由中间件。默认后端失败时 fail-open；它不替代 Web 的
+//! 单实例令牌桶，也不自动改变路由。
+//!
 //! 默认只接受 HTTP/1；最终 YAML 设置 `server.http2.enabled=true` 即可在同一端口接受 h2c prior
 //! knowledge，高级 transport 字段可省略。该入口不终止 TLS，也不实现 `Upgrade: h2c`。
 // ============================================================================
@@ -39,7 +44,7 @@
 //   use nasa::web::{mvc_router, get_mapping, post_mapping, put_mapping, delete_mapping, patch_mapping};
 //   use nasa::ws::{Endpoint, Server};   use nasa::ws::proto::{Message, Mode};
 //
-// 过程宏经 nasa-macro-support 自动发现本 crate(含 Cargo 重命名),
+// 过程宏经 macro-support 自动发现本 crate(含 Cargo 重命名),
 // 完整属性路径 #[nasa::hystrix::hystrix] / #[nasa::web::get_mapping("/x")] 同样可用。
 // ============================================================================
 #![forbid(unsafe_code)]
@@ -56,16 +61,18 @@
 ///
 /// # 单源与多源 YAML
 ///
-/// 基础设施 source 由最终 YAML 创建，不在 `main` 中手工建池或建连。MySQL 单源使用 `database`，
-/// 多源使用 `datasources.<name>`；Redis 单源使用扁平 `redis`，多源使用
+/// 基础设施 source 由最终 YAML 创建，不在 `main` 中手工建池或建连。MySQL/PostgreSQL 单源使用
+/// `database`，多源与混配使用 `datasources.<name>`；Redis 单源使用扁平 `redis`，多源使用
 /// `redis.properties.<qualifier>`；Kafka 单 client 使用 `kafka`，多 client 使用
 /// `kafkas.<client>`。同一种资源的单源根与多源根互斥，任一实例失败都会阻止完整命名表进入 Ready。
 ///
 /// ```yaml
 /// datasources:
 ///   default:
+///     driver: mysql
 ///     url: ${APP_PRIMARY_DB_URL}
 ///   reporting:
+///     driver: postgresql
 ///     url: ${APP_REPORTING_DB_URL}
 /// outbox:
 ///   datasource_ref: reporting
@@ -91,9 +98,11 @@
 ///     bootstrap_servers: ${APP_AUDIT_KAFKA_BOOTSTRAP_SERVERS}
 /// ```
 ///
-/// 单源 MySQL 固定为 `default`；单源 Redis 的持久身份为 `primary`，并提供 `default` 查询别名；
+/// 单源数据库固定为 `default`；MySQL 使用 `Application::datasource`，PostgreSQL 使用
+/// `Application::pg_datasource`，driver 错配不会回退。单源 Redis 的持久身份为 `primary`，并提供 `default` 查询别名；
 /// 单 client Kafka 省略 `client_name` 时默认为 `default`。业务通过 `default_datasource`/
-/// `datasource(name)`、`default_redis`/`redis(name)`、`default_kafka`/`kafka(name)` 取得受管句柄。
+/// `datasource(name)`、`default_pg_datasource`/`pg_datasource(name)`、`default_redis`/`redis(name)`、
+/// `default_kafka`/`kafka(name)` 取得受管句柄。
 /// Outbox 与 Saga 用 `datasource_ref`，Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
 /// 引用不存在时在建连前拒绝，不会猜测唯一实例或回退默认源。
 /// `partition.runners.<name>` 可以声明多个相互隔离的分区 Runner；每个字段都可省略并逐项使用
@@ -101,6 +110,21 @@
 /// `configure_partition_runner` 在 Service UserHook 登记 YAML 未占用的启动期名称，同名不能由两个
 /// 入口重复声明；计划在 Hook 返回后的 Prepare 才启动，Running 阶段不追加受管 Runner。运行期间按
 /// 业务参数创建执行域时，直接使用 `nasa::partition::PartitionRunnerRegistry` 并显式管理停机。
+///
+/// # Migration 门禁
+///
+/// YAML 的 `migrations` 只定义模式、锁等待和 PostgreSQL session topology。Service 在 UserHook 用
+/// `Application::configure_migrations` 为每个 datasource 登记业务通过 `sqlx::migrate!` 嵌入的
+/// `Migrator`；门禁在 initializer 与 listener 前执行。门禁模式不是 `disabled` 时，事务级 PostgreSQL 代理必须提供独立
+/// `migrations.session_url`，并在 advisory lock 前与业务池复验 database/schema 身份。Batch 应显式
+/// 调用 MySQL 的 `application::run_gate` 或 PostgreSQL 的 `migration::pgsql::run_gate`。
+///
+/// # 跨副本业务配额
+///
+/// `rate-limit` feature 提供 `RateLimitProvider`、`RedisRateLimitProvider` 和可选 Web IP 中间件。
+/// 该能力没有组件字符串或独立 YAML；业务从受管 Redis source 构造 provider，并决定 tenant、subject、
+/// API key 或客户端 IP 等主体身份。Redis provider 后端失败时 fail-open，需要 fail-closed 时应注入自定义
+/// provider。
 #[cfg(feature = "application")]
 pub mod application {
     pub use application_impl::*;
@@ -349,28 +373,60 @@ pub mod cache {
     };
 }
 
-/// ambient 事务上下文与 `#[transactional]` 声明式事务入口。
-#[cfg(feature = "tx")]
+/// ambient 事务上下文与按数据库后端分区的声明式事务入口。
+#[cfg(any(feature = "tx", feature = "tx-pgsql"))]
 pub mod tx {
+    #[cfg(feature = "tx")]
     pub use natx_macro::transactional;
+    #[cfg(feature = "tx")]
     pub use tx_impl::*;
+
+    /// PostgreSQL ambient transaction、typed 连接与专用属性宏入口。
+    #[cfg(feature = "tx-pgsql")]
+    pub mod pgsql {
+        pub use natx_macro::transactional_pgsql as transactional;
+        pub use tx_pgsql_impl::*;
+    }
 }
 
-/// 消息 Inbox：同一 MySQL 事务内的消费去重标记。
-#[cfg(feature = "inbox")]
+/// 数据库迁移门禁；PostgreSQL 入口显式接收与业务连接一致的 schema，并在事务池拓扑下使用独立 session 连接。
+#[cfg(feature = "tx-pgsql")]
+pub mod migration {
+    /// PostgreSQL advisory lock、checksum 与 validate/apply 门禁。
+    pub mod pgsql {
+        pub use migration_pgsql_impl::*;
+    }
+}
+
+/// 消息 Inbox：按数据库后端与业务副作用共享同一 ambient transaction。
+#[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
 pub mod inbox {
-    pub use inbox_core_impl::InboxClaim;
+    pub use inbox_core_impl::*;
+    #[cfg(feature = "inbox")]
     pub use inbox_mysql_impl::{InboxProcess, InboxStoreError, InboxTransactionError, MySqlInbox};
+
+    /// PostgreSQL Inbox 与后端中立消费合同。
+    #[cfg(feature = "inbox-pgsql")]
+    pub mod pgsql {
+        pub use inbox_pgsql_impl::*;
+    }
 }
 
-/// 事务型 Outbox：事件、顺序投递合同与 MySQL 持久化实现。
-#[cfg(feature = "outbox")]
+/// 事务型 Outbox：事件、顺序投递合同与按后端分区的持久实现。
+#[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
 pub mod outbox {
     pub use outbox_core_impl::{
         dispatch_in_order, DispatchReport, InMemoryOutbox, OutboxEvent, OutboxPublishError,
         OutboxPublisher, OutboxWriter,
     };
+    #[cfg(feature = "outbox")]
     pub use outbox_mysql_impl::{MySqlOutbox, OutboxStoreError};
+
+    /// PostgreSQL 事务写侧、fencing dispatcher 与 retention 实现。
+    #[cfg(feature = "outbox-pgsql")]
+    pub mod pgsql {
+        pub use outbox_pgsql_impl::*;
+    }
 }
 
 /// 业务幂等状态机及按需启用的持久化 store。
@@ -382,6 +438,11 @@ pub mod idempotency {
     };
     #[cfg(feature = "idempotency-mysql")]
     pub use idempotency_mysql_impl::MySqlIdempotencyStore;
+    /// PostgreSQL 租约、generation 与响应重放 store。
+    #[cfg(feature = "idempotency-pgsql")]
+    pub mod pgsql {
+        pub use idempotency_pgsql_impl::*;
+    }
     #[cfg(feature = "idempotency-redis")]
     pub use idempotency_redis_impl::RedisIdempotencyStore;
 }
@@ -392,11 +453,18 @@ pub mod openapi {
     pub use openapi_impl::*;
 }
 
-/// 事务型业务审计：事件与业务写共享 MySQL 事务，经 Outbox 可靠投递。
-#[cfg(feature = "audit")]
+/// 事务型业务审计：事件与业务写共享所选后端事务，经同源 Outbox 可靠投递。
+#[cfg(any(feature = "audit", feature = "audit-pgsql"))]
 pub mod audit {
     pub use audit_impl::{AuditEvent, AuditOutcome, AuditWriteError, TransactionalAuditSink};
+    #[cfg(feature = "audit")]
     pub use audit_mysql_impl::MySqlOutboxAuditSink;
+
+    /// PostgreSQL Outbox 审计 sink。
+    #[cfg(feature = "audit-pgsql")]
+    pub mod pgsql {
+        pub use audit_pgsql_impl::*;
+    }
 }
 
 /// Secret 容器、外部 provider 合同、原子 last-good 轮换与 TLS/mTLS 引用。
@@ -640,9 +708,11 @@ pub mod object {
 }
 
 /// Saga 编排：纯逻辑合同（身份派生/封闭状态机/补偿计划），开启
-/// `saga-runtime` 后再并入 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
+/// `saga-runtime` 或 `saga-runtime-pgsql` 后再并入对应 Orchestrator、参与方 adapter 与 `#[saga]` 宏。
 ///
-/// `saga-grpc` 会同时打开稳定 `grpc` 门面；纯出站调用无需声明 Application 的 `"grpc"` 组件，
+/// PostgreSQL 包装位于 `saga::pgsql`，与 MySQL 包装共享同一状态机与 transport 裁决；受管计划根据
+/// `datasource_ref` 的 driver 选择对应 typed runtime。`saga-grpc` 与 `saga-grpc-pgsql` 都会打开稳定
+/// `grpc` 门面；纯出站调用无需声明 Application 的 `"grpc"` 组件，
 /// 入站计划则必须声明它以取得唯一受管 listener。`full` 会编入运行时以及 Kafka、gRPC adapter；
 /// Redis Streams 替代通道仍需显式 feature。
 /// 业务必须声明 Application 的 `"saga"` 组件并提交流程定义、参与方信任关系和
@@ -654,6 +724,13 @@ pub mod saga {
     pub use saga_core_impl::*;
     #[cfg(feature = "saga-runtime")]
     pub use saga_runtime_impl::*;
+
+    /// PostgreSQL Saga 宏与运行包装；状态机与 MySQL 包装共享同一 core。
+    #[cfg(feature = "saga-runtime-pgsql")]
+    pub mod pgsql {
+        pub use nasaga_macro::saga_pgsql as saga;
+        pub use saga_runtime_pgsql_impl::*;
+    }
 }
 
 /// 稳定 gRPC codegen 门面、generated service registry、独立/Application listener 与有界排空。
@@ -708,13 +785,21 @@ pub mod web {
     };
 }
 
-/// 声明式 Mapper：trait + `#[Mapper]` / `#[Query]` / `#[Insert]` 等属性宏。
-#[cfg(feature = "mapper")]
+/// 声明式 Mapper：MySQL 保持既有根入口，PostgreSQL 使用独立的 `mapper::pgsql`。
+#[cfg(any(feature = "mapper", feature = "mapper-pgsql"))]
 pub mod mapper {
+    #[cfg(feature = "mapper")]
     pub use mapper_impl::*;
+    #[cfg(feature = "mapper")]
     pub use namapper_macro::{
         Delete, Execute, Insert, Mapper, MapperEnum, MapperOrderField, Query, StreamQuery, Update,
     };
+
+    /// PostgreSQL `$n` 占位符、Pg 连接与独立 cache identity 的 Mapper 入口。
+    #[cfg(feature = "mapper-pgsql")]
+    pub mod pgsql {
+        pub use mapper_pgsql_impl::*;
+    }
 }
 
 /// 命名隔离、严格 FIFO 的本地有界保序任务窃取执行器：每个 Runner 独立拥有 generation、slot
@@ -978,8 +1063,7 @@ pub mod kafka {
     }
 }
 
-/// Redis 基础层，对齐既有 RedisProxy 五件套的公开语义：
-/// client/commands/pipeline(typed ticket)/lock(V1 与 原实现 互锁)/partition
+/// Redis 基础层提供 client/commands/pipeline(typed ticket)/lock(V1 wire lock 互操作)/partition
 /// (PollCoordinator)。子能力经 feature 透传:`redis-search`(RediSearch/
 /// RedisJSON 封装)、`redis-derive`(`#[derive(RedisDocument)]`,蕴含 search)。
 ///
@@ -1009,17 +1093,17 @@ pub mod numeric {
     pub use numeric_impl::*;
 }
 
-/// 日期时间工具(crate = `date`,基于 chrono)。
-/// `nasa = { features = ["date"] }` → `use nasa::date::{format, parse, add_days, today, ...};`
-/// i64 epoch ms 规范 + GMT+8 默认 + 原实现 SimpleDateFormat 风格 pattern(`"yyyy-MM-dd HH:mm:ss"`)。
-#[cfg(feature = "date")]
+/// 日期时间便捷入口，与 `nasa::base::date` 指向同一实现。
+/// `nasa = { features = ["base"] }` → `use nasa::date::{format, parse, add_days, today, ...};`
+/// 日期时刻统一使用 i64 epoch 毫秒，默认采用 GMT+8 固定偏移。
+#[cfg(feature = "base")]
 pub mod date {
-    pub use date_impl::*;
+    pub use base_impl::date::*;
 }
 
 /// 日志(crate = `nalog`,基于 tracing)。
 /// `nasa = { features = ["log"] }` → `use nasa::log;` → `log::init();`。
-/// 原实现 logback 风格 formatter + 独立 `error.log` + 按天/按大小滚动(`maxFileSize`/`.%i`)
+/// 文本 formatter + 独立 `error.log` + 按天/按大小滚动(`maxFileSize`/`.%i`)
 /// + `maxHistory`/`totalSizeCap`/`cleanHistoryOnStart` 保留清理 + 运行期级别热切(配合 nacos)。
 ///
 ///   use nasa::log;
@@ -1031,16 +1115,17 @@ pub mod log {
     pub use log_impl::*;
 }
 
-/// 通用响应壳 `BaseResponse`(crate = `nabase`)。
+/// 公共响应、日期时间、容量、ID、字符串、环境变量和翻译能力(crate = `nabase`)。
 /// `nasa = { features = ["base"] }` → `use nasa::base::BaseResponse;` → `BaseResponse::ok(data)` / `::err(code, msg)`。
 /// 字段 `code`(默认 200)/ `msg`(提示信息)/ `aes`(需加密时的 AES 密钥)/ `data`,`None` 序列化省略。
-/// 另含 strings/env/size/id 纯工具;date/numeric/crypto/image 继续走 `nasa::{date,numeric,crypto,image}` 顶层入口。
+/// 日期能力位于 `nasa::base::date`，也可以从 `nasa::date` 便捷入口使用；启用 `base` 会引入
+/// `nabase` 的全部依赖和公开模块。
 #[cfg(feature = "base")]
 pub mod base {
     pub use base_impl::*;
 }
 
-/// 通用分层 YAML 配置加载器(对照;crate = `yml`)。
+/// 通用分层 YAML 配置加载器(crate = `yml`)。
 /// `nasa = { features = ["yml"] }` → `use nasa::yml::{YmlLoader, YmlOverlay};`
 /// `nasa = { features = ["yml-watch"] }` → `use nasa::yml::watch::YmlWatcher;`
 /// 本地主配置 `zcf/application.yml` + profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。
@@ -1159,7 +1244,7 @@ pub mod discovery {
 pub mod config {
     /// Nacos 配置中心后端(独立 `NacosConfigClient`,只建配置服务)。
     /// 单配置:`fetch`/`watch`/`watch_channel`(裸文本 + `WatchGuard`)。
-    /// 多配置(对照):`fetch_many`/`watch_many_channel`(按序拉一组 → `ConfigBundle` + `MultiWatchGuard`)。
+    /// 多配置:`fetch_many`/`watch_many_channel`(按序拉一组 → `ConfigBundle` + `MultiWatchGuard`)。
     pub mod nacos {
         pub use nacos_impl::{
             ConfigBundle, ConfigDocument, ConfigRef, MultiWatchGuard, NacosConfigClient,

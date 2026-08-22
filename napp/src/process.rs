@@ -292,11 +292,11 @@ fn build_nacos_config_component(
 ///
 /// 本函数无参数；是否编入数据源组件由编译期 feature 决定。
 fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     {
         Ok(Box::new(crate::db::DbComponent::new()))
     }
-    #[cfg(not(feature = "db"))]
+    #[cfg(not(any(feature = "db", feature = "db-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Db, "tx"))
     }
@@ -308,11 +308,11 @@ fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
 ///
 /// 返回：启用 `saga-runtime` 时返回受管组件，否则返回启动配置错误。
 fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     {
         Ok(Box::new(crate::saga::SagaComponent::new()))
     }
-    #[cfg(not(feature = "saga"))]
+    #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Saga, "saga-runtime"))
     }
@@ -324,11 +324,11 @@ fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationEr
 ///
 /// 返回：启用 `outbox` 时返回生命周期组件，否则返回指向门面 feature 的启动错误。
 fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     {
         Ok(Box::new(crate::outbox::OutboxComponent::new()))
     }
-    #[cfg(not(feature = "outbox"))]
+    #[cfg(not(any(feature = "outbox", feature = "outbox-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Outbox, "outbox"))
     }

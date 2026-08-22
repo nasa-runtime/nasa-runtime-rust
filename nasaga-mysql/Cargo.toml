@@ -13,6 +13,8 @@ categories = ["asynchronous", "database"]
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
+nasaga-backend = { version = "1.0.0" }
 nasaga-core = { version = "1.0.1" }
 # Saga store、Inbox 与 Outbox 必须共享 natx 的同一 ambient transaction。
 natx = { version = "1.0.3" }

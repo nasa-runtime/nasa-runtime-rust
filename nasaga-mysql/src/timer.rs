@@ -5,336 +5,16 @@
 //! 但**消费时必须复验 fencing token**（以及调用方侧的 `expected_saga_version` 与
 //! `generation`），失去租约的旧 owner 即使迟到也不能推进新状态。
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use nasaga_core::{AttemptNo, SagaId, StepName};
+use nasaga_backend::{
+    SagaTimerRow, TimerClaimBatch, TimerFencing, TimerFencingToken, TimerReschedule, TimerSchedule,
+    TimerScope, TimerSpec, TimerState,
+};
+use nasaga_core::{AttemptNo, SagaId};
 use sqlx::Row as _;
-use uuid::Uuid;
 
 use crate::error::{is_unique_violation, map_connection, map_database, SagaStoreError};
 use crate::instance::require_ambient_transaction;
 use crate::MySqlSagaStore;
-
-/// 实例级 timer 的固定 canonical scope key。
-///
-/// 唯一键各列必须 `NOT NULL`，实例级 timer 没有真实步骤名，用固定值占位；
-/// `scope_kind` 列已经隔离命名空间，业务步骤即使叫 `instance` 也不会与之冲突。
-const INSTANCE_SCOPE_KEY: &str = "instance";
-
-/// 派生 timer 领取 fencing token 的固定命名空间（ASCII `nasasaga-v1-fcns`）。
-const FENCING_TOKEN_NAMESPACE: Uuid = Uuid::from_bytes(*b"nasasaga-v1-fcns");
-
-/// 业务作用：以长度前缀编码 fencing 派生字段，消除 owner 等可变长字段的拼接歧义。
-///
-/// 参数说明：
-/// - `fields`: 按固定顺序给出的 runtime nonce、owner、时钟和领取序号。
-///
-/// 返回：字段边界唯一、可直接送入 UUIDv5 的规范字节串。
-fn canonical_fencing_bytes(fields: &[&[u8]]) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    for field in fields {
-        encoded.extend_from_slice(&(field.len() as u64).to_be_bytes());
-        encoded.extend_from_slice(field);
-    }
-    encoded
-}
-
-/// 业务作用：表示只能由安全发行器产生的 timer 租约 capability，禁止调用方用裸字符串伪造权威。
-///
-/// 类型不实现 `Clone`，且不提供字符串/UUID 构造入口；token 被 claim 消费后只能通过
-/// [`TimerClaimBatch::token`] 借用完成或交还本批 timer，不能再次用于领取另一批。
-#[derive(PartialEq, Eq)]
-pub struct TimerFencingToken(String);
-
-impl TimerFencingToken {
-    /// 业务作用：仅在 store 内读取 opaque token 的持久化表示，禁止 capability 原文泄漏到公共 API。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：固定为小写 UUID 文本的只读切片，仅用于 SQL fencing 条件绑定。
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// 业务作用：为单个 timer worker runtime 发行跨实例不碰撞、且只能消费一次的 fencing capability。
-///
-/// `owner` 仍承担租约归属与审计身份；实例私有随机 nonce 让两个误配同名副本或同名重启进程
-/// 也无法派生相同 token，进程内序号则保证同一实例连续领取各不相同。
-pub struct TimerFencingTokenIssuer {
-    /// 构造时由 OS 随机源生成且不允许配置注入，避免副本同名把 token 唯一性降级为运维约定。
-    runtime_nonce: Uuid,
-    /// 单个 runtime 实例内的领取序号；只参与 token 唯一性，不承载业务状态。
-    claim_seq: AtomicU64,
-}
-
-impl TimerFencingTokenIssuer {
-    /// 业务作用：建立一个独立的 fencing token 发行域，隔离副本误配与进程重启。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：持有不可注入 UUIDv4 runtime nonce、领取序号从零开始的新发行器。
-    pub fn new() -> Self {
-        // nonce 必须在 worker 构造时从随机源产生，禁止从 owner 或部署配置派生；否则同名副本
-        // 仍可能共享 fencing 权威，失去租约的旧进程便无法仅靠 token 被拒绝。
-        Self {
-            runtime_nonce: Uuid::new_v4(),
-            claim_seq: AtomicU64::new(0),
-        }
-    }
-
-    /// 业务作用：为一次 timer 批量领取生成只属于当前 runtime 实例和领取批次的 capability。
-    ///
-    /// 参数说明：
-    /// - `owner`: 本副本稳定的人类可读租约身份，仅用于域分离，不承担唯一性兜底。
-    /// - `now_ms`: 本轮领取时注入的 epoch 毫秒。
-    ///
-    /// 返回：包含 runtime 随机熵与进程内单调序号、且不能复制或从字符串重建的 token。
-    pub fn issue(&self, owner: &str, now_ms: i64) -> TimerFencingToken {
-        // Relaxed 足以保证同一 AtomicU64 不返回重复序号；token 不发布业务内存状态，
-        // 因而不需要用更强内存序把 fencing 与数据库事务错误地耦合。
-        let seq = self.claim_seq.fetch_add(1, Ordering::Relaxed);
-        TimerFencingToken(
-            Uuid::new_v5(
-                &FENCING_TOKEN_NAMESPACE,
-                &canonical_fencing_bytes(&[
-                    self.runtime_nonce.as_bytes(),
-                    owner.as_bytes(),
-                    &now_ms.to_be_bytes(),
-                    &seq.to_be_bytes(),
-                ]),
-            )
-            .to_string(),
-        )
-    }
-}
-
-impl Default for TimerFencingTokenIssuer {
-    /// 业务作用：按安全默认值创建独立的 worker fencing token 发行域。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：与 [`TimerFencingTokenIssuer::new`] 相同的新发行器。
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 业务作用：区分 timer 的作用域，把实例级期限与步骤级超时放进不同命名空间。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerScope<'a> {
-    /// 实例级（全局 deadline、resolution 预算等）。
-    Instance,
-    /// 步骤级，绑定真实 step name。
-    Step(&'a StepName),
-}
-
-impl TimerScope<'_> {
-    /// 业务作用：返回作用域类别的稳定文本名，写入 `scope_kind` 列。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：`INSTANCE` 或 `STEP`。
-    pub fn kind_str(&self) -> &'static str {
-        match self {
-            Self::Instance => "INSTANCE",
-            Self::Step(_) => "STEP",
-        }
-    }
-
-    /// 业务作用：返回作用域键，写入 `scope_key` 列。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：实例级返回固定 canonical key；步骤级返回真实 step name。
-    pub fn key_str(&self) -> &str {
-        match self {
-            Self::Instance => INSTANCE_SCOPE_KEY,
-            Self::Step(step) => step.as_str(),
-        }
-    }
-}
-
-/// 业务作用：表示 timer 行的生命周期状态。
-///
-/// 分支说明：`Claimed` 是带租约的中间态——租约到期未完成会被其它副本以新 fencing token
-/// 重新领取，旧 owner 的完成尝试随后被 fencing 拒绝。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerState {
-    /// 等待到期。
-    Pending,
-    /// 已被某个副本领取，租约生效中。
-    Claimed,
-    /// 已消费：到期触发的状态迁移已提交。
-    Fired,
-    /// 已作废：所属步骤/实例已迁移离开，即使到期也不得触发。
-    Cancelled,
-}
-
-impl TimerState {
-    /// 业务作用：返回状态的稳定文本名，用于持久化列与运维查询。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：timer 状态稳定名称。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "PENDING",
-            Self::Claimed => "CLAIMED",
-            Self::Fired => "FIRED",
-            Self::Cancelled => "CANCELLED",
-        }
-    }
-
-    /// 业务作用：把持久化列中的稳定文本解析回状态，是 `as_str` 的严格逆映射。
-    ///
-    /// 参数说明：
-    /// - `raw`: 持久化读出的状态文本。
-    ///
-    /// 返回：识别成功返回对应状态；文本不在词汇表内返回 `None`，调用方按数据损坏处理。
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "PENDING" => Some(Self::Pending),
-            "CLAIMED" => Some(Self::Claimed),
-            "FIRED" => Some(Self::Fired),
-            "CANCELLED" => Some(Self::Cancelled),
-            _ => None,
-        }
-    }
-}
-
-/// 业务作用：描述一次 timer 调度的全部持久化输入。
-///
-/// 字段说明：`expected_saga_version` 是调度时刻的实例版本——消费方触发迁移前必须
-/// 复验实例当前版本仍与之一致，版本前进说明 timer 语义所依附的状态已经变化。
-#[derive(Debug, Clone)]
-pub struct TimerSpec<'a> {
-    /// timer 的稳定身份，由调用方生成（跨调度重试稳定）。
-    pub timer_id: &'a str,
-    /// 所属实例。
-    pub saga_id: &'a SagaId,
-    /// 作用域。
-    pub scope: TimerScope<'a>,
-    /// timer 种类（如步骤超时、resolution 预算），进入唯一键与运维查询。
-    pub kind: &'a str,
-    /// 到期时刻（epoch 毫秒）。
-    pub due_at_ms: i64,
-    /// 关联的尝试序号；同一 attempt 的调度重试命中唯一键幂等吸收。
-    pub attempt: AttemptNo,
-    /// 调度时刻的实例版本，消费前复验。
-    pub expected_saga_version: u64,
-}
-
-/// 业务作用：区分 timer 调度的两种合法结果，使调度事务的崩溃重试可被幂等吸收。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerSchedule {
-    /// 本事务真实创建了 timer。
-    Scheduled,
-    /// 同一 (scope, kind, attempt) 已存在同 id timer（调度重试）；无新副作用。
-    AlreadyScheduled,
-}
-
-/// 业务作用：区分重排 timer 的结果；终态 timer 不得原地复活，新的业务动作必须用新 attempt。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerReschedule {
-    /// 已重排：due 更新、generation 递增、回到 `PENDING`。
-    Rescheduled,
-    /// 目标 timer 不存在、已 `FIRED` 或已 `CANCELLED`；调用方应按新业务裁决决定是否
-    /// 为新 attempt 调度新 timer，不能复活旧身份。
-    NotFound,
-}
-
-/// 业务作用：区分带 fencing 的 timer 操作结果。
-///
-/// 分支说明：`Lost` 表示租约已被其它副本接管或 timer 已被重排/作废——旧 owner
-/// **必须立即停止推进**，不得基于该 timer 发布任何命令。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerFencing {
-    /// 操作生效，fencing 校验通过。
-    Applied,
-    /// fencing 失败：租约/状态已不属于本 owner。
-    Lost,
-}
-
-/// 业务作用：claim 批次中的 timer 行，携带除 capability 外的全部持久化复查依据。
-///
-/// fencing token 刻意只由 [`TimerClaimBatch`] 持有，避免每行复制后被取出用于另一轮 claim。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SagaTimerRow {
-    /// timer 稳定身份。
-    pub timer_id: String,
-    /// 所属实例。
-    pub saga_id: SagaId,
-    /// 作用域类别（`INSTANCE`/`STEP`）。
-    pub scope_kind: String,
-    /// 作用域键。
-    pub scope_key: String,
-    /// timer 种类。
-    pub kind: String,
-    /// 到期时刻（epoch 毫秒）。
-    pub due_at_ms: i64,
-    /// 下次允许 worker 领取的时刻；暂停退避只改本列，不顺延业务 `due_at`。
-    pub available_at_ms: i64,
-    /// 当前状态。
-    pub state: TimerState,
-    /// 关联尝试序号。
-    pub attempt: AttemptNo,
-    /// 调度时刻的实例版本；消费前必须与实例当前版本比对。
-    pub expected_saga_version: u64,
-    /// 重排代数；每次重排递增，旧代 timer 即使迟到也不能推进新状态。
-    pub generation: u32,
-    /// 当前租约持有者。
-    pub owner: Option<String>,
-    /// 租约到期时刻（epoch 毫秒）。
-    pub claimed_until_ms: Option<i64>,
-}
-
-/// 业务作用：绑定一次领取返回的 timer 集合与其不可复制 fencing capability。
-///
-/// token 的所有权保留在批次内，调用方只能借用它完成或交还本批 timer；这使同一 token
-/// 无法再次传给 [`MySqlSagaStore::claim_due_timers`]，从类型层落实“每轮唯一”。
-pub struct TimerClaimBatch {
-    token: TimerFencingToken,
-    timers: Vec<SagaTimerRow>,
-}
-
-impl TimerClaimBatch {
-    /// 业务作用：借用本批领取的 fencing capability，供完成、交还或 Orchestrator 裁决使用。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：与本批数据库领取绑定的只读 token；所有权不会泄露给调用方复用。
-    pub fn token(&self) -> &TimerFencingToken {
-        &self.token
-    }
-
-    /// 业务作用：读取本轮成功领取的 timer 快照集合。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：只读 timer 切片；每项只能凭本批 [`Self::token`] 通过 fencing。
-    pub fn timers(&self) -> &[SagaTimerRow] {
-        &self.timers
-    }
-
-    /// 业务作用：返回本轮成功领取的 timer 数量，供有界批处理和容量门禁计数。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：本批 timer 数；零表示没有到期或可接管的 timer。
-    pub fn len(&self) -> usize {
-        self.timers.len()
-    }
-
-    /// 业务作用：判断本轮是否未领取任何 timer，避免调用方用 token 存在性误判工作量。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：timer 集合为空时返回 `true`。
-    pub fn is_empty(&self) -> bool {
-        self.timers.is_empty()
-    }
-}
 
 impl MySqlSagaStore {
     /// 业务作用：在触发它的状态迁移事务内调度一个 durable timer。
@@ -586,7 +266,7 @@ impl MySqlSagaStore {
         )
         .bind(TimerState::Claimed.as_str())
         .bind(owner)
-        .bind(fencing_token.as_str())
+        .bind(fencing_token.persistence_value())
         .bind(claimed_until)
         .bind(TimerState::Pending.as_str())
         .bind(now_ms)
@@ -604,7 +284,7 @@ impl MySqlSagaStore {
              ORDER BY due_at ASC",
         )
         .bind(owner)
-        .bind(fencing_token.as_str())
+        .bind(fencing_token.persistence_value())
         .bind(TimerState::Claimed.as_str())
         .fetch_all(connection.as_mut())
         .await
@@ -613,10 +293,7 @@ impl MySqlSagaStore {
             .iter()
             .map(parse_timer_row)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TimerClaimBatch {
-            token: fencing_token,
-            timers,
-        })
+        Ok(TimerClaimBatch::from_committed_claim(fencing_token, timers))
     }
 
     /// 业务作用：在到期触发的状态迁移事务内，以 fencing 校验消费一个已领取 timer。
@@ -651,7 +328,7 @@ impl MySqlSagaStore {
         .bind(TimerState::Fired.as_str())
         .bind(timer_id)
         .bind(TimerState::Claimed.as_str())
-        .bind(fencing_token.as_str())
+        .bind(fencing_token.persistence_value())
         .bind(now_ms)
         .execute(connection.as_mut())
         .await
@@ -705,7 +382,7 @@ impl MySqlSagaStore {
         .bind(available_at_ms)
         .bind(timer_id)
         .bind(TimerState::Claimed.as_str())
-        .bind(fencing_token.as_str())
+        .bind(fencing_token.persistence_value())
         .bind(now_ms)
         .execute(connection.as_mut())
         .await

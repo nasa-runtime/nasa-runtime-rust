@@ -1,6 +1,8 @@
 #[cfg(any(
     feature = "outbox",
+    feature = "outbox-pgsql",
     feature = "saga",
+    feature = "saga-pgsql",
     feature = "cache",
     feature = "scheduling"
 ))]
@@ -83,7 +85,7 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Log => crate::log::validate_log_section(tree, phase)?,
             #[cfg(feature = "nacos-config")]
             ComponentId::NacosConfig => crate::nacos_config::validate_nacos_section(tree, phase)?,
-            #[cfg(feature = "db")]
+            #[cfg(any(feature = "db", feature = "db-pgsql"))]
             ComponentId::Db => crate::db::validate_datasource_sections(tree, phase)?,
             #[cfg(feature = "redis")]
             ComponentId::Redis => crate::redis::validate_redis_section(tree, phase)?,
@@ -97,9 +99,9 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Cache => crate::cache::validate_cache_section(tree, phase)?,
             #[cfg(feature = "partition")]
             ComponentId::Partition => crate::partition::validate_partition_section(tree, phase)?,
-            #[cfg(feature = "saga")]
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
             ComponentId::Saga => crate::saga::validate_saga_section(tree, phase)?,
-            #[cfg(feature = "outbox")]
+            #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
             ComponentId::Outbox => crate::outbox::validate_outbox_section(tree, phase)?,
             #[cfg(feature = "kafka")]
             ComponentId::Kafka => crate::kafka::validate_kafka_sections(tree, phase)?,
@@ -138,9 +140,14 @@ fn validate_managed_references(
     tree: &Value,
     phase: ApplicationPhase,
 ) -> ApplicationResult<()> {
-    #[cfg(any(feature = "outbox", feature = "saga"))]
+    #[cfg(any(
+        feature = "outbox",
+        feature = "outbox-pgsql",
+        feature = "saga",
+        feature = "saga-pgsql"
+    ))]
     let datasource_names = configured_datasource_names(tree);
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     let user_hook_database = components.contains(&ComponentId::Saga)
         && tree
             .get("saga")
@@ -149,12 +156,12 @@ fn validate_managed_references(
             .and_then(Value::as_str)
             == Some("user_hook");
 
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     if components.contains(&ComponentId::Outbox) {
         let reference = string_setting(tree, "outbox", "datasource_ref").unwrap_or("default");
-        #[cfg(feature = "saga")]
+        #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
         let deferred_default = user_hook_database && reference == "default";
-        #[cfg(not(feature = "saga"))]
+        #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
         let deferred_default = false;
         if !deferred_default && !datasource_names.contains(reference) {
             return Err(crate::ApplicationError::new(
@@ -167,7 +174,7 @@ fn validate_managed_references(
         }
     }
 
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     if components.contains(&ComponentId::Saga) {
         let reference = string_setting(tree, "saga", "datasource_ref").unwrap_or("default");
         if !(datasource_names.contains(reference) || user_hook_database && reference == "default") {
@@ -251,7 +258,12 @@ fn validate_managed_references(
 /// 参数说明：`tree` 是已经通过 DB 段结构校验的候选配置。
 ///
 /// 返回：单库形态只含 `default`，多库形态包含 map 的全部权威键，缺段时为空。
-#[cfg(any(feature = "outbox", feature = "saga"))]
+#[cfg(any(
+    feature = "outbox",
+    feature = "outbox-pgsql",
+    feature = "saga",
+    feature = "saga-pgsql"
+))]
 fn configured_datasource_names(tree: &Value) -> BTreeSet<&str> {
     if tree.get("database").is_some() {
         return BTreeSet::from(["default"]);
@@ -321,7 +333,13 @@ fn ensure_redis_reference(
 /// 参数说明：`tree`、`section` 与 `field` 指向已完成结构校验的候选配置位置。
 ///
 /// 返回：字段存在且为字符串时返回借用；缺失时返回 `None`。
-#[cfg(any(feature = "outbox", feature = "saga", feature = "scheduling"))]
+#[cfg(any(
+    feature = "outbox",
+    feature = "outbox-pgsql",
+    feature = "saga",
+    feature = "saga-pgsql",
+    feature = "scheduling"
+))]
 fn string_setting<'a>(tree: &'a Value, section: &str, field: &str) -> Option<&'a str> {
     tree.get(section)
         .and_then(Value::as_object)

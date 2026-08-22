@@ -9,14 +9,15 @@ description = "Named ambient MySQL transactions with a managed datasource regist
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "transaction", "database", "runtime", "async"]
+categories = ["database", "asynchronous"]
 
 
 [lib]
 name = "natx"
 [dependencies]
-natx-macro = { package = "natx-macro", version = "1.0.0" }
+natx-core = { version = "1.0.0" }
+natx-macro = { package = "natx-macro", version = "1.0.1" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 anyhow = "1"

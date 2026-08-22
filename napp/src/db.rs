@@ -29,9 +29,9 @@ pub(crate) const DEFAULT_DATASOURCE: &str = "default";
 /// 两种写法只允许出现一种：同时出现时无法确定 `default` 该取谁，隐式合并会在多库场景下
 /// 静默改变事务默认库，因此按 直接报冲突。
 ///
-/// 两种写法都以**原始 JSON 值**接收:`migrations` 是 napp 编排字段而非 natx
-/// 数据源字段,而 `DataSourceConfig` 是 `deny_unknown_fields`,因此必须先把 `migrations` 从每个
-/// 数据源对象里剥离(见 [`split_datasource`]),再反序列化成 `DataSourceConfig`。
+/// 两种写法都以**原始 JSON 值**接收：`driver` 与 `migrations` 是 napp 编排字段而非 natx
+/// 数据源字段，而 `DataSourceConfig` 是 `deny_unknown_fields`，因此必须先由 [`split_datasource`]
+/// 解释并剥离这两个字段，再反序列化成 `DataSourceConfig`。
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DbConfigRoot {
@@ -123,7 +123,8 @@ async fn run_db_monitor(
     application: Application,
     inputs: Vec<DbMonitorInput>,
 ) -> ApplicationResult<()> {
-    loop {
+    let mut lifecycle = application.subscribe_state();
+    'monitor: loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
                 let now = Instant::now();
@@ -135,7 +136,10 @@ async fn run_db_monitor(
                 return Ok(());
             }
             ApplicationState::Starting => {
-                tokio::time::sleep(DB_MONITOR_INTERVAL).await;
+                // Ready 或停机转换必须立即唤醒 monitor，不能让固定探测间隔侵占全局停机预算。
+                if lifecycle.changed().await.is_err() {
+                    return Ok(());
+                }
                 continue;
             }
             ApplicationState::Ready => {}
@@ -144,7 +148,18 @@ async fn run_db_monitor(
         let now = Instant::now();
         for input in &inputs {
             // acquire 成功即触发 sqlx test_before_acquire ping;连接立即归还池,不占业务连接。
-            match input.pool.acquire().await {
+            // 停机权威优先于连接探测；连接池不可达时也不能等待 acquire timeout 后才开始反向清理。
+            let acquired = tokio::select! {
+                biased;
+                changed = lifecycle.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                    continue 'monitor;
+                }
+                result = input.pool.acquire() => result,
+            };
+            match acquired {
                 Ok(_conn) => {
                     input
                         .contributor
@@ -157,7 +172,16 @@ async fn run_db_monitor(
                 }
             }
         }
-        tokio::time::sleep(DB_MONITOR_INTERVAL).await;
+        // 生命周期变化优先，正常运行时才等待下一轮探测。
+        tokio::select! {
+            biased;
+            changed = lifecycle.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+            }
+            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {}
+        }
     }
 }
 
@@ -655,11 +679,11 @@ fn read_datasources(
     }
 }
 
-/// 业务作用：从单个数据源配置对象里剥离 napp 编排字段 `migrations`,返回 (纯数据源配置, 可选门禁设置)。
+/// 业务作用：解释 MySQL-only 构建的数据源 driver，并剥离 napp 编排字段后生成建池与迁移配置。
 ///
-/// `DataSourceConfig` 是 `deny_unknown_fields`,内嵌的 `migrations` 会让它整体解析失败,因此必须在
-/// 反序列化前把该键摘出。摘出后的剩余对象仍按 `deny_unknown_fields` 严格校验,数据源字段本身的拼写
-/// 错误不受影响;`MigrationSettings` 自身同样 `deny_unknown_fields`,其内部拼写错误在此处即被拒绝。
+/// `driver: mysql` 与省略 driver 等价；显式声明 PostgreSQL 时直接指出缺少 `db-pgsql` feature，
+/// 不把编译能力缺失误报为未知配置字段。摘出编排字段后的对象仍按 `deny_unknown_fields` 严格校验，
+/// 数据源字段本身的拼写错误不受影响；`MigrationSettings` 自身同样拒绝未知字段。
 ///
 /// # 参数
 ///
@@ -671,9 +695,38 @@ fn split_datasource(
     name: &str,
     phase: ApplicationPhase,
 ) -> ApplicationResult<(DataSourceConfig, Option<namigrate::MigrationSettings>)> {
-    let migrations_value = value
+    let object = value
         .as_object_mut()
-        .and_then(|map| map.remove("migrations"));
+        .ok_or_else(|| db_error(phase, format!("datasource `{name}` must be an object")))?;
+    match object.remove("driver") {
+        None => {}
+        Some(serde_json::Value::String(driver)) if driver == "mysql" => {}
+        Some(serde_json::Value::String(driver)) if driver == "postgresql" => {
+            return Err(db_error(
+                phase,
+                format!("datasource `{name}` requires napp feature `db-pgsql`"),
+            ));
+        }
+        Some(_) => {
+            return Err(db_error(
+                phase,
+                format!("datasource `{name}` driver is invalid"),
+            ));
+        }
+    }
+    if object.contains_key("connection_topology") {
+        return Err(db_error(
+            phase,
+            format!("datasource `{name}` MySQL does not accept connection_topology"),
+        ));
+    }
+    if object.contains_key("schema") {
+        return Err(db_error(
+            phase,
+            format!("datasource `{name}` MySQL does not accept schema"),
+        ));
+    }
+    let migrations_value = object.remove("migrations");
     let migrations = match migrations_value {
         Some(raw) => {
             let settings =
@@ -787,13 +840,37 @@ pub(crate) fn validate_datasource_sections(
 /// - `application`：持有组件资源的共享应用上下文。
 /// - `name`：数据源 qualifier；单库配置固定为 `default`。
 ///
-/// 返回：命中时克隆 Application 资源表中的同一受管 pool；缺失时保留资源容器的类型化错误。
+/// 返回：模式机、当前 Application registry 与名称全部匹配时返回同一受管 pool；引导中、名称缺失、
+/// owner 失配或停机时返回稳定的数据源查找分类，不暴露资源容器的 Rust 类型路径。
 pub(crate) async fn datasource_handle(
     application: &Application,
     name: &str,
 ) -> ApplicationResult<MySqlPool> {
-    let pool = application.named_resource::<MySqlPool>(name).await?;
-    Ok(pool.clone())
+    // 引导窗口必须先由进程级权威封口，不能让尚未登记的 Application 资源覆盖 RegistryUnavailable。
+    natx_core::resolve_datasource(name, natx_core::DatabaseDriver::MySql).map_err(|error| {
+        db_error_src(
+            ApplicationPhase::Running,
+            "MySQL datasource lookup failed",
+            error,
+        )
+    })?;
+    let registry = application
+        .resource::<Arc<DataSourceRegistry>>()
+        .await
+        .map_err(|_| {
+            db_error_src(
+                ApplicationPhase::Running,
+                "MySQL datasource lookup failed",
+                natx_core::DataSourceLookupError::RegistryUnavailable,
+            )
+        })?;
+    registry.pool(name).map_err(|error| {
+        db_error_src(
+            ApplicationPhase::Running,
+            "MySQL datasource lookup failed",
+            error,
+        )
+    })
 }
 
 /// 业务作用：创建数据源组件的稳定生命周期错误。

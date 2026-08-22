@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use naoutbox_core::{OutboxArchive, OutboxEvent, OutboxRetentionPolicy};
+use naoutbox_core::{OutboxArchive, OutboxEvent, OutboxRetentionPolicy, RetentionRoundReport};
 use sqlx::{pool::PoolConnection, MySql, MySqlConnection, Row as _};
 
 use crate::{map_err, MySqlOutbox, OutboxStoreError};
@@ -75,24 +75,6 @@ fn map_commit_err(error: sqlx::Error) -> OutboxStoreError {
 /// 清理会话的锁等待上界（秒）：候选行与业务写发生行锁冲突时快速让路，
 /// 由下一轮重试，绝不让清理反压业务提交。
 const RETENTION_LOCK_WAIT_SECONDS: u32 = 5;
-
-/// 业务作用：一轮保留清理的低基数结果，供受管层累计指标与退避决策。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RetentionRoundReport {
-    /// 本轮真实写入归档端（或收据重查确认）的事件数。
-    pub archived: u64,
-    /// 本轮删除的已投递行数。
-    pub deleted_dispatched: u64,
-    /// 本轮删除的死信行数。
-    pub deleted_dead: u64,
-    /// retention claim 被其它 owner 持有，本轮未执行任何清理。
-    pub claim_contended: bool,
-    /// 本轮因时间预算耗尽提前停止，仍有候选留待下一轮。被截断的数据库步骤随弃连
-    /// 回滚,已计入的删除/归档数都是已提交事实,不存在轮次返回后才生效的副作用。
-    pub budget_exhausted: bool,
-    /// 本轮观察到的最老候选年龄（毫秒）；无候选时为空。
-    pub oldest_candidate_age_ms: Option<i64>,
-}
 
 /// 绑定 MySQL session named lock 的 retention claim。
 ///

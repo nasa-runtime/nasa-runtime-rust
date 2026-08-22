@@ -1,0 +1,33 @@
+[package]
+name = "namapper-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Declarative PostgreSQL mapper runtime for SQLx and ambient transactions"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postgresql", "mapper", "sql", "database"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[features]
+default = []
+grouped-cache = ["dep:cacheable"]
+redis-cache = ["namapper-core/redis-cache"]
+
+[dependencies]
+namapper-core = { version = "1.0.0" }
+namapper-macro = { version = "1.0.2" }
+natx-pgsql = { version = "1.0.0" }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json"] }
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+cacheable = { version = "1.0.2", optional = true }
+futures-core = "0.3"
+futures-util = "0.3"
+linkme = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

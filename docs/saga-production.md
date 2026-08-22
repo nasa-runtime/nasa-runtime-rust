@@ -1,8 +1,8 @@
 # Saga 生产运行指南
 
-本文描述 `nasaga-core`、`nasaga-mysql`、`nasaga-runtime` 与 `nasaga-macro` 的生产接线、故障收敛和
-值班边界。Saga 的一致性基础是本地事务、Outbox 至少一次投递、Inbox 幂等、持久化状态机和显式补偿；
-它不提供跨服务 ACID 或并发隔离。
+本文描述 `nasaga-core`、`nasaga-backend`、MySQL/PostgreSQL Store、共享 runtime core、后端包装与
+`nasaga-macro` 的生产接线、故障收敛和值班边界。Saga 的一致性基础是本地事务、Outbox 至少一次投递、
+Inbox 幂等、持久化状态机和显式补偿；它不提供跨服务 ACID 或并发隔离。
 
 ## 核心价值与组件边界
 
@@ -13,8 +13,10 @@ Saga 面向“一个业务意图需要跨多个本地事务完成”的场景。
 | 组件 | 公开职责 | 不承担的职责 |
 | --- | --- | --- |
 | `nasaga-core` | definition、摘要、身份、typed outcome、封闭状态机、冻结补偿计划 | I/O、线程、连接、重试循环 |
-| `nasaga-mysql` | 实例/attempt/journal/timer/gate/审计/配额事实、CAS 与 fencing | 跨库事务、transport、业务裁决 |
-| `nasaga-runtime` | Orchestrator、参与方事务 wrapper、恢复管理、trace、调度批次和 transport 裁决；可生成 Saga gRPC service/client | listener 生命周期、部署 ACL、业务资源并发控制 |
+| `nasaga-backend` | 后端中立 Store、事务与 Inbox/Outbox 能力合同 | SQL 方言、连接池所有权、状态裁决 |
+| `nasaga-mysql` / `nasaga-pgsql` | 对应数据库的实例、attempt、journal、timer、gate、审计、配额事实、CAS 与 fencing | 跨库事务、transport、业务裁决 |
+| `nasaga-runtime-core` | 唯一 Orchestrator 状态机、恢复管理、trace、调度批次和 transport 裁决 | SQL driver、listener 生命周期、部署 ACL |
+| `nasaga-runtime` / `nasaga-runtime-pgsql` | 对应后端事务、Inbox/Outbox 与共享状态机的组合；可生成 Saga gRPC service/client | 跨 driver 原子事务、业务资源并发控制 |
 | `nasaga-macro` | `#[saga]` 声明检查、descriptor 收集、类型化 adapter | 全局流程定义、运行期状态推进 |
 | `napp` / `nasa` | Ready 门禁、组件所有权、timer/consumer/Outbox 监督与门面重导出 | 替代本地事务或自动选择 transport |
 
@@ -33,8 +35,14 @@ connector 若跳过这两个本地事务域，都不属于本产品合同。
 
 ## 部署拓扑
 
-每个 Orchestrator 副本运行相同的流程定义集合，并连接同一 Orchestrator MySQL 主写端。每个参与方
-拥有独立数据库，业务事实、participant gate、Inbox 和 result Outbox 位于同一事务域。
+每个 Orchestrator 副本运行相同的流程定义集合，并连接所选 MySQL 或 PostgreSQL datasource 的同一
+主写端。每个参与方拥有独立本地事务域，业务事实、participant gate、Inbox 和 result Outbox 位于
+同一 driver、同一 datasource。
+
+一个 Application 可以同时受管 MySQL 与 PostgreSQL 数据源，但一组 Saga 角色必须明确选择一种 driver
+和一个 datasource。Orchestrator 的状态、Inbox、command Outbox、timer 与审计不能拆到不同 driver；
+参与方 gate、业务写与 result Outbox 也不能跨 driver 提交。需要跨库协同时应把数据库边界建模为 Saga
+步骤，而不是伪装成本地原子事务。
 
 选择 Kafka 托管适配器时，至少提供 command、result 和 DLT 三类 topic：
 
@@ -46,8 +54,9 @@ connector 若跳过这两个本地事务域，都不属于本产品合同。
 消费者组和运维主体使用独立凭据，ACL 默认拒绝，仅开放所需 topic 与动作。
 
 Saga 核心不依赖 Kafka。Outbox 发布端是 provider-neutral 接口，HTTP、Kafka 或 Redis Streams 都可以
-承载 command/result。当前仓库提供两个托管消费适配器:Kafka(`saga-kafka`)与 Redis Streams
-(`saga-redis-stream`,见下文"Redis Streams 受管接入")——后者已具备消费组读取、稳定消息身份、
+承载 command/result。当前仓库为两种数据库后端提供 Kafka（`saga-kafka` / `saga-kafka-pgsql`）与
+Redis Streams（`saga-redis-stream` / `saga-redis-stream-pgsql`，见下文“Redis Streams 受管接入”）
+托管消费适配器——后者已具备消费组读取、稳定消息身份、
 显式 ACK、pending reclaim、`XAUTOCLAIM` 重领、先落 DLT 后 ACK 的原子脚本、积压观测与优雅停机。
 仍然成立的边界:只把 `XADD` 当作发布成功而没有对应消费闭环,不满足生产合同;选择哪个 transport
 是业务的显式声明,不能仅替换配置键。
@@ -91,8 +100,9 @@ Outbox。选择内置 Kafka transport 时再增加 `"kafka"`，不使用 Kafka �
 
 ## 本地事务与 ACK
 
-Orchestrator 每次推进在同一 MySQL 事务中完成 Inbox claim、attempt journal、实例 CAS、迁移事实、下一
-command Outbox 和 durable timer。参与方在同一事务中完成 Inbox、gate、业务事实和 result Outbox。
+Orchestrator 每次推进在所选 MySQL 或 PostgreSQL datasource 的同一本地事务中完成 Inbox claim、
+attempt journal、实例 CAS、迁移事实、下一 command Outbox 和 durable timer。参与方在同一后端事务中
+完成 Inbox、gate、业务事实和 result Outbox。
 
 ACK 规则固定如下：
 
@@ -147,14 +157,18 @@ Orchestrator 并发竞争同一实例时，只有数据库 CAS 胜者能够推�
 
 ## 数据库迁移
 
-生产环境按 [Saga 数据库迁移](../nasaga-mysql/migrations/README.md) 的固定顺序执行 SQL。排序规则转换
-可能重建大表，应在目标规模副本上确定 metadata lock、复制延迟、磁盘余量与完成时间预算。
+MySQL 生产环境按 [Saga 迁移顺序](../nasaga-mysql/migrations/README.md) 执行增量 SQL，并执行
+[Outbox 迁移顺序](../naoutbox-mysql/migrations/README.md)。排序规则转换可能重建大表，应在目标规模
+副本上确定 metadata lock、复制延迟、磁盘余量与完成时间预算。
 
-每个承载 `outbox_event` 的 Orchestrator 或参与方数据库还必须执行
-[Outbox 数据库迁移](../naoutbox-mysql/migrations/README.md)。`idx_dispatchable (dispatched, dead, id)`
-保证待投递计数覆盖读取，并让领取查询只定位真实候选后按主键回表，不会反复扫描本地死信；
-`idx_dead (dead, id)` 保证指标抓取不随历史已投递行数退化。两项索引必须在开放 dispatcher 与指标
-抓取前完成。
+PostgreSQL Orchestrator 执行 [`create_saga.sql`](../nasaga-pgsql/migrations/create_saga.sql)，参与方执行
+[`create_saga_participant.sql`](../nasaga-pgsql/migrations/create_saga_participant.sql)，承载 Outbox 的
+事务域执行 [`create_outbox.sql`](../naoutbox-pgsql/migrations/create_outbox.sql)。PostgreSQL timer 领取
+依赖 `FOR UPDATE SKIP LOCKED`，结构中的部分索引分别覆盖可投递、死信与 retention 候选。
+
+MySQL 的 `(dispatched, dead, id)` / `(dead, id)` 复合索引与 PostgreSQL 的 backend-specific 部分索引
+都必须在开放 dispatcher 与指标抓取前完成；应以实际领取、计数和清理 SQL 的执行计划核对，而不是把
+一个后端的索引形状复制给另一个后端。
 
 参与方摘要列采用两阶段封口：先添加可空列并从受信定义记录回填，再添加格式 `CHECK` 和 `NOT NULL`。
 摘要来源不唯一、影响行数异常或残留非法值时停止发布。历史请求无法重建的摘要保持未知并由运行时
@@ -164,7 +178,7 @@ fail-closed，不能为了通过启动检查伪造数据。
 
 容量计划至少覆盖：
 
-- MySQL 业务请求、消费事务、Outbox、timer 和管理查询的连接峰值；
+- 所选 MySQL/PostgreSQL 主写端的业务请求、消费事务、Outbox、timer 和管理查询连接峰值；
 - 所选 transport 的正常流量、retry storm、DLT 积压和后端故障后的追赶速率；
 - 每条认证信任边在完整 replay 窗口内的 nonce 数量；
 - Inbox、journal、gate、Outbox、DLT 和审计表在 replay horizon 内的存储增长；
@@ -189,7 +203,7 @@ payload、凭据、完整 reason、effect id 或 command id。
 - COMMIT/回滚结果不确定；
 - producer 认证、replay 或 capacity 拒绝；
 - timer fencing 丢失、CAS 冲突异常升高；
-- transport 分区或消费组停滞、MySQL 复制延迟和连接池耗尽。
+- transport 分区或消费组停滞、所选数据库复制延迟和连接池耗尽。
 
 告警规则位于 [Saga Prometheus rules](alerts/saga-prometheus.yml)。值班路由需要区分业务拒绝、认证异常、
 容量耗尽和基础设施不可达，不能用统一重启掩盖根因。
@@ -347,7 +361,7 @@ Outbox 保留清理在提交前步骤使用单轮 deadline；删除 `COMMIT` 发
 该轮不虚增已确认删除数，也不刷新最后成功时刻；下一轮以持久候选事实继续收敛。全局停机 deadline
 仍拥有最终进程收割权，shutdown report 必须保留未优雅收束的证据。
 
-灾难恢复需要保存 MySQL point-in-time recovery、transport frontier 与保留策略、流程定义快照、ACL、
+灾难恢复需要保存所选数据库的 point-in-time recovery、transport frontier 与保留策略、流程定义快照、ACL、
 密钥材料和告警配置。恢复后先隔离业务入口，核对数据库时间点、定义摘要、consumer group frontier、
 Outbox/DLT 积压和 timer 租约，再逐步恢复消费与写流量。
 
@@ -355,7 +369,7 @@ Outbox/DLT 积压和 timer 租约，再逐步恢复消费与写流量。
 
 代码仓库提供协议、安全不变量和本地故障场景；以下结论必须由实际部署环境负责人签署：
 
-- 候选 MySQL 副本拓扑、提升流程、备份恢复点与数据丢失目标；
+- 候选 MySQL 或 PostgreSQL 副本拓扑、提升流程、备份恢复点与数据丢失目标；
 - Kafka broker 拓扑、副本配置、ACL、凭据轮换和跨可用区故障策略；
 - 目标峰值、积压清空速率、连接池与存储余量；
 - 在线 DDL 维护窗、回退方案和审批记录；

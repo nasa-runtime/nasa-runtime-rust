@@ -32,8 +32,8 @@ use syn::{
 ///   `partition` feature。
 /// - `"grpc"`：启用受管 gRPC service registry 与 listener。业务在 UserHook 登记 generated server，
 ///   容器在 Ready 自动装配、绑定端口、监督 serve 所有权并在停机时排空；需要 `grpc` feature。
-/// - `"db"`：启用 MySQL 数据源。启动时校验并探测地址、鉴权和数据库，创建连接池、注册应用资源，
-///   同时注入 `#[transactional]` 和 Mapper 使用的事务运行时；需要 `tx` feature。
+/// - `"db"`：启用 MySQL/PostgreSQL 数据源。启动时按 driver 校验并探测地址、鉴权和数据库，创建连接池、
+///   注册应用资源，同时注入对应的事务与 Mapper 运行时；需要 `tx` 或 `tx-pgsql` feature。
 /// - `"redis"`：启用 Redis 客户端。启动时校验配置、探测 standalone/cluster 拓扑并建立受管客户端，
 ///   停机时由容器显式关闭；需要 `redis` feature。
 /// - `"redis-job"`：启用多 source RedisJob 长生命周期运行时，并隐式加入 Redis；需要
@@ -41,7 +41,7 @@ use syn::{
 /// - `"cache"`：启用由容器拥有的两级缓存运行时与可选跨节点失效广播；需要 `cache` feature。
 /// - `"saga"`：启用 Saga Ready 门禁、只读能力发布与 durable timer 监督，并隐式加入 DB 与
 ///   Outbox。业务在 UserHook 通过 `configure_saga` 提交 Orchestrator 或参与方计划；需要
-///   `saga-runtime` feature。
+///   `saga-runtime` 或 `saga-runtime-pgsql` feature。
 /// - `"kafka"`：启用受管 Kafka producer/consumer。负责 broker 探测、consumer 收集与启动、动态
 ///   readiness、运行期健康监控、停止消费和 producer flush；需要 `kafka` feature。
 /// - `"outbox"`：启用事务型 Outbox dispatcher。业务在 UserHook 提交发布计划，组件负责持续投递、
@@ -66,16 +66,17 @@ use syn::{
 ///
 /// # YAML 创建受管单源与多源
 ///
-/// MySQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数必须来自最终 YAML；Application 在启动期
+/// MySQL、PostgreSQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数必须来自最终 YAML；Application 在启动期
 /// 创建并冻结完整命名表，业务 `main` 只取得受管句柄，不自行建池或连接。三类资源的配置形态如下：
 ///
 /// | 资源 | 单源 | 多源 | 默认入口 |
 /// | --- | --- | --- | --- |
 /// | MySQL | `database` | `datasources.<name>` | `app.default_datasource().await` |
+/// | PostgreSQL | `database` | `datasources.<name>` | `app.default_pg_datasource().await` |
 /// | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | `app.default_redis().await` |
 /// | Kafka | `kafka` | `kafkas.<client>` | `app.default_kafka()` |
 ///
-/// 单源根与多源根互斥。MySQL 单源固定发布为 `default`；Redis 单源的持久身份是 `primary`，查询边界
+/// 单源根与多源根互斥。数据库单源固定发布为 `default`；Redis 单源的持久身份是 `primary`，查询边界
 /// 同时接受 `default`；Kafka 单 client 省略 `client_name` 时默认为 `default`。多源示例：
 ///
 /// ```yaml
@@ -1703,8 +1704,8 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
         }
         names.push(name);
     }
-    // Saga 的当前持久层固定使用 MySQL，并且消息闭环必然包含 Inbox 与 Outbox；Inbox 没有独立
-    // 生命周期，DB 与 Outbox 只在缺失时补入。业务显式写出依赖仍收敛为同一组件图，不应误判重复。
+    // Saga 的本地闭环必然包含同 driver 的 Inbox 与 Outbox；Inbox 没有独立生命周期，DB 与 Outbox
+    // 只在缺失时补入。业务显式写出依赖仍收敛为同一组件图，不应误判重复。
     // Kafka/Redis 等 transport 不在这里推断。
     if seen.contains("saga") && seen.insert("outbox".to_string()) {
         names.push("outbox".to_string());

@@ -19,7 +19,7 @@ pub enum ComponentId {
     RedisJob,
     /// Trace 生产、导出和停机刷新。
     Telemetry,
-    /// 保序分 lane 任务执行器。
+    /// 命名分区 Runner 执行器。
     Partition,
     /// 受管 gRPC service registry 与 listener。
     Grpc,

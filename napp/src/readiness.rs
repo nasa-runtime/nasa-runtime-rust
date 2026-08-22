@@ -54,7 +54,7 @@ pub mod reason {
     /// 贡献项已注册但尚无任何观测(初始 `Unknown`)。
     pub const UNOBSERVED: &str = "unobserved";
     /// 探针超时。
-    #[cfg(any(feature = "db", feature = "nacos-discovery"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "nacos-discovery"))]
     pub const PROBE_TIMEOUT: &str = "probe_timeout";
     /// 观测长时间未更新,已超过 `stale_after`。
     pub const WATCH_STALE: &str = "watch_stale";
@@ -65,6 +65,7 @@ pub mod reason {
     #[cfg(any(
         feature = "kafka",
         feature = "db",
+        feature = "db-pgsql",
         feature = "redis",
         feature = "cache",
         feature = "partition",

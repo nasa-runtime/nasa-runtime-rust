@@ -1059,7 +1059,7 @@ impl GrpcRuntimeState {
     /// - `service`: 仍由 UserHook 独占、尚未加入 Router 的 boxed managed service。
     ///
     /// 返回：登记窗口开放且 service 身份唯一时成功；晚到、重复或 descriptor 不合法时返回阶段错误。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub(crate) fn register_boxed(
         &self,
         service: Box<dyn nagrpc::ManagedGrpcService>,

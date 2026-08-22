@@ -7,10 +7,11 @@ description = "NASA MySQL Outbox with named natx datasource binding, transaction
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "outbox", "transaction", "messaging", "database"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
+async-trait = "0.1"
 naoutbox-core = { version = "1.0.2" }
 natx = { version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

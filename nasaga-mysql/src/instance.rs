@@ -14,9 +14,13 @@ use crate::row::{
     parse_instance_row, parse_instance_summary, SagaInstanceRow, SagaInstanceSummary,
 };
 use crate::MySqlSagaStore;
+use nasaga_backend::{
+    CasOutcome, ControlCasOutcome, ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance,
+    SagaCreation, SagaInstanceQuery, TransitionSpec,
+};
 use nasaga_core::{
-    check_transition, ControlState, DefinitionVersion, Direction, SagaId, SagaStatus, StepName,
-    TransitionGuard, TriggerKind,
+    check_transition, ControlState, Direction, SagaId, SagaStatus, StepName, TransitionGuard,
+    TriggerKind,
 };
 use sqlx::Row as _;
 
@@ -25,158 +29,6 @@ use sqlx::Row as _;
 /// 该值只出现在 `saga_transition.from_state`，不属于 [`SagaStatus`] 封闭集合，
 /// 因此不可能与任何真实状态迁移混淆。
 const FROM_STATE_NONE: &str = "NONE";
-
-/// 业务作用：描述一次实例创建请求的全部持久化输入。
-///
-/// 字段说明：`trigger_kind`/`trigger_id` 记入初始 transition——由 Kafka 事件触发时是
-/// 来源 event id，由 HTTP/管理面触发时是稳定 operation id；它们与业务幂等键共同保证
-/// 创建入口可重放。
-#[derive(Debug, Clone)]
-pub struct NewSagaInstance<'a> {
-    /// 实例身份，由调用方生成并全程稳定。
-    pub saga_id: &'a SagaId,
-    /// 租户身份；无租户部署使用固定 system tenant。
-    pub tenant: &'a nasaga_core::TenantId,
-    /// workflow 名称。
-    pub workflow: &'a nasaga_core::WorkflowName,
-    /// 业务幂等键，同一业务意图只允许一个实例。
-    pub business_key: &'a nasaga_core::BusinessKey,
-    /// 固定到实例的 definition 版本。
-    pub definition_version: DefinitionVersion,
-    /// definition 的 canonical 内容摘要（64 位小写十六进制）。
-    pub definition_digest: &'a str,
-    /// 启动请求的 canonical 摘要；只保存摘要，不把首步 payload 复制进 Orchestrator 表。
-    pub start_request_digest: &'a str,
-    /// 实例级业务 deadline（epoch 毫秒）；无全局期限时为空。
-    pub deadline_at_ms: Option<i64>,
-    /// 创建时定位的首个步骤；step 超时裁决依赖 `current_step` 与 timer 步骤一致。
-    pub current_step: Option<&'a StepName>,
-    /// 初始 transition 的触发来源类别。
-    pub trigger_kind: TriggerKind,
-    /// 初始 transition 的触发身份（event id 或 operation id）。
-    pub trigger_id: &'a str,
-    /// 创建入口显式传入的 canonical W3C traceparent；为空表示调用链未提供上下文。
-    /// 该值随实例持久化，是 timer 与崩溃恢复命令保持链路连续的唯一来源。
-    pub traceparent: Option<&'a str>,
-}
-
-/// 业务作用：描述一次租户受限实例检索的全部过滤条件。
-///
-/// 字段说明：`tenant` 是强制条件——检索面绝不跨租户；`statuses` 为空表示不过滤状态；
-/// 时间窗以 epoch 毫秒表达并允许只给单边；`after` 是上一页最后一个 saga_id 的 keyset
-/// 游标，复用与非终态扫描一致的分页口径，插删不跳行。
-#[derive(Debug, Clone, Copy)]
-pub struct SagaInstanceQuery<'a> {
-    /// 租户身份，强制过滤条件。
-    pub tenant: &'a nasaga_core::TenantId,
-    /// 业务状态集合；为空不过滤。
-    pub statuses: Option<&'a [SagaStatus]>,
-    /// 创建时刻下界（含，epoch 毫秒）；为空不设下界。
-    pub created_from_ms: Option<i64>,
-    /// 创建时刻上界（不含，epoch 毫秒）；为空不设上界。
-    pub created_to_ms: Option<i64>,
-    /// keyset 游标：上一页最后一个 saga_id；为空从首行开始。
-    pub after: Option<&'a SagaId>,
-    /// 页大小，必须在 1..=1000。
-    pub limit: u32,
-}
-
-/// 业务作用：区分创建入口的两种合法结果，驱动调用方决定是否发布首步命令。
-///
-/// 分支说明：`Existing` 表示业务幂等键命中已有实例——调用方**不得**再写首步命令
-/// Outbox、timer 或初始 transition，只能向上返回已存在实例的当前状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SagaCreation {
-    /// 本事务真实创建了实例；调用方须在同一事务内补齐首步命令 Outbox、timer 与 Audit。
-    Created(SagaInstanceRow),
-    /// 业务幂等键命中已有实例；不产生任何新副作用。
-    Existing(SagaInstanceRow),
-}
-
-/// 业务作用：描述一次 CAS 状态推进要写入的全部内容。
-///
-/// 字段说明：`failure_code` 与 `compensation_plan_version` 为空时**保留列上既有值**
-/// 而不是清空——失败证据与已冻结的计划摘要都不允许被后续迁移静默抹掉。
-#[derive(Debug, Clone)]
-pub struct TransitionSpec<'a> {
-    /// 目标业务状态。
-    pub to_status: SagaStatus,
-    /// 推进后的方向。
-    pub direction: Direction,
-    /// 推进后的当前步骤；无明确定位时为空。
-    pub current_step: Option<&'a StepName>,
-    /// 触发来源类别，与 `trigger_id` 共同构成"同一触发只推进一次"唯一键。
-    pub trigger_kind: TriggerKind,
-    /// 触发身份（event id、timer id 或管理 operation id）。
-    pub trigger_id: &'a str,
-    /// 实例固定的 definition 版本，记入 transition 审计行。
-    pub definition_version: DefinitionVersion,
-    /// 本次迁移产生的稳定失败原因码；为空时保留既有值。
-    pub failure_code: Option<&'a str>,
-    /// 进入补偿时冻结的计划摘要；为空时保留既有值。
-    pub compensation_plan_version: Option<&'a str>,
-}
-
-/// 业务作用：聚合一次暂停/恢复 CAS 的实例版本权威与审计事实，避免跨参数错配控制操作。
-#[derive(Debug, Clone, Copy)]
-pub struct ControlTransitionSpec<'a> {
-    /// 实例身份。
-    pub saga_id: &'a SagaId,
-    /// 调用方持有的实例版本。
-    pub expected_version: u64,
-    /// 调用方持有的控制态 generation。
-    pub expected_control_version: u64,
-    /// 预期当前控制状态。
-    pub from: ControlState,
-    /// 目标控制状态。
-    pub to: ControlState,
-    /// 管理请求稳定幂等身份。
-    pub operation_id: &'a str,
-    /// 认证层提供的稳定主体 id。
-    pub actor: &'a str,
-    /// 本次控制动作的工单或事故原因。
-    pub reason: &'a str,
-}
-
-/// 业务作用：区分 CAS 推进的三种结果，让调用方对"输掉竞争"与"重复触发"分别裁决。
-///
-/// 分支说明：`Conflict` 与 `DuplicateTrigger` 都意味着**本 ambient 事务必须放弃提交**
-/// （向同源 `natx::run_for` 返回错误回滚）：`Conflict` 时实例行未被本事务修改，回滚后重新读取
-/// 再裁决；`DuplicateTrigger` 时实例行已在本事务内被 CAS 修改，只有回滚才能撤销它，
-/// 之后按"该触发已生效"确认消息即可。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CasOutcome {
-    /// 推进成功；`new_version` 同时是新的 transition_seq。
-    Applied {
-        /// CAS 之后的实例版本。
-        new_version: u64,
-    },
-    /// 预期 version/status 未命中：状态已被其它副本推进，当前快照过期。
-    Conflict,
-    /// 同一触发已在本实例上推进过一次；本事务必须回滚后按已生效确认。
-    DuplicateTrigger,
-}
-
-/// 业务作用：区分控制状态 CAS 的结果；`Conflict` 表示业务实例版本、控制 generation
-/// 或当前控制状态与预期不符。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ControlCasOutcome {
-    /// 控制状态已切换。
-    Applied,
-    /// 同一 operation 已提交过；不得再次改变控制态，调用方可按幂等成功返回。
-    AlreadyApplied,
-    /// 预期 version/control_version/control_state 未命中，调用方须重新读取。
-    Conflict,
-}
-
-/// 业务作用：区分人工业务动作审计的首次写入与完全一致幂等重放。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManagementAuditOutcome {
-    /// 本事务首次登记该 operation。
-    Recorded,
-    /// 同一 operation、action、actor、reason 已提交过，调用方不得再次产生业务副作用。
-    AlreadyRecorded,
-}
 
 /// 按实例身份加载快照的查询；列集合与 [`parse_instance_row`] 一一对应。
 const SELECT_INSTANCE_BY_ID_SQL: &str = "SELECT saga_id, tenant_id, workflow_name, business_key, \

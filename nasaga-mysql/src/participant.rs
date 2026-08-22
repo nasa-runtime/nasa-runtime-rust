@@ -9,9 +9,13 @@
 //! 正向裁决，`cancel_status` 记录取消屏障裁决，`compensation_status` 记录补偿进度，
 //! `resolution_status` 记录解决通道进度。外部 intent 的幂等键必须使用对应 `effect_id`。
 
+use nasaga_backend::{
+    CancelAdjudication, CompensationAdmission, ExecuteAdmission, ExternalCancelAdmission,
+    ParticipantGateKey, ResolutionAdmission, ResolutionTarget,
+};
 use nasaga_core::{
-    DefinitionVersion, EffectId, SagaId, StepCancelStatus, StepCompensationStatus,
-    StepForwardStatus, StepName, StepPhase, StepResolutionStatus, TenantId, WorkflowName,
+    EffectId, SagaId, StepCancelStatus, StepCompensationStatus, StepForwardStatus, StepName,
+    StepPhase, StepResolutionStatus,
 };
 use sqlx::Row as _;
 
@@ -45,102 +49,6 @@ const CREATE_PARTICIPANT_SQL: &str = "CREATE TABLE IF NOT EXISTS saga_participan
      PRIMARY KEY (saga_id, step_name), \
      UNIQUE KEY uk_execute_effect (execute_effect_id) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
-
-/// 业务作用：标识参与方 gate 所属的步骤，并携带与 envelope 交叉校验所需的合同字段。
-#[derive(Debug, Clone)]
-pub struct ParticipantGateKey<'a> {
-    /// 实例身份。
-    pub saga_id: &'a SagaId,
-    /// 步骤名称。
-    pub step: &'a StepName,
-    /// 租户身份；必须与 envelope 规范化 tenant 匹配。
-    pub tenant: &'a TenantId,
-    /// workflow 名称。
-    pub workflow: &'a WorkflowName,
-    /// definition 版本。
-    pub definition_version: DefinitionVersion,
-    /// definition canonical 摘要；必须与参与方首次见到的合同完全一致。
-    pub definition_digest: &'a str,
-}
-
-/// 业务作用：区分 execute 准入的三种合法裁决，驱动 adapter 决定是否调用业务 handler。
-///
-/// 分支说明：`Suppressed` 表示取消屏障已先建立 admission fence——adapter 只提交
-/// Inbox claim 并返回可 ACK 结果，**零正向业务效果**，且不得伪造 `StepRejected`
-/// （取消事实已由先前同事务写出的 `CancelConfirmed` Outbox 证明）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecuteAdmission {
-    /// 准入成功；调用方必须在同一事务内执行业务并 [`MySqlSagaStore::settle_execute`]。
-    Admitted,
-    /// 该效果已有确定终态（重投）；按既有终态返回幂等快照，不重复业务效果。
-    AlreadyTerminal(StepForwardStatus),
-    /// 取消屏障已建立，执行被本地状态拒绝；零业务效果。
-    Suppressed,
-}
-
-/// 业务作用：区分补偿准入的三种合法裁决。
-///
-/// 分支说明：`MissingForwardEffect` 表示本地既无正向成功效果也无已补偿证据——补偿只会
-/// 对 Orchestrator 已记账成功的步骤发出，出现该分支说明协议被破坏，调用方必须提交
-/// `CompensationOutcome::Halted` 合同违规事实并告警，不得自旋等待正向命令。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompensationAdmission {
-    /// 准入成功；调用方必须在同一事务内执行补偿并 [`MySqlSagaStore::settle_compensation`]。
-    Admitted,
-    /// 本地已有补偿终态或不确定事实；普通命令按原状态重发，绝不再次调用补偿业务。
-    AlreadySettled(StepCompensationStatus),
-    /// 本地无正向成功效果且无补偿证据：协议破坏，按 `Halted` 合同违规提交。
-    MissingForwardEffect,
-}
-
-/// 业务作用：区分取消屏障的三种合法裁决，与 [`nasaga_core::CancelOutcome`] 语义对齐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelAdjudication {
-    /// 执行从未开始，admission fence 已建立；零正向效果。
-    Confirmed,
-    /// 执行已有确定终态，取消无从谈起；携带真实终态供 Orchestrator 记账。
-    AlreadyTerminal(StepForwardStatus),
-    /// 已提交外部 intent、调用在途或结果未知；不谎报取消成功。
-    ResolutionPending,
-}
-
-/// 业务作用：区分 externally-cancellable 取消是否需要调用业务 handler。
-///
-/// `Admitted` 表示 store 已持有与 execute 相同的 gate 行锁，调用方必须在同一事务内调用
-/// 类型化外部取消并落账；`AlreadyAdjudicated` 表示既有屏障事实只需重发 result，禁止重复
-/// 调用可能带外部副作用的 cancel API。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalCancelAdmission {
-    /// 已取得 gate 串行化权威，可以调用外部取消 handler。
-    Admitted,
-    /// 本地已有可重放的真实取消裁决，不得再次调用外部系统。
-    AlreadyAdjudicated(CancelAdjudication),
-}
-
-/// 业务作用：标识 resolve 正在裁决正向效果还是补偿效果，避免把退款查询结果写入正向状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionTarget {
-    /// 裁决此前 `execute=UNKNOWN` 的正向效果。
-    Forward,
-    /// 裁决此前 `compensation=UNKNOWN` 的补偿效果。
-    Compensation,
-}
-
-/// 业务作用：区分 resolve 查询的准入、终态重放与协议违规，保证查询可重试但确定裁决不可回退。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionAdmission {
-    /// 存在待裁决的未知效果；调用方可以执行类型化查询 handler。
-    Admitted(ResolutionTarget),
-    /// 本地已有确定裁决；新 attempt 只重发该事实，不再次查询或执行裁决型副作用。
-    AlreadySettled {
-        /// 既有裁决所属方向。
-        target: ResolutionTarget,
-        /// 已提交的解决终态。
-        status: StepResolutionStatus,
-    },
-    /// 本地不存在任何未知效果；该 resolve 命令违反 Orchestrator/参与方合同。
-    MissingUnknownEffect,
-}
 
 impl MySqlSagaStore {
     /// 业务作用：创建参与方 gate 表。生产环境应由 migration 拥有 schema，此方法只供

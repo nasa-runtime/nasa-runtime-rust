@@ -7,43 +7,10 @@
 
 #![forbid(unsafe_code)]
 
-pub use nainbox_core::InboxClaim;
+pub use nainbox_core::{
+    InboxClaim, InboxProcess, InboxStore, InboxStoreError, InboxTransactionError,
+};
 use natx::{TxDecision, TxRunError};
-
-/// Inbox I/O 或合同错误。文本不包含 SQL、凭据或 payload。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboxStoreError {
-    /// 稳定、脱敏的错误原因。
-    pub reason: String,
-}
-
-impl InboxStoreError {
-    /// 业务作用：用不含 SQL、连接信息或消息内容的稳定原因构造持久层错误。
-    ///
-    /// 参数说明：
-    /// - `reason`：允许向上游暴露的稳定失败分类。
-    ///
-    /// 返回：不携带底层敏感信息的 Inbox 错误。
-    fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for InboxStoreError {
-    /// 业务作用：输出脱敏后的 Inbox 持久层错误摘要。
-    ///
-    /// 参数说明：
-    /// - `formatter`：标准格式化输出目标。
-    ///
-    /// 返回：稳定摘要写入成功时返回 `Ok`。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "inbox store error: {}", self.reason)
-    }
-}
-
-impl std::error::Error for InboxStoreError {}
 
 /// 业务作用：以不可变 datasource 身份统一 Inbox claim 与本地业务事务。
 #[derive(Debug, Clone)]
@@ -61,64 +28,6 @@ impl Default for MySqlInbox {
         Self::new()
     }
 }
-
-/// 业务作用：区分首次消息已经提交业务效果与重复消息被幂等吸收。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InboxProcess<T> {
-    /// 本事务首次取得消息并已确认提交业务处理结果。
-    Applied(T),
-    /// 既有事务已经提交同一消息，本轮没有再次执行业务处理函数。
-    Duplicate,
-}
-
-/// 业务作用：保留 Inbox 事务基础设施的封闭失败阶段，供 transport 决定是否允许消耗重试预算。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboxTransactionError {
-    /// 内层错误把事务标记为只能回滚。
-    RollbackOnly,
-    /// 数据库明确拒绝提交，原消息不得确认。
-    CommitRejected,
-    /// 提交请求结果不确定，必须无界重投并依赖 Inbox 吸收可能的重复。
-    CommitUncertain,
-    /// 物理回滚失败，不能声称本轮没有副作用。
-    RollbackFailed,
-    /// 事务开始或所有权基础设施失败。
-    Infrastructure,
-}
-
-impl InboxTransactionError {
-    /// 业务作用：判断失败是否禁止被普通有限重试预算转入死信。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：提交拒绝/不确定或回滚失败返回真；其余已确认未提交阶段返回假。
-    pub fn requires_unbounded_redelivery(self) -> bool {
-        matches!(
-            self,
-            Self::CommitRejected | Self::CommitUncertain | Self::RollbackFailed
-        )
-    }
-}
-
-impl std::fmt::Display for InboxTransactionError {
-    /// 业务作用：输出不含 SQL、连接信息、消息身份或业务正文的稳定事务阶段。
-    ///
-    /// 参数说明：
-    /// - `formatter`：标准格式化输出目标。
-    ///
-    /// 返回：稳定摘要写入成功时返回 `Ok`。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::RollbackOnly => "Inbox transaction rollback-only",
-            Self::CommitRejected => "Inbox transaction commit rejected",
-            Self::CommitUncertain => "Inbox transaction commit uncertain",
-            Self::RollbackFailed => "Inbox transaction rollback failed",
-            Self::Infrastructure => "Inbox transaction infrastructure failed",
-        })
-    }
-}
-
-impl std::error::Error for InboxTransactionError {}
 
 impl MySqlInbox {
     /// 业务作用：创建绑定默认 datasource 的轻量 Inbox 入口，不提前建立连接或持有消息身份。
@@ -207,19 +116,16 @@ impl MySqlInbox {
         let mut connection = natx::mandatory_conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        let result = sqlx::query(
-            "INSERT IGNORE INTO inbox_message (consumer_name, message_id) VALUES (?, ?)",
-        )
-        .bind(consumer_name)
-        .bind(message_id)
-        .execute(connection.as_mut())
-        .await
-        .map_err(map_database)?;
-        Ok(if result.rows_affected() == 1 {
-            InboxClaim::Claimed
-        } else {
-            InboxClaim::Duplicate
-        })
+        match sqlx::query("INSERT INTO inbox_message (consumer_name, message_id) VALUES (?, ?)")
+            .bind(consumer_name)
+            .bind(message_id)
+            .execute(connection.as_mut())
+            .await
+        {
+            Ok(_) => Ok(InboxClaim::Claimed),
+            Err(error) if is_target_primary_conflict(&error) => Ok(InboxClaim::Duplicate),
+            Err(error) => Err(map_database(error)),
+        }
     }
 
     /// 业务作用：统一执行 `Inbox claim → 业务处理 → COMMIT`，让消息入口不再重复手写事务模板。
@@ -263,6 +169,24 @@ impl MySqlInbox {
     }
 }
 
+#[async_trait::async_trait]
+impl InboxStore for MySqlInbox {
+    /// 业务作用：通过后端中立合同在当前 MySQL ambient transaction 内竞争消息唯一标记。
+    ///
+    /// 参数说明：
+    /// - `consumer_name`：跨副本和重启稳定的消费命名空间。
+    /// - `message_id`：transport 提供的稳定消息身份。
+    ///
+    /// 返回：首次取得标记为 `Claimed`，既有已提交标记为 `Duplicate`；其它失败返回错误。
+    async fn claim(
+        &self,
+        consumer_name: &str,
+        message_id: &str,
+    ) -> Result<InboxClaim, InboxStoreError> {
+        MySqlInbox::claim(self, consumer_name, message_id).await
+    }
+}
+
 /// 业务作用：把 `natx` 封闭事务阶段映射为 Inbox 对外分类，同时保留业务回滚原始错误。
 ///
 /// 参数说明：
@@ -293,6 +217,35 @@ fn validate_key(field: &'static str, value: &str, max: usize) -> Result<(), Inbo
         return Err(InboxStoreError::new(format!("invalid {field}")));
     }
     Ok(())
+}
+
+/// 业务作用：只把 `inbox_message` 的复合主键冲突识别为重复消息，拒绝吞掉其它唯一约束失败。
+///
+/// 参数说明：
+/// - `error`：MySQL INSERT 返回的数据库错误。
+///
+/// 返回：错误号为重复键且服务端报告的索引名为 `PRIMARY` 时返回 `true`；无法结构化确认时返回 `false`。
+fn is_target_primary_conflict(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    let Some(mysql) = database.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() else {
+        return false;
+    };
+    if mysql.number() != 1062 {
+        return false;
+    }
+    mysql
+        .message()
+        .rsplit_once(" for key ")
+        .map(|(_, key)| {
+            key.trim_end_matches('.')
+                .trim_matches(['\'', '`'])
+                .rsplit('.')
+                .next()
+                == Some("PRIMARY")
+        })
+        .unwrap_or(false)
 }
 
 /// 业务作用：将连接获取失败收敛为不泄露 datasource 信息的稳定错误。

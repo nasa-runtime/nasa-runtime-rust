@@ -53,6 +53,9 @@ namapper = { version = "1" }
 natx = { version = "1.0.0" }
 ```
 
+分页、排序和 Mapper 缓存合同由 `namapper-core` 单点定义，并由 `namapper` 与 `namapper-pgsql` 原名重导出。
+混合 MySQL/PostgreSQL 应用的自定义 L2、codec 与指标实现无需为两个数据库重复实现 trait。
+
 ## 启动初始化
 
 Mapper client 不持有 `MySqlPool`。所有 SQL 默认从 `nasa::tx` / `natx` 全局连接池取连接；在 `#[transactional]` 作用域内自动加入当前事务。
@@ -74,8 +77,8 @@ async fn init_db() -> anyhow::Result<()> {
 在 `#[application]` 运行时下，以上装配自动完成，业务入口不再写启动代码：
 
 - 声明 `db` 组件：按 `database` / `datasources.<name>` 配置先单连接探测、再建池，并注入本运行时（等价 `try_init` / `try_init_datasource`）。
-- 声明 `cache` 组件（`nasa` feature 含 `mapper-redis-cache`）：自动安装默认 Mapper L2（`RedisMapperL2Cache`，与 `#[cached]` 的 L2 共用同一条 cluster 连接）。
-- Service 模式在对外提供服务之前自动调用 `assert_l2_cache_installed_for_cached_queries()`：存在 `cache = true` 查询却没有任何 L2 安装路径（组件或启动 Hook 显式装配）时启动失败，而不是生产静默绕过缓存。
+- 声明 `cache` 组件会托管通用两级缓存；Mapper L2 仍由业务在启动 Hook 中显式构造并安装，可复用受管 Redis 连接。
+- Service 模式在对外提供服务之前自动调用 `assert_l2_cache_installed_for_cached_queries()`：存在 `cache = true` 查询但启动 Hook 尚未安装默认 L2 时启动失败，而不是生产静默绕过缓存。
 
 下文的手工装配说明面向不使用应用运行时的项目。
 
@@ -654,7 +657,7 @@ async fn find_archive(&self, id: i64) -> anyhow::Result<Option<UserRow>>;
 
 ## 场景 22：Query 二级缓存
 
-当前 `Mapper` trait 默认 `cache = true`，但只有注入 L2 cache 后才会真正读写缓存；没有注入时会绕过缓存查库。生产建议启动时调用 `assert_l2_cache_installed_for_cached_queries()`，防止以为启用了缓存但实际没有安装；`#[application]` 运行时的 Service 模式会在就绪前自动执行该断言，声明 `cache` 组件即自动安装默认 L2。
+当前 `Mapper` trait 默认 `cache = true`，但只有注入 L2 cache 后才会真正读写缓存；没有注入时会绕过缓存查库。生产建议启动时调用 `assert_l2_cache_installed_for_cached_queries()`，防止以为启用了缓存但实际没有安装；`#[application]` 运行时的 Service 模式会在就绪前自动执行该断言，但不会构造或安装默认 L2，业务必须在启动 Hook 中显式完成装配。
 
 > **事务内缓存必须显式 opt-in**：`cache = true` 的 `Query` 在普通无事务场景读写 L2；在 `#[transactional]` ambient 事务内默认绕过 L2，避免把未提交视图写入共享缓存。业务确认某个查询在事务内也可以读写 L2 时，显式写 `cache_in_tx = true`。事务内需要读实时/未提交数据、行锁、或不想污染共享缓存的方法继续写 `cache = false`（`FOR UPDATE` / 行锁查询见场景 20）。写操作的失效仍在 commit 后执行、rollback 不清。
 
@@ -711,7 +714,7 @@ fn install_default_cache(cache: Arc<dyn nasa::mapper::MapperL2Cache>) -> anyhow:
 
 ## 场景 23：Redis Hash 二级缓存
 
-打开 `mapper-redis-cache` feature 后可使用内置 Redis Hash cache。Redis key 是 Mapper `key`，Hash field 是 `sql:{normalized_sql}:...`。`#[application]` 运行时下声明 `cache` 组件即自动完成本场景的安装，无需手写以下代码。
+打开 `mapper-redis-cache` feature 后可使用内置 Redis Hash cache。Redis key 是 Mapper `key`，Hash field 是 `sql:{normalized_sql}:...`。`#[application]` 运行时也要求在启动 Hook 中显式完成以下装配；`cache` 组件只负责通用缓存与 Redis 生命周期，不推断 Mapper 缓存策略。
 
 ```rust
 use std::sync::Arc;

@@ -64,8 +64,13 @@ nasa::tx::try_init(pool)?;
   `nasa::tx::mandatory_conn()` 取连接。
 - 使用 `&self.pool` 会绕过 ambient 事务，写入不会随事务 rollback。
 - 嵌套事务只支持同 datasource 复用外层事务，不支持 savepoint、独立子事务和跨 datasource 事务。
+- 与 `natx-pgsql` 同时编入时，driver task-local 会在业务闭包及 SQL 执行前拒绝跨后端嵌套。
 - 具名 store 或 Mapper 与 ambient datasource 不一致时会在 SQL 前失败，不会回落到 `default`。
 - `after_commit` 只在最外层事务 commit 成功后执行，适合缓存失效和提交后通知。
+- `run_decided_for_checked` 以 `TxEntryError` 分离结构化 datasource lookup 与原有 `TxRunError`；既有
+  `run_decided_for` 签名和可穷举错误保持不变。
+- `DatasourceRef::new` 继续返回 `anyhow::Result`；需要结构化名称错误的新代码使用
+  `DatasourceRef::try_new`。
 
 ## 事务语义
 

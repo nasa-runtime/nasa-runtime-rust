@@ -28,8 +28,9 @@ Ready 门禁、监督和反向停机。
 
 其中的 Saga 能力用本地事务、Outbox/Inbox、持久化状态机、稳定效果身份和显式补偿组成最终一致性
 闭环；进程崩溃、重复投递、Unknown 结果和 timer 多副本竞争均从已提交事实恢复。它不把远端调用
-伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。业务通常启用 `application` +
-`saga-runtime`，再显式选择 Kafka、Redis Streams、HTTP 或 gRPC transport；完整合同见
+伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。业务通常启用 `application`，再按
+datasource driver 选择 `saga-runtime` 或 `saga-runtime-pgsql`，并显式选择 Kafka、Redis Streams、
+HTTP 或 gRPC transport；完整合同见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 门面还提供四项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter、
@@ -69,23 +70,26 @@ async fn save_order() -> anyhow::Result<()> {
 
 ## 受管单源与多源
 
-启用 `application` 后，MySQL、Redis 与 Kafka 都由最终 YAML 创建，业务不在 `main` 中自行建池或维护
+启用 `application` 后，MySQL、PostgreSQL、Redis 与 Kafka 都由最终 YAML 创建，业务不在 `main` 中自行建池或维护
 第二张连接表。单源与多源配置根、默认身份及选择入口如下：
 
 | 资源 | 单源 | 多源 | 选择入口 |
 | --- | --- | --- | --- |
 | MySQL | `database` | `datasources.<name>` | `app.default_datasource().await` / `app.datasource(name).await` |
+| PostgreSQL | `database` | `datasources.<name>` | `app.default_pg_datasource().await` / `app.pg_datasource(name).await` |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | `app.default_redis().await` / `app.redis(name).await` |
 | Kafka | `kafka` | `kafkas.<client>` | `app.default_kafka()` / `app.kafka(name)` |
 
-Application 先校验完整命名表，再按稳定名称逐源探测，全部成功后一次性发布。Outbox 与 Saga 通过
-`datasource_ref` 选择 MySQL；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
+Application 先校验完整命名表，再按稳定名称逐源探测，全部成功后一次性发布。同一 `datasources` 表可
+同时声明 MySQL 与 PostgreSQL，Outbox 与 Saga 通过 `datasource_ref` 的 driver 选择持久后端；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
 consumer/producer 使用 client name。引用不存在时会在 Ready 前失败，不会回退默认源。
 
-MySQL 持久适配器同时提供显式绑定入口：`MySqlInbox::with_datasource`、
+两种数据库持久适配器都提供显式绑定入口。MySQL 使用 `MySqlInbox::with_datasource`、
 `MySqlOutbox::with_datasource`、`MySqlIdempotencyStore::with_datasource`、
 `MySqlOutboxAuditSink::with_datasource`、`MySqlSagaStore::with_datasource`，以及
-`Orchestrator::with_datasource` 和 `ParticipantRuntime::with_datasource`。同一原子链必须使用相同
+`Orchestrator::with_datasource` 和 `ParticipantRuntime::with_datasource`；PostgreSQL 对应入口位于
+`nasa::inbox::pgsql`、`nasa::outbox::pgsql`、`nasa::idempotency::pgsql`、`nasa::audit::pgsql` 和
+`nasa::saga::pgsql`。同一原子链必须使用相同
 qualifier；不同 datasource 之间不构成一个事务。source 集合、endpoint、凭据和身份字段在运行期
 保持冻结，变化后必须重启。完整 YAML 与生命周期合同见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
@@ -144,7 +148,37 @@ Application Ready 后，业务控制面通过 `app.redis_job_control(qualifier)`
 `primary`。取得的门面不拥有 shutdown 权限，停机仍由 Application 唯一编排。多 source 配置、独立
 `RedisJobPlan` 与完整运行边界见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redisjob-受管模式) 和
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob-分布式任务运行时)。
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
+
+## 跨副本业务配额门面
+
+`rate-limit` 蕴含 `application` 与 `redis`，从 `nasa::application` 暴露后端中立
+`RateLimitProvider`、共享 Redis 固定窗口实现和可选 Web IP 中间件。业务仍需在应用入口声明
+`"redis"` 组件，再从受管 source 构造 provider；feature 本身不自动启动资源或修改路由。
+
+```rust
+use std::time::Duration;
+use nasa::application::{RateLimitProvider, RedisRateLimitProvider};
+
+#[nasa::application("redis")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let provider = RedisRateLimitProvider::new(app.default_redis().await?, "checkout");
+    let outcome = provider
+        .check("tenant-a", 100, Duration::from_secs(60))
+        .await;
+    if !outcome.allowed {
+        // 业务在协议边界映射拒绝响应；主体身份与配额语义不由框架猜测。
+        return Err(anyhow::anyhow!("business quota exceeded"));
+    }
+    Ok(())
+}
+```
+
+所有共用 Redis 与 namespace 的副本合并同一主体计数。默认实现后端失败时 fail-open；要求 fail-closed
+的业务应提供自定义 provider。与 `web` 同时启用后可安装 `distributed_rate_limit` 按已解析客户端 IP
+返回 `429` / `Retry-After`；按 tenant、subject 或 API key 计量时直接调用 `check`。完整装配顺序、窗口
+上限和键空间合同见
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#跨副本分布式业务配额)。
 
 ## 业务初始化屏障
 
@@ -225,17 +259,26 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | --- | --- | --- |
 | `application` | `nasa::application`、`nasa::Application` | 生命周期、配置快照、资源和受管任务 |
 | `tx` | `nasa::tx` | ambient MySQL 事务和 `#[transactional]` |
+| `tx-pgsql` | `nasa::tx::pgsql` | PostgreSQL ambient 事务、`PgConn` 和专用 `#[transactional]`；与 `application` 组合时启用受管 PgPool |
 | `mapper` | `nasa::mapper` | 声明式 SQL Mapper，蕴含 `tx` |
+| `mapper-pgsql` | `nasa::mapper::pgsql` | PostgreSQL Mapper，蕴含 `tx-pgsql`；可复用受管或 standalone PgPool |
 | `mapper-redis-cache` | `nasa::mapper` | Mapper Redis Hash L2 |
 | `mapper-cache-grouped` | `nasa::mapper` | Mapper 接 `GroupedCache` |
+| `mapper-redis-cache-pgsql` | `nasa::mapper::pgsql` | PostgreSQL Mapper Redis Hash L2；不引入 MySQL runtime |
+| `mapper-cache-grouped-pgsql` | `nasa::mapper::pgsql` | PostgreSQL Mapper 接 `GroupedCache` |
 | `inbox` | `nasa::inbox` | 与业务 MySQL 副作用同事务的消费去重 |
+| `inbox-pgsql` | `nasa::inbox::pgsql` | 与业务 PostgreSQL 副作用同事务的消费去重 |
 | `outbox` | `nasa::outbox` | 与业务写同事务的事件落库和顺序投递 |
+| `outbox-pgsql` | `nasa::outbox::pgsql`、`nasa::application` | PostgreSQL 同事务事件落库与受管 dispatcher |
 | `idempotency` | `nasa::idempotency` | Provider-neutral 幂等状态机和进程内 store |
 | `idempotency-mysql` / `idempotency-redis` | `nasa::idempotency` | MySQL 强一致或 Redis response-cache 后端 |
+| `idempotency-pgsql` | `nasa::idempotency::pgsql` | PostgreSQL 租约 fencing 与持久响应重放 |
 | `audit` | `nasa::audit` | 与业务写同事务的 Outbox 审计 |
+| `audit-pgsql` | `nasa::audit::pgsql` | 与 PostgreSQL 业务写同事务的 Outbox 审计 |
 | `openapi` | `nasa::openapi` | 确定性 OpenAPI 3.1 合同 |
 | `redis` | `nasa::redis` | Redis 命令、pipeline、stream、lock |
 | `redis-job` | `nasa::redis::job`、`nasa::redis_job` | 多 source RedisJob 状态机、`#[redis_job]` 与受管生命周期；蕴含 `application` 和 `redis` |
+| `rate-limit` | `nasa::application` | 基于共享 Redis 原子计数的跨副本业务配额；蕴含 `application` 与 `redis`，无组件字符串，后端故障默认 fail-open，进入 `full` |
 | `redis-search` / `redis-derive` | `nasa::redis` | 搜索封装和文档派生 |
 | `cache` | `nasa::cache` | 两级缓存、失效广播和缓存宏 |
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |
@@ -243,9 +286,13 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `kafka-schema-registry` | `nasa::kafka`、`nasa::secret` | 有界 schema adapter；蕴含 `kafka` 与 `secret`，进入 `full` |
 | `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
+| `saga-runtime-pgsql` | `nasa::saga::pgsql`、`nasa::application` | PostgreSQL Store/Inbox/Outbox 组合与共享 Saga 状态机 |
 | `saga-kafka` | `nasa::saga` | 受管 command/result Kafka transport |
+| `saga-kafka-pgsql` | `nasa::saga::pgsql` | PostgreSQL Saga command/result Kafka transport |
 | `saga-redis-stream` | `nasa::saga`、`nasa::application` | 受管 Redis Streams 发布、消费、重领、原子 DLT 与积压观测 |
+| `saga-redis-stream-pgsql` | `nasa::saga::pgsql`、`nasa::application` | PostgreSQL Saga 的同一 Redis Streams 传输合同 |
 | `saga-grpc` | `nasa::saga`、`nasa::grpc`、`nasa::application` | 已包含 `grpc` 类型门面；generated command/result service、mTLS principal 绑定与封闭收据，入站计划复用 `"grpc"` listener，纯出站不启动 listener |
+| `saga-grpc-pgsql` | `nasa::saga::pgsql`、`nasa::grpc`、`nasa::application` | PostgreSQL Saga generated service 与同一受管 gRPC listener |
 | `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |
@@ -273,9 +320,11 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `rest-discovery` | `nasa::discovery::rest` | 服务发现 REST 负载均衡 |
 | `rest-discovery-nacos` / `nacos-discovery` | `nasa::discovery` | 注册发现装配与应用组件桥 |
 | `rest-client` / `rest-client-nacos` | `nasa::discovery::rest` | 声明式 REST client |
-| `base` / `crypto` / `numeric` / `date` / `image` | 对应同名模块 | 基础类型和纯工具 |
+| `base` | `nasa::base`、`nasa::date` | `nabase` 的完整能力：响应、日期时间、容量、ID、字符串、环境变量和翻译抽象 |
+| `crypto` / `numeric` / `image` | 对应同名模块 | 密码、精确数值和图片工具 |
 | `crypto-legacy-rsa` | `nasa::crypto` | 受控迁移的 RSA 私钥兼容入口，不进入 `full` |
 | `full` | 上述稳定能力的组合 | 非默认；包含 Schema Registry、对象存储、Saga gRPC、gRPC listener 和受管 Web listener |
+| `full-pgsql` | PostgreSQL 完整持久能力组合 | 非默认；包含 PostgreSQL Mapper Redis L2，且不引入 MySQL runtime |
 
 `kafka-gssapi` 使用目标系统的 Cyrus SASL。macOS 无需额外安装；Linux 构建环境需提供
 `libsasl2-dev` 或 `cyrus-sasl-devel`，具体包名由发行版决定。
@@ -283,6 +332,66 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 `nacos` 和 `rest-discovery-nacos` 只保证 API 可编译；真正连接后端必须同时启用 `nacos-sdk`。
 `full` 选择 Kafka 和 gRPC 作为纳入的 Saga transport，同时纳入 gRPC listener；Redis Streams 替代
 通道仍需显式开启。生产服务仍建议只选择实际使用的 feature，避免无意扩大依赖面与运行责任。
+
+## PostgreSQL 受管与 standalone 入口
+
+`tx-pgsql` 与 `mapper-pgsql` 不改变现有 MySQL `tx` / `mapper` 行为。不启用 `application` 时，业务先显式
+注册默认或命名 `PgPool`，再从后端模块声明 Mapper：
+
+```rust
+use nasa::mapper::pgsql::{Mapper, Query};
+
+#[derive(sqlx::FromRow)]
+struct AccountRow {
+    id: i64,
+}
+
+#[Mapper(datasource = "reporting", cache = false)]
+trait AccountMapper {
+    #[Query("SELECT id FROM account WHERE id = #{id}", tx = "mandatory")]
+    async fn find(&self, id: i64) -> anyhow::Result<Option<AccountRow>>;
+}
+
+nasa::tx::pgsql::try_init_datasource("reporting", pool)?;
+let mapper = AccountMapperClient::new();
+let row = nasa::tx::pgsql::run_for("reporting", async { mapper.find(7).await }).await?;
+# let _ = row;
+```
+
+PostgreSQL Mapper 生成 `$n` bind，并保持 SQL 文本中的 `?` 原样；不会翻译 MySQL 专有 SQL。与
+`application` 组合时，`tx-pgsql` 会向下启用 `napp/db-pgsql`，同一个 `"db"` 组件从 YAML 创建、探测、
+发布并关闭 PgPool：
+
+```yaml
+datasources:
+  orders:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+  reporting:
+    driver: postgresql
+    url: ${APP_POSTGRES_URL}
+    schema: reporting
+    migrations:
+      mode: validate
+```
+
+业务用 `app.datasource("orders")` 与 `app.pg_datasource("reporting")` 取得各自 typed pool。反向查询会返回
+driver mismatch；显式配置 PostgreSQL `schema` 时，它同时设置业务连接的 `search_path` 与 migration
+对象作用域，且目标 schema 必须预先存在。省略时业务连接保留服务端默认 `search_path`，受管 migration
+默认使用 `public`；需要两者严格一致时应显式配置。两种事务不能嵌套，也不提供跨库原子提交。`full-pgsql` 是 PostgreSQL-only 的稳定能力
+集合，包含受管 Application、事务、Mapper、Inbox、Outbox、幂等、审计、Saga 及三种 Saga transport；
+其依赖图不包含 MySQL runtime。需要混配时同时开启实际使用的 MySQL 与 PostgreSQL feature。
+
+`migrations` 配置只决定 `disabled`、`validate`、`apply`、锁等待和 PostgreSQL session topology，不会
+从目录自动发现业务 SQL。Service 在 UserHook 中使用
+`app.configure_migrations("reporting", sqlx::migrate!("./migrations"))?` 登记构建期嵌入的 migration；
+同一数据源只能登记一次，门禁在 initializer 与入站监听之前执行。业务需直接依赖启用对应 driver 和
+`migrate` 的 `sqlx`，例如 PostgreSQL 使用
+`sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }`。门禁模式不是
+`disabled` 时，PostgreSQL 事务级代理还必须提供指向同一 database/schema 的
+`migrations.session_url`，Application 会在 advisory lock 前复验目标身份。Batch 应在 Hook 内显式调用
+MySQL 的 `nasa::application::run_gate` 或 PostgreSQL 的 `nasa::migration::pgsql::run_gate`，不能使用该
+登记入口。
 
 ## YML 配置与使用
 

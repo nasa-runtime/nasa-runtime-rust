@@ -3,12 +3,12 @@ name = "naaudit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 业务审计事件:不可抵赖的 actor/action/resource/outcome 事件,可经 Outbox 可靠投递,不依赖 napp"
+description = "Provider-neutral business audit events and transactional Outbox sink contracts"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["audit", "outbox", "security", "transaction", "event"]
+categories = ["asynchronous", "web-programming"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

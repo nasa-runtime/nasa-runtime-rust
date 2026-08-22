@@ -114,7 +114,8 @@ fn main() {
 }
 ```
 
-baseline 应随协议 crate 归档并由协议所有者更新，不能指向个人机器或根级质量工程路径。门禁递归索引
+baseline 应随协议 crate 归档并由协议所有者更新，只能使用可进入归档的 crate 相对路径，不能指向
+个人机器绝对路径或仓库外文件。门禁递归索引
 跨文件和 nested message/enum/service 的全限定 symbol，拒绝：
 
 - 删除既有 message、enum、service 或 RPC method；

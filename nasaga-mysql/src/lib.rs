@@ -37,6 +37,7 @@
 
 mod action_rate;
 mod audit;
+mod backend;
 mod error;
 mod instance;
 mod metrics;
@@ -47,35 +48,24 @@ mod schema;
 mod stepjournal;
 mod timer;
 
-pub use audit::{
-    AttemptConflictFact, SagaConflictFactRow, SagaConflictKind, SagaControlAuditRow,
-    SagaManagementAuditRow, SagaTransitionAuditRow,
-};
 pub use error::SagaStoreError;
+pub use nasaga_backend::{
+    ActionRateReservation, AttemptConflictFact, AttemptOutcomeRecord, AttemptStart,
+    CancelAdjudication, CasOutcome, CompensationAdmission, ControlCasOutcome,
+    ControlTransitionSpec, ExecuteAdmission, ExternalCancelAdmission, ManagementAuditOutcome,
+    NewSagaInstance, ParticipantGateKey, QuotaReservation, ResolutionAdmission, ResolutionTarget,
+    SagaConflictFactRow, SagaConflictKind, SagaControlAuditRow, SagaCreation, SagaInstanceQuery,
+    SagaInstanceRow, SagaInstanceSummary, SagaManagementAuditRow, SagaStepAttemptRow, SagaStepRow,
+    SagaStoreMetrics, SagaTimerRow, SagaTransitionAuditRow, StepJournalPatch, TimerClaimBatch,
+    TimerFencing, TimerFencingToken, TimerFencingTokenIssuer, TimerReschedule, TimerSchedule,
+    TimerScope, TimerSpec, TimerState, TransitionSpec,
+};
 
 /// 人工关闭动作在管理审计表中的稳定 action 名。
 ///
 /// `MANUALLY_CLOSED` 唯一入边的同事务证据检查与管理入口的审计写入必须使用同一常量,
 /// 防止两侧字符串漂移让合法关闭被拒或伪造审计被放行。
-pub const MANUAL_CLOSE_ACTION: &str = "manual_close";
-pub use action_rate::ActionRateReservation;
-pub use instance::{
-    CasOutcome, ControlCasOutcome, ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance,
-    SagaCreation, SagaInstanceQuery, TransitionSpec,
-};
-pub use metrics::SagaStoreMetrics;
-pub use participant::{
-    CancelAdjudication, CompensationAdmission, ExecuteAdmission, ExternalCancelAdmission,
-    ParticipantGateKey, ResolutionAdmission, ResolutionTarget,
-};
-pub use quota::QuotaReservation;
-pub use row::{SagaInstanceRow, SagaInstanceSummary, SagaStepAttemptRow, SagaStepRow};
-pub use stepjournal::{AttemptOutcomeRecord, AttemptStart, StepJournalPatch};
-pub use timer::{
-    SagaTimerRow, TimerClaimBatch, TimerFencing, TimerFencingToken, TimerFencingTokenIssuer,
-    TimerReschedule, TimerSchedule, TimerScope, TimerSpec, TimerState,
-};
-
+pub use nasaga_backend::MANUAL_CLOSE_ACTION;
 /// 业务作用：以不可变 datasource 身份统一 MySQL Saga 实例、timer、审计和配额操作。
 ///
 /// 轻量句柄只保存 datasource qualifier；多副本 Orchestrator 不共享进程内可变业务状态，

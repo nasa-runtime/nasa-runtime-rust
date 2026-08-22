@@ -22,12 +22,23 @@
 ## 组件边界
 
 - [ ] feature 单独开启与常用组合都能编译，门面路径在依赖改名后仍正确。
-- [ ] 对每个最终可执行制品运行 `cargo tree -i natx`、`cargo tree -i nafka`、
-      `cargo tree -i nainbox-mysql`、`cargo tree -i naoutbox-core` 和 `cargo tree -i naoutbox-mysql`；每个包只能解析出一个 package ID
-      和一个来源，禁止 registry 与本地路径副本同时进入同一进程。
+- [ ] 对每个最终可执行制品检查实际进入依赖图的 transaction、Mapper core/adapter、Inbox/Outbox core
+      与 adapter、幂等 store、Saga backend/runtime 和 `nafka`；每个包只能解析出一个 package ID 和一个
+      来源，禁止 registry 与本地路径副本同时进入同一进程。
+- [ ] PostgreSQL-only 组合（含 `full-pgsql`）的依赖图不包含 MySQL transaction、Mapper、Inbox、
+      Outbox 或 Saga runtime；混合组合只包含业务显式选择的两组能力。
 - [ ] 配置未知字段、非法零值、冲突配置和缺少凭据均在开放流量前失败。
-- [ ] MySQL 写路径的事务归属、提交结果不确定处理和回滚语义明确。
+- [ ] MySQL 与 PostgreSQL 写路径各自的事务归属、提交结果不确定处理和回滚语义明确；两种 ambient
+      transaction 不嵌套，也不宣称跨 driver 原子提交。
+- [ ] 同一 Application 可同时配置两种 driver，datasource 名称全局唯一，typed pool 查询拒绝 driver
+      mismatch，启动失败与停机均覆盖全部已受管 pool。
+- [ ] Service 为每个业务 schema 显式登记构建期嵌入的 migrator；`disabled`、`validate` 与 `apply` 符合
+      部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
+      使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] `rate-limit` feature、`full` 组合、门面路径和 README 一致；跨副本配额显式复用受管 Redis，没有
+      隐式组件字符串或配置根。默认 fail-open、键空间上界、主体身份和 `429` / `Retry-After` 映射符合
+      业务风险选择，且不与单实例令牌桶混为同一计数。
 - [ ] 受管 Web listener 的启用前提、HTTP/1/h2c 开关、连接与 stream 上限、GOAWAY 排空、
       `<context_path>/metrics` 暴露条件、协议指标及 TLS 非目标与最终 YAML、README、rustdoc 和 manifest
       定位一致。
@@ -58,9 +69,11 @@
 - [ ] 启用租户实例配额或 Outbox 在飞配额前，全部写入方已升级且存量账本已在事务内对账并初始化；
       管理动作速率使用数据库窗口，精确用量只经受权查询读取。
 - [ ] 产生 `MANUALLY_CLOSED` 前全部副本都能解析该终态，`enable_manual_close` 的放行批次和回退边界已批准。
-- [ ] 数据库迁移按固定顺序执行；摘要封口、在线 DDL、排序规则转换和回退方案均有批准记录。
-- [ ] 每个 Outbox 表具备 `(dispatched, dead, id)` 与 `(dead, id)` 索引，待投递、死信计数和领取查询的
-      执行计划不随历史总行数退化；已投递行与死信的保留、归档和分批清理策略已经批准。
+- [ ] MySQL Saga 增量迁移与 PostgreSQL Orchestrator/participant 语义化迁移按各自合同执行；摘要门禁、
+      在线 DDL、锁预算和回退方案均有批准记录。
+- [ ] 每个 Outbox 表具备匹配所选后端查询的 dispatch、dead 与 retention 索引；MySQL 复合索引和
+      PostgreSQL 部分索引分别以实际 SQL 的执行计划复验，待投递、死信计数和领取查询不随历史总行数
+      退化；已投递行与死信的保留、归档和分批清理策略已经批准。
 - [ ] retention 提交应答不确定、预算耗尽、行锁竞争和归档收据丢失有独立指标与处置流程；不确定提交
       不计入已确认删除，也不刷新最近成功时刻。
 - [ ] replay horizon 覆盖消息最大保留期；Inbox、participant gate、journal、DLT 和审计事实不会过早清理。
@@ -69,7 +82,8 @@
 
 ## 生产环境批准
 
-- [ ] MySQL 主从拓扑、提升流程、备份恢复点、复制延迟阈值和数据丢失目标已签署。
+- [ ] 实际选用的 MySQL 和/或 PostgreSQL 主从拓扑、提升流程、备份恢复点、复制延迟阈值和数据丢失
+      目标已签署。
 - [ ] Kafka broker 拓扑、副本因子、最小同步副本、ACL、凭据轮换和故障策略已签署。
 - [ ] 候选硬件上的目标峰值、积压清空速率、资源余量和服务等级目标已签署。
 - [ ] 在线 DDL 的锁等待、总耗时、磁盘余量、维护窗和回退条件已签署。

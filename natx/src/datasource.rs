@@ -8,6 +8,8 @@ use std::time::Duration;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{Connection, MySqlConnection, MySqlPool};
 
+pub use natx_core::DataSourcePoolConfig;
+
 /// 单个数据源的连接与池化参数。
 ///
 /// 该结构体是业务 YAML(`database` / `datasources.<name>`)的反序列化目标，也是探测和建池的唯一输入。
@@ -45,6 +47,8 @@ pub struct DataSourceConfig {
 /// # 参数
 ///
 /// 本函数无参数；缺省值面向单实例中等负载服务。
+///
+/// 返回：默认连接数上限。
 fn default_max_connections() -> u32 {
     10
 }
@@ -54,6 +58,8 @@ fn default_max_connections() -> u32 {
 /// # 参数
 ///
 /// 本函数无参数；缺省值保证请求不会无限期排队等待连接。
+///
+/// 返回：毫秒单位的默认获取连接等待预算。
 fn default_acquire_timeout_ms() -> u64 {
     2_000
 }
@@ -63,6 +69,8 @@ fn default_acquire_timeout_ms() -> u64 {
 /// # 参数
 ///
 /// 本函数无参数；缺省值覆盖常见跨机房握手耗时。
+///
+/// 返回：毫秒单位的默认建连预算。
 fn default_connect_timeout_ms() -> u64 {
     5_000
 }
@@ -72,6 +80,8 @@ fn default_connect_timeout_ms() -> u64 {
 /// # 参数
 ///
 /// 本函数无参数；默认开启以便启动期就暴露真实连接错误。
+///
+/// 返回：固定为真。
 fn default_probe_on_start() -> bool {
     true
 }
@@ -82,9 +92,11 @@ impl std::fmt::Debug for DataSourceConfig {
     /// # 参数
     ///
     /// - `f`：Debug 输出使用的标准格式化器。
+    ///
+    /// 返回：脱敏字段写入成功时返回 `Ok`，否则返回格式化错误。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataSourceConfig")
-            .field("url", &redact_url(&self.url))
+            .field("url", &natx_core::redact_url(&self.url))
             .field("max_connections", &self.max_connections)
             .field("min_connections", &self.min_connections)
             .field("acquire_timeout_ms", &self.acquire_timeout_ms)
@@ -102,27 +114,30 @@ impl DataSourceConfig {
     /// # 参数
     ///
     /// 本方法无显式参数；校验只读取自身字段，不访问网络。
+    ///
+    /// 返回：公共池参数与 MySQL scheme 均合法时成功，否则返回无连接副作用的配置错误。
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.url.trim().is_empty(), "datasource url 不能为空");
+        match DataSourcePoolConfig::from(self).validate_common() {
+            Ok(()) => {}
+            Err(natx_core::PoolConfigError::EmptyUrl) => {
+                anyhow::bail!("datasource url 不能为空")
+            }
+            Err(natx_core::PoolConfigError::ZeroMaxConnections) => {
+                anyhow::bail!("datasource max_connections 必须大于 0")
+            }
+            Err(natx_core::PoolConfigError::InvalidConnectionRange) => {
+                anyhow::bail!("datasource min_connections 不能大于 max_connections")
+            }
+            Err(natx_core::PoolConfigError::ZeroAcquireTimeout) => {
+                anyhow::bail!("datasource acquire_timeout_ms 必须大于 0")
+            }
+            Err(natx_core::PoolConfigError::ZeroConnectTimeout) => {
+                anyhow::bail!("datasource connect_timeout_ms 必须大于 0")
+            }
+        }
         anyhow::ensure!(
             self.url.starts_with("mysql://"),
             "datasource url 必须以 mysql:// 开头"
-        );
-        anyhow::ensure!(
-            self.max_connections > 0,
-            "datasource max_connections 必须大于 0"
-        );
-        anyhow::ensure!(
-            self.min_connections <= self.max_connections,
-            "datasource min_connections 不能大于 max_connections"
-        );
-        anyhow::ensure!(
-            self.acquire_timeout_ms > 0,
-            "datasource acquire_timeout_ms 必须大于 0"
-        );
-        anyhow::ensure!(
-            self.connect_timeout_ms > 0,
-            "datasource connect_timeout_ms 必须大于 0"
         );
         Ok(())
     }
@@ -134,22 +149,27 @@ impl DataSourceConfig {
     /// # 参数
     ///
     /// 本方法无参数；无法解析时返回固定占位符而不是原始连接串。
+    ///
+    /// 返回：移除 scheme、userinfo、query 与 fragment 后的 endpoint。
     pub fn endpoint(&self) -> String {
-        let Some(rest) = self.url.strip_prefix("mysql://") else {
-            return "<unknown-endpoint>".to_owned();
-        };
-        let authority_and_path = match rest.rfind('@') {
-            Some(index) => &rest[index + 1..],
-            None => rest,
-        };
-        let trimmed = authority_and_path
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(authority_and_path);
-        if trimmed.is_empty() {
-            "<unknown-endpoint>".to_owned()
-        } else {
-            trimmed.to_owned()
+        DataSourcePoolConfig::from(self).endpoint()
+    }
+}
+
+impl From<&DataSourceConfig> for DataSourcePoolConfig {
+    /// 业务作用：把既有 MySQL 配置投影为 driver 中立池参数，不改变公开 struct 字段。
+    ///
+    /// 参数说明：`config` 是已反序列化的 MySQL datasource 配置。
+    ///
+    /// 返回：字段逐一对应的公共池配置；URL scheme 仍由 MySQL 包装层校验。
+    fn from(config: &DataSourceConfig) -> Self {
+        Self {
+            url: config.url.clone(),
+            max_connections: config.max_connections,
+            min_connections: config.min_connections,
+            acquire_timeout_ms: config.acquire_timeout_ms,
+            connect_timeout_ms: config.connect_timeout_ms,
+            probe_on_start: config.probe_on_start,
         }
     }
 }
@@ -162,9 +182,12 @@ impl DataSourceConfig {
 ///
 /// # 参数
 ///
-/// - `config`：已经通过 [`DataSourceConfig::validate`] 的数据源配置；其 `connect_timeout_ms`
-///   同时作为本次探测的上限，超时按连接失败处理。
+/// - `config`：待探测的数据源配置；入口会再次校验，其 `connect_timeout_ms` 同时作为探测上限。
+///
+/// 返回：配置和握手均成功且探测连接已关闭时成功；否则返回连接或配置错误。
 pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
+    // 公开探测入口自行复验配置，确保错误 driver 和无效预算不会触发网络动作。
+    config.validate()?;
     let connect = MySqlConnection::connect(&config.url);
     let connection =
         tokio::time::timeout(Duration::from_millis(config.connect_timeout_ms), connect)
@@ -188,28 +211,16 @@ pub async fn probe(config: &DataSourceConfig) -> anyhow::Result<()> {
 ///
 /// # 参数
 ///
-/// - `config`：已经通过 [`DataSourceConfig::validate`] 的数据源配置。
+/// - `config`：待建池的数据源配置；入口会再次执行完整校验。
+///
+/// 返回：配置可被 SQLx 解析时返回惰性连接池；调用方负责在停机时关闭。
 pub fn build_pool(config: &DataSourceConfig) -> anyhow::Result<MySqlPool> {
+    // 惰性池不会立即建连，但仍必须在交出句柄前执行完整配置门禁。
+    config.validate()?;
     let pool = MySqlPoolOptions::new()
         .max_connections(config.max_connections)
         .min_connections(config.min_connections)
         .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
         .connect_lazy(&config.url)?;
     Ok(pool)
-}
-
-/// 业务作用：去掉连接串中的 userinfo，用于脱敏展示。
-///
-/// # 参数
-///
-/// - `url`：可能内嵌用户名和口令的原始连接串。
-fn redact_url(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_owned();
-    };
-    let after = scheme_end + 3;
-    match url[after..].find('@') {
-        Some(at) => format!("{}***{}", &url[..after], &url[after + at..]),
-        None => url.to_owned(),
-    }
 }

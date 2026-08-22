@@ -13,12 +13,13 @@ categories = ["asynchronous", "database"]
 
 [dependencies]
 anyhow = "1"
-async-trait = "0.1"
 # linkme 作为收集点宿主，#[saga] 的 descriptor 静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
 # Saga 核心合同与 MySQL store 均固定使用公开坐标，避免运行时装载来源分裂的状态合同。
 nasaga-core = { version = "1.0.1" }
+nasaga-backend = { version = "1.0.0" }
 nasaga-mysql = { version = "1.0.2" }
+nasaga-runtime-core = { version = "1.0.0" }
 nainbox-core = { version = "1.0.1" }
 nainbox-mysql = { version = "1.0.2" }
 naoutbox-core = { version = "1.0.2" }
@@ -29,27 +30,16 @@ natx = { version = "1.0.3" }
 natelemetry = { version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-hmac = "0.12"
-sha2 = "0.10"
 # 调度批次业务键把对象身份收敛为有界十六进制摘要。
 hex = "0.4"
 uuid = { version = "1", features = ["v4", "v5"] }
-nafka = { version = "1.0.2", optional = true, default-features = false }
-# Redis Streams hosted transport:显式 ACK 裁决、pending reclaim、原子 DLT 与消息签名。
-nadis = { version = "1.0.1", optional = true }
-redis = { version = "1", optional = true, features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
-tokio = { version = "1", optional = true, features = ["time"] }
 tracing = "0.1"
-nagrpc = { version = "1.1.0", optional = true }
-
-[build-dependencies]
-nagrpc-build = "1.0.0"
 
 [features]
 default = []
 # 真实 Kafka hosted transport：手动 ACK、分区退避、可信投递次数与 durability-first DLT。
-kafka = ["dep:nafka"]
+kafka = ["nasaga-runtime-core/kafka"]
 # 真实 Redis Streams hosted transport:XREADGROUP 显式循环、XAUTOCLAIM 重领、Lua 原子 DLT+XACK。
-redis-stream = ["dep:nadis", "dep:redis", "dep:tokio"]
+redis-stream = ["nasaga-runtime-core/redis-stream"]
 # gRPC request/response transport：框架 generated service/client、mTLS 身份绑定与封闭收据。
-grpc-transport = ["dep:nagrpc"]
+grpc-transport = ["nasaga-runtime-core/grpc-transport"]

@@ -4,45 +4,11 @@
 //! COMMIT 前崩溃时留下虚假成功指标。查询只返回低基数聚合，不暴露 tenant、saga_id
 //! 或 step 等高基数标签。
 
+use nasaga_backend::SagaStoreMetrics;
 use sqlx::Row as _;
 
 use crate::error::{corrupt, map_connection, map_database, SagaStoreError};
 use crate::MySqlSagaStore;
-
-/// 业务作用：表示 MySQL 中可重建的 Saga 运行指标快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SagaStoreMetrics {
-    /// 历史创建实例数。
-    pub started_total: u64,
-    /// 进入 `COMPLETED` 的历史迁移数。
-    pub completed_total: u64,
-    /// 进入 `COMPENSATED` 的历史迁移数。
-    pub compensated_total: u64,
-    /// 进入 `MANUAL_INTERVENTION` 的历史迁移数。
-    pub manual_intervention_total: u64,
-    /// 进入 `MANUALLY_CLOSED` 的历史迁移数（系统外处置后由人工关闭自动化）。
-    pub manually_closed_total: u64,
-    /// 参与方报告 `UNKNOWN` 的历史 attempt 数。
-    pub unknown_result_total: u64,
-    /// attempt 号大于 1 的历史重试数。
-    pub retry_attempt_total: u64,
-    /// 已持久化的互斥事实数。
-    pub conflict_total: u64,
-    /// 当前正向执行实例数。
-    pub running_current: u64,
-    /// 当前等待 Unknown 裁决实例数。
-    pub waiting_resolution_current: u64,
-    /// 当前执行补偿实例数。
-    pub compensating_current: u64,
-    /// 当前人工介入实例数。
-    pub manual_intervention_current: u64,
-    /// 当前可领取且已到期的 durable timer 数。
-    pub due_timer_current: u64,
-    /// 已终结实例的持久化生命周期样本数。
-    pub lifecycle_duration_count: u64,
-    /// 已终结实例从创建到最后状态更新的累计微秒数。
-    pub lifecycle_duration_micros_sum: u64,
-}
 
 impl MySqlSagaStore {
     /// 业务作用：从已提交的 Saga 表聚合一份低基数运行指标快照。

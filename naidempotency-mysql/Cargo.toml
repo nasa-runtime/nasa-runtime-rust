@@ -7,8 +7,8 @@ description = "NASA MySQL idempotency store with named natx datasource binding a
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "idempotency", "transaction", "database", "runtime"]
+categories = ["database", "web-programming"]
 
 [dependencies]
 naidempotency = { version = "1.0.1" }

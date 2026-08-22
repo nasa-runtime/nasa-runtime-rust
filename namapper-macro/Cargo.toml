@@ -1,22 +1,22 @@
 # mapper-macro —— 声明式 Mapper trait 生成宏
 [package]
 name = "namapper-macro"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[Mapper]/#[Query]/#[Insert]/#[Update]/#[Delete]/#[Execute] proc macros"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mapper", "sql", "macro", "database", "async"]
+categories = ["development-tools::procedural-macro-helpers", "database"]
 
 [lib]
 proc-macro = true
 name = "namapper_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.1" }
+nasa-macro-support = { package = "macro-support", version = "1.0.2" }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"

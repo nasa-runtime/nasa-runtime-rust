@@ -26,11 +26,13 @@ members = [
     "macro-support",
     "naweb",
     "namapper-macro",
+    "namapper-core",
     "namapper",
+    "namapper-pgsql",
     "hystrix-macro", "hystrix",
     "nafana-macro", "nafana",
     "nacache-macro", "cacheable",
-    "natx-macro", "natx",
+    "natx-macro", "natx-core", "natx", "natx-pgsql",
     "async-macro", "nasched",
     "naweb-macro",
     "napart",
@@ -43,7 +45,6 @@ members = [
     "nadis-derive",
     "ncrypto",
     "nanum",
-    "nadate",
     "nametrics-core",
     "nagrpc",
     "nagrpc-build",
@@ -56,20 +57,30 @@ members = [
     "nauth-oauth",
     "naidempotency",
     "naidempotency-mysql",
+    "naidempotency-pgsql",
     "naidempotency-redis",
     "naoutbox-core",
     "naoutbox-mysql",
+    "naoutbox-pgsql",
     "nainbox-core",
     "nainbox-mysql",
+    "nainbox-pgsql",
     "nasaga-core",
+    "nasaga-backend",
     "nasaga-mysql",
+    "nasaga-pgsql",
+    "nasaga-runtime-core",
     "nasaga-runtime",
+    "nasaga-runtime-pgsql",
     "nasaga-macro",
     "naopenapi",
+    "namigrate-core",
     "namigrate",
+    "namigrate-pgsql",
     "naauthz",
     "naaudit",
     "naaudit-mysql",
+    "naaudit-pgsql",
     "naimg",
     "nalog",
     "nabase",
@@ -92,8 +103,8 @@ homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
-# 本地开发期统一来源:成员间依赖固定公开坐标(见各 crate manifest 注释),跨 crate 改动经
-# workspace patch 指向本地路径,发布前移除对应条目并按依赖序发版。
+# 成员间依赖保持公开版本坐标，workspace patch 只统一当前工作区的 crate 身份；单 crate
+# 归档的 normalized manifest 仍解析 registry 版本，不携带根工作区 patch。
 [patch.crates-io]
 # 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
 macro-support = { path = "macro-support" }
@@ -101,8 +112,14 @@ cacheable = { path = "cacheable" }
 nadis-derive = { path = "nadis-derive" }
 nafka = { path = "nafka" }
 namapper = { path = "namapper" }
+namapper-core = { path = "namapper-core" }
+namapper-macro = { path = "namapper-macro" }
+namapper-pgsql = { path = "namapper-pgsql" }
 namigrate = { path = "namigrate" }
+namigrate-core = { path = "namigrate-core" }
+namigrate-pgsql = { path = "namigrate-pgsql" }
 nanum = { path = "nanum" }
+nabase = { path = "nabase" }
 naws = { path = "naws" }
 # 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
 hystrix = { path = "hystrix" }
@@ -111,9 +128,19 @@ naml = { path = "naml" }
 # 进程一致性依赖必须单来源:task-local 事务上下文与 Inbox 访问若在同一图里出现
 # 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
 natx = { path = "natx" }
+natx-core = { path = "natx-core" }
+natx-macro = { path = "natx-macro" }
+natx-pgsql = { path = "natx-pgsql" }
+nainbox-core = { path = "nainbox-core" }
 nainbox-mysql = { path = "nainbox-mysql" }
+nainbox-pgsql = { path = "nainbox-pgsql" }
+naidempotency = { path = "naidempotency" }
 naidempotency-mysql = { path = "naidempotency-mysql" }
+naidempotency-pgsql = { path = "naidempotency-pgsql" }
+naoutbox-core = { path = "naoutbox-core" }
+naoutbox-pgsql = { path = "naoutbox-pgsql" }
 naaudit-mysql = { path = "naaudit-mysql" }
+naaudit-pgsql = { path = "naaudit-pgsql" }
 # 同版本双身份消除:成员既按 path 直依赖、又经其它成员的公开坐标传递引用的 crate,
 # 必须统一来源,否则类型跨身份流动即编译失败或行为分裂。
 ncrypto = { path = "ncrypto" }
@@ -122,10 +149,13 @@ naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
 async-macro = { path = "async-macro" }
 nasaga-core = { path = "nasaga-core" }
+nasaga-backend = { path = "nasaga-backend" }
 nasaga-mysql = { path = "nasaga-mysql" }
+nasaga-pgsql = { path = "nasaga-pgsql" }
+nasaga-runtime-core = { path = "nasaga-runtime-core" }
 nasaga-runtime = { path = "nasaga-runtime" }
+nasaga-runtime-pgsql = { path = "nasaga-runtime-pgsql" }
 nasaga-macro = { path = "nasaga-macro" }
-naoutbox-core = { path = "naoutbox-core" }
 naoutbox-mysql = { path = "naoutbox-mysql" }
 # 对象存储指标源在门面构造，adapter 与门面必须共享同一 naobject 类型身份。
 naobject = { path = "naobject" }

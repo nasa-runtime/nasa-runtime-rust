@@ -7,8 +7,8 @@ description = "NASA 业务幂等核心:Idempotency-Key 状态机(首次/重放/�
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["idempotency", "api", "http", "transaction", "runtime"]
+categories = ["web-programming", "asynchronous"]
 
 [dependencies]
 async-trait = "0.1"

@@ -7,11 +7,12 @@ description = "NASA Inbox MySQL backend with named natx datasource binding and a
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "inbox", "transaction", "messaging", "database"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 anyhow = "1"
-nainbox-core = { version = "1.0.0" }
+nainbox-core = { version = "1.0.2" }
+async-trait = "0.1"
 natx = { version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }

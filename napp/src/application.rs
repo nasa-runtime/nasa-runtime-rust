@@ -63,8 +63,8 @@ pub(crate) type KafkaCustomization = Box<
 /// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Prepare
 /// 阶段(监听器就绪、Web/Kafka consumer 接流之前)按数据源逐项取出,依 `database.migrations.mode`
 /// 运行 [`namigrate::run_gate`]。migrator 是嵌入式常量数据,`Send + 'static`,可跨阶段存放。
-#[cfg(feature = "db")]
-pub(crate) type MigrationRegistration = (String, namigrate::Migrator);
+#[cfg(any(feature = "db", feature = "db-pgsql"))]
+pub(crate) type MigrationRegistration = (String, crate::Migrator);
 
 #[derive(Debug, Clone)]
 /// 启动期固定的应用身份、profile、运行模式和计时基准。
@@ -191,7 +191,7 @@ pub(crate) struct ApplicationInner {
     /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Prepare
     /// 阶段一次性取走,此后再登记不可能生效,必须报阶段错误而非静默丢弃。同步互斥锁只保护一次
     /// push/take,不跨 await 持有。
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     migrations: StdMutex<Option<Vec<MigrationRegistration>>>,
     /// UserHook 移交、Prepare 消费的唯一 RedisJob 核心计划。
     #[cfg(feature = "redis-job")]
@@ -252,10 +252,10 @@ pub(crate) struct ApplicationInner {
     #[cfg(feature = "kafka")]
     kafka_runtime: Arc<crate::kafka::KafkaRuntimeState>,
     /// UserHook 注入、Saga Ready 门禁和运行期只读访问共用的受管状态。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     saga_runtime: Arc<crate::saga::SagaRuntimeState>,
     /// UserHook 注入、Outbox Ready 发布和 dispatcher 监督共用的受管状态。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     outbox_runtime: Arc<crate::outbox::OutboxRuntimeState>,
     /// 进程级统一指标注册表:各领域按 descriptor 记录到同一 hub。
     ///
@@ -346,7 +346,7 @@ impl Application {
                 user_registration_gate: StdMutex::new(()),
                 declared_components: AtomicU32::new(0),
                 readiness: Arc::new(crate::readiness::ReadinessRegistry::new()),
-                #[cfg(feature = "db")]
+                #[cfg(any(feature = "db", feature = "db-pgsql"))]
                 migrations: StdMutex::new(Some(Vec::new())),
                 #[cfg(feature = "redis-job")]
                 redis_job_runtime: crate::redis_job::RedisJobRuntimeState::new(),
@@ -385,9 +385,9 @@ impl Application {
                 grpc_runtime: Arc::new(crate::grpc::GrpcRuntimeState::new()),
                 #[cfg(feature = "kafka")]
                 kafka_runtime: Arc::new(crate::kafka::KafkaRuntimeState::new()),
-                #[cfg(feature = "saga")]
+                #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
                 saga_runtime: Arc::new(crate::saga::SagaRuntimeState::new()),
-                #[cfg(feature = "outbox")]
+                #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
                 outbox_runtime: Arc::new(crate::outbox::OutboxRuntimeState::new()),
                 metrics_hub,
                 #[cfg(feature = "web")]
@@ -796,6 +796,32 @@ impl Application {
         self.datasource(crate::db::DEFAULT_DATASOURCE).await
     }
 
+    /// 业务作用：按名称获取受 Application catalog 保护的 PostgreSQL datasource。
+    ///
+    /// 参数说明：`name` 是跨 driver 唯一的 datasource qualifier。
+    ///
+    /// 返回：名称存在且 driver 为 PostgreSQL 时返回共享 PgPool；错配、缺失或停机时返回类型化错误。
+    #[cfg(feature = "db-pgsql")]
+    pub async fn pg_datasource(&self, name: &str) -> ApplicationResult<natx_pgsql::PgPool> {
+        self.ensure_component_declared(
+            ComponentId::Db,
+            ApplicationPhase::Running,
+            "PostgreSQL datasource access",
+        )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Db, "PostgreSQL datasource access")?;
+        crate::db::pg_datasource_handle(self, name).await
+    }
+
+    /// 业务作用：获取 `default` 名下的 PostgreSQL datasource，不猜测其它唯一实例。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`default` 实际绑定 PostgreSQL 时返回 pool；绑定 MySQL 或缺失时返回明确错误。
+    #[cfg(feature = "db-pgsql")]
+    pub async fn default_pg_datasource(&self) -> ApplicationResult<natx_pgsql::PgPool> {
+        self.pg_datasource(crate::db::DEFAULT_DATASOURCE).await
+    }
+
     /// 业务作用：为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
     ///
     /// migration 属**业务 schema**,不进共享 runtime;业务在 UserHook 用
@@ -824,11 +850,11 @@ impl Application {
     /// ```ignore
     /// app.configure_migrations("default", sqlx::migrate!("./migrations"))?;
     /// ```
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     pub fn configure_migrations(
         &self,
         datasource: &str,
-        migrator: namigrate::Migrator,
+        migrator: crate::Migrator,
     ) -> ApplicationResult<()> {
         // 与 ws/router 定制登记同一把 Hook 边界线性化锁:先持锁再复查门,消除"检查时开放、写入时
         // Hook 已结束"的竞态。
@@ -845,12 +871,12 @@ impl Application {
         )?;
         // Batch 的 Prepare 早于其工作负载 UserHook，此时登记迁移已经错过该边界。
         // 与其静默漏跑,不如直接拒绝并指向显式 API——Batch 任务可在 Hook 里自行调用
-        // `nasa::run_gate`(经 `nasa::MigrationSettings` 构造设置)完成一次性校验/应用。
+        // 对应数据库门面的 `run_gate` 完成一次性校验/应用。
         if self.inner.info.mode() == ApplicationMode::Batch {
             return Err(ApplicationError::new(
                 ComponentId::Db,
                 ApplicationPhase::UserHook,
-                "configure_migrations requires Service mode; Batch Prepare completes before its workload hook. Run namigrate::run_gate explicitly in a batch hook instead",
+                "configure_migrations requires Service mode; Batch Prepare completes before its workload hook. Run the database-specific migration gate explicitly in a batch hook instead",
             ));
         }
         let datasource = datasource.trim();
@@ -1015,7 +1041,7 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数;取走后队列置 `None`,此后 `configure_migrations` 一律返回封口错误。
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     pub(crate) fn take_migrations(&self) -> Vec<MigrationRegistration> {
         self.inner
             .migrations
@@ -1692,7 +1718,7 @@ impl Application {
     /// - `plan`：包含 Orchestrator、命名参与方或两者的完整运行计划。
     ///
     /// 返回：UserHook 开放、已声明 `saga` 且首次提交时成功；重复、晚到或空计划返回阶段错误。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub fn configure_saga(
         &self,
         mut plan: crate::saga::SagaApplicationPlan,
@@ -1716,7 +1742,7 @@ impl Application {
         // 先验证角色拓扑，再把 publisher 移交给 Outbox；否则空计划失败会留下无法由调用方重试
         // 覆盖的半配置 Outbox，破坏 UserHook 内一次纠错的原子性。
         plan.validate()?;
-        #[cfg(feature = "saga-grpc")]
+        #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
         {
             let grpc_services = plan.take_grpc_services();
             if !grpc_services.is_empty() {
@@ -1746,7 +1772,7 @@ impl Application {
     /// - `plan`：包含 publisher 与明确毒丸策略的完整计划。
     ///
     /// 返回：UserHook 开放、组件已声明且首次提交时成功；重复或晚到配置返回阶段错误。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub fn configure_outbox(
         &self,
         plan: crate::outbox::OutboxApplicationPlan,
@@ -1770,7 +1796,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：组件已声明且通过 Ready 时返回句柄；未声明、未就绪或停机后返回错误。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub fn outbox(&self) -> ApplicationResult<crate::outbox::OutboxHandle> {
         self.ensure_component_declared(
             ComponentId::Outbox,
@@ -1788,7 +1814,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：应用声明 `saga` 且已通过 Ready 门禁时返回句柄；未声明、未就绪或停机后返回错误。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub fn saga(&self) -> ApplicationResult<crate::saga::SagaHandle> {
         self.ensure_component_declared(
             ComponentId::Saga,
@@ -2270,6 +2296,7 @@ impl Application {
         feature = "log",
         feature = "nacos-config",
         feature = "db",
+        feature = "db-pgsql",
         feature = "redis",
         feature = "redis-job",
         feature = "cache",
@@ -2312,7 +2339,12 @@ impl Application {
     /// - `capability`：不含 qualifier、endpoint 或凭据的稳定能力名称。
     ///
     /// 返回：Starting/Ready 时允许继续查找；Stopping、Stopped 或 Failed 时返回对应阶段的类型化错误。
-    #[cfg(any(feature = "db", feature = "redis", feature = "kafka"))]
+    #[cfg(any(
+        feature = "db",
+        feature = "db-pgsql",
+        feature = "redis",
+        feature = "kafka"
+    ))]
     fn ensure_infrastructure_lookup_open(
         &self,
         component: ComponentId,
@@ -2453,7 +2485,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：只增加共享所有权、不复制 Orchestrator 或参与方运行时的状态句柄。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub(crate) fn saga_runtime(&self) -> Arc<crate::saga::SagaRuntimeState> {
         Arc::clone(&self.inner.saga_runtime)
     }
@@ -2466,7 +2498,7 @@ impl Application {
     ///
     /// 返回：Prometheus exposition 文本;未装配任何 stream 消费者时为空串。纯内存
     /// 读取,不触发 I/O,任何生命周期阶段可安全调用。
-    #[cfg(feature = "saga-redis-stream")]
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
     pub fn saga_stream_metrics_prometheus(&self) -> String {
         crate::saga::render_stream_metrics(&self.saga_runtime())
     }
@@ -2476,7 +2508,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：共享状态句柄；克隆不复制 publisher 或计数。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub(crate) fn outbox_runtime(&self) -> Arc<crate::outbox::OutboxRuntimeState> {
         Arc::clone(&self.inner.outbox_runtime)
     }
@@ -2498,7 +2530,7 @@ impl Application {
     /// 保留上一份值并更新源级失败与快照年龄指标，调用出口不得据此丢弃无关指标族。
     #[cfg(any(feature = "telemetry", feature = "web"))]
     pub(crate) async fn refresh_metric_sources(&self) -> ApplicationResult<()> {
-        #[cfg(feature = "outbox")]
+        #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
         if self
             .ensure_component_declared(
                 ComponentId::Outbox,
@@ -2540,6 +2572,29 @@ impl Application {
                         "metric source descriptor `{}` conflicts with an existing registration",
                         conflict.name
                     ),
+                )
+            })
+    }
+
+    /// 业务作用：在 DB Prepare 阶段原子登记冻结 datasource 与后端对应关系的指标源。
+    ///
+    /// 参数说明：`catalog` 是当前 Application 已发布且仍受 owner 保护的 catalog。
+    ///
+    /// 返回：descriptor 和最坏序列预算同时登记成功时完成；冲突或预算不足会阻止 Ready。
+    #[cfg(feature = "db-pgsql")]
+    pub(crate) fn register_database_backend_metrics(
+        &self,
+        catalog: Arc<natx_core::DataSourceCatalog>,
+    ) -> ApplicationResult<()> {
+        let (source, worst_case_series) = crate::db::backend_metrics_source(&catalog);
+        self.inner
+            .metrics_hub
+            .register_legacy_source_reserved(source, worst_case_series)
+            .map_err(|error| {
+                ApplicationError::new(
+                    ComponentId::Db,
+                    ApplicationPhase::Prepare,
+                    format!("datasource backend metrics registration failed: {error}"),
                 )
             })
     }

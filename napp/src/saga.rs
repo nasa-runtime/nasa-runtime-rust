@@ -14,9 +14,11 @@ use std::{
 };
 
 use naoutbox_core::OutboxPublisher;
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 use nasaga_runtime::SagaStreamPoller;
 use nasaga_runtime::{DefinitionRegistry, Orchestrator, ParticipantRuntime};
+#[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+use nasaga_runtime_pgsql as nasaga_runtime;
 use serde::Deserialize;
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
@@ -32,7 +34,7 @@ const DEFAULT_TIMER_OPERATION_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMER_INTERVAL_MS: u64 = 60_000;
 const MAX_TIMER_FAILURE_THRESHOLD: u32 = 100;
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 macro_rules! saga_stream_metric {
     ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr) => {
         static $ident: nametrics_core::MetricDescriptor = nametrics_core::MetricDescriptor {
@@ -46,7 +48,7 @@ macro_rules! saga_stream_metric {
     };
 }
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_ACKED,
     "napp_saga_stream_acked_total",
@@ -54,7 +56,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_DEAD_LETTERED,
     "napp_saga_stream_dead_lettered_total",
@@ -62,7 +64,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_RETAINED,
     "napp_saga_stream_retained_total",
@@ -70,7 +72,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_RECLAIMED,
     "napp_saga_stream_reclaimed_total",
@@ -78,7 +80,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_DELETED_PENDING,
     "napp_saga_stream_deleted_pending_total",
@@ -86,7 +88,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_AUTH_REJECTED,
     "napp_saga_stream_auth_rejected_total",
@@ -94,7 +96,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_FAILED_ROUNDS,
     "napp_saga_stream_failed_rounds_total",
@@ -102,7 +104,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_HANDLED,
     "napp_saga_stream_handled_total",
@@ -110,7 +112,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_HANDLER_MICROS,
     "napp_saga_stream_handler_micros_sum",
@@ -118,7 +120,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Counter,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_PENDING,
     "napp_saga_stream_pending",
@@ -126,7 +128,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Gauge,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_OLDEST_PEL_AGE,
     "napp_saga_stream_oldest_pel_age_ms",
@@ -134,7 +136,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Gauge,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_HEALTHY,
     "napp_saga_stream_healthy",
@@ -142,7 +144,7 @@ saga_stream_metric!(
     nametrics_core::MetricKind::Gauge,
     &["stream", "group", "consumer"]
 );
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 saga_stream_metric!(
     STREAM_PUBLISHER_DUPLICATES,
     "napp_saga_stream_publisher_duplicate_hints_total",
@@ -151,7 +153,7 @@ saga_stream_metric!(
     &[]
 );
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 static SAGA_STREAM_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 13] = [
     &STREAM_ACKED,
     &STREAM_DEAD_LETTERED,
@@ -194,6 +196,100 @@ struct SagaSettings {
     timer_failure_threshold: u32,
 }
 
+/// 业务作用：保存 Ready 前冻结的具体 Saga Orchestrator，同时让生命周期门禁只依赖共同状态机合同。
+#[derive(Clone)]
+enum ManagedOrchestrator {
+    #[cfg(feature = "saga")]
+    MySql(Arc<nasaga_runtime::Orchestrator>),
+    #[cfg(feature = "saga-pgsql")]
+    PostgreSql(Arc<nasaga_runtime_pgsql::PgOrchestrator>),
+}
+
+impl ManagedOrchestrator {
+    /// 业务作用：读取运行时固定绑定的 datasource，供计划原子边界与配置引用复验。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不含 endpoint 的规范 datasource 引用。
+    fn datasource_ref(&self) -> &natx_core::DatasourceRef {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(runtime) => runtime.datasource_ref(),
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(runtime) => runtime.datasource_ref(),
+        }
+    }
+
+    /// 业务作用：返回运行时后端身份，供 catalog 类型化 getter 与 Outbox 同源门禁选择正确 driver。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：构造运行时的数据库 driver。
+    fn driver(&self) -> natx_core::DatabaseDriver {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(_) => natx_core::DatabaseDriver::MySql,
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(_) => natx_core::DatabaseDriver::PostgreSql,
+        }
+    }
+
+    /// 业务作用：在能力发布前执行 definition、descriptor 与历史实例兼容门禁。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：后端状态与当前合同兼容时成功；任何持久或合同失败拒绝 Ready。
+    async fn verify_startup(&self) -> anyhow::Result<()> {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(runtime) => runtime.verify_startup().await,
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(runtime) => runtime.verify_startup().await,
+        }
+    }
+
+    /// 业务作用：把一轮到期 timer 裁决委托给运行时构造时绑定的数据库后端。
+    async fn run_due_timers(&self, owner: &str, now_ms: i64) -> anyhow::Result<u32> {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(runtime) => runtime.run_due_timers(owner, now_ms).await,
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(runtime) => runtime.run_due_timers(owner, now_ms).await,
+        }
+    }
+}
+
+/// 业务作用：保存命名参与方的具体数据库运行时，并为共同生命周期提供 datasource 身份。
+#[derive(Clone)]
+enum ManagedParticipant {
+    #[cfg(feature = "saga")]
+    MySql(Arc<nasaga_runtime::ParticipantRuntime>),
+    #[cfg(feature = "saga-pgsql")]
+    PostgreSql(Arc<nasaga_runtime_pgsql::PgParticipantRuntime>),
+}
+
+impl ManagedParticipant {
+    /// 业务作用：读取参与方事实、Inbox 与结果 Outbox 共同绑定的 datasource。
+    fn datasource_ref(&self) -> &natx_core::DatasourceRef {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(runtime) => runtime.datasource_ref(),
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(runtime) => runtime.datasource_ref(),
+        }
+    }
+
+    /// 业务作用：返回参与方运行时后端身份，禁止一份计划混入不同 driver。
+    fn driver(&self) -> natx_core::DatabaseDriver {
+        match self {
+            #[cfg(feature = "saga")]
+            Self::MySql(_) => natx_core::DatabaseDriver::MySql,
+            #[cfg(feature = "saga-pgsql")]
+            Self::PostgreSql(_) => natx_core::DatabaseDriver::PostgreSql,
+        }
+    }
+}
+
 impl Default for SagaSettings {
     /// 业务作用：提供有界、偏保守的 timer 轮询与故障摘流默认值。
     ///
@@ -203,7 +299,7 @@ impl Default for SagaSettings {
     fn default() -> Self {
         Self {
             database_bootstrap: SagaDatabaseBootstrap::Application,
-            datasource_ref: natx::DEFAULT_DATASOURCE.to_owned(),
+            datasource_ref: crate::db::DEFAULT_DATASOURCE.to_owned(),
             timer_poll_interval_ms: DEFAULT_TIMER_POLL_INTERVAL_MS,
             timer_error_backoff_ms: DEFAULT_TIMER_ERROR_BACKOFF_MS,
             timer_operation_timeout_ms: DEFAULT_TIMER_OPERATION_TIMEOUT_MS,
@@ -228,7 +324,7 @@ pub(crate) fn database_bootstrap(
 
 /// 业务作用：把受管 Orchestrator 与 durable timer 的唯一所有者身份绑定为不可拆分计划。
 struct OrchestratorPlan {
-    runtime: Arc<Orchestrator>,
+    runtime: ManagedOrchestrator,
     timer_owner: String,
 }
 
@@ -238,11 +334,11 @@ struct OrchestratorPlan {
 /// 服务同时承载多个独立参与方适配器，但不允许同名覆盖。
 pub struct SagaApplicationPlan {
     orchestrator: Option<OrchestratorPlan>,
-    participants: BTreeMap<String, Arc<ParticipantRuntime>>,
+    participants: BTreeMap<String, ManagedParticipant>,
     outbox: Option<crate::outbox::OutboxApplicationPlan>,
-    #[cfg(feature = "saga-redis-stream")]
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
     redis_transport: Option<SagaRedisTransportPlan>,
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     grpc_services: Vec<Box<dyn nagrpc::ManagedGrpcService>>,
 }
 
@@ -253,7 +349,7 @@ pub struct SagaApplicationPlan {
 ///
 /// 发布端不在本计划内:command/result 事件仍经由受管 Outbox 的发布端合同投递,
 /// 本计划只托管消费侧。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 pub struct SagaRedisTransportPlan {
     client_name: String,
     pollers: Vec<Arc<dyn SagaStreamPoller>>,
@@ -261,7 +357,7 @@ pub struct SagaRedisTransportPlan {
     error_backoff_ms: u64,
 }
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 impl SagaRedisTransportPlan {
     /// 业务作用：创建绑定某个受管 Redis 客户端、尚无消费者的传输子计划。
     ///
@@ -365,7 +461,7 @@ impl SagaRedisTransportPlan {
 
 /// 业务作用：单条受管 stream 消费的进程级观测状态——区分"某条流停摆"与"整个
 /// 消费任务退出";标签值来自 Ready 时冻结的 (stream, group),基数有界。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 pub(crate) struct StreamRuntime {
     stream: String,
     group: String,
@@ -395,9 +491,9 @@ impl SagaApplicationPlan {
             orchestrator: None,
             participants: BTreeMap::new(),
             outbox: None,
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             redis_transport: None,
-            #[cfg(feature = "saga-grpc")]
+            #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
             grpc_services: Vec::new(),
         }
     }
@@ -450,6 +546,10 @@ impl SagaApplicationPlan {
         }
         let timer_owner = timer_owner.into();
         validate_runtime_name(&timer_owner, "timer owner")?;
+        #[cfg(feature = "saga")]
+        let runtime = ManagedOrchestrator::MySql(runtime);
+        #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+        let runtime = ManagedOrchestrator::PostgreSql(runtime);
         self.orchestrator = Some(OrchestratorPlan {
             runtime,
             timer_owner,
@@ -471,7 +571,89 @@ impl SagaApplicationPlan {
     ) -> ApplicationResult<Self> {
         let name = name.into();
         validate_runtime_name(&name, "participant name")?;
+        #[cfg(feature = "saga")]
+        let runtime = ManagedParticipant::MySql(runtime);
+        #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+        let runtime = ManagedParticipant::PostgreSql(runtime);
         if self.participants.insert(name, runtime).is_some() {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga plan contains a duplicate participant name",
+            ));
+        }
+        Ok(self)
+    }
+
+    /// 业务作用：创建只包含 PostgreSQL Orchestrator 的受管计划，供双后端同时编入时显式选择后端。
+    ///
+    /// 参数说明：`runtime` 是 PostgreSQL 状态机入口，`timer_owner` 是逐副本 fencing 身份。
+    ///
+    /// 返回：身份规范时返回 PostgreSQL 计划；非法身份返回 UserHook 错误。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn pgsql_orchestrator(
+        runtime: Arc<nasaga_runtime_pgsql::PgOrchestrator>,
+        timer_owner: impl Into<String>,
+    ) -> ApplicationResult<Self> {
+        Self::new().with_pgsql_orchestrator(runtime, timer_owner)
+    }
+
+    /// 业务作用：创建只包含一个 PostgreSQL 参与方的受管计划。
+    ///
+    /// 参数说明：`name` 是应用内身份，`runtime` 固定绑定 PostgreSQL datasource。
+    ///
+    /// 返回：名称规范时返回计划；重复或非法名称返回 UserHook 错误。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn pgsql_participant(
+        name: impl Into<String>,
+        runtime: Arc<nasaga_runtime_pgsql::PgParticipantRuntime>,
+    ) -> ApplicationResult<Self> {
+        Self::new().with_pgsql_participant(name, runtime)
+    }
+
+    /// 业务作用：向计划设置唯一 PostgreSQL Orchestrator，并保留其 timer fencing 身份。
+    ///
+    /// 参数说明：`runtime` 是 PostgreSQL Orchestrator，`timer_owner` 是逐副本稳定身份。
+    ///
+    /// 返回：计划尚无 Orchestrator 且身份规范时成功；否则拒绝覆盖。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn with_pgsql_orchestrator(
+        mut self,
+        runtime: Arc<nasaga_runtime_pgsql::PgOrchestrator>,
+        timer_owner: impl Into<String>,
+    ) -> ApplicationResult<Self> {
+        if self.orchestrator.is_some() {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "saga plan declares more than one orchestrator",
+            ));
+        }
+        let timer_owner = timer_owner.into();
+        validate_runtime_name(&timer_owner, "timer owner")?;
+        self.orchestrator = Some(OrchestratorPlan {
+            runtime: ManagedOrchestrator::PostgreSql(runtime),
+            timer_owner,
+        });
+        Ok(self)
+    }
+
+    /// 业务作用：向计划加入一个命名 PostgreSQL 参与方，供混配构建保持显式后端选择。
+    ///
+    /// 参数说明：`name` 是应用内唯一名称，`runtime` 是 PostgreSQL 参与方入口。
+    ///
+    /// 返回：名称未占用时返回更新计划；非法或重复名称返回 UserHook 错误。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn with_pgsql_participant(
+        mut self,
+        name: impl Into<String>,
+        runtime: Arc<nasaga_runtime_pgsql::PgParticipantRuntime>,
+    ) -> ApplicationResult<Self> {
+        let name = name.into();
+        validate_runtime_name(&name, "participant name")?;
+        if self
+            .participants
+            .insert(name, ManagedParticipant::PostgreSql(runtime))
+            .is_some()
+        {
             return Err(saga_error(
                 ApplicationPhase::UserHook,
                 "saga plan contains a duplicate participant name",
@@ -552,6 +734,16 @@ impl SagaApplicationPlan {
                     .next()
                     .map(|runtime| runtime.datasource_ref())
             });
+        let expected_driver = self
+            .orchestrator
+            .as_ref()
+            .map(|plan| plan.runtime.driver())
+            .or_else(|| {
+                self.participants
+                    .values()
+                    .next()
+                    .map(ManagedParticipant::driver)
+            });
         if let Some(expected) = expected {
             if self
                 .orchestrator
@@ -568,6 +760,22 @@ impl SagaApplicationPlan {
                 ));
             }
         }
+        if let Some(expected_driver) = expected_driver {
+            if self
+                .orchestrator
+                .as_ref()
+                .is_some_and(|plan| plan.runtime.driver() != expected_driver)
+                || self
+                    .participants
+                    .values()
+                    .any(|runtime| runtime.driver() != expected_driver)
+            {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "saga runtimes in one managed plan must bind the same database driver",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -580,7 +788,7 @@ impl SagaApplicationPlan {
     /// - `transport`: 已装配消费者的传输子计划。
     ///
     /// 返回：首次提交且子计划自洽时返回自身;重复提交或计划不完整返回 UserHook 错误。
-    #[cfg(feature = "saga-redis-stream")]
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
     pub fn with_redis_stream_transport(
         mut self,
         transport: SagaRedisTransportPlan,
@@ -608,7 +816,7 @@ impl SagaApplicationPlan {
     ///
     /// 返回：角色、单一 producer 与身份绑定都明确时返回自身；多角色、多 producer、重复 service 或
     /// 非法指纹返回 UserHook 错误。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub fn with_grpc_command_service<S>(
         self,
         service: S,
@@ -623,12 +831,27 @@ impl SagaApplicationPlan {
                 "automatic Saga gRPC command service requires exactly one participant",
             ));
         }
-        let runtime = self.participants.values().next().cloned().ok_or_else(|| {
+        let runtime = self.participants.values().next().ok_or_else(|| {
             saga_error(
                 ApplicationPhase::UserHook,
                 "automatic Saga gRPC command service requires a participant",
             )
         })?;
+        #[cfg(feature = "saga")]
+        let runtime = match runtime {
+            ManagedParticipant::MySql(runtime) => Arc::clone(runtime),
+            #[cfg(feature = "saga-pgsql")]
+            ManagedParticipant::PostgreSql(_) => {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "automatic MySQL Saga gRPC command service cannot bind a PostgreSQL participant",
+                ));
+            }
+        };
+        #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+        let runtime = match runtime {
+            ManagedParticipant::PostgreSql(runtime) => Arc::clone(runtime),
+        };
         let trusted_producer = runtime.single_trusted_command_producer().map_err(|error| {
             saga_source_error(
                 ApplicationPhase::UserHook,
@@ -637,6 +860,49 @@ impl SagaApplicationPlan {
             )
         })?;
         let handler = Arc::new(nasaga_runtime::ParticipantCommandHandler::new(
+            runtime,
+            Arc::new(service),
+        ));
+        self.with_grpc_command_transport(handler, trusted_producer, peer_principal)
+    }
+
+    /// 业务作用：从计划中的唯一 PostgreSQL 参与方生成受管 Saga command gRPC service。
+    ///
+    /// 参数说明：`service` 实现 PostgreSQL 宏合同，`peer_principal` 是可信 Orchestrator 证书指纹。
+    ///
+    /// 返回：角色与单一 producer 明确时登记 generated service；后端错配或身份含混时失败。
+    #[cfg(feature = "saga-grpc-pgsql")]
+    pub fn with_pgsql_grpc_command_service<S>(
+        self,
+        service: S,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self>
+    where
+        S: nasaga_runtime_pgsql::PgSagaCommandService,
+    {
+        if self.participants.len() != 1 {
+            return Err(saga_error(
+                ApplicationPhase::UserHook,
+                "automatic PostgreSQL Saga gRPC command service requires exactly one participant",
+            ));
+        }
+        let runtime = match self.participants.values().next() {
+            Some(ManagedParticipant::PostgreSql(runtime)) => Arc::clone(runtime),
+            _ => {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "automatic PostgreSQL Saga gRPC command service requires a PostgreSQL participant",
+                ));
+            }
+        };
+        let trusted_producer = runtime.single_trusted_command_producer().map_err(|error| {
+            saga_source_error(
+                ApplicationPhase::UserHook,
+                "automatic PostgreSQL Saga gRPC command producer is ambiguous",
+                error,
+            )
+        })?;
+        let handler = Arc::new(nasaga_runtime_pgsql::ParticipantCommandHandler::new(
             runtime,
             Arc::new(service),
         ));
@@ -654,22 +920,60 @@ impl SagaApplicationPlan {
     ///
     /// 返回：计划含唯一 Orchestrator 且身份绑定合法时返回自身；缺少角色、重复 service 或非法指纹
     /// 返回 UserHook 错误。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub fn with_grpc_result_service(
         self,
         trusted_producer: nasaga_runtime::ServiceIdentity,
         peer_principal: impl Into<Arc<str>>,
     ) -> ApplicationResult<Self> {
-        let handler = self
+        let runtime = self
             .orchestrator
             .as_ref()
-            .map(|plan| Arc::clone(&plan.runtime))
+            .map(|plan| &plan.runtime)
             .ok_or_else(|| {
                 saga_error(
                     ApplicationPhase::UserHook,
                     "automatic Saga gRPC result service requires an orchestrator",
                 )
             })?;
+        #[cfg(feature = "saga")]
+        let handler = match runtime {
+            ManagedOrchestrator::MySql(runtime) => Arc::clone(runtime),
+            #[cfg(feature = "saga-pgsql")]
+            ManagedOrchestrator::PostgreSql(_) => {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "automatic MySQL Saga gRPC result service cannot bind a PostgreSQL orchestrator",
+                ));
+            }
+        };
+        #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+        let handler = match runtime {
+            ManagedOrchestrator::PostgreSql(runtime) => Arc::clone(runtime),
+        };
+        self.with_grpc_result_transport(handler, trusted_producer, peer_principal)
+    }
+
+    /// 业务作用：从计划中的 PostgreSQL Orchestrator 生成受管 Saga result gRPC service。
+    ///
+    /// 参数说明：`trusted_producer` 是参与方逻辑身份，`peer_principal` 是对应证书指纹。
+    ///
+    /// 返回：计划后端为 PostgreSQL 且身份绑定合法时登记 service；角色缺失或错配时失败。
+    #[cfg(feature = "saga-grpc-pgsql")]
+    pub fn with_pgsql_grpc_result_service(
+        self,
+        trusted_producer: nasaga_runtime_pgsql::ServiceIdentity,
+        peer_principal: impl Into<Arc<str>>,
+    ) -> ApplicationResult<Self> {
+        let handler = match self.orchestrator.as_ref().map(|plan| &plan.runtime) {
+            Some(ManagedOrchestrator::PostgreSql(runtime)) => Arc::clone(runtime),
+            _ => {
+                return Err(saga_error(
+                    ApplicationPhase::UserHook,
+                    "automatic PostgreSQL Saga gRPC result service requires a PostgreSQL orchestrator",
+                ));
+            }
+        };
         self.with_grpc_result_transport(handler, trusted_producer, peer_principal)
     }
 
@@ -684,7 +988,7 @@ impl SagaApplicationPlan {
     /// - `peer_principal`: nagrpc 从该 Orchestrator client leaf certificate 派生的 SHA-256 指纹。
     ///
     /// 返回：身份绑定合法且 command service 尚未加入时返回自身；重复或非法指纹返回 UserHook 错误。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub fn with_grpc_command_transport<H>(
         mut self,
         handler: Arc<H>,
@@ -732,7 +1036,7 @@ impl SagaApplicationPlan {
     /// - `peer_principal`: nagrpc 从该参与方 client leaf certificate 派生的 SHA-256 指纹。
     ///
     /// 返回：身份绑定合法且 result service 尚未加入时返回自身；重复或非法指纹返回 UserHook 错误。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub fn with_grpc_result_transport<H>(
         mut self,
         handler: Arc<H>,
@@ -774,7 +1078,7 @@ impl SagaApplicationPlan {
     /// 参数说明: 无。
     ///
     /// 返回：command/result service 的唯一所有权；未启用入站 gRPC transport 时为空集合。
-    #[cfg(feature = "saga-grpc")]
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     pub(crate) fn take_grpc_services(&mut self) -> Vec<Box<dyn nagrpc::ManagedGrpcService>> {
         std::mem::take(&mut self.grpc_services)
     }
@@ -821,12 +1125,16 @@ impl SagaHandle {
     /// 返回：当前计划含 Orchestrator 且组件仍 Ready 时返回共享句柄；角色缺失或停机后返回错误。
     pub fn orchestrator(&self) -> ApplicationResult<Arc<Orchestrator>> {
         self.state.ensure_ready()?;
-        self.state.orchestrator.get().cloned().ok_or_else(|| {
-            saga_error(
+        match self.state.orchestrator.get() {
+            #[cfg(feature = "saga")]
+            Some(ManagedOrchestrator::MySql(runtime)) => Ok(Arc::clone(runtime)),
+            #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+            Some(ManagedOrchestrator::PostgreSql(runtime)) => Ok(Arc::clone(runtime)),
+            _ => Err(saga_error(
                 ApplicationPhase::Running,
-                "this application does not host a saga orchestrator",
-            )
-        })
+                "this application does not host an orchestrator for the requested backend",
+            )),
+        }
     }
 
     /// 业务作用：按稳定名称取得已经通过 Ready 门禁的参与方运行时。
@@ -837,17 +1145,72 @@ impl SagaHandle {
     /// 返回：名称存在且组件仍 Ready 时返回共享句柄；未知名称或停机后返回错误。
     pub fn participant(&self, name: &str) -> ApplicationResult<Arc<ParticipantRuntime>> {
         self.state.ensure_ready()?;
-        self.state
+        let runtime = self
+            .state
             .participants
             .get()
             .and_then(|participants| participants.get(name))
-            .cloned()
             .ok_or_else(|| {
                 saga_error(
                     ApplicationPhase::Running,
                     "requested saga participant is not hosted by this application",
                 )
-            })
+            })?;
+        match runtime {
+            #[cfg(feature = "saga")]
+            ManagedParticipant::MySql(runtime) => Ok(Arc::clone(runtime)),
+            #[cfg(all(not(feature = "saga"), feature = "saga-pgsql"))]
+            ManagedParticipant::PostgreSql(runtime) => Ok(Arc::clone(runtime)),
+            #[cfg(all(feature = "saga", feature = "saga-pgsql"))]
+            _ => Err(saga_error(
+                ApplicationPhase::Running,
+                "requested saga participant uses a different database backend",
+            )),
+        }
+    }
+
+    /// 业务作用：取得 Ready 后发布的 PostgreSQL Orchestrator，不把 MySQL 角色误转成同名能力。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：计划托管 PostgreSQL Orchestrator 时返回共享入口；角色缺失或后端不同则失败。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn pgsql_orchestrator(
+        &self,
+    ) -> ApplicationResult<Arc<nasaga_runtime_pgsql::PgOrchestrator>> {
+        self.state.ensure_ready()?;
+        match self.state.orchestrator.get() {
+            Some(ManagedOrchestrator::PostgreSql(runtime)) => Ok(Arc::clone(runtime)),
+            _ => Err(saga_error(
+                ApplicationPhase::Running,
+                "this application does not host a PostgreSQL saga orchestrator",
+            )),
+        }
+    }
+
+    /// 业务作用：按稳定名称取得 Ready 后发布的 PostgreSQL 参与方运行时。
+    ///
+    /// 参数说明：`name` 是计划提交时使用的参与方名称。
+    ///
+    /// 返回：名称存在且后端为 PostgreSQL 时返回共享入口；否则失败。
+    #[cfg(feature = "saga-pgsql")]
+    pub fn pgsql_participant(
+        &self,
+        name: &str,
+    ) -> ApplicationResult<Arc<nasaga_runtime_pgsql::PgParticipantRuntime>> {
+        self.state.ensure_ready()?;
+        match self
+            .state
+            .participants
+            .get()
+            .and_then(|participants| participants.get(name))
+        {
+            Some(ManagedParticipant::PostgreSql(runtime)) => Ok(Arc::clone(runtime)),
+            _ => Err(saga_error(
+                ApplicationPhase::Running,
+                "requested PostgreSQL saga participant is not hosted by this application",
+            )),
+        }
     }
 }
 
@@ -856,9 +1219,9 @@ pub(crate) struct SagaRuntimeState {
     pending: Mutex<Option<SagaApplicationPlan>>,
     sealed: AtomicBool,
     lifecycle: AtomicU8,
-    orchestrator: OnceLock<Arc<Orchestrator>>,
-    participants: OnceLock<Arc<BTreeMap<String, Arc<ParticipantRuntime>>>>,
-    #[cfg(feature = "saga-redis-stream")]
+    orchestrator: OnceLock<ManagedOrchestrator>,
+    participants: OnceLock<Arc<BTreeMap<String, ManagedParticipant>>>,
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
     streams: OnceLock<Arc<Vec<Arc<StreamRuntime>>>>,
 }
 
@@ -875,7 +1238,7 @@ impl SagaRuntimeState {
             lifecycle: AtomicU8::new(0),
             orchestrator: OnceLock::new(),
             participants: OnceLock::new(),
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             streams: OnceLock::new(),
         }
     }
@@ -938,10 +1301,7 @@ impl SagaRuntimeState {
         mut plan: SagaApplicationPlan,
     ) -> ApplicationResult<Option<OrchestratorPlan>> {
         let orchestrator = plan.orchestrator.take();
-        if let Some(runtime) = orchestrator
-            .as_ref()
-            .map(|entry| Arc::clone(&entry.runtime))
-        {
+        if let Some(runtime) = orchestrator.as_ref().map(|entry| entry.runtime.clone()) {
             self.orchestrator.set(runtime).map_err(|_| {
                 saga_error(
                     ApplicationPhase::Ready,
@@ -994,7 +1354,7 @@ impl SagaRuntimeState {
 pub(crate) struct SagaComponent {
     settings: Option<SagaSettings>,
     contributor: Option<ReadinessContributor>,
-    #[cfg(feature = "saga-redis-stream")]
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
     stream_contributor: Option<ReadinessContributor>,
     critical_task: Option<ApplicationFuture<'static>>,
 }
@@ -1009,7 +1369,7 @@ impl SagaComponent {
         Self {
             settings: None,
             contributor: None,
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             stream_contributor: None,
             critical_task: None,
         }
@@ -1057,7 +1417,7 @@ impl ApplicationComponent for SagaComponent {
             // 就绪注册表在 UserHook 完成时封口,而计划要到 UserHook 才提交:此处必须
             // 先注册 stream 贡献项占位;Ready 阶段若计划不含 Redis transport,占位被
             // 一次性置绿中和,不影响未启用者。
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             {
                 let state = context.application().saga_runtime();
                 context
@@ -1100,7 +1460,10 @@ impl ApplicationComponent for SagaComponent {
         Box::pin(async move {
             let application = context.application().clone();
             let state = application.saga_runtime();
-            #[cfg_attr(not(feature = "saga-redis-stream"), allow(unused_mut))]
+            #[cfg_attr(
+                not(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql")),
+                allow(unused_mut)
+            )]
             let mut plan = state.take_plan()?;
             let settings = self
                 .settings
@@ -1108,8 +1471,47 @@ impl ApplicationComponent for SagaComponent {
                 .ok_or_else(|| saga_error(ApplicationPhase::Ready, "saga settings are missing"))?;
             // 配置引用先命中当前 Application 的受管 pool，再复验 UserHook 提交的全部 runtime；
             // 任一不同源都在 descriptor 扫描或首条 SQL 前拒绝，不得自动切库。
-            let _pool = application.datasource(&settings.datasource_ref).await?;
-            let configured_datasource = natx::DatasourceRef::new(&settings.datasource_ref)
+            let runtime_driver = plan
+                .orchestrator
+                .as_ref()
+                .map(|entry| entry.runtime.driver())
+                .or_else(|| {
+                    plan.participants
+                        .values()
+                        .next()
+                        .map(ManagedParticipant::driver)
+                })
+                .ok_or_else(|| {
+                    saga_error(
+                        ApplicationPhase::Ready,
+                        "saga plan does not contain a runtime backend",
+                    )
+                })?;
+            match runtime_driver {
+                natx_core::DatabaseDriver::MySql => {
+                    #[cfg(feature = "saga")]
+                    {
+                        let _pool = application.datasource(&settings.datasource_ref).await?;
+                    }
+                    #[cfg(not(feature = "saga"))]
+                    return Err(saga_error(
+                        ApplicationPhase::Ready,
+                        "saga plan requires the MySQL runtime capability",
+                    ));
+                }
+                natx_core::DatabaseDriver::PostgreSql => {
+                    #[cfg(feature = "saga-pgsql")]
+                    {
+                        let _pool = application.pg_datasource(&settings.datasource_ref).await?;
+                    }
+                    #[cfg(not(feature = "saga-pgsql"))]
+                    return Err(saga_error(
+                        ApplicationPhase::Ready,
+                        "saga plan requires the PostgreSQL runtime capability",
+                    ));
+                }
+            }
+            let configured_datasource = natx_core::DatasourceRef::new(&settings.datasource_ref)
                 .map_err(|error| {
                     saga_source_error(
                         ApplicationPhase::Ready,
@@ -1141,7 +1543,7 @@ impl ApplicationComponent for SagaComponent {
             }
             // Redis transport 属组件生命周期所有权,不随计划进入只读能力发布;必须在
             // publish 前取走。
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             let redis_transport = plan.redis_transport.take();
 
             if let Some(orchestrator) = plan.orchestrator.as_ref() {
@@ -1199,7 +1601,7 @@ impl ApplicationComponent for SagaComponent {
                     None
                 };
 
-            #[cfg(feature = "saga-redis-stream")]
+            #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             let stream_task: Option<ApplicationFuture<'static>> = {
                 let stream_contributor =
                     self.stream_contributor.as_ref().cloned().ok_or_else(|| {
@@ -1268,7 +1670,7 @@ impl ApplicationComponent for SagaComponent {
                     }
                 }
             };
-            #[cfg(not(feature = "saga-redis-stream"))]
+            #[cfg(not(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql")))]
             let stream_task: Option<ApplicationFuture<'static>> = None;
 
             self.critical_task = match (timer_task, stream_task) {
@@ -1325,7 +1727,7 @@ impl ShutdownAction for SagaShutdown {
     }
 }
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 impl StreamRuntime {
     /// 业务作用：创建单条受管 stream 的零值观测状态。
     ///
@@ -1390,7 +1792,7 @@ impl StreamRuntime {
     }
 }
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 impl SagaRuntimeState {
     /// 业务作用：Ready 时一次性发布冻结的受管 stream 观测集合。
     ///
@@ -1421,12 +1823,12 @@ impl SagaRuntimeState {
 }
 
 /// 将受管 Redis Streams 进程计数接入唯一指标目录的兼容源。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 struct SagaStreamMetricsSource {
     state: Arc<SagaRuntimeState>,
 }
 
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 impl nametrics_core::LegacyMetricsSource for SagaStreamMetricsSource {
     /// 业务作用：返回 Saga Streams 固定 family 与冻结 transport label 目录。
     ///
@@ -1539,7 +1941,7 @@ impl nametrics_core::LegacyMetricsSource for SagaStreamMetricsSource {
 /// - `value`: counter 或 gauge 当前值。
 ///
 /// 返回：可经唯一 descriptor 校验的结构化样本。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 fn stream_metric_sample(
     name: &'static str,
     labels: Vec<(&'static str, String)>,
@@ -1559,7 +1961,7 @@ fn stream_metric_sample(
 /// - `state`: Saga 运行时状态。
 ///
 /// 返回：按 stream 分组的指标文本;未启用 transport 时为空串。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 pub(crate) fn render_stream_metrics(state: &SagaRuntimeState) -> String {
     /// 业务作用：转义 Prometheus label 值，阻止冻结配置中的特殊字符破坏 exposition 边界。
     ///
@@ -1665,7 +2067,7 @@ async fn run_saga_supervised_loops(
 /// - `contributor`: stream 消费独占的动态就绪贡献项。
 ///
 /// 返回：应用进入停机态时正常退出;系统时钟不可表示时返回关键任务错误。
-#[cfg(feature = "saga-redis-stream")]
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 async fn run_stream_poll_loop(
     application: Application,
     client: Arc<nadis::RedisClient>,
@@ -1775,7 +2177,7 @@ async fn sleep_observing_state(application: &Application, total_ms: u64) {
 /// 返回：应用进入停机态时正常退出；系统时钟不可表示时返回关键任务错误并触发失败停机。
 async fn run_timer_loop(
     application: Application,
-    orchestrator: Arc<Orchestrator>,
+    orchestrator: ManagedOrchestrator,
     timer_owner: String,
     settings: SagaSettings,
     contributor: ReadinessContributor,
@@ -1866,7 +2268,7 @@ pub(crate) fn validate_saga_section(
 ///
 /// 返回：所有值位于封闭范围时成功，否则返回不含配置原值的错误。
 fn validate_settings(settings: &SagaSettings, phase: ApplicationPhase) -> ApplicationResult<()> {
-    natx::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
+    natx_core::DatasourceRef::new(&settings.datasource_ref).map_err(|error| {
         saga_source_error(
             phase,
             "saga.datasource_ref is not a canonical datasource qualifier",
@@ -1874,7 +2276,7 @@ fn validate_settings(settings: &SagaSettings, phase: ApplicationPhase) -> Applic
         )
     })?;
     if settings.database_bootstrap == SagaDatabaseBootstrap::UserHook
-        && settings.datasource_ref != natx::DEFAULT_DATASOURCE
+        && settings.datasource_ref != crate::db::DEFAULT_DATASOURCE
     {
         return Err(saga_error(
             phase,

@@ -38,11 +38,13 @@ Web 中间件按 `(tenant, subject, route_id, client_key)` 建命名空间，并
 
 ## YML 配置
 
-核心 crate 不读取 yml。请求体和可重放响应上限由 Web 治理层配置；持久后端连接由对应 adapter 配置。
+核心 crate 不读取 yml。请求体和可重放响应上限由 Web 治理层配置；持久后端连接由
+`naidempotency-mysql`、`naidempotency-pgsql` 或 Redis adapter 配置。
 
 ## 主要边界
 
 - `InMemoryIdempotencyStore` 只适合允许重启后丢失记录的非关键场景。
 - 保存响应前必须限制状态码、header 白名单和 body 大小。
 - store 故障应 fail closed，不能在幂等不可用时继续执行副作用。
-- 资金、库存等强幂等优先使用数据库唯一键和同事务 MySQL store。
+- 资金、库存等强幂等优先使用数据库唯一键，以及与业务写同 driver、同 datasource 事务的 MySQL 或
+  PostgreSQL store。

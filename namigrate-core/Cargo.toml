@@ -1,0 +1,15 @@
+[package]
+name = "namigrate-core"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral migration state comparison and failure contracts"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["database", "migration", "schema", "runtime"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

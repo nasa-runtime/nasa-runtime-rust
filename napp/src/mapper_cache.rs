@@ -5,11 +5,11 @@ use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 /// 缓存不属于本版内置组件，但 `cache = true` 查询在缺少 L2 时会静默绕过缓存。Service 对外提供
 /// 流量前执行该断言，可以保留 Hook 显式装配边界，同时把遗漏装配变成可定位的启动失败。
 ///
-/// # 参数
+/// 参数说明: 无。
 ///
-/// 本函数无参数；二进制没有缓存查询时恒为成功。
+/// 返回: 没有缓存查询或已安装默认 L2 时成功；声明缓存查询但未安装 L2 时阻断 Ready。
 pub(crate) fn ensure_mapper_l2_installed() -> ApplicationResult<()> {
-    namapper::assert_l2_cache_installed_for_cached_queries().map_err(|error| {
+    namapper_core::assert_l2_cache_installed_for_cached_queries().map_err(|error| {
         ApplicationError::with_source(
             ComponentId::Application,
             ApplicationPhase::Ready,

@@ -10,6 +10,41 @@
 
 use std::sync::Mutex;
 
+/// 持久 Outbox 的脱敏合同错误；不携带 SQL、凭据、endpoint 或事件正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxStoreError {
+    /// 允许向业务和受管运行时公开的稳定失败分类。
+    pub reason: String,
+}
+
+impl OutboxStoreError {
+    /// 业务作用：用稳定脱敏原因构造后端中立的 Outbox 持久层错误。
+    ///
+    /// 参数说明：
+    /// - `reason`：不含底层敏感信息的失败分类。
+    ///
+    /// 返回：可由 MySQL/PostgreSQL adapter 共用的持久层错误。
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for OutboxStoreError {
+    /// 业务作用：输出不含 SQL、连接信息或 payload 的稳定错误摘要。
+    ///
+    /// 参数说明：
+    /// - `formatter`：标准格式化输出目标。
+    ///
+    /// 返回：摘要成功写入时返回 `Ok`。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "outbox store error: {}", self.reason)
+    }
+}
+
+impl std::error::Error for OutboxStoreError {}
+
 /// 一条 outbox 事件(Debezium Outbox Event Router 兼容字段)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEvent {
@@ -25,7 +60,7 @@ pub struct OutboxEvent {
     pub payload: Vec<u8>,
     /// 可选 W3C `traceparent`,供跨 DB→Kafka 传播 trace。
     pub traceparent: Option<String>,
-    /// 受信租户归因。写入权威是受信入口的 [`OutboxWriteContext`](crate::OutboxWriteContext)
+    /// 受信租户归因。写入权威是受信入口的 [`OutboxWriteContext`]
     /// 与持久 `tenant` 列;从存储读出的事件由读取路径回填该列值。发布端与归档端据此
     /// 选择租户隔离空间、加密键与授权,禁止从 payload、`aggregate_id` 或自报 header
     /// 另行推导身份。构造入口未声明租户时固定为 [`SYSTEM_TENANT`]。
@@ -242,6 +277,23 @@ impl OutboxRetentionPolicy {
 pub struct ArchiveReceipt {
     /// 归档端确认已幂等落地的事件身份。
     pub event_id: String,
+}
+
+/// 一轮保留清理的低基数结果，供后端中立的受管层累计指标与退避。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RetentionRoundReport {
+    /// 本轮真实写入归档端或通过收据重查确认的事件数。
+    pub archived: u64,
+    /// 本轮删除的已投递行数。
+    pub deleted_dispatched: u64,
+    /// 本轮删除的死信行数。
+    pub deleted_dead: u64,
+    /// retention owner 已被其它执行者持有，本轮没有执行清理。
+    pub claim_contended: bool,
+    /// 本轮因时间预算耗尽提前停止；未提交步骤不得在轮次返回后生效。
+    pub budget_exhausted: bool,
+    /// 本轮观察到的最老候选年龄；无候选时为 `None`。
+    pub oldest_candidate_age_ms: Option<i64>,
 }
 
 /// 归档失败原因(脱敏;不含归档端地址/凭据/payload)。
@@ -464,4 +516,193 @@ impl Drop for DrainedBatch<'_> {
         remaining.append(&mut current);
         *current = remaining;
     }
+}
+
+// ───────────────────────────── 持久后端中立角色合同 ─────────────────────────────
+
+/// 持久 Outbox 写侧合同；保留同步 [`OutboxWriter`] 的既有签名，不把数据库错误压入同步接口。
+#[async_trait::async_trait]
+pub trait DurableOutboxAppend: Send + Sync {
+    /// 业务作用：在句柄绑定 datasource 追加事件；ambient transaction 存在时与其同提交。
+    ///
+    /// 参数说明：
+    /// - `event`：携带稳定 `event_id` 的待发布事件。
+    ///
+    /// 返回：持久写入与正确的提交后唤醒登记完成时成功；路由或数据库失败返回脱敏错误。
+    async fn append(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError>;
+
+    /// 业务作用：只在同源 ambient transaction 内追加关键事件，禁止缺失事务时 autocommit。
+    ///
+    /// 参数说明：
+    /// - `event`：必须与当前业务事实原子提交的事件。
+    ///
+    /// 返回：写入和提交后唤醒登记完成时成功；事务缺失、跨 datasource 或数据库失败时返回错误。
+    async fn append_transactional(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError>;
+
+    /// 业务作用：按受信租户上下文在同源事务内追加事件并执行原子配额预留。
+    ///
+    /// 参数说明：
+    /// - `context`：由已认证入口构造的租户上下文。
+    /// - `event`：必须与当前业务事实原子提交的事件。
+    ///
+    /// 返回：配额预留、事件写入与提交后唤醒登记全部完成时成功；拒绝或失败返回稳定错误。
+    async fn append_transactional_with_context(
+        &self,
+        context: &OutboxWriteContext,
+        event: &OutboxEvent,
+    ) -> Result<(), OutboxStoreError>;
+}
+
+/// 持久 Outbox 投递角色合同；claim、发布结果裁决和成功前缀确认由 adapter 封装。
+#[async_trait::async_trait]
+pub trait DurableOutboxDispatch: Send + Sync {
+    /// 业务作用：读取当前后端全部可投递且非死信的积压数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负积压数；数据库失败返回脱敏错误。
+    async fn pending_count(&self) -> Result<u64, OutboxStoreError>;
+
+    /// 业务作用：读取当前后端死信集合数量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负死信数；数据库失败返回脱敏错误。
+    async fn dead_count(&self) -> Result<u64, OutboxStoreError>;
+
+    /// 业务作用：竞争投递权威并按稳定顺序发布一个有界批次，只确认成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端；下游须按 `event_id` 去重。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：未取得 claim 时为空报告；否则返回发布报告；存储失败返回脱敏错误。
+    async fn dispatch_batch(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>;
+
+    /// 业务作用：在保序投递上对确定性首失败累计死信预算，瞬态或结果不确定失败不消耗预算。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信集合前的轮次上限，必须大于零。
+    ///
+    /// 返回：本轮发布报告；阈值非法或存储失败返回脱敏错误。
+    async fn dispatch_batch_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>;
+
+    /// 业务作用：竞争单 lane 投递权威并只确认该 lane 的成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：本轮 lane 发布报告；名称非法或存储失败返回脱敏错误。
+    async fn dispatch_batch_channel(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>;
+
+    /// 业务作用：投递单 lane，并只对确定性首失败累计该 lane 的死信预算。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信集合前的轮次上限。
+    ///
+    /// 返回：本轮 lane 发布报告；输入非法或存储失败返回脱敏错误。
+    async fn dispatch_batch_channel_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>;
+
+    /// 业务作用：读取单个 lane 的可投递且非死信积压数。
+    ///
+    /// 参数说明：
+    /// - `channel`：待观测的 lane 名称。
+    ///
+    /// 返回：该 lane 的非负积压数；名称非法或数据库失败返回脱敏错误。
+    async fn pending_count_channel(&self, channel: &str) -> Result<u64, OutboxStoreError>;
+}
+
+/// 持久 Outbox 租户配额合同；对账必须由调用方放入 adapter 要求的同源事务。
+#[async_trait::async_trait]
+pub trait DurableOutboxQuota: Send + Sync {
+    /// 业务作用：读取已鉴权租户的精确在飞事件账本值。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：账本不存在时为零；数据库失败返回脱敏错误。
+    async fn tenant_quota_usage(&self, tenant: &str) -> Result<u64, OutboxStoreError>;
+
+    /// 业务作用：在同源事务内锁定租户账本并按持久待投递事实重算在飞数。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：对账后的在飞数；事务缺失、跨 datasource 或数据库失败返回错误。
+    async fn reconcile_tenant_quota(&self, tenant: &str) -> Result<u64, OutboxStoreError>;
+}
+
+/// 持久 Outbox 保留角色合同；待投递行在任何策略下都不得成为候选。
+#[async_trait::async_trait]
+pub trait DurableOutboxRetention: Send + Sync {
+    /// 业务作用：执行一轮有界保留清理，并以归档收据门禁删除已投递或已批准死信行。
+    ///
+    /// 参数说明：
+    /// - `policy`：已冻结的保留策略。
+    /// - `archive`：需要归档或清理死信时提供的幂等归档端。
+    /// - `now_ms`：统一 epoch 毫秒时钟。
+    ///
+    /// 返回：只统计已确认提交事实的轮次报告；策略非法、结果不确定或存储失败返回错误。
+    async fn retention_round(
+        &self,
+        policy: &OutboxRetentionPolicy,
+        archive: Option<&(dyn OutboxArchive + Sync)>,
+        now_ms: i64,
+    ) -> Result<RetentionRoundReport, OutboxStoreError>;
+}
+
+/// 持久 Outbox 提交后唤醒合同；通知只优化本进程延迟，数据库轮询仍是最终事实来源。
+pub trait DurableOutboxWakeup: Send + Sync {
+    /// 业务作用：订阅该 adapter 的已确认提交代际。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可合并连续通知的 watch 接收端；调用方仍须保留定时轮询。
+    fn subscribe_committed_appends(&self) -> tokio::sync::watch::Receiver<u64>;
+}
+
+/// 受管运行时所需的完整持久 Outbox 能力集合。
+pub trait DurableOutbox:
+    DurableOutboxAppend
+    + DurableOutboxDispatch
+    + DurableOutboxQuota
+    + DurableOutboxRetention
+    + DurableOutboxWakeup
+{
+}
+
+impl<T> DurableOutbox for T where
+    T: DurableOutboxAppend
+        + DurableOutboxDispatch
+        + DurableOutboxQuota
+        + DurableOutboxRetention
+        + DurableOutboxWakeup
+{
 }

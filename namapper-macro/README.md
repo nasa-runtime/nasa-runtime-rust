@@ -1,8 +1,7 @@
 # namapper-macro
 
-`namapper-macro` 是 `namapper` 的过程宏实现，提供 `#[Mapper]`、`#[Query]`、`#[Insert]`、`#[Update]`、
-`#[Delete]`、`#[Execute]` 等声明式 Mapper 宏。业务应优先阅读 [namapper README](../namapper/README.md)，
-通常不直接依赖本 crate。
+`namapper-macro` 是 MySQL 与 PostgreSQL Mapper 共用的过程宏实现，提供 Mapper 派生、SQL 方法注解和
+后端专用代码生成。业务应优先使用 `namapper`、`namapper-pgsql` 或 `nasa` 门面，通常不直接依赖本 crate。
 
 ```toml
 [dependencies]
@@ -59,13 +58,17 @@ trait UserReadMapper {
 
 ## 边界
 
-- 本 crate 只在编译期运行，运行时类型和缓存、事务、SQL 执行都在 `namapper` 中。
-- 宏展开路径会识别直接依赖 `namapper` 或经 `nasa::mapper` 门面使用。
+- 本 crate 只在编译期运行；MySQL 运行时位于 `namapper`，PostgreSQL 运行时位于 `namapper-pgsql`。
+- 既有 `Mapper` 入口继续生成 MySQL `?` bind；PostgreSQL 专用入口生成 `$n` bind，不扫描替换 SQL 文本
+  中的 `?`。
+- 宏展开路径会识别直接运行时依赖或对应的 `nasa::mapper` 后端模块。
 - 新增参数语义时要同步更新 `namapper/README.md` 和运行时行为说明。
 
 ## YML 配置与使用
 
-`namapper-macro` 没有运行期 yml 配置。它只读取 Rust 属性宏参数，并在编译期生成代码。运行期配置应写在 `namapper` 所在应用的 `mysql:`、`mapper:`、`redis:` 等配置段。
+`namapper-macro` 没有运行期 yml 配置。它只读取 Rust 属性宏参数，并在编译期生成代码。Application
+按 datasource driver 受管 MySQL/PostgreSQL pool；standalone PostgreSQL Mapper 由业务显式注册
+`natx-pgsql` pool。
 
 属性和 yml 的分工：
 
@@ -76,7 +79,8 @@ trait UserReadMapper {
 | 是否读写 L2 | Rust 属性 | `cache = true` / `cache = false` |
 | 事务内是否允许 L2 | Rust 属性 | `cache_in_tx = true` |
 | datasource 名称 | Rust 属性 | `datasource = "reporting"` |
-| MySQL URL | 应用 yml | `mysql.reporting.url` |
+| MySQL URL | 应用 yml | `datasources.orders.url` |
+| PostgreSQL URL | 应用 yml | `datasources.reporting.url` |
 | Redis L2 地址 | 应用 yml | `redis.url` |
 
 应用侧 yml 示例见 `namapper` README。不要为本 crate 单独新增配置根节点；它没有运行时可初始化对象。

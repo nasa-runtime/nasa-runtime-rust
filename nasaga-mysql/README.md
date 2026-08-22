@@ -8,6 +8,10 @@
 审计、租户配额和下一条 Outbox 消息在各自规定的事务边界内提交；进程崩溃后不依赖内存队列恢复，
 多个副本也不能凭本地状态越过已经失去的租约或实例版本。
 
+`nasaga-mysql` 实现 `nasaga-backend` 按 instance、journal、timer、participant、audit 与 governance
+拆分的中立能力。既有 `MySqlSagaStore` inherent methods 和 `nasaga_mysql::*` 模型路径继续可用；模型由
+`nasaga-backend` 单一来源重导出，使 MySQL 与 PostgreSQL adapter 接受同一套状态机输入输出。
+
 ```toml
 [dependencies]
 nasaga-mysql = "1"

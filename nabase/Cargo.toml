@@ -1,25 +1,21 @@
-# base：公共 API 与轻量工具库，提供响应壳 BaseResponse、translator 抽象及
-# strings/env/size/id 纯工具。经门面 `use nasa::base::...` 引用(crate 真名 nabase,业务无感知)。
-# 默认依赖只有 serde；date/numeric/crypto/image 等重能力保持独立 crate，
-# 由 nasa 顶层 feature 暴露,不在 base 内做重复聚合。
+# base：公共 API 与基础工具库，提供响应壳、日期时间、容量、ID、字符串、环境变量和翻译抽象。
+# 业务通过 `nasa` 的 `base` feature 一次引入本 crate 的完整能力集合。
 [package]
 name = "nabase"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 公共 API 与轻量工具库:BaseResponse/strings/env/ByteSize/Snowflake"
+description = "NASA base APIs and utilities for responses, date-time, sizes, IDs, strings, environment values, and translation"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-
+keywords = ["backend", "datetime", "utilities", "response"]
+categories = ["date-and-time", "config", "web-programming"]
 
 [lib]
 name = "nabase"
-[features]
-# 默认 feature 必须为空：只用 BaseResponse/strings 的项目不应被迫编译 chrono、bigdecimal、crypto 或图片库。
-default = []
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde = { version = "1", features = ["derive"] }

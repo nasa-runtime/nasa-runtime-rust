@@ -16,7 +16,7 @@ proc-macro = true
 name = "nasaga_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.1" }
+nasa-macro-support = { package = "macro-support", version = "1.0.2" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

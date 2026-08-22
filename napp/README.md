@@ -58,13 +58,13 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"log"` | `log` | `log` | 两阶段日志：早期控制台 → 最终文件日志；运行期 `log` 段可热重应用 | `app.log()` |
 | `"nacos-config"` | `nacos-config`；真实远端连接再加 `nacos-sdk` | `nacos` | 远端 overlay 首拉与 watch 热刷新；`enabled=false` 走纯本地 | `app.nacos_config()` |
 | `"telemetry"` | `telemetry` | `telemetry` | 有界 span 管道、可选 OTLP trace/metrics、受管停机 flush | `app.telemetry_snapshot()` / `app.otlp_metrics_snapshot()` |
-| `"db"` | `tx` | `database` 或 `datasources.<name>` | 全表校验、逐源探测、冻结 registry 与显式停机 | `app.datasource(name).await`、`app.default_datasource().await` |
+| `"db"` | MySQL 用 `tx`，PostgreSQL 用 `tx-pgsql`，混配同时开启 | `database` 或 `datasources.<name>` | 跨 driver 全表校验、逐源探测、冻结 catalog/registry 与显式停机 | MySQL 用 `app.datasource(name).await`；PostgreSQL 用 `app.pg_datasource(name).await` |
 | `"redis"` | `redis` | `redis` 或 `redis.properties.<qualifier>` | 多实例统一建连、逐源健康与显式停机 | `app.redis(name).await`、`app.default_redis().await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
 | `"partition"` | `partition` | `partition`，或 UserHook 提交 `PartitionApplicationPlan` | Prepare 启动命名 Runner、逐域健康与反序有界停机 | `app.partition()`、`app.partition_runner(name)` |
-| `"saga"` | `saga-runtime` | `saga` | Ready 前校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
+| `"saga"` | MySQL 用 `saga-runtime`，PostgreSQL 用 `saga-runtime-pgsql` | `saga` | 按 datasource driver 校验步骤合同与历史实例，发布运行角色并监督 durable timer | `app.saga()` |
 | `"kafka"` | `kafka` | `kafka` 或 `kafkas.<client>` | 受管 producer/consumer、broker Ready、动态健康与两段停机 | `app.kafka(name)`、`app.default_kafka()` |
-| `"outbox"` | `outbox` | `outbox` | 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
+| `"outbox"` | MySQL 用 `outbox`，PostgreSQL 用 `outbox-pgsql` | `outbox` | 按 datasource driver 持续投递已提交事件、退避、readiness 与反向停机；可脱离 Saga 使用 | `app.outbox()` |
 | `"redis-job"` | `redis-job`；隐式纳入 `redis` | `redis.job` 与 `redis.properties.<source>` | 冻结多 source 计划、布局与能力门禁，Ready 后启动扫描、租约、Fanout、逐源监督和有界停机 | `app.redis_job()`、`app.redis_job_control(source)`、`app.redis_job_query(source)` |
 | `"grpc"` | `grpc` | `grpc` | initializer 后自动装配 registered service、health、可选 reflection、TLS、listener、方法指标与有界排空 | `app.grpc()` |
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
@@ -77,6 +77,14 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 数据库 Web 应用可写 `#[nasa::application("db", "web")]`。独立批处理仍可只开启 `kafka` feature 并显式
 管理 `KafkaProxy`；Service 一旦把 `"kafka"` 写入属性，连接、消费、Ready、监控和停机就全部归容器所有。
 `hystrix`、`grafana`、`mapper` 不是属性组件字符串，仍通过各自 feature 使用。
+MySQL 或 PostgreSQL Mapper 缓存也不新增组件字符串：业务在启动 Hook 中显式安装共享 L2；通过 `nasa`
+门面时，MySQL 使用 `mapper-redis-cache`，PostgreSQL 使用 `mapper-redis-cache-pgsql`，Service 会在 Ready
+前检查声明缓存的查询是否已经完成安装。
+
+直接依赖 `napp` 时，`mapper-cache` 是 MySQL Mapper 的 Ready 门禁，并同步启用
+`namapper/redis-cache`；`mapper-cache-pgsql` 是 PostgreSQL Mapper 的 Ready 门禁，只依赖
+`namapper-core`，不会引入 MySQL runtime。两个 feature 都不会根据 Redis 配置构造或安装 Mapper L2，
+实际缓存实现、namespace、TTL 与失败策略仍由业务启动 Hook 显式选择。
 
 不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
@@ -87,14 +95,14 @@ grpc -> auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序
 
 ## YAML 创建单源与多源
 
-MySQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数都属于 YAML。Application 在启动期读取最终
+MySQL、PostgreSQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数都属于 YAML。Application 在启动期读取最终
 配置并创建全部实例；业务 `main` 只提交 publisher、consumer、handler、Saga 定义等业务计划，再通过
 `app.datasource(...)`、`app.redis(...)` 或 `app.kafka(...)` 取得已经受管的句柄，不自行建池、建连或
 维护第二张 source 表。所有 source 先完成全表校验，再按名称稳定排序创建；任一项失败都会阻止 Ready。
 
 | 资源 | 单源 YAML | 多源 YAML | 默认身份 | 被其它组件引用的字段 |
 | --- | --- | --- | --- | --- |
-| MySQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.datasource_ref` |
+| MySQL / PostgreSQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.datasource_ref` |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | 持久身份 `primary`，查询兼容名 `default` | `cache.redis_ref`、`cache.invalidation.redis_ref`、`scheduling.redis_ref`、`redis.job.sources.<qualifier>` |
 | Kafka | `kafka` | `kafkas.<client>` | `client_name: default` | `configure_kafka(client, ...)`、`app.kafka(client)` 与 consumer 的 `client` |
 
@@ -162,6 +170,96 @@ saga:
 `datasources`，两者共同形成原子事件链时必须使用相同的 `datasource_ref`；不存在的引用会在首次数据库
 握手前被拒绝。`database_bootstrap: user_hook` 只允许单个 `default`，命名库必须使用
 `database_bootstrap: application` 让容器从 YAML 创建。
+
+### PostgreSQL 单源
+
+PostgreSQL 必须显式声明 `driver: postgresql`；URL 接受 `postgres://` 与 `postgresql://`。业务通过
+`app.default_pg_datasource().await` 或 `app.pg_datasource("default").await` 取得 typed pool：
+
+```yaml
+database:
+  driver: postgresql
+  url: ${APP_POSTGRES_URL}
+  max_connections: 20
+  min_connections: 2
+  acquire_timeout_ms: 2000
+  connect_timeout_ms: 5000
+  probe_on_start: true
+  schema: public
+  connection_topology: direct
+  migrations:
+    mode: validate
+    lock_timeout_ms: 30000
+
+outbox:
+  datasource_ref: default
+saga:
+  database_bootstrap: application
+  datasource_ref: default
+```
+
+`connection_topology` 只接受 `direct`、`session_pool` 或 `transaction_pool`。直连与会话级代理都能让
+advisory lock、catalog 查询、执行和 unlock 留在同一物理 session；事务级代理不能保持这一不变量，
+因此门禁模式不是 `disabled` 时，`transaction_pool` 还必须提供保证 session affinity 的
+`migrations.session_url`，普通业务连接仍可
+继续使用事务池。Application 会在取锁前复验 migration endpoint 与业务池的 database/schema 身份，
+不一致时拒绝 Ready。`schema` 与这两个字段只属于 PostgreSQL，
+MySQL 配置出现时会在建连前拒绝。显式配置 `schema` 时，该值同时决定每条业务连接的 `search_path` 和
+受管 migration 的对象作用域；目标 schema 必须由数据库初始化流程预先创建，框架不会隐式创建。省略
+`schema` 时，业务连接保留 PostgreSQL 服务端的默认 `search_path`（通常为 `"$user", public`），受管
+migration 仍以 `public` 为默认作用域；需要两者严格一致时必须显式配置。启用 `probe_on_start` 时，显式
+schema 不存在或不能成为 `current_schema()` 会在 Application 开放业务路由前拒绝。
+
+### MySQL 与 PostgreSQL 混配
+
+同一个 `datasources` map 可以同时受管两种 driver，名称在统一 catalog 中不可重复：
+
+```yaml
+datasources:
+  orders:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+    max_connections: 16
+  analytics:
+    driver: postgresql
+    url: ${APP_POSTGRES_URL}
+    max_connections: 8
+    schema: reporting
+    migrations:
+      mode: validate
+```
+
+MySQL 未写 `driver` 时仍可由 `mysql://` URL 归一化；PostgreSQL 不从 URL 隐式猜测，必须显式声明。
+`app.datasource("orders")` 与 `app.pg_datasource("analytics")` 分别返回对应 typed pool，反向查询返回
+driver mismatch，不会回退到同名另一后端。`analytics` 池中的不限定 SQL 与 migration 都以
+`reporting` 为首选 schema，不需要在 URL 中重复编码 `options=-csearch_path=...`。单个 ambient transaction 只能绑定一个 driver 和一个
+datasource；需要耐久跨库收敛时使用源库 Outbox 与目标库 Inbox，不把 after-commit 当作可靠双写。
+
+### 业务 migration 登记
+
+YAML 的 `migrations.mode`、锁等待和 topology 字段只定义执行策略，不包含业务 SQL。Service 必须在
+UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`；业务因此需要直接依赖启用相应 driver
+与 `migrate` 能力的 `sqlx`，供 `sqlx::migrate!` 在构建期读取语义化 migration 文件：
+
+```toml
+[dependencies]
+nasa = { version = "1.0.3", features = ["application", "tx-pgsql"] }
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
+```
+
+```rust
+#[nasa::application("db")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    app.configure_migrations("default", sqlx::migrate!("./migrations"))?;
+    Ok(())
+}
+```
+
+数据源必须已经出现在 `database` 或 `datasources`，同一名称只能登记一次。Application 在 Prepare 阶段、
+initializer 和入站监听之前依该数据源的 driver 执行门禁；`disabled` 跳过、`validate` 只接受完全一致的
+已应用集合、`apply` 才应用未执行项。Service Hook 返回后登记入口封口。Batch 的 DB Prepare 早于业务
+Hook，必须在 Hook 内显式取得 pool；MySQL 调用 `nasa::application::run_gate`，PostgreSQL 调用
+`nasa::migration::pgsql::run_gate`，不能使用 `configure_migrations`。
 
 ### Redis 单源
 
@@ -313,7 +411,24 @@ redis:
 `redis.job` 根字段是所有被引用 source 的默认值，`sources.<qualifier>` 只是稀疏覆盖；没有覆盖块的已托管
 source 仍可被任务使用。定义引用未知 source 或 `enabled: false` 的覆盖时启动失败，不会回退到
 `primary`。完整协议、独立 `RedisJobPlan`、Fanout、Cron 和观测合同见
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob-分布式任务运行时)。
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
+
+## 跨副本分布式业务配额
+
+启用门面 `rate-limit` 后会同时启用 `application` 与 `redis`，`nasa::application` 提供后端中立的 `RateLimitProvider`、Redis 固定窗口实现
+`RedisRateLimitProvider`，以及与 `web` 组合时可用的 IP 中间件 `distributed_rate_limit`。业务从
+`app.redis(qualifier).await` 取得受管 Redis 客户端并显式构造 provider；本能力没有组件字符串或独立
+YAML 根，也不会仅因声明 `"redis"` 或 `"web"` 自动装到路由。
+
+共用 Redis 与 namespace 的所有副本对同一主体合并计数。简单主体使用
+`{namespace}:{subject}`，包含分隔符或过长的输入使用域分隔摘要；服务端 Lua 原子完成 `INCR` 与首次
+`PEXPIRE`，窗口从第一次命中开始。Redis 不可达、脚本失败、零上限或非法窗口采用 fail-open 并写
+`warn`；要求后端失效时拒绝请求的业务需要提供自己的 `RateLimitProvider`。
+
+`DistributedRateLimit::try_new` 在启动期拒绝零上限、零窗口和超过 365 天的窗口。IP 中间件依赖外层
+`resolve_client_ip` 已写入的 `ClientIp`，超额返回 `429` 与向上取整且至少一秒的 `Retry-After`；缺少
+`ClientIp` 时保守放行。按 tenant、subject 或 API key 计量时应直接调用 `RateLimitProvider::check` 并由
+业务决定主体身份和拒绝响应。该跨副本总配额可与 Web 自带的单实例令牌桶叠加，两者不共享计数语义。
 
 ## Partition 受管模式
 
@@ -528,6 +643,12 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 规范顺序为 `db -> saga -> kafka -> outbox -> web/ws`，反向停机时先关闭入口、停止 dispatcher 与消息
 消费，再关闭 Saga 能力和数据库。
 
+PostgreSQL 角色使用 `SagaApplicationPlan::pgsql_orchestrator`、`pgsql_participant`、
+`with_pgsql_orchestrator` 与 `with_pgsql_participant`。同一计划中的全部角色必须使用一种 driver 和一个
+datasource；混合 Application 可以同时受管其它 driver 的独立组件组，但不会把一次 Saga 原子链拆到
+两个数据库。PostgreSQL gRPC 自动装配入口为 `with_pgsql_grpc_command_service` 与
+`with_pgsql_grpc_result_service`，Redis Streams 与 Kafka 复用同一 envelope 和投递裁决。
+
 Saga 隐式 Outbox 默认采用 `Block`：首个未确认事件会阻塞同一 `outbox_event` 表的全部后续事件，避免
 把瞬态网络失败按固定次数误判为可以越过的 command/result。审计或其它事件若写入同一张表，绑定的唯一
 publisher 必须覆盖所有事件类型；否则应使用独立事务数据库和独立 Outbox 生命周期。`app.outbox()` 的
@@ -551,7 +672,8 @@ saga:
 确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件会在 Prepare 接管并
 完成连接探针与 migration 门禁；独立入口的 pool 所有权会原子转交给单源受管 registry，关闭所有权在
 Start 阶段预占，确保受监督任务退出后先撤销事务解析权威、再释放连接。Ready 后
-`app.datasource("default")` 返回同一受管池，停机态拒绝新的借用。该模式不读取
+MySQL 用 `app.datasource("default")`、PostgreSQL 用 `app.pg_datasource("default")` 返回同一受管池，
+停机态拒绝新的借用。该模式不读取
 `database`/`datasources` 的连接设置并会记录提示，不能用来绕过数据库门禁。
 
 timer owner 不从共享配置推断，必须随计划提供逐副本唯一且重启稳定的 canonical 身份。
@@ -591,7 +713,7 @@ Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确
 session-bound claim、退避与指标，毒丸只停摆自己的 lane（`Block` 语义与"成功前缀才标记"不变，
 改变的只是停摆半径）；整体 readiness 在全部 lane 健康时 Ready，`napp_outbox_lane_*{channel=...}`
 区分单领域停摆与整体退出。启用分片后同库禁止再运行未分片 dispatcher（两种 claim 锁名不同，
-并行会双重发布）；上线顺序见 naoutbox-mysql 迁移说明（先加列回填、行为不变，再切按 lane 所有权）。
+并行会双重发布）；上线顺序见对应数据库 Outbox 迁移说明（先加列回填、行为不变，再切按 lane 所有权）。
 
 ### Outbox 租户配额
 
@@ -1005,5 +1127,5 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## 发布边界
 
-产品 crate 只包含运行时代码、业务使用说明与许可文件。MySQL、Redis、Nacos、Kafka、OTLP 等连接信息
+产品 crate 只包含运行时代码、业务使用说明与许可文件。MySQL、PostgreSQL、Redis、Nacos、Kafka、OTLP 等连接信息
 只从部署环境注入，不写入源码、示例或发布归档。

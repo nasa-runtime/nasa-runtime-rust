@@ -18,28 +18,28 @@ release_crates() {
       printf '%s\n' "napart"
       ;;
     1)
-      printf '%s\n' "macro-support nabase naauthz nabudget nadisc"
+      printf '%s\n' "macro-support natx-core namigrate-core namapper-core nabase naauthz nabudget nadisc"
       ;;
     2)
       printf '%s\n' "naidempotency nainbox-core naoutbox-core nametrics-core natelemetry"
       ;;
     3)
-      printf '%s\n' "async-macro nacache-macro nadis-derive namapper-macro napp-macro rest-client-macro nanum"
+      printf '%s\n' "async-macro nacache-macro nadis-derive namapper-macro napp-macro natx-macro rest-client-macro nanum"
       ;;
     4)
-      printf '%s\n' "nasecret natx nanacos nadis nafka naweb"
+      printf '%s\n' "nasecret natx natx-pgsql nanacos nadis nafka naweb"
       ;;
     5)
-      printf '%s\n' "nagrpc-build nasaga-core namigrate naws-proto ncrypto nainbox-mysql naoutbox-mysql cacheable hystrix nafana nagrpc naopenapi"
+      printf '%s\n' "nagrpc-build nasaga-core namigrate namigrate-pgsql namapper-pgsql naws-proto ncrypto nainbox-mysql nainbox-pgsql naidempotency-pgsql naoutbox-mysql naoutbox-pgsql cacheable hystrix nafana nagrpc naopenapi"
       ;;
     6)
-      printf '%s\n' "naaudit-mysql nasaga-macro naidempotency-mysql nasaga-mysql"
+      printf '%s\n' "naaudit-mysql naaudit-pgsql nasaga-macro naidempotency-mysql nasaga-backend"
       ;;
     7)
-      printf '%s\n' "naobject config-boot naidempotency-redis namapper rest-discovery nasched"
+      printf '%s\n' "naobject config-boot naidempotency-redis namapper rest-discovery nasched nasaga-mysql nasaga-pgsql nasaga-runtime-core"
       ;;
     8)
-      printf '%s\n' "nasaga-runtime naws rest-discovery-nacos"
+      printf '%s\n' "nasaga-runtime nasaga-runtime-pgsql naws rest-discovery-nacos"
       ;;
     9)
       printf '%s\n' "napp"

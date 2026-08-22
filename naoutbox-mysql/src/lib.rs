@@ -23,18 +23,18 @@
 #![forbid(unsafe_code)]
 
 mod retention;
-pub use retention::{
-    RetentionRoundReport, RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION_REASON,
-};
+pub use retention::{RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION_REASON};
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use naoutbox_core::{
-    dispatch_in_order, DispatchReport, OutboxEvent, OutboxPublisher, OutboxWriteContext,
-    TENANT_QUOTA_EXCEEDED_REASON,
+    dispatch_in_order, DispatchReport, DurableOutboxAppend, DurableOutboxDispatch,
+    DurableOutboxQuota, DurableOutboxRetention, DurableOutboxWakeup, OutboxArchive, OutboxEvent,
+    OutboxPublisher, OutboxRetentionPolicy, OutboxWriteContext, TENANT_QUOTA_EXCEEDED_REASON,
 };
+pub use naoutbox_core::{OutboxStoreError, RetentionRoundReport};
 use sqlx::{pool::PoolConnection, MySql, MySqlConnection, Row as _};
 use tokio::sync::watch;
 
@@ -357,41 +357,6 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS outbox_event ( \
      KEY idx_retention_dead (dead, dead_at), \
      KEY idx_dead (dead, id) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-
-/// outbox store I/O 失败(脱敏;不含 SQL/凭据/payload)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboxStoreError {
-    /// 稳定脱敏原因。
-    pub reason: String,
-}
-
-impl OutboxStoreError {
-    /// 业务作用：用稳定脱敏原因构造 Outbox 持久层错误。
-    ///
-    /// 参数说明：
-    /// - `reason`：允许向上游暴露的稳定失败分类。
-    ///
-    /// 返回：不携带 SQL、凭据或事件正文的存储错误。
-    pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for OutboxStoreError {
-    /// 业务作用：输出不含 SQL、连接信息或 payload 的稳定存储错误。
-    ///
-    /// 参数说明：
-    /// - `formatter`：标准格式化输出目标。
-    ///
-    /// 返回：稳定摘要写入成功时返回 `Ok`。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "outbox store error: {}", self.reason)
-    }
-}
-
-impl std::error::Error for OutboxStoreError {}
 
 /// 一条待投递行(带 DB 主键 id,供投递成功后 `mark_dispatched`)。
 #[derive(Debug, Clone)]
@@ -1436,6 +1401,198 @@ impl MySqlOutbox {
         .map_err(map_err)?;
         let count: i64 = row.try_get("n").map_err(map_err)?;
         Ok(count.max(0) as u64)
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxAppend for MySqlOutbox {
+    /// 业务作用：通过后端中立写侧合同追加事件，并沿用 MySQL 的事务内外提交语义。
+    ///
+    /// 参数说明：
+    /// - `event`：携带稳定身份的待发布事件。
+    ///
+    /// 返回：持久写入与提交后唤醒登记完成时成功；路由或数据库失败返回错误。
+    async fn append(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append(self, event).await
+    }
+
+    /// 业务作用：通过后端中立合同在同源 MySQL ambient transaction 内追加关键事件。
+    ///
+    /// 参数说明：
+    /// - `event`：必须与业务事实同提交的待发布事件。
+    ///
+    /// 返回：写入与提交后唤醒登记完成时成功；事务缺失、跨 datasource 或数据库失败时返回错误。
+    async fn append_transactional(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append_transactional(self, event).await
+    }
+
+    /// 业务作用：通过后端中立合同执行受信租户配额预留与事务内事件追加。
+    ///
+    /// 参数说明：
+    /// - `context`：受信租户写入上下文。
+    /// - `event`：必须与业务事实同提交的待发布事件。
+    ///
+    /// 返回：配额预留、事件写入与唤醒登记完成时成功；拒绝或数据库失败返回错误。
+    async fn append_transactional_with_context(
+        &self,
+        context: &OutboxWriteContext,
+        event: &OutboxEvent,
+    ) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append_transactional_with_context(self, context, event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxDispatch for MySqlOutbox {
+    /// 业务作用：通过后端中立投递合同读取 MySQL 可投递积压。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负积压数；数据库失败返回错误。
+    async fn pending_count(&self) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::pending_count(self).await
+    }
+
+    /// 业务作用：通过后端中立投递合同读取 MySQL 死信数量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负死信数；数据库失败返回错误。
+    async fn dead_count(&self) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::dead_count(self).await
+    }
+
+    /// 业务作用：通过后端中立合同竞争 MySQL dispatcher claim 并确认成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：本轮发布报告；存储失败返回错误。
+    async fn dispatch_batch(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch(self, publisher, limit).await
+    }
+
+    /// 业务作用：通过后端中立合同执行带确定性死信预算的 MySQL 投递轮次。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信前的轮次上限。
+    ///
+    /// 返回：本轮发布报告；输入非法或存储失败返回错误。
+    async fn dispatch_batch_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_with_dlt(self, publisher, limit, max_attempts).await
+    }
+
+    /// 业务作用：通过后端中立合同投递一个 MySQL lane 并确认其成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：本轮 lane 报告；名称非法或存储失败返回错误。
+    async fn dispatch_batch_channel(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_channel(self, publisher, channel, limit).await
+    }
+
+    /// 业务作用：通过后端中立合同投递一个 MySQL lane，并对确定性首失败累计死信预算。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信前的轮次上限。
+    ///
+    /// 返回：本轮 lane 报告；输入非法或存储失败返回错误。
+    async fn dispatch_batch_channel_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_channel_with_dlt(self, publisher, channel, limit, max_attempts)
+            .await
+    }
+
+    /// 业务作用：通过后端中立投递合同读取 MySQL 单 lane 积压。
+    ///
+    /// 参数说明：
+    /// - `channel`：待观测的 lane 名称。
+    ///
+    /// 返回：该 lane 的非负积压数；名称非法或数据库失败返回错误。
+    async fn pending_count_channel(&self, channel: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::pending_count_channel(self, channel).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxQuota for MySqlOutbox {
+    /// 业务作用：通过后端中立配额合同读取 MySQL 租户在飞账本。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：账本不存在时为零；数据库失败返回错误。
+    async fn tenant_quota_usage(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::outbox_tenant_quota_usage(self, tenant).await
+    }
+
+    /// 业务作用：通过后端中立配额合同在同源 MySQL 事务内对账租户在飞数。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：对账后的在飞数；事务或数据库失败返回错误。
+    async fn reconcile_tenant_quota(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::reconcile_outbox_tenant_quota(self, tenant).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxRetention for MySqlOutbox {
+    /// 业务作用：通过后端中立保留合同执行 MySQL 有界归档与清理轮次。
+    ///
+    /// 参数说明：
+    /// - `policy`：冻结保留策略。
+    /// - `archive`：需要归档收据时提供的幂等归档端。
+    /// - `now_ms`：统一 epoch 毫秒时钟。
+    ///
+    /// 返回：只包含已确认提交事实的轮次报告；策略或存储失败返回错误。
+    async fn retention_round(
+        &self,
+        policy: &OutboxRetentionPolicy,
+        archive: Option<&(dyn OutboxArchive + Sync)>,
+        now_ms: i64,
+    ) -> Result<RetentionRoundReport, OutboxStoreError> {
+        MySqlOutbox::retention_round(self, policy, archive, now_ms).await
+    }
+}
+
+impl DurableOutboxWakeup for MySqlOutbox {
+    /// 业务作用：通过后端中立唤醒合同订阅 MySQL 已确认提交代际。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前进程共享的 watch 接收端；数据库轮询仍承担最终收敛。
+    fn subscribe_committed_appends(&self) -> watch::Receiver<u64> {
+        MySqlOutbox::subscribe_committed_appends()
     }
 }
 

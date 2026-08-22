@@ -51,10 +51,23 @@ use sqlx::{MySql, MySqlConnection, Transaction};
 
 pub mod datasource;
 
+pub use natx_core::{
+    redact_url, redacted_endpoint, BootstrapKind, CommitOutcome, DataSourceCatalog,
+    DataSourceLookupError, DataSourcePoolConfig, DatabaseCapabilities, DatabaseDriver,
+    DatasourceNameError, DatasourceRef, ManagedInstallationToken, ManagedRegistryOwner,
+    PoolConfigError, RegistryCoordinationError, RegistryModeSnapshot, TxDecision, TxEntryError,
+    TxRollbackCause, TxRunError, DEFAULT_DATASOURCE, MAX_DATASOURCE_NAME_BYTES,
+    MAX_MANAGED_DATASOURCES,
+};
+
 /// 重导出底层连接池类型：Application 与业务的公开 getter 需要能命名它，
 /// 且必须与本 crate 使用的 sqlx 依赖严格同源，否则不同依赖实例会得到两个互不相同的类型。
 pub use sqlx::MySqlPool;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+
+/// 当前 crate 实际编入的数据库后端能力。
+pub const DATABASE_CAPABILITIES: DatabaseCapabilities =
+    DatabaseCapabilities::empty().with(DatabaseDriver::MySql);
 
 /// 当前事务的"槽"类型。
 ///
@@ -100,83 +113,13 @@ tokio::task_local! {
 static POOL: OnceLock<StdMutex<Option<MySqlPool>>> = OnceLock::new();
 static DATASOURCE_POOLS: OnceLock<StdMutex<HashMap<String, MySqlPool>>> = OnceLock::new();
 static MANAGED_DATASOURCES: OnceLock<RwLock<Weak<DataSourceRegistry>>> = OnceLock::new();
-static DATASOURCE_REGISTRY_LOCK: StdMutex<()> = StdMutex::new(());
-pub const DEFAULT_DATASOURCE: &str = "default";
-pub const MAX_DATASOURCE_NAME_BYTES: usize = 128;
-pub const MAX_MANAGED_DATASOURCES: usize = 64;
-
-/// 业务作用：携带经过统一校验的 datasource 身份，使 store 与事务边界不依赖临时字符串。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DatasourceRef(Arc<str>);
-
-impl DatasourceRef {
-    /// 业务作用：校验并固定一个 datasource qualifier。
-    ///
-    /// 参数说明：`name` 是配置边界或业务计划给出的数据源名。
-    ///
-    /// 返回：名称符合有界 canonical 合同时返回拥有型引用；非法名称在任何数据库 I/O 前失败。
-    pub fn new(name: impl AsRef<str>) -> anyhow::Result<Self> {
-        let name = name.as_ref();
-        validate_datasource_name(name)?;
-        Ok(Self(Arc::from(name)))
-    }
-
-    /// 业务作用：返回默认 datasource 的规范化身份。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：名称固定为 `default` 的拥有型引用。
-    pub fn default_ref() -> Self {
-        Self(Arc::from(DEFAULT_DATASOURCE))
-    }
-
-    /// 业务作用：读取 datasource 的规范化 qualifier。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：与该引用同生命周期的名称切片。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Default for DatasourceRef {
-    /// 业务作用：为兼容构造入口选择 `default` datasource。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：默认 datasource 引用。
-    fn default() -> Self {
-        Self::default_ref()
-    }
-}
-
-impl AsRef<str> for DatasourceRef {
-    /// 业务作用：让事务与连接 API 统一消费已校验身份。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：规范化 datasource 名称。
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for DatasourceRef {
-    /// 业务作用：输出不含连接信息的 datasource qualifier。
-    ///
-    /// 参数说明：`formatter` 是标准格式化输出目标。
-    ///
-    /// 返回：名称写入成功时返回 `Ok`，否则返回格式化错误。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
 
 /// 业务作用：作为单个 Application 的冻结 datasource 表，统一事务、Mapper 与受管持久适配器的 pool 身份。
 pub struct DataSourceRegistry {
     pools: BTreeMap<DatasourceRef, MySqlPool>,
     accepting: AtomicBool,
+    owner: OnceLock<ManagedRegistryOwner>,
+    catalog: OnceLock<Arc<DataSourceCatalog>>,
 }
 
 impl DataSourceRegistry {
@@ -205,7 +148,29 @@ impl DataSourceRegistry {
         Ok(Self {
             pools: registry,
             accepting: AtomicBool::new(true),
+            owner: OnceLock::new(),
+            catalog: OnceLock::new(),
         })
+    }
+
+    /// 业务作用：为 Application 构造绑定 owner、尚未对 getter 开放的 MySQL registry。
+    ///
+    /// 参数说明：
+    /// - `pools`：启动期已经建立完成的 MySQL pool 集合。
+    /// - `token`：本次 Application 从 `natx-core` 领取的安装 token。
+    ///
+    /// 返回：名称合法且 owner 唯一时返回关闭态 registry；失败时不发布任何全局状态。
+    pub fn try_new_managed(
+        pools: impl IntoIterator<Item = (String, MySqlPool)>,
+        token: &ManagedInstallationToken,
+    ) -> anyhow::Result<Self> {
+        let registry = Self::try_new(pools)?;
+        registry.accepting.store(false, Ordering::Release);
+        registry
+            .owner
+            .set(token.owner().clone())
+            .map_err(|_| anyhow::anyhow!("managed registry owner is already bound"))?;
+        Ok(registry)
     }
 
     /// 业务作用：在 registry 尚未停机时选择指定连接池。
@@ -218,6 +183,20 @@ impl DataSourceRegistry {
             anyhow::bail!("managed datasource registry is closing");
         }
         let reference = DatasourceRef::new(datasource)?;
+        if self.owner.get().is_some() {
+            let expected = self
+                .catalog
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("managed datasource catalog is not bound"))?;
+            let active = natx_core::managed_catalog().map_err(anyhow::Error::new)?;
+            anyhow::ensure!(
+                Arc::ptr_eq(expected, &active)
+                    && active
+                        .owner()
+                        .ptr_eq(self.owner.get().expect("owner checked above")),
+                "managed datasource catalog identity does not match this registry"
+            );
+        }
         self.pools.get(&reference).cloned().ok_or_else(|| {
             anyhow::anyhow!("datasource `{reference}` is not managed by this application")
         })
@@ -229,10 +208,21 @@ impl DataSourceRegistry {
     ///
     /// 返回：registry 尚开放且名称存在时返回真。
     pub fn contains(&self, datasource: &str) -> bool {
-        self.accepting.load(Ordering::Acquire)
-            && DatasourceRef::new(datasource)
-                .ok()
-                .is_some_and(|reference| self.pools.contains_key(&reference))
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.owner.get().is_some()
+            && !self.catalog.get().is_some_and(|expected| {
+                natx_core::managed_catalog()
+                    .ok()
+                    .is_some_and(|active| Arc::ptr_eq(expected, &active))
+            })
+        {
+            return false;
+        }
+        DatasourceRef::new(datasource)
+            .ok()
+            .is_some_and(|reference| self.pools.contains_key(&reference))
     }
 
     /// 业务作用：在连接池关闭前封口新的事务与连接选择。
@@ -242,6 +232,127 @@ impl DataSourceRegistry {
     /// 返回：无；已借出的 pool 仍由 Application 停机预算排空。
     pub fn stop_accepting(&self) {
         self.accepting.store(false, Ordering::Release);
+    }
+
+    /// 业务作用：在 catalog 完成同 owner 发布后开放本 typed registry。
+    ///
+    /// 参数说明：`token` 必须属于构造该 registry 的 Application。
+    ///
+    /// 返回：owner 匹配时开放连接选择；错配时保持关闭。
+    pub fn start_accepting(&self, token: &ManagedInstallationToken) -> anyhow::Result<()> {
+        let owner = self
+            .owner
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("managed registry owner is not bound"))?;
+        anyhow::ensure!(
+            owner.ptr_eq(token.owner()),
+            "managed registry owner does not match installation token"
+        );
+        let catalog = self
+            .catalog
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("managed datasource catalog is not bound"))?;
+        anyhow::ensure!(
+            catalog.owner().ptr_eq(token.owner()),
+            "managed datasource catalog owner does not match installation token"
+        );
+        self.accepting.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// 业务作用：读取 registry 绑定的 Application owner，供按身份撤销全局槽。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已安装或以 managed 构造时返回 owner；普通未安装 registry 返回 `None`。
+    pub fn managed_owner(&self) -> Option<&ManagedRegistryOwner> {
+        self.owner.get()
+    }
+
+    /// 业务作用：生成该 MySQL registry 对应的 catalog 条目。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 datasource 名排序且 driver 固定为 MySQL 的拥有型条目。
+    pub fn catalog_entries(&self) -> Vec<(String, DatabaseDriver)> {
+        self.pools
+            .keys()
+            .map(|reference| (reference.as_str().to_owned(), DatabaseDriver::MySql))
+            .collect()
+    }
+
+    /// 业务作用：让持有同 owner token 的 Application staging 读取关闭态 pool 以登记资源和执行门禁。
+    ///
+    /// 参数说明：
+    /// - `datasource`：待读取的 MySQL datasource。
+    /// - `token`：当前 Application 安装 token。
+    ///
+    /// 返回：owner 与名称都匹配时返回 pool clone；该入口不开放普通业务 getter。
+    #[doc(hidden)]
+    pub fn managed_pool(
+        &self,
+        datasource: &str,
+        token: &ManagedInstallationToken,
+    ) -> anyhow::Result<MySqlPool> {
+        let owner = self
+            .owner
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("managed registry owner is not bound"))?;
+        anyhow::ensure!(
+            owner.ptr_eq(token.owner()),
+            "managed registry owner does not match installation token"
+        );
+        let reference = DatasourceRef::new(datasource)?;
+        self.pools
+            .get(&reference)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("datasource `{reference}` is not in this registry"))
+    }
+
+    /// 业务作用：把 MySQL typed registry 绑定到唯一 Application owner，阻止跨实例复用资源表。
+    ///
+    /// 参数说明：`owner` 是构造 catalog 与其它 typed registry 共同使用的身份。
+    ///
+    /// 返回：首次绑定或同身份重复绑定成功；另一 owner 已占用时保持原身份并失败。
+    fn bind_owner(&self, owner: &ManagedRegistryOwner) -> anyhow::Result<()> {
+        if let Some(existing) = self.owner.get() {
+            anyhow::ensure!(
+                existing.ptr_eq(owner),
+                "managed registry is already bound to another owner"
+            );
+            return Ok(());
+        }
+        self.owner
+            .set(owner.clone())
+            .map_err(|_| anyhow::anyhow!("managed registry owner binding raced"))
+    }
+
+    /// 业务作用：把 MySQL typed registry 绑定到同 owner 的共享 catalog，供开放前后复验全局权威。
+    ///
+    /// 参数说明：
+    /// - `catalog`：跨 driver 完整 datasource catalog。
+    /// - `token`：当前 Application 安装 token。
+    ///
+    /// 返回：owner 和 Arc 身份一致时成功；错配时不替换已有 catalog。
+    fn bind_catalog(
+        &self,
+        catalog: &Arc<DataSourceCatalog>,
+        token: &ManagedInstallationToken,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            catalog.owner().ptr_eq(token.owner()),
+            "managed catalog owner does not match installation token"
+        );
+        if let Some(existing) = self.catalog.get() {
+            anyhow::ensure!(
+                Arc::ptr_eq(existing, catalog),
+                "managed registry is already bound to another catalog"
+            );
+            return Ok(());
+        }
+        self.catalog
+            .set(catalog.clone())
+            .map_err(|_| anyhow::anyhow!("managed catalog binding raced"))
     }
 }
 
@@ -277,92 +388,6 @@ impl RollbackOnly {
     pub const CODE: &'static str = "TX_ROLLBACK_ONLY";
 }
 
-/// 业务作用：显式声明事务体已经得到可提交领域结果，或要求携带原始故障整体回滚。
-///
-/// 该类型把事务裁决放进返回类型，不依赖 `anyhow::Error` downcast 或特殊 marker；
-/// 因而调用方看到 `Commit` 就知道领域拒绝等事实会被可靠保留，看到 `Rollback` 就知道
-/// 本次尝试没有可提交结论。
-#[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TxDecision<T, E> {
-    /// 当前执行已得到允许提交的领域结果。
-    Commit(T),
-    /// 当前执行没有可提交结果，必须回滚。
-    Rollback(E),
-}
-
-/// 业务作用：保留物理回滚失败之前的原始裁决来源，避免基础设施故障抹掉业务证据。
-#[derive(Debug)]
-pub enum TxRollbackCause<E> {
-    /// 最外层事务体显式要求回滚，并保留其原始错误。
-    Decision(E),
-    /// 内层事务已经把 ambient transaction 标记为 rollback-only，但外层吞掉了内层错误。
-    RollbackOnly {
-        /// 首次置位 rollback-only 时保存的脱敏原因。
-        reason: String,
-    },
-}
-
-/// 业务作用：对显式事务裁决的全部失败阶段进行封闭分类，供消息 ACK 与重试策略安全决策。
-///
-/// `CommitUncertain` 和 `RollbackFailed` 都表示不能声称数据库已经回滚；消息消费者必须
-/// 保留输入并依靠 Inbox、业务唯一键和状态查询收敛，不能把它们降级成普通领域拒绝。
-#[derive(Debug)]
-pub enum TxRunError<E> {
-    /// 业务要求回滚，且数据库已经确认回滚完成。
-    Rollback(E),
-    /// 内层回滚要求被外层吞掉，最外层已确认整体回滚。
-    RollbackOnly {
-        /// 首次置位 rollback-only 时保存的脱敏原因。
-        reason: String,
-    },
-    /// 数据库明确拒绝 COMMIT，可确认事务没有提交。
-    CommitRejected {
-        /// 稳定、脱敏的失败分类。
-        reason: String,
-    },
-    /// COMMIT 请求后的连接或协议状态不确定，无法证明提交或回滚。
-    CommitUncertain {
-        /// 稳定、脱敏的失败分类。
-        reason: String,
-    },
-    /// 物理回滚失败，原始回滚原因与基础设施分类同时保留。
-    RollbackFailed {
-        /// 触发回滚的原始裁决。
-        cause: TxRollbackCause<E>,
-        /// 稳定、脱敏的回滚失败分类。
-        reason: String,
-    },
-    /// 在事务开始前或执行内核中发生的基础设施错误。
-    Infrastructure {
-        /// 稳定、脱敏的失败分类。
-        reason: String,
-    },
-}
-
-impl<E: std::fmt::Display> std::fmt::Display for TxRunError<E> {
-    /// 业务作用：输出不含 SQL、连接串和业务 payload 的事务失败分类。
-    ///
-    /// 参数说明：
-    /// - `formatter`: 标准库格式化器。
-    ///
-    /// 返回：格式化成功返回 `Ok`；写入失败时透传格式化错误。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Rollback(error) => write!(formatter, "transaction rolled back: {error}"),
-            Self::RollbackOnly { reason } => {
-                write!(formatter, "transaction was rollback-only: {reason}")
-            }
-            Self::CommitRejected { reason } => write!(formatter, "commit rejected: {reason}"),
-            Self::CommitUncertain { reason } => write!(formatter, "commit uncertain: {reason}"),
-            Self::RollbackFailed { reason, .. } => write!(formatter, "rollback failed: {reason}"),
-            Self::Infrastructure { reason } => {
-                write!(formatter, "transaction infrastructure failed: {reason}")
-            }
-        }
-    }
-}
-
 /// 业务作用：注入默认连接池，建立 ambient transaction 与普通连接的唯一数据源入口。
 ///
 /// main 启动时调一次。重复调用【不会替换】已有 pool —— 此时记 error 日志使其可见,
@@ -387,20 +412,21 @@ pub fn init(pool: MySqlPool) {
 ///
 /// 返回：当前无独立池且无受管 registry 时成功；重复或模式冲突时不替换已有 pool。
 pub fn try_init(pool: MySqlPool) -> anyhow::Result<()> {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ensure_no_managed_registry()?;
-    let mut current = POOL
-        .get_or_init(|| StdMutex::new(None))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    anyhow::ensure!(
-        current.is_none(),
-        "natx::init/try_init 重复调用:连接池已初始化,不能替换"
-    );
-    *current = Some(pool);
-    Ok(())
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .register_standalone(DatabaseDriver::MySql, DEFAULT_DATASOURCE)
+            .map_err(anyhow::Error::new)?;
+        let mut current = POOL
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        anyhow::ensure!(
+            current.is_none(),
+            "natx::init/try_init 重复调用:连接池已初始化,不能替换"
+        );
+        *current = Some(pool);
+        Ok(())
+    })
 }
 
 /// 业务作用：注入命名 datasource，使显式多库业务能绑定到稳定且不可替换的连接源。
@@ -421,19 +447,20 @@ pub fn try_init_datasource(name: impl Into<String>, pool: MySqlPool) -> anyhow::
     if name == DEFAULT_DATASOURCE {
         return try_init(pool);
     }
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ensure_no_managed_registry()?;
-    let pools = DATASOURCE_POOLS.get_or_init(|| StdMutex::new(HashMap::new()));
-    let mut pools = pools.lock().unwrap();
-    if pools.contains_key(&name) {
-        return Err(anyhow::anyhow!(
-            "natx::try_init_datasource 重复调用:datasource `{name}` 已初始化,不能替换"
-        ));
-    }
-    pools.insert(name, pool);
-    Ok(())
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .register_standalone(DatabaseDriver::MySql, &name)
+            .map_err(anyhow::Error::new)?;
+        let pools = DATASOURCE_POOLS.get_or_init(|| StdMutex::new(HashMap::new()));
+        let mut pools = pools.lock().unwrap_or_else(|error| error.into_inner());
+        if pools.contains_key(&name) {
+            return Err(anyhow::anyhow!(
+                "natx::try_init_datasource 重复调用:datasource `{name}` 已初始化,不能替换"
+            ));
+        }
+        pools.insert(name, pool);
+        Ok(())
+    })
 }
 
 /// 业务作用：以日志可见但不中断调用方的方式注入命名 datasource。
@@ -457,22 +484,15 @@ pub fn init_datasource(name: impl Into<String>, pool: MySqlPool) {
 ///
 /// 返回：非空且无首尾空白返回 `Ok`；否则返回错误。
 fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
-    if name.trim().is_empty() {
-        return Err(anyhow::anyhow!("datasource 名称不能为空"));
-    }
-    if name.trim() != name {
-        return Err(anyhow::anyhow!("datasource 名称首尾不能包含空白"));
-    }
-    if name.len() > MAX_DATASOURCE_NAME_BYTES
-        || !name
-            .bytes()
-            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
-    {
-        return Err(anyhow::anyhow!(
+    natx_core::validate_datasource_name(name).map_err(|error| match error {
+        natx_core::DatasourceNameError::Empty => anyhow::anyhow!("datasource 名称不能为空"),
+        natx_core::DatasourceNameError::SurroundingWhitespace => {
+            anyhow::anyhow!("datasource 名称首尾不能包含空白")
+        }
+        natx_core::DatasourceNameError::InvalidCharacters => anyhow::anyhow!(
             "datasource 名称只能包含 ASCII 字母、数字、'.'、'_'和'-'，且不超过 {MAX_DATASOURCE_NAME_BYTES} 字节"
-        ));
-    }
-    Ok(())
+        ),
+    })
 }
 
 /// 业务作用：发布当前 Application 拥有的唯一 datasource registry。
@@ -481,10 +501,134 @@ fn validate_datasource_name(name: &str) -> anyhow::Result<()> {
 ///
 /// 返回：当前进程没有独立注册表且没有其它 live Application 时成功；冲突时保留原权威并失败。
 pub fn install_managed_registry(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    install_managed_registry_locked(registry)
+    let owner = registry
+        .managed_owner()
+        .cloned()
+        .unwrap_or_else(ManagedRegistryOwner::new);
+    registry.bind_owner(&owner)?;
+    let catalog = match registry.catalog.get() {
+        Some(catalog) => catalog.clone(),
+        None => {
+            let catalog = Arc::new(DataSourceCatalog::try_new(
+                owner.clone(),
+                registry.catalog_entries(),
+            )?);
+            registry
+                .catalog
+                .set(catalog.clone())
+                .map_err(|_| anyhow::anyhow!("managed catalog binding raced"))?;
+            catalog
+        }
+    };
+
+    natx_core::coordinate(|coordinator| {
+        ensure_local_standalone_empty()?;
+        let token = coordinator
+            .begin_bootstrap(&owner, BootstrapKind::Configured)
+            .map_err(anyhow::Error::new)?;
+        if let Err(error) = install_managed_slot_locked(registry) {
+            let _ = coordinator.abort_bootstrap(&token);
+            return Err(error);
+        }
+        registry.bind_catalog(&catalog, &token)?;
+        if let Err(error) = coordinator.install_catalog(&token, &catalog) {
+            clear_managed_slot_locked(registry);
+            let _ = coordinator.abort_bootstrap(&token);
+            return Err(anyhow::Error::new(error));
+        }
+        if let Err(error) = registry.start_accepting(&token) {
+            clear_managed_slot_locked(registry);
+            let _ = coordinator.clear_managed(&owner);
+            return Err(error);
+        }
+        if let Err(error) = coordinator.open_catalog(&token, &catalog) {
+            registry.stop_accepting();
+            clear_managed_slot_locked(registry);
+            let _ = coordinator.clear_managed(&owner);
+            return Err(anyhow::Error::new(error));
+        }
+        Ok(())
+    })
+}
+
+/// 业务作用：为 napp 领取受管 datasource owner 与安装 token，但不创建或开放连接池。
+///
+/// 参数说明：`kind` 区分配置建池与 UserHook 延后 default。
+///
+/// 返回：进程入口为空时进入 Bootstrapping；已有 standalone 或 managed 权威时失败。
+#[doc(hidden)]
+pub fn begin_managed_bootstrap(
+    kind: BootstrapKind,
+) -> anyhow::Result<(ManagedRegistryOwner, ManagedInstallationToken)> {
+    natx_core::begin_managed_bootstrap(kind).map_err(anyhow::Error::new)
+}
+
+/// 业务作用：把关闭态 MySQL registry 安装到当前 owner 的 typed 槽，但不开放全局 getter。
+///
+/// 参数说明：
+/// - `registry`：由 [`DataSourceRegistry::try_new_managed`] 构造的关闭态表。
+/// - `token`：当前 Application 安装 token。
+///
+/// 返回：owner 匹配、无 standalone 且 typed 槽空闲时成功；失败不改变原权威。
+#[doc(hidden)]
+pub fn install_closed_managed_registry(
+    registry: &Arc<DataSourceRegistry>,
+    token: &ManagedInstallationToken,
+) -> anyhow::Result<()> {
+    registry.bind_owner(token.owner())?;
+    registry.stop_accepting();
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .verify_installation_token(token)
+            .map_err(anyhow::Error::new)?;
+        ensure_local_standalone_empty()?;
+        install_managed_slot_locked(registry)
+    })
+}
+
+/// 业务作用：把共享 catalog 绑定到已安装的 MySQL registry，保证资源持有同一 owner。
+///
+/// 参数说明：
+/// - `registry`：当前 Application 的 MySQL typed registry。
+/// - `catalog`：跨 driver 完整 catalog。
+/// - `token`：当前 Application 安装 token。
+///
+/// 返回：三者 owner 一致时成功；错配时 registry 保持关闭。
+#[doc(hidden)]
+pub fn attach_managed_catalog(
+    registry: &Arc<DataSourceRegistry>,
+    catalog: &Arc<DataSourceCatalog>,
+    token: &ManagedInstallationToken,
+) -> anyhow::Result<()> {
+    registry.bind_catalog(catalog, token)
+}
+
+/// 业务作用：在共享 catalog 即将开放前开放 MySQL typed registry。
+///
+/// 参数说明：
+/// - `registry`：已经绑定共享 catalog 的 registry。
+/// - `token`：当前 Application 安装 token。
+///
+/// 返回：owner 匹配时开放；错配时保持关闭。
+#[doc(hidden)]
+pub fn open_managed_registry(
+    registry: &Arc<DataSourceRegistry>,
+    token: &ManagedInstallationToken,
+) -> anyhow::Result<()> {
+    registry.start_accepting(token)
+}
+
+/// 业务作用：在 catalog 封口后按 registry Arc 身份撤销 MySQL typed 槽。
+///
+/// 参数说明：`registry` 是正在停机或启动失败清理的资源表。
+///
+/// 返回：无；旧实例不命中当前槽时不修改新实例。
+#[doc(hidden)]
+pub fn clear_managed_registry_slot(registry: &Arc<DataSourceRegistry>) {
+    natx_core::coordinate(|_| {
+        registry.stop_accepting();
+        clear_managed_slot_locked(registry);
+    });
 }
 
 /// 业务作用：把 UserHook 以独立入口注入的默认连接池原子转交给 Application registry。
@@ -494,45 +638,116 @@ pub fn install_managed_registry(registry: &Arc<DataSourceRegistry>) -> anyhow::R
 /// 返回：仅存在一个独立默认池、无命名独立池且无其它受管 registry 时完成所有权转移；
 /// 条件不成立时保留原有入口并失败。
 pub fn adopt_standalone_default_registry() -> anyhow::Result<Arc<DataSourceRegistry>> {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ensure_no_managed_registry()?;
-    anyhow::ensure!(
-        !DATASOURCE_POOLS.get().is_some_and(|pools| {
-            !pools
+    natx_core::coordinate(|coordinator| {
+        anyhow::ensure!(
+            !local_named_standalone_present(),
+            "named standalone datasources cannot be adopted by the default-only managed registry"
+        );
+        let owner = ManagedRegistryOwner::new();
+        let token = coordinator
+            .begin_legacy_adopt(&owner, DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)?;
+        let pool = {
+            let mut slot = POOL
+                .get_or_init(|| StdMutex::new(None))
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_empty()
-        }),
-        "named standalone datasources cannot be adopted by the default-only managed registry"
-    );
-    let slot = POOL
-        .get_or_init(|| StdMutex::new(None))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut slot = slot;
-    let pool = slot
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"))?;
-    let registry =
-        match DataSourceRegistry::try_new([(DEFAULT_DATASOURCE.to_owned(), pool.clone())]) {
+                .unwrap_or_else(|error| error.into_inner());
+            match slot.take() {
+                Some(pool) => pool,
+                None => {
+                    // 本地 pool 与 core 模式不一致时立即恢复 standalone，避免一次失败永久占住引导态。
+                    let _ = coordinator.restore_legacy_standalone(&token, DatabaseDriver::MySql);
+                    return Err(anyhow::anyhow!("datasource `default` 未初始化"));
+                }
+            }
+        };
+        let registry = Arc::new(DataSourceRegistry::try_new([(
+            DEFAULT_DATASOURCE.to_owned(),
+            pool.clone(),
+        )])?);
+        registry.bind_owner(&owner)?;
+        let catalog = Arc::new(DataSourceCatalog::try_new(
+            owner.clone(),
+            registry.catalog_entries(),
+        )?);
+        registry.bind_catalog(&catalog, &token)?;
+
+        let publish = (|| -> anyhow::Result<()> {
+            install_managed_slot_locked(&registry)?;
+            coordinator
+                .install_catalog(&token, &catalog)
+                .map_err(anyhow::Error::new)?;
+            registry.start_accepting(&token)?;
+            coordinator
+                .open_catalog(&token, &catalog)
+                .map_err(anyhow::Error::new)?;
+            Ok(())
+        })();
+        if let Err(error) = publish {
+            registry.stop_accepting();
+            clear_managed_slot_locked(&registry);
+            if coordinator.clear_managed(&owner).is_ok() {
+                let _ = coordinator.register_standalone(DatabaseDriver::MySql, DEFAULT_DATASOURCE);
+            } else {
+                let _ = coordinator.restore_legacy_standalone(&token, DatabaseDriver::MySql);
+            }
+            *POOL
+                .get_or_init(|| StdMutex::new(None))
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(pool);
+            return Err(error);
+        }
+        Ok(registry)
+    })
+}
+
+/// 业务作用：把 UserHook 安装的 MySQL default 转入同 owner 的关闭态 registry。
+///
+/// 参数说明：`token` 是 Start 阶段领取的 DeferredDefault 安装 token。
+///
+/// 返回：只存在 MySQL default 且 owner/driver 匹配时返回关闭态 registry；失败保留 standalone。
+#[doc(hidden)]
+pub fn adopt_standalone_default_registry_closed(
+    token: &ManagedInstallationToken,
+) -> anyhow::Result<Arc<DataSourceRegistry>> {
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .verify_deferred_adopt(token, DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)?;
+        anyhow::ensure!(
+            !local_named_standalone_present(),
+            "named standalone datasources cannot be adopted by the default-only managed registry"
+        );
+        let pool = {
+            let mut slot = POOL
+                .get_or_init(|| StdMutex::new(None))
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            slot.take()
+                .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"))?
+        };
+        let registry = match DataSourceRegistry::try_new_managed(
+            [(DEFAULT_DATASOURCE.to_owned(), pool.clone())],
+            token,
+        ) {
             Ok(registry) => Arc::new(registry),
             Err(error) => {
-                *slot = Some(pool);
+                *POOL
+                    .get_or_init(|| StdMutex::new(None))
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(pool);
                 return Err(error);
             }
         };
-    drop(slot);
-    if let Err(error) = install_managed_registry_locked(&registry) {
-        // 发布失败时必须恢复独立入口，避免 UserHook 已建立的池变成无人持有的半完成状态。
-        *POOL
-            .get_or_init(|| StdMutex::new(None))
-            .lock()
-            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(pool);
-        return Err(error);
-    }
-    Ok(registry)
+        if let Err(error) = install_managed_slot_locked(&registry) {
+            *POOL
+                .get_or_init(|| StdMutex::new(None))
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(pool);
+            return Err(error);
+        }
+        Ok(registry)
+    })
 }
 
 /// 业务作用：在动态数据库 UserHook 开放前确认独立注册表不含历史资源。
@@ -542,26 +757,13 @@ pub fn adopt_standalone_default_registry() -> anyhow::Result<Arc<DataSourceRegis
 /// 返回：无 standalone pool 且无 live 受管 registry 时成功；否则拒绝开放会混淆所有权的引导窗口。
 #[doc(hidden)]
 pub fn ensure_standalone_datasources_empty_for_managed_bootstrap() -> anyhow::Result<()> {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ensure_no_managed_registry()?;
-    let default_present = POOL.get().is_some_and(|pool| {
-        pool.lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
-    });
-    let named_present = DATASOURCE_POOLS.get().is_some_and(|pools| {
-        !pools
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_empty()
-    });
-    anyhow::ensure!(
-        !default_present && !named_present,
-        "standalone datasource registry must be empty before managed user-hook bootstrap"
-    );
-    Ok(())
+    natx_core::coordinate(|coordinator| {
+        anyhow::ensure!(
+            matches!(coordinator.snapshot(), RegistryModeSnapshot::Empty),
+            "standalone datasource registry must be empty before managed user-hook bootstrap"
+        );
+        ensure_local_standalone_empty()
+    })
 }
 
 /// 业务作用：在动态 UserHook 未完成接管就失败时，取回本轮引导窗口注入的全部池。
@@ -572,10 +774,143 @@ pub fn ensure_standalone_datasources_empty_for_managed_bootstrap() -> anyhow::Re
 #[doc(hidden)]
 pub fn take_standalone_datasources_for_managed_shutdown() -> anyhow::Result<Vec<(String, MySqlPool)>>
 {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ensure_no_managed_registry()?;
+    natx_core::coordinate(|coordinator| {
+        anyhow::ensure!(
+            matches!(
+                coordinator.snapshot(),
+                RegistryModeSnapshot::Empty
+                    | RegistryModeSnapshot::Standalone(DatabaseDriver::MySql)
+            ),
+            "managed datasource bootstrap requires owner-aware cleanup"
+        );
+        let pools = take_local_standalone_pools();
+        coordinator
+            .release_standalone(DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)?;
+        Ok(pools)
+    })
+}
+
+/// 业务作用：在 DeferredDefault 启动失败时按 owner token 取回 MySQL standalone pool。
+///
+/// 参数说明：`token` 是本轮 Application 安装 token。
+///
+/// 返回：owner 与 deferred driver 匹配时撤销并返回有序 pool；错配时不触碰全局入口。
+#[doc(hidden)]
+pub fn take_deferred_standalone_for_managed_shutdown(
+    token: &ManagedInstallationToken,
+) -> anyhow::Result<Vec<(String, MySqlPool)>> {
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .verify_deferred_adopt(token, DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)?;
+        let pools = take_local_standalone_pools();
+        coordinator
+            .clear_deferred_driver(token, DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)?;
+        Ok(pools)
+    })
+}
+
+/// 业务作用：关闭态 adopt 后若后续 staging 失败，清除 core 中已接管的 MySQL deferred driver 记录。
+///
+/// 参数说明：`token` 是本轮 DeferredDefault owner token；调用方必须先撤销 typed 槽并关闭 pool。
+///
+/// 返回：owner 与 driver 匹配时清除记录；错配时保留模式，防止越权释放。
+#[doc(hidden)]
+pub fn clear_adopted_deferred_driver(token: &ManagedInstallationToken) -> anyhow::Result<()> {
+    natx_core::coordinate(|coordinator| {
+        coordinator
+            .clear_deferred_driver(token, DatabaseDriver::MySql)
+            .map_err(anyhow::Error::new)
+    })
+}
+
+/// 业务作用：在全局数据源协调锁内发布唯一受管 registry。
+///
+/// 参数说明：`registry` 是已冻结且由 Application 持有的资源表。
+///
+/// 返回：独立入口为空且无其它 live registry 时成功；冲突时不改变全局槽。
+fn install_managed_slot_locked(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
+    let slot = MANAGED_DATASOURCES.get_or_init(|| RwLock::new(Weak::new()));
+    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
+    if current.upgrade().is_some() {
+        anyhow::bail!("another managed datasource registry is already active");
+    }
+    *current = Arc::downgrade(registry);
+    Ok(())
+}
+
+/// 业务作用：按 Arc 身份清除 MySQL typed registry 弱槽，防止旧实例撤销新实例。
+///
+/// 参数说明：`registry` 是正在失败清理或停机的 registry。
+///
+/// 返回：无；槽为空或身份不匹配时保持当前状态。
+fn clear_managed_slot_locked(registry: &Arc<DataSourceRegistry>) {
+    let Some(slot) = MANAGED_DATASOURCES.get() else {
+        return;
+    };
+    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
+    if current
+        .upgrade()
+        .is_some_and(|active| Arc::ptr_eq(&active, registry))
+    {
+        *current = Weak::new();
+    }
+}
+
+/// 业务作用：仅在全局槽仍指向目标 Application registry 时封口并撤销发布。
+///
+/// 参数说明：`registry` 是正在进入逆序停机的资源表。
+///
+/// 返回：无；指针复验防止旧 Application 误清理后续实例的槽位。
+pub fn clear_managed_registry(registry: &Arc<DataSourceRegistry>) {
+    natx_core::coordinate(|coordinator| {
+        registry.stop_accepting();
+        clear_managed_slot_locked(registry);
+        if let Some(owner) = registry.managed_owner() {
+            let _ = coordinator.clear_managed(owner);
+        }
+    });
+}
+
+/// 业务作用：确认 MySQL 本地 standalone 表为空，避免与受管 registry 形成两张资源表。
+///
+/// 参数说明: 无。
+///
+/// 返回：没有 live 受管 registry 时成功；已进入受管模式时失败。
+fn ensure_local_standalone_empty() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !POOL.get().is_some_and(|pool| {
+            pool.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+        }) && !local_named_standalone_present(),
+        "standalone datasource registry is already initialized and cannot be mixed with managed mode"
+    );
+    Ok(())
+}
+
+/// 业务作用：检查 MySQL 命名 standalone 表是否仍持有任何 pool。
+///
+/// 参数说明: 无。
+///
+/// 返回：至少存在一个命名 pool 时返回真；未初始化或空表返回假。
+fn local_named_standalone_present() -> bool {
+    DATASOURCE_POOLS.get().is_some_and(|pools| {
+        !pools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    })
+}
+
+/// 业务作用：原子取走 MySQL 本地 default 与命名 standalone pool，供失败路径按序关闭。
+///
+/// 参数说明: 无。
+///
+/// 返回：按 datasource 名排序的拥有型 pool 列表；调用后本地 standalone 表为空。
+fn take_local_standalone_pools() -> Vec<(String, MySqlPool)> {
     let mut pools = Vec::new();
     if let Some(pool) = POOL.get().and_then(|pool| {
         pool.lock()
@@ -590,79 +925,7 @@ pub fn take_standalone_datasources_for_managed_shutdown() -> anyhow::Result<Vec<
         ));
     }
     pools.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(pools)
-}
-
-/// 业务作用：在全局数据源协调锁内发布唯一受管 registry。
-///
-/// 参数说明：`registry` 是已冻结且由 Application 持有的资源表。
-///
-/// 返回：独立入口为空且无其它 live registry 时成功；冲突时不改变全局槽。
-fn install_managed_registry_locked(registry: &Arc<DataSourceRegistry>) -> anyhow::Result<()> {
-    if POOL.get().is_some_and(|pool| {
-        pool.lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
-    }) || DATASOURCE_POOLS.get().is_some_and(|pools| {
-        !pools
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_empty()
-    }) {
-        anyhow::bail!(
-            "standalone datasource registry is already initialized and cannot be mixed with managed mode"
-        );
-    }
-    let slot = MANAGED_DATASOURCES.get_or_init(|| RwLock::new(Weak::new()));
-    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
-    if current.upgrade().is_some() {
-        anyhow::bail!("another managed datasource registry is already active");
-    }
-    *current = Arc::downgrade(registry);
-    Ok(())
-}
-
-/// 业务作用：仅在全局槽仍指向目标 Application registry 时封口并撤销发布。
-///
-/// 参数说明：`registry` 是正在进入逆序停机的资源表。
-///
-/// 返回：无；指针复验防止旧 Application 误清理后续实例的槽位。
-pub fn clear_managed_registry(registry: &Arc<DataSourceRegistry>) {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    registry.stop_accepting();
-    let Some(slot) = MANAGED_DATASOURCES.get() else {
-        return;
-    };
-    let mut current = slot.write().unwrap_or_else(|error| error.into_inner());
-    if current
-        .upgrade()
-        .is_some_and(|active| Arc::ptr_eq(&active, registry))
-    {
-        *current = Weak::new();
-    }
-}
-
-/// 业务作用：阻止独立注册入口与 Application 受管 registry 在同一进程形成两张资源表。
-///
-/// 参数说明: 无。
-///
-/// 返回：没有 live 受管 registry 时成功；已进入受管模式时失败。
-fn ensure_no_managed_registry() -> anyhow::Result<()> {
-    let active = MANAGED_DATASOURCES
-        .get()
-        .and_then(|slot| {
-            slot.read()
-                .unwrap_or_else(|error| error.into_inner())
-                .upgrade()
-        })
-        .is_some();
-    anyhow::ensure!(
-        !active,
-        "managed datasource registry is active and rejects standalone initialization"
-    );
-    Ok(())
+    pools
 }
 
 /// 业务作用：解析指定 datasource 的连接池，统一默认库与命名库的查找失败语义。
@@ -672,18 +935,34 @@ fn ensure_no_managed_registry() -> anyhow::Result<()> {
 ///
 /// 返回：已初始化的连接池 clone；名称非法或未初始化返回错误。
 fn pool_for(datasource: &str) -> anyhow::Result<MySqlPool> {
-    let _coordinator = DATASOURCE_REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    validate_datasource_name(datasource)?;
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(anyhow::Error::new)?;
+    match pool_for_checked(datasource) {
+        Ok(pool) => Ok(pool),
+        // 兼容入口继续保留 1.x 的未初始化文本；新增 checked 入口仍提供结构化 NotFound。
+        Err(DataSourceLookupError::NotFound { datasource }) => {
+            Err(anyhow::anyhow!("datasource `{datasource}` 未初始化"))
+        }
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+/// 业务作用：解析 MySQL pool 并保留 datasource 查找的结构化失败，供加法 checked 事务入口使用。
+///
+/// 参数说明：`datasource` 是业务声明的 datasource 名称。
+///
+/// 返回：命中 typed pool 时返回 clone；名称、driver、生命周期或缺失状态返回封闭 lookup 分类。
+fn pool_for_checked(datasource: &str) -> Result<MySqlPool, DataSourceLookupError> {
+    let reference = natx_core::resolve_datasource(datasource, DatabaseDriver::MySql)?;
     if let Some(registry) = MANAGED_DATASOURCES.get().and_then(|slot| {
         slot.read()
             .unwrap_or_else(|error| error.into_inner())
             .upgrade()
     }) {
-        return registry.pool(datasource);
+        return registry
+            .pool(reference.as_str())
+            .map_err(|_| DataSourceLookupError::RegistryUnavailable);
     }
-    if datasource == DEFAULT_DATASOURCE {
+    if reference.as_str() == DEFAULT_DATASOURCE {
         return POOL
             .get()
             .and_then(|pool| {
@@ -691,16 +970,22 @@ fn pool_for(datasource: &str) -> anyhow::Result<MySqlPool> {
                     .unwrap_or_else(|error| error.into_inner())
                     .clone()
             })
-            .ok_or_else(|| anyhow::anyhow!("datasource `default` 未初始化"));
+            .ok_or(DataSourceLookupError::NotFound {
+                datasource: reference,
+            });
     }
     let pools = DATASOURCE_POOLS
         .get()
-        .ok_or_else(|| anyhow::anyhow!("datasource `{datasource}` 未初始化"))?;
-    let pools = pools.lock().unwrap();
+        .ok_or_else(|| DataSourceLookupError::NotFound {
+            datasource: reference.clone(),
+        })?;
+    let pools = pools.lock().unwrap_or_else(|error| error.into_inner());
     pools
-        .get(datasource)
+        .get(reference.as_str())
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("datasource `{datasource}` 未初始化"))
+        .ok_or(DataSourceLookupError::NotFound {
+            datasource: reference,
+        })
 }
 
 /// 业务作用：向无事务长生命周期执行器提供指定 datasource 的独立连接池入口。
@@ -767,6 +1052,55 @@ where
     F: Future<Output = TxDecision<T, E>>,
 {
     run_decided_for(DEFAULT_DATASOURCE, body).await
+}
+
+/// 业务作用：在默认 MySQL datasource 执行显式裁决，并保留 datasource 查找的结构化错误。
+///
+/// 参数说明：`body` 返回提交或回滚裁决。
+///
+/// 返回：查找失败经 [`TxEntryError::Lookup`] 返回；事务开始后的失败经 [`TxEntryError::Run`] 返回。
+pub async fn run_decided_checked<T, E, F>(body: F) -> Result<T, TxEntryError<E>>
+where
+    F: Future<Output = TxDecision<T, E>>,
+{
+    run_decided_for_checked(DEFAULT_DATASOURCE, body).await
+}
+
+/// 业务作用：在指定 MySQL datasource 执行显式裁决，并在连接前暴露名称、状态与 driver 错配。
+///
+/// 参数说明：
+/// - `datasource`：本次本地事务绑定的数据源。
+/// - `body`：返回提交或回滚裁决的业务 Future。
+///
+/// 返回：datasource 入口失败与事务执行失败保持为两个可穷举阶段。
+pub async fn run_decided_for_checked<T, E, F, D>(
+    datasource: D,
+    body: F,
+) -> Result<T, TxEntryError<E>>
+where
+    F: Future<Output = TxDecision<T, E>>,
+    D: AsRef<str>,
+{
+    let datasource = DatasourceRef::new(datasource)
+        .map_err(|_| TxEntryError::Lookup(DataSourceLookupError::InvalidName))?;
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(|error| {
+        TxEntryError::Run(TxRunError::Infrastructure {
+            reason: error.to_string(),
+        })
+    })?;
+    let prepared_pool = if CUR_TX.try_with(|_| ()).is_ok() {
+        None
+    } else {
+        Some(pool_for_checked(datasource.as_str()).map_err(TxEntryError::Lookup)?)
+    };
+    run_decision_kernel_with_pool(
+        datasource,
+        body,
+        |_| "nested explicit rollback".to_string(),
+        prepared_pool,
+    )
+    .await
+    .map_err(TxEntryError::Run)
 }
 
 /// 业务作用：按业务代码给出的显式裁决，在指定 datasource 中提交或回滚本地事务。
@@ -854,6 +1188,33 @@ where
     F: Future<Output = TxDecision<T, E>>,
     R: Fn(&E) -> String,
 {
+    run_decision_kernel_with_pool(datasource, body, describe_rollback, None).await
+}
+
+/// 业务作用：复用 checked 入口已经解析的 pool 执行事务，消除查找与 BEGIN 之间的重复全局查询。
+///
+/// 参数说明：
+/// - `datasource`：本次事务的数据源。
+/// - `body`：返回显式裁决的业务 Future。
+/// - `describe_rollback`：生成首个 rollback-only 脱敏原因。
+/// - `prepared_pool`：外层 checked 入口已解析的 pool；嵌套或兼容入口传 `None`。
+///
+/// 返回：数据库确认提交时返回业务值；其它执行阶段返回封闭事务分类。
+async fn run_decision_kernel_with_pool<T, E, F, R>(
+    datasource: DatasourceRef,
+    body: F,
+    describe_rollback: R,
+    prepared_pool: Option<MySqlPool>,
+) -> Result<T, TxRunError<E>>
+where
+    F: Future<Output = TxDecision<T, E>>,
+    R: Fn(&E) -> String,
+{
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(|error| {
+        TxRunError::Infrastructure {
+            reason: error.to_string(),
+        }
+    })?;
     // 嵌套调用只能加入相同 datasource；跨库写不能静默伪装成一个本地事务。
     if let Ok(ctx) = CUR_TX.try_with(Clone::clone) {
         if ctx.datasource != datasource {
@@ -875,9 +1236,12 @@ where
         };
     }
 
-    let pool = pool_for(datasource.as_str()).map_err(|_| TxRunError::Infrastructure {
-        reason: "transaction pool unavailable".to_string(),
-    })?;
+    let pool = match prepared_pool {
+        Some(pool) => pool,
+        None => pool_for(datasource.as_str()).map_err(|error| TxRunError::Infrastructure {
+            reason: error.to_string(),
+        })?,
+    };
     let transaction = pool.begin().await.map_err(|_| TxRunError::Infrastructure {
         reason: "transaction begin failed".to_string(),
     })?;
@@ -889,7 +1253,11 @@ where
         rollback_reason: std::sync::Mutex::new(None),
         after_commit: std::sync::Mutex::new(Vec::new()),
     });
-    let decision = CUR_TX.scope(ctx.clone(), body).await;
+    let decision = natx_core::scope_driver(DatabaseDriver::MySql, CUR_TX.scope(ctx.clone(), body))
+        .await
+        .map_err(|error| TxRunError::Infrastructure {
+            reason: error.to_string(),
+        })?;
     let transaction = slot
         .lock()
         .await
@@ -1042,6 +1410,7 @@ pub async fn conn() -> anyhow::Result<Conn> {
 ///
 /// 返回：事务内返回同 datasource 的事务连接，事务外返回池连接；名称、归属或获取失败返回错误。
 pub async fn conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(anyhow::Error::new)?;
     let datasource = DatasourceRef::new(datasource)?;
     match CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())) {
         // 在事务里:锁住槽(OwnedMutexGuard 需要 Arc<Mutex>,故用 lock_owned),持有它到 query 跑完
@@ -1079,6 +1448,7 @@ pub async fn mandatory_conn() -> anyhow::Result<Conn> {
 ///
 /// 返回：ambient transaction 存在且 datasource 一致时返回连接；否则返回错误且绝不 fallback。
 pub async fn mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(anyhow::Error::new)?;
     let datasource = DatasourceRef::new(datasource)?;
     let (tx_datasource, slot) = CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())).map_err(|_| {
         anyhow::anyhow!("mandatory_conn_for({datasource}):当前不在 #[transactional] 事务中(关键写必须在事务内)")

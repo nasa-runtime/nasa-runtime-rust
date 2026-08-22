@@ -356,7 +356,7 @@ impl ApplicationRunner {
                 // Hook 中显式安装 L2 时，在对外提供服务之前 fail-fast，避免生产流量静默绕过缓存。
                 // 断言放在 Hook 之后，业务装配已经完成；Batch 不做该断言，因为它的 Hook 本身就是
                 // 工作负载，事后断言会把已经完成的批任务错误改判为失败。
-                #[cfg(feature = "mapper-cache")]
+                #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
                 if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)

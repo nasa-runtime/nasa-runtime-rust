@@ -1,7 +1,8 @@
 # naoutbox-core
 
-`naoutbox-core` 定义 Outbox 事件、写入端、下游发布端和保序至少一次投递算法。事件字段包含
-全局 `event_id`、聚合类型/ID、事件类型、payload 和可选 W3C `traceparent`。
+`naoutbox-core` 定义 Outbox 事件、同步进程内 writer、下游发布端、保序至少一次算法，以及
+MySQL/PostgreSQL 持久 adapter 共用的异步角色合同。事件字段包含全局 `event_id`、聚合类型/ID、
+事件类型、payload、受信租户归因和可选 W3C `traceparent`。
 
 业务应用通常通过门面的 `outbox` feature 使用；实现独立 adapter 时才直接依赖本 crate：
 
@@ -22,7 +23,21 @@ let event = OutboxEvent::new(
 .with_traceparent(traceparent);
 ```
 
-持久业务代码通常使用 `naoutbox-mysql`；`InMemoryOutbox` 只适合允许进程退出后丢失待投事件的场景。
+持久业务代码按 datasource driver 选择 `naoutbox-mysql` 或 `naoutbox-pgsql`；`InMemoryOutbox` 只适合
+允许进程退出后丢失待投事件的场景。
+
+## 持久 adapter 合同
+
+既有 `OutboxWriter` 是无错误的同步进程内接口，签名保持不变。数据库 adapter 通过加法角色 trait 暴露：
+
+- `DurableOutboxAppend`：普通 append、强制事务 append 和受信租户配额 append；
+- `DurableOutboxDispatch`：owner claim、成功前缀、死信和 lane 投递；
+- `DurableOutboxQuota`：租户在飞账本读取与事务内对账；
+- `DurableOutboxRetention`：收据门禁的有界归档与清理；
+- `DurableOutboxWakeup`：只在明确提交后推进的进程内唤醒代际。
+
+`DurableOutbox` 是上述能力的组合合同。具体 adapter 继续保留同名 inherent methods，业务可以渐进迁移，
+受管运行时则无需按数据库类型匹配方法名。
 
 ## 发布合同
 

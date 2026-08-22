@@ -3,7 +3,7 @@
 `naaudit` 定义业务审计事件和可靠写入合同。它记录谁在何时对哪个资源执行了什么动作以及结果，
 并把事件映射为 Outbox 事件；它不是普通运行日志，也不负责数据库连接或 dispatcher 生命周期。
 
-业务项目通过门面开启 `audit`：
+业务项目按数据库后端通过门面开启 MySQL `audit` 或 PostgreSQL `audit-pgsql`：
 
 ```toml
 [dependencies]
@@ -42,10 +42,14 @@ async fn grant_role(user_id: i64, now_millis: u64) -> anyhow::Result<()> {
 
 事务提交时业务写与审计 outbox 行一起可见；回滚时两者一起消失。
 
+PostgreSQL 使用 `nasa::audit::pgsql::PgOutboxAuditSink` 和
+`nasa::tx::pgsql::transactional`；两种 sink 共享同一 `AuditEvent` 映射合同，但不能跨 driver 复用
+ambient transaction。
+
 ## YML 配置
 
-本 crate 不读取独立 yml。MySQL 连接、迁移和事务配置归 `database:` / `datasources:`；审计事件字段
-由业务代码提供。
+本 crate 不读取独立 yml。MySQL/PostgreSQL 连接、迁移和事务配置归 `database:` / `datasources:`；
+审计事件字段由业务代码提供。
 
 ```yaml
 database:

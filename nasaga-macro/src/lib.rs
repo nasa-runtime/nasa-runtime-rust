@@ -46,7 +46,30 @@ struct SagaArgs {
 pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
     let item_impl = parse_macro_input!(item as ItemImpl);
-    match expand(metas, item_impl) {
+    let root = nasa_macro_support::runtime_root("saga", "nasaga-runtime")
+        .map_err(|message| syn::Error::new(proc_macro2::Span::call_site(), message));
+    match root.and_then(|root| expand(metas, item_impl, root)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：生成固定绑定 PostgreSQL Saga wrapper 的步骤 descriptor 与参与方 adapter。
+///
+/// 参数说明：`attr` 是步骤合同，`item` 是 `impl SagaStep` 块。
+///
+/// 返回：合同合法时生成指向 `nasaga-runtime-pgsql` 或 `nasa::saga::pgsql` 的代码；否则生成编译错误。
+#[proc_macro_attribute]
+pub fn saga_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
+    let item_impl = parse_macro_input!(item as ItemImpl);
+    let root = nasa_macro_support::runtime_root_nested(
+        &["saga", "pgsql"],
+        "saga-runtime-pgsql",
+        "nasaga-runtime-pgsql",
+    )
+    .map_err(|message| syn::Error::new(proc_macro2::Span::call_site(), message));
+    match root.and_then(|root| expand(metas, item_impl, root)) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
@@ -59,14 +82,16 @@ pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `item_impl`: 被标注的 impl 块。
 ///
 /// 返回：校验全部通过时返回生成代码；任一合同违规返回定位到源码的编译错误。
-fn expand(metas: Punctuated<Meta, Token![,]>, item_impl: ItemImpl) -> syn::Result<TokenStream2> {
+fn expand(
+    metas: Punctuated<Meta, Token![,]>,
+    item_impl: ItemImpl,
+    root: TokenStream2,
+) -> syn::Result<TokenStream2> {
     let args = parse_args(&metas)?;
     verify_impl_shape(&item_impl)?;
     let service_type = (*item_impl.self_ty).clone();
     let service_type_name = type_name_of(&service_type)?;
 
-    let root = nasa_macro_support::runtime_root("saga", "nasaga-runtime")
-        .map_err(|message| syn::Error::new(proc_macro2::Span::call_site(), message))?;
     let workflow = &args.workflow;
     let version = args.version;
     let step = &args.step;

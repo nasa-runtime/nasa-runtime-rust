@@ -8,6 +8,7 @@
 //! 时间源固定取数据库 `NOW(6)`：多副本 Orchestrator 共享同一个窗口边界，不受各进程
 //! 本地时钟漂移影响；也因此本模块不接受调用方传入的时刻参数。
 
+use nasaga_backend::ActionRateReservation;
 use sqlx::Row as _;
 
 use crate::error::{map_connection, map_database, SagaStoreError};
@@ -23,15 +24,6 @@ pub(crate) const CREATE_ACTION_RATE_SQL: &str =
      updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), \
      PRIMARY KEY (tenant_id, window_start_ms) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
-
-/// 业务作用：区分速率预留的两种结论；拒绝携带稳定原因码，与系统故障可区分。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionRateReservation {
-    /// 当前窗口仍有预算，动作可以继续。
-    Reserved,
-    /// 该租户当前窗口的管理动作预算已耗尽；调用方必须回滚动作事务并返回稳定拒绝。
-    Exceeded,
-}
 
 impl MySqlSagaStore {
     /// 业务作用：在管理动作事务内为租户原子预留一次当前窗口的动作预算。

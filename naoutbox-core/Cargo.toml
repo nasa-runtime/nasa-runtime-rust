@@ -7,8 +7,8 @@ description = "NASA Outbox 核心:业务 DB 事务内写事件(Debezium Outbox E
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["outbox", "transaction", "messaging", "database", "event"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 async-trait = "0.1"

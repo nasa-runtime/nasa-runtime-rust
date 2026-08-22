@@ -18,7 +18,23 @@ use syn::{
 #[proc_macro_attribute]
 #[allow(non_snake_case)]
 pub fn Mapper(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match mapper_impl(attr.into(), item.into()) {
+    match mapper_impl(attr.into(), item.into(), MapperBackend::MySql) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：解析并展开 PostgreSQL `#[Mapper]` trait，生成 `$n` 占位符、Pg 执行器和独立缓存身份。
+///
+/// # 参数
+/// - `attr`: 属性宏括号内的 token stream。
+/// - `item`: 被处理的 Mapper trait。
+///
+/// 返回：成功时生成指向 `namapper-pgsql` 或 `nasa::mapper::pgsql` 的实现；非法输入生成编译错误。
+#[proc_macro_attribute]
+#[allow(non_snake_case)]
+pub fn PgMapper(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match mapper_impl(attr.into(), item.into(), MapperBackend::PostgreSql) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -29,7 +45,21 @@ pub fn Mapper(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(MapperOrderField, attributes(mapper_order_field))]
 #[allow(non_snake_case)]
 pub fn derive_mapper_order_field(item: TokenStream) -> TokenStream {
-    match mapper_order_field_impl(item.into()) {
+    match mapper_order_field_impl(item.into(), MapperBackend::MySql) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：为 PostgreSQL Mapper 生成白名单排序字段映射。
+///
+/// # 参数
+/// - `item`: 被派生的字段 enum。
+///
+/// 返回：成功时实现 PostgreSQL runtime 的 `MapperOrderField`；非法 enum 生成编译错误。
+#[proc_macro_derive(PgMapperOrderField, attributes(mapper_order_field))]
+pub fn derive_pg_mapper_order_field(item: TokenStream) -> TokenStream {
+    match mapper_order_field_impl(item.into(), MapperBackend::PostgreSql) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -40,9 +70,50 @@ pub fn derive_mapper_order_field(item: TokenStream) -> TokenStream {
 #[proc_macro_derive(MapperEnum)]
 #[allow(non_snake_case)]
 pub fn derive_mapper_enum(item: TokenStream) -> TokenStream {
-    match mapper_enum_impl(item.into()) {
+    match mapper_enum_impl(item.into(), MapperBackend::MySql) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：为 PostgreSQL Mapper 生成稳定 enum ordinal 转换。
+///
+/// # 参数
+/// - `item`: 被派生的无字段 enum。
+///
+/// 返回：成功时实现 PostgreSQL runtime 的 `MapperEnum`；非法 enum 生成编译错误。
+#[proc_macro_derive(PgMapperEnum)]
+pub fn derive_pg_mapper_enum(item: TokenStream) -> TokenStream {
+    match mapper_enum_impl(item.into(), MapperBackend::PostgreSql) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Mapper 宏生成代码所使用的数据库后端。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapperBackend {
+    /// 保持既有 `?` 占位符和 `namapper` runtime。
+    MySql,
+    /// 使用 `$n` 占位符和 `namapper-pgsql` runtime。
+    PostgreSql,
+}
+
+impl MapperBackend {
+    /// 业务作用：解析当前后端对应的运行时根路径，支持门面、Cargo 重命名和直接依赖。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：可写入宏展开代码的 runtime 路径；依赖缺失时返回清晰提示。
+    fn runtime_root(self) -> Result<TokenStream2, String> {
+        match self {
+            Self::MySql => nasa_macro_support::runtime_root("mapper", "namapper"),
+            Self::PostgreSql => nasa_macro_support::runtime_root_nested(
+                &["mapper", "pgsql"],
+                "mapper-pgsql",
+                "namapper-pgsql",
+            ),
+        }
     }
 }
 
@@ -78,8 +149,11 @@ sql_attr_stub!(Execute);
 /// 业务作用：完成 Mapper 宏 `mapper_enum_impl` 的编译期转换步骤，并把失败定位到调用方源码。
 /// # 参数
 /// - `item`: 被宏处理的 Rust item token stream。
-fn mapper_enum_impl(item: TokenStream2) -> syn::Result<TokenStream2> {
-    let root = match nasa_macro_support::runtime_root("mapper", "namapper") {
+/// - `backend`: 派生实现所绑定的 Mapper 数据库后端。
+///
+/// 返回：后端对应的 ordinal 转换实现；输入不满足合同则返回编译期错误。
+fn mapper_enum_impl(item: TokenStream2, backend: MapperBackend) -> syn::Result<TokenStream2> {
+    let root = match backend.runtime_root() {
         Ok(root) => root,
         Err(msg) => return Ok(quote! { ::core::compile_error!(#msg); }),
     };
@@ -143,8 +217,14 @@ fn mapper_enum_impl(item: TokenStream2) -> syn::Result<TokenStream2> {
 /// 业务作用：完成 Mapper 宏 `mapper_order_field_impl` 的编译期转换步骤，并把失败定位到调用方源码。
 /// # 参数
 /// - `item`: 被宏处理的 Rust item token stream。
-fn mapper_order_field_impl(item: TokenStream2) -> syn::Result<TokenStream2> {
-    let root = match nasa_macro_support::runtime_root("mapper", "namapper") {
+/// - `backend`: 派生实现所绑定的 Mapper 数据库后端。
+///
+/// 返回：后端对应的排序字段白名单实现；输入不满足合同则返回编译期错误。
+fn mapper_order_field_impl(
+    item: TokenStream2,
+    backend: MapperBackend,
+) -> syn::Result<TokenStream2> {
+    let root = match backend.runtime_root() {
         Ok(root) => root,
         Err(msg) => return Ok(quote! { ::core::compile_error!(#msg); }),
     };
@@ -576,6 +656,7 @@ struct MethodPlan {
     flush_cache: bool,
     flush_refs: bool,
     checked: bool,
+    backend: MapperBackend,
 }
 
 type ParsedSqlTemplate = (String, Vec<String>, Vec<BindInfo>, Option<DynamicSqlPlan>);
@@ -583,8 +664,15 @@ type ParsedSqlTemplate = (String, Vec<String>, Vec<BindInfo>, Option<DynamicSqlP
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
 /// - `item`: 被宏处理的 Rust item token stream。
-fn mapper_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
-    let root = match nasa_macro_support::runtime_root("mapper", "namapper") {
+/// - `backend`: 当前 Mapper 固定使用的数据库后端。
+///
+/// 返回：完整 Mapper trait、client、缓存元数据与方法实现；非法声明返回编译期错误。
+fn mapper_impl(
+    attr: TokenStream2,
+    item: TokenStream2,
+    backend: MapperBackend,
+) -> syn::Result<TokenStream2> {
+    let root = match backend.runtime_root() {
         Ok(root) => root,
         Err(msg) => return Ok(quote! { ::core::compile_error!(#msg); }),
     };
@@ -610,7 +698,12 @@ fn mapper_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
         .client
         .clone()
         .unwrap_or_else(|| format_ident!("{}Client", trait_ident));
-    let key_expr = key_expr(trait_args.key.as_deref(), &trait_ident);
+    let key_expr = key_expr(
+        trait_args.key.as_deref(),
+        &trait_ident,
+        backend,
+        trait_args.datasource.as_deref(),
+    );
     let meta_ident = format_ident!(
         "__{}_MAPPER_CACHE_META",
         trait_ident.to_string().to_ascii_uppercase()
@@ -622,7 +715,7 @@ fn mapper_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     for item in items {
         match item {
             TraitItem::Fn(method) => {
-                let plan = plan_method(method, &trait_args)?;
+                let plan = plan_method(method, &trait_args, backend)?;
                 let mut cleaned = plan.method.clone();
                 cleaned.attrs.retain(|attr| SqlKind::of(attr).is_none());
                 cleaned_items.push(TraitItem::Fn(cleaned));
@@ -643,8 +736,16 @@ fn mapper_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     let has_cached_query = plans
         .iter()
         .any(|plan| plan.kind.is_query() && plan.cache && !plan.flush_cache);
-    let clear_also = str_array_tokens(&trait_args.clear_also);
-    let clear_when = str_array_tokens(&trait_args.clear_when);
+    let clear_also = cache_reference_array_tokens(
+        &trait_args.clear_also,
+        backend,
+        trait_args.datasource.as_deref(),
+    );
+    let clear_when = cache_reference_array_tokens(
+        &trait_args.clear_when,
+        backend,
+        trait_args.datasource.as_deref(),
+    );
     let trait_cache_codec = cache_codec_factory_tokens(trait_args.cache_codec.as_ref());
 
     let impl_methods = plans
@@ -761,7 +862,14 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
 /// # 参数
 /// - `method`: trait 方法 AST 或 HTTP 方法。
 /// - `trait_args`: rest client 或 mapper trait 级配置参数。
-fn plan_method(method: TraitItemFn, trait_args: &TraitArgs) -> syn::Result<MethodPlan> {
+/// - `backend`: 当前 Mapper 固定使用的数据库后端。
+///
+/// 返回：已校验且绑定固定后端的方法生成计划；声明冲突时返回编译期错误。
+fn plan_method(
+    method: TraitItemFn,
+    trait_args: &TraitArgs,
+    backend: MapperBackend,
+) -> syn::Result<MethodPlan> {
     if method.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
             &method.sig.ident,
@@ -849,7 +957,7 @@ fn plan_method(method: TraitItemFn, trait_args: &TraitArgs) -> syn::Result<Metho
         .ok_or_else(|| syn::Error::new_spanned(attr, "SQL 注解缺少 SQL 字符串"))?;
     let params = parse_params(&method)?;
     let (normalized_sql, sql_fragments, binds, dynamic) =
-        parse_sql_template(&sql, &params, attr.span())?;
+        parse_sql_template(&sql, &params, attr.span(), backend)?;
     let checked = method_args.checked.unwrap_or(false);
     if checked {
         validate_checked_query(&binds, dynamic.as_ref(), attr.span())?;
@@ -892,6 +1000,16 @@ fn plan_method(method: TraitItemFn, trait_args: &TraitArgs) -> syn::Result<Metho
     let flush_cache = method_args
         .flush_cache
         .unwrap_or_else(|| kind.default_flush_cache());
+    if backend == MapperBackend::PostgreSql
+        && (cache || flush_cache)
+        && method_args.datasource.is_some()
+        && method_args.datasource != trait_args.datasource
+    {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "PostgreSQL Mapper 使用 L2 cache 时 datasource 必须声明在 trait 级，确保 driver/datasource 进入统一缓存身份",
+        ));
+    }
     if kind.is_query() && cache && flush_cache {
         return Err(syn::Error::new_spanned(
             attr,
@@ -940,6 +1058,7 @@ fn plan_method(method: TraitItemFn, trait_args: &TraitArgs) -> syn::Result<Metho
         flush_cache,
         flush_refs: method_args.flush_refs.unwrap_or(true),
         checked,
+        backend,
     })
 }
 /// 业务作用：校验 Mapper DSL 的 `validate_checked_query` 约束，阻止不安全或歧义输入进入代码生成。
@@ -1105,12 +1224,16 @@ fn parse_params(method: &TraitItemFn) -> syn::Result<Vec<ParamInfo>> {
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `params`: 已解析的函数参数或宏参数列表。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
+/// - `backend`: 决定裸 `?` 校验与 prepared bind 占位符语法的数据库后端。
+///
+/// 返回：规范 SQL、文本片段、bind 与可选动态节点；模板非法时返回编译期错误。
 fn parse_sql_template(
     sql: &str,
     params: &[ParamInfo],
     span: proc_macro2::Span,
+    backend: MapperBackend,
 ) -> syn::Result<ParsedSqlTemplate> {
-    validate_sql_template_safety(sql, span)?;
+    validate_sql_template_safety(sql, span, backend)?;
 
     if has_dynamic_sql_tag(sql, span)? {
         let dynamic = parse_dynamic_sql_template(sql, params, span)?;
@@ -1120,14 +1243,25 @@ fn parse_sql_template(
         return Ok((normalized_sql, Vec::new(), binds, Some(dynamic)));
     }
 
-    let (normalized_sql, fragments, binds) = parse_plain_sql_template(sql, params, span)?;
+    let (mut normalized_sql, fragments, binds) = parse_plain_sql_template(sql, params, span)?;
+    if backend == MapperBackend::PostgreSql && !binds.iter().any(|bind| bind.kind == BindKind::List)
+    {
+        normalized_sql = render_postgres_static_sql(&fragments, &binds);
+    }
     Ok((normalized_sql, fragments, binds, None))
 }
 /// 业务作用：校验 Mapper DSL 的 `validate_sql_template_safety` 约束，阻止不安全或歧义输入进入代码生成。
 /// # 参数
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
-fn validate_sql_template_safety(sql: &str, span: proc_macro2::Span) -> syn::Result<()> {
+/// - `backend`: 当前 SQL 模板所属的数据库后端。
+///
+/// 返回：模板满足当前后端安全边界时成功，否则返回对应源码位置的错误。
+fn validate_sql_template_safety(
+    sql: &str,
+    span: proc_macro2::Span,
+    backend: MapperBackend,
+) -> syn::Result<()> {
     if sql.contains("${") {
         return Err(syn::Error::new(
             span,
@@ -1157,7 +1291,7 @@ fn validate_sql_template_safety(sql: &str, span: proc_macro2::Span) -> syn::Resu
             b'/' if idx + 1 < bytes.len() && bytes[idx + 1] == b'*' => {
                 idx = skip_block_comment(bytes, idx + 2, span)?;
             }
-            b'?' => {
+            b'?' if backend == MapperBackend::MySql => {
                 return Err(syn::Error::new(
                     span,
                     "Mapper 禁止裸 `?` 占位符; 请使用 `#{name}` 让宏生成 prepared bind",
@@ -1173,6 +1307,27 @@ fn validate_sql_template_safety(sql: &str, span: proc_macro2::Span) -> syn::Resu
         }
     }
     Ok(())
+}
+
+/// 业务作用：从普通 SQL 的 fragment/bind 结构生成 PostgreSQL 静态 `$n` SQL。
+///
+/// # 参数
+/// - `fragments`: 每个业务 bind 前后的原始 SQL 文本。
+/// - `binds`: 按源码顺序解析的标量 bind；调用方已排除列表 bind。
+///
+/// 返回：仅在 bind 节点写入 `$n` 的规范化 SQL，文本中的 `?` 原样保留。
+fn render_postgres_static_sql(fragments: &[String], binds: &[BindInfo]) -> String {
+    let mut sql = String::new();
+    for (index, bind) in binds.iter().enumerate() {
+        sql.push_str(&fragments[index]);
+        debug_assert!(bind.kind == BindKind::Scalar);
+        sql.push('$');
+        sql.push_str(&(index + 1).to_string());
+    }
+    if let Some(fragment) = fragments.last() {
+        sql.push_str(fragment);
+    }
+    normalize_sql_whitespace(&sql)
 }
 /// 业务作用：推进 Mapper DSL 的 `skip_single_quote` 扫描位置，同时保持引号、注释和标签边界正确。
 /// # 参数
@@ -3626,16 +3781,20 @@ fn dynamic_bind_one_token(
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
+///
+/// 返回：运行时构造当前后端最终 prepared SQL 的代码。
 fn sql_init_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
     span: proc_macro2::Span,
 ) -> TokenStream2 {
     if let Some(dynamic) = &plan.dynamic {
-        return dynamic_sql_init_tokens(root, dynamic, span);
+        return dynamic_sql_init_tokens(root, dynamic, span, plan.backend);
     }
 
-    if !plan.binds.iter().any(|bind| bind.kind == BindKind::List) {
+    if plan.backend == MapperBackend::MySql
+        && !plan.binds.iter().any(|bind| bind.kind == BindKind::List)
+    {
         let sql_lit = LitStr::new(&plan.normalized_sql, span);
         return quote! {
             let __mapper_normalized_sql: ::std::borrow::Cow<'static, str> =
@@ -3651,25 +3810,43 @@ fn sql_init_tokens(
         });
         match bind.kind {
             BindKind::Scalar => {
-                parts.push(quote! {
-                    __mapper_sql.push('?');
-                });
+                if plan.backend == MapperBackend::PostgreSql {
+                    parts.push(quote! {
+                        __mapper_bind_index.push_bind(&mut __mapper_sql);
+                    });
+                } else {
+                    parts.push(quote! {
+                        __mapper_sql.push('?');
+                    });
+                }
             }
             BindKind::List => {
                 let ident = &bind.root;
-                parts.push(quote! {
-                    __mapper_sql.push_str(
-                        #root::__private::sql_in_placeholders(#ident.len())?.as_str(),
-                    );
-                });
+                if plan.backend == MapperBackend::PostgreSql {
+                    parts.push(quote! {
+                        __mapper_bind_index.push_bind_list(&mut __mapper_sql, #ident.len())?;
+                    });
+                } else {
+                    parts.push(quote! {
+                        __mapper_sql.push_str(
+                            #root::__private::sql_in_placeholders(#ident.len())?.as_str(),
+                        );
+                    });
+                }
             }
         }
     }
     let last_fragment = plan.sql_fragments.last().cloned().unwrap_or_default();
     let last_fragment = LitStr::new(&last_fragment, span);
+    let bind_index = if plan.backend == MapperBackend::PostgreSql {
+        quote! { let mut __mapper_bind_index = #root::__private::PostgresBindIndex::new(); }
+    } else {
+        TokenStream2::new()
+    };
     quote! {
         let __mapper_normalized_sql: ::std::borrow::Cow<'static, str> = {
             let mut __mapper_sql = ::std::string::String::new();
+            #bind_index
             #(#parts)*
             __mapper_sql.push_str(#last_fragment);
             ::std::borrow::Cow::Owned(#root::__private::normalize_sql_whitespace(&__mapper_sql))
@@ -3681,16 +3858,26 @@ fn sql_init_tokens(
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `dynamic`: 动态 SQL 节点或动态绑定上下文。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
+/// - `backend`: 决定动态 bind 使用 `?` 或连续 `$n` 的数据库后端。
+///
+/// 返回：按实际分支构造规范 SQL 的运行时代码。
 fn dynamic_sql_init_tokens(
     root: &TokenStream2,
     dynamic: &DynamicSqlPlan,
     span: proc_macro2::Span,
+    backend: MapperBackend,
 ) -> TokenStream2 {
     let target = format_ident!("__mapper_sql");
-    let body = push_dynamic_sql_nodes_tokens(root, &dynamic.nodes, span, &target);
+    let body = push_dynamic_sql_nodes_tokens(root, &dynamic.nodes, span, &target, backend);
+    let bind_index = if backend == MapperBackend::PostgreSql {
+        quote! { let mut __mapper_bind_index = #root::__private::PostgresBindIndex::new(); }
+    } else {
+        TokenStream2::new()
+    };
     quote! {
         let __mapper_normalized_sql: ::std::borrow::Cow<'static, str> = {
             let mut #target = ::std::string::String::new();
+            #bind_index
             #body
             ::std::borrow::Cow::Owned(#root::__private::normalize_sql_whitespace(&#target))
         };
@@ -3702,11 +3889,15 @@ fn dynamic_sql_init_tokens(
 /// - `nodes`: 动态 SQL 节点列表。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
 /// - `target`: 生成代码中承载动态 SQL 字符串的目标 buffer 变量。
+/// - `backend`: 当前节点固定使用的数据库后端。
+///
+/// 返回：按节点顺序追加 SQL 并同步推进 bind 编号的运行时代码。
 fn push_dynamic_sql_nodes_tokens(
     root: &TokenStream2,
     nodes: &[SqlNode],
     span: proc_macro2::Span,
     target: &Ident,
+    backend: MapperBackend,
 ) -> TokenStream2 {
     let mut parts = Vec::new();
     for node in nodes {
@@ -3719,21 +3910,33 @@ fn push_dynamic_sql_nodes_tokens(
             }
             SqlNode::Bind(bind) => match bind.kind {
                 BindKind::Scalar => {
-                    parts.push(quote! {
-                        #target.push('?');
-                    });
+                    if backend == MapperBackend::PostgreSql {
+                        parts.push(quote! {
+                            __mapper_bind_index.push_bind(&mut #target);
+                        });
+                    } else {
+                        parts.push(quote! {
+                            #target.push('?');
+                        });
+                    }
                 }
                 BindKind::List => {
                     let ident = &bind.root;
-                    parts.push(quote! {
-                        #target.push_str(
-                            #root::__private::sql_in_placeholders(#ident.len())?.as_str(),
-                        );
-                    });
+                    if backend == MapperBackend::PostgreSql {
+                        parts.push(quote! {
+                            __mapper_bind_index.push_bind_list(&mut #target, #ident.len())?;
+                        });
+                    } else {
+                        parts.push(quote! {
+                            #target.push_str(
+                                #root::__private::sql_in_placeholders(#ident.len())?.as_str(),
+                            );
+                        });
+                    }
                 }
             },
             SqlNode::If { test, body } => {
-                let body = push_dynamic_sql_nodes_tokens(root, body, span, target);
+                let body = push_dynamic_sql_nodes_tokens(root, body, span, target, backend);
                 parts.push(quote! {
                     if #test {
                         #body
@@ -3741,11 +3944,13 @@ fn push_dynamic_sql_nodes_tokens(
                 });
             }
             SqlNode::Choose { whens, otherwise } => {
-                let otherwise = push_dynamic_sql_nodes_tokens(root, otherwise, span, target);
+                let otherwise =
+                    push_dynamic_sql_nodes_tokens(root, otherwise, span, target, backend);
                 let mut chain = quote! { #otherwise };
                 for when in whens.iter().rev() {
                     let test = &when.test;
-                    let body = push_dynamic_sql_nodes_tokens(root, &when.body, span, target);
+                    let body =
+                        push_dynamic_sql_nodes_tokens(root, &when.body, span, target, backend);
                     chain = quote! {
                         if #test {
                             #body
@@ -3767,7 +3972,7 @@ fn push_dynamic_sql_nodes_tokens(
                 let open = LitStr::new(open, span);
                 let separator = LitStr::new(separator, span);
                 let close = LitStr::new(close, span);
-                let body = push_dynamic_sql_nodes_tokens(root, body, span, target);
+                let body = push_dynamic_sql_nodes_tokens(root, body, span, target, backend);
                 parts.push(quote! {
                     if #collection.is_empty() {
                         return ::core::result::Result::Err(
@@ -3799,7 +4004,7 @@ fn push_dynamic_sql_nodes_tokens(
                 let suffix = LitStr::new(suffix, span);
                 let prefix_overrides = str_array_tokens(prefix_overrides);
                 let suffix_overrides = str_array_tokens(suffix_overrides);
-                let body = push_dynamic_sql_nodes_tokens(root, body, span, &trim_target);
+                let body = push_dynamic_sql_nodes_tokens(root, body, span, &trim_target, backend);
                 parts.push(quote! {
                     {
                         let mut #trim_target = ::std::string::String::new();
@@ -4937,12 +5142,35 @@ fn is_ident_continue(ch: char) -> bool {
 /// # 参数
 /// - `key`: `#[mapper(key = "...")]` 显式指定的 mapper 名称。
 /// - `trait_ident`: 生成 mapper 实现时使用的 trait 标识符。
-fn key_expr(key: Option<&str>, trait_ident: &Ident) -> TokenStream2 {
-    if let Some(key) = key {
-        let lit = LitStr::new(key, trait_ident.span());
-        quote! { #lit }
-    } else {
-        quote! { concat!(module_path!(), "::", stringify!(#trait_ident)) }
+/// - `backend`: 当前 Mapper 固定使用的数据库后端。
+/// - `datasource`: trait 级命名数据源；省略时采用 `default`。
+///
+/// 返回：MySQL 兼容 key 或包含 PostgreSQL driver/datasource 身份的静态表达式。
+fn key_expr(
+    key: Option<&str>,
+    trait_ident: &Ident,
+    backend: MapperBackend,
+    datasource: Option<&str>,
+) -> TokenStream2 {
+    match (backend, key) {
+        (MapperBackend::MySql, Some(key)) => {
+            let lit = LitStr::new(key, trait_ident.span());
+            quote! { #lit }
+        }
+        (MapperBackend::MySql, None) => {
+            quote! { concat!(module_path!(), "::", stringify!(#trait_ident)) }
+        }
+        (MapperBackend::PostgreSql, Some(key)) => {
+            let key = LitStr::new(key, trait_ident.span());
+            let datasource = LitStr::new(datasource.unwrap_or("default"), trait_ident.span());
+            quote! { concat!("postgresql:", #datasource, ":", #key) }
+        }
+        (MapperBackend::PostgreSql, None) => {
+            let datasource = LitStr::new(datasource.unwrap_or("default"), trait_ident.span());
+            quote! {
+                concat!("postgresql:", #datasource, ":", module_path!(), "::", stringify!(#trait_ident))
+            }
+        }
     }
 }
 /// 业务作用：生成 Mapper 宏 `str_array_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
@@ -4952,6 +5180,30 @@ fn str_array_tokens(values: &[String]) -> TokenStream2 {
     let values = values
         .iter()
         .map(|value| LitStr::new(value, proc_macro2::Span::call_site()));
+    quote! { &[#(#values),*] }
+}
+/// 业务作用：为缓存关联键补齐 PostgreSQL driver 与 datasource 身份，防止跨后端或跨数据源误清理。
+/// # 参数
+/// - `values`: `clear_also` 或 `clear_when` 声明的 Mapper key。
+/// - `backend`: 当前 Mapper 的数据库后端。
+/// - `datasource`: trait 级命名数据源；省略时采用 `default`。
+///
+/// 返回：MySQL 保持既有 key；PostgreSQL 生成与 Mapper 主 key 相同命名规则的静态数组。
+fn cache_reference_array_tokens(
+    values: &[String],
+    backend: MapperBackend,
+    datasource: Option<&str>,
+) -> TokenStream2 {
+    if backend == MapperBackend::MySql {
+        return str_array_tokens(values);
+    }
+    let datasource = datasource.unwrap_or("default");
+    let values = values.iter().map(|value| {
+        LitStr::new(
+            &format!("postgresql:{datasource}:{value}"),
+            proc_macro2::Span::call_site(),
+        )
+    });
     quote! { &[#(#values),*] }
 }
 /// 业务作用：生成 Mapper 宏 `option_u64_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。

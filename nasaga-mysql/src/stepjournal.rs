@@ -4,6 +4,7 @@
 //! （`UNIQUE(command_id)` 建在这里）；`saga_step` 的 phase 列只是当前 attempt 的投影。
 //! 冻结补偿计划、恢复裁决与人工介入都必须从这两张表的已提交事实出发。
 
+use nasaga_backend::{AttemptOutcomeRecord, AttemptStart, StepJournalPatch};
 use nasaga_core::{
     AttemptNo, CommandId, CompensationPlan, EffectId, SagaId, StepAttemptStatus, StepCancelStatus,
     StepCompensationStatus, StepForwardStatus, StepName, StepPhase, StepResolutionStatus,
@@ -15,49 +16,6 @@ use crate::error::{is_unique_violation, map_connection, map_database, SagaStoreE
 use crate::instance::{require_ambient_transaction, validate_reason_code};
 use crate::row::{parse_attempt_row, parse_step_row, SagaStepAttemptRow, SagaStepRow};
 use crate::MySqlSagaStore;
-
-/// 业务作用：区分 attempt 登记的两种合法结果，使创建/推进事务的崩溃重试可被幂等吸收。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptStart {
-    /// 本事务真实登记了该 attempt。
-    Recorded,
-    /// 同一 attempt 已以相同身份登记过（崩溃重试）；无新副作用。
-    AlreadyRecorded,
-}
-
-/// 业务作用：区分 outcome 记账、幂等重放与互斥事实冲突，使矛盾结果能同事务转人工留证。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptOutcomeRecord {
-    /// 本事务真实写入了该终态。
-    Recorded,
-    /// 同一 attempt 已记录完全相同的终态（重复结果事件）；无新副作用。
-    AlreadyRecorded,
-    /// 同一 attempt 已有不同终态；调用方必须记录 incoming 冲突事实并升级人工介入。
-    Conflicting {
-        /// journal 中已经提交的真实终态。
-        existing: StepAttemptStatus,
-    },
-}
-
-/// 业务作用：描述一次 step journal 投影更新；为空的字段保留列上既有值。
-///
-/// 字段说明：全部字段都是"设置为该值"而非"清空"——journal 状态只允许被显式改写，
-/// 不存在把已裁决状态抹回未知的合法业务路径。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StepJournalPatch<'a> {
-    /// 正向阶段状态；为空保留既有值。
-    pub forward_status: Option<StepForwardStatus>,
-    /// 取消屏障裁决状态；为空保留既有值。
-    pub cancel_status: Option<StepCancelStatus>,
-    /// 补偿阶段状态；为空保留既有值。
-    pub compensation_status: Option<StepCompensationStatus>,
-    /// 解决阶段状态；为空保留既有值。
-    pub resolution_status: Option<StepResolutionStatus>,
-    /// 稳定失败原因码；为空保留既有值。
-    pub last_error_code: Option<&'a str>,
-    /// 为真时把 finished_at 定格为当前时刻（已有值则保留首次定格）。
-    pub mark_finished: bool,
-}
 
 /// execute 阶段的投影更新语句；`COALESCE(execute_attempt, 0) <= ?` 保证投影单调，
 /// 旧 attempt 的迟到写入不能覆盖新 attempt 的投影。

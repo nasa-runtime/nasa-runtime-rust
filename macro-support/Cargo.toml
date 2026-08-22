@@ -11,8 +11,8 @@ description = "NASA 过程宏的运行时路径发现(proc-macro-crate 封装,�
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["proc-macro", "crate-path", "facade", "runtime"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [dependencies]
 proc-macro-crate = "3"

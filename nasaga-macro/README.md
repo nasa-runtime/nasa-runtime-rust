@@ -1,7 +1,8 @@
 # nasaga-macro
 
-`nasaga-macro` 提供参与方 `#[saga]` 属性宏，在编译期检查步骤声明，并生成静态 descriptor 与事务
-adapter。业务通过 `nasa` 门面的 `saga-runtime` feature 使用，不需要直接依赖宏 crate。
+`nasaga-macro` 提供 MySQL/PostgreSQL 参与方 `#[saga]` 属性宏，在编译期检查步骤声明，并生成静态
+descriptor 与对应后端的事务 adapter。业务通过 `nasa` 门面的 `saga-runtime` 或
+`saga-runtime-pgsql` feature 使用，不需要直接依赖宏 crate。
 
 宏的价值是把“声明了某种取消/裁决能力”和“类型确实实现该能力”绑定在一起，并把本地步骤投影加入
 启动预检；它不会把业务方法包装成一个缺少 Inbox、gate 或 Outbox 的半事务入口。
@@ -10,6 +11,9 @@ adapter。业务通过 `nasa` 门面的 `saga-runtime` feature 使用，不需�
 [dependencies]
 nasa = { version = "1", features = ["saga-runtime"] }
 ```
+
+PostgreSQL 把 feature 换为 `saga-runtime-pgsql`，并从 `nasa::saga::pgsql::saga` 导入属性宏；
+`SagaStep` 等纯逻辑合同仍从 `nasa::saga` 导入。宏在编译期固定事务后端，不根据连接 URL 猜测 driver。
 
 ## 声明步骤
 

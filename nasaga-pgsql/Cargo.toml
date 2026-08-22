@@ -1,0 +1,21 @@
+[package]
+name = "nasaga-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Durable named-datasource PostgreSQL store for NASA Saga state, fencing, audit, quotas and recovery"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["saga", "postgresql", "workflow", "compensation", "microservices"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+nasaga-backend = { version = "1.0.0" }
+nasaga-core = { version = "1.0.1" }
+natx-pgsql = { version = "1.0.0" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres"] }
+uuid = { version = "1", features = ["v4", "v5"] }

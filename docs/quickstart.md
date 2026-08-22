@@ -22,6 +22,17 @@ nasa = { version = "1.0.3", features = [
 ] }
 ```
 
+PostgreSQL 服务把 `tx`、`mapper` 换成 `tx-pgsql`、`mapper-pgsql`；需要同时访问两种数据库时可同时
+开启两组 feature，Application 会按每个 datasource 的 `driver` 建立 typed pool，但不提供跨 driver
+原子事务：
+
+```toml
+[dependencies]
+nasa = { version = "1.0.3", features = [
+    "application", "config-boot", "log", "tx-pgsql", "mapper-pgsql", "web",
+] }
+```
+
 使用仓库坐标时只替换依赖来源，feature 保持一致：
 
 ```toml
@@ -49,8 +60,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## Saga 最小接线
 
-Orchestrator 服务启用 Application 与 MySQL Saga runtime；Kafka、Redis Streams、HTTP 或 gRPC
-按真实链路另选，不能只配置地址就假定已经具备消费、确认和 DLT 闭环：
+Orchestrator 服务启用 Application，并按 Saga 所在 datasource 的 driver 选择 MySQL
+`saga-runtime` 或 PostgreSQL `saga-runtime-pgsql`。Kafka、Redis Streams、HTTP 或 gRPC 按真实链路
+另选，不能只配置地址就假定已经具备消费、确认和 DLT 闭环。以下是 MySQL 接线：
 
 ```toml
 [dependencies]
@@ -81,21 +93,55 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
+PostgreSQL 使用相同状态机合同，只替换后端入口和受管计划构造：
+
+```toml
+[dependencies]
+nasa = { version = "1.0.3", features = ["application", "saga-runtime-pgsql", "web"] }
+```
+
+```rust
+use std::sync::Arc;
+use nasa::application::SagaApplicationPlan;
+use nasa::saga::pgsql::{DefinitionRegistry, OrchestratorConfig, PgOrchestrator};
+
+#[nasa::application("saga", "web")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let mut definitions = DefinitionRegistry::new();
+    definitions.register(checkout_definition()?)?;
+
+    let orchestrator = Arc::new(PgOrchestrator::new(
+        definitions,
+        OrchestratorConfig::default(),
+    )?);
+    let publisher = Arc::new(build_event_publisher(&app).await?);
+
+    app.configure_saga(
+        SagaApplicationPlan::pgsql_orchestrator(orchestrator, "checkout-orchestrator-a")?
+            .with_event_publisher(publisher)?,
+    )?;
+    Ok(())
+}
+```
+
 `timer_owner` 必须逐副本唯一且重启稳定。纯参与方使用
 `SagaApplicationPlan::participant(name, runtime)`；同一进程同时承载 Orchestrator 与参与方时用
 `with_participant` 追加。发布端必须实现 `OutboxPublisher` 并且只在下游已经明确确认后返回成功。
 
-启动前必须按 [Saga MySQL 迁移顺序](../nasaga-mysql/migrations/README.md) 和
-[Outbox MySQL 迁移顺序](../naoutbox-mysql/migrations/README.md) 准备每个本地事务域。Application 会在
-Ready 前校验定义、descriptor、历史非终态实例、数据库结构、发布端和参与方信任；任何一项不完整都
-拒绝开放监听或消费。
+启动前必须按选定后端准备每个本地事务域：MySQL 执行
+[Saga 迁移顺序](../nasaga-mysql/migrations/README.md) 与
+[Outbox 迁移顺序](../naoutbox-mysql/migrations/README.md)；PostgreSQL 的 Orchestrator 执行
+[Saga 结构](../nasaga-pgsql/migrations/create_saga.sql)，参与方执行
+[Saga gate 结构](../nasaga-pgsql/migrations/create_saga_participant.sql)，两侧按需执行
+[Outbox 结构](../naoutbox-pgsql/migrations/create_outbox.sql)。Application 会在 Ready 前校验定义、
+descriptor、历史非终态实例、数据库结构、发布端和参与方信任；任何一项不完整都拒绝开放监听或消费。
 
 | transport | 需要的门面 feature | Application 声明 | 额外责任 |
 | --- | --- | --- | --- |
-| Kafka | `saga-kafka` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
-| Redis Streams | `saga-redis-stream` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
-| HTTP | `saga-runtime` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
-| gRPC | `saga-grpc`（已包含 `grpc` 类型门面） | 入站增加 Application `"grpc"`；纯出站 client 不声明组件 | 框架 generated service/client、mTLS principal、deadline、资源上限、封闭收据与 drain |
+| Kafka | MySQL `saga-kafka`；PostgreSQL `saga-kafka-pgsql` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
+| Redis Streams | MySQL `saga-redis-stream`；PostgreSQL `saga-redis-stream-pgsql` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
+| HTTP | MySQL `saga-runtime`；PostgreSQL `saga-runtime-pgsql` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
+| gRPC | MySQL `saga-grpc`；PostgreSQL `saga-grpc-pgsql` | 入站增加 Application `"grpc"`；纯出站 client 不声明组件 | 框架 generated service/client、mTLS principal、deadline、资源上限、封闭收据与 drain |
 
 gRPC 入站不手工创建 tonic Router、generated server 或 `Arc` handler。单参与方在计划上调用
 `with_grpc_command_service(service, peer_principal)`，Application 从 Participant runtime 的冻结信任投影
@@ -140,12 +186,56 @@ server:
     enabled: false
 ```
 
+PostgreSQL 或混合数据源改用带 driver 的命名配置；业务分别通过 `app.datasource("orders")` 与
+`app.pg_datasource("reporting")` 取得 typed pool：
+
+```yaml
+datasources:
+  orders:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+  reporting:
+    driver: postgresql
+    url: ${APP_POSTGRES_URL}
+    schema: reporting
+    migrations:
+      mode: validate
+```
+
+显式配置 `schema` 时，它同时约束业务连接的 `search_path` 与受管 migration，且需要在部署数据库时
+预先创建；框架会在连接握手后复验 `current_schema()`。省略 `schema` 时，业务连接保留 PostgreSQL
+服务端默认 `search_path`（通常为 `"$user", public`），受管 migration 默认使用 `public`。需要业务 SQL
+与 migration 始终落在同一非默认 schema 时应显式配置。
+
+YAML 只定义门禁策略，业务 migration 仍需在 Service 启动 Hook 中登记；业务 manifest 同时直依赖启用
+PostgreSQL 与 `migrate` 的 `sqlx`：
+
+```toml
+[dependencies]
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
+```
+
+```rust
+#[nasa::application("db", "web")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    app.configure_migrations("reporting", sqlx::migrate!("./migrations"))?;
+    Ok(())
+}
+```
+
+门禁会在 initializer 与 listener 之前执行；同一数据源只能登记一次。门禁模式不是 `disabled` 时，事务级代理应声明
+`connection_topology: transaction_pool`，并在 `migrations.session_url` 提供指向同一 database/schema
+的直连或会话级 endpoint，Application 会在取 advisory lock 前复验目标身份。Batch 模式应在 Hook 内
+显式运行 `nasa::migration::pgsql::run_gate`，不使用 `configure_migrations`。
+
 配置默认拒绝未知字段。数据库、Redis 和其它外部凭据通过环境变量或部署平台 secret 注入，不写入仓库。
 本示例已经启用 `application,web` 并声明 `"web"` 组件，因此受管 Web listener 默认只接受 HTTP/1；
 业务需要 h2c prior knowledge 时只需把 `server.http2.enabled` 改为 `true`，高级 transport 字段可以
 省略。该开关不提供 TLS 终止或 `Upgrade: h2c`。
 
 ## Mapper 与事务
+
+以下是 MySQL 根入口：
 
 ```rust
 use nasa::mapper::{Mapper, Query};
@@ -172,6 +262,10 @@ async fn create_order() -> anyhow::Result<()> {
 
 参与事务的写入必须使用当前 ambient datasource。需要可靠发布外部事件时使用 Outbox；消费消息并与
 本地业务写共同提交时使用 Inbox。
+
+PostgreSQL 使用 `nasa::mapper::pgsql::{Mapper, Query}` 与
+`nasa::tx::pgsql::transactional`。Mapper 生成 `$1..$n` bind；两种 ambient transaction 不能嵌套，
+同一业务原子链中的 Inbox、业务事实和 Outbox 必须使用同一 driver 与 datasource。
 
 ## 路由
 
