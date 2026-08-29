@@ -1,6 +1,7 @@
 # nalog
 
-`nalog` 是基于 `tracing` 的日志组件，提供兼容旧 logback 风格的 formatter、运行期级别热切、按天和按大小滚动、保留清理、独立 error.log。
+`nalog` 是基于 `tracing` 的日志组件，提供可配置 formatter、运行期级别热切、按天和按大小滚动、
+保留清理与独立 error.log。
 
 业务项目通过门面开启 `log`：
 
@@ -98,7 +99,7 @@ log:
 | `clean_history_on_start` | `true` | 启动时是否清理过期归档；也兼容 `cleanHistoryOnStart`。 |
 | `split_error_file` | `true` | 是否单独写 `error.log`。 |
 | `color` | `false` | 文件日志是否输出 ANSI 颜色。 |
-| `pattern` | 内置 pattern | logback 风格输出 pattern；也兼容 `log_pattern`、`logPattern`、`LOG_PATTERN`。 |
+| `pattern` | 内置 pattern | 输出 pattern；也接受 `log_pattern`、`logPattern`、`LOG_PATTERN`。 |
 
 启动代码：
 

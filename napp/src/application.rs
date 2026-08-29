@@ -257,6 +257,9 @@ pub(crate) struct ApplicationInner {
     /// UserHook 注入、Outbox Ready 发布和 dispatcher 监督共用的受管状态。
     #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     outbox_runtime: Arc<crate::outbox::OutboxRuntimeState>,
+    /// UserHook 登记、Ready 后受管执行并在停机时先于数据库收口的 Inbox 保留清理状态。
+    #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+    inbox_retention_runtime: Arc<crate::inbox::InboxRetentionRuntimeState>,
     /// 进程级统一指标注册表:各领域按 descriptor 记录到同一 hub。
     ///
     /// nafka 域为原生记录(fan-out 到本 hub,取代业务手工 sink);naweb 域经
@@ -272,6 +275,13 @@ pub(crate) struct ApplicationInner {
     /// `OnceLock` 保证只注入一次;未注入则不启用授权层(默认零行为)。
     #[cfg(feature = "web")]
     authz_registry: OnceLock<crate::authz::SharedPolicyRegistry>,
+    /// route 未命中任何授权策略时的缺省裁决；未设置时按兼容语义放行。
+    #[cfg(feature = "web")]
+    authz_unmatched: OnceLock<naauthz::UnmatchedRoutePolicy>,
+    /// `configure_router` 动态路由经 UserHook 显式登记的类型化合同；
+    /// 进入 OpenAPI 与授权覆盖对账，杜绝"逃生舱路由游离在一切审计之外"。
+    #[cfg(feature = "web")]
+    dynamic_route_contracts: std::sync::Mutex<Vec<naopenapi::RouteContract>>,
     /// 对象级授权 provider 与固定调用预算；请求边界冻结进 RequestSecurityContext。
     #[cfg(feature = "web")]
     object_authorizer: OnceLock<(crate::authz::SharedObjectAuthorizer, std::time::Duration)>,
@@ -389,11 +399,17 @@ impl Application {
                 saga_runtime: Arc::new(crate::saga::SagaRuntimeState::new()),
                 #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
                 outbox_runtime: Arc::new(crate::outbox::OutboxRuntimeState::new()),
+                #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+                inbox_retention_runtime: Arc::new(crate::inbox::InboxRetentionRuntimeState::new()),
                 metrics_hub,
                 #[cfg(feature = "web")]
                 idempotency_store: OnceLock::new(),
                 #[cfg(feature = "web")]
                 authz_registry: OnceLock::new(),
+                #[cfg(feature = "web")]
+                authz_unmatched: OnceLock::new(),
+                #[cfg(feature = "web")]
+                dynamic_route_contracts: std::sync::Mutex::new(Vec::new()),
                 #[cfg(feature = "web")]
                 object_authorizer: OnceLock::new(),
                 #[cfg(feature = "web")]
@@ -958,7 +974,7 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数;span 生产者用它非阻塞入队,拿不到即表示遥测未激活,直接跳过入队。
-    /// 仅在同时启用 `web` 时编译:目前唯一生产者是 Web trace 中间件。
+    /// Web、调度与消息组件都只取得该只写能力，不能接管 exporter 生命周期。
     #[cfg(feature = "telemetry")]
     pub(crate) fn telemetry_exporter(
         &self,
@@ -1011,6 +1027,8 @@ impl Application {
     ///
     /// - `name`:低基数 span 名。
     /// - `trace`:父链路上下文(通常来自请求扩展),子 span 沿用其 trace-id。
+    ///
+    /// 返回：无；遥测未启用时直接结束，启用时仅尝试非阻塞入队。
     #[cfg(feature = "telemetry")]
     pub fn record_span(&self, name: impl Into<String>, trace: &natelemetry::TraceContext) {
         let Some(exporter) = self.inner.telemetry_exporter.get() else {
@@ -1033,6 +1051,7 @@ impl Application {
             start_unix_nano: now,
             end_unix_nano: now,
             http_status_code: None,
+            attributes: Vec::new(),
         });
     }
 
@@ -1197,10 +1216,17 @@ impl Application {
         Ok(cacheable::cache_handle())
     }
 
-    /// 业务作用：从 Ready 阶段发布的静态业务路由事实生成 OpenAPI 3.1 文档。
+    /// 业务作用：从 Ready 阶段发布的静态业务路由事实与已登记的动态路由合同生成 OpenAPI 3.1 文档。
     ///
-    /// `configure_router` 追加的不透明路由没有可审计的类型元数据，刻意不进入文档。授权标记同时合并
+    /// `configure_router` 追加的不透明路由默认没有可审计的类型元数据，不自动入档；确有对外合同的
+    /// 动态路由经 [`Self::register_route_contract`] 显式提交后与静态路由同等入档。授权标记同时合并
     /// 端点声明和当前 route policy 快照，避免把运行时收紧的路由误报成公开接口。
+    ///
+    /// 参数说明：
+    /// - `title`：公开 API 文档标题。
+    /// - `version`：应用对外声明的 API 版本。
+    ///
+    /// 返回：Web 能力已发布时返回合并静态与显式动态合同的 OpenAPI 3.1 JSON；能力未就绪时返回应用错误。
     #[cfg(feature = "web")]
     pub fn openapi_document(
         &self,
@@ -1309,6 +1335,36 @@ impl Application {
                             .is_some_and(|policies| policies.is_protected(&route_id)),
                 }
             });
+        // 动态路由的显式合同与静态路由同等入档;同 method/path 与 operation_id 冲突由
+        // generate 的既有校验统一拒绝,不在此处重复实现。授权标记同样合并当前策略快照,
+        // 避免运行时被策略收紧的动态路由在文档中误报为公开接口。
+        let routes = routes.chain(self.dynamic_route_contracts().into_iter().map(
+            |mut contract| {
+                let effective_path = if context_path.is_empty() {
+                    contract.path.clone()
+                } else {
+                    format!("{context_path}{}", contract.path)
+                };
+                let route_id = format!("{} {effective_path}", contract.method);
+                contract.auth_required = contract.auth_required
+                    || policy_set
+                        .as_ref()
+                        .is_some_and(|policies| policies.is_protected(&route_id));
+                // 授权仍使用真实 Axum route ID；OpenAPI 只转换 catch-all 语法，并必须把
+                // Application 的挂载前缀写进公开 path，避免文档把不存在的根路径暴露给调用方。
+                contract.path = effective_path
+                    .split('/')
+                    .map(|segment| {
+                        segment
+                            .strip_prefix("{*")
+                            .and_then(|tail| tail.strip_suffix('}'))
+                            .map_or_else(|| segment.to_owned(), |name| format!("{{{name}}}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                contract
+            },
+        ));
         naopenapi::generate(title, version, routes).map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Web,
@@ -2513,6 +2569,16 @@ impl Application {
         Arc::clone(&self.inner.outbox_runtime)
     }
 
+    /// 业务作用：取得 Inbox 保留清理的 Application 级唯一性与指标所有权根。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享运行时状态；克隆不会复制计划、计数或清理任务。
+    #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+    pub(crate) fn inbox_retention_runtime(&self) -> Arc<crate::inbox::InboxRetentionRuntimeState> {
+        Arc::clone(&self.inner.inbox_retention_runtime)
+    }
+
     /// 业务作用：返回进程级统一指标 hub:各领域按 descriptor 记录到此。
     ///
     /// # 参数
@@ -2655,6 +2721,113 @@ impl Application {
     #[cfg(feature = "web")]
     pub(crate) fn authz_registry(&self) -> Option<crate::authz::SharedPolicyRegistry> {
         self.inner.authz_registry.get().cloned()
+    }
+
+    /// 业务作用：设置 route 未命中任何授权策略时的缺省裁决，在 UserHook 阶段调用一次。
+    ///
+    /// 兼容缺省 `Permit` 会让漏配策略的受保护 route 静默放行；`Observe` 保持放行但记录命中
+    /// 证据(计数+每 route 首次警示日志)供灰度清点；`Deny` 把缺省翻转为 fail-closed。声明公开
+    /// (auth_required=false)的路由与框架探针路由自动豁免于 Observe/Deny;`Deny` 下仍存在未命中
+    /// 策略的鉴权 route 时 Web 装配在 Ready 期失败,漏配在部署期显形而不是上线后全量 403。
+    /// `Observe`/`Deny` 要求已注入策略注册表,否则 Ready 期拒绝装配;未注入注册表且保持缺省
+    /// `Permit` 时授权层行为不变。同一缺省也可经 YAML `server.authz_unmatched_route` 配置
+    /// (词表 permit/observe/deny);两处同时出现且不一致时 Web 装配拒绝,不做静默优先级。
+    ///
+    /// 参数说明：
+    /// - `policy`: 三态未命中缺省。
+    ///
+    /// 返回：首次注入成功时返回 `Ok(())`；UserHook 已封口或策略已经注入时拒绝覆盖。
+    #[cfg(feature = "web")]
+    pub fn set_authz_unmatched_policy(
+        &self,
+        policy: naauthz::UnmatchedRoutePolicy,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("authz unmatched policy injection")?;
+        self.inner.authz_unmatched.set(policy).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "authz unmatched-route policy has already been injected".to_string(),
+            )
+        })
+    }
+
+    /// 业务作用：读取 UserHook 是否注入了未命中缺省(Web 装配用);最终生效值由 Web Ready 期
+    /// 与 YAML `server.authz_unmatched_route` 统一解析,双源冲突拒绝装配。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已注入时返回对应策略，否则返回 `None`，不在读取路径隐式写入默认值。
+    #[cfg(feature = "web")]
+    pub(crate) fn authz_unmatched_policy_injected(&self) -> Option<naauthz::UnmatchedRoutePolicy> {
+        self.inner.authz_unmatched.get().copied()
+    }
+
+    /// 业务作用：为 `configure_router` 动态路由登记显式类型化合同，在 UserHook 阶段调用。
+    ///
+    /// 逃生舱路由没有可审计的类型元数据，默认游离在 OpenAPI 与授权覆盖对账之外;确有对外合同的
+    /// 动态路由经本入口提交 method、path、schema 与授权要求后，与静态路由同等进入文档生成和
+    /// 启动期授权对账。合同事实由业务声明,框架不从任意 Router 运行时猜测;同 method/path 或
+    /// 重复 operation_id 与静态路由冲突时,由文档生成的既有冲突校验拒绝。
+    ///
+    /// 参数说明：
+    /// - `contract`: 动态路由的完整类型化合同;`path` 不含 context_path 前缀,与静态路由口径一致。
+    ///
+    /// 返回：合同形态有效且 UserHook 仍开放时完成登记；method、path、operation_id 非法或阶段
+    /// 已封口时返回定位明确的生命周期错误。
+    #[cfg(feature = "web")]
+    pub fn register_route_contract(
+        &self,
+        contract: naopenapi::RouteContract,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("dynamic route contract registration")?;
+        // 启动期只做定位友好的形态校验;完整冲突与 schema 校验由 generate 的既有门禁承担。
+        if contract.method.trim().is_empty()
+            || !contract
+                .method
+                .chars()
+                .all(|character| character.is_ascii_uppercase())
+        {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract method must be non-empty uppercase".to_string(),
+            ));
+        }
+        if !contract.path.starts_with('/') {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract path must start with '/'".to_string(),
+            ));
+        }
+        if contract.operation_id.trim().is_empty() {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract operation_id must be non-empty".to_string(),
+            ));
+        }
+        self.inner
+            .dynamic_route_contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(contract);
+        Ok(())
+    }
+
+    /// 业务作用：读取已登记的动态路由合同(文档生成与授权对账用)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前已登记合同的拥有型快照；调用方修改返回值不会改变容器内冻结账目。
+    #[cfg(feature = "web")]
+    pub(crate) fn dynamic_route_contracts(&self) -> Vec<naopenapi::RouteContract> {
+        self.inner
+            .dynamic_route_contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// 业务作用：在 UserHook 注入对象级授权 provider；provider 错误/超时均 fail closed。
@@ -3275,7 +3448,9 @@ impl Application {
     /// # 参数
     ///
     /// - `operation`：只包含 API 类别、不包含业务输入的稳定诊断名称。
-    fn ensure_user_hook_open(&self, operation: &str) -> ApplicationResult<()> {
+    ///
+    /// 返回：UserHook 登记窗口仍开放时成功；封口后返回稳定阶段错误。
+    pub(crate) fn ensure_user_hook_open(&self, operation: &str) -> ApplicationResult<()> {
         if self.inner.user_hook_open.load(Ordering::Acquire) {
             return Ok(());
         }

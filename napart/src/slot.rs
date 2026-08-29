@@ -879,6 +879,7 @@ pub(crate) async fn run(
     exit_guard.clean = true;
 }
 
+/// 业务作用：确保 slot worker 未取得排空证明就离场时把最小故障域转入关闭状态。
 struct WorkerExitGuard {
     inner: Arc<RunnerInner>,
     slot: Arc<PartitionSlot>,

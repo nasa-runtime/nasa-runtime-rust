@@ -1040,6 +1040,31 @@ where
     run_for(DEFAULT_DATASOURCE, body).await
 }
 
+/// 业务作用：拒绝 ambient 事务并以非事务方式执行业务体，`#[transactional(never)]` 的运行时入口。
+///
+/// 有些路径**绝不能被外层事务包住**:自治审计写(外层回滚不得连带撤销)、对外即时可见的副作用、
+/// 以及依赖"语句各自提交"的维护操作。ambient 传播默认"复用外层事务",这类路径被事务内调用时
+/// 会静默入伙并随外层回滚——本入口把该违规变成进入前的显式错误。
+///
+/// 参数说明：
+/// - `body`: 以非事务连接执行的业务 future(内部 `conn()`/`conn_for` 走 pool 直连,语句各自提交)。
+///
+/// 返回：无 ambient 事务时返回业务结果；检测到 ambient 事务立即返回错误且不执行业务体。
+pub async fn run_never<T, F>(body: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    if let Some(driver) = natx_core::current_driver() {
+        // `never` 拒绝全部数据库 driver 的环境事务；只检查 MySQL task-local 会让 PostgreSQL
+        // 外层事务中的自治副作用继续执行，破坏调用方声明的立即可见与不随外层回滚语义。
+        anyhow::bail!(
+            "transactional(never) 拒绝在 ambient 事务内执行(driver={driver});\
+             该函数的副作用不允许随外层事务回滚,请在事务外调用"
+        );
+    }
+    body.await
+}
+
 /// 业务作用：按业务代码给出的显式裁决，在默认 datasource 中提交或回滚本地事务。
 ///
 /// 参数说明：
@@ -1258,9 +1283,16 @@ where
         .map_err(|error| TxRunError::Infrastructure {
             reason: error.to_string(),
         })?;
+    // 提交/回滚前必须独占槽。业务体已返回,常规语句守卫必然已释放;此刻仍有人持锁只能是
+    // 泄漏的连接句柄(未消费完的事务内 MapperStream、被移出事务体的 Conn)——用阻塞等待会把
+    // 泄漏变成永久卡死,fail-fast 才能把缺陷在提交门禁处显形。
     let transaction = slot
-        .lock()
-        .await
+        .try_lock()
+        .map_err(|_| TxRunError::Infrastructure {
+            reason: "transaction connection is still held at commit; drop or fully consume any \
+                     transactional MapperStream/Conn before the transactional body returns"
+                .to_string(),
+        })?
         .take()
         .ok_or_else(|| TxRunError::Infrastructure {
             reason: "transaction ownership was lost".to_string(),
@@ -1461,6 +1493,36 @@ pub async fn mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<C
     Ok(Conn::Tx(slot.lock_owned().await))
 }
 
+/// 业务作用：获取默认 datasource 的非事务连接，拒绝在 ambient 事务内调用(`tx = "never"` 的连接入口)。
+///
+/// 参数说明: 无。
+///
+/// 返回：无 ambient 事务时返回池连接(语句各自提交)；处于事务内立即返回错误且不取连接。
+pub async fn never_conn() -> anyhow::Result<Conn> {
+    never_conn_for(DEFAULT_DATASOURCE).await
+}
+
+/// 业务作用：获取指定 datasource 的非事务连接，把"该语句不允许随外层事务回滚"固化为连接门禁。
+///
+/// 与 [`run_never`] 同一裁决:副作用必须立即可见的语句(自治审计写、维护操作)被事务内调用时,
+/// 在取连接前显式失败,而不是静默加入外层事务。
+///
+/// 参数说明：
+/// - `datasource`: 本次 SQL 使用的 datasource 名称。
+///
+/// 返回：无 ambient 事务时返回该 datasource 的池连接；处于事务内返回携带事务 datasource 的错误。
+pub async fn never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
+    natx_core::ensure_driver(DatabaseDriver::MySql).map_err(anyhow::Error::new)?;
+    let datasource = DatasourceRef::new(datasource)?;
+    if let Some(current) = current_datasource() {
+        anyhow::bail!(
+            "tx=never 的语句拒绝在 ambient 事务内执行(当前事务 datasource=`{current}`);\
+             该语句的副作用不允许随外层事务回滚,请在事务外调用"
+        );
+    }
+    Ok(Conn::Pool(pool_for(datasource.as_str())?.acquire().await?))
+}
+
 /// "当前连接"句柄。两种来源统一暴露成 `&mut MySqlConnection`(它实现了 sqlx::Executor):
 ///   · 事务连接:Transaction 与 PoolConnection 都 DerefMut 到 MySqlConnection,故能统一。
 /// ⚠️ 同一段代码里【不要同时持有两个 conn() 句柄】:事务分支会锁同一把 Mutex,嵌套持有会死锁。
@@ -1473,6 +1535,23 @@ pub enum Conn {
 }
 
 impl Conn {
+    /// 业务作用：把非事务池连接标记为归还时关闭，用于会话锁解除结果不确定等不可复用状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：池连接成功进入 close-on-drop 保护态；事务连接没有独立会话所有权时返回错误。
+    pub fn close_on_drop(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Pool(connection) => {
+                connection.close_on_drop();
+                Ok(())
+            }
+            Self::Tx(_) => anyhow::bail!(
+                "ambient transaction connection cannot be independently closed on drop"
+            ),
+        }
+    }
+
     /// 业务作用：把事务连接与池连接统一暴露为 SQLx 执行所需的可变 MySQL 连接。
     ///
     /// 取出 `&mut MySqlConnection` 交给 sqlx 执行 query。

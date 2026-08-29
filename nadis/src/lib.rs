@@ -2,29 +2,8 @@
 //!
 //! 业务通常通过 `nasa::redis` 门面接入；本 crate 承载单点/集群 Redis 的类型化命令、
 //! 连接治理和分布式协作能力。
-// ============================================================================
-// nadis：Redis 五件套能力的基础层。
-//
-// 对照 原实现 原框架-boot-starter-原工具包 的 cache/redis 包:
-//   RedisProxy            → client::RedisClient + commands(类型化命令层)
-//   LettucePipeline       → pipeline::PipelineSession(显式批,typed ticket)
-//   LettuceDistributedLock→ lock::DistributedLock(4 Lua 逐字节照搬,V1 可与 原实现 互锁)
-//   RedisPartition        → partition 分区消费运行时
-//   RediSearch            → search 类型化查询与索引管理
-//
-// 核心模块:
-//   config  —— RedisConfig + CompatibilityProfile(无默认值,缺失即配置错)
-//   error   —— 统一错误(含 ExecutionUnknown:写出后断线="可能已执行")
-//   keytag  —— redis_slot 逐字节复刻(CRC16+有效 hash tag 规则)+ synthetic tag 表
-//   codec   —— Json<T> 包装(serde_json;原实现 互通 codec,为显式 feature 预留)
-//   client  —— connect(协议标记 SET NX/校验)/registry/shutdown
-//   commands—— kv/hash/zset/通用 子集(KeyTtl 类型化返回;KEYS 不提供,SCAN 流式)
-//   pipeline—— PipelineSession(本地 buffer,到 max_commands/max_bytes 阈值滚动 auto-flush 续接,move 语义)
-//   lock    —— try_lock/lock/with_lock + 本地重入(StillReentered)+ 看门狗 + HoldStatus 三态
-//
-// 设计红线(文档 差异表):同步 API→async;对象池→move;threadId 重入→Guard 显式重入;
-// publish 静默→Err;Drop 仅 best-effort,正确性入口 = 显式 unlock/with_lock。
-// ============================================================================
+// 核心模块分别拥有连接与拓扑、类型化命令、显式 pipeline、锁、分区消费和搜索边界。
+// 写出后断线统一归类为 ExecutionUnknown；Drop 只承担 best-effort，涉及权威释放时必须使用显式入口。
 
 /// Redis 连接建立、拓扑识别和统一执行入口。
 pub mod client;

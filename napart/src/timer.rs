@@ -11,6 +11,7 @@ use tokio::time::Instant;
 
 use crate::runner::RunnerInner;
 
+/// 业务作用：保存当前 generation 的延迟任务索引、有效条目与接纳封口状态。
 struct TimerState {
     heap: BinaryHeap<Reverse<(Instant, u64)>>,
     active: HashMap<u64, TimerEntry>,
@@ -18,6 +19,7 @@ struct TimerState {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// 业务作用：记录延迟任务本段截止时刻及超长延迟尚未进入计时器的剩余时长。
 struct TimerEntry {
     deadline: Instant,
     remaining: Duration,

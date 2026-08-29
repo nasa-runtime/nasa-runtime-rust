@@ -292,6 +292,12 @@ async fn run_on_session(
         MigrationMode::Apply => apply_on_connection(connection, migrator, evidence).await,
     };
 
+    if matches!(body, Err(MigrationError::NonTransactionalTimeout(_, _))) {
+        // 非事务 DDL 超时后服务端是否仍在执行无法由客户端证明；继续复用 session 或排队发送 unlock
+        // 都会把独立执行预算变成无界等待。保持保护态并关闭物理连接，由 session 终止释放锁；
+        // 下次启动只依据显式 catalog 证据决定补记或续作。
+        return body;
+    }
     // 只有服务端明确返回 `true` 才能把 session 视为无锁；回包丢失与 `false` 都保持保护态并关闭连接。
     let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
         .bind(lock_key)

@@ -2,39 +2,8 @@
 //!
 //! 提供 `tracing` 订阅器装配、运行期日志级别切换、按大小滚动的 info/error 文件输出，
 //! 以及可由配置模块驱动的日志管理入口。
-// ============================================================================
-// nlog —— NASA 日志(对照 原实现 原工具包 的 logback-原框架.xml)
-//
-// 业务经门面引用:`use nasa::log;` → `log::init();`(一行完成全局注册)。
-// 实现 = tracing + tracing-subscriber(≈ SLF4J + Logback)。
-//
-// 【对照 logback-原框架.xml(原框架-boot-starter-原工具包)】
-//   - PatternLayout 风格 formatter:`yyyy-MM-dd HH:mm:ss.SSS [LEVEL] [thread] logger[line] - msg`
-//   - 独立 error.log:仅 ERROR(对照 error appender + ThresholdFilter ERROR)
-//   - 按天 + 按大小滚动:`{base}.log` → 归档 `{base}_{yyyy-MM-dd}.{i}.log`
-//     (对照 SizeAndTimeBasedRollingPolicy + maxFileSize)
-//   - 保留清理:maxHistory(天)+ totalSizeCap(归档总量)+ cleanHistoryOnStart
-//     (原 rust-simple-mvc 版**缺这三项,会涨爆磁盘**——本次补齐)
-//   - 运行期级别热切(reload):配合 nacos——先控制台,配置就绪后热接文件 + 改级别
-//
-// 【推荐用法:配置抽象(配合 nacos)】业务只声明 `pub log: nasa::log::LogConfig` 并反序列化 YAML/Nacos,
-//   由 nlog 负责 LogConfig→FileLogConfig 映射 / 默认值 / 单位解析 / 路径策略 / 启停。
-//     use nasa::log::{LogContext, LogManager};
-//     let mut log_manager = LogManager::bootstrap(boot.log.as_ref());   // 最早期:仅控制台
-//     // … 拉取 nacos 配置 …
-//     let ctx = LogContext::with_app_name(&cfg.server.name);            // 缺 path = 只控制台(Rust 现状)
-//     // 想对齐 原实现 /usr/local/logs/{app}:LogContext::原实现_default(&cfg.server.name)
-//     log_manager.apply(&cfg.log, &ctx)?;                              // set_level + 接文件
-//     // log_manager 必须持有到进程结束(同 LogGuard);Nacos 热更新复用同一 manager 再 apply。
-//
-// 【底层用法(无需配置抽象)】
-//     use nasa::log;
-//     log::init_with_default("info");            // 最早期:仅控制台
-//     log::set_level("info,my_app=debug");        // 热切级别
-//     let _g = log::enable_file_logging(Some("/usr/local/logs/my-app")); // 接文件
-//     // _g(LogGuard)必须持有到进程结束,否则后台刷盘线程停止、缓冲日志丢失
-//     // 关闭文件日志回到只控制台:log::disable_file_logging() + drop 旧 guard
-// ============================================================================
+// 全局订阅器只注册一次；运行期通过原子 writer 槽和 filter handle 切换文件输出与日志级别。
+// LogGuard 必须由唯一生命周期 owner 持有到停机 flush 完成，避免后台刷盘线程提前退出。
 #![forbid(unsafe_code)]
 
 use std::fs::{create_dir_all, read_dir, rename, File, OpenOptions};
@@ -54,7 +23,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// 应用侧日志配置抽象(`LogConfig`/`ByteSize`/`LogContext`/`LogManager` 等),把
-/// `LogConfig → FileLogConfig` 映射从各业务 main 收敛到此(对照 原实现 logback-原框架.xml 的应用映射)。
+/// `LogConfig → FileLogConfig` 映射从各业务 main 收敛到此，保持配置与文件生命周期只有一个 owner。
 mod config;
 pub use config::*;
 
@@ -92,14 +61,14 @@ pub(crate) fn set_log_pattern(pattern: std::sync::Arc<CompiledLogPattern>) {
     LOG_PATTERN.store(Some(pattern));
 }
 
-// ── logback 默认值(对照 logback-原框架.xml 的 property)──
+// logback 风格默认值由公开配置合同统一定义。
 const DEFAULT_MAX_FILE_SIZE: u64 = 500 * 1024 * 1024; // maxFileSize=500MB
 const DEFAULT_MAX_HISTORY_DAYS: i64 = 30; // maxHistory=30
 const DEFAULT_TOTAL_SIZE_CAP: u64 = 30 * 1024 * 1024 * 1024; // totalSizeCap=30GB
 
 /// 文件日志配置(对照 logback `RollingFileAppender` + `SizeAndTimeBasedRollingPolicy`)。
 ///
-/// `dir` 对照 logback `LOG_PATH`(默认 `/usr/local/logs/${原框架.application.name}`,即按服务名分目录);
+/// `dir` 对应 logback `LOG_PATH`；历史默认策略使用 `/usr/local/logs/{application.name}`，即按服务名分目录；
 /// 文件基名固定 `info`/`error`(对照 logback 两个 appender),业务无需传服务名。
 #[derive(Clone, Debug)]
 pub struct FileLogConfig {

@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "async-macro"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "macro-support",
  "proc-macro2",
@@ -2155,18 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "naauthz"
-version = "1.0.1"
-dependencies = [
- "arc-swap",
- "async-trait",
- "tokio",
-]
-
-[[package]]
-name = "naauthz"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dabeac931209852f1be3d19894ae495ecb540302ab4dce7c2dd031dd414bed49"
+version = "1.0.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2276,6 +2265,7 @@ dependencies = [
  "hex",
  "nabase",
  "nadis-derive",
+ "natelemetry",
  "redis",
  "serde",
  "serde_json",
@@ -2441,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -2471,21 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "naidempotency-redis"
-version = "1.0.1"
-dependencies = [
- "async-trait",
- "nadis",
- "naidempotency",
- "redis",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "naidempotency-redis"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b15f9d63be8d6594850e6308b78461a44cb9c462287cd8e9bdc17930be5b23b"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "nadis",
@@ -2527,6 +2503,8 @@ dependencies = [
  "nainbox-core",
  "natx",
  "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2538,6 +2516,8 @@ dependencies = [
  "nainbox-core",
  "natx-pgsql",
  "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2766,6 +2746,7 @@ dependencies = [
  "arc-swap",
  "dashmap",
  "futures-util",
+ "natelemetry",
  "tokio",
  "tracing",
 ]
@@ -2787,12 +2768,15 @@ dependencies = [
  "ipnet",
  "linkme",
  "matchit",
- "naauthz 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naauthz",
  "nabudget 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis",
  "nafka",
  "nagrpc",
  "naidempotency",
+ "nainbox-core",
+ "nainbox-mysql",
+ "nainbox-pgsql",
  "nalog 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper",
  "namapper-core",
@@ -2809,7 +2793,7 @@ dependencies = [
  "napart",
  "nasaga-runtime",
  "nasaga-runtime-pgsql",
- "nasched 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasched",
  "nasecret",
  "natelemetry",
  "natx",
@@ -2867,7 +2851,7 @@ dependencies = [
  "naidempotency",
  "naidempotency-mysql",
  "naidempotency-pgsql",
- "naidempotency-redis 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naidempotency-redis",
  "naimg 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core",
  "nainbox-mysql",
@@ -2892,7 +2876,7 @@ dependencies = [
  "nasaga-macro",
  "nasaga-runtime",
  "nasaga-runtime-pgsql",
- "nasched 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasched",
  "nasecret",
  "nasecret-http 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-vault 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2904,7 +2888,7 @@ dependencies = [
  "naweb-macro 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naws",
  "ncrypto",
- "rest-client-macro 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-client-macro",
  "rest-discovery",
  "rest-discovery-nacos",
 ]
@@ -3033,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "nasched"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-macro",
@@ -3042,24 +3026,8 @@ dependencies = [
  "croner",
  "linkme",
  "nadis",
- "tokio",
- "tokio-cron-scheduler",
- "tracing",
-]
-
-[[package]]
-name = "nasched"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2306d156fa2a80fb70dbbe1bedb8e6a13253323f192d45fe6bc5ffc230561be1"
-dependencies = [
- "anyhow",
- "async-macro",
- "chrono",
- "chrono-tz",
- "croner",
- "linkme",
- "nadis",
+ "napart",
+ "natelemetry",
  "tokio",
  "tokio-cron-scheduler",
  "tracing",
@@ -4212,19 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "rest-client-macro"
-version = "1.0.1"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "rest-client-macro"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8b37f4ac55be3377491a0672fbc09f54933f802a6d2c38f4cc621aaf5925096"
+version = "1.0.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

@@ -304,8 +304,11 @@ enum ParamBind {
         ident: Ident,
     },
     /// `#[QueryMap] filter: T`(`T: Serialize`)→ 整个结构体按字段名展开成 query,按声明顺序 append(不覆盖)。
+    /// `Option<T>` 的稳定合同:`None` 不追加任何 query 片段,`Some` 展开内层结构体——
+    /// Option 本身从不进序列化器,不依赖 serde_urlencoded 对 `Option<Struct>` 的行为。
     QueryMap {
         ident: Ident,
+        optional: bool,
     },
     Body {
         ident: Ident,
@@ -398,21 +401,15 @@ fn classify_param(pt: &mut syn::PatType, http: &str) -> syn::Result<ParamBind> {
             }),
             "RequestHeaders" => Ok(ParamBind::Headers { ident }),
             "QueryMap" => {
-                // QueryMap 整体按字段名展开,名字无意义;v1 也不支持 Option<T>(serde_urlencoded 对
-                // Option<Struct> 行为不稳定 —— 先拒绝,后续确认稳定再放开。
+                // QueryMap 整体按字段名展开,名字无意义。Option<T> 按稳定合同支持:
+                // None 不追加、Some 展开内层——Option 本身不进序列化器。
                 if name.is_some() {
                     return Err(syn::Error::new(
                         span,
                         "#[QueryMap] 不接受名字参数(整个结构体按字段名展开成 query)",
                     ));
                 }
-                if optional {
-                    return Err(syn::Error::new(
-                        span,
-                        "#[QueryMap] 暂不支持 Option<T>(serde_urlencoded 对 Option<Struct> 行为不稳定;请传非 Option 结构体)",
-                    ));
-                }
-                Ok(ParamBind::QueryMap { ident })
+                Ok(ParamBind::QueryMap { ident, optional })
             }
             "RequestBody" => {
                 if body_raw {
@@ -593,9 +590,11 @@ fn extract_result_inner(ret: &ReturnType) -> syn::Result<Type> {
         if let Some(seg) = tp.path.segments.last() {
             if seg.ident == "Result" {
                 if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    // 只接受【单类型参数】的 Result(即 anyhow::Result<T> / 别名 Result<T> 形态)。
-                    // 生成代码用 `?` 把 RestDiscoveryError 经 anyhow 转换,故 `Result<T, E>`(双参)的自定义 E
-                    // 不保证能从 RestDiscoveryError 转换 → 显式拒绝,而非延后到难懂的类型不匹配。
+                    // 单参数 = anyhow::Result<T>/别名 Result<T>(错误经 anyhow 收敛,兼容缺省);
+                    // 双参数 = 业务自定义错误 Result<T, E>:生成代码的全部失败点都是
+                    // RestDiscoveryError,`?` 依赖 `E: From<RestDiscoveryError>` 完成映射——
+                    // 缺该实现时编译错误直接指出缺失的 From,业务据此显式定义错误转换,
+                    // 转换入参是已脱敏的 RestDiscoveryError,不存在回显远端敏感正文的通道。
                     let type_args: Vec<&Type> = ab
                         .args
                         .iter()
@@ -606,10 +605,11 @@ fn extract_result_inner(ret: &ReturnType) -> syn::Result<Type> {
                         .collect();
                     return match type_args.as_slice() {
                         [inner] => Ok((*inner).clone()),
+                        [inner, _custom_error] => Ok((*inner).clone()),
                         _ => Err(syn::Error::new(
                             ty.span(),
-                            "rest_client 方法返回类型必须是 anyhow::Result<T>(单类型参数);\
-                             不支持 Result<T, E>——自定义错误类型不保证能从 RestDiscoveryError 转换",
+                            "rest_client 方法返回类型必须是 anyhow::Result<T> 或 Result<T, E>\
+                             (E: From<RestDiscoveryError>)",
                         )),
                     };
                 }
@@ -1197,9 +1197,18 @@ fn gen_body(
                     });
                 }
             }
-            ParamBind::QueryMap { ident } => {
+            ParamBind::QueryMap { ident, optional } => {
                 // 整个结构体序列化成 query 片段,按声明顺序 append(与 RequestParam 共存时不覆盖同名 key)。
-                binds.push(quote! { __req = __req.query(&#ident); });
+                // Option 形态:None 不追加任何片段,Some 展开内层;Option 本身从不进序列化器。
+                if *optional {
+                    binds.push(quote! {
+                        if let ::core::option::Option::Some(__query_map) = &#ident {
+                            __req = __req.query(__query_map);
+                        }
+                    });
+                } else {
+                    binds.push(quote! { __req = __req.query(&#ident); });
+                }
             }
             ParamBind::Body { ident } => {
                 binds.push(quote! { __req = __req.json(&#ident); });

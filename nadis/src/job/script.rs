@@ -73,6 +73,37 @@ pub(crate) async fn eval(
     }
 }
 
+/// 业务作用：执行允许在调用方权威截止内重新发送的 Job 状态脚本，并保留传输错误类别。
+///
+/// 参数说明：
+/// - `client`: 承载控制连接的 RedisClient。
+/// - `script`: 重复执行不会越过业务权威的嵌入脚本。
+/// - `keys`: 已序列化的二进制键，必须全部同 slot。
+/// - `argv`: 已序列化的二进制脚本参数。
+///
+/// 返回：脚本确定返回时给出原始数组；NOSCRIPT 自动回退整文本，传输失败保留为 Redis 错误，
+/// 由掌握硬截止的调用方决定是否重发。只允许用于重复执行仍安全的状态推进。
+pub(crate) async fn eval_retry_safe(
+    client: &RedisClient,
+    script: &JobScript,
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+) -> Result<Vec<Value>> {
+    ensure_same_slot(keys)?;
+    let mut conn = client.job_heartbeat_conn().await?;
+    match run(&mut conn, "EVALSHA", script.sha().as_bytes(), keys, argv).await {
+        Ok(values) => Ok(values),
+        Err(error) if is_noscript(&error) => {
+            let values = run(&mut conn, "EVAL", script.text.as_bytes(), keys, argv)
+                .await
+                .map_err(NasaRedisError::Redis)?;
+            client.record_job_script_reload();
+            Ok(values)
+        }
+        Err(error) => Err(NasaRedisError::Redis(error)),
+    }
+}
+
 /// 业务作用：区分脚本的确定性服务端拒绝与写出后结果不确定，阻止上层把可能已提交的状态动作透明重放。
 ///
 /// 参数说明：

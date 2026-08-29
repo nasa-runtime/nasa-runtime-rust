@@ -5,3 +5,6 @@ CREATE TABLE inbox_message (
         CHECK (processed_at_ms >= 0),
     CONSTRAINT inbox_message_pkey PRIMARY KEY (consumer_name, message_id)
 );
+
+CREATE INDEX inbox_message_retention_idx
+    ON inbox_message (consumer_name, processed_at_ms);

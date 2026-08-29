@@ -38,6 +38,19 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
 - 配置刷新没有 `ApplyFailed` 或 `RestartRequired` 长时间未处理。
 - 日志中没有连接串、访问令牌、业务 payload 或控制 token。
 
+## 授权与链路观测
+
+- `napp_authz_routes_uncovered` 必须与发布时批准的公开 route 覆盖一致；deny 模式下未覆盖鉴权 route
+  会阻止 Ready，不应通过临时放宽全局缺省绕过。
+- `napp_authz_unmatched_observed_total` 用于评估从 observe 收紧到 deny 的真实影响；
+  `napp_authz_unmatched_denied_total` 增长时先核对稳定 route ID、策略 generation 和公开 route 豁免。
+- 合法入站 `traceparent` 必须继承原 sampled 位。没有 exporter 的服务只传播未采样根；不得把下游
+  span 数量上升解释为本服务已导出。
+- 调度 span 只代表已经通过 leader gate 与 FireLog claim 的业务运行。Skipped 没有执行 span 是正常
+  语义，应结合运行记录判断 leader 缺席、重复 claim 或 misfire 决策。
+- `ExporterSnapshot` 的 pending 持续接近队列上限或 dropped 增长时，优先检查 OTLP endpoint、停机
+  预算和采样率；不得把 payload、完整业务身份或凭据加入 span 属性辅助排查。
+
 ## 配置刷新
 
 配置视图把期望快照和每个组件的应用状态放在同一次发布动作中。运维必须同时查看配置修订与状态：

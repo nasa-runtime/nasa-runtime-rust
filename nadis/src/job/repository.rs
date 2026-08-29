@@ -175,6 +175,19 @@ pub enum DeleteOutcome {
     },
 }
 
+/// 单个调度分片的命名空间门禁只读快照；治理聚合据此区分已收敛、未收敛与未触达分片。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceShardSnapshot {
+    /// 分片序号。
+    pub shard: u32,
+    /// `namespaceState` 原文(ENABLED/PAUSED)；从未治理过的分片为 `None`，按缺省 ENABLED 解释。
+    pub state: Option<String>,
+    /// 最近一次治理发布的权威毫秒时刻。
+    pub updated_at_ms: Option<i64>,
+    /// 最近一次治理的操作来源(审计字段)。
+    pub updated_by: Option<String>,
+}
+
 /// 设置普通 Run 命名空间门禁的封闭结局。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceStateOutcome {
@@ -1736,6 +1749,34 @@ impl JobRepository {
         let argv: Vec<Vec<u8>> = vec![state.wire_name().as_bytes().to_vec(), actor.into_bytes()];
         let raw = eval(&self.client, &NAMESPACE_SET_STATE, &[key], &argv).await?;
         interpret_namespace_state(&raw)
+    }
+
+    /// 业务作用：读取一个调度分片当前的命名空间门禁快照，供逐分片治理操作的收敛核对。
+    ///
+    /// 只读控制 HASH 的三个既有字段，不触碰任何脚本或写路径，与 Java 侧共享布局保持逐字节兼容。
+    ///
+    /// 参数说明：
+    /// - `shard`: 目标调度分片。
+    ///
+    /// 返回：三字段的原样快照；分片从未被治理操作触达时三者均为 `None`(消费方按缺省 ENABLED 解释)。
+    pub async fn namespace_state_snapshot(&self, shard: u32) -> Result<NamespaceShardSnapshot> {
+        let key = self.keyspace.control(shard);
+        let mut connection = self.client.conn();
+        let (state, updated_at_ms, updated_by): (Option<String>, Option<i64>, Option<String>) =
+            redis::cmd("HMGET")
+                .arg(&key)
+                .arg("namespaceState")
+                .arg("updatedAt")
+                .arg("updatedBy")
+                .query_async(&mut connection)
+                .await
+                .map_err(NasaRedisError::Redis)?;
+        Ok(NamespaceShardSnapshot {
+            shard,
+            state,
+            updated_at_ms,
+            updated_by,
+        })
     }
 
     /// 业务作用：有界回收一个分片内 tombstone 已到期的定义枚举与 fencing 字段；保留期内绝不删除。

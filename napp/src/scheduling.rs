@@ -192,8 +192,7 @@ impl ApplicationComponent for SchedulingComponent {
 impl SchedulingComponent {
     /// 业务作用：把配置翻译成调度器启动选项，必要时先建立 Redis leader gate。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `application`：提供已注册 Redis 资源的共享上下文。
     /// - `config`：已校验的调度配置。
     ///
@@ -208,6 +207,10 @@ impl SchedulingComponent {
             ClusterMode::Local => nasched::SchedulerOptions::local(),
             ClusterMode::Leader => self.build_clustered_options(application, config).await?,
         };
+        #[cfg(feature = "telemetry")]
+        if let Some(recorder) = application.span_recorder() {
+            options = options.with_span_recorder(recorder);
+        }
         options.node_id = config.node_id.clone();
         Ok(options)
     }

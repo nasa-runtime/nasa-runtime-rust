@@ -115,13 +115,11 @@ pub enum RestDiscoveryError {
     #[error("HTTP 发送失败:{0}")]
     Http(#[from] reqwest::Error),
 
-    /// 便捷方法(send_json/send_text)遇到非 2xx;body 只保留有限摘要,避免日志打爆/泄露大响应。
-    #[error("HTTP 状态错误 {status}:{body_snippet}")]
+    /// 便捷方法遇到非 2xx；远端正文不进入公开错误，避免凭据、用户数据或内部诊断经错误转换外泄。
+    #[error("HTTP 状态错误 {status}")]
     HttpStatus {
         /// 下游返回的非 2xx HTTP 状态。
         status: reqwest::StatusCode,
-        /// 响应体摘要,用于排障但避免记录完整大响应。
-        body_snippet: String,
     },
 
     /// 2xx 响应体解码/解包失败(`unwrap = "data"`:body 非合法 JSON、缺解包字段、或字段值类型不匹配)。

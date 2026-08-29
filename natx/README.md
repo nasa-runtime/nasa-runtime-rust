@@ -79,6 +79,12 @@ nasa::tx::try_init(pool)?;
 - `mandatory_conn` 无事务直接 Err,不回退池连接。
 - 事务内任一 SQL 执行错误使整个事务回滚;未注册 datasource 的 `run_for` / `pool_for_datasource` 返回 Err。
 - `tokio::spawn` 出的任务不继承 ambient 事务;同一作用域不要同时持有两个 `Conn`(会互等池连接)。
+- `#[transactional(never)]`(运行时入口 `run_never`):拒绝任一数据库 driver 的 ambient 事务且不开启事务——供"绝不能
+  被外层事务包住"的路径(自治审计写、对外即时可见的副作用)把违规调用变成进入前的显式错误,
+  而不是静默入伙随外层回滚;`never` 与 `datasource` 互斥。
+- 提交/回滚前对事务连接槽做 fail-fast 独占:业务体已返回却仍被持有的连接句柄(未消费完的事务内
+  `MapperStream`、被移出事务体的 `Conn`)会让事务以 "transaction connection is still held at
+  commit" 显式失败,而不是在槽锁上永久卡死。
 
 ## YML 配置与使用
 

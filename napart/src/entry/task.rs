@@ -330,6 +330,7 @@ pub(crate) enum TaskAuthorityError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 业务作用：把任务终态与稳定原因绑定为一次不可分割的结算记录。
 struct TerminalRecord {
     state: EntryState,
     reason: Option<&'static str>,
@@ -355,6 +356,9 @@ pub(crate) struct TaskEntry<T> {
     global_permit: Mutex<Option<OwnedSemaphorePermit>>,
     queued_permit: Mutex<Option<OwnedSemaphorePermit>>,
     completed: Notify,
+    /// 提交时刻的环境 trace 上下文；执行期恢复为业务 Future 的环境作用域。
+    /// 26 字节 Copy 值，迁移、归还与失败收口均不读写该字段。
+    trace: Option<natelemetry::TraceContext>,
 }
 
 impl<T> TaskEntry<T> {
@@ -403,7 +407,19 @@ impl<T> TaskEntry<T> {
             global_permit: Mutex::new(global_permit),
             queued_permit: Mutex::new(queued_permit),
             completed: Notify::new(),
+            // 构造点即提交点(立即与延迟两条入口都经此),在此捕获提交方的环境链路;
+            // 延迟任务因此关联到提交时刻而不是到期 tick,与"谁发起谁的链路"一致。
+            trace: natelemetry::ambient(),
         }))
+    }
+
+    /// 业务作用：读取提交时捕获的环境 trace 上下文，供 worker 在执行业务 Future 前恢复同一链路。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：提交方处于链路作用域内时返回其上下文，否则返回 None。
+    pub(crate) fn trace(&self) -> Option<natelemetry::TraceContext> {
+        self.trace
     }
 
     /// 业务作用：读取不可复用提交标识，供延迟索引、moving 表和诊断记录关联同一任务。

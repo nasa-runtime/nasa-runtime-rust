@@ -203,12 +203,14 @@ impl NonStrictTunnelGroup {
     }
 }
 
+/// 业务作用：为严格任务类型签发单调序号，并阻止执行越过尚未结算的前序任务。
 struct StrictOrder {
     next_issue: AtomicU64,
     state: Mutex<StrictOrderState>,
     changed: Notify,
 }
 
+/// 业务作用：保存严格顺序门禁的下一可运行序号与提前完成集合。
 struct StrictOrderState {
     next_run: u64,
     settled_ahead: BTreeSet<u64>,

@@ -1,13 +1,13 @@
-//! 日志配置抽象:把应用侧 `LogConfig → FileLogConfig` 映射 + 默认值 + 单位解析 + 路径策略 + 启停/重配置
-//! 收敛到 nlog,业务只需声明 `pub log: nasa::log::LogConfig` 并反序列化 YAML/Nacos(对照 原实现 logback-原框架.xml
-//! 的应用映射)。**nlog 不读 YAML/Nacos/env,只消费已反序列化的 `LogConfig`。**
+//! 日志配置抽象：把应用侧 `LogConfig → FileLogConfig` 映射、默认值、单位解析、路径策略和启停重配置
+//! 收敛到 nalog。业务只需声明 `pub log: nasa::log::LogConfig` 并反序列化 YAML/Nacos；nalog 不读取
+//! YAML/Nacos/env，只消费已反序列化的 `LogConfig`。
 //!
 //! ```ignore
 //! use nasa::log::{LogContext, LogManager};
 //! let mut mgr = LogManager::bootstrap(boot.log.as_ref()); // 早期:只控制台
 //! let ctx = LogContext::with_app_name(&cfg.server.name);    // 缺 path = 只控制台(Rust 现状)
 //! mgr.apply(&cfg.log, &ctx)?;                               // 最终:set_level + 接文件
-//! // 想对齐 原实现 /usr/local/logs/{app}:LogContext::原实现_default(&cfg.server.name)
+//! // 需要历史默认目录时使用 LogContext::legacy_default(&cfg.server.name)
 //! ```
 
 use crate::{
@@ -214,7 +214,7 @@ pub enum MissingPathPolicy {
 /// 解析路径所需的运行上下文(应用名 / 默认根 / 缺失策略)。
 #[derive(Debug, Clone)]
 pub struct LogContext {
-    /// 应用名(对照 `原框架.application.name`),`原实现Default` 缺 path 时拼默认目录用。
+    /// 应用名；`LegacyDefault` 缺少 path 时用于拼接默认目录。
     pub app_name: Option<String>,
     /// 默认日志根(对照 原实现 `/usr/local/logs`)。
     pub default_log_root: String,

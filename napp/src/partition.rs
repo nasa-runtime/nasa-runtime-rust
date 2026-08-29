@@ -199,6 +199,7 @@ impl Default for PartitionApplicationPlan {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// 业务作用：承载单个分区 Runner 的可选 YAML 字段，并在启动期补齐有界默认值。
 struct PartitionRunnerSettings {
     #[serde(default)]
     partitions: Option<usize>,
@@ -323,6 +324,7 @@ impl PartitionRunnerSettings {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// 业务作用：绑定默认 Runner 名与命名 Runner 配置表，避免运行期猜测唯一实例。
 struct NamedPartitionSettings {
     #[serde(default = "default_runner_name")]
     default_runner: String,
@@ -337,6 +339,7 @@ enum PartitionSettingsShape {
 }
 
 #[derive(Clone)]
+/// 业务作用：保存已经规范化的默认 Runner 身份与全部唯一命名启动计划。
 struct PartitionPlanSet {
     default_runner: napart::RunnerName,
     runners: BTreeMap<napart::RunnerName, PartitionApplicationPlan>,
@@ -685,6 +688,7 @@ fn normalized_partitions(partitions: usize) -> usize {
 }
 
 #[derive(Clone)]
+/// 业务作用：原子发布 Ready 后可访问的默认 Runner 与命名只读句柄表。
 struct PublishedRunners {
     default_runner: napart::RunnerName,
     handles: BTreeMap<napart::RunnerName, PartitionApplicationHandle>,
@@ -1127,6 +1131,7 @@ impl ApplicationComponent for PartitionComponent {
 }
 
 #[derive(Clone)]
+/// 业务作用：把一个已启动 Runner 与其冻结计划、名称和 readiness 更新权绑定到同一所有权单元。
 struct ManagedRunner {
     name: napart::RunnerName,
     runner: napart::PartitionRunner,

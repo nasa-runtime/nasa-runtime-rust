@@ -65,7 +65,11 @@ case "$http_code" in
     fi
     ;;
   404)
-    echo "$crate_name 尚未存在于 crates.io，工作区版本为 $version"
+    if [[ "$version" != "1.0.0" ]]; then
+      echo "$crate_name 尚未存在于 crates.io，首次公开版本必须是 1.0.0，当前版本: $version" >&2
+      exit 1
+    fi
+    echo "$crate_name 尚未存在于 crates.io，首次公开版本为 1.0.0"
     ;;
   *)
     echo "查询 $crate_name 的 crates.io 版本返回 HTTP $http_code" >&2

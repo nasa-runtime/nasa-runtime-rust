@@ -36,7 +36,7 @@ search = []
 derive = ["dep:nadis-derive", "search"]
 # job：完整分布式任务运行时（调度、执行器注册、租约、Fanout、drain）。
 # 必须显式开启，避免只用基础命令与幂等计数的项目编译 Cron、Fanout 与后台运行时。
-job = ["dep:base64", "dep:cron", "dep:chrono", "dep:chrono-tz"]
+job = ["dep:base64", "dep:cron", "dep:chrono", "dep:chrono-tz", "dep:natelemetry"]
 [dependencies]
 # Job payload 的稳定 Base64 编码；仅 job feature 启用。
 base64 = { version = "0.22", optional = true }
@@ -52,12 +52,14 @@ redis = { version = "1", features = ["tokio-comp", "script", "connection-manager
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-# preserve_order：Value 保持字段插入顺序（即结构体声明顺序），省略 null 时不会
-# BTreeMap 字母序重排,维持与 原实现(Jackson 声明序)的 JSON 字节对齐。
+# preserve_order：Value 保持字段插入顺序（即结构体声明顺序），省略 null 后也不会按字母序重排，
+# 从而为摘要、幂等比较和线协议生成稳定 JSON 字节。
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"
 futures = "0.3"
 tracing = "0.1"
+# 手工触发在环境链路作用域内记录 trace_id 与派生 run_id 的关联；wire 与共享 Lua 不携带 trace。
+natelemetry = { version = "1.0.2", optional = true }
 uuid = { version = "1", features = ["v4"] }
 # nonce 幂等计数的跨语言账本身份与 canonical slot token 摘要；与 Java SHA-256 逐字节一致。
 sha2 = "0.10"

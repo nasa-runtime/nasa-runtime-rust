@@ -1,23 +1,14 @@
 //! 异步任务和定时任务运行时。
 //!
-//! 提供 linkme 收集的定时任务启动、错过触发策略、固定频率/固定延迟任务、
-//! 分布式 FireLog 去重和主节点门禁。
-// ============================================================================
-// scheduling 运行端 —— #[scheduled] 定时任务的【收集 + 启动 + 停机】
-//
-// 设计取舍(给后续维护者,免翻外部源码即可理解):
-//   1) 任务收集靠 linkme 的 distributed_slice(链接器在编译期把各处 #[scheduled] 生成的注册项汇总进
-//      SCHEDULED_TASKS),**不做运行期反射/扫描**——Rust 没有容器,也不需要。
-//   2) cron 任务分两路：misfire=Skip 走 tokio-cron-scheduler；misfire=FireOnce/ClaimOnly 走
-//      【自管 CronPlan driver】(croner 算名义触发时刻),因为前者回调拿不到"本拍名义 scheduled_at",而 FireLog
-//      claim 去重要跨节点一致的 scheduled_at(FireOnce 额外挂 misfire 巡检补漏,ClaimOnly 只每拍 claim)。非 cron(固定频率/固定延迟/一次性)**自管 tokio::time**
-//      (该库对 non-cron 的 Duration 会按秒截断 + 固定 500ms tick,毫秒级会失真)。
-//   3) #[Async] 是【编译期改写"调用即 spawn"】,不经过这里;本文件只管 #[scheduled]。
-//
-// 刻意不做的能力(它们在原框架里靠 DI/容器/AOP 实现,Rust 宏 + 静态收集模型无法也不应硬凑):
-//   配置占位符解析(${...})、按名字选调度器/执行器、注解代理(proxy/mode)、容器式任务清单注册表。
-//   需要这些时由业务在调用处显式处理,而非框架隐式注入。
-// ============================================================================
+//! # 执行权与触发架构
+//!
+//! 定时任务由链接期注册表收集；cron、固定频率、固定延迟和一次性 driver 产生稳定名义触发时刻。
+//! leader gate 决定节点资格，FireLog claim 为需要去重的拍次取得跨节点权威。只有通过全部门禁的拍次
+//! 才进入 Started 并创建调度执行 span；失权或重复拍次记录 Skipped。
+//!
+//! leader-only 与 claim 都不替代业务幂等或外部写 fencing。任务必须在外部副作用前复验权威，
+//! 并让下游能够拒绝失效 token。本 crate 不提供物理 exactly-once，不推断业务事务边界，也不按名称
+//! 定位业务持有的执行器。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -30,10 +21,7 @@ use linkme::distributed_slice;
 use tokio::task::JoinHandle;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-// ============================================================================
-// 集群门控(cluster gate)—— 让 #[scheduled(cluster="leader")] 只由当前 leader 触发。
-// core 不依赖 Redis；连接 nadis::Leader 的 adapter 位于 `cluster` feature 下。
-// ============================================================================
+// 集群门控只依赖执行权判断；`cluster` feature 负责接入 nadis::Leader。
 
 /// 任务的集群执行模式(由 `#[scheduled(cluster=...)]` 决定,默认 `Local`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +59,8 @@ pub struct SchedulerOptions {
     pub cluster: Option<ClusterOptions>,
     /// 运行记录器；默认 `NoopRecorder`（不记录）。用 `with_recorder` 设置。
     pub recorder: Arc<dyn ExecutionRecorder>,
+    /// 调度 span 记录器；未设置时仍建立未采样根上下文，只传播而不导出。
+    pub span_recorder: Option<natelemetry::SpanRecorder>,
     /// 记录用的节点标识(写进 `RunEvent.node`);默认空串。用 `with_node_id` 设。
     pub node_id: String,
     /// misfire claim 存储；`misfire=FireOnce`/`ClaimOnly` 任务必需，否则可为 `None`。用 `with_fire_log` 设置。
@@ -91,10 +81,15 @@ pub struct SchedulerOptions {
 
 impl Default for SchedulerOptions {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：本地执行、无 span/claim/leader 后端且补偿周期有界的启动选项。
     fn default() -> Self {
         Self {
             cluster: None,
             recorder: Arc::new(NoopRecorder),
+            span_recorder: None,
             node_id: String::new(),
             fire_log: None,
             misfire_sweep_interval: MISFIRE_SWEEP_INTERVAL,
@@ -106,7 +101,11 @@ impl Default for SchedulerOptions {
 }
 
 impl SchedulerOptions {
-    /// 业务作用：本地模式(= `Default`)。
+    /// 业务作用：创建不依赖 leader 或 FireLog 的本地调度启动选项。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：带有有界 misfire 默认值、空节点身份和无操作记录器的本地选项。
     pub fn local() -> Self {
         Self::default()
     }
@@ -143,10 +142,23 @@ impl SchedulerOptions {
         self
     }
 
+    /// 业务作用：设置调度 span 记录器；每次取得实际执行权后才创建新根 span。
+    ///
+    /// 参数说明：
+    /// - `recorder`：由应用遥测组件发布的只写记录器。
+    ///
+    /// 返回：更新后的启动选项；未取得 leader/claim 的触发不会使用该记录器。
+    pub fn with_span_recorder(mut self, recorder: natelemetry::SpanRecorder) -> Self {
+        self.span_recorder = Some(recorder);
+        self
+    }
+
     /// 业务作用：设节点标识(builder;写进 `RunEvent.node`)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `node_id`: 当前进程或实例的节点标识,用于运行记录和排查。
+    ///
+    /// 返回：写入节点身份后的启动选项；后续运行事件使用该稳定值。
     pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
         self.node_id = node_id.into();
         self
@@ -154,8 +166,10 @@ impl SchedulerOptions {
 
     /// 业务作用：设 misfire claim 存储(builder;`misfire=FireOnce`/`ClaimOnly` 任务必需)。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `fire_log`: misfire claim 存储实现,用于跨节点去重和补漏。
+    ///
+    /// 返回：安装 claim 权威后的启动选项；需要 FireLog 的任务在缺少该入口时拒绝启动。
     pub fn with_fire_log(mut self, fire_log: Arc<dyn FireLog>) -> Self {
         self.fire_log = Some(fire_log);
         self
@@ -269,7 +283,7 @@ impl SchedulerOptions {
 /// 业务作用：触发时刻判定本节点是否应执行该任务。
 /// `Local` 恒 true;`Leader` 读 gate;`Leader` 但无 gate = 不应发生(启动期已 fail-fast),保守 false。
 ///
-/// # 参数
+/// 参数说明：
 /// - `cluster`: 当前任务的集群执行模式。
 /// - `gate`: 启动期为该任务解析出的 leader gate；本地任务可为 `None`。
 fn should_run(cluster: ClusterMode, gate: &Option<Arc<dyn LeaderGate>>) -> bool {
@@ -453,19 +467,24 @@ fn record_skip(
 /// run 在**内层 JoinSet** 里跑:panic 被收成 JoinError → 记 `Panicked`(不打穿外层);外层 future 被
 /// drop(shutdown)时,内层 JoinSet 随之 drop → run 任务一并 abort。not-leader skip 不走本函数(由 record_skip 记 `Skipped` 事件)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `run`: 宏生成的任务函数指针,调用后返回业务 future。
 /// - `recorder`: 运行事件记录器。
+/// - `span_recorder`: 可选遥测记录器；存在时按其 sampler 创建调度根 span。
 /// - `node_id`: 当前节点标识,写入 Started/Finished 事件。
 /// - `name`: 任务展示名。
 /// - `id`: 稳定任务 id。
 /// - `cluster`: 当前任务的集群模式。
 /// - `fire_at_ms`: 本次运行的名义触发时间。
 /// - `timeout_ms`: 可选任务级超时毫秒数；`None` 表示不做超时控制。
+///
+/// 返回：取得执行权后运行任务并记录终态的 future；任务取消时不伪造 Finished 事件，span guard
+/// 仍按实际存活区间收口。
 #[allow(clippy::too_many_arguments)]
 fn recorded_run(
     run: RunFn,
     recorder: Arc<dyn ExecutionRecorder>,
+    span_recorder: Option<natelemetry::SpanRecorder>,
     node_id: Arc<str>,
     name: &'static str,
     id: &'static str,
@@ -486,8 +505,27 @@ fn recorded_run(
             },
         );
         let started = Instant::now();
+        // 只有走到 recorded_run 才表示本节点已通过 leader/claim 门禁；此后创建 span 不会把
+        // 未取得执行权的拍次错误记录为已执行。没有 exporter 时仍建立未采样根供出站传播。
+        let span_guard = span_recorder.map(|recorder| {
+            recorder.start_root(
+                format!("scheduled {name}"),
+                natelemetry::SpanKind::Internal,
+                [
+                    natelemetry::SpanAttribute::new("scheduler.task.name", name),
+                    natelemetry::SpanAttribute::new(
+                        "scheduler.scheduled_at_ms",
+                        fire_at_ms.to_string(),
+                    ),
+                ],
+            )
+        });
+        let trace_context = span_guard
+            .as_ref()
+            .map(natelemetry::SpanGuard::context)
+            .or_else(|| Some(natelemetry::TraceContext::new_root(false)));
         let mut js = tokio::task::JoinSet::new();
-        js.spawn(run());
+        js.spawn(natelemetry::with_ambient(trace_context, run()));
         // timeout_ms=Some:tokio::time::timeout 协作式超时——仅在 await 边界生效;阻塞 I/O / CPU 死循环 / 已 detach 的子任务杀不掉。
         let joined = match timeout_ms {
             Some(ms) => tokio::time::timeout(Duration::from_millis(ms), js.join_next()).await,
@@ -783,9 +821,10 @@ fn latest_before<Tz: chrono::TimeZone>(
 
 /// 业务作用：FireOnce/ClaimOnly 任务的单次触发:先 claim(原子去重),拿到才跑(经 recorded_run 记录);claim 失败 fail-closed 跳过。
 ///
-/// # 参数
+/// 参数说明：
 /// - `run`: 宏生成的任务函数指针。
 /// - `recorder`: 运行事件记录器。
+/// - `span_recorder`: 可选调度 span 记录器。
 /// - `node_id`: 当前节点标识。
 /// - `name`: 任务展示名。
 /// - `id`: 稳定任务 id,作为 FireLog claim key。
@@ -794,10 +833,13 @@ fn latest_before<Tz: chrono::TimeZone>(
 /// - `scheduled_at_ms`: 本拍名义触发时间(epoch ms)。
 /// - `stale_before_ms`: 允许覆盖旧 claim 的阈值(epoch ms)。
 /// - `timeout_ms`: 可选任务级超时毫秒数。
+///
+/// 返回：先完成原子 claim、再按裁决运行或跳过本拍的 future；claim 失败不会建立执行 span。
 #[allow(clippy::too_many_arguments)]
 fn fire_once_guarded(
     run: RunFn,
     recorder: Arc<dyn ExecutionRecorder>,
+    span_recorder: Option<natelemetry::SpanRecorder>,
     node_id: Arc<str>,
     name: &'static str,
     id: &'static str,
@@ -818,6 +860,7 @@ fn fire_once_guarded(
                 recorded_run(
                     run,
                     recorder,
+                    span_recorder,
                     node_id,
                     name,
                     id,
@@ -870,6 +913,7 @@ struct FireOnceTask {
     /// 稳定 claim id(见 [`ScheduledTask::id`]);claim/last_fire 用它,`name` 仅作展示。
     id: &'static str,
     run: RunFn,
+    span_recorder: Option<natelemetry::SpanRecorder>,
     cluster: ClusterMode,
     plan: Arc<CronPlan>,
     /// 是否参与 misfire 巡检补漏:`FireOnce`=true;`ClaimOnly`=false(只每拍 claim 去重,不补漏)。
@@ -884,10 +928,11 @@ struct FireOnceTask {
 /// driver 自己用 `CronPlan::next_after` 算出本拍的【精确名义 `scheduled_at`】,睡到点后用它做 claim + recorder,
 /// 跨节点一致 → claim 去重成立。run 用内层 JoinSet spawn(长任务不阻塞下一拍的计算);shutdown 时随 JoinSet abort。
 ///
-/// # 参数
+/// 参数说明：
 /// - `plan`: 已解析 cron 计划,负责计算下一拍名义触发时间。
 /// - `run`: 宏生成的任务函数指针。
 /// - `recorder`: 运行事件记录器。
+/// - `span_recorder`: 可选调度 span 记录器，取得 claim 后才使用。
 /// - `node_id`: 当前节点标识。
 /// - `name`: 任务展示名。
 /// - `id`: 稳定任务 id,作为 FireLog claim key。
@@ -895,11 +940,14 @@ struct FireOnceTask {
 /// - `gate`: 启动期解析好的 leader gate。
 /// - `fire_log`: 跨节点共享的 claim 存储。
 /// - `timeout_ms`: 可选任务级超时毫秒数。
+///
+/// 返回：无；持续计算触发点直至任务被取消，非法计划会记录错误并结束 driver。
 #[allow(clippy::too_many_arguments)]
 async fn fire_once_cron_driver(
     plan: Arc<CronPlan>,
     run: RunFn,
     recorder: Arc<dyn ExecutionRecorder>,
+    span_recorder: Option<natelemetry::SpanRecorder>,
     node_id: Arc<str>,
     name: &'static str,
     id: &'static str,
@@ -935,6 +983,7 @@ async fn fire_once_cron_driver(
             inflight.spawn(fire_once_guarded(
                 run,
                 recorder.clone(),
+                span_recorder.clone(),
                 node_id.clone(),
                 name,
                 id,
@@ -962,13 +1011,15 @@ async fn fire_once_cron_driver(
 /// 不挂在 cron 回调上(cron 两次触发间无 tick)。tolerance 吸收节点间时钟偏差 + 一个 sweep 周期。
 /// 补偿用 spawn(不 inline await):单个长任务不拖垮整轮巡检。
 ///
-/// # 参数
+/// 参数说明：
 /// - `tasks`: 需要补漏的 FireOnce cron 任务列表。
 /// - `fire_log`: 跨节点共享的 claim 存储。
 /// - `recorder`: 运行事件记录器。
 /// - `node_id`: 当前节点标识。
 /// - `sweep_interval`: 巡检周期。
 /// - `tolerance_ms`: 认定旧 claim 可被补偿覆盖的容差毫秒数。
+///
+/// 返回：无；循环存活期间只为当前 leader 补偿可原子认领的拍次，取消时由上层停止。
 async fn misfire_sweep_loop(
     tasks: Vec<FireOnceTask>,
     fire_log: Arc<dyn FireLog>,
@@ -1008,6 +1059,7 @@ async fn misfire_sweep_loop(
                 inflight.spawn(fire_once_guarded(
                     t.run,
                     recorder.clone(),
+                    t.span_recorder.clone(),
                     node_id.clone(),
                     t.name,
                     t.id,
@@ -1201,20 +1253,24 @@ fn parse_fixed_offset(s: &str) -> Option<chrono::FixedOffset> {
 /// **仅给 misfire=Skip 的 cron 用**(经 tokio-cron-scheduler 回调);FireOnce/ClaimOnly cron 走自管 [`fire_once_cron_driver`]。
 /// 注:Skip cron 经回调触发拿不到名义触发时刻,故 `RunEvent.fire_at_ms` 用 `now_ms()`(它不参与 claim 去重)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `should`: 当前触发点是否允许本节点执行。
 /// - `run`: 宏生成的任务函数指针。
 /// - `recorder`: 运行事件记录器。
+/// - `span_recorder`: 可选调度 span 记录器，通过 leader 门禁后才传入执行路径。
 /// - `node_id`: 当前节点标识。
 /// - `name`: 任务展示名。
 /// - `id`: 稳定任务 id。
 /// - `cluster`: 当前任务的集群模式。
 /// - `timeout_ms`: 可选任务级超时毫秒数。
+///
+/// 返回：本节点无执行权时返回仅记录 Skipped 的空 future；有执行权时返回完整运行 future。
 #[allow(clippy::too_many_arguments)]
 fn cron_fire(
     should: bool,
     run: RunFn,
     recorder: &Arc<dyn ExecutionRecorder>,
+    span_recorder: &Option<natelemetry::SpanRecorder>,
     node_id: &Arc<str>,
     name: &'static str,
     id: &'static str,
@@ -1236,6 +1292,7 @@ fn cron_fire(
     recorded_run(
         run,
         recorder.clone(),
+        span_recorder.clone(),
         node_id.clone(),
         name,
         id,
@@ -1248,7 +1305,7 @@ fn cron_fire(
 /// 业务作用：按 zone 建 cron Job(**仅 misfire=Skip cron**)。zone 解析:`UTC`/`GMT`/`Z`/空 → UTC;含 `/` → IANA;
 /// 其余 → 固定 offset。无法解析 → `Err`。FireOnce/ClaimOnly cron 不走这里(见 [`fire_once_cron_driver`])。
 ///
-/// # 参数
+/// 参数说明：
 /// - `expr`: 6 字段 cron 表达式。
 /// - `zone`: 可选 cron 时区。
 /// - `run`: 宏生成的任务函数指针。
@@ -1257,8 +1314,11 @@ fn cron_fire(
 /// - `name`: 任务展示名。
 /// - `id`: 稳定任务 id。
 /// - `recorder`: 运行事件记录器。
+/// - `span_recorder`: 可选调度 span 记录器。
 /// - `node_id`: 当前节点标识。
 /// - `timeout_ms`: 可选任务级超时毫秒数。
+///
+/// 返回：时区与 cron 均合法时返回按拍复验 leader 的 Job；解析或构造失败时返回错误。
 #[allow(clippy::too_many_arguments)]
 fn build_cron_job(
     expr: &'static str,
@@ -1269,6 +1329,7 @@ fn build_cron_job(
     name: &'static str,
     id: &'static str,
     recorder: Arc<dyn ExecutionRecorder>,
+    span_recorder: Option<natelemetry::SpanRecorder>,
     node_id: Arc<str>,
     timeout_ms: Option<u64>,
 ) -> anyhow::Result<Job> {
@@ -1287,6 +1348,7 @@ fn build_cron_job(
                 should_run(cluster, &gate),
                 run,
                 &recorder,
+                &span_recorder,
                 &node_id,
                 name,
                 id,
@@ -1303,6 +1365,7 @@ fn build_cron_job(
                 should_run(cluster, &gate),
                 run,
                 &recorder,
+                &span_recorder,
                 &node_id,
                 name,
                 id,
@@ -1319,6 +1382,7 @@ fn build_cron_job(
                 should_run(cluster, &gate),
                 run,
                 &recorder,
+                &span_recorder,
                 &node_id,
                 name,
                 id,
@@ -1344,10 +1408,14 @@ struct NonCron {
 
 /// 业务作用：启动 start scheduled inner 流程；用于初始化后台任务或运行时。
 ///
-/// # 参数
+/// 参数说明：
 /// - `opts`: 已通过启动指纹检查的调度器配置。
+///
+/// 返回：全部任务、cron driver 与补漏循环完成登记时成功；配置、leader gate、claim 存储或
+/// cron 构造不满足启动不变量时返回错误且不发布可用状态。
 async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
     let recorder = opts.recorder.clone();
+    let span_recorder = opts.span_recorder.clone();
     let node_id: Arc<str> = Arc::from(opts.node_id.as_str());
     let fire_log = opts.fire_log.clone();
     let misfire_sweep_interval = opts.misfire_sweep_interval;
@@ -1434,6 +1502,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                             name,
                             id,
                             run,
+                            span_recorder: span_recorder.clone(),
                             cluster,
                             plan,
                             sweep: misfire == MisfirePolicy::FireOnce, // ClaimOnly 不补漏
@@ -1455,6 +1524,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                             name,
                             id,
                             recorder.clone(),
+                            span_recorder.clone(),
                             node_id.clone(),
                             timeout_ms,
                         )?;
@@ -1518,6 +1588,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                     delay_ms
                 );
                 let recorder = recorder.clone();
+                let span_recorder = span_recorder.clone();
                 let node_id = node_id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -1527,6 +1598,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                     once.spawn(recorded_run(
                         run,
                         recorder.clone(),
+                        span_recorder.clone(),
                         node_id.clone(),
                         name,
                         id,
@@ -1557,6 +1629,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                 );
                 let gate = gate.clone();
                 let recorder = recorder.clone();
+                let span_recorder = span_recorder.clone();
                 let node_id = node_id.clone();
                 tokio::spawn(async move {
                     let period = Duration::from_millis(period_ms);
@@ -1589,7 +1662,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                                         );
                                         record_skip(recorder.as_ref(), name, id, cluster, node_id.as_ref(), now_ms(), SkipReason::InflightLimit);
                                     }
-                                    _ => { inflight.spawn(recorded_run(run, recorder.clone(), node_id.clone(), name, id, cluster, now_ms(), timeout_ms)); }
+                                    _ => { inflight.spawn(recorded_run(run, recorder.clone(), span_recorder.clone(), node_id.clone(), name, id, cluster, now_ms(), timeout_ms)); }
                                 }
                             }
                             // 任一子任务完成即回收 + 记录 panic(子任务 panic 不影响 driver 继续调度)。
@@ -1612,6 +1685,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                 );
                 let gate = gate.clone();
                 let recorder = recorder.clone();
+                let span_recorder = span_recorder.clone();
                 let node_id = node_id.clone();
                 tokio::spawn(async move {
                     if let Some(d) = initial_delay_ms {
@@ -1628,6 +1702,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                             set.spawn(recorded_run(
                                 run,
                                 recorder.clone(),
+                                span_recorder.clone(),
                                 node_id.clone(),
                                 name,
                                 id,
@@ -1675,6 +1750,7 @@ async fn start_scheduled_inner(opts: &SchedulerOptions) -> anyhow::Result<()> {
                 t.plan.clone(),
                 t.run,
                 recorder.clone(),
+                t.span_recorder.clone(),
                 node_id.clone(),
                 t.name,
                 t.id,
@@ -1743,6 +1819,11 @@ pub use async_macro::{scheduled, Async, EnableAsync, EnableScheduling};
 #[doc(hidden)]
 pub mod __private {
     pub use linkme;
+    // 分区执行域形态的展开引用 napart 的提交入口与受理/拒绝类型;
+    // 未启用 feature 时该形态在编译期以"__private 中无 napart"显形,spawn 形态不受影响。
+    #[cfg(feature = "partition")]
+    pub use napart;
+    pub use natelemetry;
     pub use tokio;
     pub use tracing;
 }

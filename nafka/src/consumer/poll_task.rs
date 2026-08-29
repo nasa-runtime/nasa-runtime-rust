@@ -4500,14 +4500,6 @@ fn prepare_typed_message(
     }
 }
 
-/// 业务作用：从透传上下文提取低基数 trace id；缺失或非字符串时返回空串。
-fn consume_trace_id(ctx: &ConsumeCtx) -> &str {
-    ctx.passthrough
-        .get("traceId")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-}
-
 /// 业务作用：在每次调用业务 handler 前，同步可信总投递序号与独立的普通失败预算序号。
 ///
 /// 同一 offset 退避后会重新解码为新的记录；这里仍在最终调用点覆盖一次，确保 batch 合并、
@@ -4553,12 +4545,18 @@ fn annotate_delivery_attempt(
 /// - `runtime`: 提供 owner 外部异步运行时与 handler 超时。
 /// - `route`: 本次调用的冻结 route。
 /// - `records`: 同分区、同 route 的非空连续交付 run。
+/// - `handler_ambient`：从消息传播信息派生的 handler 环境 trace。
+///
+/// 返回：handler 的完成结局；超过冻结预算时返回稳定超时失败。
 fn invoke_typed_handler(
     runtime: &Arc<KafkaProxyInner>,
     route: &Arc<dyn crate::consumer::erased::ErasedConsumer>,
     records: Vec<ErasedRecord>,
+    handler_ambient: Option<natelemetry::TraceContext>,
 ) -> InvocationOutcome {
-    let future = route.invoke(records);
+    // handler 全程处于消息链路的环境作用域:业务在处理中发起的出站调用(REST/Kafka)未显式绑定
+    // 上下文时自动延续本条消息的 trace,与 HTTP 入站中间件的作用域语义一致。
+    let future = natelemetry::with_ambient(handler_ambient, route.invoke(records));
     if let Some(timeout) = runtime.config.behavior.handler_timeout_ms {
         runtime.runtime.block_on(async {
             match tokio::time::timeout(Duration::from_millis(timeout), future).await {
@@ -4756,16 +4754,27 @@ fn process_logical_typed_batch(
                     let last_offset = sources
                         .last()
                         .map_or(first.offset, |source| source.ctx.offset);
-                    let trace_id = consume_trace_id(first);
-                    let consumer_span = first.trace_context().and_then(|parent| {
-                        runtime.span_recorder.as_ref().map(|recorder| {
-                            recorder.start(
-                                "Kafka consume",
-                                &parent,
-                                natelemetry::SpanKind::Consumer,
-                            )
-                        })
+                    // 缺失或非法 traceparent 的消息必须建立新根：否则 handler 内的 REST/Kafka
+                    // 出站调用仍会断链。新根是否采样沿用 exporter 的冻结策略；未装 recorder 时
+                    // 只传播不记录，避免为了关联性擅自增加遥测出口负载。
+                    let parent = first.trace_context().unwrap_or_else(|| {
+                        natelemetry::TraceContext::new_root(
+                            runtime
+                                .span_recorder
+                                .as_ref()
+                                .is_some_and(natelemetry::SpanRecorder::should_sample_root),
+                        )
                     });
+                    let trace_id = parent.trace_id_hex();
+                    let consumer_span = runtime.span_recorder.as_ref().map(|recorder| {
+                        recorder.start("Kafka consume", &parent, natelemetry::SpanKind::Consumer)
+                    });
+                    // handler 的环境上下文与 consumer span 同一 span-id;recorder 未启用时
+                    // 也派生子上下文,保证下游 parent 指向本次消费而不是上游 producer。
+                    let handler_ambient = consumer_span
+                        .as_ref()
+                        .map(natelemetry::SpanGuard::context)
+                        .or_else(|| Some(parent.child(natelemetry::random_span_id())));
                     let outcome = if route.meta().shape == ConsumerShape::Batch {
                         let span = tracing::info_span!(
                             "kafka.consume_batch",
@@ -4781,7 +4790,9 @@ fn process_logical_typed_batch(
                             retry_attempt,
                             trace_id
                         );
-                        span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
+                        span.in_scope(|| {
+                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
+                        })
                     } else {
                         let span = tracing::info_span!(
                             "kafka.consume",
@@ -4795,7 +4806,9 @@ fn process_logical_typed_batch(
                             retry_attempt,
                             trace_id
                         );
-                        span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
+                        span.in_scope(|| {
+                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
+                        })
                     };
                     if let Some(span) = consumer_span {
                         let _ = span.finish(None);

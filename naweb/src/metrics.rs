@@ -1,7 +1,7 @@
 //! 端点安全流水线的低基数进程内指标与 Prometheus 文本渲染。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -466,6 +466,8 @@ impl RouteSecurityMetrics {
 pub struct SecurityMetrics {
     /// 按静态 route ID 排序的有限路由指标集合。
     routes: RwLock<BTreeMap<&'static str, Arc<RouteSecurityMetrics>>>,
+    /// 统一指标目录完成容量预留后关闭新 route ID 注册，保证渲染面不越过冻结上界。
+    frozen: AtomicBool,
     /// 成功发布与失败保留 last-good 的热更新计数。
     reloads: [AtomicU64; 2],
     /// 当前已发布安全快照代次。
@@ -485,6 +487,7 @@ impl SecurityMetrics {
     pub fn new(generation: u64) -> Self {
         Self {
             routes: RwLock::new(BTreeMap::new()),
+            frozen: AtomicBool::new(false),
             reloads: std::array::from_fn(|_| AtomicU64::new(0)),
             generation: AtomicU64::new(generation),
         }
@@ -499,15 +502,51 @@ impl SecurityMetrics {
     /// # 返回
     ///
     /// 同一 route ID 始终返回同一原子集合；注册数量受二进制静态路由数限制，不读取 raw path。
+    ///
+    /// # Panics
+    ///
+    /// [`SecurityMetrics::freeze_worst_case_series`] 返回后传入此前未登记的 route ID 时中止调用；
+    /// 冻结后的集合不能继续增长，否则进程级指标目录已经预留的最坏序列上界会失真。既有 route ID
+    /// 在请求期仍可重复取得，不会触发该门禁。
     pub fn route(&self, policy: RoutePolicy) -> Arc<RouteSecurityMetrics> {
         if let Some(existing) = read_routes(&self.routes).get(policy.route_id).cloned() {
             return existing;
         }
         let mut routes = write_routes(&self.routes);
+        if let Some(existing) = routes.get(policy.route_id).cloned() {
+            return existing;
+        }
+        // 容量预留与新 route 注册共享写锁作为线性化点；冻结后继续增长会让统一目录的
+        // 最坏序列上界失真，因此必须在路由开放前明确中止装配。
+        assert!(
+            !self.frozen.load(Ordering::Acquire),
+            "security metric route registration is closed after series budget freeze"
+        );
         routes
             .entry(policy.route_id)
             .or_insert_with(|| Arc::new(RouteSecurityMetrics::new(policy)))
             .clone()
+    }
+
+    /// 业务作用：计算当前静态路由集合在全部指标槽位被观测后可能导出的最大 Prometheus 序列数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含 counter、gauge，以及每个 histogram 的有限 bucket、正无穷 bucket、sum、count；
+    /// 结果供进程级指标目录在发布兼容源前一次性预留容量。
+    pub fn worst_case_series(&self) -> usize {
+        worst_case_series_for(&read_routes(&self.routes))
+    }
+
+    /// 业务作用：在统一指标目录预留容量的线性化点冻结 route 集合并返回精确最坏序列数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：写锁内观测到的完整 route 集合上界；返回后既有 route 可继续记录，新 route ID 会拒绝注册。
+    pub fn freeze_worst_case_series(&self) -> usize {
+        let routes = write_routes(&self.routes);
+        self.frozen.store(true, Ordering::Release);
+        worst_case_series_for(&routes)
     }
 
     /// 业务作用：记录一次安全快照热更新结果。
@@ -715,6 +754,37 @@ fn non_cumulative_buckets(
     }
     buckets.push(count.saturating_sub(previous));
     buckets
+}
+
+/// 业务作用：按冻结或只读的安全 route 集合计算全部 counter、gauge 与 histogram 的序列上界。
+///
+/// 参数说明：
+/// - `routes`：以稳定 route ID 去重后的指标集合。
+///
+/// 返回：包含三条全局序列和每条 route 全部可能槽位的饱和和。
+fn worst_case_series_for(routes: &BTreeMap<&'static str, Arc<RouteSecurityMetrics>>) -> usize {
+    const GLOBAL_SERIES: usize = 3;
+    const HISTOGRAM_SERIES: usize = DURATION_BUCKETS_NANOS.len() + 3;
+    routes.values().fold(GLOBAL_SERIES, |total, route| {
+        let auth = usize::from(
+            route.auth_requirement != "public" && route.auth_requirement != "unspecified",
+        ) * auth_outcomes().len();
+        let crypto_directions = usize::from(route.crypto_directions.request)
+            + usize::from(route.crypto_directions.response);
+        let crypto = crypto_directions * metric_outcomes().len();
+        let replay = usize::from(route.replay_required) * replay_outcomes().len();
+        let bypass = usize::from(route.condition.is_some());
+        let durations = metric_operations().len() * HISTOGRAM_SERIES;
+        total.saturating_add(
+            metric_outcomes()
+                .len()
+                .saturating_add(auth)
+                .saturating_add(crypto)
+                .saturating_add(replay)
+                .saturating_add(bypass)
+                .saturating_add(durations),
+        )
+    })
 }
 
 impl Default for SecurityMetrics {

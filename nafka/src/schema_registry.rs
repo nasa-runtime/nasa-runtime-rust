@@ -10,7 +10,7 @@
 //! 本模块不生成 Avro/Protobuf/JSON codec，不决定 subject 命名、兼容级别、发布审批、ACL 或灾备。
 //! 调用取消后远端结果未知，写入方必须依靠 Registry 去重语义和自己的发布流程安全重试。
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -711,7 +711,35 @@ pub struct ConfluentSchemaRegistry {
     client: reqwest::Client,
     options: ConfluentRegistryOptions,
     cache: Mutex<SchemaCache>,
+    /// 冷缓存 singleflight:同一 schema ID 的并发未命中只放行一个 leader 去访问 Registry,
+    /// 其余调用等待该轮结束后重查缓存。防止冷启动或 Registry 故障时,解码并发被原样放大成
+    /// 对 Registry 的请求风暴;leader 失败时等待者逐个接替(串行重试),不回到并行放大。
+    inflight: Mutex<HashMap<SchemaId, tokio::sync::watch::Receiver<()>>>,
     metrics: SchemaRegistryMetrics,
+}
+
+/// 单个 schema ID 的一轮 singleflight 领导权;Drop 时先摘除在飞登记再释放 watch sender,
+/// 使正常返回、错误返回与调用方取消都必然唤醒等待者且不会让新请求加入已死的轮次。
+struct InflightRound<'a> {
+    registry: &'a ConfluentSchemaRegistry,
+    id: SchemaId,
+    _sender: tokio::sync::watch::Sender<()>,
+}
+
+impl Drop for InflightRound<'_> {
+    /// 业务作用：结束本轮 singleflight——无论 leader 以何种方式离开(成功/失败/被取消),
+    /// 都摘除登记并经 sender drop 唤醒全部等待者,杜绝等待者被遗忘的悬挂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；移除登记后 sender 随守卫释放，等待者可重查缓存或竞争下一轮。
+    fn drop(&mut self) {
+        self.registry
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 
 impl ConfluentSchemaRegistry {
@@ -739,6 +767,11 @@ impl ConfluentSchemaRegistry {
     }
 
     /// 业务作用：校验配置并构造 adapter。
+    ///
+    /// 参数说明：
+    /// - `options`：Registry endpoint、超时、响应上限与正负缓存策略。
+    ///
+    /// 返回：配置全部有界且 endpoint 可作 HTTP(S) 基址时返回 adapter；否则返回稳定配置错误。
     pub fn new(options: ConfluentRegistryOptions) -> Result<Self, SchemaRegistryError> {
         if options.cache_capacity == 0
             || options.max_response_bytes == 0
@@ -786,6 +819,7 @@ impl ConfluentSchemaRegistry {
             endpoint,
             client,
             cache: Mutex::new(SchemaCache::new(options.cache_capacity)),
+            inflight: Mutex::new(HashMap::new()),
             metrics: SchemaRegistryMetrics::new(),
             options,
         })
@@ -889,7 +923,11 @@ struct SchemaRequest<'a> {
 
 #[async_trait::async_trait]
 impl SchemaRegistryClient for ConfluentSchemaRegistry {
-    /// 业务作用：优先读取正/负缓存，未命中时按全局 ID 拉取并缓存 Registry schema。
+    /// 业务作用：优先读取正/负缓存，未命中时经 singleflight 按全局 ID 拉取并缓存 Registry schema。
+    ///
+    /// 同一 ID 的并发未命中只放行一个 leader 访问 Registry;其余调用等待该轮结束后重查缓存,
+    /// leader 成功即全体命中,失败则等待者逐个接替(串行而非并行重试)。冷启动与 Registry 故障
+    /// 期间对 Registry 的请求量因此以"每 ID 同时至多一个"为上界,不随解码并发放大。
     ///
     /// 参数说明：
     /// - `id`: Registry 分配且已经过正数校验的全局 schema ID。
@@ -905,21 +943,60 @@ impl SchemaRegistryClient for ConfluentSchemaRegistry {
             (Arc<RegisteredSchema>, SchemaLookupOutcome),
             (SchemaRegistryError, SchemaLookupOutcome),
         > = async {
-            let cached = self
-                .cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(id, Instant::now());
-            if let Some(value) = cached {
-                // 正负缓存都未访问 Registry，但负命中表示上游持续按不存在的 ID 解码，
-                // 必须与正命中分开观测，才能区分健康复用和无效流量。
-                return match value {
-                    Some(schema) => Ok((schema, SchemaLookupOutcome::CacheHit)),
-                    None => Err((
-                        SchemaRegistryError::SchemaNotFound(id),
-                        SchemaLookupOutcome::NegativeCacheHit,
-                    )),
+            // singleflight 领导权轮次:守卫存在期间同 ID 的其它调用都在等待本轮;必须在取得
+            // 领导权后立刻持有,使任何离开路径(含取消)都能结束轮次。
+            let _round: InflightRound<'_>;
+            loop {
+                let cached = self
+                    .cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(id, Instant::now());
+                if let Some(value) = cached {
+                    // 正负缓存都未访问 Registry，但负命中表示上游持续按不存在的 ID 解码，
+                    // 必须与正命中分开观测，才能区分健康复用和无效流量。
+                    // singleflight 等待后到达这里的调用同样按缓存结局记账——它没有访问 Registry。
+                    return match value {
+                        Some(schema) => Ok((schema, SchemaLookupOutcome::CacheHit)),
+                        None => Err((
+                            SchemaRegistryError::SchemaNotFound(id),
+                            SchemaLookupOutcome::NegativeCacheHit,
+                        )),
+                    };
+                }
+                // 领导权裁决在锁内完成,守卫构造与等待都在锁外——map 锁绝不跨 await,
+                // 守卫的 Drop(会再取同一把锁)也绝不在持锁路径上构造或析构。
+                let joined = {
+                    let mut inflight = self
+                        .inflight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match inflight.get(&id) {
+                        Some(receiver) => Err(receiver.clone()),
+                        None => {
+                            // 无在飞轮次:本调用成为 leader。先登记再发请求,窗口内到达的并发
+                            // 调用都会订阅本轮;watch sender 随守卫在任何离开路径释放。
+                            let (sender, receiver) = tokio::sync::watch::channel(());
+                            inflight.insert(id, receiver);
+                            Ok(sender)
+                        }
+                    }
                 };
+                match joined {
+                    Ok(sender) => {
+                        _round = InflightRound {
+                            registry: self,
+                            id,
+                            _sender: sender,
+                        };
+                        break;
+                    }
+                    Err(mut receiver) => {
+                        // 等待当前轮次结束(changed 在 sender drop 时以 Err 返回,即轮次结束
+                        // 信号),然后回到循环开头重查缓存:leader 成功→命中;失败→接替为新 leader。
+                        let _ = receiver.changed().await;
+                    }
+                }
             }
 
             let id_text = id.get().to_string();

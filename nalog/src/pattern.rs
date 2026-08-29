@@ -1,4 +1,4 @@
-//! logback `LOG_PATTERN` 子集:解析(compile)+ 渲染(render),对照 原实现 logback-原框架.xml 的
+//! logback `LOG_PATTERN` 子集：解析(compile)+ 渲染(render)，支持
 //! `%d{...} %highlight([%-5level]) %magenta([%thread]) %cyan(%logger{30}[%line]) - %msg%n`。
 //!
 //! **仅实现当前 XML 用到的子集**(`%d{}`/`%d`/`%level`/`%-5level`/`%thread`/`%logger{N}`/`%line`/`%msg`/`%n`/`%%`/
@@ -9,7 +9,7 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
-/// 默认 pattern(逐字对照 原工具包 logback-原框架.xml 的 `LOG_PATTERN`)。`LogConfig.pattern=None` 时使用。
+/// 默认 `LOG_PATTERN`；`LogConfig.pattern=None` 时使用。
 pub const DEFAULT_LOG_PATTERN: &str =
     "%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight([%-5level]) %magenta([%thread]) %cyan(%logger{30}[%line]) - %msg%n";
 

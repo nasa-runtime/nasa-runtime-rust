@@ -3,6 +3,13 @@
 业务应用只依赖 `nasa` 门面，并按实际运行能力启用 feature。服务型项目使用
 `#[nasa::application]` 统一拥有配置、组件生命周期、信号和停机顺序。
 
+## 开始前的边界
+
+服务型项目优先使用 `nasa` 门面和 Application，让最终 YAML、资源探测、Ready 与反向停机形成一个
+生命周期。只需要算法、协议 codec 或显式连接管理的库型项目可以直接装配对应组件，但必须自行负责
+初始化失败、观测和资源释放。Application 管理多种 datasource，不提供跨 driver 原子提交；跨库流程
+应组合源库 Outbox、目标库 Inbox 和稳定事件标识。
+
 ## Cargo 依赖
 
 以下组合提供配置装载、日志、MySQL 事务、Mapper、Redis、两级缓存和 Web：

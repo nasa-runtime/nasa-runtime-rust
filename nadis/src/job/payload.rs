@@ -42,6 +42,7 @@ pub fn decode_json_payload<T: DeserializeOwned>(bytes: &[u8]) -> core::result::R
     serde_json::from_slice(bytes).map_err(|error| error.to_string())
 }
 
+/// 业务作用：累计单个 RedisJob JSON 载荷的解析节点，限制结构复杂度消耗。
 struct JsonBudget {
     nodes: usize,
 }
@@ -61,6 +62,7 @@ impl JsonBudget {
     }
 }
 
+/// 业务作用：把共享节点预算与当前递归深度传入 serde 的下一层解析。
 struct StrictJsonSeed<'a> {
     budget: &'a mut JsonBudget,
     depth: usize,
@@ -89,6 +91,7 @@ impl<'de> DeserializeSeed<'de> for StrictJsonSeed<'_> {
     }
 }
 
+/// 业务作用：遍历 JSON 标量与容器，同时拒绝重复键、过深结构和超量节点。
 struct StrictJsonVisitor<'a> {
     budget: &'a mut JsonBudget,
     depth: usize,

@@ -838,11 +838,14 @@ pub fn patch_mapping(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   method = "GET"/"POST"/"PUT"/"DELETE"/"PATCH"（存注册项 + 日志）；
 ///   verb   = "get"/"post"/"put"/"delete"/"patch"（生成 ::axum::routing::<verb>）
 ///
-/// # 参数
+/// 参数说明：
 /// - `attr`: 属性宏括号内的 token stream。
 /// - `item`: 被宏处理的 Rust item token stream。
-/// - `method`: trait 方法 AST 或 HTTP 方法。
-/// - `verb`: HTTP 方法字符串。
+/// - `method`: 写入路由合同的 HTTP 方法。
+/// - `verb`: 选择 Axum routing 构造器的小写方法名。
+///
+/// 返回：参数和 handler 合法时返回包含业务函数与静态路由注册项的 token stream；非法 route、媒体类型、
+/// 安全配置或 interceptor 合同时返回 `compile_error!` token stream，不产生部分注册项。
 fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> TokenStream {
     let (axum_p, linkme_p, _tracing_p) = third_party_paths();
     let runtime_p = web_runtime_path();
@@ -883,7 +886,7 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
         // 否则按 key=value 列表解析。
         let parser = syn::meta::parser(|meta| {
             if meta.path.is_ident("path") || meta.path.is_ident("value") {
-                path = Some(meta.value()?.parse::<LitStr>()?.value()); // path 与 value 同义(对齐 原框架)
+                path = Some(meta.value()?.parse::<LitStr>()?.value()); // path 与 value 是公开兼容别名。
             } else if meta.path.is_ident("produces") {
                 produces = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("consumes") {
@@ -955,7 +958,7 @@ fn expand(attr: TokenStream, item: TokenStream, method: &str, verb: &str) -> Tok
         }
     };
 
-    // ── path 必须以 '/' 开头(对齐 axum/原框架 路由约定:相对 context-path 的绝对路径)──
+    // path 必须是相对 context-path 的绝对路由，提前拒绝可避免把无效路由留到运行期。
     //   否则 axum `.route()` 运行期会 panic("paths must start with a slash"),不如编译期就报错提醒。
     if !path.starts_with('/') {
         return syn::Error::new(

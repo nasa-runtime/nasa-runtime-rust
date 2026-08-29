@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use nadis::job::{
-    JobConfig, JobDefinition, JobHandler, JobQuery, JobSourceHealthState, PreparedJobRuntime,
-    RedisJobPlan, RedisJobSources, RunningJobRuntime,
+    JobConfig, JobDefinition, JobHandler, JobQuery, JobSourceHealthReason, JobSourceHealthState,
+    PreparedJobRuntime, RedisJobPlan, RedisJobSources, RunningJobRuntime,
 };
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
@@ -766,7 +766,14 @@ async fn run_job_health_monitor(
                         .map_or(reason::DEGRADED, |value| value.as_str()),
                 ),
                 JobSourceHealthState::NotReady => {
-                    terminal_source.get_or_insert_with(|| snapshot.qualifier.clone());
+                    terminal_source.get_or_insert_with(|| {
+                        (
+                            snapshot.qualifier.clone(),
+                            snapshot
+                                .reason
+                                .unwrap_or(JobSourceHealthReason::CriticalRuntime),
+                        )
+                    });
                     (
                         DependencyState::NotReady,
                         snapshot
@@ -801,11 +808,12 @@ async fn run_job_health_monitor(
             },
             Instant::now(),
         );
-        if let Some(qualifier) = terminal_source {
+        if let Some((qualifier, terminal_reason)) = terminal_source {
             return Err(job_error(
                 ApplicationPhase::Running,
                 format!(
-                    "RedisJob source `{qualifier}` entered terminal NotReady after its control authority or restart budget was exhausted"
+                    "RedisJob source `{qualifier}` entered terminal NotReady: {}",
+                    terminal_reason.as_str()
                 ),
             ));
         }
@@ -956,6 +964,7 @@ enum RedisJobLifecycle {
     Empty,
 }
 
+/// 业务作用：持有 RedisJob 启动任务或运行时的唯一停机权，保证两种阶段都能完成受管收口。
 struct RedisJobShutdown {
     lifecycle: Arc<tokio::sync::Mutex<RedisJobLifecycle>>,
 }

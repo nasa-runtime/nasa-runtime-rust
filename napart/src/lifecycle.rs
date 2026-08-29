@@ -89,6 +89,7 @@ pub(crate) enum SupervisorWaitError {
     AuthorityLost,
 }
 
+/// 业务作用：把受监督子任务的类型、可等待句柄与强制中止权绑定到同一 lease 槽位。
 struct ChildHandleEntry {
     kind: ChildTaskKind,
     handle: Option<JoinHandle<()>>,
@@ -498,6 +499,7 @@ impl LifecycleCore {
     }
 }
 
+/// 业务作用：保存 supervisor 当前 epoch 的等待与中止句柄，以及最后取得退出证明的 epoch。
 struct SupervisorSlot {
     epoch: Option<u64>,
     handle: Option<JoinHandle<()>>,

@@ -472,6 +472,7 @@ pub(crate) fn run_isolated(context: &str, action: impl FnOnce()) {
     }));
 }
 
+/// 业务作用：隔离调用方 Waker 的唤醒与析构，防止外部实现展开越过框架 panic 边界。
 struct ShieldWake {
     downstream: Mutex<Option<Waker>>,
 }

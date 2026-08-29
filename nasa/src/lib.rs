@@ -28,6 +28,16 @@
 //! 显式声明 Redis 组件并决定主体身份或路由中间件。默认后端失败时 fail-open；它不替代 Web 的
 //! 单实例令牌桶，也不自动改变路由。
 //!
+//! # 请求安全与链路传播
+//!
+//! `authz` 门面公开同代 route 策略、未命中缺省与 generation 的完整裁决快照；Web、registry 与
+//! handler 请求上下文使用同一语义，显式策略不会被公开 route 豁免绕过。对象授权 provider 不能
+//! 明确放行时 fail-closed；身份验签仍由 `oauth` 或业务认证层负责。
+//!
+//! `telemetry` 严格继承合法上游的 sampled 位，只有 exporter sampler 能裁决无上游的新根；纯传播
+//! 入口保持未采样。`scheduling` 在 leader 与 claim 权威都取得后才创建执行 span，拒绝拍次只记录
+//! Skipped。门面不提供跨服务采样协调、物理 exactly-once 调度或业务对象归属推断。
+//!
 //! 默认只接受 HTTP/1；最终 YAML 设置 `server.http2.enabled=true` 即可在同一端口接受 h2c prior
 //! knowledge，高级 transport 字段可省略。该入口不终止 TLS，也不实现 `Upgrade: h2c`。
 // ============================================================================
@@ -73,7 +83,7 @@
 ///     url: ${APP_PRIMARY_DB_URL}
 ///   reporting:
 ///     driver: postgresql
-///     url: ${APP_REPORTING_DB_URL}
+///     url: ${APP_REPORTING_POSTGRES_URL}
 /// outbox:
 ///   datasource_ref: reporting
 /// saga:
@@ -105,6 +115,7 @@
 /// `default_kafka`/`kafka(name)` 取得受管句柄。
 /// Outbox 与 Saga 用 `datasource_ref`，Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
 /// 引用不存在时在建连前拒绝，不会猜测唯一实例或回退默认源。
+/// `partition` 的 `partitions`、`queue_capacity` 与 `max_partitions` 字段描述默认 Runner；
 /// `partition.runners.<name>` 可以声明多个相互隔离的分区 Runner；每个字段都可省略并逐项使用
 /// 有界默认值，`default_runner` 决定 `app.partition()` 的业务投影。代码侧可用
 /// `configure_partition_runner` 在 Service UserHook 登记 YAML 未占用的启动期名称，同名不能由两个

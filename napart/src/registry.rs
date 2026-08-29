@@ -59,7 +59,7 @@ impl RunnerName {
 }
 
 impl fmt::Debug for RunnerName {
-    /// 业务作用：渲染稳定 Runner 名称，供配置错误和测试断言定位执行域。
+    /// 业务作用：渲染稳定 Runner 名称，供配置错误与运行诊断定位执行域。
     ///
     /// 参数说明：
     /// - `f`: 接收结构化名称的格式化器。
@@ -304,6 +304,7 @@ impl PartitionRunnerRegistryBuilder {
     }
 }
 
+/// 业务作用：集中拥有命名 Runner 的容量、身份分配器与唯一实例表。
 struct RegistryInner {
     max_runners: usize,
     next_id: AtomicU64,

@@ -162,6 +162,7 @@ pub(crate) enum ConsumerPoll<T> {
     Failed,
 }
 
+/// 业务作用：保存单个全局序号的发布状态与至多一个业务载荷。
 struct Slot<T> {
     state: AtomicU8,
     value: Mutex<Option<T>>,
@@ -181,6 +182,7 @@ impl<T> Slot<T> {
     }
 }
 
+/// 业务作用：把连续序号映射到固定数量槽位，支持队列按段回收而不移动存量任务。
 struct Segment<T> {
     base: u64,
     slots: Box<[Slot<T>]>,
@@ -214,6 +216,7 @@ impl<T> Segment<T> {
     }
 }
 
+/// 业务作用：集中拥有序号分配、producer 临界计数、分段索引与单向失败状态。
 struct QueueCore<T> {
     next_sequence: AtomicU64,
     accepting: AtomicBool,
@@ -411,6 +414,7 @@ impl<T> QueueCore<T> {
     }
 }
 
+/// 业务作用：用 RAII 表示一次 producer 序号预留临界区，保证关闭方最终观察到零在途提交。
 struct ProducerSection<'a, T> {
     core: &'a QueueCore<T>,
 }

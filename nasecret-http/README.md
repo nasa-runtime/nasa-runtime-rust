@@ -3,6 +3,19 @@
 `nasecret-http` 把 `nasecret` 快照转换为可两阶段轮换的 reqwest TLS/mTLS client。证书、私钥、
 信任根解析和 client 构造全部发生在 prepare；commit 只原子发布已经验证的客户端指针。
 
+## 轮换架构
+
+```text
+SecretSnapshot 候选 ──→ prepare：解析证书、私钥、信任根并构造 client
+                                      │
+                                      ├─ 失败：拒绝候选，保留 current
+                                      └─ 成功 ──→ commit：原子发布新快照
+请求开始 ──→ 固定 current 快照 ──→ 请求结束
+```
+
+prepare 不改变对外可见客户端；只有所有材料通过校验后才允许 commit。调用方通过统一轮换协调器观察
+prepare/commit 结果和当前代际，单次请求始终使用同一快照。
+
 业务通过门面开启 `secret-http`：
 
 ```toml

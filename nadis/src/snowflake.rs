@@ -88,7 +88,7 @@ impl WorkerIdLease {
     }
 }
 
-// ==================== 配置 + builder(替 原框架 自动配置)====================
+// ==================== 显式配置与 builder ====================
 
 /// 雪花配置(对照 原实现 `nasa.snowflake`;serde 反序列化,不进容器)。
 #[derive(Debug, Clone, Deserialize)]

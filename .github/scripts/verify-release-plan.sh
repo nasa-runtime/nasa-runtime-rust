@@ -22,6 +22,7 @@ trap cleanup EXIT
 
 metadata_file="$plan_root/workspace-metadata.json"
 plan_file="$plan_root/release-plan.tsv"
+versioned_plan_file="$plan_root/release-versioned-plan.tsv"
 edges_file="$plan_root/workspace-edges.tsv"
 versions_file="$plan_root/workspace-versions.tsv"
 resolved_file="$plan_root/resolved-requirements.tsv"
@@ -99,7 +100,29 @@ report_registry_failure() {
 "$cargo_bin" metadata --locked --no-deps --format-version 1 \
   --manifest-path "$repository_root/Cargo.toml" > "$metadata_file"
 "$repository_root/.github/scripts/release-crates.sh" --plan > "$plan_file"
+"$repository_root/.github/scripts/release-crates.sh" --versioned-plan > "$versioned_plan_file"
 : > "$resolved_file"
+
+while IFS=$'\t' read -r batch stage items; do
+  plain_stage="$(awk -F '\t' -v batch="$batch" '$1 == batch { print $2; exit }' "$plan_file")"
+  if [[ "$plain_stage" != "$stage" ]]; then
+    echo "批次 $batch 的普通计划与版本计划阶段不一致" >&2
+    exit 1
+  fi
+  for item in $items; do
+    crate_name="${item%@*}"
+    planned_version="${item##*@}"
+    workspace_version="$(jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version' "$metadata_file")"
+    if [[ -z "$workspace_version" || "$workspace_version" == "null" ]]; then
+      echo "版本计划中的 $crate_name 不属于当前工作区" >&2
+      exit 1
+    fi
+    if [[ "$planned_version" != "$workspace_version" ]]; then
+      echo "$crate_name 的发布计划版本 $planned_version 与 manifest 版本 $workspace_version 不一致" >&2
+      exit 1
+    fi
+  done
+done < "$versioned_plan_file"
 
 while IFS=$'\t' read -r _batch _stage crates; do
   for crate_name in $crates; do

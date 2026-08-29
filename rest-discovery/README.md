@@ -140,6 +140,14 @@ trait OrderApi {
 }
 ```
 
+- 返回类型接受 `anyhow::Result<T>`(错误经 anyhow 收敛)或
+  `Result<T, E>`(要求 `E: From<RestDiscoveryError>`)——全部失败点都是已脱敏的
+  `RestDiscoveryError`，业务错误转换不存在回显远端敏感正文的通道。
+- `#[QueryMap]` 支持 `Option<T>` 的稳定合同：`None` 不追加任何 query 片段，`Some` 按字段声明
+  顺序展开内层结构体；`Option` 本身从不进序列化器。
+- 未显式绑定 trace 上下文的调用在环境(task-local)链路作用域内发起时，自动延续同一 trace
+  并派生 client 子 span；显式绑定始终优先。
+
 ## YML 配置与使用
 
 `rest-discovery` 本体是 provider-neutral 运行时，不直接读取 yml。若需要从 yml 一键装配 Nacos 注册发现，请使用 `rest-discovery-nacos` 的 `rest_discovery:` 配置。只用本 crate 时，推荐应用定义 `rest:` 段再映射到 `RestDiscoveryOptions`。

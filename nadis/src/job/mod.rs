@@ -33,6 +33,7 @@ pub mod trigger;
 
 pub use api::{
     JobControl, JobQuery, JobSourceHealthReason, JobSourceHealthSnapshot, JobSourceHealthState,
+    NamespaceGovernanceReport,
 };
 pub use config::{JobConfig, JobConfigBuilder, JobSourceConfig, JobSourceConfigBuilder};
 pub use coordinator::{FanoutBuilder, FanoutCoordinator, FanoutRootContext, FanoutSubmitOutcome};
@@ -73,8 +74,9 @@ pub use repository::{
     CancelOutcome, CompletionTrimOutcome, DeferOutcome, DefinitionControlOutcome, DeleteOutcome,
     DueEntry, FailWaitingOutcome, FinishFanoutRootOutcome, FinishOutcome, FireDueBatchItem,
     FireDueBatchResult, FireDueOutcome, JobDefinitionRecord, JobReapOutcome, JobRegisterOutcome,
-    JobRepository, ManualFireOutcome, NamespaceStateOutcome, PrepareFanoutRootOutcome, Promotion,
-    RecoverOutcome, RenewBatchItem, RenewBatchResult, RenewOutcome, ScheduleDueScan, StartOutcome,
+    JobRepository, ManualFireOutcome, NamespaceShardSnapshot, NamespaceStateOutcome,
+    PrepareFanoutRootOutcome, Promotion, RecoverOutcome, RenewBatchItem, RenewBatchResult,
+    RenewOutcome, ScheduleDueScan, StartOutcome,
 };
 pub use run::JobRun;
 pub use scanner::JobScanner;

@@ -368,6 +368,8 @@ impl FanoutDispatcher {
                 Err(_) => {
                     // 截止到达后必须撤销本地 future；AuthorityGuard 会同步关闭 attempt 门禁，后续完成提交被拒绝。
                     task.abort();
+                    // 取消请求本身不代表 future 已退出；等待 JoinHandle 后，in-flight guard 与容量许可才确定释放。
+                    let _ = task.await;
                     if first_error.is_none() {
                         first_error = Some(
                             crate::job::JobError::ShutdownDeadline(

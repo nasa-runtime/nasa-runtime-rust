@@ -20,6 +20,7 @@ pub(crate) const DEFAULT_DATASOURCE: &str = "default";
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
+/// 业务作用：承载互斥的单源与多源数据库配置根，供启动期统一解析。
 struct DbConfigRoot {
     database: Option<serde_json::Value>,
     datasources: Option<BTreeMap<String, serde_json::Value>>,
@@ -52,6 +53,7 @@ impl PgConnectionTopology {
 }
 
 #[derive(Clone)]
+/// 业务作用：冻结单个 PostgreSQL datasource 的迁移策略、目标 schema 与独立 session 拓扑。
 struct MigrationPlan {
     settings: namigrate_core::MigrationSettings,
     schema: String,
@@ -68,6 +70,7 @@ enum DriverConfig {
     },
 }
 
+/// 业务作用：绑定 datasource 规范名称、数据库后端、连接配置与可选迁移门禁。
 struct DatasourceSpec {
     name: String,
     driver: DatabaseDriver,
@@ -114,6 +117,7 @@ impl ManagedPool {
     }
 }
 
+/// 业务作用：把受管数据库池与其唯一 readiness 更新句柄移交健康监控循环。
 struct DbMonitorInput {
     pool: ManagedPool,
     contributor: ReadinessContributor,
@@ -133,6 +137,7 @@ pub(crate) struct DbComponent {
 }
 
 #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+/// 业务作用：保存 Saga 延迟数据库安装在 catalog 发布前持有的 owner token 与 readiness 权限。
 struct DeferredBootstrap {
     owner: ManagedRegistryOwner,
     token: ManagedInstallationToken,
@@ -318,7 +323,10 @@ impl ApplicationComponent for DbComponent {
                             natx::datasource::probe(&config).await.map_err(|error| {
                                 db_error_src(
                                     ApplicationPhase::Start,
-                                    format!("datasource `{name}` MySQL probe failed"),
+                                    format!(
+                                        "datasource `{name}` probe failed during handshake on {}",
+                                        config.endpoint()
+                                    ),
                                     error,
                                 )
                             })?;
@@ -344,7 +352,10 @@ impl ApplicationComponent for DbComponent {
                             probe.map_err(|error| {
                                 db_error_src(
                                     ApplicationPhase::Start,
-                                    format!("datasource `{name}` PostgreSQL probe failed"),
+                                    format!(
+                                        "datasource `{name}` probe failed during handshake on {}",
+                                        config.endpoint()
+                                    ),
                                     error,
                                 )
                             })?;
@@ -1007,6 +1018,7 @@ fn build_monitor_inputs(
     Ok(inputs)
 }
 
+/// 业务作用：在数据库启动未完成时持有可撤销 bootstrap token，保证失败路径释放进程级权威。
 struct BootstrapShutdown {
     token: Option<ManagedInstallationToken>,
 }
@@ -1036,6 +1048,7 @@ impl ShutdownAction for BootstrapShutdown {
     }
 }
 
+/// 业务作用：在停机时先封口 datasource catalog，再按 owner 身份撤销各后端 typed registry。
 struct DbRegistryShutdown {
     catalog_owner: Option<ManagedRegistryOwner>,
     #[cfg(feature = "db")]
@@ -1076,6 +1089,7 @@ impl ShutdownAction for DbRegistryShutdown {
     }
 }
 
+/// 业务作用：在查找入口封口后拥有一个命名数据库池的最终排空与关闭动作。
 struct DbPoolShutdown {
     name: String,
     pool: Option<ManagedPool>,
@@ -1127,23 +1141,27 @@ fn read_datasources(
                 error,
             )
         })?;
-    let values = match (root.database, root.datasources) {
-        (Some(_), Some(_)) => {
-            return Err(db_error(
+    let values =
+        match (root.database, root.datasources) {
+            (Some(_), Some(_)) => {
+                return Err(db_error(
+                    phase,
+                    "configuration conflict: declare either `database` or `datasources`, not both",
+                ))
+            }
+            (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
+            (None, Some(values)) if !values.is_empty() => values,
+            (None, Some(_)) => return Err(db_error(
                 phase,
-                "declare either database or datasources, not both",
-            ))
-        }
-        (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
-        (None, Some(values)) if !values.is_empty() => values,
-        (None, Some(_)) => return Err(db_error(phase, "datasources cannot be empty")),
-        (None, None) => {
-            return Err(db_error(
-                phase,
-                "database component requires database or datasources configuration",
-            ))
-        }
-    };
+                "`datasources` is declared but empty; remove it or declare at least one datasource",
+            )),
+            (None, None) => {
+                return Err(db_error(
+                    phase,
+                    "database component requires database or datasources configuration",
+                ))
+            }
+        };
     if values.len() > natx_core::MAX_MANAGED_DATASOURCES {
         return Err(db_error(
             phase,
@@ -1260,14 +1278,14 @@ fn split_datasource(
                     .map_err(|error| {
                         db_error_src(
                             phase,
-                            format!("invalid MySQL datasource `{name}` configuration"),
+                            format!("invalid datasource `{name}` configuration"),
                             error,
                         )
                     })?;
                 config.validate().map_err(|error| {
                     db_error_src(
                         phase,
-                        format!("invalid MySQL datasource `{name}` configuration"),
+                        format!("invalid datasource `{name}` configuration"),
                         error,
                     )
                 })?;
@@ -1358,8 +1376,22 @@ fn parse_migration_plan(
             "MySQL migrations do not accept session_url",
         ));
     }
-    let settings = serde_json::from_value(raw)
-        .map_err(|error| db_error_src(phase, "invalid datasource migration settings", error))?;
+    let settings: namigrate_core::MigrationSettings =
+        serde_json::from_value(raw).map_err(|error| {
+            db_error_src(
+                phase,
+                format!("invalid `migrations` configuration for datasource `{datasource}`"),
+                error,
+            )
+        })?;
+    // migration 安全旋钮必须在数据库探针前冻结；否则非法续跑策略会先对外部 endpoint 产生握手副作用。
+    settings.validate().map_err(|error| {
+        db_error_src(
+            phase,
+            format!("invalid `migrations` configuration for datasource `{datasource}`"),
+            error,
+        )
+    })?;
     Ok(Some(MigrationPlan {
         settings,
         schema,
@@ -1386,18 +1418,22 @@ pub(crate) fn validate_datasource_sections(
             error,
         )
     })?;
-    let values = match (root.database, root.datasources) {
-        (Some(_), Some(_)) => {
-            return Err(db_error(
+    let values =
+        match (root.database, root.datasources) {
+            (Some(_), Some(_)) => {
+                return Err(db_error(
+                    phase,
+                    "configuration conflict: declare either `database` or `datasources`, not both",
+                ))
+            }
+            (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
+            (None, Some(values)) if !values.is_empty() => values,
+            (None, Some(_)) => return Err(db_error(
                 phase,
-                "declare either database or datasources, not both",
-            ))
-        }
-        (Some(value), None) => BTreeMap::from([(DEFAULT_DATASOURCE.to_owned(), value)]),
-        (None, Some(values)) if !values.is_empty() => values,
-        (None, Some(_)) => return Err(db_error(phase, "datasources cannot be empty")),
-        (None, None) => return Ok(()),
-    };
+                "`datasources` is declared but empty; remove it or declare at least one datasource",
+            )),
+            (None, None) => return Ok(()),
+        };
     if values.len() > natx_core::MAX_MANAGED_DATASOURCES {
         return Err(db_error(
             phase,
@@ -1495,6 +1531,7 @@ static DATASOURCE_BACKEND_INFO: nametrics_core::MetricDescriptor =
 static DATASOURCE_BACKEND_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 1] =
     [&DATASOURCE_BACKEND_INFO];
 
+/// 业务作用：把冻结 catalog 中的 datasource 与后端对应关系投影到统一低基数指标目录。
 struct DatasourceBackendMetricsSource {
     entries: Vec<(String, DatabaseDriver)>,
 }

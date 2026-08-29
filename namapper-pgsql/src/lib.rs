@@ -18,6 +18,10 @@ pub use namapper_macro::{
 pub use sqlx::types::Json;
 
 /// PostgreSQL Mapper 流式查询返回类型。
+///
+/// 事务外持有 datasource 的池连接；`#[transactional_pgsql]` ambient 事务内则持有事务连接的槽锁
+/// 直到流被消费完或丢弃——流存活期间同一事务不得发出其它语句,未释放就返回事务体会在提交
+/// 门禁处显式失败。
 pub struct MapperStream<T> {
     inner: Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>,
 }
@@ -274,7 +278,7 @@ pub async fn conn() -> anyhow::Result<natx_pgsql::PgConn> {
 
 /// 业务作用: 获取指定 datasource 的 PostgreSQL Mapper 执行连接，并阻止事务内跨源复用。
 ///
-/// # 参数
+/// 参数说明：
 /// - `datasource`: Mapper 声明的静态 datasource。
 ///
 /// 返回: 同源事务连接或池连接；跨源与连接失败返回错误。
@@ -299,6 +303,25 @@ pub async fn mandatory_conn() -> anyhow::Result<natx_pgsql::PgConn> {
 /// 返回: 同源事务连接；缺失事务或 datasource 不一致时拒绝。
 pub async fn mandatory_conn_for(datasource: &'static str) -> anyhow::Result<natx_pgsql::PgConn> {
     natx_pgsql::mandatory_conn_for(datasource).await
+}
+
+/// 业务作用: 获取拒绝 ambient 事务的 Mapper SQL 执行连接(`tx = "never"` 的连接入口)。
+///
+/// 参数说明: 无。
+///
+/// 返回: 无事务时的池连接；处于事务内立即拒绝且不取连接。
+pub async fn never_conn() -> anyhow::Result<natx_pgsql::PgConn> {
+    natx_pgsql::never_conn().await
+}
+
+/// 业务作用: 从指定 datasource 获取拒绝 ambient 事务的 Mapper SQL 执行连接。
+///
+/// 参数说明：
+/// - `datasource`: Mapper 声明的静态 datasource。
+///
+/// 返回: 无事务时该 datasource 的池连接；处于事务内立即拒绝。
+pub async fn never_conn_for(datasource: &'static str) -> anyhow::Result<natx_pgsql::PgConn> {
+    natx_pgsql::never_conn_for(datasource).await
 }
 
 /// 业务作用: 在无事务时立即清理 Mapper cache，在事务内延迟到 PostgreSQL COMMIT 被明确确认后清理。

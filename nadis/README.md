@@ -136,9 +136,28 @@ let plan = nasa::redis::job::RedisJobPlan::new()
     })?;
 ```
 
-每个定义的 `qualifier` 是强路由字段。`prepare_sources` 接受冻结的 `RedisJobSources`，每个 source 独立拥有客户端、namespace、键布局、连接角色、监督代次、健康、指标和停机边界；未知、禁用或 client 身份不一致的 source 在写定义前拒绝。独立运行时可用 `shutdown_source(qualifier, budget)` 只排空一个 source，其它 source 继续领取和续租；全量停机使用 `shutdown(budget)`。`JobControl` 提供 trigger、单任务 pause/resume、当前 source 的 `pause_namespace`/`resume_namespace`、cancel、delete 与 conflict resolve；命名空间暂停阻止新的普通 Run 触发、尚未领取的普通 Run 和可见性消息重建，不撤销已有 attempt，也不影响其它 source。普通定义不宣告 Fanout 能力，删除 `FANOUT_ONLY` 定义会在 tombstone 提交后同步撤销执行器能力，撤销失败可用相同定义修订号幂等补偿，避免新 Fanout 快照继续选择已失去 Handler 的节点。`JobQuery` 提供 definition、run、Fanout、健康和无 Redis I/O 的指标快照。
+每个定义的 `qualifier` 是强路由字段。`prepare_sources` 接受冻结的 `RedisJobSources`，每个 source 独立拥有客户端、namespace、键布局、连接角色、监督代次、健康、指标和停机边界；未知、禁用或 client 身份不一致的 source 在写定义前拒绝。独立运行时可用 `shutdown_source(qualifier, budget)` 只排空一个 source，其它 source 继续领取和续租；全量停机使用 `shutdown(budget)`。启动先建立 Fanout 订阅再逐项登记能力；任一登记失败都会关闭本地准入，并按全部已尝试 Worker 坐标尝试全量注销，包含“脚本已提交但回包丢失”的能力。若 Redis 持续不可达而无法取得注销确认，本地不再接纳或处理工作，服务端成员与能力记录只由 TTL 和 Registry GC 收敛。`JobControl` 提供 trigger、单任务 pause/resume、当前 source 的 `pause_namespace`/`resume_namespace`、cancel、delete 与 conflict resolve；命名空间暂停阻止新的普通 Run 触发、尚未领取的普通 Run 和可见性消息重建，不撤销已有 attempt，也不影响其它 source。普通定义不宣告 Fanout 能力，删除 `FANOUT_ONLY` 定义会在 tombstone 提交后同步撤销执行器能力，撤销失败可用相同定义修订号幂等补偿，避免新 Fanout 快照继续选择已失去 Handler 的节点。`JobQuery` 提供 definition、run、Fanout、健康和无 Redis I/O 的指标快照。
 
-命名空间暂停或恢复按调度分片逐一发布，不是跨分片原子事务。控制调用返回错误时，部分分片可能已经进入目标状态，调用方不得据此判定整个 source 已暂停或已恢复，必须使用同一 actor 幂等重试直至成功；当前不提供聚合的“部分生效”指标，返回错误本身就是未收敛信号。该门禁只阻止普通 Run 取得新执行权：已经取得的 attempt 可以继续续期和完成，已经建立的 Fanout 批次也会继续投递和收敛。
+停机先发布 `Draining` 并关闭新准入，再等待监督循环与已接纳 Handler。绝对期限到达时会对剩余 Tokio task 提交 `abort`，但注销 Registry 前仍会逐个 await `JoinHandle`，直到 future 实际结束、权威 guard 析构且容量许可释放；取消请求本身不作为所有权已终止的证据。
+
+执行器心跳以最近一次 Redis 成功回包中的 `redisNow/expireAt` 折算本地保守权威截止，并使用不与
+其它状态脚本共享断链结局的独立连接 lane。单机装载、Cluster 切换或槽迁移产生的
+`LOADING`、`TRYAGAIN`、`CLUSTERDOWN`、`MASTERDOWN`、`MOVED`、`ASK`、`READONLY`
+以及 Redis 的 `ERR max number of clients reached` 容量响应与传输失败一样，只能在该截止前有上限退避；
+认证、ACL、本地客户端配置、RESP 解析、返回类型、其它 `ERR` 文案、跨 slot 或脚本合同错误立即拒绝；
+兼容实现不得依赖未声明的模糊文案匹配，也不得把确定性的凭据或协议错误延迟到租约截止。
+受监督运行时为每个逻辑心跳携带稳定请求 ID 和最后确认的 `heartbeatRevision`，因此传输重发只读取
+第一次执行结果，不会重复延长服务端存活期；脚本也拒绝续期已经到期但尚未 GC 的记录。第一次续租若
+已在 Redis 执行但其结果始终无法在旧截止前取回，本地仍会立即关闭准入，服务端成员可能保留到该次
+续租的 TTL 到期；Fanout 投递必须依赖持久 receipt 和失联重分配收敛，不能把成员记录等同于进程确认。
+后续成功会把 Degraded 恢复为 Up；`NotFound`、权威 revision 不一致、协议响应非法或已确认截止耗尽
+会让 source 进入 NotReady。监督器只记录 source、循环与封闭原因，不记录 endpoint、payload 或凭据。
+
+命名空间暂停或恢复按调度分片逐一发布，不是跨分片原子事务。控制调用返回错误时，部分分片可能已经进入目标状态，调用方不得据此判定整个 source 已暂停或已恢复，必须使用同一 actor 幂等重试直至成功。`JobControl::namespace_governance` 聚合 `enabled`、`paused`、`untouched` 与 `unknown` 分片数、最近权威时刻和 actor；混合状态或未知持久值都会把 `divergent` 置真，供治理面告警与续作，但不会把逐分片操作包装为原子成功。该门禁只阻止普通 Run 取得新执行权：已经取得的 attempt 可以继续续期和完成，已经建立的 Fanout 批次也会继续投递和收敛。
+
+手工 trigger 在存在环境 trace 时只记录 `trace_id` 到派生 `run_id` 的映射；业务 `request_id` 原文
+不进入日志。Run hash 与共享 Lua 的跨语言线协议在所有实现共同扩展前保持不变，因此 worker 侧
+暂不从 RedisJob 持久状态恢复该 trace。
 
 JSON Handler 在业务反序列化前递归拒绝重复键、`@class`/`@type`、过深或节点过多的结构。运行时只支持已经声明的协议、codec 与 Cron 语义，不承诺无限 Run 历史、永久 nonce、永久 Fanout 去重，也不会把普通本地定时任务自动升级为 RedisJob。
 

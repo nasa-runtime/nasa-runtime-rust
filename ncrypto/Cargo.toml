@@ -1,16 +1,16 @@
-# ncrypto —— 无状态密码学工具 crate，兼容原工具包 Encryptor 静态工具类。
+# ncrypto —— 无状态密码学工具 crate，提供现代密码能力与受控的遗留协议互通入口。
 # 组件设计与兼容边界见 README.md。本 crate 只提供无 Web 依赖的密码原语；端点透明加解密
 # 由 mapping 路由属性和安全运行时编排，不在这里增加独立属性宏或 Axum 依赖。
 #
 # 字节保真：hex 大小写按函数区分、AES key 使用 key 串 UTF-8 字节、AES-GCM 布局为 IV‖ct‖tag，
 # RSA 使用 PKCS1v1.5 并自动分段，RSA 私钥加密使用 PKCS1 type-1 低层 padding。
-# 安全改良:随机值(salt/AES key/GCM IV)一律用 OS 安全 RNG,不复刻 原实现 的 Math.random()。
+# salt、AES key 与 GCM IV 等随机值一律使用 OS CSPRNG。
 [package]
 name = "ncrypto"
 version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 密码学工具：Argon2id/AES-GCM、hash/HMAC/KDF、RSA/Ed25519 与旧系统兼容算法"
+description = "NASA 密码学工具：Argon2id/AES-GCM、hash/HMAC/KDF、RSA/Ed25519 与受控兼容算法"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

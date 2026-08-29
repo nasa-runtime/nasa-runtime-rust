@@ -734,7 +734,7 @@ let delivery = kafka
     .event("created")
     .key(&order.id)
     .timestamp(epoch_ms)
-    .header("traceparent", Some(traceparent.as_bytes()))
+    .trace_context(&trace_context)
     .send()
     .await?;
 
@@ -754,9 +754,19 @@ builder 字段语义：
 - `header(name, value)`：追加 header；允许同名重复，`None` 表示 Kafka null header value。
 - `ctx(&record.ctx)`：复制消费上下文中的 passthrough Map，适合消费后继续发布。
 - `passthrough(key, value)?`：追加一个可 JSON 序列化的跨服务上下文字段。
+- `trace_context(parent)`：显式绑定父 trace context，优先于当前任务的环境 context。
 
 业务 header 保留顺序、重复名和 null value。`X-Nasa-*` 框架 header 由类型化 builder 生成，业务不能
 通过通用 `header()` 覆盖。
+
+业务未显式调用 `trace_context` 时，类型化、raw 与 tombstone builder 会读取当前 task-local 环境
+context，派生 producer 子 context 并写入唯一 W3C `traceparent`；当前任务没有环境 context 时不凭空
+建立链路。consumer 在 handler 前解析最后一个 `traceparent`，合法值派生 consumer 子 context，缺失或
+非法值按 exporter 的冻结采样策略建立新根。handler 内未显式绑定的 REST/Kafka 出站调用会继续使用该
+环境 context；同一消息重投时重新从原 header 延续同一 trace，DLT 也保留该 header。批量 handler 以本批
+第一条记录建立环境 context，各条消息的 topic、partition、offset 等身份仍分别保留在 `KafkaRecord` 中。
+`kafka.consume` 与 `kafka.consume_batch` span 的 `trace_id` 字段固定表示当前 W3C trace ID；业务
+passthrough 中名为 `traceId` 的自定义字段不参与该日志字段的取值。
 
 ### 2. `send()` 与 `fire()`
 
@@ -1214,6 +1224,11 @@ kafka:
 
 生产默认禁止自动注册。数据面只按已批准的 schema ID 拉取，命中结果进有界正缓存，确认不存在的 ID
 进有界负缓存，两者各有独立 TTL 与统一条目上限；`auto_register` 必须显式开启才允许写入新修订。
+
+数据面冷缓存查询按 schema ID singleflight：同一 ID 的并发未命中只放行一个 leader 访问
+Registry，其余调用等待该轮结束后重查缓存——leader 成功即全体命中，失败或被取消时等待者逐个
+串行接替。冷启动与 Registry 故障期间对 Registry 的请求量因此以"每 ID 同时至多一个"为上界，
+不随解码并发放大；等待者的查询结局按其真实路径记账(经缓存命中的记 `cache_hit`)。
 
 ### 运行架构与安全合同
 

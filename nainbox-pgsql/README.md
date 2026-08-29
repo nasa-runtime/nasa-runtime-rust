@@ -36,11 +36,15 @@ async fn consume(message_id: &str) -> anyhow::Result<()> {
 本 crate 不创建独立 registry。`new()` 固定绑定 `default`；`with_datasource(name)` 固定绑定
 `natx-pgsql` 已登记的命名 datasource。claim 与业务 SQL 的 datasource 不一致时直接失败，不回退默认库。
 
-生产结构由 migration 创建；`ensure_schema` 只用于显式自举。
+生产结构由 migration 创建；启用保留任务前，既有表必须应用语义迁移
+`migrations/add_inbox_retention_index.sql`，建立 `(consumer_name, processed_at_ms)` 范围索引。
+`ensure_schema` 只用于显式自举，并以幂等 DDL 确认该索引。
 
-本 crate 不读取独立 YAML，也不启动后台任务。Application 配置沿用 `database` / `datasources`；Inbox
-结果由消费端按 `Applied`、`Duplicate` 和事务失败分类记录，message id 与 consumer name 不应直接作为
-无限指标 label。
+本 crate 不读取独立 YAML。Application 配置沿用 `database` / `datasources`；启用
+`application,inbox-pgsql` 后可显式提交 `InboxRetentionPlan`，由 Application 在 Ready 后运行串行
+fixed-delay 清理。计划与 `PgInbox::with_datasource` 绑定同一命名 registry，不会回退默认库。Inbox
+结果由消费端按 `Applied`、`Duplicate` 和事务失败分类记录，message id 与 consumer name 不直接作为
+无限指标 label；受管保留指标为无标签进程聚合。
 
 ## 事务与失败边界
 
@@ -50,3 +54,9 @@ async fn consume(message_id: &str) -> anyhow::Result<()> {
 - `CommitUncertain`、`CommitRejected` 或 `RollbackFailed` 时必须保留原消息持续重投，不能消耗普通有限重试预算。
 - 回滚同时撤销唯一标记与业务写，后续投递仍可取得 claim。
 - 外部 HTTP、Kafka 或其它数据库副作用不在本地事务合同内，应使用同源 Outbox 或目标系统幂等键收敛。
+- `PgInbox` 同时实现 `DurableInboxRetention`：按 `nainbox-core` 保留清理合同做 owner 互斥
+  (会话级 advisory lock，锁与删除同连接)的分批过期清理，cutoff 轮初以数据库时钟冻结、经 ctid
+  子查询沿 `(consumer_name, processed_at_ms)` 索引从最老标记开始有界批删除；策略视界约束与
+  轮次报告见 `nainbox-core` README。完整墙上时间预算覆盖取连接、取锁、删除、统计和解锁；轮次拒绝
+  任一数据库 driver 的环境事务；取消、超时或解除锁未获确认时关闭物理连接，不把可能持锁的
+  session 放回池。

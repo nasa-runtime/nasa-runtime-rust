@@ -3,6 +3,17 @@
 `naaudit-mysql` 是 `TransactionalAuditSink` 的 MySQL Outbox adapter。它本身无连接池和全局状态，
 每次写入都从 `natx` ambient 事务取得同一条连接。
 
+## 写入架构
+
+```text
+业务处理器 ──→ 同 datasource ambient transaction ──→ 业务表
+                                      └──────────────→ 审计 Outbox 行
+COMMIT 明确成功 ──→ Outbox dispatcher ──→ 审计消费方
+```
+
+adapter 只在当前事务中追加审计事件，不自行提交或发布。事务回滚时业务写与审计行一并消失；提交结果
+不确定时调用方不得把事件当作已经可靠投递，应按业务事务的未知结果流程收敛。
+
 业务通常不直接依赖本 crate，而是通过门面：
 
 ```toml

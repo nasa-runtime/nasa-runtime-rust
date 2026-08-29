@@ -142,6 +142,7 @@ pub struct JobSupervisorMetricsSnapshot {
 }
 
 #[derive(Debug, Clone)]
+/// 业务作用：保存单个监督循环当前代次、重启累计和封闭结局历史。
 struct SupervisorMetric {
     generation: u64,
     restart_total: u64,
@@ -185,6 +186,7 @@ pub struct JobMetricsSnapshot {
 }
 
 #[derive(Debug)]
+/// 业务作用：集中保存一个 Redis source 的固定指标值、分片 gauge 与监督循环账目。
 struct JobMetricsState {
     values: BTreeMap<&'static str, i64>,
     fire_results: BTreeMap<JobFireResult, u64>,

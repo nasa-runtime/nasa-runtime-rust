@@ -1,53 +1,33 @@
-//! # numeric —— 定点精确算术(对照 原实现 原工具包 `Numeric`)
+//! # nanum —— 定点与任意精度算术
 //!
-//! 撮合 / 金额场景的精确算术根。值表示为 **`i128` 定点数**:`真实值 = mantissa × 10^(−scale)`。
+//! 面向撮合、金额、价格和最小变动单位的显式精度运算。定点值表示为
+//! `真实值 = mantissa × 10^(-scale)`，mantissa 使用 i128，scale 上限为 [`MAX_SCALE`]。
 //!
-//! ## 既定设计:**有限数 / 正常输入路径逐值对齐 原实现**
-//! 逐值复刻 原实现 `Numeric`(含其 f64 中间运算)保证跨语言一致；少数不安全的边界行为采用明确偏离并在函数文档标注：
-//! - `to_fixed_f64`/`float::*` 的 NaN/±Inf → `Err`(非 原实现 `Math.round` 的 0/Long 边界)。
-//! - `next_int_max(i32::MAX)` 正常工作(非 原实现 `max+1` 溢出抛异常)。
-//! - `copy_to_char_array(i64::MIN)` 输出正确十进制串，不沿用 原实现 `-Long.MIN_VALUE` 的取负溢出行为。
-//! - `decimal::random_step_bd` 超 i64 域按符号**饱和**(非 原实现 `BigDecimal.longValue()` 低 64 位回绕)。
-//! - 泛型比较 `eq/gt/...` 的 f64 `NaN` 走 Rust `PartialOrd`;需 原实现 `Double.compareTo` 总序用 [`eq_f64`] 等专用族(**已提供,非偏离**)。
+//! ## 算术与舍入合同
+//! - `add`、`subtract` 和 `align*` 使用整数路径。
+//! - `multiply` 与 `divide` 的整数部分使用整数、余数部分使用 f64，并支持全部八种 [`RoundingMode`]。
+//! - `to_fixed_f64` 按 `floor(value × 10^scale + 0.5)` 处理 tie，因此 tie 朝正无穷舍入。
+//! - `multiply` 与 `divide` 的 `HalfUp` 为 tie 远离零；调用方不能把两套 tie 规则混用。
+//! - `to_fixed_str` 先解析为 f64，只接受 Rust `str::parse::<f64>()` 支持的十进制或科学计数法输入。
 //!
-//! 要点:
-//! - **`multiply`/`divide`**（全部八种 mode）：整数部分使用整数、余数部分使用 f64，兼容原实现 `roundHalfUp`/`applyRounding`。
-//! - **`to_fixed_f64`**：`Math.round(val×10^scale)`，经 f64 计算，ties 向正无穷方向舍入。
-//!   **`to_fixed_str`**:对**十进制/科学计数法**输入按 `Math.round(parseDouble×10^scale)` 语义对齐;解析走 Rust
-//!   `str::parse::<f64>()`,**非 原实现 `Double.parseDouble` 全集**(十六进制浮点字面量如 `"0x1.0p0"` 返 `Err`)。
-//! - **`scale` 上限 = [`MAX_SCALE`] = 8**,对齐 原实现 `MAX_FIXED_SCALE`(超则 `Err`)。
-//! - **`add`/`subtract`/`align*`/`to_plain_string`/`string_size`**:原实现 本就是纯整数,Rust 纯整数一致。
+//! ## 精度与失败边界
+//! - 定点 scale 大于 8、除零、i128 溢出、非有限 f64、解析失败以及 `Unnecessary` 实际需要舍入时返回
+//!   [`NumericError`]，不执行 wrapping，也不触发 panic。
+//! - [`decimal`] 提供不受定点 scale 上限限制的 BigDecimal 运算；需要展开 `10^n` 的操作受
+//!   `decimal::MAX_DECIMAL_EXPANSION` 保护。
+//! - [`float`] 是 f64 便捷入口；涉及 NaN 总序时应使用 [`eq_f64`] 等专用比较函数。
+//! - `decimal::random_step_bd` 超出 i64 域时按符号饱和，`next_int_max(i32::MAX)` 保持有效。
 //!
-//! 类型用 `i128`(非 原实现 `long`=i64):同算法下,**对 原实现 不溢出的输入逐值一致**;i128 仅避免复刻 原实现 long
-//! 中间积的静默回绕，超 i128 域返 `Err`。
-//!
-//! ## 舍入(两套,原实现 本就不一致,分别保真)
-//! - `multiply/divide`:`roundHalfUp` = **ties away-from-zero**(负 .5 远离零);全 8 mode 走 `applyRounding`。
-//! - `to_fixed_*`:`Math.round` = **ties 朝 +∞**(`floor(x+0.5)`)。
-//!
-//! ## 错误模型
-//! 溢出 / 除零 / 非法 scale / 解析失败 / `Unnecessary` 遇舍入 → 返 [`NumericError`](`Result`),**不 panic、不 wrapping**。
-//!
-//! ## API 速览(**全量迁移 原实现 `Numeric`**)
-//! - 定点算术(i128,scale≤8):[`add`] [`subtract`] [`multiply`] [`divide`](+ `_rounding` 全模式 / `_default` 默认 scale=8)
-//! - 精度对齐:[`align`] [`align_up`] [`align_down`] [`is_aligned`](撮合 tick 对齐)
-//! - I/O:[`to_fixed_str`] [`to_fixed_f64`] / [`to_plain_string`] / 保尾零 [`to_plain_string_raw`] /
-//!   定点&显示精度分离 [`to_plain_string_display`] [`to_plain_string_raw_display`] / [`to_big_decimal`]
-//!   (均带 `_default` 默认 scale=8 与 `_f64` double 入参重载)
-//! - **[`decimal`] 模块**:BigDecimal 段,**不受 fixed `MAX_SCALE=8` 限制**(对照 原实现 `Numeric` 的 BigDecimal API);
-//!   所有运算(`add/subtract/multiply/multiply_scale/divide/sum/avg/align*`,均返 `Result`)在 scale 对齐时受
-//!   `decimal::MAX_DECIMAL_EXPANSION` 防 OOM 边界保护、极端 scale 返 `Err(Scale)` 不 panic)+ [`scale_min`] [`random_step`]
-//!   (仅构造、不展开、不设界)
-//! - **[`float`] 模块**:`double` 便捷算术(对照 原实现 `Numeric` 的 `double` 重载,内部走定点防漂移)
-//! - 整数 / 比较:[`string_size`] [`is_even`] [`is_odd`] [`gt`] [`ge`] [`lt`] [`le`]
-//! - 随机:[`next_int`] [`next_int_max`]
+//! ## API 入口
+//! - 定点算术：[`add`]、[`subtract`]、[`multiply`]、[`divide`]。
+//! - 精度对齐：[`align`]、[`align_up`]、[`align_down`]、[`is_aligned`]。
+//! - 转换与显示：[`to_fixed_str`]、[`to_fixed_f64`]、[`to_plain_string`]、[`to_big_decimal`]。
+//! - 任意精度：[`decimal`]；f64 便捷运算：[`float`]。
 
 mod arithmetic;
-/// BigDecimal 高精度段(scale>8 退化路径)+ Decimal 后缀便捷段。对照 原实现 `Numeric` 的 BigDecimal API。
-/// 用 `numeric::decimal::add(&BigDecimal, &BigDecimal)` 等(模块命名空间区分 i128 定点同名函数,对照 原实现 重载)。
+/// BigDecimal 高精度段与 Decimal 后缀便捷入口；模块命名空间用于区分 i128 定点同名函数。
 pub mod decimal;
-/// `double`(f64)便捷算术段。对照 原实现 `Numeric` 的 `double` 重载(模块命名空间区分 i128/BigDecimal 同名函数)。
-/// 用 `numeric::float::add(a, b, scale)` 等。
+/// f64 便捷算术入口；模块命名空间用于区分 i128 与 BigDecimal 同名函数。
 pub mod float;
 mod io;
 mod random;
@@ -64,20 +44,18 @@ pub use io::{
     to_plain_string_raw_f64_display,
 };
 pub use random::{next_int, next_int_max};
-// scale_min / random_step 走 BigDecimal(对照 原实现 返 BigDecimal,不受 fixed 8 位限制),不再是定点 String/i128。
-// (构造本身不展开 10^n;后续 align*/divide 等运算受 decimal::MAX_DECIMAL_EXPANSION 边界保护。)
-/// 任意精度十进制(= `bigdecimal::BigDecimal`,原实现 `BigDecimal` 等价物)。
+// scale_min 与 random_step 返回 BigDecimal，不受 fixed 8 位限制；后续展开运算仍受资源边界保护。
+/// 任意精度十进制类型。
 pub use bigdecimal::BigDecimal;
 pub use decimal::{random_step, scale_min};
 
-/// 撮合默认精度(×10^8),对照 原实现 `Numeric.DEFAULT_FIXED_SCALE`。
+/// 撮合默认精度，表示乘以 10^8 的定点单位。
 pub const DEFAULT_SCALE: u32 = 8;
 
-/// 定点 scale 上限 = **8**,**对齐 原实现 `Numeric.MAX_FIXED_SCALE`**(所有算法全部与 原实现 对齐)。
-/// scale > 8 时 原实现 直接抛异常(无 原实现 参照、且 f64 的 `10^s` 超安全整数域),本 crate 同样返 `Err(Scale)`。
+/// 定点 scale 上限；超过该值时返回 `NumericError::Scale`，避免 f64 的 10^s 超出安全整数域。
 pub const MAX_SCALE: u32 = 8;
 
-/// 舍入模式,语义对齐 `原实现.math.RoundingMode` / `BigDecimal`。
+/// 定点与 BigDecimal 运算支持的舍入模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoundingMode {
     /// 始终远离零(进位)。

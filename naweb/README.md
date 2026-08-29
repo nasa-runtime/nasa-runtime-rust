@@ -109,7 +109,7 @@ let app = nasa::web::Router::new().nest(&cfg.server.context_path, router);
 nasa = { version = "1.0.3", features = ["web-security"] }
 ```
 
-`web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需历史 RSA
+`web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需遗留 RSA
 线协议的迁移服务才同时启用 `web-crypto-legacy-rsa`；`LocalCryptoProvider` 的运行时允许开关
 仍须显式为真，路由审计会拒绝能力与 key ring 不匹配的配置。
 
@@ -804,3 +804,9 @@ let health = runtime.health();
 启用 `web-security` 后，每条静态路由在注册时获得固定指标槽位。`MappingRuntime::metrics().render_prometheus()` 返回可与应用现有 `/metrics` 文本直接拼接的 Prometheus 片段，覆盖端点结果、身份、双向密码、required replay、受控旁路、阶段延迟、热更新结果和快照代次。
 
 指标只使用编译期 `route_id`、静态 protocol/condition、固定 direction/operation/outcome 标签。运行时 path 参数、query、subject、tenant、rid、token、kid、密钥来源、明文和完整密文都不会进入标签或 HELP 文本。热更新复用同一个注册表，计数不会因 ArcSwap 替换快照而清零。
+
+`SecurityMetrics::worst_case_series()` 按当前已注册 route 的真实协议形状计算公开容量；每个
+histogram 组合完整计入有限 bucket、正无穷 bucket、sum 与 count。`napp` 在全部业务 Router
+transform 完成后调用 `freeze_worst_case_series()`，以同一线性化点关闭新 route ID 注册并事务式
+预留统一指标目录；既有 route 继续记录，迟到的新 route 会拒绝装配，容量不足时也不会发布半份
+descriptor 或指标源。

@@ -2,10 +2,10 @@
 # 业务项目优先依赖 nasa 门面并开启 scheduling feature；内部迁移可直接依赖 nasched 包。
 [package]
 name = "nasched"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "异步/定时门面(cron: misfire=skip 走 tokio-cron-scheduler、fire_once 走自管 CronPlan driver;非 cron 用 tokio::time;#[Async]/#[scheduled]/#[EnableScheduling])"
+description = "NASA async and scheduled task runtime with leader gates, misfire claims, execution records, and authority-aware tracing"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -20,14 +20,21 @@ default = []
 # 只启用 nadis adapter(NadisLeaderGate / start_scheduled_clustered*),不是启用 cluster 语义本身——
 # cluster="leader" 配合自定义 LeaderGate 时，默认 feature 即可使用。
 cluster = ["dep:nadis"]
+# `#[Async(runner = .., spec = ..)]` 分区执行域形态的运行时桥:展开经 __private 引用 napart 的
+# 提交入口与受理/拒绝类型。仅 spawn 形态的用户不承担 napart 依赖。
+partition = ["dep:napart"]
 
 [dependencies]
-async-macro = { version = "1.0.1" }
+async-macro = { version = "1.0.2" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
 nadis = { package = "nadis", version = "1.0.1", optional = true }
 linkme = "0.3"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-cron-scheduler = "0.13"
+# 宏展开经 __private 桥恢复调用方 trace 上下文;调度触发以新根链路关联下游调用。
+natelemetry = { version = "1.0.1" }
+# `#[Async]` 分区执行域形态的提交内核;feature `partition` 显式启用。
+napart = { version = "1.1.2", optional = true }
 # misfire 补偿需要计算上一拍应触发时刻；tokio-cron-scheduler 内部使用 croner，因此直接依赖同款做反向搜索。
 croner = "2"
 tracing = "0.1"

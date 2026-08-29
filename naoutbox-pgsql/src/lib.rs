@@ -315,6 +315,7 @@ impl Default for PgOutbox {
 }
 
 #[derive(Debug, Clone)]
+/// 业务作用：把 PostgreSQL 内部行身份与已校验的公开 Outbox 事件绑定供顺序投递。
 struct PendingRow {
     id: i64,
     event: OutboxEvent,

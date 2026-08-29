@@ -13,7 +13,7 @@ ncrypto = "1"
 
 新业务优先使用 `encrypt_modern` / `decrypt_modern`。默认写入的 NC2 使用 Argon2id 从口令派生密钥，再用 AES-256-GCM 同时提供机密性和完整性。旧系统兼容函数如 AES-ECB、CBC(IV=Key)、RSA PKCS#1 v1.5、RSA 私钥“加密”等只用于和既有系统逐字节互通，不应作为新系统保密边界。
 
-默认构建不会执行 PKCS#1 v1.5 私钥解密或历史私钥 type-1 运算；RS256 公钥验签、RSA-OAEP、
+默认构建不会执行 PKCS#1 v1.5 私钥解密或兼容私钥 type-1 运算；RS256 公钥验签、RSA-OAEP、
 Ed25519、现代 AEAD、哈希和 KDF 不受影响。确有迁移合同的调用方必须单独启用：
 
 ```toml

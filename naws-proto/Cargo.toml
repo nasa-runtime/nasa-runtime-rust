@@ -1,11 +1,10 @@
-# naws-proto —— NASA wire schema 与编解码(原独立工程 ws 的 proto 子 crate)。
-# 消费方用依赖别名保持 `use proto::...` 不变:proto = { package = "naws-proto", ... }。
+# naws-proto —— NASA wire schema 与有界编解码实现。
 [package]
 name = "naws-proto"
 version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "ProtocolBytes 的 Rust 移植(逐字节兼容原协议)。VARINT_TLV/BITPACK_TLV/JSON_BYTES codec。"
+description = "NASA 长连接 wire codec：VARINT_TLV、BITPACK_TLV 与 JSON_BYTES"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -13,13 +12,12 @@ keywords.workspace = true
 categories.workspace = true
 
 [lib]
-# 保持 crate 名 `proto`:历史源码的 `use proto::` 可继续使用,外部消费方经依赖别名同名引用。
+# crate 名固定为 `naws_proto`，外部消费方也可以按需要设置依赖别名。
 name = "naws_proto"
 path = "src/lib.rs"
 
-# VARINT/BITPACK 编解码全自己实现以保证跟 原实现 逐字节一致(架构说明 决策①)。
-# JSON_BYTES 模式用 serde + serde_json(地道 Rust 序列化栈),靠 NON_EMPTY/camelCase/有符号
-# 字节数组等属性对齐 原实现 Jackson 的输出(golden 对拍验证)。
+# VARINT/BITPACK 编解码显式控制 tag、wire type、长度和字段顺序，维持稳定线协议。
+# JSON_BYTES 模式通过 serde 属性控制字段名称、缺省值和字节数组表示。
 [dependencies]
 naws-proto-derive = { package = "naws-proto-derive", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }

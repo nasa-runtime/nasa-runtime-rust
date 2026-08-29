@@ -383,6 +383,7 @@ fn default_probe_on_start() -> bool {
 static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
+/// 业务作用：为单个 Application 的数据库 registry 所有权提供不可由数值相等伪造的 Arc 身份。
 struct OwnerIdentity {
     id: u64,
 }
@@ -911,6 +912,7 @@ enum RegistryMode {
 }
 
 #[derive(Debug)]
+/// 业务作用：保存进程级 datasource 安装模式与当前 owner 弱引用，线性化独立和受管入口。
 struct RegistryState {
     mode: RegistryMode,
 }

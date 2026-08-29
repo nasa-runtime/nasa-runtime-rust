@@ -21,6 +21,7 @@ pub(crate) enum StrictQueue {
     Staging,
 }
 
+/// 业务作用：为严格迁移的单一阶段保存独立 FIFO 与精确深度账目。
 struct StrictFifo {
     sender: SequencedSender<Arc<TaskEnvelope>>,
     receiver: Mutex<SequencedReceiver<Arc<TaskEnvelope>>>,

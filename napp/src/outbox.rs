@@ -418,6 +418,11 @@ outbox_metric!(
     &["channel"]
 );
 
+/// 无 label 的 Outbox family 数;快照对每个 family 恒产一条,是预算的固定项。
+const OUTBOX_FIXED_METRIC_SERIES: usize = 21;
+/// 每个冻结 channel lane 的 family 数(published/failed/healthy/pending);预算按 lane 数线性扩展。
+const OUTBOX_LANE_METRIC_SERIES: usize = 4;
+
 static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 25] = [
     &OUTBOX_ROUNDS,
     &OUTBOX_PUBLISHED,
@@ -1700,20 +1705,6 @@ impl ApplicationComponent for OutboxComponent {
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let settings = read_outbox_settings(context.application(), ApplicationPhase::Start)?;
-            let state = context.application().outbox_runtime();
-            context
-                .application()
-                .metrics_hub()
-                .register_legacy_source(Arc::new(OutboxMetricsSource { state }))
-                .map_err(|conflict| {
-                    outbox_error(
-                        ApplicationPhase::Start,
-                        format!(
-                            "outbox metric descriptor `{}` conflicts with an existing registration",
-                            conflict.name
-                        ),
-                    )
-                })?;
             let contributor = context.application().register_readiness(
                 ComponentId::Outbox,
                 Arc::<str>::from("outbox:dispatcher"),
@@ -1837,6 +1828,41 @@ impl ApplicationComponent for OutboxComponent {
                 }
                 None => None,
             };
+
+            // 指标源在 lane 计划冻结后注册,最坏序列数因此可精确承诺:
+            // 21 个无 label family 各一条 + 每个冻结 channel lane 四条。
+            let worst_case_series = OUTBOX_FIXED_METRIC_SERIES.saturating_add(
+                lanes
+                    .as_ref()
+                    .map_or(0, |lanes| lanes.len())
+                    .saturating_mul(OUTBOX_LANE_METRIC_SERIES),
+            );
+            context
+                .application()
+                .metrics_hub()
+                .register_legacy_source_reserved(
+                    Arc::new(OutboxMetricsSource {
+                        state: Arc::clone(&state),
+                    }),
+                    worst_case_series,
+                )
+                .map_err(|error| match error {
+                    nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => {
+                        outbox_error(
+                            ApplicationPhase::Ready,
+                            format!(
+                                "outbox metric descriptor `{}` conflicts with an existing registration",
+                                conflict.name
+                            ),
+                        )
+                    }
+                    nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                        outbox_error(
+                            ApplicationPhase::Ready,
+                            "outbox metric series reservation exceeds the process limit",
+                        )
+                    }
+                })?;
 
             state.publish_outbox(outbox.clone())?;
             // 停机保护必须先于权限发布入栈；否则后续 Ready 失败时 dispatcher 状态可能游离于

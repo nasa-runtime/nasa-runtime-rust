@@ -21,6 +21,7 @@ pub struct SingleFlightMapperL2Cache {
     locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// 业务作用：在 single-flight 调用离场时回收没有等待者的 key 锁，限制锁表随业务 key 增长。
 struct SingleFlightLockCleanup<'a> {
     locks: &'a StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     lock_key: String,

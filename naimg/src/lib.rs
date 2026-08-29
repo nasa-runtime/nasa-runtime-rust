@@ -1,42 +1,22 @@
-//! # naimg —— 图片压缩/缩放(对照 原实现 原工具包 `ImageUtils`)
+//! # naimg —— 有界图片压缩与缩放
 //!
 //! 公开 crate 名为 `naimg`；内部依赖 crates.io 的 `image` 已别名为 `image_crate`，避免使用方误把
 //! 底层 codec API 当作本组件稳定合同。
 //!
-//! 把图片按**质量(quality)**与**尺寸(scale/width/height)**压缩后写出。原实现 用 thumbnailator,Rust 用
-//! [`image`](https://docs.rs/image) crate(`DynamicImage::resize` + `JpegEncoder` quality)。
+//! 输入统一为内存字节，输出为新的图片字节。`scale` 执行等比缩放；同时给出 width 与 height 时，
+//! `keep_aspect_ratio` 决定贴框还是拉伸；只给一个维度时按原图比例推导另一维。quality 范围为
+//! 0.0..=1.0，且只影响 JPEG。
 //!
-//! ## 与 原实现 的对应
-//! - `.scale(s)` → 等比缩放(`resize_exact((w*s),(h*s))`)。
-//! - `.size(w,h)` + `keepAspectRatio` → `resize`(保持比例,贴框)/`resize_exact`(拉伸)。
-//! - `.width(w)` / `.height(h)`(单维度)→ 按原图比例等比推导另一维后缩放。
-//! - `.outputQuality(q)`(0.0–1.0)→ `JpegEncoder::new_with_quality((q*100) as u8)`,**仅 JPEG 有效**(PNG 等忽略,同 thumbnailator)。
-//! - **输出格式默认保留输入格式**(thumbnailator 未指定 outputFormat 时沿用源格式;历史图片处理路径即此)。
-//! - 1.0 格式合同限定为 JPEG、PNG、GIF、WebP、BMP、ICO、TIFF、PNM、QOI、TGA；未声明的
-//!   AVIF/EXR 等格式不随默认依赖编入，调用方应在上传边界先转换。
+//! ## 格式与输出边界
+//! - 未指定输出格式时保留输入格式。
+//! - 支持 JPEG、PNG、GIF、WebP、BMP、ICO、TIFF、PNM、QOI 与 TGA；其它格式应由上传边界转换。
+//! - 不读取 EXIF orientation，带方向标记的图片保持原始像素方向。
+//! - RGBA 转 JPEG 时直接丢弃 alpha，透明像素可能呈现为黑色；调用方需要其它底色时应先合成。
+//! - 本 crate 不执行文件 I/O、MIME 映射、Content-Type 推断或对象存储操作。
 //!
-//! ## 已知偏离 thumbnailator(文档化,未复刻)
-//! - **EXIF orientation 不应用**:thumbnailator 默认 `useExifOrientation=true` 会按 EXIF 旋正照片;
-//!   本 crate 的 `image::load_from_memory` 不读 EXIF,带旋转标记的手机照片输出方向保持原始像素方向。
-//!   需要旋正时调用方先行处理(如 `kamadak-exif` + `DynamicImage::rotate*`)。
-//! - **透明通道→JPEG 黑底**:RGBA(如透明 PNG)转 JPEG 时经 `to_rgb8()` 直接丢弃 alpha,
-//!   透明像素 `(0,0,0,0)` 变黑色;不做白底合成、不报错。需要白底请先自行合成。
-//!
-//! ## 不复刻 原实现 的重载爆炸
-//! 原实现 13 个 compress(InputStream/File/BufferedImage × scale/size/quality)→ 这里 `&[u8] → Vec<u8>` 统一,
-//! 文件读写由调用方处理。
-//!
-//! ## 有意不迁移:`imgFormatMap`/`getImgFormat`/`addImgFormat`(浏览器 MIME 子类型映射)
-//! 原实现 `ImageUtils` 还含 `jpg→jpeg`/`tif→tiff` 等扩展名→MIME 子类型映射。**本 crate 只负责压缩,不做 MIME 映射**:
-//! 本组件只负责压缩,不设置 Content-Type,故浏览器 MIME 子类型映射由上传层按需处理。
-//! 按扩展名派生 `image/{subtype}` 属于上传或 Web 层职责，不在本 crate 中隐式推断。
-//!
-//! ## 参数校验(对照 原实现 thumbnailator fail-fast)
-//! 非法 `scale<=0` / `width|height==0` / `quality∉0.0..=1.0` 返 [`ImageError::InvalidArgument`],**不静默修正**
-//! (与 thumbnailator 抛 `IllegalArgumentException` 语义一致;暴露调用方/配置错误)。
-//!
-//! ## 保真边界
-//! **不与 thumbnailator 逐像素一致**(底层重采样算法不同),只保证语义等价(比例/尺寸/质量)。
+//! ## 资源与失败边界
+//! 非法 scale、零尺寸、越界 quality、无法解码的输入以及超过输出像素上限的请求返回
+//! [`ImageError`]。重采样和 codec 选择不会承诺与其它实现逐像素一致。
 
 use image_crate::codecs::jpeg::JpegEncoder;
 use image_crate::{DynamicImage, ExtendedColorType, ImageEncoder};
@@ -44,7 +24,7 @@ use std::io::Cursor;
 
 pub use image_crate::ImageFormat;
 
-/// 缩放过滤器(默认 [`Filter::Lanczos3`],接近 thumbnailator 默认的高质量重采样)。
+/// 缩放过滤器，默认使用 [`Filter::Lanczos3`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
     /// 最近邻采样，速度最快但锯齿明显，适合像素风或缩略图占位。
@@ -55,7 +35,7 @@ pub enum Filter {
     CatmullRom,
     /// 高斯采样，适合平滑缩放。
     Gaussian,
-    /// Lanczos3 高质量采样，作为默认值对齐 thumbnailator 的高质量缩放预期。
+    /// Lanczos3 高质量采样，作为默认值。
     #[default]
     Lanczos3,
 }
@@ -76,14 +56,14 @@ impl Filter {
     }
 }
 
-/// 压缩选项(对照 thumbnailator builder 的可选链)。`Default` = 不缩放、不设质量、Lanczos3。
+/// 压缩选项；`Default` 表示不缩放、不指定质量并使用 Lanczos3。
 #[derive(Debug, Clone, Default)]
 pub struct CompressOpts {
     /// outputQuality,0.0–1.0,**仅 JPEG**;`None` = 编码器默认。
     pub quality: Option<f32>,
     /// 等比缩放比例(0–1 缩小,>1 放大)。**与 width/height 互斥,后者优先**。
     pub scale: Option<f64>,
-    /// 目标宽。只给 width(height=None)时按原图比例等比推导高(对齐 thumbnailator `.width(w)`)。
+    /// 目标宽。只给 width 时按原图比例等比推导高度。
     pub width: Option<u32>,
     /// 目标高。只给 height(width=None)时按原图比例等比推导宽。
     pub height: Option<u32>,

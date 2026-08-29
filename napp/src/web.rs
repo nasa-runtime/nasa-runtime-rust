@@ -1,3 +1,15 @@
+//! 受管 Web HTTP listener 组件。
+//!
+//! # 请求体形态边界
+//!
+//! 接入面只处理**有界缓冲 body**(上限见配置)与显式声明的 streaming 响应:
+//!
+//! - **不支持 `multipart/form-data`**:文件上传走对象存储直传，Web 层只收上传凭证与元数据；
+//!   表单文件字段没有解析入口，携带 multipart 的请求按普通 body 上限处理，不做分 part 语义。
+//! - **不提供 SSE(`text/event-stream`) 语义**:streaming 响应可承载字节流，但事件帧、心跳与
+//!   `Last-Event-ID` 续传不在合同内;需要服务端推送用受管 WebSocket。用裸 streaming 自拼 SSE
+//!   的兼容性后果由业务自担。
+
 use std::{
     collections::HashMap,
     io,
@@ -351,10 +363,15 @@ struct ServerConfig {
     /// 明文 HTTP/2 与共享 TCP 连接容量策略；默认只接受 HTTP/1。
     http2: Http2Config,
     /// mapping/安全运行时就绪失败(route audit 漂移 / active 签名 key 缺失 / required-replay 后端不可用)是否
-    /// 升级为**关键**就绪:默认 `false` = 非关键,monitor 复审失败只 Degraded
+    /// 升级为**关键**就绪:默认 `false` = 非关键,monitor 重新校验失败只 Degraded
     /// (last-good 路由/interceptor 合同仍服务、`/readyz` 保持 200,不把可恢复后端抖动升级成整实例摘流);
-    /// `true` = `affects_ready` 关键,monitor 复审失败置 NotReady → `/readyz` 503,交由编排替换本实例。
+    /// `true` = `affects_ready` 关键,monitor 重新校验失败置 NotReady → `/readyz` 503,交由编排替换本实例。
     mapping_readiness_critical: bool,
+    /// route 未命中任何授权策略时的缺省裁决,词表 `permit`/`observe`/`deny`;`None` 沿
+    /// UserHook 注入值或兼容缺省 permit。仅在授权层装配时有对象;与 UserHook 注入值同时出现
+    /// 且不一致时 Ready 期拒绝——安全缺省不允许两处配置静默分歧。
+    #[serde(alias = "authz-unmatched-route")]
+    authz_unmatched_route: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -385,6 +402,7 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             http2: Http2Config::default(),
             mapping_readiness_critical: false,
+            authz_unmatched_route: None,
         }
     }
 }
@@ -462,6 +480,17 @@ impl ServerConfig {
         // 可信代理列表提前解析校验:非法 IP/CIDR 在 Start 即 fail-fast,不等到请求期。
         crate::governance::parse_trusted_proxies(&self.trusted_proxies)
             .map_err(|message| web_error(phase, message))?;
+        // 未命中缺省属安全配置:词表外取值在 Start 即拒绝,不允许拖到 Ready 或请求期才暴露。
+        if let Some(value) = &self.authz_unmatched_route {
+            if naauthz::UnmatchedRoutePolicy::parse(value).is_none() {
+                return Err(web_error(
+                    phase,
+                    format!(
+                        "server.authz_unmatched_route `{value}` is invalid; use permit, observe or deny"
+                    ),
+                ));
+            }
+        }
         if self.cors.enabled {
             // 启用时提前用同一构造器校验(空来源 / `*`+credentials),misconfig 在 Start 就 fail-closed。
             crate::governance::CorsPolicy::new(
@@ -555,7 +584,7 @@ impl ApplicationComponent for WebComponent {
             // mapping/安全运行时就绪 contributor 必须在 UserHook 封口前(Start)登记;Ready 发布
             // MappingRuntime 后 observe、并由 monitor 反映运行期热刷新失败。默认非关键:reload 失败保留 last-good、
             // 只 Degraded(`/readyz` 仍 200);`server.mapping_readiness_critical=true` 时升级为关键(affects_ready)
-            // → monitor 复审失败置 NotReady → `/readyz` 503。
+            // → monitor 重新校验失败置 NotReady → `/readyz` 503。
             let contributor = context.application().register_readiness(
                 ComponentId::Web,
                 Arc::<str>::from("web:mapping-runtime"),
@@ -661,25 +690,6 @@ impl ApplicationComponent for WebComponent {
                     monitor: Some(monitor),
                 }));
             }
-            // 把 naweb 安全端点指标作为兼容源并入进程级统一 hub(descriptor 冲突审计 +
-            // 由 hub 统一渲染)。naweb 自持 registry,本注册只把它的 descriptor 纳入 catalog 并保存源。
-            // 仅 web-security 编入 naweb 的 auth/crypto 指标 registry,故 gate 到该特性。
-            #[cfg(feature = "web-security")]
-            if let Some(runtime) = application.mapping_runtime() {
-                let source =
-                    std::sync::Arc::new(crate::metrics::NawebMetricsSource::new(runtime.metrics()));
-                crate::metrics::register_naweb_source(&application.metrics_hub(), source).map_err(
-                    |conflict| {
-                        web_error(
-                            ApplicationPhase::Ready,
-                            format!(
-                                "naweb metric descriptor `{}` conflicts with an existing registration",
-                                conflict.name
-                            ),
-                        )
-                    },
-                )?;
-            }
             // 取走即封口：此后业务再调 configure_router 会得到阶段错误，而不是被静默丢弃。
             for transform in application.take_router_transforms() {
                 router = match catch_unwind(AssertUnwindSafe(move || transform(router))) {
@@ -694,6 +704,32 @@ impl ApplicationComponent for WebComponent {
                         ));
                     }
                 };
+            }
+            // configure_router 已封口并执行完成，此时安全 route 集合才完整。统一指标目录在同一
+            // 线性化点冻结 route 注册并预留最坏序列，后续不能再扩张实际渲染面。
+            #[cfg(feature = "web-security")]
+            if let Some(runtime) = application.mapping_runtime() {
+                let source =
+                    std::sync::Arc::new(crate::metrics::NawebMetricsSource::new(runtime.metrics()));
+                crate::metrics::register_naweb_source(&application.metrics_hub(), source).map_err(
+                    |error| match error {
+                        nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => {
+                            web_error(
+                                ApplicationPhase::Ready,
+                                format!(
+                                    "naweb metric descriptor `{}` conflicts with an existing registration",
+                                    conflict.name
+                                ),
+                            )
+                        }
+                        nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                            web_error(
+                                ApplicationPhase::Ready,
+                                "naweb metric series reservation exceeds the process limit",
+                            )
+                        }
+                    },
+                )?;
             }
             if config.health {
                 // 探针在业务定制之后挂载，因此不被 configure_router 里的全局 layer 覆盖。
@@ -750,7 +786,90 @@ impl ApplicationComponent for WebComponent {
             // 幂等/handler。主体由下方 authentication 层写入请求扩展。默认零行为。
             let registry = application.authz_registry();
             let object_authorizer = application.object_authorizer();
+            let unmatched = resolve_unmatched_policy(&application, &config)?;
+            // Observe/Deny 的安全含义依赖可命中的策略集合；即使没有注入任何授权 provider，
+            // 也必须先拒绝无效装配，不能因授权层未创建而把显式安全配置静默降级成零行为。
+            if registry.is_none() && unmatched != naauthz::UnmatchedRoutePolicy::Permit {
+                return Err(web_error(
+                    ApplicationPhase::Ready,
+                    format!(
+                        "authz unmatched-route policy `{}` requires a route policy registry; \
+                         inject policies via set_authz_registry or keep the default permit",
+                        unmatched.as_str(),
+                    ),
+                ));
+            }
             if registry.is_some() || object_authorizer.is_some() {
+                let dynamic_contracts = application.dynamic_route_contracts();
+                if let Some(registry) = registry.as_ref() {
+                    // 启动期策略覆盖对账:悬空策略(指向不存在 route)阻断 Ready——它多半是模板
+                    // 写错,运行期表现为"想保护的 route 实际未被保护"。未覆盖的鉴权 route 在
+                    // permit/observe 下只清点告示(是否放行由未命中缺省裁决);deny 下阻断 Ready:
+                    // 缺省已承诺 fail-closed,漏配路由等价于死路由,启动期显形优于请求期 403。
+                    audit_authz_coverage(
+                        registry,
+                        &routes,
+                        &dynamic_contracts,
+                        &config.context_path,
+                        unmatched,
+                    )?;
+                }
+                // 授权治理观测只在装配了授权层时注册:未启用授权的应用不产生
+                // "漏配为零"的误导序列;预留量与 descriptor 数一致,冲突即拒绝 Ready。
+                application
+                    .metrics_hub()
+                    .register_legacy_source_reserved(
+                        std::sync::Arc::new(crate::authz::AuthzMetricsSource::new(
+                            registry.clone(),
+                        )),
+                        crate::authz::AUTHZ_METRIC_SERIES,
+                    )
+                    .map_err(|error| match error {
+                        nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => {
+                            web_error(
+                                ApplicationPhase::Ready,
+                                format!(
+                                    "authz metric descriptor `{}` conflicts with an existing registration",
+                                    conflict.name
+                                ),
+                            )
+                        }
+                        nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                            web_error(
+                                ApplicationPhase::Ready,
+                                "authz metric series reservation exceeds the process limit",
+                            )
+                        }
+                    })?;
+                // 未命中缺省的豁免集合:声明公开(auth_required=false)的静态路由与动态合同路由,
+                // 加上框架探针/指标路由——它们不属于业务安全面,Deny 把探针 403 会直接打死
+                // liveness/readiness。口径必须与 audit_authz_coverage 的"公开即显式豁免"一致。
+                let mut unmatched_exempt = std::collections::HashSet::new();
+                let exempt_prefix = if config.context_path == "/" {
+                    ""
+                } else {
+                    config.context_path.as_str()
+                };
+                for route in routes.iter().filter(|route| !route.auth_required) {
+                    unmatched_exempt
+                        .insert(format!("{} {exempt_prefix}{}", route.method, route.path));
+                }
+                for contract in dynamic_contracts
+                    .iter()
+                    .filter(|contract| !contract.auth_required)
+                {
+                    unmatched_exempt.insert(format!(
+                        "{} {exempt_prefix}{}",
+                        contract.method, contract.path
+                    ));
+                }
+                if config.health {
+                    unmatched_exempt.insert(format!("GET {exempt_prefix}/healthz"));
+                    unmatched_exempt.insert(format!("GET {exempt_prefix}/readyz"));
+                    // 与上方 /metrics 挂载条件同 cfg:未编入指标出口时不虚增豁免面。
+                    #[cfg(any(feature = "kafka", feature = "web"))]
+                    unmatched_exempt.insert(format!("GET {exempt_prefix}/metrics"));
+                }
                 let (object_authorizer, object_timeout) = object_authorizer
                     .map(|(provider, timeout)| (Some(provider), timeout))
                     .unwrap_or((None, Duration::from_millis(200)));
@@ -758,7 +877,9 @@ impl ApplicationComponent for WebComponent {
                     registry,
                     object_authorizer,
                     object_timeout,
-                );
+                )
+                .with_unmatched_policy(unmatched)
+                .with_unmatched_exemptions(std::sync::Arc::new(unmatched_exempt));
                 router = router.layer(from_fn_with_state(state, crate::authz::authorize));
             }
             // authentication 中间件:仅当业务注入认证器时启用;装在授权**之外**——认证永远早于
@@ -905,6 +1026,30 @@ impl ApplicationComponent for WebComponent {
                     error,
                 )
             })?;
+            // 分布式配额观测随 Web 出口常驻注册:零流量时全零可见,部署据此确认
+            // 策略与主体来源已生效;序列词表编译期冻结,预留量恒等于五。
+            #[cfg(feature = "rate-limit")]
+            application
+                .metrics_hub()
+                .register_legacy_source_reserved(
+                    std::sync::Arc::new(crate::ratelimit::RateLimitMetricsSource),
+                    crate::ratelimit::RATE_LIMIT_METRIC_SERIES,
+                )
+                .map_err(|error| match error {
+                    nametrics_core::MetricSourceRegistrationError::Conflict(conflict) => web_error(
+                        ApplicationPhase::Ready,
+                        format!(
+                            "rate limit metric descriptor `{}` conflicts with an existing registration",
+                            conflict.name
+                        ),
+                    ),
+                    nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                        web_error(
+                            ApplicationPhase::Ready,
+                            "rate limit metric series reservation exceeds the process limit",
+                        )
+                    }
+                })?;
             let web_runtime = application.web_runtime();
             application
                 .metrics_hub()
@@ -999,7 +1144,7 @@ impl ShutdownAction for WebShutdown {
 /// 运行时的**完整就绪合同**反映进 `/readyz`。
 ///
 /// `readiness_bound` 用启动期(mvc_router! 建路由时经 `audit_route_plans` 冻结)的 last-good 路由/interceptor
-/// 合同,对当前 last-good 快照复审路由(route audit)、校验 active 签名 key,并对声明 required replay 的路由
+/// 合同,对当前 last-good 快照重新审计路由(route audit)、校验 active 签名 key,并对声明 required replay 的路由
 /// 探测 replay 后端可用性。任一失败(路由审计漂移 / active key 缺失 / required replay 后端不可用)→ Degraded
 /// (last-good 快照仍在服务、`/readyz` 保持 200;非关键——不把可恢复的后端抖动升级成整实例摘流);成功→Ready。
 /// 进入停机态即优雅退出。`readiness_bound` 只读 last-good、由 monitor 低频执行,绝不从 `/readyz` handler 直接
@@ -1009,8 +1154,8 @@ impl ShutdownAction for WebShutdown {
 ///
 /// - `application`:读取全局生命周期状态与已发布 MappingRuntime。
 /// - `contributor`:mapping 就绪贡献句柄。
-/// - `critical`:失败是否升级为关键(`server.mapping_readiness_critical`):`true` → 复审失败 NotReady(→503),
-///   `false` → 复审失败 Degraded(last-good 仍服务、`/readyz` 保持 200)。
+/// - `critical`:失败是否升级为关键(`server.mapping_readiness_critical`):`true` → 重新校验失败 NotReady(→503),
+///   `false` → 重新校验失败 Degraded(last-good 仍服务、`/readyz` 保持 200)。
 /// - `cancel`:停机取消令牌。
 async fn run_mapping_monitor(
     application: Application,
@@ -1042,7 +1187,7 @@ async fn run_mapping_monitor(
                 Ok(_audit) => {
                     contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 }
-                // 安全合同复审失败:last-good 仍服务。默认非关键 Degraded(不摘流);
+                // 安全合同重新校验失败:last-good 仍服务。默认非关键 Degraded(不摘流);
                 // `mapping_readiness_critical` 时升级为 NotReady(affects_ready 关键 → `/readyz` 503)。
                 Err(_error) => {
                     let state = if critical {
@@ -1793,4 +1938,151 @@ pub(crate) fn validate_server_section(
 /// - `message`：不包含请求体或配置秘密的诊断摘要。
 fn web_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ComponentId::Web, phase, message)
+}
+
+/// 业务作用：解析授权未命中缺省的最终生效值，统一 UserHook 注入与 YAML 配置两个来源。
+///
+/// 两处同时配置且不一致时拒绝装配——该开关决定"漏配策略的路由放行还是拒绝",允许静默分歧
+/// 等于让部署无法从任何单一位置确认真实生效的安全缺省。
+///
+/// # 参数
+///
+/// - `application`：读取 UserHook 阶段注入值。
+/// - `config`：Ready 冻结的 server 配置(YAML `server.authz_unmatched_route`,已过词表校验)。
+///
+/// # 返回
+///
+/// 唯一来源或双源一致时返回生效值(均未配置回落兼容缺省 permit)；双源冲突返回 Ready 错误。
+fn resolve_unmatched_policy(
+    application: &Application,
+    config: &ServerConfig,
+) -> ApplicationResult<naauthz::UnmatchedRoutePolicy> {
+    let injected = application.authz_unmatched_policy_injected();
+    let configured = match config.authz_unmatched_route.as_deref() {
+        Some(value) => Some(naauthz::UnmatchedRoutePolicy::parse(value).ok_or_else(|| {
+            web_error(
+                ApplicationPhase::Ready,
+                format!(
+                    "server.authz_unmatched_route `{value}` is invalid; use permit, observe or deny"
+                ),
+            )
+        })?),
+        None => None,
+    };
+    match (injected, configured) {
+        (Some(hook), Some(yaml)) if hook != yaml => Err(web_error(
+            ApplicationPhase::Ready,
+            format!(
+                "authz unmatched-route policy is configured twice with different values \
+                 (UserHook `{}` vs server.authz_unmatched_route `{}`); keep exactly one source",
+                hook.as_str(),
+                yaml.as_str(),
+            ),
+        )),
+        (Some(hook), _) => Ok(hook),
+        (None, Some(yaml)) => Ok(yaml),
+        (None, None) => Ok(naauthz::UnmatchedRoutePolicy::default()),
+    }
+}
+
+/// 业务作用：启动期把授权策略与有效路由表对账，阻断悬空策略并按未命中缺省处置未覆盖面。
+///
+/// 悬空策略(route_id 不指向任何有效路由)几乎必然是模板写错——运行期的后果是"以为已保护的
+/// route 实际未被任何策略命中",在未命中缺省为放行时形成静默漏配,因此直接阻断 Ready。
+/// 未覆盖的鉴权 route 分级处置:permit/observe 下只清点与警示(是否放行由未命中缺省在请求期
+/// 裁决),使 `observe -> deny` 的灰度有账可查;deny 下阻断 Ready——缺省已承诺 fail-closed,
+/// 漏配路由等价于永远 403 的死路由,部署期显形优于请求期拒绝。声明公开(auth_required=false)
+/// 的 route 属显式豁免,不进入未覆盖清点,运行期同样不受 observe/deny 收紧。
+///
+/// # 参数
+///
+/// - `policy_set`：Ready 冻结代次的策略快照。
+/// - `routes`：业务二进制投影出的全部静态路由元数据。
+/// - `dynamic_contracts`：`configure_router` 动态路由经显式登记的合同；与静态路由同等参与对账。
+/// - `context_path`：路由挂载前缀；运行期 `MatchedPath` 含该前缀，策略模板必须一致。
+/// - `unmatched`：未命中缺省，决定未覆盖面是警示还是阻断。
+///
+/// # 返回
+///
+/// 对账通过返回 `Ok`；存在悬空策略、或缺省为 deny 且存在未覆盖鉴权 route 时返回 Ready 阶段
+/// 错误并阻断 Web 装配。
+fn audit_authz_coverage(
+    registry: &naauthz::PolicyRegistry,
+    routes: &[RouteMeta],
+    dynamic_contracts: &[naopenapi::RouteContract],
+    context_path: &str,
+    unmatched: naauthz::UnmatchedRoutePolicy,
+) -> ApplicationResult<()> {
+    let prefix = if context_path == "/" {
+        ""
+    } else {
+        context_path
+    };
+    let mut effective =
+        std::collections::HashSet::with_capacity(routes.len() + dynamic_contracts.len());
+    for route in routes {
+        effective.insert(format!("{} {prefix}{}", route.method, route.path));
+    }
+    for contract in dynamic_contracts {
+        effective.insert(format!("{} {prefix}{}", contract.method, contract.path));
+    }
+    // 未覆盖清点:只统计声明需要身份的 route;声明 public(auth_required=false)的 route 属显式豁免。
+    let protected: Vec<String> = routes
+        .iter()
+        .filter(|route| route.auth_required)
+        .map(|route| format!("{} {prefix}{}", route.method, route.path))
+        .chain(
+            dynamic_contracts
+                .iter()
+                .filter(|contract| contract.auth_required)
+                .map(|contract| format!("{} {prefix}{}", contract.method, contract.path)),
+        )
+        .collect();
+    // 覆盖合同先复验当前快照再安装；后续每次 reload 都在同一快照写门禁内复验该合同，
+    // 策略或未命中缺省不满足时完整保留 last-good，不允许绕过启动期安全证明。
+    let audit = registry
+        .install_coverage_contract(effective, protected.clone(), unmatched)
+        .map_err(|error| match error {
+            naauthz::PolicyError::DanglingRoutes(routes) => web_error(
+                ApplicationPhase::Ready,
+                format!(
+                    "authz 策略指向不存在的 route(悬空策略会让目标 route 实际不受保护),共 {} 条: {}",
+                    routes.len(),
+                    routes.iter().take(16).cloned().collect::<Vec<_>>().join(", "),
+                ),
+            ),
+            naauthz::PolicyError::UncoveredRoutes(routes) => web_error(
+                ApplicationPhase::Ready,
+                format!(
+                    "authz 未命中缺省为 deny,但 {} 条有鉴权要求的 route 未命中任何授权策略,\
+                     上线即全部 403;请补策略或将 route 声明为公开(示例: {})",
+                    routes.len(),
+                    routes.iter().take(16).cloned().collect::<Vec<_>>().join(", "),
+                ),
+            ),
+            other => web_error(
+                ApplicationPhase::Ready,
+                format!("authz coverage contract installation failed: {other}"),
+            ),
+        })?;
+    // 覆盖账目进入指标出口：启动日志会滚走，漏配面必须能在 metrics 上持续核对。
+    crate::authz::record_coverage_audit(audit.covered, audit.uncovered);
+    let policy_set = registry.current();
+    let mut uncovered = protected
+        .into_iter()
+        .filter(|route| !policy_set.is_protected(route))
+        .collect::<Vec<_>>();
+    if !uncovered.is_empty() {
+        uncovered.sort_unstable();
+        let total = uncovered.len();
+        // 只展示有界前缀,避免超大路由表刷爆启动日志;完整清单可按同规则离线复算。
+        uncovered.truncate(16);
+        tracing::warn!(
+            unmatched_policy = unmatched.as_str(),
+            uncovered_total = total,
+            uncovered_sample = %uncovered.join(", "),
+            "authz 覆盖清点: 有鉴权要求但未命中任何授权策略的 route;缺省翻转为 deny 前必须补齐,否则启动被阻断"
+        );
+    }
+    Ok(())
 }

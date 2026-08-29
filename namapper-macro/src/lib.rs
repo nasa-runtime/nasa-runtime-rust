@@ -442,6 +442,8 @@ enum TxMode {
     Auto,
     /// 方法必须在事务中调用,否则返回错误。
     Mandatory,
+    /// 方法拒绝在 ambient 事务中调用——语句的副作用不允许随外层事务回滚。
+    Never,
 }
 
 impl TxMode {
@@ -450,17 +452,16 @@ impl TxMode {
     /// # 参数
     /// - `value`: mapper 属性中的事务策略字符串。
     /// - `span`: 源码位置,用于生成精确的编译期错误。
+    ///
+    /// 返回：词表命中时返回对应事务模式；未知值返回带源码位置的编译错误。
     fn parse(value: &str, span: proc_macro2::Span) -> syn::Result<Self> {
         match value {
             "auto" => Ok(Self::Auto),
             "mandatory" => Ok(Self::Mandatory),
-            "never" => Err(syn::Error::new(
-                span,
-                "tx = \"never\" 首版不支持,请使用 tx = \"auto\" 或 tx = \"mandatory\"",
-            )),
+            "never" => Ok(Self::Never),
             other => Err(syn::Error::new(
                 span,
-                format!("tx 不支持 `{other}`,只能是 \"auto\" / \"mandatory\""),
+                format!("tx 不支持 `{other}`,只能是 \"auto\" / \"mandatory\" / \"never\""),
             )),
         }
     }
@@ -3321,6 +3322,8 @@ fn gen_query_method(
 /// # 参数
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+///
+/// 返回：成功时返回持有连接到流结束的方法实现 token；签名不符合流式合同时返回编译错误。
 fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<TokenStream2> {
     let sig = &plan.method.sig;
     let result_ty = result_inner(&sig.output)?;
@@ -3332,22 +3335,19 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
     };
     let sql_init = sql_init_tokens(root, plan, sig.ident.span());
     let query = stream_query_builder_tokens(root, plan, row_ty)?;
-    let pool = pool_tokens(root, plan.datasource.as_deref());
+    let conn = conn_tokens(root, TxMode::Auto, plan.datasource.as_deref());
 
     Ok(quote! {
         #sig {
-            if #root::in_transaction() {
-                return ::core::result::Result::Err(
-                    #root::__private::anyhow::anyhow!(
-                        "StreamQuery 首版不支持在 #[transactional] ambient 事务中返回流"
-                    )
-                );
-            }
             #sql_init
-            let __mapper_pool = #pool;
+            // 流统一持有普通 SQL 入口返回的拥有型连接：事务内是连接槽锁，事务外是池连接。
+            // 两条路径因此都执行 datasource 与数据库 driver 门禁，不会在另一种 driver 的
+            // ambient transaction 中绕过检查而静默退化为池读取。连接持有到流消费完或丢弃；
+            // 事务内流存活期间同一事务不得发出其它语句，未释放就返回事务体会在提交门禁显式失败。
+            let mut __mapper_conn = #conn;
             let __mapper_query = #query;
             let __mapper_stream = #root::__private::async_stream::try_stream! {
-                let mut __mapper_rows = __mapper_query.fetch(&__mapper_pool);
+                let mut __mapper_rows = __mapper_query.fetch(__mapper_conn.as_mut());
                 while let ::core::option::Option::Some(__mapper_row) =
                     #root::__private::futures_util::TryStreamExt::try_next(&mut __mapper_rows).await?
                 {
@@ -4862,6 +4862,8 @@ fn clear_tokens(
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `tx`: 后台任务发送消息的通道或事务句柄。
 /// - `datasource`: mapper 方法绑定的数据源名称。
+///
+/// 返回：按事务模式和 datasource 选定默认、强制事务或拒绝事务连接入口的 token。
 fn conn_tokens(root: &TokenStream2, tx: TxMode, datasource: Option<&str>) -> TokenStream2 {
     match (tx, datasource) {
         (TxMode::Auto, Some(datasource)) => {
@@ -4874,19 +4876,11 @@ fn conn_tokens(root: &TokenStream2, tx: TxMode, datasource: Option<&str>) -> Tok
             quote! { #root::mandatory_conn_for(#datasource).await? }
         }
         (TxMode::Mandatory, None) => quote! { #root::mandatory_conn().await? },
-    }
-}
-/// 业务作用：生成 Mapper 宏 `pool_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
-/// - `datasource`: mapper 方法绑定的数据源名称。
-fn pool_tokens(root: &TokenStream2, datasource: Option<&str>) -> TokenStream2 {
-    match datasource {
-        Some(datasource) => {
+        (TxMode::Never, Some(datasource)) => {
             let datasource = LitStr::new(datasource, proc_macro2::Span::call_site());
-            quote! { #root::pool_for(#datasource)? }
+            quote! { #root::never_conn_for(#datasource).await? }
         }
-        None => quote! { #root::pool_for("default")? },
+        (TxMode::Never, None) => quote! { #root::never_conn().await? },
     }
 }
 /// 业务作用：完成 Mapper 宏 `bind_expr` 的编译期转换步骤，并把失败定位到调用方源码。

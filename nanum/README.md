@@ -13,7 +13,7 @@ nanum = "1"
 真实值 = mantissa * 10^-scale
 ```
 
-默认 scale 为 8，对齐历史 `Numeric.DEFAULT_FIXED_SCALE`。
+默认 scale 为 8，对应 `DEFAULT_SCALE` 的公开合同。
 
 ## 定点运算
 
@@ -29,7 +29,7 @@ assert_eq!(to_plain_string(notional, 8)?, "246.9");
 let half = divide(price, to_fixed_str("2", 8)?, 8)?;
 ```
 
-`multiply` / `divide` 逐值对齐历史实现：整数部分走整数，余数部分走 f64 中转和兼容舍入。
+`multiply` / `divide` 使用稳定的兼容数值合同：整数部分走整数，余数部分走 f64 中转和兼容舍入。
 
 ## 精度对齐
 
@@ -67,8 +67,8 @@ f64 路径是便捷入口，内部仍走定点化以减少普通浮点误差；�
 
 ## 行为边界
 
-- `to_fixed_str` 字符串先经 f64(逐值对齐原实现 parseDouble+round):有效数字 **≥16 位**开始失真;超过 `scale` 位的小数被**静默舍入**(`to_fixed_str("0.000000001", 8) = Ok(0)`)。需要任意精度的精确字符串解析请用 `decimal` 模块。
-- `to_plain_string_display` / `to_plain_string_raw_display` 负值舍到 0 时输出 `"-0"`(逐值对齐原实现);两参 `to_plain_string` 则有 `-0` 守卫。展示层不接受 `-0` 时请自行归一。
+- `to_fixed_str` 字符串先经 f64 parse 和 round：有效数字 **≥16 位**开始失真；超过 `scale` 位的小数被**静默舍入**(`to_fixed_str("0.000000001", 8) = Ok(0)`)。需要任意精度的精确字符串解析请用 `decimal` 模块。
+- `to_plain_string_display` / `to_plain_string_raw_display` 负值舍到 0 时输出 `"-0"`；两参 `to_plain_string` 则有 `-0` 守卫。展示层不接受 `-0` 时请自行归一。
 - `align*` 语义:对齐到 `to_scale` 精度但**仍保持 `from_scale` 体系表示**(如 `align(20021365, 8, 4) = 20020000`,即 0.20021365 → 0.2002 仍 ×10^8),配合 `is_aligned` 做撮合 tick 校验。
 - 定点四则无浮点误差(0.1+0.2 精确等于 0.3);除零、scale>8、i128 溢出、非有限 f64、`Unnecessary` 需舍入等均返回错误,不 panic。
 

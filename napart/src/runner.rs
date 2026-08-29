@@ -185,6 +185,7 @@ fn legacy_rejection(error: SubmitRejection) -> SubmitError {
     }
 }
 
+/// 业务作用：冻结停止动作开始时的终态基线，用于生成本次停机而非进程累计的报告。
 struct StopBaseline {
     completed: u64,
     cancelled: u64,
@@ -192,6 +193,7 @@ struct StopBaseline {
     frozen: u64,
 }
 
+/// 业务作用：让并发停止调用共享唯一动作、强制升级信号与最终停机报告。
 struct StopOperation {
     started: AtomicBool,
     force_requested: AtomicBool,
@@ -200,6 +202,7 @@ struct StopOperation {
     done: Notify,
 }
 
+/// 业务作用：绑定延迟索引所需的任务权威、路由哈希、执行规格与信封身份。
 struct DelayedTask {
     entry: Arc<crate::entry::TaskEntry<Job>>,
     hash: u64,
@@ -248,11 +251,13 @@ impl StopOperation {
     }
 }
 
+/// 业务作用：保存当前与最近 generation，支持重启切换和终态报告查询使用同一权威。
 struct ControlState {
     current: Option<Arc<RunnerInner>>,
     last: Option<Arc<RunnerInner>>,
 }
 
+/// 业务作用：拥有命名 Runner 的 generation 切换、配置与跨 generation 停止控制。
 pub(crate) struct RunnerControl {
     id: u64,
     name: RunnerName,
@@ -3727,6 +3732,7 @@ impl RunnerInner {
     }
 }
 
+/// 业务作用：保护一次提交从接纳复验到物理发布的临界区，并在离场时归还 producer 计数。
 struct ProducerGuard {
     inner: Arc<RunnerInner>,
 }
@@ -3971,6 +3977,9 @@ async fn run_business(
     };
     backstop.running = true;
     inner.metrics.running.fetch_add(1, Ordering::Relaxed);
+    // 恢复提交时捕获的链路作用域:业务 Future 内未显式绑定的出站调用延续提交方 trace;
+    // None 时零成本直通,不为无链路任务制造新根。
+    let job = natelemetry::with_ambient(envelope.authority().trace(), job);
     let outcome = AssertUnwindSafe(job).catch_unwind().await;
     let panicked = outcome.is_err();
     match outcome {
@@ -3996,6 +4005,7 @@ async fn run_business(
     inner.lifecycle().notify_progress();
 }
 
+/// 业务作用：在 slot 执行许可归还时唤醒对应 worker，避免已排队任务等待周期控制 tick。
 struct SlotExecutionWake {
     wake: Arc<Notify>,
 }
@@ -4012,6 +4022,7 @@ impl Drop for SlotExecutionWake {
     }
 }
 
+/// 业务作用：在业务 Future 异常离场时帮助发布终态并归还执行账目，避免任务永久悬挂。
 struct BusinessBackstop {
     inner: Arc<RunnerInner>,
     envelope: Arc<TaskEnvelope>,

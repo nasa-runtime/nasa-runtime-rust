@@ -153,6 +153,10 @@ saga_stream_metric!(
     &[]
 );
 
+/// 每个 stream runtime 的带标识 family 数;快照对每个 runtime 恒产十二条,预算按 poller 数线性扩展。
+#[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
+const SAGA_STREAM_SERIES_PER_RUNTIME: usize = 12;
+
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 static SAGA_STREAM_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 13] = [
     &STREAM_ACKED,
@@ -1416,23 +1420,10 @@ impl ApplicationComponent for SagaComponent {
             )?;
             // 就绪注册表在 UserHook 完成时封口,而计划要到 UserHook 才提交:此处必须
             // 先注册 stream 贡献项占位;Ready 阶段若计划不含 Redis transport,占位被
-            // 一次性置绿中和,不影响未启用者。
+            // 一次性置绿中和,不影响未启用者。stream 指标源不在此注册——它的序列数取决于
+            // 计划冻结后的 poller 数,推迟到 Ready 以精确预算注册。
             #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
             {
-                let state = context.application().saga_runtime();
-                context
-                    .application()
-                    .metrics_hub()
-                    .register_legacy_source(Arc::new(SagaStreamMetricsSource { state }))
-                    .map_err(|conflict| {
-                        saga_error(
-                            ApplicationPhase::Start,
-                            format!(
-                                "saga stream metric descriptor `{}` conflicts with an existing registration",
-                                conflict.name
-                            ),
-                        )
-                    })?;
                 self.stream_contributor = Some(context.application().register_readiness(
                     ComponentId::Saga,
                     Arc::<str>::from("saga:redis-stream"),
@@ -1643,6 +1634,37 @@ impl ApplicationComponent for SagaComponent {
                             })
                             .collect();
                         state.publish_streams(runtimes.clone())?;
+                        // poller 集合随计划在此冻结,最坏序列数可精确承诺:
+                        // 每个 stream runtime 十二个带标识 family 各一条,外加一个全局 family。
+                        let worst_case_series = runtimes
+                            .len()
+                            .saturating_mul(SAGA_STREAM_SERIES_PER_RUNTIME)
+                            .saturating_add(1);
+                        application
+                            .metrics_hub()
+                            .register_legacy_source_reserved(
+                                Arc::new(SagaStreamMetricsSource {
+                                    state: Arc::clone(&state),
+                                }),
+                                worst_case_series,
+                            )
+                            .map_err(|error| match error {
+                                nametrics_core::MetricSourceRegistrationError::Conflict(
+                                    conflict,
+                                ) => saga_error(
+                                    ApplicationPhase::Ready,
+                                    format!(
+                                        "saga stream metric descriptor `{}` conflicts with an existing registration",
+                                        conflict.name
+                                    ),
+                                ),
+                                nametrics_core::MetricSourceRegistrationError::SeriesBudgetExceeded => {
+                                    saga_error(
+                                        ApplicationPhase::Ready,
+                                        "saga stream metric series reservation exceeds the process limit",
+                                    )
+                                }
+                            })?;
                         stream_contributor.observe(
                             DependencyState::Ready,
                             reason::HEALTHY,

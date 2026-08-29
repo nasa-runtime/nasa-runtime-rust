@@ -9,7 +9,7 @@
 # ============================================================================
 [package]
 name = "async-macro"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[Async]/#[scheduled]/#[EnableScheduling] 属性宏(异步/定时)"

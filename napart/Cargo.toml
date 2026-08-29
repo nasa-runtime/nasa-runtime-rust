@@ -23,6 +23,8 @@ name = "napart"
 # Tokio 提供监督任务、容量许可、唤醒与单调定时器。
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
+# 任务权威在提交时捕获环境 trace 上下文，业务 Future 执行期恢复同一链路。
+natelemetry = { version = "1.0.1" }
 # 类型状态注册表按 key 分片，已存在类型的提交不经过 slot 级全表互斥锁。
 dashmap = "6"
 # 业务 Future 的 poll 展开在单任务边界转换为稳定失败终态。

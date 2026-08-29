@@ -134,3 +134,87 @@ pub trait InboxStore: Send + Sync {
         message_id: &str,
     ) -> Result<InboxClaim, InboxStoreError>;
 }
+
+// ───────────────────────────── retention(去重标记保留与清理合同)─────────────────────────────
+
+/// Inbox 去重标记的保留清理策略。
+///
+/// 去重标记只增不减会让判重表随消费历史无限增长，最终拖慢唯一键判重本身。清理的安全边界由
+/// `redelivery_horizon_ms` 承载：删除窗口一旦小于消息源的最大重投视界，窗口外重投的同
+/// `message_id` 会再次判为首见并造成二次消费。该字段没有默认值——它取决于消息源(如 Kafka 源
+/// topic 的保留期与消费重置策略中的较大者)，只有业务能够声明；超过视界的重复消息本就无法判重，
+/// 属于既有合同边界而不是清理引入的损失。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxRetentionPolicy {
+    /// 消息源最大重投视界毫秒；由业务按消息源事实显式声明，是清理下限的安全依据。
+    pub redelivery_horizon_ms: i64,
+    /// 已处理标记的最小保留毫秒；必须不小于 `redelivery_horizon_ms`。
+    pub processed_min_age_ms: i64,
+    /// 单批删除行数上限；每轮循环删除直到空批或预算耗尽。
+    pub batch_limit: u32,
+    /// 单轮时间预算毫秒；到达预算即返回报告，剩余候选留待下一轮。
+    pub round_time_budget_ms: i64,
+}
+
+impl InboxRetentionPolicy {
+    /// 业务作用：校验策略自洽性，把"删除窗口小于重投视界"这类必然造成二次消费的配置拦在启动期。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部约束成立时返回 `Ok`；否则返回不含敏感信息的稳定原因文本。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.redelivery_horizon_ms <= 0 {
+            return Err("redelivery_horizon_ms must be positive".into());
+        }
+        if self.processed_min_age_ms < self.redelivery_horizon_ms {
+            return Err(
+                "processed_min_age_ms must be at least redelivery_horizon_ms; \
+                 deleting markers inside the redelivery horizon re-admits duplicates"
+                    .into(),
+            );
+        }
+        if self.batch_limit == 0 || self.batch_limit > 10_000 {
+            return Err("batch_limit must be within 1..=10000".into());
+        }
+        if self.round_time_budget_ms <= 0 {
+            return Err("round_time_budget_ms must be positive".into());
+        }
+        Ok(())
+    }
+}
+
+/// 一轮 Inbox 保留清理的账目报告；四项全部进入观测，不允许静默轮次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InboxRetentionRoundReport {
+    /// 本轮删除的过期标记行数。
+    pub deleted: u64,
+    /// retention owner 已被其它执行者持有，本轮没有执行清理。
+    pub claim_contended: bool,
+    /// 时间预算耗尽提前返回，仍有候选留待下一轮。
+    pub budget_exhausted: bool,
+    /// 本轮结束时最老候选标记的年龄毫秒；无候选时为 `None`。
+    pub oldest_candidate_age_ms: Option<i64>,
+}
+
+/// 后端中立的 Inbox 保留清理合同。
+///
+/// 实现必须以后端原生互斥(如 advisory lock)保证同一物理 Inbox 表内的同一
+/// `consumer_name` 同时至多一个清理者；互斥身份必须包含数据库命名空间，避免同一数据库实例中
+/// 互不相干的库或 schema 相互阻塞。竞争失败以 `claim_contended` 报告而不是并发删除。删除只允许命中 `processed_at` 早于
+/// cutoff 的行：claim 在 ambient 事务内写入，行对清理可见时其事务必已提交，按时间下界删除
+/// 不存在半行竞态。cutoff 必须取整轮开始时刻，轮内不得随时间推进。
+#[async_trait::async_trait]
+pub trait DurableInboxRetention: Send + Sync {
+    /// 业务作用：对单个消费命名空间执行一轮 owner 互斥的过期标记清理。
+    ///
+    /// 参数说明：
+    /// - `consumer_name`：目标消费命名空间；owner 互斥按该值隔离。
+    /// - `policy`：已通过 `validate` 的保留策略；实现必须复验，拒绝未校验策略。
+    ///
+    /// 返回：本轮账目报告；连接、互斥或删除失败返回脱敏错误。
+    async fn retention_round(
+        &self,
+        consumer_name: &str,
+        policy: &InboxRetentionPolicy,
+    ) -> Result<InboxRetentionRoundReport, InboxStoreError>;
+}

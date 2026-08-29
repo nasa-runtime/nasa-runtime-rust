@@ -143,10 +143,14 @@ fn expand_transactional(
     //    `async move #block`:把原函数体当成一个 async 块,按 move 捕获所有参数 →
     //       它就是 run 需要的"事务内要执行的业务 future",输出 = 原返回类型 anyhow::Result<T>。
     //    #root = 解析出的运行时根(::nasa::tx / ::tx / crate),run 见 tx crate 的 src/lib.rs。
-    let run_call = if let Some(datasource) = datasource {
-        quote! { #root::run_for(#datasource, async move #block).await }
-    } else {
-        quote! { #root::run(async move #block).await }
+    let run_call = match datasource {
+        // never:进入前拒绝 ambient 事务且不开启新事务——供"绝不能被外层事务包住"的路径
+        // (如自治审计写、必须立即可见的对外副作用)把违规调用变成显式错误而不是静默入伙。
+        TransactionalMode::Never => quote! { #root::run_never(async move #block).await },
+        TransactionalMode::Named(datasource) => {
+            quote! { #root::run_for(#datasource, async move #block).await }
+        }
+        TransactionalMode::Default => quote! { #root::run(async move #block).await },
     };
     let expanded = quote! {
         #(#attrs)*
@@ -157,26 +161,40 @@ fn expand_transactional(
     expanded.into()
 }
 
+/// `#[transactional]` 的编排模式；由属性参数在编译期唯一确定。
+enum TransactionalMode {
+    /// 默认 datasource 的 ambient 事务。
+    Default,
+    /// 显式命名 datasource 的 ambient 事务。
+    Named(LitStr),
+    /// 拒绝 ambient 事务且不开启事务。
+    Never,
+}
+
 /// 业务作用：解析 `#[transactional]` 属性参数。
 ///
-/// 支持三种写法：空参数表示默认 datasource，字符串字面量表示兼容短写，
-/// `datasource = "..."` 表示显式命名 datasource。其它参数一律编译期报错。
+/// 支持四种写法：空参数表示默认 datasource，字符串字面量表示兼容短写，
+/// `datasource = "..."` 表示显式命名 datasource，`never` 表示拒绝 ambient 事务且不开启事务。
+/// 其它参数一律编译期报错；`never` 与 datasource 互斥(既拒绝事务又指定事务源自相矛盾)。
 ///
 /// # 参数
 /// - `attr`: 属性括号内的 token stream。
 ///
-/// 返回：默认 datasource 返回 `None`，命名 datasource 返回已校验字面量，非法语法返回编译错误。
-fn parse_transactional_attr(attr: TokenStream) -> Result<Option<LitStr>, proc_macro2::TokenStream> {
+/// 返回：解析出的编排模式；非法语法返回编译错误。
+fn parse_transactional_attr(
+    attr: TokenStream,
+) -> Result<TransactionalMode, proc_macro2::TokenStream> {
     if attr.is_empty() {
-        return Ok(None);
+        return Ok(TransactionalMode::Default);
     }
 
     if let Ok(lit) = syn::parse::<LitStr>(attr.clone()) {
-        return validate_datasource_lit(lit).map(Some);
+        return validate_datasource_lit(lit).map(TransactionalMode::Named);
     }
 
     // 使用 syn 的 meta parser 保留准确 span，业务写错参数时能指到属性本身。
     let mut datasource = None;
+    let mut never = false;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("datasource") {
             if datasource.is_some() {
@@ -185,19 +203,31 @@ fn parse_transactional_attr(attr: TokenStream) -> Result<Option<LitStr>, proc_ma
             let lit = meta.value()?.parse::<LitStr>()?;
             datasource = Some(lit);
             Ok(())
+        } else if meta.path.is_ident("never") {
+            if never {
+                return Err(meta.error("transactional never 不能重复"));
+            }
+            never = true;
+            Ok(())
         } else {
-            Err(meta.error("transactional 只支持 datasource = \"...\" 参数"))
+            Err(meta.error("transactional 只支持 datasource = \"...\" 或 never 参数"))
         }
     });
     if let Err(err) = Parser::parse(parser, attr) {
         return Err(err.to_compile_error());
     }
-    let Some(datasource) = datasource else {
-        return Err(quote! {
-            ::core::compile_error!("transactional 参数不能为空;请使用 #[transactional] 或 #[transactional(datasource = \"...\")]");
-        });
-    };
-    validate_datasource_lit(datasource).map(Some)
+    match (never, datasource) {
+        (true, Some(_)) => Err(quote! {
+            ::core::compile_error!("transactional never 与 datasource 互斥;never 表示拒绝进入任何事务");
+        }),
+        (true, None) => Ok(TransactionalMode::Never),
+        (false, Some(datasource)) => {
+            validate_datasource_lit(datasource).map(TransactionalMode::Named)
+        }
+        (false, None) => Err(quote! {
+            ::core::compile_error!("transactional 参数不能为空;请使用 #[transactional]、#[transactional(never)] 或 #[transactional(datasource = \"...\")]");
+        }),
+    }
 }
 
 /// 业务作用：校验 datasource 字面量是否能安全传给运行时。

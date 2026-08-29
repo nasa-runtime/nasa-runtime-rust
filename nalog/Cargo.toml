@@ -1,20 +1,12 @@
-# nlog —— NASA 日志 crate(对照 原实现 原工具包 的 logback-原框架.xml)。
-#
-# 命名:叫 nlog 而非 log,避免与 crates.io 的 `log` 门面 crate 撞名(同 nadis/ncrypto 惯例);
-#       业务经门面 `use nasa::log` 引用,无感知 crate 真名。
-#
-# 能力(tracing + tracing-subscriber,≈ SLF4J + Logback):
-#   - 原实现 logback PatternLayout 风格 formatter(yyyy-MM-dd HH:mm:ss.SSS [LEVEL] [thread] logger[line] - msg)
-#   - 运行期级别热切(reload),配合 nacos:先控制台,配置就绪后热接文件 + 改级别
-#   - 按天 + 按大小滚动(maxFileSize,带 .%i 索引),对照 logback SizeAndTimeBasedRollingPolicy
-#   - 保留清理:maxHistory(天) + totalSizeCap(总量) + cleanHistoryOnStart,对照 logback(原 Rust 版缺,会涨爆磁盘)
-#   - 独立 error.log(仅 ERROR),对照 logback 的 error appender + ThresholdFilter
+# nalog —— 基于 tracing 的日志运行时。
+# 提供可配置 formatter、运行期级别热切、按天和按大小滚动、保留上限与独立 error.log。
+# 业务通过 `nasa::log` 门面使用；crate 名避免与 crates.io 的 `log` 包冲突。
 [package]
 name = "nalog"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 日志(对照原日志配置):tracing + 兼容 formatter + 按天/按大小滚动 + maxHistory/totalSizeCap 保留 + 独立 error.log + 级别热切"
+description = "NASA tracing 日志：可配置格式、级别热切、按天/大小滚动、保留上限与独立错误文件"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

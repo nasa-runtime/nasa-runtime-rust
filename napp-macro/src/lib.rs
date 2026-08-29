@@ -507,6 +507,7 @@ fn expand_redis_job(
         #function
 
         const _: () = {
+            /// 业务作用：保存宏入口冻结的 Application 句柄，并把 RedisJob 执行上下文适配给业务函数。
             struct __NasaRedisJobHandler { #handler_field }
 
             impl #runtime::__private::nadis::job::JobHandler for __NasaRedisJobHandler {

@@ -24,7 +24,7 @@ use nasa::mapper::{Mapper, Query, Insert, Update, Delete, Execute};
 
 - 需要运行时拼任意表名、列名、SQL 片段的场景。`namapper` 明确禁止 `${...}` 和裸 `?`。
 - 跨多个 datasource 的同一个分布式事务。
-- 首版 `StreamQuery` 的动态 SQL、IN 列表或事务内流式读取。
+- `StreamQuery` 的动态 SQL、IN 列表与 `checked` 组合(编译期拒绝)。
 
 ## 安装
 
@@ -164,7 +164,7 @@ Trait 级 `#[Mapper(...)]`：
 | `typed_cache_codec` | `Query` | 方法级强类型 codec |
 | `flush_cache` | 全部 | 写操作默认 `true`，Query 默认 `false` |
 | `flush_refs` | 全部 | 是否展开 `clear_also` / `clear_when` |
-| `tx` | 非 StreamQuery | `"auto"` 或 `"mandatory"`，`"never"` 首版不支持 |
+| `tx` | 非 StreamQuery | `"auto"`、`"mandatory"` 或 `"never"`(拒绝在 ambient 事务内执行) |
 | `datasource` | 全部 | 覆盖 trait 级 datasource |
 | `strict_params` | 全部 | 覆盖 trait 级严格参数检查 |
 | `checked` | 静态 Query | 使用 `sqlx::query!` / `query_as!` 编译期校验 |
@@ -615,7 +615,7 @@ impl UserService {
 async fn find_for_update(&self, id: i64) -> anyhow::Result<UserRow>;
 ```
 
-`tx = "mandatory"` 在无事务调用时返回 Err。`tx = "never"` 首版不支持。
+`tx = "mandatory"` 在无事务调用时返回 Err。`tx = "never"` 在 ambient 事务内调用时于取连接前返回 Err——供副作用不允许随外层事务回滚的语句(如自治审计写)把违规调用显式暴露。
 
 ## 场景 21：多数据源
 
@@ -1058,7 +1058,7 @@ trait UserProfileMapper {
 
 ## 场景 30：枚举 ordinal
 
-对齐历史 `EnumIntegerHandler` 的 ordinal 语义。
+枚举持久化采用稳定 ordinal 语义。
 
 ```rust
 #[derive(Copy, Clone, Debug, PartialEq, Eq, nasa::mapper::MapperEnum)]
@@ -1105,7 +1105,13 @@ trait OrderMapper {
 
 ## 场景 31：StreamQuery
 
-首版 `StreamQuery` 只支持静态 SQL、标量 bind、无动态标签、无 IN 列表、无缓存、无事务参数。返回 `MapperStream<T>`。
+`StreamQuery` 只支持静态 SQL、标量 bind、无动态标签、无 IN 列表、无缓存、无事务参数。返回 `MapperStream<T>`。
+
+事务边界：`#[transactional]` ambient 事务**外**由生成代码持有 datasource 池连接；ambient
+事务**内**的流走事务连接——本事务未提交的写入对流可见，且不再要求整个结果集
+驻留内存。事务内的流持有事务连接的槽锁直到被消费完或丢弃：流存活期间同一事务不得发出其它语句
+(与"不要同时持有两个 conn 句柄"同一合同)；未释放就返回事务体会在提交门禁处得到
+"transaction connection is still held at commit" 的显式失败，而不是静默卡死。
 
 ```rust
 #[nasa::mapper::Mapper(key = "user_stream", cache = false)]

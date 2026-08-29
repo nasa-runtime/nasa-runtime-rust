@@ -284,6 +284,9 @@ pub struct RedisClient {
     /// Job 状态脚本专用 lane：与普通命令、Pipeline 和阻塞读取隔离，避免业务流量阻塞租约与完成提交。
     #[cfg(feature = "job")]
     job_control_cell: tokio::sync::OnceCell<Conn>,
+    /// Job 心跳专用 lane：传输重建与截止内重发不能让其它状态脚本继承同一断链结局。
+    #[cfg(feature = "job")]
+    job_heartbeat_cell: tokio::sync::OnceCell<Conn>,
     /// 当前 Job source generation 的本地指标弱引用；运行时换代可替换，客户端不会反向延长其生命周期。
     #[cfg(feature = "job")]
     job_metrics: RwLock<Option<std::sync::Weak<crate::job::metrics::JobMetrics>>>,
@@ -486,6 +489,8 @@ impl RedisClient {
             #[cfg(feature = "job")]
             job_control_cell: tokio::sync::OnceCell::new(),
             #[cfg(feature = "job")]
+            job_heartbeat_cell: tokio::sync::OnceCell::new(),
+            #[cfg(feature = "job")]
             job_metrics: RwLock::new(None),
             idempotent: std::sync::OnceLock::new(),
         }))
@@ -615,10 +620,26 @@ impl RedisClient {
         Ok(conn.clone())
     }
 
+    /// 业务作用：返回 Job 心跳独占的惰性连接，使截止内重发不影响其它状态动作的结局分类。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：首次心跳建立独立 transport，后续复用可自动重连的句柄；建连失败返回传输错误。
+    #[cfg(feature = "job")]
+    pub(crate) async fn job_heartbeat_conn(&self) -> Result<Conn> {
+        let conn = self
+            .job_heartbeat_cell
+            .get_or_try_init(|| self.build_transport("Job heartbeat lane"))
+            .await?;
+        Ok(conn.clone())
+    }
+
     /// 业务作用：新建一条独立 transport(与 connect() 的主连接同款建法;供 pipeline lane 惰性建连)。
     ///
     /// # 参数
     /// - `what`: 错误或超时日志中标识当前操作的名称。
+    ///
+    /// 返回：按已探测拓扑建立独立单节点或 Cluster transport；建连或截止时间失败返回带操作归因的传输错误。
     async fn build_transport(&self, what: &str) -> Result<Conn> {
         let resp_timeout = self.cfg.command.response_timeout_ms;
         if self.is_cluster {

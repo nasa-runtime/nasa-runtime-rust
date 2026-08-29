@@ -22,6 +22,14 @@
 //! 本能力不增加组件字符串或配置根，默认后端错误采用 fail-open。与 `web` 组合时可安装 IP 中间件，
 //! tenant、subject 或 API key 配额则直接使用 provider 合同。
 //!
+//! Web 授权边界在认证后冻结 Principal、route 策略、未命中缺省与 generation。显式策略始终优先，
+//! 公开 route 或健康探针豁免只能作用于没有显式策略的 route；registry 入口和 handler 请求上下文
+//! 使用同一完整快照。对象授权缺失、拒绝、错误或超时均 fail-closed。
+//!
+//! 合法上游 Trace Context 严格继承 sampled 位；没有上游时由受管 telemetry exporter 的 sampler
+//! 唯一裁决新根。未启用 telemetry 的 Web 仍传播未采样上下文，不会替下游声明已采样。调度 span
+//! 只在 leader 与 claim 门禁通过后建立。
+//!
 //! 启用 gRPC 组件时，UserHook 只登记统一 codegen 生成的业务 service，Prepare 永久封口 registry，
 //! 全部 initializer 成功后的 Ready 才自动装配 Router、health、可选 reflection 并绑定 listener。
 //! 组件独占 shutdown，持续 accept 失败会摘除 readiness 并保持有界恢复，serve 所有权丢失则触发
@@ -80,9 +88,14 @@ mod discovery;
 mod error;
 mod future;
 mod global;
+/// Inbox 去重标记的显式保留计划、受管串行清理与统一观测。
+#[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+mod inbox;
 mod initialization;
 #[cfg(feature = "kafka")]
 mod kafka;
+#[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+pub use inbox::{InboxRetentionPlan, InboxRetentionSnapshot};
 #[cfg(feature = "log")]
 mod log;
 #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
@@ -121,10 +134,13 @@ pub use governance::{ClientIp, RequestBudget, RequestId};
 #[cfg(feature = "rate-limit")]
 mod ratelimit;
 #[cfg(all(feature = "rate-limit", feature = "web"))]
-pub use ratelimit::{distributed_rate_limit, DistributedRateLimit};
+pub use ratelimit::{
+    distributed_rate_limit, DistributedRateLimit, MissingSubjectPolicy, QuotaSubject,
+};
 #[cfg(feature = "rate-limit")]
 pub use ratelimit::{
-    RateLimitOutcome, RateLimitProvider, RedisRateLimitProvider, SharedRateLimitProvider,
+    rate_limit_counters, RateLimitFailurePolicy, RateLimitOutcome, RateLimitProvider,
+    RedisRateLimitProvider, SharedRateLimitProvider,
 };
 
 /// 输入校验提取器与统一错误:`ValidatedJson/Query/Path` + `ValidateRequest`。
@@ -149,13 +165,17 @@ pub use naidempotency::{
 #[cfg(feature = "web")]
 mod authz;
 #[cfg(feature = "web")]
-pub use authz::{authorize, AuthorizationLayerState, SharedObjectAuthorizer, SharedPolicyRegistry};
+pub use authz::{
+    authorize, unmatched_denied_total, unmatched_observed_total, AuthorizationLayerState,
+    SharedObjectAuthorizer, SharedPolicyRegistry,
+};
 /// 业务构造授权策略所需的 naauthz 公共类型再导出。
 #[cfg(feature = "web")]
 pub use naauthz::{
     AuthzDecision, DenyReason, ObjectAuthorizationError, ObjectAuthorizationRequest,
-    ObjectAuthorizer, ObjectDecision, ObjectProviderError, PolicyError, PolicyRegistry, PolicySet,
-    Principal, RequestSecurityContext, RequireMode, RoutePolicy,
+    ObjectAuthorizer, ObjectDecision, ObjectProviderError, PolicyCoverageAudit,
+    PolicyDecisionSnapshot, PolicyError, PolicyRegistry, PolicySet, Principal,
+    RequestSecurityContext, RequireMode, RoutePolicy, UnmatchedRoutePolicy,
 };
 
 /// OAuth Resource Server / JWKS 认证组件:配置驱动 warmup JWKS,Ready 发布 Authenticator。

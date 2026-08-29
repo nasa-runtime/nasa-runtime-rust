@@ -7,6 +7,26 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
 
+## 核心价值与运行架构
+
+`nasa` 把配置收敛、依赖校验、组件启动、Ready 发布和反向停机统一为一个受管生命周期，让业务只选择
+需要的能力，同时保留各基础设施组件的真实事务、租约和故障边界。核心价值是让配置错误、资源缺失和
+安全门禁在开放流量前失败，并让运行中的权威变化、队列背压和停机排空保持可观测、可控。
+
+```text
+本地配置 + 远端配置
+        │
+        v
+最终 YAML ──→ 全量校验与资源探测 ──→ 冻结 Application 快照 ──→ Ready / 业务流量
+                                              │
+                                              ├─ Web / Redis / Kafka / DB
+                                              └─ Saga / 调度 / 长连接 / 可观测性
+停机信号 ──→ 关闭业务入口 ──→ 停止新后台动作 ──→ 反向排空 ──→ 释放资源
+```
+
+Application 不提供跨数据库原子事务，也不会替业务推断租户身份、授权关系、消息投递闭环或生产容量。
+独立组件可以脱离 Application 显式装配；此时连接、启动门禁、停机顺序和可观测性由调用方负责。
+
 ## 受管多源运行时
 
 Application 可从最终 YAML 同时创建多组 MySQL、PostgreSQL、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
@@ -28,7 +48,7 @@ datasources:
     url: ${APP_PRIMARY_DB_URL}
   workflow:
     driver: postgresql
-    url: ${APP_WORKFLOW_DB_URL}
+    url: ${APP_WORKFLOW_POSTGRES_URL}
 
 outbox:
   datasource_ref: workflow
@@ -54,16 +74,49 @@ redis:
 门禁。完整配置、查询入口、失败语义和停机边界见
 [napp 的单源与多源章节](napp/README.md#yaml-创建单源与多源)。
 
+### Inbox 长期保留边界
+
+Inbox 去重标记的删除必须晚于消息源最大重投视界。业务显式提交 `InboxRetentionPlan` 后，Application
+在 Ready 后以串行 fixed-delay 循环治理到龄标记，并公开删除、owner 争用、预算耗尽、失败轮次和最老
+候选年龄的无标签指标；它不会猜测 Kafka 或其它消息源的保留策略，也不会在线创建生产索引。停机时
+先停止新轮次，再收口当前数据库动作；锁状态未知的连接不会返回连接池。配置和非目标见
+[napp Inbox 章节](napp/README.md#inbox-去重标记保留)。
+
+## 请求授权与链路采样
+
+Web 安全边界把 route 策略、未命中缺省和 generation 作为一次原子发布的完整授权快照。请求进入后
+冻结该快照，Web 中间件、`PolicyRegistry` 便捷入口和 handler 内的 `RequestSecurityContext` 使用
+同一裁决语义；显式 route 策略始终优先，公开路由或健康探针豁免只能作用于没有显式策略的 route。
+`permit`、`observe`、`deny` 三态缺省用于逐步收紧覆盖面，对象授权缺失、拒绝、错误或超时均
+fail-closed。认证仍由 OAuth/JWKS 或业务身份层负责，授权层不验签 token，也不推断租户或对象归属。
+
+```text
+已验证 Principal + 稳定 route ID
+              │
+              v
+PolicySet + UnmatchedRoutePolicy + generation ──→ route 裁决
+              │                                  └─→ 同请求对象授权快照
+              └─ 校验成功后原子发布；失败保留 last-good
+```
+
+链路传播严格遵守 W3C `traceparent` flags：合法上游上下文原样继承 sampled 位；缺失或非法上下文只有
+在 exporter 存在时才由冻结的 `root_sample_ratio` 裁决新根，纯传播入口始终创建未采样根。REST 与
+Kafka 出站复用请求上下文。调度器仅在 leader gate 和 FireLog claim 都通过后创建执行 span，并记录
+稳定任务名与名义触发时刻；未取得执行权的拍次不会伪装成已执行。完整配置、指标与失败边界见
+[naauthz](naauthz/README.md)、[natelemetry](natelemetry/README.md) 和
+[nasched 调度 trace](nasched/README.md#调度-trace)。
+
 ## 跨副本业务配额
 
 `rate-limit` feature 提供 `RateLimitProvider` 和共享 Redis 固定窗口实现，让所有副本对同一 tenant、
 subject、API key 或客户端 IP 合并计数，扩容不会成倍放大业务总配额。业务从 Application 取得受管
-Redis 客户端后显式构造 provider，并选择直接判定业务主体或安装 Web IP 中间件；它没有组件字符串和
-独立 YAML 根，也不会自动改变路由。
+Redis 客户端后显式构造 provider，并选择直接判定业务主体或安装 Web 中间件；中间件可从已验证
+Principal 选择 tenant、subject/client_id，也可选择真实客户端 IP 或摘要后的 API key。它没有组件
+字符串和独立 YAML 根，也不会自动改变路由。
 
 Redis Lua 在服务端原子完成计数与首次过期设置。默认 Redis provider 在后端不可达、窗口非法或脚本
-失败时 fail-open 并记录告警，优先保持业务可用；要求配额基础设施失效时拒绝请求的场景必须提供自己的
-provider。该能力与 Web 的单实例令牌桶分层：前者约束跨副本总量，后者只保护当前进程。
+失败时默认 fail-open 并记录告警，优先保持业务可用；高保障入口可把 Redis provider 配置为
+fail-closed。该能力与 Web 的单实例令牌桶分层：前者约束跨副本总量，后者只保护当前进程。
 
 ## PostgreSQL 受管与独立持久能力
 
@@ -141,7 +194,7 @@ feature 并声明 `#[nasa::application("web")]` 时才由容器创建；满足�
 
 ### RedisJob Fanout 背压与观测
 
-启用 `redis-job` 后，运行时按“计划冻结 → 能力快照 → 调度投递 → receipt/租约 → Handler 执行 → CAS 对账”的路径工作。Fanout 在目标节点持久确认接收后再申请本地执行槽。槽位不足时使用有界容量窗口和独立容量路由预算：超窗优先切换兼容执行器，无候选时继续保留当前 assignment，不把健康满载节点判为失联。shard 的 `capacityRouteTotal` 持久记录历史容量迁移次数，`capacityRouteCount` 只表示当前路由预算；实时指标用于告警，不跨进程重启累计。`JobContext::parameter::<T>()` 支持集合、映射和嵌套 JSON 参数，并执行结构安全门禁；非 JSON 参数由业务按声明 codec 从 `payload()` 解码。完整配置、边界和查询方式见 [nadis README](nadis/README.md#redisjob)。
+启用 `redis-job` 后，运行时按“计划冻结 → 能力快照 → 调度投递 → receipt/租约 → Handler 执行 → CAS 对账”的路径工作。Fanout 在目标节点持久确认接收后再申请本地执行槽。槽位不足时使用有界容量窗口和独立容量路由预算：超窗优先切换兼容执行器，无候选时继续保留当前 assignment，不把健康满载节点判为失联。shard 的 `capacityRouteTotal` 持久记录历史容量迁移次数，`capacityRouteCount` 只表示当前路由预算；实时指标用于告警，不跨进程重启累计。启动期能力登记部分成功会在返回失败前关闭本地准入并尝试全量注销；Redis 持续不可达时，未确认的服务端记录只能依靠 TTL 与 Registry GC 排除。停机超时触发 task abort 后仍等待实际退出，再允许撤销 Registry。`JobContext::parameter::<T>()` 支持集合、映射和嵌套 JSON 参数，并执行结构安全门禁；非 JSON 参数由业务按声明 codec 从 `payload()` 解码。完整配置、边界和查询方式见 [nadis README](nadis/README.md#redisjob)。
 
 ### 推荐入口
 
@@ -345,7 +398,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | HTTP 路由 | `web` | `nasa::web::{get_mapping, mvc_router}` |
 | 路由身份认证 | `web-auth` | `nasa::web::auth::{AuthProvider, AuthContext}` |
 | 路由双协议加密 | `web-crypto` | `nasa::web::crypto::{CryptoRuntime, KeyRing}` |
-| 历史 RSA 私钥协议迁移 | `web-crypto-legacy-rsa` | 编译期开关；仍需 provider 运行时显式允许 |
+| 遗留 RSA 私钥协议互通 | `web-crypto-legacy-rsa` | 编译期开关；仍需 provider 运行时显式允许 |
 | 完整端点安全流水线 | `web-security` | `try_register_all`、`MappingRuntime`、route policy |
 | SQL Mapper | `mapper` | `nasa::mapper::{Mapper, Query, Insert, Update, Delete}` |
 | PostgreSQL SQL Mapper | `mapper-pgsql` | `nasa::mapper::pgsql::{Mapper, Query, Insert, Update, Delete}`；与 `application` 组合时复用受管 PgPool |
@@ -367,7 +420,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
 | PostgreSQL 受管事务 Outbox | `outbox-pgsql` | 同一 `OutboxApplicationPlan` 与按 driver 选择的持久后端 |
 | 事务型业务审计 | `audit` | `nasa::audit::{MySqlOutboxAuditSink, TransactionalAuditSink}` |
-| OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 的 `request_schema` / `response_schema` |
+| OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 合同及 `register_route_contract` 显式动态合同；文档 path 包含实际 `context_path` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
 | OAuth/JWKS/Metadata | `oauth` | `nasa::oauth::{MetadataClient, JwksRegistry}` |
 | Schema Registry | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
@@ -415,7 +468,7 @@ nasa = { version = "1.0.3", features = ["hystrix", "cache", "ws-redis", "rest-cl
 ```
 
 内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`naimg`、`naws`。
-包名可用性是发布时事实，正式发布前仍须按 [发布指南](docs/publishing.md) 实时复查 crates.io，不能依赖
+包名可用性是发布时事实，正式发布前仍须按 [交付就绪清单](docs/release-checklist.md) 实时复查 crates.io，不能依赖
 本地缓存结论。Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
 `nasa::image` 等。
 
@@ -560,7 +613,7 @@ HTTP/1/h2c listener。
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
 | [nafana-macro](nafana-macro/README.md) | `grafana` | `#[grafana]` 编译期参数校验与包装 | 无运行期 yml |
 | [nametrics-core](nametrics-core/README.md) | `application` 内部合同 | 单一指标目录、冲突审计、同源 Prometheus/OTLP 快照与样本拒绝诊断 | 无运行期 yml |
-| [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | Trace Context、有界 span 队列，并由 `napp` 统一管理 OTLP trace/metrics 停机 flush | `telemetry.*` 由 `napp` 读取 |
+| [natelemetry](natelemetry/README.md) | `telemetry` 内部运行时 | W3C flags 继承、exporter 唯一根采样裁决、有界 span 队列，并由 `napp` 管理 OTLP trace/metrics 停机 flush | `telemetry.*` 由 `napp` 读取 |
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
 | [napart](napart/README.md) | `partition` | 命名 Runner 隔离、严格 FIFO 的保序任务窃取、有界背压、延迟稳定终态与可证明停机 | 直接模式运行期动态创建并显式停机；Application 模式由 YAML/UserHook 提交启动期计划 |
@@ -569,7 +622,7 @@ HTTP/1/h2c listener。
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
 | [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；Registry 由业务配置投影 |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
-| [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和历史兼容加解密 | `crypto.*`、环境变量承载密钥 |
+| [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和受控兼容加解密 | `crypto.*`、环境变量承载密钥 |
 | [nanum](nanum/README.md) | `numeric` | 定点金额、价格、最小变动单位对齐、舍入 | `numeric.*` |
 | [naimg](naimg/README.md) | `image` | 图片压缩、尺寸裁剪、格式转换 | `image.*` |
 | [nalog](nalog/README.md) | `log` | 控制台和文件日志、级别热切换 | `log.*` |
@@ -579,7 +632,7 @@ HTTP/1/h2c listener。
 | [namigrate-core](namigrate-core/README.md) | runtime 内部合同 | 后端中立 migration 状态比较与封闭失败分类 | 不读取业务配置 |
 | [namigrate-pgsql](namigrate-pgsql/README.md) | `tx-pgsql` 内部迁移门禁 | PostgreSQL migration validate/apply、session advisory lock 与非事务完成证据 | standalone 显式调用；Application 在 Prepare 执行 |
 | [naopenapi](naopenapi/README.md) | `openapi` | 从已审计路由事实生成确定性 OpenAPI 3.1 | `application.*` 文档信息 |
-| [naauthz](naauthz/README.md) | `application` + `web` 内部合同 | 路由 scope 与对象级授权 | 策略由代码或外部 provider 注入 |
+| [naauthz](naauthz/README.md) | `application` + `web` 内部合同 | 同代 route 策略、未命中缺省与 generation 的完整快照，以及 fail-closed 对象授权 | 策略由代码或外部 provider 注入 |
 | [nauth-oauth](nauth-oauth/README.md) | `oauth` | JWT、JWKS 与授权服务器 metadata | `auth.*` 由 `napp` 读取 |
 | [nasecret](nasecret/README.md) | `secret` | 分片解析、脱敏快照与两阶段轮换 | `secrets.*` |
 | [nasecret-http](nasecret-http/README.md) | `secret-http` | 随 secret 代际轮换的 TLS/mTLS HTTP client | 引用 `secrets.*` ID |
@@ -591,7 +644,7 @@ HTTP/1/h2c listener。
 
 ## 安全说明(务必阅读)
 
-- **`ncrypto` 的弱加密是【刻意兼容历史实现】,不是缺陷、也不适合作新系统的机密性边界。**
+- **`ncrypto` 的弱加密只用于受控兼容既有密文协议，不适合作新系统的机密性边界。**
   为逐字节对齐既有服务,ncrypto 保留了 AES-ECB、CBC(IV=Key)、RSA PKCS#1 v1.5、
   以及"用 RSA 私钥做保密"等**已知弱**的构造。**只用于与既有系统互操作**;新系统请用
   `nasa::crypto::encrypt_modern` / `decrypt_modern` 这类现代入口,不要复用这些兼容函数。现代入口默认使用
@@ -599,7 +652,7 @@ HTTP/1/h2c listener。
   既有 PBKDF2-HMAC-SHA256 的 `NC1.*` 仅保持兼容读取，错误口令、AAD 错配或密文篡改都会失败。
 
 - **`rsa` 0.9 计时侧信道（RUSTSEC-2023-0071，Marvin 攻击）当前没有上游安全更新。**
-  由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；历史
+  由 ncrypto 引入。默认构建只保留 RS256 公钥验签等不执行易受攻击私钥解密的能力；兼容格式
   PKCS#1 v1.5 私钥解密与私钥 type-1 运算受专用编译 feature 和 Web 运行时开关双重隔离，
   且不进入 `full`。`deny.toml` 仍按包级 advisory 显式登记，待上游提供安全更新后移除。
 
@@ -624,11 +677,10 @@ HTTP/1/h2c listener。
 | [快速开始](docs/quickstart.md) | 业务应用如何依赖 `nasa`、选择特性、配置 yml 和编写最小示例。 |
 | [部署指南](docs/deployment.md) | 应用模式构建、配置注入、容器信号、健康端点和接流条件。 |
 | [运维指南](docs/operations.md) | 运行状态、退出码、停机顺序、配置刷新和故障排查。 |
+| [Saga 生产指南](docs/saga-production.md) | Saga 事务边界、消息合同、恢复治理与生产准入条件。 |
 | [交付就绪清单](docs/release-checklist.md) | 产品归档、组件边界和生产环境批准条件。 |
-| [公开归档说明](docs/publishing.md) | 多包依赖拓扑、归档内容和许可说明。 |
 | [贡献指南](CONTRIBUTING.md) | 贡献规则、文档、注释和代码维护约束。 |
 | [安全说明](SECURITY.md) | 安全报告方式、敏感面和默认安全策略。 |
-| [当前变更说明](CHANGELOG.md) | 当前公开业务能力概览。 |
 
 ## 许可证
 

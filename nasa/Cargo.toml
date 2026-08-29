@@ -7,7 +7,7 @@ name = "nasa"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed multi-source lifecycle, durable Saga, RedisJob, gRPC, messaging, and HTTP/1/h2c web services"
+description = "NASA Rust facade for managed lifecycle, durable Saga, request security, trace propagation, messaging, gRPC, and HTTP services"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -32,8 +32,8 @@ tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
 # PostgreSQL 事务入口保持独立 typed API；与 application 组合时向下启用受管 PostgreSQL 数据源组件。
 tx-pgsql = ["dep:tx_pgsql_impl", "dep:natx_macro", "dep:migration_pgsql_impl", "application_impl?/db-pgsql"]
 # Inbox 去重标记与业务副作用共享 tx ambient MySQL 事务。
-inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl"]
-inbox-pgsql = ["tx-pgsql", "dep:inbox_core_impl", "dep:inbox_pgsql_impl"]
+inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl", "application_impl?/inbox"]
+inbox-pgsql = ["tx-pgsql", "dep:inbox_core_impl", "dep:inbox_pgsql_impl", "application_impl?/inbox-pgsql"]
 # Outbox 事件与业务写共享 tx ambient MySQL 事务；同时启用 application 时编入受管 dispatcher。
 outbox = ["tx", "dep:outbox_core_impl", "dep:outbox_mysql_impl", "application_impl?/outbox"]
 outbox-pgsql = ["tx-pgsql", "dep:outbox_core_impl", "dep:outbox_pgsql_impl", "application_impl?/outbox-pgsql"]
@@ -97,7 +97,8 @@ mapper-cache-grouped-pgsql = ["mapper-pgsql", "cache", "mapper_pgsql_impl/groupe
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
 mapper-redis-cache-pgsql = ["mapper-pgsql", "mapper_pgsql_impl/redis-cache", "application_impl?/mapper-cache-pgsql"]
 # 命名分区 Runner；同时启用 application 时纳入逐域 readiness 与反序停机。
-partition = ["dep:partition_impl", "application_impl?/partition"]
+# scheduling 同时在位时连带打开 `#[Async]` 的分区执行域形态(scheduling_impl 的 __private 桥)。
+partition = ["dep:partition_impl", "application_impl?/partition", "scheduling_impl?/partition"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
 ws = ["dep:ws_impl", "application_impl?/ws"]
@@ -274,16 +275,16 @@ tx_impl = { package = "natx", version = "1.0.3", optional = true }
 tx_pgsql_impl = { package = "natx-pgsql", version = "1.0.0", optional = true }
 migration_pgsql_impl = { package = "namigrate-pgsql", version = "1.0.0", optional = true }
 natx_macro = { package = "natx-macro", version = "1.0.1", optional = true }
-inbox_core_impl = { package = "nainbox-core", version = "1.0.1", optional = true }
+inbox_core_impl = { package = "nainbox-core", version = "1.0.2", optional = true }
 inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.2", optional = true }
 inbox_pgsql_impl = { package = "nainbox-pgsql", version = "1.0.0", optional = true }
 outbox_core_impl = { package = "naoutbox-core", version = "1.0.2", optional = true }
 outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.2", optional = true }
 outbox_pgsql_impl = { package = "naoutbox-pgsql", version = "1.0.0", optional = true }
-idempotency_impl = { package = "naidempotency", version = "1.0.1", optional = true }
+idempotency_impl = { package = "naidempotency", version = "1.0.2", optional = true }
 idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.2", optional = true }
 idempotency_pgsql_impl = { package = "naidempotency-pgsql", version = "1.0.0", optional = true }
-idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.1", optional = true }
+idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.2", optional = true }
 openapi_impl = { package = "naopenapi", version = "1.0.1", optional = true }
 audit_impl = { package = "naaudit", version = "1.0.0", optional = true }
 audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.2", optional = true }
@@ -298,8 +299,8 @@ saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "1.0.0",
 nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
 grpc_impl = { package = "nagrpc", version = "1.1.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
-scheduling_impl = { package = "nasched", version = "1.0.1", optional = true }
-async_macro = { package = "async-macro", version = "1.0.1", optional = true }
+scheduling_impl = { package = "nasched", version = "1.0.2", optional = true }
+async_macro = { package = "async-macro", version = "1.0.2", optional = true }
 web_impl = { package = "naweb", version = "1.0.2", optional = true }
 web_macro = { package = "naweb-macro", version = "1.0.0", optional = true }
 mapper_impl = { package = "namapper", version = "1.0.2", optional = true }
@@ -319,5 +320,5 @@ image_impl = { package = "naimg", version = "1.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "1.0.1", optional = true }
 nacos_impl = { package = "nanacos", version = "1.0.2", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "1.0.1", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "1.0.1", optional = true }
+rest_client_macro = { package = "rest-client-macro", version = "1.0.2", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.2", optional = true, default-features = false }

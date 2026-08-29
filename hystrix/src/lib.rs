@@ -2,6 +2,23 @@
 //!
 //! 本 crate 提供可显式调用的 `Command` 运行时与 axum 中间件辅助，适合保护慢下游、
 //! 热点接口和需要被 Dashboard 观测的业务入口。
+//!
+//! # 与受管治理面的分工
+//!
+//! 本 crate 是业务代码**显式包裹执行体**的独立工具，不并入 Application 受管治理，三层各管一段：
+//!
+//! - Web 限流（单进程令牌桶 + 分布式配额）管**入站配额**；
+//! - REST 发现客户端内建的 bulkhead/circuit 只对**传输级失败**（建连、超时、可分类 5xx）熔断；
+//! - hystrix `Command` 包裹**业务判定的失败**(语义错误、慢成功)与非 REST 出站依赖
+//!   (慢查询隔离、第三方 SDK)。
+//!
+//! # 反模式
+//!
+//! - **REST 调用外层再包 hystrix 时，`Command` timeout 必须大于该客户端的重试总预算**：否则内层
+//!   还在跨实例重试、外层已判超时并计入结局，被放弃的重试还会继续占用连接。
+//! - **包执行体而不是包提交**：`Command` 不感知任务队列语义，包裹 napart/`#[Async]` 的提交动作
+//!   只测到入队耗时，超时与隔离对真实执行不生效。
+//! - **命令名必须是代码常量级低基数**：拼接租户、订单等业务值会让指标序列失控。
 #![recursion_limit = "512"] // hystrix snapshot_json 的 json!{} 字段多,提高宏递归上限
                             // ============================================================================
 
@@ -11,41 +28,12 @@ pub use fallback::{
     global_fallback_installed, initialize_global_fallback, install_global_fallback, FallbackCause,
     FallbackContext, FallbackDecision, GlobalFallbackHandler, GlobalFallbackInstallError,
 };
-// 路由级 bulkhead 隔离 + 超时 + Dashboard 指标流
+// 路由命令由信号量限制并发、由 deadline 限制执行时间，并向 Dashboard 输出滚动结局与延迟。
+// 本组件不维护错误率触发的 Closed/Open/HalfOpen 状态机；下游持续失败时只由并发和超时边界
+// 限制当前进程的资源消耗，`isCircuitBreakerOpen` 恒为 false，短路计数恒为零。
 //
-// ★ 能力范围(明确,避免误读):本模块只做【信号量隔离(bulkhead)+ 超时 + 滚动窗口指标】,
-//   **不提供错误率触发的短路熔断**(无 Closed/Open/HalfOpen 状态机、无 error-threshold 短路;
-//   Dashboard 的 isCircuitBreakerOpen 恒 false、rollingCountShortCircuited 恒 0)。
-//   下游持续失败时靠并发上限 + 超时保护自身,不会自动短路。完整熔断器可作为独立状态机扩展。
-//
-// 对照参考实现的隔离 filter：
-//   - 它按 URL 给每类接口套【线程池/信号量隔离 + 超时 + 队列拒绝】并上报 /hystrix.stream
-//   - 本模块在 async Rust 里用【per-route 信号量(bulkhead)+ 超时 + 滚动窗口指标】等价实现
-//     （async 不需要线程池隔离：慢调用 .await 挂起不占 worker 线程，详见文档）
-//
-// 四部分：
-//   ① Command —— 一个被隔离+监控的“命令”(= 一条路由)：
-//        · tokio::Semaphore 限并发(bulkhead)，try_acquire 满了立刻拒(429)，不排队
-//        · tokio::time::timeout 限时(对应 executionTimeoutInMilliseconds)
-//        · 滚动窗口(10s)统计 success/failure/timeout/rejected + 延迟百分位
-//        · 当前并发数 gauge(currentConcurrentExecutionCount)
-//      用法：作为 axum middleware 包在某条路由上(见 main.rs)。
-//
-//   ② hystrix_stream —— GET /hystrix.stream 的 SSE 端点：
-//        每秒把所有已注册 Command 的快照序列化成 Hystrix Dashboard 认得的 JSON 推出去。
-//        字段名严格对齐 SerialHystrixDashboardData(type=HystrixCommand / rollingCountXxx / latencyExecute...)。
-//
-//   ③ CostTime 风格的定时延迟日志(融合自 原工具包 CostTime)：
-//        【每个 Command 在 build() 里各自 spawn 一个独立的 10s 周期任务】(相位锚定创建时刻、
-//        互相错开，对齐 原实现「每 url 各起一个 TimingWheel 任务」)，每拍打一行
-//        `path N次/10s min/avg/max (ms)`，复用 ① 的 Rolling 滚动窗口、不另存计数器。
-//        是"每请求延迟日志"的低开销聚合替代。可选 extra 钩子(set_extra)对齐 CostTime 的 Function<Long,String>。
-//
-//   ④ 配置驱动隔离(init_isolation + dispatch) —— 对标 原实现 HystrixDashboardFilter：
-//        yml 配 hystrix.isolation 的路由前缀模式(/download/*) → 建 matchit Trie；
-//        一个全局中间件 dispatch 每请求拿 path 匹配 Trie，命中就按模式懒加载 Command 套上 ①。
-//        与"硬编码 per-route Command"(main.rs 的 SpotKline/HeavySlow)并存，对照两种范式。
-// ============================================================================
+// 显式 `Command` 与配置驱动的路由匹配共享同一执行合同：并发满载立即拒绝，不在组件内排队；
+// 每个已注册命令独立维护滚动窗口、当前并发和周期聚合日志；`hystrix_stream` 每秒输出快照。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};

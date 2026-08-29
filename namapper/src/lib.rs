@@ -35,8 +35,9 @@ pub use sqlx::types::Json;
 
 /// Mapper 流式查询返回类型。
 ///
-/// `MapperStream` 拥有底层 stream；首版 `#[StreamQuery]` 只允许无 ambient 事务场景，
-/// 由生成代码克隆 datasource pool 并把 pool 生命周期放进 stream 内部。
+/// `MapperStream` 拥有底层 stream。事务外由生成代码持有 datasource 的池连接；
+/// `#[transactional]` ambient 事务内则持有事务连接的槽锁直到流被消费完或
+/// 丢弃——流存活期间同一事务不得发出其它语句,未释放就返回事务体会在提交门禁处显式失败。
 pub struct MapperStream<T> {
     inner: Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>,
 }
@@ -287,11 +288,34 @@ pub async fn mandatory_conn_for(datasource: &'static str) -> anyhow::Result<natx
     natx::mandatory_conn_for(datasource).await
 }
 
+/// 业务作用：获取拒绝 ambient 事务的 Mapper SQL 执行连接(`tx = "never"` 的连接入口)。
+///
+/// 该入口用于副作用不允许随外层事务回滚的语句;处于事务内时立即报错且不取连接。
+///
+/// 参数说明：无。
+///
+/// 返回：无 ambient 事务时返回默认 datasource 的池连接；事务存在时立即拒绝且不取连接。
+pub async fn never_conn() -> anyhow::Result<natx::Conn> {
+    natx::never_conn().await
+}
+
+/// 业务作用：从指定 datasource 获取拒绝 ambient 事务的 Mapper SQL 执行连接。
+///
+/// 参数说明：
+/// - `datasource`: `#[Mapper(datasource = "...")]` 指定的数据源名称。
+///
+/// 返回：无 ambient 事务时返回指定 datasource 的池连接；事务存在时立即拒绝且不取连接。
+pub async fn never_conn_for(datasource: &'static str) -> anyhow::Result<natx::Conn> {
+    natx::never_conn_for(datasource).await
+}
+
 /// 业务作用：在无事务时立即清理缓存；在事务内注册 commit 后清理。
 ///
 /// # 参数
 /// - `cache`: 当前 client 注入的缓存实现。
 /// - `keys`: 需要清理的缓存组。
+///
+/// 返回：事务外返回立即清理结果；事务内成功登记 commit 后动作即返回，未注入缓存时直接成功。
 pub async fn clear_after_commit_or_now(
     cache: Option<Arc<dyn MapperL2Cache>>,
     keys: Vec<String>,

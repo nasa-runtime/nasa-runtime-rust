@@ -9,6 +9,17 @@
 nasa = { version = "1", features = ["redis-derive"] }
 ```
 
+## 编译与运行边界
+
+```text
+结构体属性 ──→ nadis-derive 编译期校验 ──→ RedisDocument 元数据与转换实现
+                                                    │
+                                                    └─→ nadis / SearchActuator
+```
+
+属性冲突、缺少唯一 ID 或非法占位符会直接导致编译失败。宏不连接 Redis，不创建索引，也不拥有后台
+任务或指标；运行期 schema 校验、索引创建、错误与观测由 `nadis` 和调用方负责。
+
 ## 基本文档
 
 ```rust

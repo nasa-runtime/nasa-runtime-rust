@@ -905,8 +905,8 @@ fn otlp_json_double(value: f64) -> serde_json::Value {
 /// 业务作用：把一批 span 编码成 OTLP/HTTP JSON `ExportTraceServiceRequest`(proto3 JSON 映射)。
 ///
 /// trace/span id 用十六进制字符串(OTLP JSON 对 id 的约定)；时间戳使用生产者记录的真实开始/结束
-/// Unix 纳秒。kind 取自记录(SERVER=2/INTERNAL=1/CLIENT=3)。只含低基数 name 与 id，不含
-/// payload/属性正文。
+/// Unix 纳秒。kind 取自记录(SERVER=2/INTERNAL=1/CLIENT=3)，span attributes 映射为字符串
+/// `KeyValue`；调用方必须保证属性已脱敏且有界，不导出 payload 正文。
 ///
 /// 参数说明：
 /// - `batch`: 待编码的一批 span。
@@ -931,6 +931,19 @@ fn otlp_traces_json(batch: &[SpanRecord], service_name: &str, service_instance_i
             });
             if let Some(parent) = &span.parent_span_id_hex {
                 encoded["parentSpanId"] = serde_json::Value::String(parent.clone());
+            }
+            if !span.attributes.is_empty() {
+                encoded["attributes"] = serde_json::Value::Array(
+                    span.attributes
+                        .iter()
+                        .map(|attribute| {
+                            serde_json::json!({
+                                "key": attribute.key,
+                                "value": { "stringValue": attribute.value }
+                            })
+                        })
+                        .collect(),
+                );
             }
             encoded
         })
@@ -1158,11 +1171,13 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 /// 业务作用：把一批 span 编码成 OTLP/HTTP protobuf `ExportTraceServiceRequest`(二进制 wire 格式)。
 ///
 /// 手写最小编码器,只覆盖本管道实际发出的字段(字段号取自 opentelemetry-proto v1 trace.proto):
-/// `Span{trace_id=1,span_id=2,name=5,kind=6,start_time_unix_nano=7,end_time_unix_nano=8}`、
+/// `Span{trace_id=1,span_id=2,name=5,kind=6,start_time_unix_nano=7,end_time_unix_nano=8,
+/// attributes=9}`、
 /// `ScopeSpans{scope=1,spans=2}`、`ResourceSpans{resource=1,scope_spans=2}`、
 /// `ExportTraceServiceRequest{resource_spans=1}`、`Resource{attributes=1}`、`KeyValue{key=1,value=2}`、
 /// `AnyValue{string_value=1}`。id 由十六进制解成 `bytes`;时间戳同 JSON 使用生产者记录值;kind 取自记录。
-/// 不含 payload/属性正文，只携带 `service.name` 与 `service.instance.id` resource 属性。
+/// span 属性按字符串 `KeyValue` 写入，不含 payload 正文；resource 另携带 `service.name` 与
+/// `service.instance.id`。
 ///
 /// 参数说明：
 /// - `batch`: 待编码的一批 span。
@@ -1193,6 +1208,13 @@ fn otlp_traces_protobuf(
         put_varint_field(&mut span_msg, 6, u64::from(span.kind.otlp_value()));
         put_fixed64_field(&mut span_msg, 7, span.start_unix_nano);
         put_fixed64_field(&mut span_msg, 8, span.end_unix_nano);
+        for attribute in &span.attributes {
+            put_len_field(
+                &mut span_msg,
+                9,
+                &string_key_value_protobuf(&attribute.key, &attribute.value),
+            );
+        }
         let mut status = Vec::new();
         put_varint_field(
             &mut status,

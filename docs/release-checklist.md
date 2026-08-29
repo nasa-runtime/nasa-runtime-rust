@@ -7,7 +7,9 @@
 - [ ] `LICENSE`、`LICENSE-MIT`、`LICENSE-APACHE` 与 `NOTICE` 完整，并进入每个公开归档。
 - [ ] 根 README 能索引全部组件，组件 README 均包含用途、接入、初始化、yml 和主要边界。
 - [ ] `SECURITY.md`、`CONTRIBUTING.md` 与当前实现一致。
-- [ ] 公开文档、rustdoc、源码注释和 manifest 注释只描述当前业务能力、配置、边界和失败后果。
+- [ ] 公开文档、rustdoc、源码注释和 manifest 注释准确描述当前业务能力、配置、边界和失败后果。
+- [ ] 全部公开文本通过仓库文本规则检查，不含问题处置标签、内部里程碑、工作流水、工具归因、外部
+      技术栈类比或临时诊断内容。
 - [ ] 凭据、证书、临时脚本和内部路径不进入产品归档。
 - [ ] 文档与示例不包含真实密钥、私有地址、内部主机名或业务数据。
 
@@ -16,8 +18,20 @@
 - [ ] 每个公开 crate 的离线归档构建成功，归档内容仅包含产品源码、公开文档和再分发所需文件。
 - [ ] 直接从每个 `.crate` 归档读取 README 和规范化 manifest；核心价值在 README 首屏、独立架构章节、
       crate rustdoc 与 description 中一致，keywords/categories 能支持正确搜索与选型。
+- [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。
+- [ ] `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致；目标版本高于
+      crates.io 当前最高稳定版本，或该名称尚未发布且从 `1.0.0` 起步。
+- [ ] 每个批次发布并回读后，在干净工作树运行 `prepare-next-release-batch.sh <completed-batch>`；只删除
+      已上线 crate 的根级 `[patch.crates-io]` 本地覆盖，审阅并提交 `Cargo.toml` 与 `Cargo.lock` 后才启动
+      下一批。
+- [ ] 下一批 workflow 已通过 `verify-release-transition.sh`，确认所有前置 crate 都不再使用根级 path
+      patch；`cargo package --locked` 在该状态下从 registry 解析前置版本和 feature。
+- [ ] 默认流程严格按“完成提交 → 推送目标分支 → 远端 CI 全绿 → 核对远端提交 SHA → 获得明确上传授权
+      → 上传 registry → 回读 registry 元数据与 README”推进；本地 dry-run 或归档通过不构成上传授权。
+- [ ] 公开版本不可原地替换；归档遗漏或文档合同不完整时停止当前批次，以新的补丁版本承载后续内容，
+      不把尚未上线的本地改动描述成 registry 已完成处置。
 
 ## 组件边界
 

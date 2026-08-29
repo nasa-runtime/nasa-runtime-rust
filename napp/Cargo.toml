@@ -3,7 +3,7 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA application lifecycle with managed multi-source registries, HTTP/1 and h2c listeners, readiness, supervision, and bounded shutdown"
+description = "NASA managed application lifecycle with multi-source registries, request security, trace propagation, supervised listeners, and bounded shutdown"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -43,10 +43,13 @@ kafka = ["dep:futures", "dep:nafka"]
 # Outbox：在 UserHook 接收发布端，Ready 后按 datasource driver 监督 dispatcher；可脱离 Saga 独立使用。
 outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql"]
 outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql"]
+# Inbox retention：业务显式提交保留策略后，由 Application 串行执行清理轮次并发布统一指标。
+inbox = ["db", "dep:nainbox-core", "dep:nainbox-mysql"]
+inbox-pgsql = ["db-pgsql", "dep:nainbox-core", "dep:nainbox-pgsql"]
 # Saga：在 UserHook 接收已完成业务定义装配的运行时，Ready 前执行合同与历史实例门禁，
 # 并由 Application 监督 durable timer 轮询。数据库可以由 db 组件或业务 Hook 初始化。
-saga = ["db", "outbox", "dep:nasaga-runtime"]
-saga-pgsql = ["db-pgsql", "outbox-pgsql", "dep:nasaga-runtime-pgsql"]
+saga = ["db", "inbox", "outbox", "dep:nasaga-runtime"]
+saga-pgsql = ["db-pgsql", "inbox-pgsql", "outbox-pgsql", "dep:nasaga-runtime-pgsql"]
 # Saga 的 Redis Streams 受管 transport:组件在 Ready 前校验拓扑/group/route owner,
 # 消费循环受 Runner 监督,停机先关领取再排空、最后由 Redis 组件释放连接。
 saga-redis-stream = ["saga", "redis", "nasaga-runtime/redis-stream", "nasaga-runtime-pgsql?/redis-stream"]
@@ -88,8 +91,8 @@ naml = { version = "1.0.3" }
 nametrics-core = { version = "1.0.2" }
 nabudget = { version = "1.0.1" }
 nasecret = { version = "1.0.1" }
-naidempotency = { version = "1.0.1" }
-naauthz = { version = "1.0.1" }
+naidempotency = { version = "1.0.2" }
+naauthz = { version = "1.0.2" }
 natelemetry = { version = "1.0.1" }
 napart = { version = "1.1.2", optional = true }
 nagrpc = { version = "1.1.0", optional = true }
@@ -116,6 +119,9 @@ nafka = { version = "1.0.2", optional = true, default-features = false }
 naoutbox-core = { version = "1.0.2", optional = true }
 naoutbox-mysql = { version = "1.0.2", optional = true }
 naoutbox-pgsql = { version = "1.0.0", optional = true }
+nainbox-core = { version = "1.0.2", optional = true }
+nainbox-mysql = { version = "1.0.2", optional = true }
+nainbox-pgsql = { version = "1.0.0", optional = true }
 nasaga-runtime = { version = "1.0.2", optional = true }
 nasaga-runtime-pgsql = { version = "1.0.0", optional = true }
 nanacos = { version = "1.0.2", optional = true, default-features = false }

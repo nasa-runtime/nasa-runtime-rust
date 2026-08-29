@@ -33,7 +33,7 @@
 - Redis Stream、Kafka 和分区消费错误必须对调用方可见，不能静默丢弃。
 - 配置遇到未知字段、非法必填值或冲突组合时快速失败，并对凭据脱敏。
 - 兼容密码能力只用于受控迁移；新业务使用现代认证加密入口。
-- 历史私钥解密路径默认不进入稳定能力组合，启用时还需要运行期风险控制。
+- 遗留私钥解密路径默认不进入稳定能力组合，启用时还需要运行期风险控制。
 - Saga command/result producer 来自 broker ACL、mTLS principal 或覆盖完整 envelope 的消息签名，
   不能相信 payload 自报身份。
 - Redis Streams 的消息签名覆盖 stream、event identity、payload 和 trace 存在性；Cluster 下源 stream、

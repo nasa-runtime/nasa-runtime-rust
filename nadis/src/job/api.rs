@@ -18,6 +18,28 @@ use crate::job::repository::{
 };
 use crate::job::run::JobRun;
 
+/// 命名空间门禁的跨分片治理聚合；回答逐分片暂停/恢复"现在收敛到哪"。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NamespaceGovernanceReport {
+    /// 当前 source 的调度分片总数。
+    pub total_shards: u32,
+    /// 显式处于 ENABLED 的分片数。
+    pub enabled: u32,
+    /// 处于 PAUSED 的分片数。
+    pub paused: u32,
+    /// 从未被治理操作触达的分片数(门禁缺省开放)。
+    pub untouched: u32,
+    /// 持久状态不是 `ENABLED`/`PAUSED` 的分片数；该值非零表示线协议或数据受到破坏。
+    pub unknown: u32,
+    /// 存在部分生效(既非全开放也非全暂停)时为真，应驱动幂等重试或告警。
+    pub divergent: bool,
+    /// 全部分片中最近一次治理发布的权威毫秒时刻。
+    pub last_updated_at_ms: Option<i64>,
+    /// 最近一次治理的操作来源(审计字段)。
+    pub last_updated_by: Option<String>,
+}
+
 /// 单个 Redis source 的聚合运行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobSourceHealthState {
@@ -142,7 +164,15 @@ impl SourceHealth {
             entry.0 = reason;
             entry.1 = entry.1.saturating_add(1);
         }
-        self.metrics.restart_scheduled(loop_name)
+        let generation = self.metrics.restart_scheduled(loop_name);
+        tracing::warn!(
+            source = %self.qualifier,
+            supervisor_loop = loop_name.as_str(),
+            reason = reason.as_str(),
+            generation,
+            "redis-job supervisor scheduled a bounded recovery attempt"
+        );
+        generation
     }
 
     /// 业务作用：标记一个可恢复循环的新代次已经成功推进，并仅清除该循环的降级事实。
@@ -163,6 +193,11 @@ impl SourceHealth {
         }
         drop(degraded);
         self.metrics.recovered(loop_name);
+        tracing::info!(
+            source = %self.qualifier,
+            supervisor_loop = loop_name.as_str(),
+            "redis-job supervisor recovered"
+        );
     }
 
     /// 业务作用：在可恢复循环耗尽预算时关闭 source 准入并保留终态原因。
@@ -178,6 +213,12 @@ impl SourceHealth {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         terminal.get_or_insert(JobSourceHealthReason::RestartBudgetExhausted);
+        tracing::error!(
+            source = %self.qualifier,
+            supervisor_loop = loop_name.as_str(),
+            reason = JobSourceHealthReason::RestartBudgetExhausted.as_str(),
+            "redis-job supervisor entered terminal state"
+        );
     }
 
     /// 业务作用：记录 attempt 或 executor 权威循环失效，立即关闭当前 source 的新工作准入。
@@ -194,6 +235,12 @@ impl SourceHealth {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         terminal.get_or_insert(reason);
+        tracing::error!(
+            source = %self.qualifier,
+            supervisor_loop = loop_name.as_str(),
+            reason = reason.as_str(),
+            "redis-job control authority is no longer valid"
+        );
     }
 
     /// 业务作用：在正常停机或失败停机开始时关闭新任务准入。
@@ -250,16 +297,85 @@ impl SourceHealth {
     }
 }
 
+/// 业务作用：识别 Redis 通用 `ERR` 中可在既有执行器租约内等待的容量背压。
+///
+/// 参数说明：`error` 为 Redis 返回的服务端错误。
+///
+/// 返回：仅连接容量已满返回真；其它自由文本仍按协议或脚本合同失败处理。
+fn redis_response_error_is_transient(error: &redis::RedisError) -> bool {
+    matches!(
+        error.kind(),
+        redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+    ) && error.detail().is_some_and(|detail| {
+        detail
+            .trim()
+            .eq_ignore_ascii_case("max number of clients reached")
+    })
+}
+
+/// 业务作用：识别 Redis 未归一化扩展码中的认证与 ACL 拒绝，避免把凭据错误误当成链路抖动重试。
+///
+/// 参数说明：`error` 为 Redis 客户端返回的错误。
+///
+/// 返回：错误码为 `NOAUTH`、`WRONGPASS` 或 `NOPERM` 时返回真。
+fn redis_error_is_access_denied(error: &redis::RedisError) -> bool {
+    error.code().is_some_and(|code| {
+        matches!(
+            code.trim().to_ascii_uppercase().as_str(),
+            "NOAUTH" | "WRONGPASS" | "NOPERM"
+        )
+    })
+}
+
 /// 业务作用：把内部错误归入健康快照允许公开的封闭类别。
 ///
 /// 参数说明：`error` 为 source 循环返回的错误，不会把其自由文本写入快照。
 ///
 /// 返回：稳定、低基数的健康原因。
-fn classify_error(error: &NasaRedisError) -> JobSourceHealthReason {
+pub(crate) fn classify_error(error: &NasaRedisError) -> JobSourceHealthReason {
     match error {
-        NasaRedisError::Redis(_) | NasaRedisError::ConnectProbe { .. } => {
-            JobSourceHealthReason::RedisTransport
-        }
+        NasaRedisError::Redis(error) => match error.kind() {
+            // Redis 切换、装载和槽迁移期间的明确暂态只在既有 executor 租约内等待，
+            // 硬截止仍会阻止失去服务端确认的节点继续接纳工作。
+            redis::ErrorKind::Server(
+                redis::ServerErrorKind::BusyLoading
+                | redis::ServerErrorKind::TryAgain
+                | redis::ServerErrorKind::ClusterDown
+                | redis::ServerErrorKind::MasterDown
+                | redis::ServerErrorKind::Moved
+                | redis::ServerErrorKind::Ask
+                | redis::ServerErrorKind::ReadOnly,
+            ) => JobSourceHealthReason::RedisTransport,
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+                if redis_response_error_is_transient(error) =>
+            {
+                JobSourceHealthReason::RedisTransport
+            }
+            redis::ErrorKind::Server(redis::ServerErrorKind::NoPerm) => {
+                JobSourceHealthReason::RuntimeConfiguration
+            }
+            redis::ErrorKind::Server(_) => JobSourceHealthReason::ProtocolContract,
+            redis::ErrorKind::Io
+            | redis::ErrorKind::ClusterConnectionNotFound
+            | redis::ErrorKind::NoValidReplicasFoundBySentinel => {
+                JobSourceHealthReason::RedisTransport
+            }
+            redis::ErrorKind::AuthenticationFailed
+            | redis::ErrorKind::InvalidClientConfig
+            | redis::ErrorKind::Client
+            | redis::ErrorKind::MasterNameNotFoundBySentinel
+            | redis::ErrorKind::EmptySentinelList => JobSourceHealthReason::RuntimeConfiguration,
+            redis::ErrorKind::Extension if redis_error_is_access_denied(error) => {
+                JobSourceHealthReason::RuntimeConfiguration
+            }
+            redis::ErrorKind::Parse
+            | redis::ErrorKind::UnexpectedReturnType
+            | redis::ErrorKind::Extension
+            | redis::ErrorKind::RESP3NotSupported => JobSourceHealthReason::ProtocolContract,
+            // 新增客户端错误类别默认封闭为协议问题，只有上面逐项确认的链路/路由错误允许租约内重试。
+            _ => JobSourceHealthReason::ProtocolContract,
+        },
+        NasaRedisError::ConnectProbe { .. } => JobSourceHealthReason::RedisTransport,
         NasaRedisError::JobProtocol(_) => JobSourceHealthReason::ProtocolContract,
         NasaRedisError::ExecutionUnknown(_) => JobSourceHealthReason::ExecutionUnknown,
         NasaRedisError::JobExecutionStopped(_) => JobSourceHealthReason::ExecutionAuthority,
@@ -469,9 +585,27 @@ impl JobControl {
         payload: &JobPayload,
     ) -> Result<ManualFireOutcome> {
         self.ensure_accepting()?;
-        self.repository
+        let outcome = self
+            .repository
             .manual_fire(definition, request_id, payload)
-            .await
+            .await?;
+        // wire 与共享 Lua 受跨语言逐字节对齐约束，trace 上下文不进 payload 或 Run hash；
+        // 在两端协议共同扩展前，只用派生后的 run_id 关联环境链路，业务 request_id 原文不进入日志。
+        let run_id = match &outcome {
+            ManualFireOutcome::Fired { run_id, .. } | ManualFireOutcome::Adopted { run_id } => {
+                Some(run_id.as_str())
+            }
+            ManualFireOutcome::NotFound | ManualFireOutcome::StateMismatch => None,
+        };
+        if let (Some(context), Some(run_id)) = (natelemetry::ambient(), run_id) {
+            tracing::info!(
+                trace_id = %context.trace_id_hex(),
+                run_id,
+                job = definition.name(),
+                "redis-job manual trigger linked to ambient trace"
+            );
+        }
+        Ok(outcome)
     }
 
     /// 业务作用：暂停一个定义的新自动触发，不撤销已有执行权。
@@ -518,6 +652,44 @@ impl JobControl {
             .await
     }
 
+    /// 业务作用：聚合当前 source 全部调度分片的命名空间门禁，供治理面核对逐分片操作是否已收敛。
+    ///
+    /// 暂停/恢复按分片逐项发布,不是跨分片事务;本报告用只读快照回答"现在到底处于什么状态":
+    /// 全部分片同态即已收敛,混合状态说明存在部分生效(多半是失败后尚未重试收敛),据此驱动
+    /// 幂等重试与告警,而不是把逐分片操作包装成虚假的原子结果。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：分片总数、合法状态、未触达与未知状态计数、是否分歧及最近治理审计信息；
+    /// 任一分片读取失败时返回错误，不用不完整报告冒充全量事实。
+    pub async fn namespace_governance(&self) -> Result<NamespaceGovernanceReport> {
+        self.ensure_accepting()?;
+        let total = self.repository.shard_count();
+        let mut report = NamespaceGovernanceReport {
+            total_shards: total,
+            ..Default::default()
+        };
+        for shard in 0..total {
+            let snapshot = self.repository.namespace_state_snapshot(shard).await?;
+            match snapshot.state.as_deref() {
+                Some("PAUSED") => report.paused = report.paused.saturating_add(1),
+                Some("ENABLED") => report.enabled = report.enabled.saturating_add(1),
+                Some(_) => report.unknown = report.unknown.saturating_add(1),
+                // 从未被治理触达:门禁缺省开放,归入 enabled 之外单列,便于区分"显式恢复"与"从未暂停"。
+                None => report.untouched = report.untouched.saturating_add(1),
+            }
+            if snapshot.updated_at_ms > report.last_updated_at_ms {
+                report.last_updated_at_ms = snapshot.updated_at_ms;
+                report.last_updated_by = snapshot.updated_by;
+            }
+        }
+        // 门禁语义上 untouched 与显式 ENABLED 同为开放；合法终点只有全开放或全暂停。
+        // 未知状态不能按开放处理，必须连同混合状态驱动协议告警与人工核对。
+        report.divergent =
+            report.unknown > 0 || (report.paused > 0 && report.paused < report.total_shards);
+        Ok(report)
+    }
+
     /// 业务作用：先完成控制参数校验，再逐分片传播命名空间门禁，避免非法参数造成部分状态变更。
     ///
     /// 参数说明：`state` 仅由暂停/恢复入口传入，`actor` 为规范化前的操作来源。
@@ -526,13 +698,25 @@ impl JobControl {
     async fn set_namespace_state(&self, state: JobDefinitionState, actor: &str) -> Result<()> {
         self.ensure_accepting()?;
         let actor = require_name(actor, "actor")?;
-        for shard in 0..self.repository.shard_count() {
-            if matches!(
-                self.repository
-                    .set_namespace_state(shard, state, &actor)
-                    .await?,
-                NamespaceStateOutcome::Invalid
-            ) {
+        let total = self.repository.shard_count();
+        for shard in 0..total {
+            // 逐分片发布不是跨分片事务:中途失败时 [0, shard) 已进入目标状态。失败必须携带
+            // 精确进度,使调用方知道部分生效范围并以幂等重试收敛,而不是把逐分片操作误当原子。
+            let outcome = self
+                .repository
+                .set_namespace_state(shard, state, &actor)
+                .await
+                .inspect_err(|_| {
+                    // 进度进入低基数控制日志，但保留原始错误类型；把 Redis 传输失败包装为协议
+                    // 错误会破坏调用方的可重试分类，反而阻止幂等续作。
+                    tracing::warn!(
+                        completed_shards = shard,
+                        total_shards = total,
+                        target_state = state.wire_name(),
+                        "redis-job namespace state propagation stopped before convergence"
+                    );
+                })?;
+            if matches!(outcome, NamespaceStateOutcome::Invalid) {
                 return Err(crate::job::JobError::Protocol(
                     "namespace_set_state 拒绝内部已校验状态".to_owned(),
                 )

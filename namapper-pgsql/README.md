@@ -49,6 +49,8 @@ Mapper 通过同一 `natx-pgsql` registry 使用该 pool。
 - `tx = "auto"` 在同 datasource 的 ambient transaction 内复用连接，事务外从对应 pool 获取连接。
 - `tx = "mandatory"` 要求调用发生在同名 PostgreSQL transaction 内；缺少事务或 datasource 不一致时，
   在执行 SQL 前拒绝。
+- `tx = "never"` 拒绝在 ambient transaction 内调用，取连接前显式失败——供副作用不允许随外层事务
+  回滚的语句(如自治审计写)使用。
 - trait 级 `datasource` 决定默认连接和缓存身份。启用缓存或写后失效时，方法级 datasource 不能偏离 trait
   声明，避免同一缓存 namespace 指向多个数据库。
 - PostgreSQL 事务只覆盖一个 driver 的一个 datasource，不提供跨 datasource 或跨数据库原子事务。
@@ -81,4 +83,4 @@ redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
   identifier 等 MySQL 语法。
 - SQL 模板禁止 `${...}` 和行注释。动态标识符只能通过 Mapper 白名单排序合同进入 SQL。
 - 空列表 bind 会拒绝执行，业务应在调用前给出明确的空集合语义。
-- `MapperStream` 拥有池连接生命周期；调用方必须持续消费或及时释放流，避免长期占用连接。
+- `MapperStream` 持有池连接或 ambient 事务连接槽；调用方必须持续消费或及时释放流，避免长期占用连接。

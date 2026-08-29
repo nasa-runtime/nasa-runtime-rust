@@ -68,5 +68,10 @@ natx_pgsql::try_init(pool)?;
 - `mandatory_conn` 不会在事务上下文缺失时降级为 autocommit；同一事务内不要同时持有两个 `PgConn`。
 - 内层回滚会把最外层事务置为 rollback-only。after-commit hook 只在数据库明确确认最外层提交后执行。
 - 数据库明确拒绝 COMMIT 与结果未知分开返回；结果未知不会自动重放业务闭包，也不会运行 hook。
+- `#[transactional_pgsql(never)]`(运行时入口 `run_never`)拒绝任一数据库 driver 的 ambient 事务且不开启事务——供
+  "绝不能被外层事务包住"的路径把违规调用变成进入前的显式错误；`never` 与 `datasource` 互斥。
+- 提交/回滚前对事务连接槽做 fail-fast 独占：业务体已返回却仍被持有的连接句柄(未消费完的事务内
+  `MapperStream`、被移出事务体的 `PgConn`)会让事务以 "transaction connection is still held at
+  commit" 显式失败，而不是在槽锁上永久卡死。
 - `classify_sqlstate` 提供 `23505`、`40001`、`40P01`、`55P03` 和 SQLSTATE class `08` 的稳定分类，
   不解析数据库错误正文。

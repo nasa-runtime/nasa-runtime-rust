@@ -484,6 +484,15 @@ impl FanoutMonitor {
             .await
     }
 
+    /// 业务作用：按指定关闭模式 CAS 切换 Fanout shard assignment，并只为成功的新代次投递一次。
+    ///
+    /// 参数说明：
+    /// - `root`：当前 Fanout 根事实。
+    /// - `shard`：需要撤销旧 inbox 并重分配的 shard。
+    /// - `target`：兼容时选定的新执行器；为空时持久进入等待状态。
+    /// - `mode`：传给共享 Lua 的封闭重分配模式。
+    ///
+    /// 返回：旧代次已经收敛或新 assignment 完成持久投递时成功；Redis 协议与传输失败返回错误。
     async fn reassign_and_deliver_mode(
         &self,
         root: &FanoutRoot,

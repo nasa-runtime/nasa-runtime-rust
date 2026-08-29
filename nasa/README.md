@@ -40,6 +40,24 @@ YAML 中设置 `server.http2.enabled=true`，同一明文端口即接受 h2c pri
 HTTP/1，其它 transport 参数均可省略并采用受校验默认值。四项能力保持独立 feature 以控制依赖面，
 同时纳入 `full`；所有权、运行边界和非目标在下文单独说明。
 
+## 请求安全与链路传播
+
+门面通过 `nasa::authz` 暴露完整 route 裁决快照。策略集合、未命中三态缺省和 generation 同代冻结，
+Web 边界、registry 入口与 handler 请求上下文不会各自读取不同代配置；显式策略不会被公开路由豁免
+绕过。对象授权沿用同一请求快照，provider 缺失、拒绝、错误或超时都拒绝访问。身份验签仍由
+`nasa::oauth` 或业务认证层完成，授权入口只消费已经验证的 `Principal`。
+
+```text
+OAuth/JWKS 或业务认证 → Principal → route 完整快照 → handler 对象授权
+合法 traceparent ───────────────────→ REST / Kafka 继续传播
+无上游上下文 ── exporter sampler ───→ 新根；无 exporter 时保持未采样
+```
+
+`nasa::telemetry` 严格继承合法上游的 sampled 位，只有受管 exporter 能按 `root_sample_ratio` 裁决
+无上游的新根。`nasa::scheduling` 在 leader 与 claim 权威均取得后才创建调度执行 span；拒绝拍次只
+记录 Skipped。该组合提供传播与低基数观测，不替业务建立身份信任、对象归属、跨服务采样协调或
+exactly-once 调度。
+
 ```toml
 [dependencies]
 nasa = { version = "1.0.3", features = [
@@ -94,6 +112,18 @@ qualifier；不同 datasource 之间不构成一个事务。source 集合、endp
 保持冻结，变化后必须重启。完整 YAML 与生命周期合同见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
 
+### Inbox 保留治理
+
+`inbox` 与 `inbox-pgsql` 除了导出事务内 claim adapter，也向 Application 提供显式
+`InboxRetentionPlan`。业务必须按消息源事实声明最大重投视界和不小于该视界的标记年龄；Application
+不从 Kafka topic、消费组或数据库配置猜测窗口。计划在 Ready 后由单一串行 fixed-delay 循环执行，
+停机先停止新轮次，adapter 在取消或预算耗尽时不会把锁状态未知的 session 放回池。
+
+`Application::inbox_retention_snapshot()` 与统一指标端点公开轮次、删除、owner 争用、预算耗尽、失败
+轮次和最老候选年龄的无标签聚合账目。该能力只清理已经提交且超过安全窗口的去重标记，不创建生产
+索引，不延长消息系统实际可重投的期限，也不改变 Inbox 仅覆盖同一数据库事务内副作用的边界。完整
+配置入口和指标名见 [napp Inbox 章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#inbox-去重标记保留)。
+
 ## 应用入口
 
 `application` feature 提供声明式入口。组件字符串可以任意书写；宏会拒绝未知项与重复项，再按唯一规范顺序
@@ -122,7 +152,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 启用 `redis-job` 后，业务从 `nasa::redis::job` 使用定义、上下文、结果、控制和查询类型，并用
 `#[nasa::redis_job]` 静态登记 Handler。`#[nasa::application("redis-job")]` 会隐式纳入 Redis transport；
 宏 descriptor 与 UserHook 中通过 `app.configure_redis_jobs(plan)` 提交的动态定义进入同一冻结计划，
-无需业务拼接 Lua、管理扫描器、续租、Fanout 订阅或停机任务。
+无需业务拼接 Lua、管理扫描器、续租、Fanout 订阅或停机任务。启动登记部分成功时运行时会先关闭本地准入，
+再按全部已尝试能力坐标执行补偿注销；Redis 持续不可达时，未确认的远端记录依赖 TTL 与 Registry GC
+收敛。停机对超时 task 发出取消后仍等待其实际退出，Registry 注销不会越过仍存活的执行权 guard。
 
 Fanout 遇到本地槽位不足时会在有界容量窗口内等待，超窗优先切换兼容执行器，无候选时继续保留当前 assignment；容量迁移次数可通过 shard 的 `capacityRouteTotal` 审计。该字段是持久状态，进程指标不跨重启累计。
 
@@ -153,7 +185,7 @@ Application Ready 后，业务控制面通过 `app.redis_job_control(qualifier)`
 ## 跨副本业务配额门面
 
 `rate-limit` 蕴含 `application` 与 `redis`，从 `nasa::application` 暴露后端中立
-`RateLimitProvider`、共享 Redis 固定窗口实现和可选 Web IP 中间件。业务仍需在应用入口声明
+`RateLimitProvider`、共享 Redis 固定窗口实现和可选 Web 配额中间件。业务仍需在应用入口声明
 `"redis"` 组件，再从受管 source 构造 provider；feature 本身不自动启动资源或修改路由。
 
 ```rust
@@ -174,10 +206,10 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-所有共用 Redis 与 namespace 的副本合并同一主体计数。默认实现后端失败时 fail-open；要求 fail-closed
-的业务应提供自定义 provider。与 `web` 同时启用后可安装 `distributed_rate_limit` 按已解析客户端 IP
-返回 `429` / `Retry-After`；按 tenant、subject 或 API key 计量时直接调用 `check`。完整装配顺序、窗口
-上限和键空间合同见
+所有共用 Redis 与 namespace 的副本合并同一主体计数。默认实现后端失败时 fail-open，也可在构造期
+选择 fail-closed。与 `web` 同时启用后，`distributed_rate_limit` 可按已解析客户端 IP、已验证
+Principal 的 tenant 或 subject/client_id，以及摘要后的 API key 计量；来源缺失时按冻结策略放行或
+拒绝，超额返回 `429` / `Retry-After`。完整装配顺序、窗口上限和键空间合同见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#跨副本分布式业务配额)。
 
 ## 业务初始化屏障
@@ -275,7 +307,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `idempotency-pgsql` | `nasa::idempotency::pgsql` | PostgreSQL 租约 fencing 与持久响应重放 |
 | `audit` | `nasa::audit` | 与业务写同事务的 Outbox 审计 |
 | `audit-pgsql` | `nasa::audit::pgsql` | 与 PostgreSQL 业务写同事务的 Outbox 审计 |
-| `openapi` | `nasa::openapi` | 确定性 OpenAPI 3.1 合同 |
+| `openapi` | `nasa::openapi` | 静态 mapping 与显式动态路由的确定性 OpenAPI 3.1 合同；path 包含 Application `context_path` |
 | `redis` | `nasa::redis` | Redis 命令、pipeline、stream、lock |
 | `redis-job` | `nasa::redis::job`、`nasa::redis_job` | 多 source RedisJob 状态机、`#[redis_job]` 与受管生命周期；蕴含 `application` 和 `redis` |
 | `rate-limit` | `nasa::application` | 基于共享 Redis 原子计数的跨副本业务配额；蕴含 `application` 与 `redis`，无组件字符串，后端故障默认 fail-open，进入 `full` |
@@ -308,7 +340,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `grpc` | `nasa::grpc`、`nasa::application` | 统一 codegen、独立或 `"grpc"` Application 受管 listener、TLS/mTLS、方法策略与观测，进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
-| `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()`、`app.partition_runner(name)` | 直接 Registry 支持运行期动态 Runner 并由业务显式停机；Application 模式冻结启动期计划，提供命名隔离、严格 FIFO 保序任务窃取、逐域健康与统一停机 |
+| `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()`、`app.partition_runner(name)`；与 `scheduling` 组合时连带开启 `#[Async(runner = .., spec = ..)]` 分区执行域形态 | 直接 Registry 支持运行期动态 Runner 并由业务显式停机；Application 模式冻结启动期计划，提供命名隔离、严格 FIFO 保序任务窃取、逐域健康与统一停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |

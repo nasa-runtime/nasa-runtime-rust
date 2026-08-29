@@ -18,7 +18,7 @@ use crate::job::identifiers::{snapshot_digest, worker_key};
 use crate::job::keyspace::JobKeyspace;
 use crate::job::model::JobExecutorState;
 use crate::job::names::require_name;
-use crate::job::script::{eval, value_to_string, JobScript};
+use crate::job::script::{eval, eval_retry_safe, value_to_string, JobScript};
 
 /// 登记能力的重路径脚本。
 static EXECUTOR_REGISTER: JobScript =
@@ -262,6 +262,7 @@ pub struct ExecutorRegistry {
     config: Arc<JobConfig>,
     identity: ExecutorIdentity,
     workers: Mutex<BTreeSet<String>>,
+    known_workers: Mutex<BTreeSet<String>>,
 }
 
 impl ExecutorRegistry {
@@ -286,6 +287,7 @@ impl ExecutorRegistry {
             config,
             identity,
             workers: Mutex::new(BTreeSet::new()),
+            known_workers: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -321,6 +323,13 @@ impl ExecutorRegistry {
             definition.contract_revision(),
             definition.schema_id()
         ));
+        if fanout_capable {
+            // 在写出前保存全量注销坐标；登记提交后回包丢失时，启动补偿仍能撤销该能力索引。
+            self.known_workers
+                .lock()
+                .expect("registry known workers lock")
+                .insert(worker_name.to_owned());
+        }
         let keys: Vec<Vec<u8>> = vec![
             self.keyspace.executors().into_bytes(),
             self.keyspace
@@ -374,6 +383,43 @@ impl ExecutorRegistry {
         state: JobExecutorState,
         inflight: u32,
     ) -> Result<HeartbeatOutcome> {
+        self.heartbeat_inner(state, inflight, None).await
+    }
+
+    /// 业务作用：以稳定逻辑请求与已确认 revision 发送可安全重发的执行器心跳。
+    ///
+    /// 参数说明：
+    /// - `state`: 本执行器当前状态；`Draining` 不再进入新能力快照。
+    /// - `inflight`: 当前在途 Handler 数量，供容量观测。
+    /// - `request_id`: 同一逻辑心跳的稳定标识，传输重发时不得变化。
+    /// - `expected_revision`: 调用方最后一次确认的心跳修订号。
+    ///
+    /// 返回：首次执行或同请求重放均返回同一续租结局；服务端记录已过期或 revision 不一致时拒绝续租。
+    pub(crate) async fn heartbeat_idempotent(
+        &self,
+        state: JobExecutorState,
+        inflight: u32,
+        request_id: &str,
+        expected_revision: i64,
+    ) -> Result<HeartbeatOutcome> {
+        self.heartbeat_inner(state, inflight, Some((request_id, expected_revision)))
+            .await
+    }
+
+    /// 业务作用：组装执行器心跳键与参数，并按是否携带 fencing 证据选择结局分类。
+    ///
+    /// 参数说明：
+    /// - `state`: 本执行器当前状态。
+    /// - `inflight`: 当前在途 Handler 数量。
+    /// - `idempotency`: 受监督运行时提供的逻辑请求 ID 与已确认 revision；低层单次调用不提供。
+    ///
+    /// 返回：脚本的封闭心跳结局；受监督调用保留可重发的 Redis 错误，低层调用在结局未知时阻止透明重放。
+    async fn heartbeat_inner(
+        &self,
+        state: JobExecutorState,
+        inflight: u32,
+        idempotency: Option<(&str, i64)>,
+    ) -> Result<HeartbeatOutcome> {
         let sorted: Vec<String> = self
             .workers
             .lock()
@@ -395,7 +441,7 @@ impl ExecutorRegistry {
         }
         // Fanout 就绪仅在 Active 时请求；Draining 节点不应进入新快照。
         let fanout_ready = matches!(state, JobExecutorState::Active);
-        let argv: Vec<Vec<u8>> = vec![
+        let mut argv: Vec<Vec<u8>> = vec![
             self.identity.executor_id().as_bytes().to_vec(),
             state.wire_name().as_bytes().to_vec(),
             self.config.executor_expire_ms.to_string().into_bytes(),
@@ -406,7 +452,17 @@ impl ExecutorRegistry {
                 b"false".to_vec()
             },
         ];
-        let raw = eval(&self.client, &EXECUTOR_HEARTBEAT, &keys, &argv).await?;
+        if let Some((request_id, expected_revision)) = idempotency {
+            argv.push(request_id.as_bytes().to_vec());
+            argv.push(expected_revision.to_string().into_bytes());
+        }
+        // 受监督心跳用同一请求 ID 重发，服务端只允许一次 revision 推进；低层单次调用没有该证据，
+        // 写出后失联时必须维持结局未知，不能把新调用误当成同一逻辑请求。
+        let raw = if idempotency.is_some() {
+            eval_retry_safe(&self.client, &EXECUTOR_HEARTBEAT, &keys, &argv).await?
+        } else {
+            eval(&self.client, &EXECUTOR_HEARTBEAT, &keys, &argv).await?
+        };
         interpret_heartbeat(&raw)
     }
 
@@ -417,9 +473,9 @@ impl ExecutorRegistry {
     /// 返回：注销成功或重复注销返回 `Ok`；记录不存在返回 `NotFound`；被同身份新进程覆盖返回 `StaleExecutor`。
     pub async fn unregister(&self) -> Result<UnregisterOutcome> {
         let sorted: Vec<String> = self
-            .workers
+            .known_workers
             .lock()
-            .expect("registry workers lock")
+            .expect("registry known workers lock")
             .iter()
             .cloned()
             .collect();
@@ -476,6 +532,10 @@ impl ExecutorRegistry {
         .await?;
         let code = raw.first().map(value_to_string).unwrap_or_default();
         if code == "OK" {
+            self.known_workers
+                .lock()
+                .expect("registry known workers lock")
+                .remove(worker_name);
             Ok(())
         } else {
             Err(protocol("executor_remove_capability 返回未知码"))
@@ -692,12 +752,12 @@ fn interpret_register_capability(raw: &[redis::Value]) -> Result<RegisterCapabil
     }
 }
 
-/// 业务作用：把 executor_heartbeat 原始返回解释为封闭结局；OK 缺字段或未知码时 fail-closed。
+/// 业务作用：把 executor_heartbeat 原始返回解释为封闭结局；权威不一致、OK 缺字段或未知码时 fail-closed。
 ///
 /// 参数说明：
 /// - `raw`: 脚本返回数组。
 ///
-/// 返回：OK 返回存活截止与心跳修订号；NOT_FOUND 返回对应结局；未知码返回协议错误。
+/// 返回：OK 返回存活截止与心跳修订号；NOT_FOUND 返回对应结局；STALE_AUTHORITY 返回失权错误；未知码返回协议错误。
 fn interpret_heartbeat(raw: &[redis::Value]) -> Result<HeartbeatOutcome> {
     let code = raw.first().map(value_to_string).unwrap_or_default();
     match code.as_str() {
@@ -710,6 +770,10 @@ fn interpret_heartbeat(raw: &[redis::Value]) -> Result<HeartbeatOutcome> {
                 heartbeat_revision,
             })
         }
+        "STALE_AUTHORITY" => Err(crate::job::JobError::StaleOwner(
+            "executor_heartbeat 的 heartbeatRevision 已被其它权威推进".to_owned(),
+        )
+        .into()),
         _ => Err(protocol("executor_heartbeat 返回未知码")),
     }
 }

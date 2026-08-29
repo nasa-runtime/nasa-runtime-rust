@@ -23,6 +23,11 @@ gRPC 入站同样遵守这个模型：业务登记 generated service 或提交 S
 同一个 sealed registry 中完成 Router、TLS、health、reflection、容量、指标、listener 和 drain，不会
 产生第二个 tonic Router 或第二套生命周期。
 
+Web 请求安全和 trace 也服从同一快照边界：认证完成后冻结 Principal、route 策略、未命中缺省与
+generation，显式策略不会被公开路由豁免绕过；合法上游 trace flags 原样继承，无上游时只有
+`"telemetry"` exporter 的 sampler 可以决定新根 sampled 位。没有声明 `"telemetry"` 的 Web 仍传播
+上下文，但不会替下游宣布已采样。调度执行 span 只在 scheduling 取得 leader/claim 权威后建立。
+
 ## 最小入口
 
 ```toml
@@ -355,10 +360,18 @@ kafkas:
 
 `"redis-job"` 隐式纳入 `"redis"`，但仍是独立的长生命周期组件。业务只声明定义与 Handler；Application
 在 Prepare 阶段按 `qualifier` 精确绑定受管 Redis source，完成布局、ACL、脚本、定义和指标容量门禁，
-全部 initializer 成功后才启动领取。停机时先关闭所有 source 的新控制动作和领取，再按稳定逆序排空
-Handler、注销执行器并关闭专用连接。一个 source 的健康、监督代次和停机结果不会被另一个 source 覆盖。
+全部 initializer 成功后才启动领取。能力登记只要有一项失败，就会关闭该 source 准入，并按全部已尝试
+Worker 坐标执行补偿注销；Redis 持续不可达时，本地不会接纳工作，未确认的远端 `ACTIVE` 成员依赖
+TTL 与 Registry GC 收敛。停机时先关闭所有 source 的新控制动作和领取，再按稳定逆序排空 Handler；
+超时 task 的取消必须等待实际退出后，才注销执行器并关闭专用连接。一个 source 的健康、监督代次和
+停机结果不会被另一个 source 覆盖。
 
 Ready 后的运行路径由 `nadis::job` 执行：计划按 source 冻结，执行器发布能力快照，Dispatcher 投递并由目标持久确认，Handler 取得带 lease 和 fencing 的 attempt 后执行，receipt、ready、lease 和 root 扫描器分别完成恢复与聚合。Fanout 容量背压使用独立窗口和路由预算；`capacityRouteTotal` 保留历史容量迁移次数，便于 source 级运维审计。
+
+心跳传输失败不会在第一次错误时直接宣告失权：运行时只在最近一次 Redis 已确认的执行器
+`expireAt` 之前退避重试并发布 Degraded，成功后恢复；`NotFound`、协议失败或硬截止耗尽才关闭
+当前 source 准入。终态运行错误包含 `JobSourceHealthReason` 的封闭名称，且状态迁移会写入不含
+endpoint、任务参数或 payload 的监督日志。
 
 静态任务使用 `#[nasa::redis_job]`，无需在 `main` 中手工建立 plan：
 
@@ -422,13 +435,27 @@ YAML 根，也不会仅因声明 `"redis"` 或 `"web"` 自动装到路由。
 
 共用 Redis 与 namespace 的所有副本对同一主体合并计数。简单主体使用
 `{namespace}:{subject}`，包含分隔符或过长的输入使用域分隔摘要；服务端 Lua 原子完成 `INCR` 与首次
-`PEXPIRE`，窗口从第一次命中开始。Redis 不可达、脚本失败、零上限或非法窗口采用 fail-open 并写
-`warn`；要求后端失效时拒绝请求的业务需要提供自己的 `RateLimitProvider`。
+`PEXPIRE`，窗口从第一次命中开始。
 
-`DistributedRateLimit::try_new` 在启动期拒绝零上限、零窗口和超过 365 天的窗口。IP 中间件依赖外层
-`resolve_client_ip` 已写入的 `ClientIp`，超额返回 `429` 与向上取整且至少一秒的 `Retry-After`；缺少
-`ClientIp` 时保守放行。按 tenant、subject 或 API key 计量时应直接调用 `RateLimitProvider::check` 并由
-业务决定主体身份和拒绝响应。该跨副本总配额可与 Web 自带的单实例令牌桶叠加，两者不共享计数语义。
+后端失效(Redis 不可达、脚本失败、零上限、非法窗口)按构造期冻结的
+`RateLimitFailurePolicy` 裁决：缺省 `open` 放行并写 `warn`(可用性优先)；高保障路径用
+`with_failure_policy(Closed)` 把"无法计量"视同"超额"——失效期一律拒绝并携带保守的整窗
+`Retry-After`。
+
+`DistributedRateLimit::try_new` 在启动期拒绝零上限、零窗口和超过 365 天的窗口。配额主体来源经
+`with_subject` 类型化选择：`QuotaSubject::ClientIp`(缺省，依赖外层 `resolve_client_ip` 写入的
+`ClientIp`)、`QuotaSubject::Tenant`(已验证 Principal 的 tenant)、`QuotaSubject::Principal`
+(优先 subject、否则 client_id)、`QuotaSubject::Header`(API key 形态——header 值在离开中间件前
+即做域分隔 SHA-256 摘要，凭据原文不进 provider、Redis key 或日志)。选择的来源缺失时不会回退
+到其它身份，统一按 `with_missing_subject_policy` 裁决：缺省 `Allow` 计数放行，`Deny` 直接
+`403` 封死"不可归因即不设限"的旁路。超额返回 `429` 与向上取整且至少一秒的 `Retry-After`。
+
+五类事件(allowed/denied/backend_error/invalid_config/missing_subject)进入统一指标目录的
+`napp_rate_limit_events_total{event=...}`(封闭词表、恒五条序列，Web Ready 注册)，也可经
+`rate_limit_counters()` 直接读取累计值。`allowed`/`denied` 与 `missing_subject` 统计 Web
+中间件请求；`backend_error`/`invalid_config` 是内置 Redis provider 的原因计数。业务直接调用
+`RateLimitProvider::check` 不经过中间件，因此不会增加最终请求结局计数。该跨副本总配额可与 Web
+自带的单实例令牌桶叠加，两者不共享计数语义。
 
 ## Partition 受管模式
 
@@ -564,8 +591,15 @@ telemetry:
 `metrics_interval_ms` 在启用指标出口时必须为 `1000..=300000`。Counter 使用 cumulative
 temporality，Gauge 发当前快照，Histogram 直接复用 Prometheus descriptor 的边界。
 
+Web 对合法上游 `traceparent` 严格继承 sampled 位；没有上游时由 `root_sample_ratio` 唯一裁决。
+只声明 `"web"`、没有声明 `"telemetry"` 时，入口仍传播 trace 上下文，但新根固定为未采样，
+不会替下游擅自开启记录。Application 同时声明 `"telemetry"` 与 `"scheduling"` 时，取得实际
+执行权的调度运行会导出新根 span，并携带稳定任务名和名义触发时刻；leader/claim 拒绝不产生该 span。
+
 Prometheus `/metrics` 与 OTLP 从同一 `MetricHub` 结构化快照读取，包括原生指标、
-naweb、nafana、Outbox 和 Saga Streams；两个出口并存且都不清零计数。单次失败只将
+naweb、nafana、Outbox 和 Saga Streams；naweb 在 Ready 期按全部静态 route 形状预留最坏序列，
+每个 histogram 完整计入有限 bucket、正无穷 bucket、sum 与 count，容量不足时源与 descriptor
+都不发布。两个出口并存且都不清零计数。单次失败只将
 `telemetry:metrics-exporter` 降级，不重试当前快照、不背压业务；停机时在全局剩余预算内
 尝试最后一次快照。`app.otlp_metrics_snapshot()` 只暴露批次、已确认样本和失败数，
 不暴露 endpoint 或 label 值。
@@ -583,11 +617,51 @@ Outbox 的 `pending`、`dead` 与逐 lane `pending` 来自数据库已提交事�
 OTLP 继续发送完整缓存并把 exporter 标为 Degraded。停机在数据库释放前强制刷新一次，最终 OTLP
 flush 只读取缓存。
 
+## Inbox 去重标记保留
+
+Inbox claim 是事务内原语，没有独立组件字符串；MySQL 使用 `inbox` feature，PostgreSQL 使用
+`inbox-pgsql`。长期运行的服务可在 UserHook 调用 `configure_inbox_retention`，把 datasource、消费
+命名空间、最大重投视界、最小保留年龄、单轮预算与 fixed-delay 间隔冻结到 Application：
+
+```rust
+use std::time::Duration;
+use nasa::application::InboxRetentionPlan;
+use nasa::inbox::InboxRetentionPolicy;
+
+#[nasa::application("db")]
+async fn main(app: nasa::Application) -> anyhow::Result<()> {
+    let policy = InboxRetentionPolicy {
+        redelivery_horizon_ms: 86_400_000,
+        processed_min_age_ms: 86_400_000,
+        batch_limit: 500,
+        round_time_budget_ms: 2_000,
+    };
+    app.configure_inbox_retention(InboxRetentionPlan::new(
+        "default",
+        "order-projection",
+        policy,
+        Duration::from_secs(30),
+    )?).await?;
+    Ok(())
+}
+```
+
+Application 在 Ready 后立即执行首轮，随后从上一轮完整结束时计算下一次延迟，因此慢轮次不会重叠或
+积累补跑债务。同一 datasource 与 consumer 组合只能登记一次；不同 datasource 上的同名 consumer
+属于独立去重集合。协作停机不再开启新轮次并等待当前轮次，若全局停机截止时间先到，adapter 会关闭
+锁状态未知的物理连接，不把该 session 放回池。
+
+`napp_inbox_retention_rounds_total`、`deleted_total`、`claim_contended_total`、
+`budget_exhausted_total`、`failed_rounds_total` 和 `oldest_candidate_age_ms` 均为无标签聚合指标，避免
+datasource、consumer 或 message id 扩张序列数。`inbox_retention_snapshot()` 提供相同进程账目。
+Application 不推断消息源的重投视界，也不自动创建或在线变更生产索引；表结构和
+`(consumer_name, processed_at)` 保留索引必须由对应 datasource migration 管理。
+
 ## Saga 受管模式
 
 `"saga"` 是组合组件：宏会隐式加入 DB 与 Outbox，业务不再重复写 `"db"`、`"outbox"` 或手工
-dispatcher。Inbox 没有后台生命周期，它由 Orchestrator 和参与方在本地事务中直接调用，因此不存在
-单独的 `"inbox"` 组件字符串。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测：业务明确
+dispatcher。Inbox claim 由 Orchestrator 和参与方在本地事务中直接调用，因此不存在单独的
+`"inbox"` 组件字符串；可选保留循环由 UserHook 显式登记到 Application。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测：业务明确
 选择 Kafka 托管消费时声明 `"kafka"` 并启用 `saga-kafka`；选择 Redis Streams 托管消费时声明
 `"redis"` 并启用 `saga-redis-stream`,经 `SagaApplicationPlan::with_redis_stream_transport`
 提交已构造的 result/command 消费者(`(stream, group, consumer)` 身份须唯一)。Redis 组件在
@@ -883,6 +957,49 @@ server:
 | `napp_web_connections_active` | 当前仍由 listener 管理的连接 |
 | `napp_web_accept_errors_total` | 可恢复的 TCP accept 错误 |
 | `napp_web_connection_errors_total` | 协议判定或 HTTP driver 的连接级错误 |
+
+Web 请求体只处理有界缓冲 body 与显式声明的 streaming 响应：不支持 `multipart/form-data`
+(文件上传走对象存储直传，Web 层只收上传凭证与元数据)，也不提供 SSE(`text/event-stream`)
+的事件帧、心跳与 `Last-Event-ID` 续传语义(服务端推送使用受管 WebSocket)。
+
+## route 授权与未命中缺省
+
+业务在 UserHook 经 `set_authz_registry` 注入路由策略注册表、经 `set_object_authorizer` 注入对象
+授权 provider 后，Web 装配统一的授权边界(认证之后、幂等与 handler 之前)。对象授权恒
+fail-closed：provider 错误与超时都不降级为放行。
+
+route 未命中任何策略时按三态缺省裁决，词表 `permit`/`observe`/`deny`：
+
+- `permit`(兼容缺省)：放行；
+- `observe`：放行，但累计计数并对每个 route 首次命中输出警示日志，供翻转前清点漏配面；
+- `deny`：fail-closed 直接 `403`，与对象授权失败语义对齐。
+
+配置入口二选一：UserHook `set_authz_unmatched_policy(...)` 或 YAML
+`server.authz_unmatched_route`；两处同时出现且取值不一致时 Ready 期拒绝装配，不做静默优先级。
+
+豁免与启动门禁：
+
+- 声明公开(`auth_required=false`)的路由与框架探针(`/healthz`、`/readyz`、`/metrics`)不受
+  `observe`/`deny` 收紧；该豁免随覆盖合同进入 registry 与单请求安全快照，Web、registry 便捷入口和
+  handler 复用 `RequestSecurityContext` 时得到同一结果；未命中真实路由的请求交 router 兜底 `404`；
+- 悬空策略(route_id 不指向任何有效路由)阻断 Ready；
+- `deny` 下仍存在未命中策略的鉴权 route 时阻断 Ready——漏配在部署期显形，而不是上线后全量
+  `403`；
+- `observe`/`deny` 要求已注入策略注册表，否则 Ready 期拒绝装配。
+
+`configure_router` 的动态路由默认游离在对账之外；确有对外合同的动态路由经
+`register_route_contract` 显式提交后，与静态路由同等进入 OpenAPI、覆盖对账与豁免口径。
+生成 OpenAPI 时静态和动态 path 都会带上实际 `context_path`，Axum catch-all 语法只在文档路径中
+转换为 OpenAPI 模板。
+
+Ready 安装的路由覆盖合同会继续约束运行期策略更新：`PolicyRegistry::reload` 保留当前三态缺省并
+复验完整覆盖关系；需要同时改变策略与缺省时使用 `reload_with_unmatched`。任一候选含悬空策略，
+或 deny 候选留下未覆盖鉴权 route，策略、缺省和 generation 都保持 last-good。
+
+观测：覆盖账目与未命中计数进入统一指标目录(`napp_authz_unmatched_observed_total`、
+`napp_authz_unmatched_denied_total` 两 counter 与 `napp_authz_routes_covered`、
+`napp_authz_routes_uncovered` 两 gauge，仅在装配授权层时注册)，也可经
+`unmatched_observed_total()` / `unmatched_denied_total()` 直接读取。
 
 ## gRPC listener 受管模式
 

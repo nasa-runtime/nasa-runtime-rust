@@ -25,9 +25,6 @@ use crate::options::{
 };
 use crate::resilience::ResilienceRuntime;
 
-/// 响应错误摘要保留的最大字符数(避免日志打爆/泄露大响应)。
-const BODY_SNIPPET_MAX: usize = 512;
-
 /// 带服务发现 + 负载均衡的 HTTP client。`discovery=None` 即 external-only(`rest_discovery.enabled=false`)。
 pub struct RestDiscoveryClient {
     http: reqwest::Client,
@@ -1255,6 +1252,10 @@ impl RestRequestBuilder {
     }
 
     /// 业务作用：发送并返回原始 `reqwest::Response`(不做 `error_for_status`)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：绝对预算内完成解析、选址与全部尝试时返回原始响应；取消、超时、选址或传输失败返回脱敏错误。
     pub async fn send(mut self) -> Result<reqwest::Response> {
         if self
             .budget
@@ -1262,6 +1263,11 @@ impl RestRequestBuilder {
             .is_some_and(RequestBudget::is_exhausted)
         {
             return Err(RestDiscoveryError::BudgetExhausted);
+        }
+        // 业务未显式绑定时回退环境上下文(HTTP 入站中间件、消费/任务入口建立的 task-local 作用域),
+        // 使漏穿线的调用点不再静默断链;显式绑定始终优先,既有行为不变。
+        if self.trace_context.is_none() {
+            self.trace_context = natelemetry::ambient();
         }
         // 出站传播必须使用新的 client span-id，不能把入站 server span-id 原样复用。即便 telemetry
         // 未启用也派生子上下文，保证下游看到的 parent 是本次调用；启用 recorder 时同一 context
@@ -1374,19 +1380,19 @@ impl RestRequestBuilder {
         }
     }
 
-    /// 业务作用：发送并把 2xx body 反序列化为 `T`;非 2xx 返回 `HttpStatus`(带 body 摘要)。
+    /// 业务作用：发送并把 2xx body 反序列化为 `T`;非 2xx 只返回状态码，不读取或公开远端正文。
     ///
     /// 错误分类:body 读取(传输层)失败 → `Http`;读到了但 JSON 反序列化失败(2xx 响应体不符合约定)
     /// → `ResponseDecodeFailed`,与 `send_json_unwrap` 一致(传输失败 vs 响应契约失败彻底分开)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：2xx 且 JSON 契约匹配时返回 `T`；非 2xx、传输失败或反序列化失败返回对应稳定错误。
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
         let resp = self.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RestDiscoveryError::HttpStatus {
-                status,
-                body_snippet: body_snippet(&body),
-            });
+            return Err(RestDiscoveryError::HttpStatus { status });
         }
         // 先读字节(传输失败 → Http),再本地反序列化(契约失败 → ResponseDecodeFailed)。
         let bytes = resp.bytes().await?;
@@ -1400,15 +1406,13 @@ impl RestRequestBuilder {
     ///
     /// # 参数
     /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
+    ///
+    /// 返回：2xx 响应含指定顶层字段且其类型匹配时返回 `T`；状态、JSON 或字段合同不满足时返回脱敏错误。
     pub async fn send_json_unwrap<T: DeserializeOwned>(self, field: &str) -> Result<T> {
         let resp = self.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RestDiscoveryError::HttpStatus {
-                status,
-                body_snippet: body_snippet(&body),
-            });
+            return Err(RestDiscoveryError::HttpStatus { status });
         }
         // 先读字节(传输失败 → Http),再本地解析 Value 取顶层字段;声明式客户端场景可接受一次中转分配。
         let bytes = resp.bytes().await?;
@@ -1430,43 +1434,44 @@ impl RestRequestBuilder {
     }
 
     /// 业务作用：发送并返回 2xx 文本;非 2xx 返回 `HttpStatus`。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：2xx 时返回完整文本；非 2xx 不读取敏感正文并返回状态错误。
     pub async fn send_text(self) -> Result<String> {
         let resp = self.send().await?;
         let status = resp.status();
-        let body = resp.text().await?;
         if !status.is_success() {
-            return Err(RestDiscoveryError::HttpStatus {
-                status,
-                body_snippet: body_snippet(&body),
-            });
+            // 非成功正文可能包含凭据、用户数据或内部诊断；即使调用方请求文本，也不能让它进入公开错误链。
+            return Err(RestDiscoveryError::HttpStatus { status });
         }
-        Ok(body)
+        Ok(resp.text().await?)
     }
 
     /// 业务作用：发送并只校验 2xx、丢弃 body(供宏 `-> anyhow::Result<()>` 生成)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：2xx 时丢弃正文并成功；非 2xx 返回不包含正文的状态错误。
     pub async fn send_ok(self) -> Result<()> {
         let resp = self.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RestDiscoveryError::HttpStatus {
-                status,
-                body_snippet: body_snippet(&body),
-            });
+            return Err(RestDiscoveryError::HttpStatus { status });
         }
         Ok(())
     }
 
     /// 业务作用：发送并返回 2xx 响应体字节(供宏 `response = "bytes"` 生成)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：2xx 时返回响应字节；非 2xx 不读取正文并返回状态错误。
     pub async fn send_bytes(self) -> Result<bytes::Bytes> {
         let resp = self.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RestDiscoveryError::HttpStatus {
-                status,
-                body_snippet: body_snippet(&body),
-            });
+            return Err(RestDiscoveryError::HttpStatus { status });
         }
         Ok(resp.bytes().await?)
     }
@@ -1567,6 +1572,8 @@ fn split_path_query(pq: &str) -> (&str, Option<&str>) {
 ///
 /// # 参数
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
+///
+/// 返回：名称属于连接级或 Host 保留 header 时为 `true`，普通业务 header 为 `false`。
 fn is_forbidden_header(name: &str) -> bool {
     const FORBIDDEN: &[&str] = &[
         "host",
@@ -1581,17 +1588,4 @@ fn is_forbidden_header(name: &str) -> bool {
         "upgrade",
     ];
     FORBIDDEN.iter().any(|f| name.eq_ignore_ascii_case(f))
-}
-
-/// 业务作用：截取响应 body 前 N 字符作错误摘要(按 char 边界,避免切断多字节)。
-///
-/// # 参数
-/// - `body`: 请求体、响应体或待处理原始内容。
-fn body_snippet(body: &str) -> String {
-    if body.chars().count() <= BODY_SNIPPET_MAX {
-        body.to_string()
-    } else {
-        let s: String = body.chars().take(BODY_SNIPPET_MAX).collect();
-        format!("{s}…")
-    }
 }

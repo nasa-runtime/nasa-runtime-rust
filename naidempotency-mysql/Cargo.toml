@@ -11,7 +11,7 @@ keywords = ["mysql", "idempotency", "transaction", "database", "runtime"]
 categories = ["database", "web-programming"]
 
 [dependencies]
-naidempotency = { version = "1.0.1" }
+naidempotency = { version = "1.0.2" }
 natx = { version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 async-trait = "0.1"

@@ -32,6 +32,7 @@ enum CandidateKind {
 }
 
 #[derive(Debug, Clone)]
+/// 业务作用：保存保留清理候选的持久行、终态类别与进入该终态的时间证据。
 struct RetentionCandidate {
     row: PendingRow,
     kind: CandidateKind,

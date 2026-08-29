@@ -42,7 +42,8 @@ migration 执行；`0` 表示锁取得不设置外层截止时间。
 
 普通 migration 保持事务性。标记为非事务的 migration（例如 `CREATE INDEX CONCURRENTLY`）必须通过
 `NonTransactionalEvidence` 提供独立超时和完成探针；执行中断后只有探针确认目标状态完整，框架才补记
-checksum，避免盲目重复外部副作用。
+checksum，避免盲目重复外部副作用。独立超时发生时不再向同一 session 排队发送 unlock，而是关闭
+物理连接释放会话锁；下次启动重新读取完成证据，不把未知状态连接放回业务池。
 
 只支持 SQLx 默认的 `_sqlx_migrations` catalog 名称。业务 pool 与 migration endpoint 分离时，应先用
 `verify_target_identity` 复验 database 与 schema，再把专有连接交给 `run_gate_on_connection`。

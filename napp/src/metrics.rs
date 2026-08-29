@@ -15,6 +15,8 @@
 #[cfg(any(feature = "kafka", feature = "web-security"))]
 use std::sync::Arc;
 
+#[cfg(feature = "web-security")]
+use nametrics_core::MetricSourceRegistrationError;
 #[cfg(any(feature = "kafka", feature = "web-security"))]
 use nametrics_core::{MetricConflict, MetricDescriptor, MetricHub, MetricKind};
 
@@ -361,15 +363,18 @@ impl LegacyMetricsSource for NawebMetricsSource {
     }
 }
 
-/// 业务作用：把 naweb 兼容源注册进 hub(审计其 descriptor 并保存以便渲染)。
+/// 业务作用：把 naweb 兼容源及其按静态路由展开的最坏公开序列预算事务式注册进 hub。
 ///
-/// # 错误
+/// 参数说明：
+/// - hub：Application 唯一进程级指标目录。
+/// - source：Web Ready 发布的安全指标源。
 ///
-/// 任一 naweb descriptor 与已注册项冲突时返回首个 [`MetricConflict`]。
+/// 返回：descriptor 无冲突且完整序列容量可预留时发布；失败时目录、源和容量账目均保持不变。
 #[cfg(feature = "web-security")]
 pub fn register_naweb_source(
     hub: &MetricHub,
     source: Arc<NawebMetricsSource>,
-) -> Result<(), MetricConflict> {
-    hub.register_legacy_source(source)
+) -> Result<(), MetricSourceRegistrationError> {
+    let worst_case_series = source.metrics.freeze_worst_case_series();
+    hub.register_legacy_source_reserved(source, worst_case_series)
 }

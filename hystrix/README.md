@@ -2,6 +2,10 @@
 
 `hystrix` 提供路由级 bulkhead 隔离、超时和 Hystrix Dashboard 指标流。业务通常通过门面使用：
 
+它是业务代码显式包裹执行体的独立命令面，不并入 Application 受管治理：Web 限流负责入站配额，
+REST 发现客户端的 bulkhead/circuit 负责传输级失败，hystrix 负责业务判定失败、慢成功和非 REST
+出站依赖的隔离。三者不会自动互相调用或共享状态。
+
 ```toml
 [dependencies]
 nasa = { version = "1", features = ["hystrix"] }
@@ -66,6 +70,13 @@ async fn detail() -> Result<Json<serde_json::Value>, AppError> {
 错误率仍会如实体现。
 
 本 crate 不做错误率触发的 Open/HalfOpen/Closed 熔断状态机。下游持续失败时，它保护的是本服务并发和超时边界，不会自动短路。
+
+## 组合边界
+
+- REST 调用外层再包 hystrix 时，`Command` timeout 必须大于客户端的完整重试预算；否则外层已判超时，
+  内层跨实例尝试仍可能占用连接。
+- 包裹真实执行体，不包裹 napart 或 `#[Async]` 的提交动作；hystrix 不感知队列等待、任务终态或取消合同。
+- 命令名必须是代码常量级低基数，不得拼接租户、订单等业务值。
 
 指标口径注意:`rollingMaxConcurrentExecutionCount` 是**进程生命周期内的并发峰值**(只增不减),不是滚动窗口内峰值——一次流量尖峰后 Dashboard 会持续显示该值。其余 rollingCount* 为 10s 滚动窗口。同名 Command 重复构造会在 Dashboard 出现重复圈(各自独立统计),注解宏路径已按 handler 缓存避免;
 手动 `Command::new` 请自行复用实例——重复构造同 (group, name) 时会打一条 `warn` 提示。

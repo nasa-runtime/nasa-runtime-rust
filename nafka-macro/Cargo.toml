@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "nafka 消费者静态收集属性宏"
+description = "NASA Kafka 消费者属性宏：编译期签名校验与静态 descriptor 收集"
 
 [lib]
 proc-macro = true

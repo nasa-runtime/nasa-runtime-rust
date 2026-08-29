@@ -153,6 +153,7 @@ pub struct RunnerMetricsSnapshot {
 /// 兼容旧执行器公开名称的指标别名。
 pub type MetricsSnapshot = RunnerMetricsSnapshot;
 
+/// 业务作用：集中保存单个 Runner generation 的低成本原子运行账目。
 pub(crate) struct RunnerMetrics {
     pub(crate) submitted: AtomicU64,
     pub(crate) completed: AtomicU64,
@@ -214,6 +215,7 @@ impl RunnerMetrics {
     }
 }
 
+/// 业务作用：有界保留无法安全完成任务的最近证据，不持有业务 Future 或载荷所有权。
 pub(crate) struct FrozenEvidenceRing {
     capacity: usize,
     recent: Mutex<VecDeque<FrozenEvidence>>,

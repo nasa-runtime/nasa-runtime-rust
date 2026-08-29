@@ -97,6 +97,10 @@ jobs:
             cargo metadata --locked --no-deps --format-version 1 |
               jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
           )
+      - name: verify previous batches use registry
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
+        run: .github/scripts/verify-release-transition.sh "$RELEASE_BATCH"
       - name: verify release topology
         run: .github/scripts/verify-release-plan.sh
       - name: verify formatting
@@ -145,6 +149,14 @@ jobs:
             tar -xzf "$archive" -C "$crate_scan_dir"
             if grep -REni --binary-files=without-match '(cargo[[:space:]]+test|cfg\(test\)|#\[test\]|(^|[^[:alnum:]_])trybuild([^[:alnum:]_]|$)|(^|[^[:alnum:]_])fixture([^[:alnum:]_]|$)|测试|单测|测例|test target|compile test)' "$crate_scan_dir"; then
               echo "$crate_name 归档包含验证性内容" >&2
+              exit 1
+            fi
+            if grep -REn --binary-files=without-match '修复|(^|[^[:alnum:]_])[Bb][Uu][Gg]([_-]?[0-9]+)?([^[:alnum:]_]|$)|V[0-9]+[-.][0-9]+|§[0-9]+[-.][0-9]+' "$crate_scan_dir"; then
+              echo "$crate_name 归档包含公开文本禁用表述" >&2
+              exit 1
+            fi
+            if grep -REn --binary-files=without-match '原框架|后续维护|本次补齐|质量活动|质量检查记录|质量检查结果|审查过程|审查记录|复审记录|验收记录|验收结果|发布历史|历次发布|版本沿革|自动化助手|Claude|Codex|ChatGPT|AI助手|AI 助手|大模型生成|临时调试|临时验证|失效路径|((本轮|本次|测试|验收|审查|质量).*(执行结果|执行记录))|((执行结果|执行记录).*(本轮|本次|测试|验收|审查|质量))|((类似|相当于|对标|类比|照搬).*(Spring|Java|Golang|Node\.js|\.NET|Django|Rails))|((Spring|Java|Golang|Node\.js|\.NET|Django|Rails).*(类似|相当于|对标|类比|照搬))' "$crate_scan_dir"; then
+              echo "$crate_name 归档包含内部过程或无关类比" >&2
               exit 1
             fi
           done

@@ -1,13 +1,11 @@
 # nadis-derive：提供 #[derive(RedisDocument)] 派生宏。
-# 纯语法糖:生成的代码只调用 nadis 的公开 API(DocMeta/FieldMeta/RedisDocument),
-# 手写 impl 与宏生成 impl 语义零差异(对照 原实现 注解 @RsDocument/@RsId/@TagField/
-# @TextField/@NumericField/@JsonArrayKey → MetaResolver 启动期解析)。
+# 宏只调用 nadis 的公开 API(DocMeta/FieldMeta/RedisDocument)，手写 impl 与派生 impl 共享同一运行时语义。
 [package]
 name = "nadis-derive"
 version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[derive(RedisDocument)] —— nadis RediSearch 文档元数据派生宏。"
+description = "NASA RedisDocument 派生宏：RediSearch/RedisJSON 元数据与字段转换"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -22,6 +20,5 @@ name = "nadis_derive"
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-# 运行时路径发现:直接依赖 nadis → ::nadis;门面消费者 → ::nasa::redis
-# (含 Cargo 重命名;消费侧冒烟实测:硬编码 ::nadis 在纯门面工程解析不到)。
+# 运行时路径发现支持直接依赖 nadis、经 nasa::redis 门面使用以及 Cargo 依赖重命名。
 nasa-macro-support = { package = "macro-support", version = "1.0.1" }
