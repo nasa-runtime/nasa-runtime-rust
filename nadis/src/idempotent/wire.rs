@@ -15,7 +15,9 @@ pub const SLOT_COUNT: usize = 16_384;
 
 /// 不区分方向的逻辑计数器结构身份；进入 record field 与 ledger shard 摘要，值固定不可变。
 pub const FAMILY_STRING: u8 = 1;
+/// Hash field 计数器的持久结构类别。
 pub const FAMILY_HASH: u8 = 2;
+/// Sorted Set member 计数器的持久结构类别。
 pub const FAMILY_ZSET: u8 = 3;
 
 /// 业务作用：以 4 字节大端长度前缀拼接多个二进制身份段再取 SHA-256，防止 field、member 或 nonce 内容
