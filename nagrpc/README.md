@@ -289,7 +289,9 @@ secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同
   `ListServices` 只列出实际装配的业务 service，descriptor 中未登记的相邻 service 也不能通过 symbol
   查询旁路暴露；业务不手工登记 descriptor。
 - health 自动提供 transport 存活与 service 名目录，不替业务判断数据库、下游或业务数据是否健康。
-- Application 启动期冻结 TLS 材料，不提供进程内证书热切；轮换通过新实例 Ready 后切流完成。
+- `GrpcTlsAcceptorSource` 可为每次新握手提供一份已校验的 TLS 快照；来源负责原子发布与旧信任根期限。
+  Application 的 Saga 安全快照结合 `nacos-config` 提供证书热轮换与有界重叠窗口，非法候选保留当前材料。
+  既有连接不会重新握手；Saga 会在每个 RPC 上复验证书 principal 的当前授权，通用业务需自行定义撤权语义。
 - 兼容门禁保护 protobuf wire 与 RPC cardinality，不替业务判断字段语义、授权范围或数据保留政策。
 - drain 先关闭新准入，再发送两阶段 GOAWAY，并让已接纳调用使用整个 `drain_timeout_ms`；首请求、空闲
   和连接年龄驱逐才使用 `connection_eviction_grace_ms`。预算耗尽会终止 serve task，不遗留 detached listener。

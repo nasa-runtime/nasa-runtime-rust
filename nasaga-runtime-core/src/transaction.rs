@@ -76,6 +76,41 @@ where
         .map_err(map_error)
 }
 
+/// 业务作用：在事务体开始、每次恢复轮询及交还提交裁决前复验执行资格，等待期间失权则回滚创建事实。
+///
+/// 参数说明：`backend` 固定事务域，`authorize` 同步验证本次操作的冻结资格，`body` 只能产生同事务数据库写入。
+///
+/// 返回：资格持续有效且提交确认后返回领域值；失权使事务体返回错误并走正常回滚。
+/// 已在有效资格下发出的 COMMIT 仍按数据库收据裁决，不因确认回包较晚而宣称回滚。
+pub(crate) async fn run_authorized_for<B, T, F>(
+    backend: &B,
+    authorize: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    body: F,
+) -> anyhow::Result<T>
+where
+    B: SagaBackend,
+    F: Future<Output = anyhow::Result<T>> + Send,
+    T: Send,
+{
+    run_for(backend, async {
+        let outcome = {
+            let mut body = Box::pin(body);
+            std::future::poll_fn(|context| {
+                // BEGIN、连接池或行锁都可能消耗租期；恢复数据库操作前必须重新取得同一资格。
+                if let Err(error) = authorize() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                body.as_mut().poll(context)
+            })
+            .await
+        }?;
+        // 先释放事务体的连接借用，再决定提交；失权不能留下实例、首步 Outbox 或 timer 的半份事实。
+        authorize()?;
+        Ok(outcome)
+    })
+    .await
+}
+
 /// 业务作用：把 natx 的封闭事务阶段映射成 Saga 对外错误，同时保留领域回滚原始错误。
 ///
 /// 参数说明：

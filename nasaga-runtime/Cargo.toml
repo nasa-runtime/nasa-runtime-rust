@@ -30,6 +30,7 @@ natx = { version = "1.0.3" }
 natelemetry = { version = "1.0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtime-tokio"] }
 # 调度批次业务键把对象身份收敛为有界十六进制摘要。
 hex = "0.4"
 uuid = { version = "1", features = ["v4", "v5"] }

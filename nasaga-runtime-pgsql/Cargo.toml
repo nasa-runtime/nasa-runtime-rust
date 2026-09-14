@@ -13,6 +13,7 @@ categories = ["asynchronous", "database"]
 
 [dependencies]
 anyhow = "1"
+linkme = "0.3"
 nainbox-pgsql = { version = "1.0.0" }
 naoutbox-pgsql = { version = "1.0.0" }
 nasaga-backend = { version = "1.0.0" }
@@ -21,6 +22,8 @@ nasaga-pgsql = { version = "1.0.0" }
 nasaga-runtime-core = { version = "1.0.0" }
 natelemetry = { version = "1.0.1" }
 natx-pgsql = { version = "1.0.0" }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
+serde_json = "1"
 
 [features]
 default = []

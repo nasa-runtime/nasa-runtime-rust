@@ -11,7 +11,7 @@ pub use retention::{RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use naoutbox_core::{
     DispatchReport, DurableOutboxAppend, DurableOutboxDispatch, DurableOutboxQuota,
@@ -93,7 +93,9 @@ pub const DEFAULT_CHANNEL: &str = "global";
 static CHANNEL_ROUTES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 static TENANT_QUOTAS: OnceLock<BTreeMap<String, u64>> = OnceLock::new();
 static QUOTA_REJECTIONS: AtomicU64 = AtomicU64::new(0);
-static COMMIT_SIGNAL: OnceLock<watch::Sender<u64>> = OnceLock::new();
+// 提交信号以 datasource 与 lane 共同定界，避免一个业务链的提交唤醒无关 dispatcher。
+type CommitSignalRegistry = BTreeMap<(String, String), watch::Sender<u64>>;
+static COMMIT_SIGNALS: OnceLock<Mutex<CommitSignalRegistry>> = OnceLock::new();
 
 /// 业务作用：校验 lane 名可安全用于列值、owner 主键与低基数观测标签。
 ///
@@ -451,6 +453,18 @@ impl PgOutbox {
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), OutboxStoreError> {
         let datasource = natx_pgsql::DatasourceRef::new(datasource).map_err(map_err)?;
         let mut connection = natx_pgsql::conn_for(&datasource).await.map_err(map_err)?;
+        Self::ensure_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建当前 Outbox 表和索引，使外层
+    /// schema 互斥权覆盖整个结构操作。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：结构已存在或创建成功时完成；DDL 失败返回脱敏错误。
+    pub async fn ensure_schema_on_connection(
+        connection: &mut natx_pgsql::PgConn,
+    ) -> Result<(), OutboxStoreError> {
         sqlx::raw_sql(CREATE_SCHEMA_SQL)
             .execute(connection.as_mut())
             .await
@@ -482,9 +496,12 @@ impl PgOutbox {
         }
         if transactional {
             // 唤醒只能跟随最外层事务的明确提交；登记失败必须向上传递，让调用方回滚本轮事件写入。
-            register_commit_notification()?;
+            register_commit_notification(
+                self.datasource.as_str(),
+                channel_of(&event.aggregate_type),
+            )?;
         } else {
-            notify_committed_append();
+            notify_committed_append(self.datasource.as_str(), channel_of(&event.aggregate_type));
         }
         Ok(())
     }
@@ -507,7 +524,10 @@ impl PgOutbox {
         drop(connection);
         if inserted {
             // 事务提交前不开放本进程投递唤醒，避免 dispatcher 观察到尚未成为持久事实的事件。
-            register_commit_notification()?;
+            register_commit_notification(
+                self.datasource.as_str(),
+                channel_of(&event.aggregate_type),
+            )?;
         }
         Ok(())
     }
@@ -609,7 +629,10 @@ impl PgOutbox {
         drop(connection);
         if inserted {
             // 配额预留与事件写入必须先由业务事务共同提交，随后才能发布可合并的唤醒信号。
-            register_commit_notification()?;
+            register_commit_notification(
+                self.datasource.as_str(),
+                channel_of(&event.aggregate_type),
+            )?;
         }
         Ok(())
     }
@@ -649,7 +672,7 @@ impl PgOutbox {
 
     /// 业务作用：读取全部可投递且非死信事件数量。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：基于 partial index 的非负积压数；数据库失败返回错误。
     pub async fn pending_count(&self) -> Result<u64, OutboxStoreError> {
@@ -667,7 +690,7 @@ impl PgOutbox {
 
     /// 业务作用：读取死信集合数量，供告警和人工恢复决策使用。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：基于 dead partial index 的非负计数；数据库失败返回错误。
     pub async fn dead_count(&self) -> Result<u64, OutboxStoreError> {
@@ -1105,11 +1128,11 @@ impl PgOutbox {
 
     /// 业务作用：订阅当前进程 PostgreSQL Outbox 的已确认提交代际。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`channel` 指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：初值为当前代际的 watch 接收端；调用方仍须保留数据库轮询。
-    pub fn subscribe_committed_appends() -> watch::Receiver<u64> {
-        commit_signal().subscribe()
+    pub fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        commit_signal(self.datasource.as_str(), channel.unwrap_or("*")).subscribe()
     }
 }
 
@@ -1299,34 +1322,54 @@ where
     })
 }
 
-/// 业务作用：取得 PostgreSQL Outbox 进程唯一的提交代际发布端。
+/// 业务作用：取得 PostgreSQL Outbox 指定 datasource 与 lane 的提交代际发布端。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：写侧和 dispatcher 共同使用的 datasource 身份。
+/// - `channel`：事件所属 lane，`*` 表示该 datasource 的全局订阅。
 ///
-/// 返回：惰性创建且进程内稳定的 watch sender。
-fn commit_signal() -> &'static watch::Sender<u64> {
-    COMMIT_SIGNAL.get_or_init(|| watch::channel(0).0)
+/// 返回：惰性创建且进程内按精确键稳定复用的 watch sender。
+fn commit_signal(datasource: &str, channel: &str) -> watch::Sender<u64> {
+    let signals = COMMIT_SIGNALS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut signals = signals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    signals
+        .entry((datasource.to_owned(), channel.to_owned()))
+        .or_insert_with(|| watch::channel(0).0)
+        .clone()
 }
 
-/// 业务作用：在数据库提交已经明确确认后推进本进程唤醒代际。
+/// 业务作用：在数据库提交已经明确确认后推进精确 lane 与 datasource 全局唤醒代际。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际落库的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：无；通知可被合并，持久待投递集合仍以数据库为准。
-fn notify_committed_append() {
-    commit_signal().send_modify(|generation| {
+fn notify_committed_append(datasource: &str, channel: &str) {
+    commit_signal(datasource, channel).send_modify(|generation| {
         *generation = generation.wrapping_add(1);
     });
+    if channel != "*" {
+        commit_signal(datasource, "*").send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+    }
 }
 
 /// 业务作用：把唤醒登记到最外层 PostgreSQL ambient transaction 的明确提交之后。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际写入的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：登记成功时完成；事务上下文丢失时返回错误并要求调用方回滚事件写入。
-fn register_commit_notification() -> Result<(), OutboxStoreError> {
-    natx_pgsql::after_commit(|| async {
-        notify_committed_append();
+fn register_commit_notification(datasource: &str, channel: &str) -> Result<(), OutboxStoreError> {
+    let datasource = datasource.to_owned();
+    let channel = channel.to_owned();
+    natx_pgsql::after_commit(move || async move {
+        notify_committed_append(&datasource, &channel);
     })
     .map_err(map_err)
 }
@@ -1400,6 +1443,20 @@ impl DurableOutboxAppend for PgOutbox {
 
 #[async_trait::async_trait]
 impl DurableOutboxDispatch for PgOutbox {
+    /// 业务作用：从本数据源已提交事件计算指定合同的最老排队时间。
+    ///
+    /// 参数说明：`event_type` 是待观测的固定事件合同名。
+    ///
+    /// 返回：非负毫秒数；无待确认事件时为零，数据库失败时返回错误。
+    async fn oldest_pending_age_ms(&self, event_type: &str) -> Result<u64, OutboxStoreError> {
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
+        let age: i64 = sqlx::query_scalar("SELECT COALESCE(GREATEST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT - MIN(created_at_ms), 0), 0) FROM outbox_event WHERE NOT dispatched AND NOT dead AND event_type = $1")
+            .bind(event_type).fetch_one(connection.as_mut()).await.map_err(map_err)?;
+        Ok(age.max(0) as u64)
+    }
+
     /// 业务作用：通过后端中立合同读取 PostgreSQL 可投递积压。
     ///
     /// 参数说明: 无。
@@ -1544,10 +1601,11 @@ impl DurableOutboxRetention for PgOutbox {
 impl DurableOutboxWakeup for PgOutbox {
     /// 业务作用：通过后端中立合同订阅 PostgreSQL 已确认提交代际。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：
+    /// - `channel`：指定 lane 时隔离唤醒；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：当前进程共享的 watch 接收端；数据库轮询仍承担最终收敛。
-    fn subscribe_committed_appends(&self) -> watch::Receiver<u64> {
-        PgOutbox::subscribe_committed_appends()
+    fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        PgOutbox::subscribe_committed_appends(self, channel)
     }
 }

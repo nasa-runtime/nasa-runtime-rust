@@ -563,6 +563,15 @@ pub trait DurableOutboxDispatch: Send + Sync {
     /// 返回：非负积压数；数据库失败返回脱敏错误。
     async fn pending_count(&self) -> Result<u64, OutboxStoreError>;
 
+    /// 业务作用：按固定事件类型读取最老未获确认事件的年龄，定位投递排队。
+    ///
+    /// 参数说明：`event_type` 是受信事件合同名，不从 payload 推断。
+    ///
+    /// 返回：数据库时钟计算的非负毫秒数；无积压为零，后端不支持或查询失败返回错误。
+    async fn oldest_pending_age_ms(&self, _event_type: &str) -> Result<u64, OutboxStoreError> {
+        Err(OutboxStoreError::new("outbox age metrics are unavailable"))
+    }
+
     /// 业务作用：读取当前后端死信集合数量。
     ///
     /// 参数说明: 无。
@@ -680,12 +689,15 @@ pub trait DurableOutboxRetention: Send + Sync {
 
 /// 持久 Outbox 提交后唤醒合同；通知只优化本进程延迟，数据库轮询仍是最终事实来源。
 pub trait DurableOutboxWakeup: Send + Sync {
-    /// 业务作用：订阅该 adapter 的已确认提交代际。
+    /// 业务作用：订阅该 datasource 内指定 lane 的已确认提交代际。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`channel` 是 dispatcher 冻结的 lane；空值订阅该 datasource 的未分片兼容通道。
     ///
     /// 返回：可合并连续通知的 watch 接收端；调用方仍须保留定时轮询。
-    fn subscribe_committed_appends(&self) -> tokio::sync::watch::Receiver<u64>;
+    fn subscribe_committed_appends(
+        &self,
+        channel: Option<&str>,
+    ) -> tokio::sync::watch::Receiver<u64>;
 }
 
 /// 受管运行时所需的完整持久 Outbox 能力集合。

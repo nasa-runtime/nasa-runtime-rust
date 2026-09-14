@@ -232,7 +232,7 @@ impl PgSagaStore {
             let Some(existing) = existing else {
                 // 本 attempt 无行却仍冲突,说明 effect/command 身份被其它步骤占用:
                 // 确定性派生保证不同输入不同身份,出现共享即身份体系被破坏。
-                return Err(SagaStoreError::new(
+                return Err(SagaStoreError::conflict(
                     "attempt identity collides with a different step attempt",
                 ));
             };
@@ -241,7 +241,7 @@ impl PgSagaStore {
             if existing_effect != effect_text || existing_command != command_text {
                 // 同一 attempt 出现两套身份意味着重派生结果漂移,继续执行会让
                 // 外部幂等键失效,必须显式失败转人工。
-                return Err(SagaStoreError::new(
+                return Err(SagaStoreError::conflict(
                     "attempt already recorded with different identities",
                 ));
             }

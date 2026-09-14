@@ -155,10 +155,34 @@ fn validate_managed_references(
             .and_then(|settings| settings.get("database_bootstrap"))
             .and_then(Value::as_str)
             == Some("user_hook");
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    let direct_saga_client = saga_direct_client_without_storage(tree);
 
     #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
-    if components.contains(&ComponentId::Outbox) {
-        let reference = string_setting(tree, "outbox", "datasource_ref").unwrap_or("default");
+    if components.contains(&ComponentId::Outbox)
+        && !{
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            {
+                direct_saga_client
+            }
+            #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
+            {
+                false
+            }
+        }
+    {
+        let reference = string_setting(tree, "outbox", "datasource_ref")
+            .or_else(|| {
+                #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+                {
+                    saga_storage_datasource_ref(tree)
+                }
+                #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
+                {
+                    None
+                }
+            })
+            .unwrap_or("default");
         #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
         let deferred_default = user_hook_database && reference == "default";
         #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
@@ -175,8 +199,8 @@ fn validate_managed_references(
     }
 
     #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
-    if components.contains(&ComponentId::Saga) {
-        let reference = string_setting(tree, "saga", "datasource_ref").unwrap_or("default");
+    if components.contains(&ComponentId::Saga) && !direct_saga_client {
+        let reference = saga_storage_datasource_ref(tree).unwrap_or("default");
         if !(datasource_names.contains(reference) || user_hook_database && reference == "default") {
             return Err(crate::ApplicationError::new(
                 ComponentId::Saga,
@@ -251,6 +275,67 @@ fn validate_managed_references(
 
     let _ = (components, tree, phase);
     Ok(())
+}
+
+/// 业务作用：从候选配置识别不持有本地事务事实的 managed direct client，供资源引用门禁保持零存储。
+///
+/// 参数说明：`tree` 是尚未建立连接的完整候选配置。
+///
+/// 返回：明确选择 managed client 且 `reliable_start` 关闭时返回 true；缺失字段不作推断。
+#[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+fn saga_direct_client_without_storage(tree: &Value) -> bool {
+    let Some(saga) = tree.get("saga").and_then(Value::as_object) else {
+        return false;
+    };
+    saga.get("role").and_then(Value::as_str) == Some("client")
+        && saga
+            .get("plan_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("managed")
+            == "managed"
+        && !saga
+            .get("client")
+            .and_then(Value::as_object)
+            .and_then(|client| client.get("reliable_start"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// 业务作用：按 Saga 角色读取唯一需要本地持久化的 datasource 引用，不从无关角色字段猜测。
+///
+/// 参数说明：`tree` 是同一代完整配置候选。
+///
+/// 返回：协调、参与或可靠 client 角色声明的引用；direct client 与缺失配置返回空。
+#[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+fn saga_storage_datasource_ref(tree: &Value) -> Option<&str> {
+    let saga = tree.get("saga")?.as_object()?;
+    let fallback = saga.get("datasource_ref").and_then(Value::as_str);
+    match saga.get("role").and_then(Value::as_str)? {
+        "orchestrator" | "combined" => saga
+            .get("orchestrator")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("datasource_ref"))
+            .and_then(Value::as_str)
+            .or(fallback),
+        "participant" => saga
+            .get("participant")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("datasource_ref"))
+            .and_then(Value::as_str)
+            .or(fallback),
+        "client" => saga
+            .get("client")
+            .and_then(Value::as_object)
+            .filter(|settings| {
+                settings
+                    .get("reliable_start")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .and_then(|settings| settings.get("datasource_ref"))
+            .and_then(Value::as_str),
+        _ => fallback,
+    }
 }
 
 /// 业务作用：从候选 MySQL 配置提取业务可引用的规范化 datasource 名称。

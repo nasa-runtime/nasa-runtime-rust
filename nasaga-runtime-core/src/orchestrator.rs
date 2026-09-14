@@ -13,17 +13,21 @@
 //! - **补偿计划冻结**：进入 `COMPENSATING` 前由已提交 journal 一次性冻结计划并落库，
 //!   之后只幂等完成计划内步骤。
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use nainbox_core::{InboxClaim, InboxStore};
 use naoutbox_core::DurableOutboxAppend;
 use nasaga_backend::{
     AttemptConflictFact, AttemptOutcomeRecord, CasOutcome, ControlCasOutcome,
-    ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance, SagaAuditStore, SagaBackend,
-    SagaBackendFactory, SagaConflictKind, SagaCreation, SagaGovernanceStore, SagaInstanceQuery,
-    SagaInstanceRow, SagaInstanceStore, SagaInstanceSummary, SagaJournalStore, SagaStepRow,
-    SagaTimerRow, SagaTimerStore, StepJournalPatch, TimerFencing, TimerFencingToken,
-    TimerFencingTokenIssuer, TimerScope, TimerSpec, TransitionSpec,
+    ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance, SagaAuditEventCursor,
+    SagaAuditEventRecord, SagaAuditStore, SagaBackend, SagaBackendErrorKind, SagaBackendFactory,
+    SagaConflictKind, SagaCreation, SagaGovernanceStore, SagaInstanceQuery, SagaInstanceRow,
+    SagaInstanceStore, SagaInstanceSummary, SagaJournalStore, SagaStepRow, SagaTimerRow,
+    SagaTimerStore, StepJournalPatch, TimerFencing, TimerFencingToken, TimerFencingTokenIssuer,
+    TimerScope, TimerSpec, TransitionSpec,
 };
 use nasaga_core::{
     freeze_compensation_plan, AttemptNo, BusinessKey, CancelMode, CommandId, DefinitionVersion,
@@ -37,7 +41,10 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::envelope::{canonical_bytes, SagaCommandEnvelope, SagaResultEnvelope, VerifiedIdentity};
-use crate::management::{SagaAuditTrail, SagaManagementContext, SagaManagementPermission};
+use crate::management::{
+    SagaAuditPage, SagaAuditPageCursor, SagaAuditRecord, SagaAuditTrail, SagaManagementContext,
+    SagaManagementError, SagaManagementExpectation, SagaManagementPermission,
+};
 use crate::observability::{
     record_action_rate_rejection, record_quota_rejection, SagaOperationalMetrics,
 };
@@ -122,8 +129,8 @@ impl Default for OrchestratorConfig {
 
 /// 业务作用：单租户变更类管理动作的固定窗口速率上限。
 ///
-/// 窗口边界由**数据库时钟**对齐,多副本 Orchestrator 共享同一套窗口;预算按提交的
-/// 动作调用计——幂等重放同样提交并计数,失败回滚的尝试不消耗。
+/// 窗口边界由**数据库时钟**对齐,多副本 Orchestrator 共享同一套窗口;预算只按首次
+/// 提交的新 operation 计，完全相同的已提交 operation 重放不重复计数，失败回滚不消耗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TenantActionRate {
     /// 单窗口允许提交的动作数;0 表示完全封禁。
@@ -140,6 +147,93 @@ pub enum StartOutcome {
     /// 同一业务意图已有实例；返回其当前快照。
     AlreadyExists(SagaInstanceRow),
 }
+
+/// 业务作用：封闭 Saga 创建的确定性拒绝原因，供协议适配器按类型映射稳定状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StartSagaError {
+    /// 指定 workflow/version 当前不允许创建新实例。
+    DefinitionInactive,
+    /// 正文格式、schema 或双重输入来源不符合冻结步骤合同。
+    InvalidPayload,
+    /// 已发布 definition 没有可执行步骤。
+    DefinitionEmpty,
+    /// Saga 身份或业务幂等槽已被不同启动请求占用。
+    RequestConflict,
+    /// 租户在飞实例配额已耗尽。
+    TenantQuotaExceeded,
+}
+
+impl StartSagaError {
+    /// 业务作用：从完整错误链中提取协议层可以安全公开的 Saga 创建拒绝类别。
+    ///
+    /// 参数说明：`error` 是运行核心返回且可能附加调用上下文的完整错误链。
+    ///
+    /// 返回：包含封闭创建拒绝时返回对应类别；基础设施或未知失败返回 `None`。
+    pub fn from_error(error: &anyhow::Error) -> Option<Self> {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Self>().copied())
+    }
+}
+
+impl std::fmt::Display for StartSagaError {
+    /// 业务作用：输出不含租户用量、请求正文或持久化细节的稳定创建拒绝摘要。
+    ///
+    /// 参数说明：`formatter` 是标准格式化输出目标。
+    ///
+    /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidPayload => "Saga payload contract is invalid",
+            Self::DefinitionInactive => "Saga workflow definition is not active",
+            Self::DefinitionEmpty => "Saga workflow definition has no steps",
+            Self::RequestConflict => "Saga identity is already bound to a different start request",
+            Self::TenantQuotaExceeded => "saga_tenant_quota_exceeded",
+        })
+    }
+}
+
+impl std::error::Error for StartSagaError {}
+
+/// 业务作用：保留状态迁移 CAS 未生效的确定性并发裁决，禁止协议层解析错误文本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaConcurrencyError {
+    /// 调用方使用的实例状态或版本快照已经过期。
+    StaleSnapshot,
+    /// 相同触发身份已经提交过另一条迁移。
+    DuplicateTrigger,
+}
+
+impl SagaConcurrencyError {
+    /// 业务作用：从事务与调用上下文包裹的错误链中提取 CAS 并发裁决。
+    ///
+    /// 参数说明：`error` 是状态迁移调用返回的完整错误链。
+    ///
+    /// 返回：包含确定性并发裁决时返回对应类别；其它失败返回 `None`。
+    pub fn from_error(error: &anyhow::Error) -> Option<Self> {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Self>().copied())
+    }
+}
+
+impl std::fmt::Display for SagaConcurrencyError {
+    /// 业务作用：输出不携带实例身份与业务数据的稳定 CAS 裁决摘要。
+    ///
+    /// 参数说明：`formatter` 是标准格式化输出目标。
+    ///
+    /// 返回：摘要写入成功时返回 `Ok`；格式化失败返回对应错误。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::StaleSnapshot => "Saga state snapshot is stale",
+            Self::DuplicateTrigger => "Saga transition trigger was already applied",
+        })
+    }
+}
+
+impl std::error::Error for SagaConcurrencyError {}
 
 /// 业务作用：区分结果处理的两种可 ACK 结论。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,8 +284,16 @@ pub struct StartSagaRequest<'a> {
     pub trigger_id: &'a str,
     /// 首步 execute 命令携带的业务输入；后续步骤由参与方本地事实解析。
     pub first_command_payload: Option<serde_json::Value>,
+    /// 原始首步正文；与兼容 JSON 输入互斥，媒体类型与 schema 纳入请求摘要。
+    pub first_command_raw_payload: Option<nasaga_core::SagaPayload>,
     /// 当前时刻（epoch 毫秒），由调用方注入统一时钟。
     pub now_ms: i64,
+}
+
+/// 业务作用：保留调用方选择的首步正文合同，兼容 JSON envelope 与原始字节 envelope 不相互转换。
+enum CommandInput {
+    Json(serde_json::Value),
+    Raw(nasaga_core::SagaPayload),
 }
 
 /// 业务作用：Saga Orchestrator——所有推进都以数据库 CAS 与单一本地事务落库。
@@ -200,7 +302,7 @@ pub struct StartSagaRequest<'a> {
 /// CAS、唯一键与 fencing token 承担，任何副本崩溃后另一副本可无缝接管。
 pub struct Orchestrator<B: SagaBackend> {
     backend: B,
-    registry: DefinitionRegistry,
+    registry: RwLock<Arc<DefinitionRegistry>>,
     config: OrchestratorConfig,
     /// 每个 runtime 实例独立的 fencing token 发行域；不承载业务状态或租约归属。
     fencing_tokens: TimerFencingTokenIssuer,
@@ -292,6 +394,15 @@ fn checked_deadline(now_ms: i64, delay_ms: i64) -> anyhow::Result<i64> {
         .ok_or_else(|| anyhow::anyhow!("saga timer deadline overflow"))
 }
 
+/// 业务作用：为管理状态门禁保留脱敏诊断，同时让协议层从错误链按类型分类。
+///
+/// 参数说明：`message` 是不含实例身份与业务数据的稳定前置条件摘要。
+///
+/// 返回：外层显示具体门禁、内层保留 [`SagaManagementError::PreconditionFailed`] 的错误。
+fn management_precondition(message: &'static str) -> anyhow::Error {
+    anyhow::Error::new(SagaManagementError::PreconditionFailed).context(message)
+}
+
 /// 业务作用：把 JSON 值按类型、数组顺序和排序后的对象键写入摘要，消除对象插入顺序差异。
 ///
 /// 参数说明：
@@ -340,7 +451,7 @@ fn hash_canonical_json(hasher: &mut Sha256, value: &serde_json::Value) {
 /// - `first_step`: definition 的首步身份。
 ///
 /// 返回：六十四位小写十六进制 SHA-256 摘要。
-fn derive_start_request_digest(
+fn derive_legacy_start_request_digest(
     request: &StartSagaRequest<'_>,
     definition_digest: &str,
     first_step: &StepName,
@@ -369,6 +480,35 @@ fn derive_start_request_digest(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// 业务作用：以规范领域字段和原始正文构造跨协议相同的创建摘要。
+///
+/// 参数说明：request 固定业务身份，definition_digest 与 first_step 固定执行合同，payload 保留原始字节。
+///
+/// 返回：有正文时把媒体、schema 和正文纳入独立摘要域；无正文沿用既有空输入摘要。
+fn derive_start_request_digest(
+    request: &StartSagaRequest<'_>,
+    definition_digest: &str,
+    first_step: &StepName,
+    payload: Option<&nasaga_core::SagaPayload>,
+) -> String {
+    let mut empty = request.clone();
+    empty.first_command_payload = None;
+    empty.first_command_raw_payload = None;
+    let domain = derive_legacy_start_request_digest(&empty, definition_digest, first_step);
+    let Some(payload) = payload else {
+        return domain;
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_bytes(&[
+        b"saga-start-payload",
+        domain.as_bytes(),
+        payload.content_type.as_bytes(),
+        payload.schema_id.as_bytes(),
+        &payload.body,
+    ]));
+    hex::encode(hasher.finalize())
 }
 
 /// 业务作用：从任意有界 cause id 派生定长补偿收敛 trigger，保持同一原因重试身份稳定。
@@ -418,7 +558,7 @@ where
         validate_config(&config)?;
         Ok(Self {
             backend: B::default_backend()?,
-            registry,
+            registry: RwLock::new(Arc::new(registry)),
             config,
             fencing_tokens: TimerFencingTokenIssuer::new(),
         })
@@ -440,7 +580,7 @@ where
         validate_config(&config)?;
         Ok(Self {
             backend: B::backend_for(datasource.as_ref())?,
-            registry,
+            registry: RwLock::new(Arc::new(registry)),
             config,
             fencing_tokens: TimerFencingTokenIssuer::new(),
         })
@@ -455,6 +595,44 @@ where
         self.backend.datasource_ref()
     }
 
+    /// 业务作用：取得当前完整 registry generation 的共享快照，使一次状态机操作不会跨代读取定义。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前不可变快照；锁中毒时仍读取最后一次完整发布值。
+    fn registry_snapshot(&self) -> Arc<DefinitionRegistry> {
+        self.registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// 业务作用：原子发布已经完成 Catalog、历史实例与 capability 门禁的新 registry generation。
+    ///
+    /// 参数说明：`registry` 同时包含 active definition 和旧实例仍需的 deprecated definition。
+    ///
+    /// 返回：新快照成为后续操作唯一入口后完成；进行中的操作继续持有旧快照直到事务结束。
+    pub fn replace_registry(&self, registry: DefinitionRegistry) {
+        *self
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+    }
+
+    /// 业务作用：在动态 Catalog 快照发布前确认全部非终态实例仍能找到相同摘要的 definition。
+    ///
+    /// 参数说明：`registry` 是 watcher 刚从共享 generation 完整装载的候选快照。
+    ///
+    /// 返回：所有在途实例均可安全继续时成功；缺失或摘要漂移时拒绝切换。
+    pub async fn verify_registry_snapshot(
+        &self,
+        registry: &DefinitionRegistry,
+    ) -> anyhow::Result<()> {
+        registry
+            .verify_non_terminal(self.backend.store(), self.config.startup_scan_limit)
+            .await
+    }
+
     /// 业务作用：启动预检——非终态实例引用的 definition 必须可用且摘要一致，否则拒绝 Ready。
     ///
     /// 参数说明: 无。
@@ -463,7 +641,8 @@ where
     pub async fn verify_startup(&self) -> anyhow::Result<()> {
         // 本进程收集的步骤合同必须先于历史实例扫描校验；否则同一 binary 内重复 handler 或
         // 合同漂移可能在数据库事实通过后才随首条命令暴露，形成已 Ready 但不可安全推进的窗口。
-        crate::verify_descriptors(&self.registry)?;
+        let registry = self.registry_snapshot();
+        crate::verify_descriptors(&registry)?;
         // 设限租户的配额账本必须已完成初始化回填:存量非终态实例未入账时,其终态释放
         // 会扣掉新实例的名额、上限被静默穿透。回填只能在全部写入方都运行记账版本后
         // 经 reconcile 的受锁窗口执行——这里 fail-fast,不把部署错误拖到首次预留。
@@ -482,9 +661,40 @@ where
                 );
             }
         }
-        self.registry
+        registry
             .verify_non_terminal(self.backend.store(), self.config.startup_scan_limit)
             .await
+    }
+
+    /// 业务作用：读取当前 registry 快照中指定 definition 的 canonical 摘要，供协议兼容门禁在创建前校验。
+    ///
+    /// 参数说明：`workflow` 与 `version` 共同定位不可变流程版本。
+    ///
+    /// 返回：当前快照已注册时返回摘要；未知或未激活版本返回空。
+    pub fn definition_digest(
+        &self,
+        workflow: &WorkflowName,
+        version: DefinitionVersion,
+    ) -> Option<String> {
+        self.registry_snapshot()
+            .get(workflow, version)
+            .map(WorkflowDefinition::digest)
+    }
+
+    /// 业务作用：按租户读取当前可用于运行期复验的 definition 摘要。
+    ///
+    /// 参数说明：`tenant`、`workflow` 与 `version` 共同定位租户专属流程版本。
+    ///
+    /// 返回：active、deprecated 或静态全局定义存在时返回摘要；未知版本为空。
+    pub fn definition_digest_for_tenant(
+        &self,
+        tenant: &TenantId,
+        workflow: &WorkflowName,
+        version: DefinitionVersion,
+    ) -> Option<String> {
+        self.registry_snapshot()
+            .get_for_tenant(tenant, workflow, version)
+            .map(WorkflowDefinition::digest)
     }
 
     /// 业务作用：为管理面读取指定租户拥有的 Saga 快照，阻止仅凭 saga_id 跨租户枚举。
@@ -536,13 +746,16 @@ where
             .load_instance(saga_id)
             .await?
             .filter(|instance| &instance.tenant == tenant)
-            .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
+            .ok_or(SagaManagementError::NotFound)?;
         Ok(SagaAuditTrail {
             attempts: self
                 .backend
                 .store()
-                .load_attempt_audit(saga_id, limit)
-                .await?,
+                .load_attempt_audit(saga_id, None, limit)
+                .await?
+                .into_iter()
+                .map(|row| row.attempt)
+                .collect(),
             transitions: self
                 .backend
                 .store()
@@ -556,13 +769,73 @@ where
             management_operations: self
                 .backend
                 .store()
-                .load_management_audit(saga_id, limit)
+                .load_management_audit(saga_id, None, limit)
                 .await?,
             conflicts: self
                 .backend
                 .store()
-                .load_conflict_audit(saga_id, limit)
+                .load_conflict_audit(saga_id, None, limit)
                 .await?,
+        })
+    }
+
+    /// 业务作用：按数据库全局序号读取不可变审计事件，使运行中新增事实和 attempt 终态变化
+    /// 都能出现在既有游标之后。
+    ///
+    /// 参数说明：
+    /// - `management`: 已认证主体与审计读取权限。
+    /// - `tenant`: 主体获授权访问的租户。
+    /// - `saga_id`: 目标实例。
+    /// - `cursor`: 上一页末项的全局序号；`None` 表示从事件流起点开始。
+    /// - `limit`: 单页最大事实数，范围 1..=1000。
+    ///
+    /// 返回：按 `audit_seq` 返回至多 `limit` 条事实；非空页同时返回末项 checkpoint，
+    /// 供历史遍历或后续追加事实续读。越权、跨租户或持久化失败返回错误。
+    pub async fn load_audit_page(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        cursor: Option<&SagaAuditPageCursor>,
+        limit: u32,
+    ) -> anyhow::Result<SagaAuditPage> {
+        if limit == 0 || limit > 1_000 {
+            return Err(SagaManagementError::InvalidContext.into());
+        }
+        // 审计事实含业务身份和人工主体，必须在解析游标和查询目标之前完成权限门禁。
+        management.require(SagaManagementPermission::ReadAudit)?;
+        self.backend
+            .store()
+            .load_instance(saga_id)
+            .await?
+            .filter(|instance| &instance.tenant == tenant)
+            .ok_or(SagaManagementError::NotFound)?;
+        let after = SagaAuditEventCursor {
+            audit_seq: cursor.map_or(0, |cursor| cursor.audit_seq),
+        };
+        let events = self
+            .backend
+            .store()
+            .load_audit_events(saga_id, after, limit)
+            .await?;
+        // 非满页也必须签发末项 checkpoint；运行中 Saga 可在读取瞬间的尾部之后继续
+        // 追加事实，调用方据此断线续读，不必重新遍历或依赖类别内排序。
+        let next_cursor = events.last().map(|event| SagaAuditPageCursor {
+            audit_seq: event.audit_seq,
+        });
+        let records = events
+            .into_iter()
+            .map(|event| match event.record {
+                SagaAuditEventRecord::Attempt(row) => SagaAuditRecord::Attempt(row),
+                SagaAuditEventRecord::Transition(row) => SagaAuditRecord::Transition(row),
+                SagaAuditEventRecord::Control(row) => SagaAuditRecord::Control(row),
+                SagaAuditEventRecord::Management(row) => SagaAuditRecord::Management(row),
+                SagaAuditEventRecord::Conflict(row) => SagaAuditRecord::Conflict(row),
+            })
+            .collect();
+        Ok(SagaAuditPage {
+            records,
+            next_cursor,
         })
     }
 
@@ -577,7 +850,8 @@ where
     /// - `management`: 已认证主体与权限快照。
     /// - `query`: 租户、状态集合、时间窗、cursor 与页大小。
     ///
-    /// 返回：满足条件的实例摘要（saga_id 升序）；无权限、页大小非法或持久层失败返回错误。
+    /// 返回：无时间条件时按 saga_id 升序；有时间条件时按创建时刻、saga_id 升序；无权限、
+    /// 参数非法或持久层失败返回错误。
     pub async fn list_instances(
         &self,
         management: &SagaManagementContext,
@@ -650,8 +924,8 @@ where
             nasaga_backend::ActionRateReservation::Exceeded
         ) {
             record_action_rate_rejection();
-            // 稳定原因码使速率拒绝与系统故障可区分;错误文本不携带其它租户信息。
-            anyhow::bail!("saga_tenant_action_rate_exceeded");
+            // 类型化拒绝使协议层无需读取错误文本，也不会暴露其它租户的用量。
+            return Err(SagaManagementError::RateLimitExceeded.into());
         }
         Ok(())
     }
@@ -696,9 +970,13 @@ where
         producer: &ServiceIdentity,
     ) -> anyhow::Result<()> {
         let identity = envelope.verified_for_delivery()?;
-        let definition = self
-            .registry
-            .get(&identity.workflow, identity.definition_version)
+        let registry = self.registry_snapshot();
+        let definition = registry
+            .get_for_tenant(
+                &identity.tenant,
+                &identity.workflow,
+                identity.definition_version,
+            )
             .ok_or(crate::SagaResultProcessingError::ContractInvalid)?;
         if definition.digest() != identity.definition_digest {
             return Err(crate::SagaResultProcessingError::ContractInvalid.into());
@@ -755,6 +1033,8 @@ where
     ) -> anyhow::Result<HandleOutcome> {
         // producer 权限必须在 Inbox claim 之前复验，防止越权消息抢占 event id。
         self.verify_result_producer(envelope, producer)?;
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::TransitionTransaction);
         self.handle_verified_result(envelope, receipt_trace, now_ms)
             .await
     }
@@ -769,7 +1049,7 @@ where
     /// - `request`: 创建请求。
     ///
     /// 返回：真实创建返回 [`StartOutcome::Started`]；幂等命中返回 `AlreadyExists`；
-    /// workflow 未注册、definition 为空或底层失败返回错误（事务回滚）。
+    /// 确定性拒绝可下转为 [`StartSagaError`]；事务失败保留回滚、提交结果不明或回滚失败的封闭分类。
     pub async fn start_saga(&self, request: &StartSagaRequest<'_>) -> anyhow::Result<StartOutcome> {
         self.start_saga_traced(request, None).await
     }
@@ -792,19 +1072,74 @@ where
         request: &StartSagaRequest<'_>,
         trace: Option<&TraceContext>,
     ) -> anyhow::Result<StartOutcome> {
-        let definition = self
-            .registry
-            .get(request.workflow, request.version)
-            .ok_or_else(|| anyhow::anyhow!("workflow definition is not registered"))?;
+        self.start_saga_authorized_traced(request, trace, &|| Ok(()))
+            .await
+    }
+
+    /// 业务作用：在调用方冻结的执行资格下裁决 Saga 创建与重复收据，连接池、行锁和事务等待不能延长权限。
+    ///
+    /// 参数说明：`request` 是创建事实，`trace` 是受信链路上下文，`authorize` 同步复验本次操作的资格与期限。
+    ///
+    /// 返回：资格有效且创建事务提交后返回创建或重复收据；失权走事务回滚，底层提交不确定分类保持不变。
+    /// deprecated 定义仍按持久请求摘要裁决重复与冲突；只有真正的新建适用 active 门禁。
+    /// 此门禁覆盖本次创建操作；加入已有同源事务时，外层事务还须在其最终提交前复验自己的执行资格。
+    pub async fn start_saga_authorized_traced(
+        &self,
+        request: &StartSagaRequest<'_>,
+        trace: Option<&TraceContext>,
+        authorize: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<StartOutcome> {
+        // 快照必须在执行资格复验之后读取，认证时持有的旧资格不能授权当前创建。
+        authorize()?;
+        let registry = self.registry_snapshot();
+        // 停用只撤销新建资格，已提交请求仍需用同一不可变定义计算摘要，不能失去持久提交的确认能力。
+        let definition = registry
+            .get_for_tenant(request.tenant, request.workflow, request.version)
+            .ok_or(StartSagaError::DefinitionInactive)?;
         let digest = definition.digest();
         let first_step = definition
             .steps()
             .first()
-            .ok_or_else(|| anyhow::anyhow!("definition has no steps"))?;
-        let start_request_digest = derive_start_request_digest(request, &digest, first_step.name());
+            .ok_or(StartSagaError::DefinitionEmpty)?;
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::StartTransaction);
+        if request.first_command_payload.is_some() && request.first_command_raw_payload.is_some() {
+            return Err(StartSagaError::InvalidPayload.into());
+        }
+        let payload = request.first_command_raw_payload.clone().or_else(|| {
+            request
+                .first_command_payload
+                .clone()
+                .map(nasaga_core::SagaPayload::json)
+        });
+        if let Some(payload) = &payload {
+            payload
+                .validate()
+                .map_err(|_| StartSagaError::InvalidPayload)?;
+            if &payload.contract() != first_step.payload_contract() {
+                return Err(StartSagaError::InvalidPayload.into());
+            }
+        }
+        let start_request_digest =
+            derive_start_request_digest(request, &digest, first_step.name(), payload.as_ref());
+        let legacy_start_request_digest = match payload.as_ref() {
+            Some(payload) if payload.contract() == nasaga_core::SagaPayloadContract::default() => {
+                let mut legacy = request.clone();
+                legacy.first_command_payload = Some(
+                    serde_json::from_slice(&payload.body)
+                        .map_err(|_| StartSagaError::InvalidPayload)?,
+                );
+                Some(derive_legacy_start_request_digest(
+                    &legacy,
+                    &digest,
+                    first_step.name(),
+                ))
+            }
+            _ => None,
+        };
         let canonical_trace = trace.map(TraceContext::to_traceparent);
 
-        let outcome = crate::transaction::run_for(&self.backend, async {
+        let outcome = crate::transaction::run_authorized_for(&self.backend, authorize, async {
             let creation = self
                 .backend
                 .store()
@@ -816,6 +1151,7 @@ where
                     definition_version: request.version,
                     definition_digest: &digest,
                     start_request_digest: &start_request_digest,
+                    legacy_start_request_digest: legacy_start_request_digest.as_deref(),
                     deadline_at_ms: request.deadline_at_ms,
                     // 创建即定位首步:step 超时裁决要求 current_step 与 timer 步骤一致。
                     current_step: Some(first_step.name()),
@@ -825,12 +1161,27 @@ where
                     // 实例行取 trace,发起入口的调用链从第一跳起就不断开。
                     traceparent: canonical_trace.as_deref(),
                 })
-                .await?;
+                .await
+                .map_err(|error| {
+                    if error.kind() == SagaBackendErrorKind::Conflict {
+                        anyhow::Error::new(StartSagaError::RequestConflict)
+                    } else {
+                        error.into()
+                    }
+                })?;
             let instance = match creation {
                 // 幂等命中:绝不重复发布首步命令、timer 或初始 transition。
                 SagaCreation::Existing(row) => return Ok(StartOutcome::AlreadyExists(row)),
                 SagaCreation::Created(row) => row,
             };
+            // 唯一键与摘要已在同一事务中裁决；新建遇到停用必须回滚实例及初始 transition，
+            // 在此之前不预留配额、不发布命令或 timer，不能让拒绝的启动留下可见事实。
+            if registry
+                .get_for_start(request.tenant, request.workflow, request.version)
+                .is_none()
+            {
+                return Err(StartSagaError::DefinitionInactive.into());
+            }
             // 配额预留只对真实创建执行且与创建同事务:幂等命中不占额,创建回滚时预留
             // 一并回滚。条件自增在租户行锁上串行化并发创建——无锁计数会穿透上限。
             let cap = self
@@ -846,8 +1197,8 @@ where
                 nasaga_backend::QuotaReservation::Exceeded
             ) {
                 record_quota_rejection();
-                // 稳定原因码使配额拒绝与系统故障可区分;错误文本不携带其它租户信息。
-                anyhow::bail!("saga_tenant_quota_exceeded");
+                // 类型化拒绝使协议层无需读取错误文本，也不会暴露其它租户的用量。
+                return Err(StartSagaError::TenantQuotaExceeded.into());
             }
             self.backend
                 .store()
@@ -858,7 +1209,16 @@ where
                 first_step,
                 StepPhase::Execute,
                 AttemptNo::FIRST,
-                request.first_command_payload.clone(),
+                request
+                    .first_command_raw_payload
+                    .clone()
+                    .map(CommandInput::Raw)
+                    .or_else(|| {
+                        request
+                            .first_command_payload
+                            .clone()
+                            .map(CommandInput::Json)
+                    }),
                 None,
                 request.now_ms,
                 instance.version,
@@ -926,6 +1286,7 @@ where
         let terminal = envelope
             .parsed_terminal()
             .map_err(|_| crate::SagaResultProcessingError::ContractInvalid)?;
+        let registry = self.registry_snapshot();
 
         let outcome = crate::transaction::run_for(&self.backend, async {
             if matches!(
@@ -950,9 +1311,12 @@ where
                 // 类型化延后使同事务 Inbox claim 回滚且不消耗毒消息预算；恢复后再裁决。
                 return Err(crate::SagaResultProcessingError::Paused.into());
             }
-            let definition = self
-                .registry
-                .get(&instance.workflow, instance.definition_version)
+            let definition = registry
+                .get_for_tenant(
+                    &instance.tenant,
+                    &instance.workflow,
+                    instance.definition_version,
+                )
                 .ok_or_else(|| anyhow::anyhow!("instance definition is not registered"))?;
             let step_def = definition.step(&identity.step).ok_or_else(|| {
                 anyhow::Error::from(crate::SagaResultProcessingError::ContractInvalid)
@@ -1193,7 +1557,10 @@ where
         base_now_ms: i64,
         claimed_at: Option<Instant>,
     ) -> anyhow::Result<TimerOutcome> {
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::TransitionTransaction);
         let step_scope = parse_step_scope(&timer.scope_kind, &timer.scope_key)?;
+        let registry = self.registry_snapshot();
         crate::transaction::run_for(&self.backend, async {
             let Some(instance) = self.backend.store().load_instance(&timer.saga_id).await? else {
                 // 实例已被归档清理的孤儿 timer:消费吸收,不再触发。
@@ -1230,6 +1597,10 @@ where
             ) {
                 return Ok(TimerOutcome::SkippedFencingLost);
             }
+            crate::latency::observe(
+                crate::latency::LatencyStage::TimerLateness,
+                Duration::from_millis(now_ms.saturating_sub(timer.due_at_ms).max(0) as u64),
+            );
             // attempt 级 timeout 只对调度它的实例版本有效；版本已推进说明相应结果或
             // 另一计时器先完成了裁决，旧 timer 必须被吸收，绝不能再次发命令或改状态。
             // 实例 deadline 与解决总预算跨越多个实例版本，故意不采用该精确版本条件。
@@ -1243,9 +1614,12 @@ where
             {
                 return Ok(TimerOutcome::SkippedStale);
             }
-            let definition = self
-                .registry
-                .get(&instance.workflow, instance.definition_version)
+            let definition = registry
+                .get_for_tenant(
+                    &instance.tenant,
+                    &instance.workflow,
+                    instance.definition_version,
+                )
                 .ok_or_else(|| anyhow::anyhow!("instance definition is not registered"))?;
 
             // 与 handle_result 同理:超时裁决分支装箱,防止 fire_timer 状态机撑爆调用栈。
@@ -1352,19 +1726,42 @@ where
         saga_id: &SagaId,
         operation_id: &str,
     ) -> anyhow::Result<()> {
+        self.pause_with_expectation(
+            management,
+            tenant,
+            saga_id,
+            operation_id,
+            SagaManagementExpectation::default(),
+        )
+        .await
+    }
+
+    /// 业务作用：在事务内复验调用方版本后暂停实例，避免旧管理快照覆盖并发状态或控制迁移。
+    ///
+    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    ///
+    /// 返回：版本匹配且暂停提交时成功；初始控制态不允许动作返回管理前置条件错误，
+    /// 提交 CAS 失去竞争返回可重试快照过期，权限或持久化失败返回对应错误。
+    pub async fn pause_with_expectation(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+        expectation: SagaManagementExpectation,
+    ) -> anyhow::Result<()> {
         // 权限门禁必须早于实例查询，避免无权主体利用存在性与租户错误枚举 saga_id。
         management.require(SagaManagementPermission::Pause)?;
         crate::transaction::run_for(&self.backend, async {
-            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
-            // 实例数据也不泄漏存在性。
-            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .backend
                 .store()
                 .load_instance(saga_id)
                 .await?
                 .filter(|instance| &instance.tenant == tenant)
-                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
+                .ok_or(SagaManagementError::NotFound)?;
+            // 先让持久层识别完全相同的 operation；首次动作即使暂时完成 UPDATE，也仍在
+            // 当前事务内，随后 expected version 失配会整体回滚，不能绕过并发门禁。
             match self
                 .backend
                 .store()
@@ -1380,9 +1777,26 @@ where
                 })
                 .await?
             {
-                ControlCasOutcome::Applied | ControlCasOutcome::AlreadyApplied => Ok(()),
+                ControlCasOutcome::Applied => {
+                    expectation.verify(instance.version, instance.control_version)?;
+                    // 只有首次 operation 才占用动作预算；若额度不足，控制态和审计与
+                    // 本次预留在同一事务回滚。已提交重放在上面的持久事实分支直接返回。
+                    self.reserve_action_rate_budget(tenant).await?;
+                    Ok(())
+                }
+                ControlCasOutcome::AlreadyApplied => Ok(()),
                 ControlCasOutcome::Conflict => {
-                    anyhow::bail!("pause lost the control-state race; reload and retry")
+                    expectation.verify(instance.version, instance.control_version)?;
+                    if instance.control_state == nasaga_core::ControlState::Active {
+                        // 初次快照允许暂停而 CAS 未命中，说明提交前已经失去控制权威；
+                        // 返回可重试并发类别，让协议层要求调用方重新加载。
+                        Err(anyhow::Error::new(SagaConcurrencyError::StaleSnapshot)
+                            .context("pause lost the control-state race; reload and retry"))
+                    } else {
+                        Err(management_precondition(
+                            "pause requires an active control state",
+                        ))
+                    }
                 }
             }
         })
@@ -1415,19 +1829,42 @@ where
         saga_id: &SagaId,
         operation_id: &str,
     ) -> anyhow::Result<()> {
+        self.resume_with_expectation(
+            management,
+            tenant,
+            saga_id,
+            operation_id,
+            SagaManagementExpectation::default(),
+        )
+        .await
+    }
+
+    /// 业务作用：在事务内复验调用方版本后恢复实例，并保持原业务 deadline 语义。
+    ///
+    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    ///
+    /// 返回：版本匹配且恢复提交时成功；初始控制态不允许动作返回管理前置条件错误，
+    /// 提交 CAS 失去竞争返回可重试快照过期，权限或持久化失败返回对应错误。
+    pub async fn resume_with_expectation(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+        expectation: SagaManagementExpectation,
+    ) -> anyhow::Result<()> {
         // 与 pause 相同，先鉴权再读实例，防止管理读侧成为跨租户枚举 oracle。
         management.require(SagaManagementPermission::Resume)?;
         crate::transaction::run_for(&self.backend, async {
-            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
-            // 实例数据也不泄漏存在性。
-            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .backend
                 .store()
                 .load_instance(saga_id)
                 .await?
                 .filter(|instance| &instance.tenant == tenant)
-                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
+                .ok_or(SagaManagementError::NotFound)?;
+            // 持久 operation 事实优先于调用方旧快照；首次恢复仍在同一事务内复验版本，
+            // 失配会连同控制态 UPDATE 一起回滚，已提交重放则不再次唤醒 timer。
             match self
                 .backend
                 .store()
@@ -1444,6 +1881,10 @@ where
                 .await?
             {
                 ControlCasOutcome::Applied => {
+                    expectation.verify(instance.version, instance.control_version)?;
+                    // 新恢复动作才消耗预算；超限会回滚刚完成的控制态 CAS 与审计，
+                    // 完全相同的已提交重放不改变速率账本。
+                    self.reserve_action_rate_budget(tenant).await?;
                     // 恢复不重置业务期限：只清除暂停产生的 available_at 退避，
                     // 已逾期 timer 会在下一轮立即可领，未来 timer 仍等待原 due_at。
                     self.backend.store().wake_saga_timers(saga_id).await?;
@@ -1451,7 +1892,17 @@ where
                 }
                 ControlCasOutcome::AlreadyApplied => Ok(()),
                 ControlCasOutcome::Conflict => {
-                    anyhow::bail!("resume lost the control-state race; reload and retry")
+                    expectation.verify(instance.version, instance.control_version)?;
+                    if instance.control_state == nasaga_core::ControlState::Paused {
+                        // 初次快照允许恢复而 CAS 未命中，说明提交前已经失去控制权威；
+                        // 返回可重试并发类别，让协议层要求调用方重新加载。
+                        Err(anyhow::Error::new(SagaConcurrencyError::StaleSnapshot)
+                            .context("resume lost the control-state race; reload and retry"))
+                    } else {
+                        Err(management_precondition(
+                            "resume requires a paused control state",
+                        ))
+                    }
                 }
             }
         })
@@ -1489,24 +1940,42 @@ where
         operation_id: &str,
         now_ms: i64,
     ) -> anyhow::Result<SagaStatus> {
+        self.retry_compensation_with_expectation(
+            management,
+            tenant,
+            saga_id,
+            operation_id,
+            now_ms,
+            SagaManagementExpectation::default(),
+        )
+        .await
+    }
+
+    /// 业务作用：在事务内命中调用方版本后重开冻结补偿计划，禁止旧快照发布新的外部命令。
+    ///
+    /// 参数说明：管理上下文、实例、操作身份和时刻定位动作，`expectation` 约束事务内实例版本。
+    ///
+    /// 返回：提交后的状态；过期快照、权限、恢复前置条件或持久化失败返回错误。
+    pub async fn retry_compensation_with_expectation(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+        now_ms: i64,
+        expectation: SagaManagementExpectation,
+    ) -> anyhow::Result<SagaStatus> {
         // 人工恢复会再次发布外部补偿命令，必须先做最小权限校验，再接触实例数据。
         management.require(SagaManagementPermission::RetryCompensation)?;
+        let registry = self.registry_snapshot();
         let status = crate::transaction::run_for(&self.backend, async {
-            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
-            // 实例数据也不泄漏存在性。
-            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .backend
                 .store()
                 .load_instance(saga_id)
                 .await?
                 .filter(|instance| &instance.tenant == tenant)
-                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
-            if !instance.control_state.allows_automatic_actions() {
-                // 人工恢复会立即发布外部命令；PAUSED 下先写审计再由 advance 冲突回滚，
-                // 既给出误导错误也无法留下审计。必须要求显式 resume 后使用新 operation。
-                anyhow::bail!("retry_compensation requires ACTIVE control state; resume first");
-            }
+                .ok_or(SagaManagementError::NotFound)?;
             match self
                 .backend
                 .store()
@@ -1524,16 +1993,34 @@ where
                 ManagementAuditOutcome::AlreadyRecorded => return Ok(instance.status),
                 ManagementAuditOutcome::Recorded => {}
             }
+            // operation 审计先区分首次调用与已提交重放；仅首次调用预留额度，后续任何
+            // 前置条件或命令发布失败都会让审计与预算一起回滚。
+            self.reserve_action_rate_budget(tenant).await?;
+            // 新 operation 只有命中调用方观察到的版本才可发布外部补偿命令；失配时本事务
+            // 会回滚刚写入的管理审计，原 operation id 仍可由调用方更正后使用。
+            expectation.verify(instance.version, instance.control_version)?;
+            if !instance.control_state.allows_automatic_actions() {
+                return Err(management_precondition(
+                    "retry_compensation requires ACTIVE control state; resume first",
+                ));
+            }
             if instance.status != SagaStatus::ManualIntervention {
-                anyhow::bail!("retry_compensation requires MANUAL_INTERVENTION");
+                return Err(management_precondition(
+                    "retry_compensation requires MANUAL_INTERVENTION",
+                ));
             }
             if instance.compensation_plan_version.is_none() {
-                anyhow::bail!("no frozen compensation plan to retry");
+                return Err(management_precondition(
+                    "no frozen compensation plan to retry",
+                ));
             }
-            let definition = self
-                .registry
-                .get(&instance.workflow, instance.definition_version)
-                .ok_or_else(|| anyhow::anyhow!("instance definition is not registered"))?;
+            let definition = registry
+                .get_for_tenant(
+                    &instance.tenant,
+                    &instance.workflow,
+                    instance.definition_version,
+                )
+                .ok_or_else(|| management_precondition("instance definition is not registered"))?;
             let steps = self.backend.store().load_steps(saga_id).await?;
             match next_pending_compensation(&instance, definition, &steps, true)? {
                 Some(step) => {
@@ -1561,9 +2048,9 @@ where
                             None,
                         )
                         .await?;
-                    let step_def = definition
-                        .step(&step)
-                        .ok_or_else(|| anyhow::anyhow!("plan step absent from definition"))?;
+                    let step_def = definition.step(&step).ok_or_else(|| {
+                        management_precondition("plan step absent from definition")
+                    })?;
                     let attempt = self
                         .next_attempt(saga_id, &step, StepPhase::Compensate)
                         .await?;
@@ -1635,21 +2122,41 @@ where
         operation_id: &str,
         now_ms: i64,
     ) -> anyhow::Result<SagaStatus> {
+        self.retry_resolution_with_expectation(
+            management,
+            tenant,
+            saga_id,
+            operation_id,
+            now_ms,
+            SagaManagementExpectation::default(),
+        )
+        .await
+    }
+
+    /// 业务作用：在事务内命中调用方版本后重开 Unknown 解决周期，禁止旧快照发布新的查询命令。
+    ///
+    /// 参数说明：管理上下文、实例、操作身份和时刻定位动作，`expectation` 约束事务内实例版本。
+    ///
+    /// 返回：提交后的状态；过期快照、权限、解决前置条件或持久化失败返回错误。
+    pub async fn retry_resolution_with_expectation(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+        now_ms: i64,
+        expectation: SagaManagementExpectation,
+    ) -> anyhow::Result<SagaStatus> {
         management.require(SagaManagementPermission::RetryResolution)?;
+        let registry = self.registry_snapshot();
         let status = crate::transaction::run_for(&self.backend, async {
-            // 速率预算先于实例读写:动作失败回滚时预算同事务退还,超限拒绝不触碰
-            // 实例数据也不泄漏存在性。
-            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .backend
                 .store()
                 .load_instance(saga_id)
                 .await?
                 .filter(|instance| &instance.tenant == tenant)
-                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
-            if !instance.control_state.allows_automatic_actions() {
-                anyhow::bail!("retry_resolution requires ACTIVE control state; resume first");
-            }
+                .ok_or(SagaManagementError::NotFound)?;
             match self
                 .backend
                 .store()
@@ -1665,22 +2172,40 @@ where
                 ManagementAuditOutcome::AlreadyRecorded => return Ok(instance.status),
                 ManagementAuditOutcome::Recorded => {}
             }
+            // 已提交 operation 不再占用额度；首次操作的审计、预算、HALTED 重开和
+            // resolve command 仍处于同一事务，要么全部提交，要么全部撤销。
+            self.reserve_action_rate_budget(tenant).await?;
+            // 已提交重放直接返回；首次操作必须在同一事务内命中 expected version，
+            // 才能解除 HALTED 门禁并产生新的 resolve command。
+            expectation.verify(instance.version, instance.control_version)?;
+            if !instance.control_state.allows_automatic_actions() {
+                return Err(management_precondition(
+                    "retry_resolution requires ACTIVE control state; resume first",
+                ));
+            }
             if instance.status != SagaStatus::ManualIntervention {
-                anyhow::bail!("retry_resolution requires MANUAL_INTERVENTION");
+                return Err(management_precondition(
+                    "retry_resolution requires MANUAL_INTERVENTION",
+                ));
             }
             let step = instance
                 .current_step
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("manual resolution has no current step"))?;
-            let definition = self
-                .registry
-                .get(&instance.workflow, instance.definition_version)
-                .ok_or_else(|| anyhow::anyhow!("instance definition is not registered"))?;
+                .ok_or_else(|| management_precondition("manual resolution has no current step"))?;
+            let definition = registry
+                .get_for_tenant(
+                    &instance.tenant,
+                    &instance.workflow,
+                    instance.definition_version,
+                )
+                .ok_or_else(|| management_precondition("instance definition is not registered"))?;
             let step_def = definition
                 .step(step)
-                .ok_or_else(|| anyhow::anyhow!("resolution step absent from definition"))?;
+                .ok_or_else(|| management_precondition("resolution step absent from definition"))?;
             if step_def.resolution().mode() != Some(ResolutionMode::Poll) {
-                anyhow::bail!("retry_resolution requires a Poll resolver");
+                return Err(management_precondition(
+                    "retry_resolution requires a Poll resolver",
+                ));
             }
             let row = self
                 .backend
@@ -1689,7 +2214,7 @@ where
                 .await?
                 .into_iter()
                 .find(|row| row.step == *step)
-                .ok_or_else(|| anyhow::anyhow!("resolution step journal is missing"))?;
+                .ok_or_else(|| management_precondition("resolution step journal is missing"))?;
             let has_unknown_target = match instance.direction {
                 Direction::Forward => row.forward_status == StepForwardStatus::Unknown,
                 Direction::Compensating => {
@@ -1702,7 +2227,9 @@ where
                     StepResolutionStatus::Pending | StepResolutionStatus::Halted
                 )
             {
-                anyhow::bail!("retry_resolution requires an unresolved Unknown effect");
+                return Err(management_precondition(
+                    "retry_resolution requires an unresolved Unknown effect",
+                ));
             }
 
             let attempt = self.next_attempt(saga_id, step, StepPhase::Resolve).await?;
@@ -1783,30 +2310,45 @@ where
         saga_id: &SagaId,
         operation_id: &str,
     ) -> anyhow::Result<SagaStatus> {
+        self.manual_close_with_expectation(
+            management,
+            tenant,
+            saga_id,
+            operation_id,
+            SagaManagementExpectation::default(),
+        )
+        .await
+    }
+
+    /// 业务作用：在事务内命中调用方版本后人工关闭自动化，避免旧快照终结已并发变化的实例。
+    ///
+    /// 参数说明：管理上下文、租户、实例和操作身份定位动作，`expectation` 约束事务内实例版本。
+    ///
+    /// 返回：关闭后或幂等重放状态；过期快照、权限、状态或持久化失败返回错误。
+    pub async fn manual_close_with_expectation(
+        &self,
+        management: &SagaManagementContext,
+        tenant: &TenantId,
+        saga_id: &SagaId,
+        operation_id: &str,
+        expectation: SagaManagementExpectation,
+    ) -> anyhow::Result<SagaStatus> {
         management.require(SagaManagementPermission::ManualClose)?;
         // 滚动升级门禁:新终态一旦落库不可回退,旧副本读到未知状态会按数据损坏停止推进。
         // 必须先全量部署可解析 MANUALLY_CLOSED 的读者,再由部署方开启本能力。
         if !self.config.enable_manual_close {
-            anyhow::bail!(
-                "manual close is disabled: deploy MANUALLY_CLOSED-aware readers to every replica, then enable it explicitly"
-            );
+            return Err(management_precondition(
+                "manual close is disabled: deploy MANUALLY_CLOSED-aware readers to every replica, then enable it explicitly",
+            ));
         }
         let status = crate::transaction::run_for(&self.backend, async {
-            // 速率预算先于实例读写:预算按提交的动作调用计,幂等重放同样提交并计数;
-            // 动作失败回滚时预算同事务退还。
-            self.reserve_action_rate_budget(tenant).await?;
             let instance = self
                 .backend
                 .store()
                 .load_instance(saga_id)
                 .await?
                 .filter(|instance| &instance.tenant == tenant)
-                .ok_or_else(|| anyhow::anyhow!("saga instance not found"))?;
-            if !instance.control_state.allows_automatic_actions() {
-                // PAUSED 下 advance 的 CAS 必然失败;先拒绝并要求显式 resume,避免写下
-                // 审计后整个事务回滚、operation 身份被白白消耗。
-                anyhow::bail!("manual_close requires ACTIVE control state; resume first");
-            }
+                .ok_or(SagaManagementError::NotFound)?;
             // 审计先行且与迁移同事务:状态机对本边的放行证据就是这行审计,先写审计
             // 再 CAS 的顺序保证证据与迁移一起提交或一起消失。
             match self
@@ -1825,8 +2367,21 @@ where
                 ManagementAuditOutcome::AlreadyRecorded => return Ok(instance.status),
                 ManagementAuditOutcome::Recorded => {}
             }
+            // 人工关闭的同一 operation 重放直接返回；只有新关闭事实才消耗额度。
+            // 后续门禁或状态迁移失败会使审计和预算共同回滚。
+            self.reserve_action_rate_budget(tenant).await?;
+            // 先识别已提交 operation，保证丢失响应后的原请求可重放；新关闭动作仍必须
+            // 命中调用方版本和 ACTIVE 控制态，否则审计插入随事务一起回滚。
+            expectation.verify(instance.version, instance.control_version)?;
+            if !instance.control_state.allows_automatic_actions() {
+                return Err(management_precondition(
+                    "manual_close requires ACTIVE control state; resume first",
+                ));
+            }
             if instance.status != SagaStatus::ManualIntervention {
-                anyhow::bail!("manual_close requires MANUAL_INTERVENTION");
+                return Err(management_precondition(
+                    "manual_close requires MANUAL_INTERVENTION",
+                ));
             }
             self.advance(
                 &instance,
@@ -3377,9 +3932,13 @@ where
             .compensation_plan_version
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("compensating instance has no frozen plan"))?;
-        let definition = self
-            .registry
-            .get(&instance.workflow, instance.definition_version)
+        let registry = self.registry_snapshot();
+        let definition = registry
+            .get_for_tenant(
+                &instance.tenant,
+                &instance.workflow,
+                instance.definition_version,
+            )
             .ok_or_else(|| anyhow::anyhow!("instance definition is not registered"))?;
         let steps = self.backend.store().load_steps(saga_id).await?;
         let journal: Vec<StepJournalEntry> = steps
@@ -3499,7 +4058,7 @@ where
     /// - `step_def`: 目标步骤定义。
     /// - `phase`: 命令阶段。
     /// - `attempt`: 尝试序号。
-    /// - `payload`: 业务输入；仅首步 execute 携带。
+    /// - `payload`: 已校验的业务输入及原始输入形式；仅首步 execute 携带。
     /// - `recovery_operation_id`: 已审计人工恢复身份；普通自动命令为空。
     /// - `now_ms`: 当前时刻。
     /// - `expected_version`: timer 登记的实例版本（推进后的版本）。
@@ -3512,7 +4071,7 @@ where
         step_def: &StepDefinition,
         phase: StepPhase,
         attempt: AttemptNo,
-        payload: Option<serde_json::Value>,
+        payload: Option<CommandInput>,
         recovery_operation_id: Option<&str>,
         now_ms: i64,
         expected_version: u64,
@@ -3525,6 +4084,12 @@ where
             .store()
             .record_attempt_started(&instance.saga_id, step, phase, attempt, &effect, &command)
             .await?;
+        // 兼容输入继续写原有 JSON 字段；显式 bytes 输入只写 raw_payload，不能丢失字节或 schema。
+        let (payload, raw_payload) = match payload {
+            Some(CommandInput::Json(value)) => (Some(value), None),
+            Some(CommandInput::Raw(value)) => (None, Some(value)),
+            None => (None, None),
+        };
         let envelope = SagaCommandEnvelope {
             saga_id: instance.saga_id.as_str().to_string(),
             tenant_id: instance.tenant.as_str().to_string(),
@@ -3538,6 +4103,7 @@ where
             command_id: command.to_string(),
             recovery_operation_id: recovery_operation_id.map(str::to_owned),
             payload,
+            raw_payload,
         };
         // 命令继承实例已提交的因果上下文并派生新 span:同一 trace-id 串联发起入口、
         // 编排端与参与方,每一跳都是新的 child;列值损坏或缺失时按无上下文投递——
@@ -3868,10 +4434,8 @@ fn merge_deferred_projection(
 fn ensure_applied(outcome: CasOutcome) -> anyhow::Result<u64> {
     match outcome {
         CasOutcome::Applied { new_version } => Ok(new_version),
-        CasOutcome::Conflict => anyhow::bail!("cas conflict: snapshot is stale; redeliver"),
-        CasOutcome::DuplicateTrigger => {
-            anyhow::bail!("duplicate trigger: transition already applied; rollback and reload")
-        }
+        CasOutcome::Conflict => Err(SagaConcurrencyError::StaleSnapshot.into()),
+        CasOutcome::DuplicateTrigger => Err(SagaConcurrencyError::DuplicateTrigger.into()),
     }
 }
 

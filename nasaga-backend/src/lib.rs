@@ -18,17 +18,20 @@ mod timer;
 mod traits;
 
 pub use audit::{
-    AttemptConflictFact, SagaConflictFactRow, SagaConflictKind, SagaControlAuditRow,
-    SagaManagementAuditRow, SagaTransitionAuditRow,
+    AttemptConflictFact, SagaAttemptAuditCursor, SagaAttemptAuditRow, SagaAuditEventCursor,
+    SagaAuditEventRecord, SagaAuditEventRow, SagaConflictFactRow, SagaConflictKind,
+    SagaControlAuditRow, SagaManagementAuditRow, SagaTimedAuditCursor, SagaTransitionAuditRow,
 };
 pub use error::{SagaBackendError, SagaBackendErrorKind};
 pub use governance::{ActionRateReservation, QuotaReservation, MANUAL_CLOSE_ACTION};
 pub use instance::{
-    CasOutcome, ControlCasOutcome, ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance,
-    SagaCreation, SagaInstanceQuery, TransitionSpec,
+    validate_saga_instance_query, CasOutcome, ControlCasOutcome, ControlTransitionSpec,
+    ManagementAuditOutcome, NewSagaInstance, SagaCreation, SagaInstanceQuery,
+    SagaInstanceQueryParameterError, TransitionSpec, SAGA_INSTANCE_TIME_MAX_MS,
+    SAGA_INSTANCE_TIME_MIN_MS,
 };
 pub use journal::{AttemptOutcomeRecord, AttemptStart, StepJournalPatch};
-pub use metrics::SagaStoreMetrics;
+pub use metrics::{SagaLifecycleQuantiles, SagaStoreMetrics};
 pub use participant::{
     CancelAdjudication, CompensationAdmission, ExecuteAdmission, ExternalCancelAdmission,
     ParticipantGateKey, ResolutionAdmission, ResolutionTarget,

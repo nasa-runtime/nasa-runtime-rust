@@ -18,10 +18,12 @@ use crate::{
     CancelAdjudication, CasOutcome, CompensationAdmission, ControlCasOutcome,
     ControlTransitionSpec, ExecuteAdmission, ExternalCancelAdmission, ManagementAuditOutcome,
     NewSagaInstance, ParticipantGateKey, QuotaReservation, ResolutionAdmission, ResolutionTarget,
+    SagaAttemptAuditCursor, SagaAttemptAuditRow, SagaAuditEventCursor, SagaAuditEventRow,
     SagaBackendError, SagaConflictFactRow, SagaControlAuditRow, SagaCreation, SagaInstanceQuery,
     SagaInstanceRow, SagaInstanceSummary, SagaManagementAuditRow, SagaStepAttemptRow, SagaStepRow,
-    SagaStoreMetrics, SagaTransitionAuditRow, StepJournalPatch, TimerClaimBatch, TimerFencing,
-    TimerFencingToken, TimerReschedule, TimerSchedule, TimerScope, TimerSpec, TransitionSpec,
+    SagaStoreMetrics, SagaTimedAuditCursor, SagaTransitionAuditRow, StepJournalPatch,
+    TimerClaimBatch, TimerFencing, TimerFencingToken, TimerReschedule, TimerSchedule, TimerScope,
+    TimerSpec, TransitionSpec,
 };
 
 /// 事务执行器接受的有界异步业务操作。
@@ -525,16 +527,29 @@ pub trait SagaAuditStore: Send + Sync {
         fact: &AttemptConflictFact<'_>,
     ) -> Result<(), SagaBackendError>;
 
+    /// 业务作用：按全局单调序号读取跨类别、不可变的实例审计事件。
+    ///
+    /// 参数说明：`saga_id` 定位实例，`after` 是最后已交付序号，`limit` 限制返回量。
+    ///
+    /// 返回：严格按 `audit_seq` 递增的事件；参数或读取失败返回封闭错误。
+    async fn load_audit_events(
+        &self,
+        saga_id: &SagaId,
+        after: SagaAuditEventCursor,
+        limit: u32,
+    ) -> Result<Vec<SagaAuditEventRow>, SagaBackendError>;
+
     /// 业务作用：有界读取实例的 attempt 审计事实。
     ///
-    /// 参数说明：`saga_id` 定位实例，`limit` 限制返回量。
+    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
     ///
     /// 返回：稳定排序的事实集合；参数或读取失败返回封闭错误。
     async fn load_attempt_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaAttemptAuditCursor>,
         limit: u32,
-    ) -> Result<Vec<SagaStepAttemptRow>, SagaBackendError>;
+    ) -> Result<Vec<SagaAttemptAuditRow>, SagaBackendError>;
 
     /// 业务作用：按序号游标读取实例状态迁移审计。
     ///
@@ -562,23 +577,25 @@ pub trait SagaAuditStore: Send + Sync {
 
     /// 业务作用：有界读取实例的人工管理审计。
     ///
-    /// 参数说明：`saga_id` 定位实例，`limit` 限制返回量。
+    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
     ///
     /// 返回：稳定排序的管理审计集合；参数或读取失败返回封闭错误。
     async fn load_management_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaManagementAuditRow>, SagaBackendError>;
 
     /// 业务作用：有界读取实例的互斥事实证据。
     ///
-    /// 参数说明：`saga_id` 定位实例，`limit` 限制返回量。
+    /// 参数说明：`saga_id` 定位实例，`after` 是上一页末项，`limit` 限制返回量。
     ///
     /// 返回：稳定排序的冲突事实集合；参数或读取失败返回封闭错误。
     async fn load_conflict_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaConflictFactRow>, SagaBackendError>;
 }

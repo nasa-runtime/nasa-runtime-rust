@@ -161,6 +161,14 @@ impl ApplicationComponent for NacosDiscoveryComponent {
                         endpoint.authority.unwrap_or_default(),
                     );
             }
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            for (key, value) in crate::saga::discovery_registration_metadata(
+                application,
+                &registration_bind_ip(application),
+                port,
+            )? {
+                info = info.with_metadata(key, value);
+            }
             session.lock().await.register(info).await.map_err(|error| {
                 discovery_error_src(
                     ApplicationPhase::Ready,

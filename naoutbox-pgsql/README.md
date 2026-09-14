@@ -43,7 +43,8 @@ async fn create_order(order_id: i64) -> anyhow::Result<()> {
 - 每条发布前都会续租并复验 fencing token；单条发布等待上限为 25 秒，超时按 `Transient` 保留重投。
   每个已取得权威的批次按 `id` 升序发布，遇首个失败停止，只确认本轮成功前缀。
 - 取消、断连或提交结果不确定时，未确认行保持可重投；下游必须按 `event_id` 幂等去重。
-- append 唤醒只在最外层事务明确提交后产生。回滚与提交结果不确定不产生唤醒，数据库轮询始终是最终事实。
+- append 唤醒只在最外层事务明确提交后产生，并限定到 PostgreSQL driver、datasource_ref 与 lane。
+  回滚与提交结果不确定不产生唤醒，数据库轮询始终是最终事实。
 - global dispatcher 与 lane dispatcher 是两种互斥运行模式，不能同时处理同一张 `outbox_event` 表；
   lane 模式必须为每个已配置 lane 启动对应 dispatcher。
 

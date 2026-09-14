@@ -60,8 +60,8 @@ saga = ["dep:saga_core_impl"]
 saga-runtime = ["saga", "inbox", "outbox", "dep:saga_runtime_impl", "dep:nasaga_macro", "application_impl?/saga"]
 saga-runtime-pgsql = ["saga", "inbox-pgsql", "outbox-pgsql", "dep:saga_runtime_pgsql_impl", "dep:nasaga_macro", "application_impl?/saga-pgsql"]
 # Saga 真实 Kafka hosted transport；要求同时启用 nasa Kafka 门面并向下打开 runtime adapter。
-saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
-saga-kafka-pgsql = ["saga-runtime-pgsql", "kafka", "saga_runtime_pgsql_impl/kafka"]
+saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka", "application_impl?/saga-kafka"]
+saga-kafka-pgsql = ["saga-runtime-pgsql", "kafka", "saga_runtime_pgsql_impl/kafka", "application_impl?/saga-kafka-pgsql"]
 # Saga Redis Streams hosted transport：显式 ACK 裁决、pending reclaim、原子 DLT 与消息签名。
 saga-redis-stream = ["saga-runtime", "redis", "saga_runtime_impl/redis-stream", "application_impl?/saga-redis-stream"]
 saga-redis-stream-pgsql = ["saga-runtime-pgsql", "redis", "saga_runtime_pgsql_impl/redis-stream", "application_impl?/saga-redis-stream-pgsql"]
@@ -297,7 +297,7 @@ saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
 saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "1.0.0", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.1.0", optional = true }
+grpc_impl = { package = "nagrpc", path = "../nagrpc", version = "1.1.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "1.0.2", optional = true }
 async_macro = { package = "async-macro", version = "1.0.2", optional = true }

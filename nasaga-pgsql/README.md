@@ -15,6 +15,10 @@ datasource 与 ambient transaction。
 - SQLSTATE `23505` 只在已声明的业务唯一约束处转换为幂等或冲突；其它约束失败保留为基础设施错误。
 - 本后端不提供跨 datasource、跨 driver 或 XA 事务。
 
+创建幂等由 `(tenant_id, workflow_name, business_key)` 唯一事实与请求摘要共同裁决。
+请求 `saga_id` 已被其它业务意图占用时，即使业务键命中另一实例也返回冲突。两种身份在原事务内
+锁定核验；未占用的新 `saga_id` 可按相同业务键和请求摘要取得原实例的重复收据，不追加创建副作用。
+
 ## 初始化与配置
 
 ```toml
@@ -27,14 +31,21 @@ natx-pgsql = "1"
 let store = nasaga_pgsql::PgSagaStore::with_datasource("orders")?;
 ```
 
-schema 应在 Application Prepare 阶段通过 migration 管理：Orchestrator 执行
-[`create_saga.sql`](migrations/create_saga.sql)，参与方执行
-[`create_saga_participant.sql`](migrations/create_saga_participant.sql)。
-`PgSagaStore::ensure_schema` 与 `PgSagaStore::ensure_participant_schema` 读取相同文件，
+schema 由 Application 在角色 Ready 前确保：Orchestrator 结构包含全局状态、timer、Catalog、
+capability、审计与配额，参与方结构只包含 gate；Inbox 与 Outbox 由对应 adapter 确保。
+`PgSagaStore::ensure_schema` 与 `PgSagaStore::ensure_participant_schema` 使用组件内嵌结构，
 仅用于 standalone 引导，不会创建连接池或改变 datasource 所有权。
+统一审计表尚不存在时可按当前合同首次创建并回填；一旦审计表存在，列、主键、逻辑唯一约束、stream
+索引、函数与 trigger 必须在回填前匹配，回填提交后还会再次复验。任何未知漂移都会阻止 Ready。
+
+审计读取基于 `saga_audit_event` 的全局只增序号。attempt 创建及后续状态变化、实例迁移、控制操作、
+管理操作与冲突事实都在原业务事务内追加独立事件，因此持久游标不会因类别切换、字典序或原地状态变化
+漏过后提交的事实。trigger 在分配序号前递增按 Saga 隔离的 `saga_audit_stream_guard`，使同一实例的
+后发事务必须等待先发事务提交，同时不阻塞其它 Saga。
 
 本 crate 不读取 YAML。业务经门面使用时开启 `saga-runtime-pgsql`，从 `nasa::saga::pgsql` 使用运行时
-包装；Application 依据 Saga 计划中的 `datasource_ref` 复验 driver，并拥有 pool、timer 与停机顺序。
+包装；Application 依据当前角色作用域内的 `datasource_ref` 复验 driver，并拥有 pool、Catalog、timer
+与停机顺序。managed 模式下业务不提交 Saga 运行计划。
 
 ## 观测
 

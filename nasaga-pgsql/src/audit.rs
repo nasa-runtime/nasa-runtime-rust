@@ -1,8 +1,9 @@
 //! Saga attempt、状态迁移、控制操作、人工恢复与冲突事实的只读审计查询。
 
 use nasaga_backend::{
-    AttemptConflictFact, SagaConflictFactRow, SagaControlAuditRow, SagaManagementAuditRow,
-    SagaTransitionAuditRow,
+    AttemptConflictFact, SagaAttemptAuditCursor, SagaAttemptAuditRow, SagaAuditEventCursor,
+    SagaAuditEventRecord, SagaAuditEventRow, SagaConflictFactRow, SagaControlAuditRow,
+    SagaManagementAuditRow, SagaTimedAuditCursor, SagaTransitionAuditRow,
 };
 use nasaga_core::{AttemptNo, SagaId, StepAttemptStatus, StepName, StepPhase};
 use sqlx::Row as _;
@@ -11,7 +12,7 @@ use crate::error::{
     corrupt, map_connection, map_database, pg_u64, row_u32, row_u64, SagaStoreError,
 };
 use crate::instance::require_ambient_transaction;
-use crate::row::{parse_attempt_row, SagaStepAttemptRow};
+use crate::row::parse_attempt_row;
 use crate::PgSagaStore;
 
 impl PgSagaStore {
@@ -54,27 +55,92 @@ impl PgSagaStore {
         Ok(())
     }
 
-    /// 业务作用：按步骤、阶段、attempt 顺序读取实例的 attempt 事实。
-    pub async fn load_attempt_audit(
+    /// 业务作用：按数据库全局序号读取跨类别不可变审计事件，支持运行中持续追加。
+    ///
+    /// 参数说明：实例、最后已交付序号与上限共同限定下一页。
+    ///
+    /// 返回：严格按 `audit_seq` 递增的事实快照；参数、数据损坏或读取失败返回错误。
+    pub async fn load_audit_events(
         &self,
         saga_id: &SagaId,
+        after: SagaAuditEventCursor,
         limit: u32,
-    ) -> Result<Vec<SagaStepAttemptRow>, SagaStoreError> {
+    ) -> Result<Vec<SagaAuditEventRow>, SagaStoreError> {
         validate_limit(limit)?;
         let mut connection = natx_pgsql::conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
         let rows = sqlx::query(
-            "SELECT step_name, phase, attempt_no, effect_id, command_id, status, outcome_event_id \
-             FROM saga_step_attempt WHERE saga_id = $1 \
-             ORDER BY step_name, phase, attempt_no LIMIT $2",
+            "SELECT audit_seq, record_kind, step_name, phase, attempt_no, effect_id, command_id, \
+             attempt_status AS status, outcome_event_id, transition_seq, from_state, to_state, \
+             trigger_kind, trigger_id, definition_version, control_seq, operation_id, action, \
+             actor, reason, incoming_event_id, existing_status, incoming_status, conflict_kind, \
+             to_char(occurred_at AT TIME ZONE 'UTC', \
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+             FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
+             FROM saga_audit_event WHERE saga_id = $1 AND audit_seq > $2 \
+             ORDER BY audit_seq LIMIT $3",
         )
         .bind(saga_id.as_str())
+        .bind(pg_u64(after.audit_seq)?)
         .bind(i64::from(limit))
         .fetch_all(connection.as_mut())
         .await
         .map_err(map_database)?;
-        rows.iter().map(parse_attempt_row).collect()
+        rows.iter().map(parse_audit_event).collect()
+    }
+
+    /// 业务作用：按步骤、阶段、attempt 顺序读取实例的 attempt 事实。
+    pub async fn load_attempt_audit(
+        &self,
+        saga_id: &SagaId,
+        after: Option<&SagaAttemptAuditCursor>,
+        limit: u32,
+    ) -> Result<Vec<SagaAttemptAuditRow>, SagaStoreError> {
+        validate_limit(limit)?;
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                "SELECT step_name, phase, attempt_no, effect_id, command_id, status, outcome_event_id, \
+                 to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM started_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_step_attempt WHERE saga_id = $1 AND \
+                 (step_name, phase, attempt_no) > ($2, $3, $4) \
+                 ORDER BY step_name, phase, attempt_no LIMIT $5",
+            )
+            .bind(saga_id.as_str())
+            .bind(after.step.as_str())
+            .bind(after.phase.as_str())
+            .bind(i64::from(after.attempt.get()))
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        } else {
+            sqlx::query(
+                "SELECT step_name, phase, attempt_no, effect_id, command_id, status, outcome_event_id, \
+                 to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM started_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_step_attempt WHERE saga_id = $1 \
+                 ORDER BY step_name, phase, attempt_no LIMIT $2",
+            )
+            .bind(saga_id.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        };
+        rows.iter()
+            .map(|row| {
+                Ok(SagaAttemptAuditRow {
+                    attempt: parse_attempt_row(row)?,
+                    occurred_at: row.try_get("occurred_at").map_err(map_database)?,
+                    occurred_at_ms: row.try_get("occurred_at_ms").map_err(map_database)?,
+                })
+            })
+            .collect()
     }
 
     /// 业务作用：从指定序号后分页读取业务状态迁移审计链。
@@ -91,7 +157,8 @@ impl PgSagaStore {
         let rows = sqlx::query(
             "SELECT transition_seq, from_state, to_state, trigger_kind, trigger_id, \
              definition_version, to_char(occurred_at AT TIME ZONE 'UTC', \
-             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at \
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+             FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
              FROM saga_transition WHERE saga_id = $1 AND transition_seq > $2 \
              ORDER BY transition_seq LIMIT $3",
         )
@@ -118,7 +185,8 @@ impl PgSagaStore {
         let rows = sqlx::query(
             "SELECT control_seq, from_state, to_state, operation_id, actor, reason, \
              to_char(occurred_at AT TIME ZONE 'UTC', \
-             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at \
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+             FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
              FROM saga_control_transition WHERE saga_id = $1 AND control_seq > $2 \
              ORDER BY control_seq LIMIT $3",
         )
@@ -135,23 +203,45 @@ impl PgSagaStore {
     pub async fn load_management_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaManagementAuditRow>, SagaStoreError> {
         validate_limit(limit)?;
         let mut connection = natx_pgsql::conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        let rows = sqlx::query(
-            "SELECT operation_id, action, actor, reason, \
-             to_char(occurred_at AT TIME ZONE 'UTC', \
-             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at \
-             FROM saga_management_audit WHERE saga_id = $1 ORDER BY occurred_at, operation_id LIMIT $2",
-        )
-        .bind(saga_id.as_str())
-        .bind(i64::from(limit))
-        .fetch_all(connection.as_mut())
-        .await
-        .map_err(map_database)?;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                "SELECT operation_id, action, actor, reason, \
+                 to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_management_audit WHERE saga_id = $1 AND \
+                 (to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), operation_id) > ($2, $3) \
+                 ORDER BY occurred_at, operation_id LIMIT $4",
+            )
+            .bind(saga_id.as_str())
+            .bind(&after.occurred_at)
+            .bind(&after.identity)
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        } else {
+            sqlx::query(
+                "SELECT operation_id, action, actor, reason, \
+                 to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_management_audit WHERE saga_id = $1 ORDER BY occurred_at, operation_id LIMIT $2",
+            )
+            .bind(saga_id.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        };
         rows.iter().map(parse_management).collect()
     }
 
@@ -159,26 +249,76 @@ impl PgSagaStore {
     pub async fn load_conflict_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaConflictFactRow>, SagaStoreError> {
         validate_limit(limit)?;
         let mut connection = natx_pgsql::conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        let rows = sqlx::query(
-            "SELECT incoming_event_id, step_name, phase, attempt_no, existing_status, \
-             incoming_status, conflict_kind, \
-             to_char(occurred_at AT TIME ZONE 'UTC', \
-             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at \
-             FROM saga_conflict_fact WHERE saga_id = $1 ORDER BY occurred_at, incoming_event_id LIMIT $2",
-        )
-        .bind(saga_id.as_str())
-        .bind(i64::from(limit))
-        .fetch_all(connection.as_mut())
-        .await
-        .map_err(map_database)?;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                "SELECT incoming_event_id, step_name, phase, attempt_no, existing_status, \
+                 incoming_status, conflict_kind, \
+                 to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_conflict_fact WHERE saga_id = $1 AND \
+                 (to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), incoming_event_id) > ($2, $3) \
+                 ORDER BY occurred_at, incoming_event_id LIMIT $4",
+            )
+            .bind(saga_id.as_str())
+            .bind(&after.occurred_at)
+            .bind(&after.identity)
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        } else {
+            sqlx::query(
+                "SELECT incoming_event_id, step_name, phase, attempt_no, existing_status, \
+                 incoming_status, conflict_kind, \
+                 to_char(occurred_at AT TIME ZONE 'UTC', \
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at, \
+                 FLOOR(EXTRACT(EPOCH FROM occurred_at) * 1000)::BIGINT AS occurred_at_ms \
+                 FROM saga_conflict_fact WHERE saga_id = $1 ORDER BY occurred_at, incoming_event_id LIMIT $2",
+            )
+            .bind(saga_id.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?
+        };
         rows.iter().map(parse_conflict).collect()
     }
+}
+
+/// 业务作用：把统一事件表的一行收敛为封闭审计类别，并拒绝列组合损坏。
+///
+/// 参数说明：`row` 是按 `audit_seq` 读取的事件快照。
+///
+/// 返回：类别与必填字段一致时返回类型化事件；未知类别或坏值返回错误。
+fn parse_audit_event(row: &sqlx::postgres::PgRow) -> Result<SagaAuditEventRow, SagaStoreError> {
+    let record_kind: String = row.try_get("record_kind").map_err(map_database)?;
+    let occurred_at = row.try_get("occurred_at").map_err(map_database)?;
+    let occurred_at_ms = row.try_get("occurred_at_ms").map_err(map_database)?;
+    let record = match record_kind.as_str() {
+        "attempt" => SagaAuditEventRecord::Attempt(SagaAttemptAuditRow {
+            attempt: parse_attempt_row(row)?,
+            occurred_at,
+            occurred_at_ms,
+        }),
+        "transition" => SagaAuditEventRecord::Transition(parse_transition(row)?),
+        "control" => SagaAuditEventRecord::Control(parse_control(row)?),
+        "management" => SagaAuditEventRecord::Management(parse_management(row)?),
+        "conflict" => SagaAuditEventRecord::Conflict(parse_conflict(row)?),
+        _ => return Err(corrupt("record_kind")),
+    };
+    Ok(SagaAuditEventRow {
+        audit_seq: row_u64(row, "audit_seq")?,
+        record,
+    })
 }
 
 /// 业务作用：校验审计查询上限，防止管理请求把全历史一次加载进内存。
@@ -211,6 +351,7 @@ fn parse_transition(row: &sqlx::postgres::PgRow) -> Result<SagaTransitionAuditRo
         trigger_id: row.try_get("trigger_id").map_err(map_database)?,
         definition_version: row_u32(row, "definition_version")?,
         occurred_at: row.try_get("occurred_at").map_err(map_database)?,
+        occurred_at_ms: row.try_get("occurred_at_ms").map_err(map_database)?,
     })
 }
 
@@ -224,6 +365,7 @@ fn parse_control(row: &sqlx::postgres::PgRow) -> Result<SagaControlAuditRow, Sag
         actor: row.try_get("actor").map_err(map_database)?,
         reason: row.try_get("reason").map_err(map_database)?,
         occurred_at: row.try_get("occurred_at").map_err(map_database)?,
+        occurred_at_ms: row.try_get("occurred_at_ms").map_err(map_database)?,
     })
 }
 
@@ -235,6 +377,7 @@ fn parse_management(row: &sqlx::postgres::PgRow) -> Result<SagaManagementAuditRo
         actor: row.try_get("actor").map_err(map_database)?,
         reason: row.try_get("reason").map_err(map_database)?,
         occurred_at: row.try_get("occurred_at").map_err(map_database)?,
+        occurred_at_ms: row.try_get("occurred_at_ms").map_err(map_database)?,
     })
 }
 
@@ -256,5 +399,6 @@ fn parse_conflict(row: &sqlx::postgres::PgRow) -> Result<SagaConflictFactRow, Sa
             .ok_or_else(|| corrupt("incoming_status"))?,
         conflict_kind: row.try_get("conflict_kind").map_err(map_database)?,
         occurred_at: row.try_get("occurred_at").map_err(map_database)?,
+        occurred_at_ms: row.try_get("occurred_at_ms").map_err(map_database)?,
     })
 }

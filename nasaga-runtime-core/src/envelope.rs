@@ -114,6 +114,9 @@ pub struct SagaCommandEnvelope {
     pub recovery_operation_id: Option<String>,
     /// 首步 execute 的业务输入；其余命令为空。
     pub payload: Option<serde_json::Value>,
+    /// 原始业务正文；与兼容 JSON payload 互斥，字节与 schema 在重投中保持不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_payload: Option<nasaga_core::SagaPayload>,
 }
 
 /// 业务作用：参与方发回 Orchestrator 的结果 envelope。
@@ -313,6 +316,61 @@ fn verify_result_contract(
 }
 
 impl SagaCommandEnvelope {
+    /// 业务作用：合并兼容 JSON 与原始字节入口为唯一正文合同，拒绝双重正文来源。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：原始正文或规范 JSON 字节；重复来源与非法正文返回类型化合同拒绝。
+    pub fn business_payload(&self) -> anyhow::Result<Option<nasaga_core::SagaPayload>> {
+        if self.payload.is_some() && self.raw_payload.is_some() {
+            return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
+        }
+        let payload = self
+            .raw_payload
+            .clone()
+            .or_else(|| self.payload.clone().map(nasaga_core::SagaPayload::json));
+        if let Some(payload) = &payload {
+            payload
+                .validate()
+                .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
+        }
+        Ok(payload)
+    }
+
+    /// 业务作用：在 Inbox 和业务解码前按本地 handler 声明复验媒体与 schema。
+    ///
+    /// 参数说明：content_type 与 schema_id 来自编译期 descriptor，不来自请求 header。
+    ///
+    /// 返回：无正文或合同完全一致时成功；任一漂移返回确定性合同拒绝。
+    pub fn verify_payload_contract(
+        &self,
+        content_type: &str,
+        schema_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(payload) = self.business_payload()? {
+            if payload.content_type != content_type || payload.schema_id != schema_id {
+                return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// 业务作用：把已验证的正文转换为 handler 的类型化输入，二进制合同交付字节数组。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：JSON 按原始文本直接解码，二进制保留全部字节；类型不匹配时返回合同拒绝。
+    pub fn decode_payload<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
+        let result = match self.business_payload()? {
+            None => serde_json::from_value(serde_json::Value::Null),
+            Some(payload) if payload.content_type == "application/json" => {
+                serde_json::from_slice(&payload.body)
+            }
+            Some(payload) => serde_json::from_value(serde_json::json!(payload.body)),
+        };
+        result.map_err(|_| crate::SagaCommandProcessingError::ContractInvalid.into())
+    }
+
     /// 业务作用：解析并复验命令 envelope 的身份字段。
     ///
     /// 参数说明: 无。

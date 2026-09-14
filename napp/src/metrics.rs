@@ -15,10 +15,12 @@
 #[cfg(any(feature = "kafka", feature = "web-security"))]
 use std::sync::Arc;
 
+#[cfg(feature = "kafka")]
+use nametrics_core::MetricConflict;
 #[cfg(feature = "web-security")]
 use nametrics_core::MetricSourceRegistrationError;
 #[cfg(any(feature = "kafka", feature = "web-security"))]
-use nametrics_core::{MetricConflict, MetricDescriptor, MetricHub, MetricKind};
+use nametrics_core::{MetricDescriptor, MetricHub, MetricKind};
 
 // ───────────────────────────── nafka 域(原生) ─────────────────────────────
 

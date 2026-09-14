@@ -25,6 +25,11 @@ pub mod proto {
     nagrpc::include_proto!("nasa.saga.transport.v1");
 }
 
+/// Saga 对业务调用方公开的 start、query、管理与 Definition Registry 协议。
+pub mod orchestrator_proto {
+    nagrpc::include_proto!("nasa.saga.orchestrator.v1");
+}
+
 /// mTLS leaf 指纹到 Saga 逻辑 producer 的绑定配置错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SagaGrpcBindingError {

@@ -152,6 +152,18 @@ impl PgInbox {
         let mut connection = natx_pgsql::conn_for(&datasource)
             .await
             .map_err(map_connection)?;
+        Self::ensure_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建 Inbox 表，使外层 schema
+    /// 互斥权覆盖整个 DDL 操作。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：表已存在或创建成功时完成；DDL 失败返回脱敏错误。
+    pub async fn ensure_schema_on_connection(
+        connection: &mut natx_pgsql::PgConn,
+    ) -> Result<(), InboxStoreError> {
         sqlx::raw_sql(CREATE_TABLE_SQL)
             .execute(connection.as_mut())
             .await

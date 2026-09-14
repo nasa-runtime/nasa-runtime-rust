@@ -13,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use naoutbox_core::{DurableOutbox, OutboxArchive, OutboxPublisher, OutboxRetentionPolicy};
+use naoutbox_core::{
+    DurableOutbox, OutboxArchive, OutboxEvent, OutboxPublishError, OutboxPublisher,
+    OutboxRetentionPolicy,
+};
 use serde::Deserialize;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
@@ -36,6 +39,30 @@ const OUTBOX_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// 持久化指标刷新失败后的重试间隔，避免瞬时故障让 last-good 快照长期停滞。
 const OUTBOX_METRICS_FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CHANNEL: &str = "global";
+
+type PublisherRoutes = BTreeMap<(String, String), Arc<dyn OutboxPublisher + Send + Sync>>;
+
+/// 一个事务域共享同一 dispatcher；业务事件按精确身份选择发布端，其余事件保留原计划语义。
+struct RoutedOutboxPublisher {
+    fallback: Arc<dyn OutboxPublisher + Send + Sync>,
+    routes: PublisherRoutes,
+}
+
+#[async_trait::async_trait]
+impl OutboxPublisher for RoutedOutboxPublisher {
+    /// 业务作用：在取得同一 Outbox claim 后选择事件目标，保持数据库顺序与原有失败策略。
+    ///
+    /// 参数说明：`event` 是已提交的待投递事件。
+    ///
+    /// 返回：目标确认才成功；失败分类原样交给 dispatcher，未登记事件委托原计划。
+    async fn publish(&self, event: &OutboxEvent) -> Result<(), OutboxPublishError> {
+        self.routes
+            .get(&(event.aggregate_type.clone(), event.event_type.clone()))
+            .unwrap_or(&self.fallback)
+            .publish(event)
+            .await
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutboxBackend {
@@ -418,12 +445,23 @@ outbox_metric!(
     &["channel"]
 );
 
+const OUTBOX_AGE_EVENT_TYPES: [&str; 3] = ["saga.command", "saga.result", "saga.start.requested"];
+static OUTBOX_EVENT_AGE: nametrics_core::MetricDescriptor = nametrics_core::MetricDescriptor {
+    name: "napp_outbox_oldest_pending_age_seconds",
+    help: "按固定 Saga 事件合同观测最老未确认事件的排队时间。",
+    unit: "seconds",
+    kind: nametrics_core::MetricKind::Gauge,
+    label_names: &["event_type"],
+    histogram_bounds: &[],
+};
+
 /// 无 label 的 Outbox family 数;快照对每个 family 恒产一条,是预算的固定项。
-const OUTBOX_FIXED_METRIC_SERIES: usize = 21;
+const OUTBOX_FIXED_METRIC_SERIES: usize = 24;
 /// 每个冻结 channel lane 的 family 数(published/failed/healthy/pending);预算按 lane 数线性扩展。
 const OUTBOX_LANE_METRIC_SERIES: usize = 4;
 
-static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 25] = [
+static OUTBOX_DESCRIPTORS: [&nametrics_core::MetricDescriptor; 26] = [
+    &OUTBOX_EVENT_AGE,
     &OUTBOX_ROUNDS,
     &OUTBOX_PUBLISHED,
     &OUTBOX_FAILED_ROUNDS,
@@ -501,6 +539,7 @@ pub enum OutboxPoisonPolicy {
 /// 发布端负责把事件映射到 Kafka、Redis Streams 或其它下游；组件只负责持久化轮询和生命周期，
 /// 因而 Outbox 可以脱离 Saga 独立使用。
 pub struct OutboxApplicationPlan {
+    datasource_ref: Option<String>,
     publisher: Arc<dyn OutboxPublisher + Send + Sync>,
     poison_policy: OutboxPoisonPolicy,
     retention: Option<OutboxRetentionPlan>,
@@ -594,12 +633,40 @@ impl OutboxApplicationPlan {
         P: OutboxPublisher + Send + Sync + 'static,
     {
         Self {
+            datasource_ref: None,
             publisher,
             poison_policy: OutboxPoisonPolicy::Block,
             retention: None,
             channels: None,
             tenant_quotas: None,
         }
+    }
+
+    /// 业务作用：把发布计划精确绑定到一个命名 datasource，供多事务域服务启动独立 dispatcher。
+    ///
+    /// 参数说明：`datasource_ref` 是 Application datasource catalog 中的规范名称。
+    ///
+    /// 返回：名称合法且首次绑定时返回计划；重复或非法引用返回配置错误。
+    pub fn with_datasource_ref(
+        mut self,
+        datasource_ref: impl Into<String>,
+    ) -> ApplicationResult<Self> {
+        if self.datasource_ref.is_some() {
+            return Err(outbox_error(
+                ApplicationPhase::UserHook,
+                "outbox plan datasource can be configured only once",
+            ));
+        }
+        let datasource_ref = datasource_ref.into();
+        natx_core::DatasourceRef::new(&datasource_ref).map_err(|error| {
+            outbox_source_error(
+                ApplicationPhase::UserHook,
+                "outbox plan datasource_ref is invalid",
+                error,
+            )
+        })?;
+        self.datasource_ref = Some(datasource_ref);
+        Ok(self)
     }
 
     /// 业务作用：提交每租户在飞事件配额——限制单租户挤占 Outbox 积压容量的显式 opt-in。
@@ -931,13 +998,18 @@ impl OutboxHandle {
     /// 返回：组件 Ready 时返回持久化积压；停机或数据库失败返回统一错误。
     pub async fn pending_count(&self) -> ApplicationResult<u64> {
         self.state.ensure_ready()?;
-        self.state.outbox()?.pending_count().await.map_err(|error| {
-            outbox_source_error(
-                ApplicationPhase::Running,
-                "outbox pending count failed",
-                error,
-            )
-        })
+        let mut total = 0u64;
+        for outbox in self.state.outboxes()?.into_values() {
+            let count = outbox.pending_count().await.map_err(|error| {
+                outbox_source_error(
+                    ApplicationPhase::Running,
+                    "outbox pending count failed",
+                    error,
+                )
+            })?;
+            total = total.saturating_add(count);
+        }
+        Ok(total)
     }
 
     /// 业务作用：读取数据库中保留的 Outbox 死信事件数。
@@ -947,9 +1019,14 @@ impl OutboxHandle {
     /// 返回：组件 Ready 时返回死信累计值；停机或数据库失败返回统一错误。
     pub async fn dead_count(&self) -> ApplicationResult<u64> {
         self.state.ensure_ready()?;
-        self.state.outbox()?.dead_count().await.map_err(|error| {
-            outbox_source_error(ApplicationPhase::Running, "outbox dead count failed", error)
-        })
+        let mut total = 0u64;
+        for outbox in self.state.outboxes()?.into_values() {
+            let count = outbox.dead_count().await.map_err(|error| {
+                outbox_source_error(ApplicationPhase::Running, "outbox dead count failed", error)
+            })?;
+            total = total.saturating_add(count);
+        }
+        Ok(total)
     }
 
     /// 业务作用：读取不含事件正文和业务身份的进程级投递计数。
@@ -979,9 +1056,22 @@ impl OutboxHandle {
         let refresh_failures = self.state.metrics_refresh_failures.load(Ordering::Relaxed);
         // 拒绝计数来自当前后端 adapter 的进程内累计:低基数、不携带租户标签,
         // 精确租户用量只经受鉴权管理查询返回。
-        let quota_rejections = quota_rejections_total(self.state.outbox.get());
+        let quota_rejections = self
+            .state
+            .outboxes
+            .get()
+            .and_then(|outboxes| outboxes.values().next())
+            .map_or(0, |outbox| quota_rejections_total(Some(outbox)));
         // lane 标签值来自 Ready 时冻结的 lane 集合,基数有界;未分片时不输出 lane 行。
         let mut lane_lines = String::new();
+        lane_lines.push_str("# TYPE napp_outbox_oldest_pending_age_seconds gauge\n");
+        for (index, event_type) in OUTBOX_AGE_EVENT_TYPES.iter().enumerate() {
+            lane_lines.push_str(&format!(
+                "napp_outbox_oldest_pending_age_seconds{{event_type=\"{event_type}\"}} {}\n",
+                self.state.metrics_event_age_ms[index].load(Ordering::Relaxed) as f64 / 1000.0
+            ));
+        }
+
         for lane in self.state.lanes() {
             let lane_pending = lane.pending_count();
             lane_lines.push_str(&format!(
@@ -1080,11 +1170,12 @@ impl OutboxHandle {
 
 /// 业务作用：保存 Outbox 计划、生命周期门禁、累计计数和最近一份完整持久化指标快照。
 pub(crate) struct OutboxRuntimeState {
-    pending: Mutex<Option<OutboxApplicationPlan>>,
+    pending: Mutex<Option<Vec<OutboxApplicationPlan>>>,
+    routes: Mutex<BTreeMap<String, PublisherRoutes>>,
     sealed: AtomicBool,
     lifecycle: AtomicU8,
     /// Ready 门禁、dispatcher、retention 与指标查询共用的命名 datasource Outbox。
-    outbox: OnceLock<ManagedOutbox>,
+    outboxes: OnceLock<BTreeMap<String, ManagedOutbox>>,
     rounds: AtomicU64,
     published: AtomicU64,
     failed_rounds: AtomicU64,
@@ -1104,6 +1195,7 @@ pub(crate) struct OutboxRuntimeState {
     retention_last_success_ms: AtomicU64,
     /// 指标出口最近一次从已提交事实查询到的待投递数。
     metrics_pending: AtomicU64,
+    metrics_event_age_ms: [AtomicU64; 3],
     /// 指标出口最近一次从已提交事实查询到的死信数。
     metrics_dead: AtomicU64,
     /// 持久化指标年龄使用的单调时钟起点，避免系统时间校准造成快照年龄跳变。
@@ -1118,6 +1210,8 @@ pub(crate) struct OutboxRuntimeState {
     metrics_refresh: AsyncMutex<OutboxMetricsRefreshGate>,
     /// 分片模式下的 lane 观测状态;未分片时为空。Ready 时一次发布,此后只读。
     lanes: Mutex<Option<Vec<Arc<LaneRuntime>>>>,
+    /// 多数据源模式下逐 dispatcher 的健康位；整体 Ready 只在全部健康位为真时恢复。
+    datasource_health: OnceLock<Vec<Arc<AtomicBool>>>,
 }
 
 impl OutboxRuntimeState {
@@ -1128,10 +1222,11 @@ impl OutboxRuntimeState {
     /// 返回：空的 configuring 状态。
     pub(crate) fn new() -> Self {
         Self {
-            pending: Mutex::new(None),
+            pending: Mutex::new(Some(Vec::new())),
+            routes: Mutex::new(BTreeMap::new()),
             sealed: AtomicBool::new(false),
             lifecycle: AtomicU8::new(0),
-            outbox: OnceLock::new(),
+            outboxes: OnceLock::new(),
             rounds: AtomicU64::new(0),
             published: AtomicU64::new(0),
             failed_rounds: AtomicU64::new(0),
@@ -1148,6 +1243,7 @@ impl OutboxRuntimeState {
             retention_interval_ms: AtomicU64::new(0),
             retention_last_success_ms: AtomicU64::new(0),
             metrics_pending: AtomicU64::new(0),
+            metrics_event_age_ms: std::array::from_fn(|_| AtomicU64::new(0)),
             metrics_dead: AtomicU64::new(0),
             metrics_clock_started: Instant::now(),
             metrics_last_success_tick: AtomicU64::new(0),
@@ -1155,7 +1251,33 @@ impl OutboxRuntimeState {
             metrics_refresh_failed: AtomicBool::new(false),
             metrics_refresh: AsyncMutex::new(OutboxMetricsRefreshGate::new()),
             lanes: Mutex::new(None),
+            datasource_health: OnceLock::new(),
         }
+    }
+
+    /// 业务作用：发布多数据源 dispatcher 健康集合，供任一循环恢复时复验整体状态。
+    ///
+    /// 参数说明：`health` 与 Ready 时冻结的 datasource 计划一一对应。
+    ///
+    /// 返回：首次发布成功；重复发布返回 Ready 错误。
+    fn publish_datasource_health(&self, health: Vec<Arc<AtomicBool>>) -> ApplicationResult<()> {
+        self.datasource_health.set(health).map_err(|_| {
+            outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource health was already published",
+            )
+        })
+    }
+
+    /// 业务作用：判断全部命名 datasource dispatcher 是否已经完成健康轮次。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：未启用多数据源或全部健康时为真；任一停摆时为假。
+    fn all_datasources_healthy(&self) -> bool {
+        self.datasource_health
+            .get()
+            .is_none_or(|health| health.iter().all(|entry| entry.load(Ordering::Acquire)))
     }
 
     /// 业务作用：Ready 时一次性发布 lane 观测状态,供快照与指标读取。
@@ -1216,13 +1338,79 @@ impl OutboxRuntimeState {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.sealed.load(Ordering::Acquire) || pending.is_some() {
+        if self.sealed.load(Ordering::Acquire) {
             return Err(outbox_error(
                 ApplicationPhase::UserHook,
-                "outbox plan can be configured only once",
+                "outbox configuration is sealed before Ready",
             ));
         }
-        *pending = Some(plan);
+        let plans = pending.as_mut().ok_or_else(|| {
+            outbox_error(
+                ApplicationPhase::UserHook,
+                "outbox configuration is sealed before Ready",
+            )
+        })?;
+        if plan.datasource_ref.is_none() && plans.iter().any(|entry| entry.datasource_ref.is_none())
+        {
+            return Err(outbox_error(
+                ApplicationPhase::UserHook,
+                "only one outbox plan may inherit outbox.datasource_ref",
+            ));
+        }
+        if let Some(datasource) = plan.datasource_ref.as_deref() {
+            if plans
+                .iter()
+                .any(|entry| entry.datasource_ref.as_deref() == Some(datasource))
+            {
+                return Err(outbox_error(
+                    ApplicationPhase::UserHook,
+                    "outbox plans must use unique datasource_ref values",
+                ));
+            }
+        }
+        plans.push(plan);
+        Ok(())
+    }
+
+    /// 业务作用：为同一 dispatcher 登记精确的业务事件发布目标，不产生额外 claim 域。
+    ///
+    /// 参数说明：`datasource` 指定事务域，`aggregate_type` 和 `event_type` 唯一标识业务事件，`publisher` 负责下游确认。
+    ///
+    /// 返回：登记成功后由 Ready 冻结；名称非法、协议保留名称、重复或晚到登记均拒绝。
+    pub(crate) fn register_publisher(
+        &self,
+        datasource: &str,
+        aggregate_type: &str,
+        event_type: &str,
+        publisher: Arc<dyn OutboxPublisher + Send + Sync>,
+    ) -> ApplicationResult<()> {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.sealed.load(Ordering::Acquire)
+            || natx_core::DatasourceRef::new(datasource).is_err()
+            || [aggregate_type, event_type]
+                .iter()
+                .any(|value| value.trim() != *value || value.is_empty() || value.len() > 128)
+            || aggregate_type.starts_with("Saga")
+            || event_type.starts_with("saga.")
+        {
+            // Saga 协议只能由受管计划的认证与路由合同处理，业务登记不得覆盖该权威。
+            return Err(outbox_error(
+                ApplicationPhase::UserHook,
+                "outbox business publisher registration is invalid or sealed",
+            ));
+        }
+        let entries = routes.entry(datasource.to_owned()).or_default();
+        let key = (aggregate_type.to_owned(), event_type.to_owned());
+        if entries.contains_key(&key) {
+            return Err(outbox_error(
+                ApplicationPhase::UserHook,
+                "outbox business publisher is already registered",
+            ));
+        }
+        entries.insert(key, publisher);
         Ok(())
     }
 
@@ -1231,12 +1419,13 @@ impl OutboxRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：已提交计划；缺失时拒绝启动空 dispatcher。
-    fn take_plan(&self) -> ApplicationResult<OutboxApplicationPlan> {
+    fn take_plans(&self) -> ApplicationResult<Vec<OutboxApplicationPlan>> {
         self.sealed.store(true, Ordering::Release);
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+            .filter(|plans| !plans.is_empty())
             .ok_or_else(|| {
                 outbox_error(
                     ApplicationPhase::Ready,
@@ -1267,11 +1456,17 @@ impl OutboxRuntimeState {
     /// 参数说明：`outbox` 是已经过资源存在性与数据库探针复验的句柄。
     ///
     /// 返回：首次发布成功；重复发布返回 Ready 阶段错误。
-    fn publish_outbox(&self, outbox: ManagedOutbox) -> ApplicationResult<()> {
-        self.outbox.set(outbox).map_err(|_| {
+    fn publish_outboxes(&self, outboxes: BTreeMap<String, ManagedOutbox>) -> ApplicationResult<()> {
+        if outboxes.is_empty() {
+            return Err(outbox_error(
+                ApplicationPhase::Ready,
+                "outbox datasource bindings cannot be empty",
+            ));
+        }
+        self.outboxes.set(outboxes).map_err(|_| {
             outbox_error(
                 ApplicationPhase::Ready,
-                "outbox datasource binding was already published",
+                "outbox datasource bindings were already published",
             )
         })
     }
@@ -1281,11 +1476,11 @@ impl OutboxRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：已发布时返回同源句柄 clone；未发布时返回阶段错误。
-    fn outbox(&self) -> ApplicationResult<ManagedOutbox> {
-        self.outbox.get().cloned().ok_or_else(|| {
+    fn outboxes(&self) -> ApplicationResult<BTreeMap<String, ManagedOutbox>> {
+        self.outboxes.get().cloned().ok_or_else(|| {
             outbox_error(
                 ApplicationPhase::Ready,
-                "outbox datasource binding has not been published",
+                "outbox datasource bindings have not been published",
             )
         })
     }
@@ -1414,7 +1609,11 @@ impl nametrics_core::LegacyMetricsSource for OutboxMetricsSource {
             ),
             outbox_counter(
                 OUTBOX_QUOTA_REJECTIONS.name,
-                quota_rejections_total(self.state.outbox.get()),
+                self.state
+                    .outboxes
+                    .get()
+                    .and_then(|outboxes| outboxes.values().next())
+                    .map_or(0, |outbox| quota_rejections_total(Some(outbox))),
             ),
             outbox_counter(OUTBOX_RETENTION_ROUNDS.name, snapshot.retention_rounds),
             outbox_counter(OUTBOX_RETENTION_ARCHIVED.name, snapshot.retention_archived),
@@ -1459,6 +1658,15 @@ impl nametrics_core::LegacyMetricsSource for OutboxMetricsSource {
                 snapshot.retention_last_success_ms,
             ),
         ];
+        for (index, event_type) in OUTBOX_AGE_EVENT_TYPES.iter().enumerate() {
+            samples.push(nametrics_core::MetricSample {
+                name: OUTBOX_EVENT_AGE.name,
+                labels: vec![("event_type", (*event_type).to_owned())],
+                value: nametrics_core::MetricValue::Gauge(
+                    self.state.metrics_event_age_ms[index].load(Ordering::Relaxed) as f64 / 1000.0,
+                ),
+            });
+        }
         for lane in self.state.lanes() {
             let labels = vec![("channel", lane.channel_name().to_owned())];
             samples.push(nametrics_core::MetricSample {
@@ -1623,18 +1831,44 @@ async fn refresh_metrics_with_policy(
 ///
 /// 返回：全部数据库计数成功时发布并返回成功；任一查询失败时不改变既有缓存。
 async fn query_and_publish_metrics(state: &Arc<OutboxRuntimeState>) -> ApplicationResult<()> {
-    let outbox = state.outbox()?;
-    let (pending, dead) =
-        tokio::try_join!(outbox.pending_count(), outbox.dead_count()).map_err(|error| {
-            outbox_source_error(
-                ApplicationPhase::Running,
-                "outbox metrics snapshot query failed",
-                error,
-            )
-        })?;
+    let outboxes = state.outboxes()?;
+    let mut pending = 0u64;
+    let mut dead = 0u64;
+    let mut ages = [0u64; 3];
+    for outbox in outboxes.values() {
+        let (current_pending, current_dead) =
+            tokio::try_join!(outbox.pending_count(), outbox.dead_count()).map_err(|error| {
+                outbox_source_error(
+                    ApplicationPhase::Running,
+                    "outbox metrics snapshot query failed",
+                    error,
+                )
+            })?;
+        for (index, event_type) in OUTBOX_AGE_EVENT_TYPES.iter().enumerate() {
+            let age = outbox
+                .oldest_pending_age_ms(event_type)
+                .await
+                .map_err(|error| {
+                    outbox_source_error(
+                        ApplicationPhase::Running,
+                        "outbox age metrics query failed",
+                        error,
+                    )
+                })?;
+            ages[index] = ages[index].max(age);
+        }
+        pending = pending.saturating_add(current_pending);
+        dead = dead.saturating_add(current_dead);
+    }
     let lanes = state.lanes();
     let mut lane_pending = Vec::with_capacity(lanes.len());
     for lane in &lanes {
+        let outbox = outboxes.values().next().ok_or_else(|| {
+            outbox_error(
+                ApplicationPhase::Running,
+                "outbox datasource binding is absent",
+            )
+        })?;
         let value = outbox
             .pending_count_channel(lane.channel_name())
             .await
@@ -1646,6 +1880,9 @@ async fn query_and_publish_metrics(state: &Arc<OutboxRuntimeState>) -> Applicati
                 )
             })?;
         lane_pending.push(value);
+    }
+    for (target, age) in state.metrics_event_age_ms.iter().zip(ages) {
+        target.store(age, Ordering::Relaxed);
     }
     state.metrics_pending.store(pending, Ordering::Relaxed);
     state.metrics_dead.store(dead, Ordering::Relaxed);
@@ -1660,6 +1897,7 @@ pub(crate) struct OutboxComponent {
     settings: Option<OutboxSettings>,
     contributor: Option<ReadinessContributor>,
     critical_task: Option<ApplicationFuture<'static>>,
+    inactive_direct_client: bool,
 }
 
 impl OutboxComponent {
@@ -1673,6 +1911,7 @@ impl OutboxComponent {
             settings: None,
             contributor: None,
             critical_task: None,
+            inactive_direct_client: false,
         }
     }
 }
@@ -1704,6 +1943,22 @@ impl ApplicationComponent for OutboxComponent {
     /// 返回：配置合法且贡献项登记成功时完成；否则阻止进入 UserHook。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
+            let application = context.application();
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            if application
+                .ensure_component_declared(
+                    ComponentId::Saga,
+                    ApplicationPhase::Start,
+                    "Saga direct client Outbox isolation",
+                )
+                .is_ok()
+                && crate::saga::is_managed_direct_client(application, ApplicationPhase::Start)?
+            {
+                // direct client 没有本地 start-intent；角色门禁要求隐式 Outbox 保持空闲，不得
+                // 建表、启动 dispatcher 或要求业务提交一个无意义的发布计划。
+                self.inactive_direct_client = true;
+                return Ok(());
+            }
             let settings = read_outbox_settings(context.application(), ApplicationPhase::Start)?;
             let contributor = context.application().register_readiness(
                 ComponentId::Outbox,
@@ -1729,110 +1984,181 @@ impl ApplicationComponent for OutboxComponent {
     /// 返回：计划和数据库均可用时发布 Ready；缺失计划、探针失败或超时拒绝启动。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
+            if self.inactive_direct_client {
+                // direct client 没有持久发布计划，业务目标不能被静默丢弃后仍报告启动成功。
+                if !context
+                    .application()
+                    .outbox_runtime()
+                    .routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+                {
+                    return Err(outbox_error(
+                        ApplicationPhase::Ready,
+                        "direct Saga client has no Outbox publishing plan for business events",
+                    ));
+                }
+                return Ok(());
+            }
             let application = context.application().clone();
             let state = application.outbox_runtime();
-            let mut plan = state.take_plan()?;
+            let mut plans = state.take_plans()?;
             let settings = self.settings.clone().ok_or_else(|| {
                 outbox_error(ApplicationPhase::Ready, "outbox settings are missing")
             })?;
-            // catalog 是 datasource 与 driver 的唯一权威；先完成类型化 getter 复验，禁止 store 回退到其它默认库。
-            let outbox = create_managed_outbox(&application, &settings.datasource_ref).await?;
-            let probe_budget = context
-                .remaining()
-                .min(Duration::from_millis(settings.operation_timeout_ms));
-            tokio::time::timeout(probe_budget, outbox.pending_count())
-                .await
-                .map_err(|error| {
-                    outbox_source_error(
-                        ApplicationPhase::Ready,
-                        "outbox database probe timed out",
-                        error,
-                    )
-                })?
-                .map_err(|error| {
-                    outbox_source_error(
-                        ApplicationPhase::Ready,
-                        "outbox database probe failed",
-                        error,
-                    )
-                })?;
-
+            let mut routes = std::mem::take(
+                &mut *state
+                    .routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            // 每个业务目标必须依附一个既有事务域计划，遗漏绑定时在任何 dispatcher 启动前拒绝。
+            if routes.keys().any(|datasource| {
+                !plans.iter().any(|plan| {
+                    plan.datasource_ref
+                        .as_deref()
+                        .unwrap_or(&settings.datasource_ref)
+                        == datasource
+                })
+            }) {
+                return Err(outbox_error(
+                    ApplicationPhase::Ready,
+                    "outbox business publisher has no datasource publishing plan",
+                ));
+            }
+            for plan in &mut plans {
+                let datasource = plan
+                    .datasource_ref
+                    .as_deref()
+                    .unwrap_or(&settings.datasource_ref);
+                if let Some(routes) = routes.remove(datasource) {
+                    plan.publisher = Arc::new(RoutedOutboxPublisher {
+                        fallback: Arc::clone(&plan.publisher),
+                        routes,
+                    });
+                }
+            }
             let contributor = self.contributor.as_ref().cloned().ok_or_else(|| {
                 outbox_error(
                     ApplicationPhase::Ready,
                     "outbox readiness contributor is missing",
                 )
             })?;
-            // 通用结构合同:受信租户归因列是每笔 Outbox 写入都要落的列,其宽度上界由公开
-            // 身份合同定义,与是否启用租户配额无关。存量窄列必须在 Ready 拒绝,否则
-            // 191..=256 字节的合法租户要到第一笔业务写入才被数据库拒绝。
-            verify_outbox_schema(&outbox, &settings.datasource_ref, false)
-                .await
-                .map_err(|error| {
-                    outbox_source_error(
+            let multiple_datasources = plans.len() > 1;
+            let datasource_health = multiple_datasources.then(|| {
+                (0..plans.len())
+                    .map(|_| Arc::new(AtomicBool::new(true)))
+                    .collect::<Vec<_>>()
+            });
+            let mut prepared = Vec::with_capacity(plans.len());
+            let mut published_outboxes = BTreeMap::new();
+            let mut metric_lanes = None;
+            for mut plan in plans.drain(..) {
+                let datasource = plan
+                    .datasource_ref
+                    .clone()
+                    .unwrap_or_else(|| settings.datasource_ref.clone());
+                if multiple_datasources && (plan.channels.is_some() || plan.tenant_quotas.is_some())
+                {
+                    return Err(outbox_error(
                         ApplicationPhase::Ready,
-                        "outbox event schema is incomplete",
-                        error,
-                    )
-                })?;
-            // 配额 opt-in:Ready 时安装进程级冻结配额——安装失败(与既有配额冲突)
-            // 必须拒绝 Ready,否则写侧的预留口径会在同进程内分裂。
-            if let Some(quotas) = plan.tenant_quotas.take() {
-                install_tenant_quotas(outbox.backend, quotas).map_err(|error| {
-                    outbox_source_error(
+                        "multi-datasource Outbox plans cannot share process-wide channel routes or tenant quotas",
+                    ));
+                }
+                if published_outboxes.contains_key(&datasource) {
+                    return Err(outbox_error(
                         ApplicationPhase::Ready,
-                        "outbox tenant quotas could not be installed",
-                        error,
-                    )
-                })?;
-                // 配额依赖 tenant 归因列与账本表;迁移漏跑必须在 Ready 暴露,否则
-                // 第一轮投递才失败——那时业务写入已经在按配额受理了。
-                verify_outbox_schema(&outbox, &settings.datasource_ref, true)
+                        "outbox plans resolve to the same datasource_ref",
+                    ));
+                }
+                // 每个 datasource 都独立完成真实连接与结构门禁，任何一个失败都不能回退到默认库。
+                let outbox = create_managed_outbox(&application, &datasource).await?;
+                let probe_budget = context
+                    .remaining()
+                    .min(Duration::from_millis(settings.operation_timeout_ms));
+                tokio::time::timeout(probe_budget, outbox.pending_count())
                     .await
                     .map_err(|error| {
                         outbox_source_error(
                             ApplicationPhase::Ready,
-                            "outbox tenant quota schema is incomplete",
+                            "outbox database probe timed out",
+                            error,
+                        )
+                    })?
+                    .map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Ready,
+                            "outbox database probe failed",
                             error,
                         )
                     })?;
-            }
-            // 分片 opt-in:Ready 时安装进程级冻结路由——安装失败(与既有路由冲突)
-            // 必须拒绝 Ready,不能带着口径分裂的写侧继续启动。
-            let lanes = match plan.channels.take() {
-                Some(channel_plan) => {
-                    install_channel_routes(outbox.backend, channel_plan.routes.clone()).map_err(
-                        |error| {
+                verify_outbox_schema(&outbox, &datasource, false)
+                    .await
+                    .map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Ready,
+                            "outbox event schema is incomplete",
+                            error,
+                        )
+                    })?;
+                if let Some(quotas) = plan.tenant_quotas.take() {
+                    install_tenant_quotas(outbox.backend, quotas).map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Ready,
+                            "outbox tenant quotas could not be installed",
+                            error,
+                        )
+                    })?;
+                    verify_outbox_schema(&outbox, &datasource, true)
+                        .await
+                        .map_err(|error| {
                             outbox_source_error(
                                 ApplicationPhase::Ready,
-                                "outbox channel routes could not be installed",
+                                "outbox tenant quota schema is incomplete",
                                 error,
                             )
-                        },
-                    )?;
-                    let lanes: Vec<Arc<LaneRuntime>> = channel_plan
-                        .lanes
-                        .iter()
-                        .map(|channel| {
-                            Arc::new(LaneRuntime {
-                                channel: channel.clone(),
-                                published: AtomicU64::new(0),
-                                failed_rounds: AtomicU64::new(0),
-                                healthy: AtomicBool::new(true),
-                                pending: AtomicU64::new(0),
-                            })
-                        })
-                        .collect();
-                    state.publish_lanes(lanes.clone());
-                    Some(lanes)
+                        })?;
                 }
-                None => None,
-            };
+                let lanes = match plan.channels.take() {
+                    Some(channel_plan) => {
+                        install_channel_routes(outbox.backend, channel_plan.routes.clone())
+                            .map_err(|error| {
+                                outbox_source_error(
+                                    ApplicationPhase::Ready,
+                                    "outbox channel routes could not be installed",
+                                    error,
+                                )
+                            })?;
+                        let lanes: Vec<Arc<LaneRuntime>> = channel_plan
+                            .lanes
+                            .iter()
+                            .map(|channel| {
+                                Arc::new(LaneRuntime {
+                                    channel: channel.clone(),
+                                    published: AtomicU64::new(0),
+                                    failed_rounds: AtomicU64::new(0),
+                                    healthy: AtomicBool::new(true),
+                                    pending: AtomicU64::new(0),
+                                })
+                            })
+                            .collect();
+                        state.publish_lanes(lanes.clone());
+                        metric_lanes = Some(lanes.clone());
+                        Some(lanes)
+                    }
+                    None => None,
+                };
+                let mut datasource_settings = settings.clone();
+                datasource_settings.datasource_ref = datasource.clone();
+                published_outboxes.insert(datasource, outbox.clone());
+                prepared.push((outbox, plan, datasource_settings, lanes));
+            }
 
             // 指标源在 lane 计划冻结后注册,最坏序列数因此可精确承诺:
             // 21 个无 label family 各一条 + 每个冻结 channel lane 四条。
             let worst_case_series = OUTBOX_FIXED_METRIC_SERIES.saturating_add(
-                lanes
+                metric_lanes
                     .as_ref()
                     .map_or(0, |lanes| lanes.len())
                     .saturating_mul(OUTBOX_LANE_METRIC_SERIES),
@@ -1864,7 +2190,10 @@ impl ApplicationComponent for OutboxComponent {
                     }
                 })?;
 
-            state.publish_outbox(outbox.clone())?;
+            state.publish_outboxes(published_outboxes)?;
+            if let Some(health) = datasource_health.as_ref() {
+                state.publish_datasource_health(health.clone())?;
+            }
             // 停机保护必须先于权限发布入栈；否则后续 Ready 失败时 dispatcher 状态可能游离于
             // Application 反向清理之外，并在 transport 或数据库开始释放后继续投递。
             context.activate(Box::new(OutboxShutdown {
@@ -1876,57 +2205,79 @@ impl ApplicationComponent for OutboxComponent {
             // 保留清理与 dispatcher 在同一关键任务内并行:清理停摆只降级观测面,绝不
             // 反向终止投递;全部循环只在应用停机边界退出。启用分片时未分片 dispatcher
             // 被按 lane 循环整体取代,同进程不存在两种 claim 并行。
-            let retention = plan.retention.take();
             self.critical_task = Some(Box::pin(async move {
-                let dispatch: ApplicationFuture<'static> = match lanes {
-                    Some(lanes) => {
-                        // 每 lane 一个受监督子任务:任一 lane 循环异常终止都会把整个
-                        // 关键任务失败上抛,不允许"半死"的 dispatcher 伪装健康。
-                        let mut lane_tasks = tokio::task::JoinSet::new();
-                        for lane in lanes {
-                            lane_tasks.spawn(run_lane_dispatch_loop(
+                let mut datasource_tasks = tokio::task::JoinSet::new();
+                for (index, (outbox, mut plan, settings, lanes)) in prepared.into_iter().enumerate()
+                {
+                    let application = application.clone();
+                    let state = Arc::clone(&state);
+                    let contributor = contributor.clone();
+                    let datasource_health = datasource_health
+                        .as_ref()
+                        .and_then(|health| health.get(index))
+                        .cloned();
+                    datasource_tasks.spawn(async move {
+                        let retention = plan.retention.take();
+                        let dispatch: ApplicationFuture<'static> = match lanes {
+                            Some(lanes) => {
+                                let mut lane_tasks = tokio::task::JoinSet::new();
+                                for lane in lanes {
+                                    lane_tasks.spawn(run_lane_dispatch_loop(
+                                        application.clone(),
+                                        Arc::clone(&state),
+                                        outbox.clone(),
+                                        Arc::clone(&plan.publisher),
+                                        plan.poison_policy,
+                                        settings.clone(),
+                                        contributor.clone(),
+                                        lane,
+                                    ));
+                                }
+                                Box::pin(async move {
+                                    while let Some(joined) = lane_tasks.join_next().await {
+                                        joined.map_err(|error| {
+                                            outbox_source_error(
+                                                ApplicationPhase::Running,
+                                                "outbox lane dispatcher terminated abnormally",
+                                                error,
+                                            )
+                                        })??;
+                                    }
+                                    Ok(())
+                                })
+                            }
+                            None => Box::pin(run_dispatch_loop(
                                 application.clone(),
                                 Arc::clone(&state),
                                 outbox.clone(),
-                                Arc::clone(&plan.publisher),
-                                plan.poison_policy,
-                                settings.clone(),
-                                contributor.clone(),
-                                lane,
-                            ));
-                        }
-                        Box::pin(async move {
-                            while let Some(joined) = lane_tasks.join_next().await {
-                                joined.map_err(|error| {
-                                    outbox_source_error(
-                                        ApplicationPhase::Running,
-                                        "outbox lane dispatcher terminated abnormally",
-                                        error,
-                                    )
-                                })??;
+                                plan,
+                                settings,
+                                contributor,
+                                datasource_health,
+                            )),
+                        };
+                        match retention {
+                            Some(retention_plan) => {
+                                let retention =
+                                    run_retention_loop(application, state, outbox, retention_plan);
+                                let (dispatch_outcome, retention_outcome) =
+                                    tokio::join!(dispatch, retention);
+                                dispatch_outcome.and(retention_outcome)
                             }
-                            Ok(())
-                        })
-                    }
-                    None => Box::pin(run_dispatch_loop(
-                        application.clone(),
-                        Arc::clone(&state),
-                        outbox.clone(),
-                        plan,
-                        settings,
-                        contributor,
-                    )),
-                };
-                match retention {
-                    Some(retention_plan) => {
-                        let retention =
-                            run_retention_loop(application, state, outbox, retention_plan);
-                        let (dispatch_outcome, retention_outcome) =
-                            tokio::join!(dispatch, retention);
-                        dispatch_outcome.and(retention_outcome)
-                    }
-                    None => dispatch.await,
+                            None => dispatch.await,
+                        }
+                    });
                 }
+                while let Some(joined) = datasource_tasks.join_next().await {
+                    joined.map_err(|error| {
+                        outbox_source_error(
+                            ApplicationPhase::Running,
+                            "outbox datasource dispatcher terminated abnormally",
+                            error,
+                        )
+                    })??;
+                }
+                Ok(())
             }));
             Ok(())
         })
@@ -1997,12 +2348,16 @@ async fn run_dispatch_loop(
     plan: OutboxApplicationPlan,
     settings: OutboxSettings,
     contributor: ReadinessContributor,
+    datasource_health: Option<Arc<AtomicBool>>,
 ) -> ApplicationResult<()> {
     let mut application_states = application.subscribe_state();
-    let mut committed_appends = outbox.store.subscribe_committed_appends();
+    let mut committed_appends = outbox.store.subscribe_committed_appends(None);
     loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
+                if let Some(health) = datasource_health.as_ref() {
+                    health.store(false, Ordering::Release);
+                }
                 contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
                 return Ok(());
             }
@@ -2053,10 +2408,19 @@ async fn run_dispatch_loop(
             Ok(Err(_)) | Err(_) => false,
         };
         let delay = if healthy {
-            contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+            if let Some(health) = datasource_health.as_ref() {
+                health.store(true, Ordering::Release);
+            }
+            // 单个 datasource 恢复不能覆盖其它 dispatcher 的失败观察；只有全体健康才恢复接流。
+            if state.all_datasources_healthy() {
+                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+            }
             settings.poll_interval_ms
         } else {
             state.failed_rounds.fetch_add(1, Ordering::Relaxed);
+            if let Some(health) = datasource_health.as_ref() {
+                health.store(false, Ordering::Release);
+            }
             // 未确认的发布必须留在数据库并退避；禁止为保持 Ready 而跳过首个失败事件。
             contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
             settings.error_backoff_ms
@@ -2103,7 +2467,9 @@ async fn run_lane_dispatch_loop(
     lane: Arc<LaneRuntime>,
 ) -> ApplicationResult<()> {
     let mut application_states = application.subscribe_state();
-    let mut committed_appends = outbox.store.subscribe_committed_appends();
+    let mut committed_appends = outbox
+        .store
+        .subscribe_committed_appends(Some(&lane.channel));
     loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
@@ -2387,7 +2753,16 @@ fn read_outbox_settings(
         Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
             outbox_source_error(phase, "invalid outbox configuration section", error)
         })?,
-        None => OutboxSettings::default(),
+        None => {
+            let mut settings = OutboxSettings::default();
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            if let Some(datasource) =
+                crate::saga::managed_outbox_datasource_ref(application, phase)?
+            {
+                settings.datasource_ref = datasource;
+            }
+            settings
+        }
     };
     validate_settings(&settings, phase)?;
     Ok(settings)

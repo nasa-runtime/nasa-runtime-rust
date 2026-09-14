@@ -7,6 +7,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub use nasaga_core::{SagaPayload, SagaPayloadContract, SagaPayloadError};
+mod latency;
+pub use latency::{
+    render_saga_latency_metrics, saga_latency_snapshot, SagaLatencySnapshot, SAGA_LATENCY_BUCKETS,
+};
+mod catalog;
 mod envelope;
 mod management;
 mod observability;
@@ -30,15 +36,27 @@ mod transport_redis;
 ))]
 mod transport_shared;
 
+pub use catalog::{
+    select_capability_route, select_capability_routes, validate_capability_route_contract,
+    validate_redis_stream_route, CapabilityDescriptor, CapabilityReceipt, DefinitionActivationGate,
+    DefinitionArtifact, DefinitionCancelMode, DefinitionCatalogError, DefinitionCompensation,
+    DefinitionLifecycle, DefinitionLifecycleOperation, DefinitionPublishDisposition,
+    DefinitionRecord, DefinitionResolution, DefinitionResolutionMode, DefinitionStepArtifact,
+    DefinitionTimeoutPolicy, DynamicCatalogSnapshot, RegisteredCapability,
+    CATALOG_OBJECT_KEY_MAX_LEN,
+};
 pub use envelope::{
     canonical_bytes, derive_result_event_id, SagaCommandEnvelope, SagaResultEnvelope,
     VerifiedIdentity, COMMAND_EVENT_TYPE, RESULT_EVENT_TYPE, SAGA_AGGREGATE_TYPE,
 };
-pub use management::{SagaAuditTrail, SagaManagementContext, SagaManagementPermission};
+pub use management::{
+    SagaAuditPage, SagaAuditPageCursor, SagaAuditRecord, SagaAuditTrail, SagaManagementContext,
+    SagaManagementError, SagaManagementExpectation, SagaManagementPermission,
+};
 pub use observability::SagaOperationalMetrics;
 pub use orchestrator::{
-    HandleOutcome, Orchestrator, OrchestratorConfig, StartOutcome, StartSagaRequest,
-    TenantActionRate, TimerOutcome,
+    HandleOutcome, Orchestrator, OrchestratorConfig, SagaConcurrencyError, StartOutcome,
+    StartSagaError, StartSagaRequest, TenantActionRate, TimerOutcome,
 };
 pub use participant::{
     AuthenticatedParticipantRuntime, ParticipantCommandTrust, ParticipantHandled,
@@ -60,22 +78,23 @@ pub use transport::{
     SagaKafkaResultConsumer, SagaKafkaResultConsumerConfig,
 };
 pub use transport_auth::{
-    render_saga_http_command_dlt_metric, SagaHttpMessageAuthError, SagaHttpMessageAuthFailure,
-    SagaHttpMessageAuthenticator, SagaHttpReplayGuard, SagaHttpReplayMetricAggregate,
-    SagaHttpReplayMetrics, SagaHttpReplayPlane, SagaHttpSignedMessage,
+    render_saga_http_command_dlt_metric, SagaHttpCredentialSource, SagaHttpCredentials,
+    SagaHttpMessageAuthError, SagaHttpMessageAuthFailure, SagaHttpMessageAuthenticator,
+    SagaHttpReplayGuard, SagaHttpReplayMetricAggregate, SagaHttpReplayMetrics, SagaHttpReplayPlane,
+    SagaHttpSignedMessage,
 };
 #[cfg(feature = "grpc-transport")]
 pub use transport_grpc::{
-    outbox_disposition_of, proto as grpc_proto, SagaGrpcBindingError, SagaGrpcCommandServer,
-    SagaGrpcCommandTransportService, SagaGrpcPeerBinding, SagaGrpcPeerIdentity, SagaGrpcReceipt,
-    SagaGrpcResultServer, SagaGrpcResultTransportService,
+    orchestrator_proto, outbox_disposition_of, proto as grpc_proto, SagaGrpcBindingError,
+    SagaGrpcCommandServer, SagaGrpcCommandTransportService, SagaGrpcPeerBinding,
+    SagaGrpcPeerIdentity, SagaGrpcReceipt, SagaGrpcResultServer, SagaGrpcResultTransportService,
 };
 #[cfg(feature = "redis-stream")]
 pub use transport_redis::{
     publisher_duplicate_hints_total, safe_trim_by_group_frontier, stream_group_backlog,
     verify_stream_transport_ready, SagaRedisStreamCommandConsumer, SagaRedisStreamPublisher,
     SagaRedisStreamResultConsumer, SagaStreamAuth, SagaStreamConsumerConfig, SagaStreamPoller,
-    StreamPollReport,
+    SagaStreamVerificationKey, StreamPollReport,
 };
 #[cfg(any(
     feature = "kafka",
@@ -355,12 +374,19 @@ pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDi
 /// 业务作用：`#[saga]` 为每个本地步骤生成的静态合同投影。
 #[derive(Debug, Clone, Copy)]
 pub struct SagaStepDescriptor {
+    /// 本 handler 接受的规范媒体类型。
+    pub payload_content_type: &'static str,
+    /// 本 handler 支持的稳定 schema 身份。
+    pub payload_schema_id: &'static str,
+
     /// workflow 名称。
     pub workflow: &'static str,
     /// definition 版本。
     pub definition_version: u32,
     /// 步骤名称。
     pub step: &'static str,
+    /// 多事务域参与方使用的显式 datasource binding；单事务域可省略。
+    pub binding: Option<&'static str>,
     /// 业务 Service 类型名。
     pub service_type: &'static str,
     /// 是否可补偿。
@@ -379,6 +405,51 @@ pub struct SagaStepDescriptor {
 #[linkme::distributed_slice]
 pub static COLLECTED_SAGA_STEPS: [SagaStepDescriptor];
 
+/// 业务作用：描述一个由 `#[saga_workflow]` 登记的只读流程定义工厂。
+///
+/// 工厂只返回业务合同，不持有 Orchestrator、transport 或 Application 生命周期；来源位置只在
+/// Ready 拒绝时帮助定位同一二进制内的冲突声明。
+#[derive(Clone, Copy)]
+pub struct SagaWorkflowDescriptor {
+    /// 返回一份已经完成业务字段构造、仍需进入运行时注册校验的流程定义。
+    pub factory: fn() -> anyhow::Result<nasaga_core::WorkflowDefinition>,
+    /// 声明所在源码位置，只用于启动拒绝的低敏定位。
+    pub source: &'static str,
+}
+
+/// 当前二进制内 `#[saga_workflow]` 收集到的全部流程定义工厂。
+#[linkme::distributed_slice]
+pub static COLLECTED_SAGA_WORKFLOWS: [SagaWorkflowDescriptor];
+
+/// 业务作用：调用当前二进制内全部流程工厂，并构造不可变、按定义键去重的注册表快照。
+///
+/// 收集顺序不具备业务含义；每份 definition 自身携带完整步骤顺序。同键同摘要按幂等声明处理，
+/// 同键不同摘要拒绝启动，不能由链接顺序决定哪一份合同生效。
+///
+/// 参数说明: 无。
+///
+/// 返回：全部工厂和 definition 校验通过时返回注册表；构造失败或摘要冲突时返回带声明位置的错误。
+pub fn collect_workflow_definitions() -> anyhow::Result<DefinitionRegistry> {
+    let mut registry = DefinitionRegistry::new();
+    for descriptor in COLLECTED_SAGA_WORKFLOWS {
+        let definition = (descriptor.factory)().map_err(|error| {
+            anyhow::anyhow!(
+                "saga workflow definition factory failed at {}: {}",
+                descriptor.source,
+                error
+            )
+        })?;
+        registry.register(definition).map_err(|error| {
+            anyhow::anyhow!(
+                "saga workflow definition is invalid at {}: {}",
+                descriptor.source,
+                error
+            )
+        })?;
+    }
+    Ok(registry)
+}
+
 /// 业务作用：在 Ready 前复验本地步骤合同唯一且与 definition 一致。
 ///
 /// 参数说明：`registry` 是启动期冻结的 workflow definition 集合。
@@ -387,6 +458,12 @@ pub static COLLECTED_SAGA_STEPS: [SagaStepDescriptor];
 pub fn verify_descriptors(registry: &DefinitionRegistry) -> anyhow::Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for descriptor in COLLECTED_SAGA_STEPS {
+        nasaga_core::SagaPayloadContract {
+            content_type: descriptor.payload_content_type.to_owned(),
+            schema_id: descriptor.payload_schema_id.to_owned(),
+        }
+        .validate()?;
+
         let key = (
             descriptor.workflow,
             descriptor.definition_version,
@@ -421,7 +498,9 @@ pub fn verify_descriptors(registry: &DefinitionRegistry) -> anyhow::Result<()> {
             );
         };
         // 合同漂移在 Ready 前拒绝，避免已运行实例被不同的补偿或取消语义驱动。
-        if step_definition.compensation() != descriptor.compensation
+        if step_definition.payload_contract().content_type != descriptor.payload_content_type
+            || step_definition.payload_contract().schema_id != descriptor.payload_schema_id
+            || step_definition.compensation() != descriptor.compensation
             || step_definition.cancel_mode() != descriptor.cancel_mode
             || step_definition.resolution().allow_unknown() != descriptor.allow_unknown
             || step_definition.resolution().mode() != descriptor.resolution_mode

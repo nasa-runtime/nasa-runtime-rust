@@ -84,7 +84,7 @@ impl MySqlSagaStore {
                         }
                     }
                     // 自然键无行却冲突 = timer_id 被其它作用域占用,身份复用是禁止的。
-                    None => Err(SagaStoreError::new(
+                    None => Err(SagaStoreError::conflict(
                         "timer id collides with a different timer scope",
                     )),
                 }

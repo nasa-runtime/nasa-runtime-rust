@@ -41,24 +41,27 @@ cache = ["dep:cacheable", "dep:async-trait"]
 # Kafka：受管 producer/consumer、broker Ready、动态健康和两段停机由 napp 编排。
 kafka = ["dep:futures", "dep:nafka"]
 # Outbox：在 UserHook 接收发布端，Ready 后按 datasource driver 监督 dispatcher；可脱离 Saga 独立使用。
-outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql"]
-outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql"]
+outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql", "dep:async-trait"]
+outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql", "dep:async-trait"]
 # Inbox retention：业务显式提交保留策略后，由 Application 串行执行清理轮次并发布统一指标。
 inbox = ["db", "dep:nainbox-core", "dep:nainbox-mysql"]
 inbox-pgsql = ["db-pgsql", "dep:nainbox-core", "dep:nainbox-pgsql"]
 # Saga：在 UserHook 接收已完成业务定义装配的运行时，Ready 前执行合同与历史实例门禁，
 # 并由 Application 监督 durable timer 轮询。数据库可以由 db 组件或业务 Hook 初始化。
-saga = ["db", "inbox", "outbox", "dep:nasaga-runtime"]
-saga-pgsql = ["db-pgsql", "inbox-pgsql", "outbox-pgsql", "dep:nasaga-runtime-pgsql"]
+saga = ["db", "inbox", "outbox", "dep:nasaga-runtime", "dep:async-trait", "dep:reqwest", "dep:ncrypto", "dep:hex"]
+saga-pgsql = ["db-pgsql", "inbox-pgsql", "outbox-pgsql", "dep:nasaga-runtime-pgsql", "dep:async-trait", "dep:reqwest", "dep:ncrypto", "dep:hex"]
+# Saga Kafka 受管 transport：Saga 在 Kafka Ready 前登记消费者，并从同一 client 构造 Outbox 发布端。
+saga-kafka = ["saga", "kafka", "dep:base64", "nasaga-runtime/kafka", "nasaga-runtime-pgsql?/kafka"]
+saga-kafka-pgsql = ["saga-pgsql", "kafka", "dep:base64", "nasaga-runtime-pgsql/kafka", "nasaga-runtime?/kafka"]
 # Saga 的 Redis Streams 受管 transport:组件在 Ready 前校验拓扑/group/route owner,
 # 消费循环受 Runner 监督,停机先关领取再排空、最后由 Redis 组件释放连接。
-saga-redis-stream = ["saga", "redis", "nasaga-runtime/redis-stream", "nasaga-runtime-pgsql?/redis-stream"]
-saga-redis-stream-pgsql = ["saga-pgsql", "redis", "nasaga-runtime-pgsql/redis-stream", "nasaga-runtime?/redis-stream"]
+saga-redis-stream = ["saga", "redis", "dep:hex", "nasaga-runtime/redis-stream", "nasaga-runtime-pgsql?/redis-stream"]
+saga-redis-stream-pgsql = ["saga-pgsql", "redis", "dep:hex", "nasaga-runtime-pgsql/redis-stream", "nasaga-runtime?/redis-stream"]
 # Saga request/response transport：计划自动把框架 generated service 登记到同一 gRPC registry。
-saga-grpc = ["saga", "grpc", "nasaga-runtime/grpc-transport", "nasaga-runtime-pgsql?/grpc-transport"]
-saga-grpc-pgsql = ["saga-pgsql", "grpc", "nasaga-runtime-pgsql/grpc-transport", "nasaga-runtime?/grpc-transport"]
+saga-grpc = ["saga", "grpc", "dep:prost", "dep:http-body", "nasaga-runtime/grpc-transport", "nasaga-runtime-pgsql?/grpc-transport"]
+saga-grpc-pgsql = ["saga-pgsql", "grpc", "dep:prost", "dep:http-body", "nasaga-runtime-pgsql/grpc-transport", "nasaga-runtime?/grpc-transport"]
 # Web：自动端点收集、确定的 HTTP/1/h2c 监听与排空；无 Web 的批处理不编译路由和网络依赖。
-web = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:naweb", "dep:matchit", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
+web = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:naweb", "dep:matchit", "dep:tower", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
 # Web 安全端点：把 naweb 的 auth/crypto 组合显式编入 Application 容器路径。
 web-security = ["web", "naweb/security"]
 # scheduling：启动/关闭 `#[scheduled]` 任务；cluster 模式另需 nasched 的 nadis 适配层与 redis 组件。
@@ -78,12 +81,14 @@ scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]
 [dependencies]
 anyhow = "1"
 arc-swap = "1"
+base64 = { version = "0.22", optional = true }
 axum = { version = "0.8", optional = true }
 hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["service", "tokio"], optional = true }
 config-boot = { version = "1.0.2", optional = true }
 futures = { version = "0.3", optional = true }
 futures-util = "0.3"
+http-body = { version = "1", optional = true }
 linkme = "0.3"
 naweb = { version = "1.0.2", optional = true }
 matchit = { version = "0.8", optional = true }
@@ -93,14 +98,16 @@ nabudget = { version = "1.0.1" }
 nasecret = { version = "1.0.1" }
 naidempotency = { version = "1.0.2" }
 naauthz = { version = "1.0.2" }
-natelemetry = { version = "1.0.1" }
+natelemetry = { version = "1.0.2" }
 napart = { version = "1.1.2", optional = true }
-nagrpc = { version = "1.1.0", optional = true }
+nagrpc = { path = "../nagrpc", version = "1.1.0", optional = true }
+ncrypto = { version = "1.0.1", optional = true }
+hex = { version = "0.4", optional = true }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
 nauth-oauth = { version = "1.0.0", optional = true }
 naopenapi = { version = "1.0.1", optional = true }
 # 仅 web 特性使用：auth 组件远程拉取 `jwks_uri`；rustls-tls 对齐 rest-discovery 的 TLS 栈。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 namapper-core = { version = "1.0.0", optional = true, default-features = false }
 namapper = { version = "1.0.2", optional = true, default-features = false }
 natx = { version = "1.0.3", optional = true }
@@ -127,16 +134,18 @@ nasaga-runtime-pgsql = { version = "1.0.0", optional = true }
 nanacos = { version = "1.0.2", optional = true, default-features = false }
 nasched = { version = "1.0.1", optional = true }
 naws = { version = "1.0.1", optional = true, default-features = false }
-rest-discovery-nacos = { version = "1.0.2", optional = true, default-features = false }
+rest-discovery-nacos = { path = "../rest-discovery-nacos", version = "1.0.2", optional = true, default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "=1.52.3", features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tower-http = { version = "0.6", features = ["trace", "catch-panic", "compression-gzip"], optional = true }
+tower-http = { version = "0.6", features = ["trace", "catch-panic", "compression-gzip", "timeout"], optional = true }
+tower = { version = "0.5", features = ["limit"], optional = true }
 ipnet = { version = "2", optional = true }
 tracing = "0.1"
 rand = "0.8"
 sha2 = "0.10"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
+uuid = { version = "1", features = ["v5"] }

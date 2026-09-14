@@ -50,15 +50,18 @@ mod timer;
 
 pub use error::SagaStoreError;
 pub use nasaga_backend::{
+    validate_saga_instance_query, SAGA_INSTANCE_TIME_MAX_MS, SAGA_INSTANCE_TIME_MIN_MS,
+};
+pub use nasaga_backend::{
     ActionRateReservation, AttemptConflictFact, AttemptOutcomeRecord, AttemptStart,
     CancelAdjudication, CasOutcome, CompensationAdmission, ControlCasOutcome,
     ControlTransitionSpec, ExecuteAdmission, ExternalCancelAdmission, ManagementAuditOutcome,
     NewSagaInstance, ParticipantGateKey, QuotaReservation, ResolutionAdmission, ResolutionTarget,
     SagaConflictFactRow, SagaConflictKind, SagaControlAuditRow, SagaCreation, SagaInstanceQuery,
-    SagaInstanceRow, SagaInstanceSummary, SagaManagementAuditRow, SagaStepAttemptRow, SagaStepRow,
-    SagaStoreMetrics, SagaTimerRow, SagaTransitionAuditRow, StepJournalPatch, TimerClaimBatch,
-    TimerFencing, TimerFencingToken, TimerFencingTokenIssuer, TimerReschedule, TimerSchedule,
-    TimerScope, TimerSpec, TimerState, TransitionSpec,
+    SagaInstanceQueryParameterError, SagaInstanceRow, SagaInstanceSummary, SagaManagementAuditRow,
+    SagaStepAttemptRow, SagaStepRow, SagaStoreMetrics, SagaTimerRow, SagaTransitionAuditRow,
+    StepJournalPatch, TimerClaimBatch, TimerFencing, TimerFencingToken, TimerFencingTokenIssuer,
+    TimerReschedule, TimerSchedule, TimerScope, TimerSpec, TimerState, TransitionSpec,
 };
 
 /// 人工关闭动作在管理审计表中的稳定 action 名。

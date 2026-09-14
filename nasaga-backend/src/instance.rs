@@ -6,6 +6,14 @@ use nasaga_core::{
 
 use crate::SagaInstanceRow;
 
+/// 创建时间检索可移植到全部受支持数据库的最小 epoch 毫秒。
+pub const SAGA_INSTANCE_TIME_MIN_MS: i64 = 0;
+
+/// 创建时间检索可移植到全部受支持数据库的最大 epoch 毫秒。
+pub const SAGA_INSTANCE_TIME_MAX_MS: i64 = 32_536_771_199_999;
+
+const SAGA_INSTANCE_TIME_MAX_US: i64 = SAGA_INSTANCE_TIME_MAX_MS * 1_000 + 999;
+
 /// 业务作用：描述一次实例创建请求的全部持久化输入。
 #[derive(Debug, Clone)]
 pub struct NewSagaInstance<'a> {
@@ -23,6 +31,8 @@ pub struct NewSagaInstance<'a> {
     pub definition_digest: &'a str,
     /// 启动请求的 canonical 摘要。
     pub start_request_digest: &'a str,
+    /// 仅匹配既有无 schema JSON 实例的兼容摘要；新实例仍写入原始字节摘要。
+    pub legacy_start_request_digest: Option<&'a str>,
     /// 实例级业务 deadline；无全局期限时为空。
     pub deadline_at_ms: Option<i64>,
     /// 创建时定位的首个步骤。
@@ -40,16 +50,98 @@ pub struct NewSagaInstance<'a> {
 pub struct SagaInstanceQuery<'a> {
     /// 租户身份，强制过滤条件。
     pub tenant: &'a nasaga_core::TenantId,
+    /// workflow 名称；为空不过滤。
+    pub workflow: Option<&'a nasaga_core::WorkflowName>,
     /// 业务状态集合；为空不过滤。
     pub statuses: Option<&'a [SagaStatus]>,
     /// 创建时刻下界，含该时刻。
     pub created_from_ms: Option<i64>,
     /// 创建时刻上界，不含该时刻。
     pub created_to_ms: Option<i64>,
-    /// 上一页最后一个 saga_id；为空从首行开始。
+    /// 时间有序查询中上一页最后一行的精确创建时刻；单位为微秒，必须与 `after` 同时出现。
+    pub after_created_at_us: Option<i64>,
+    /// 上一页最后一个 saga_id；时间有序查询中与创建时刻共同组成游标。
     pub after: Option<&'a SagaId>,
-    /// 页大小，必须在 adapter 公共边界内。
+    /// 单次存储读取上限；协议层为判定下一页可请求公开页大小加一，最大为 1001。
     pub limit: u32,
+}
+
+/// 业务作用：区分实例检索参数违反的公共协议约束，供 HTTP 与数据库适配器执行同一裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SagaInstanceQueryParameterError {
+    /// 存储读取上限不在公共边界内。
+    PageSizeOutOfRange,
+    /// 时间过滤或时间游标超出数据库公共可表示范围。
+    TimeOutOfRange,
+    /// 创建时间下界晚于上界。
+    TimeWindowInverted,
+    /// 时间有序分页只提供了创建时刻或 saga_id 中的一部分。
+    CursorIncomplete,
+}
+
+impl std::fmt::Display for SagaInstanceQueryParameterError {
+    /// 业务作用：把类型化参数错误转换为不含业务数据的稳定诊断文本。
+    ///
+    /// 参数说明：`formatter` 接收标准格式化输出目标。
+    ///
+    /// 返回：写入对应公共约束的稳定文本；格式化目标失败时返回格式化错误。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PageSizeOutOfRange => "instance query fetch limit must be within 1..=1001",
+            Self::TimeOutOfRange => "instance query time is outside the portable range",
+            Self::TimeWindowInverted => "instance query time window is inverted",
+            Self::CursorIncomplete => "instance query time cursor is incomplete",
+        })
+    }
+}
+
+impl std::error::Error for SagaInstanceQueryParameterError {}
+
+/// 业务作用：在进入任一数据库前验证实例检索的公共页大小、时间范围与复合游标合同。
+///
+/// 参数说明：`query` 是协议层或内部调用方组装的完整检索条件。
+///
+/// 返回：参数在全部受支持数据库上语义一致时成功；否则返回可映射为客户端错误的类型化原因。
+pub fn validate_saga_instance_query(
+    query: &SagaInstanceQuery<'_>,
+) -> Result<(), SagaInstanceQueryParameterError> {
+    if query.limit == 0 || query.limit > 1_001 {
+        return Err(SagaInstanceQueryParameterError::PageSizeOutOfRange);
+    }
+    for timestamp in [query.created_from_ms, query.created_to_ms]
+        .into_iter()
+        .flatten()
+    {
+        if !(SAGA_INSTANCE_TIME_MIN_MS..=SAGA_INSTANCE_TIME_MAX_MS).contains(&timestamp) {
+            return Err(SagaInstanceQueryParameterError::TimeOutOfRange);
+        }
+    }
+    if query.after_created_at_us.is_some_and(|timestamp| {
+        !(SAGA_INSTANCE_TIME_MIN_MS..=SAGA_INSTANCE_TIME_MAX_US).contains(&timestamp)
+    }) {
+        return Err(SagaInstanceQueryParameterError::TimeOutOfRange);
+    }
+    if query
+        .created_from_ms
+        .zip(query.created_to_ms)
+        .is_some_and(|(from, to)| from > to)
+    {
+        return Err(SagaInstanceQueryParameterError::TimeWindowInverted);
+    }
+    let time_ordered = query.created_from_ms.is_some() || query.created_to_ms.is_some();
+    let cursor_complete = match (
+        time_ordered,
+        query.after_created_at_us.is_some(),
+        query.after.is_some(),
+    ) {
+        (true, has_time, has_id) => has_time == has_id,
+        (false, false, _) => true,
+        (false, true, _) => false,
+    };
+    if !cursor_complete {
+        return Err(SagaInstanceQueryParameterError::CursorIncomplete);
+    }
+    Ok(())
 }
 
 /// 业务作用：区分实例真实创建和业务幂等命中，决定是否允许发布首步命令。

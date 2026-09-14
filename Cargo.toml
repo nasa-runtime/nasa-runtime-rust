@@ -87,8 +87,8 @@ homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
-# 成员间依赖保持公开版本坐标，workspace patch 只统一当前工作区的 crate 身份；单 crate
-# 归档的 normalized manifest 仍解析 registry 版本，不携带根工作区 patch。
+# 成员间依赖保留公开版本约束，可同时用 path 选择本地组件；workspace patch 统一其它传递引用的
+# crate 身份。归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
 [patch.crates-io]
 # 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
 macro-support = { path = "macro-support" }

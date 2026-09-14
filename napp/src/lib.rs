@@ -15,7 +15,7 @@
 //! 当前数据库对应的 `nasaga-runtime` 或 `nasaga-runtime-pgsql` 持久合同承担。
 //!
 //! 数据库 YAML 中的 migration 段只定义执行策略。Service UserHook 通过
-//! [`Application::configure_migrations`] 登记业务嵌入的 migrator，DB Prepare 在 initializer 和入站
+//! `Application::configure_migrations` 登记业务嵌入的 migrator，DB Prepare 在 initializer 和入站
 //! listener 之前执行门禁；PostgreSQL 独立 session endpoint 还会在 advisory lock 前复验目标身份。
 //!
 //! `rate-limit` 提供共享 Redis 原子计数的跨副本业务配额。业务显式从受管 Redis source 构造 provider；
@@ -295,7 +295,11 @@ pub use runner::{ApplicationExit, ApplicationExitReason, ApplicationRunner};
 #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
 pub use saga::SagaRedisTransportPlan;
 #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
-pub use saga::{SagaApplicationPlan, SagaHandle};
+pub use saga::{
+    SagaApplicationPlan, SagaHandle, SagaOrchestratorHandle, SagaPlanMode, SagaRemoteClient,
+    SagaRemoteSnapshot, SagaRemoteStartDisposition, SagaRemoteStartReceipt, SagaRemoteStartRequest,
+    SagaRole,
+};
 pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal};
 pub use spec::ApplicationSpec;
 #[cfg(feature = "web")]

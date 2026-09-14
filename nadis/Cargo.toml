@@ -46,8 +46,8 @@ cron = { version = "0.15", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
 # 触发引擎的命名时区解析（如 "UTC"、"Asia/Shanghai"）；仅 job feature 启用。
 chrono-tz = { version = "0.10", optional = true }
-nabase = { package = "nabase", version = "1.0.1" }
-nadis-derive = { package = "nadis-derive", version = "1.0.0", optional = true }
+nabase = { path = "../nabase", package = "nabase", version = "1.0.1" }
+nadis-derive = { path = "../nadis-derive", package = "nadis-derive", version = "1.0.0", optional = true }
 redis = { version = "1", features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -59,7 +59,7 @@ thiserror = "1"
 futures = "0.3"
 tracing = "0.1"
 # 手工触发在环境链路作用域内记录 trace_id 与派生 run_id 的关联；wire 与共享 Lua 不携带 trace。
-natelemetry = { version = "1.0.2", optional = true }
+natelemetry = { path = "../natelemetry", version = "1.0.2", optional = true }
 uuid = { version = "1", features = ["v4"] }
 # nonce 幂等计数的跨语言账本身份与 canonical slot token 摘要；与 Java SHA-256 逐字节一致。
 sha2 = "0.10"

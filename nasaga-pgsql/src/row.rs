@@ -77,6 +77,10 @@ pub(crate) fn parse_instance_summary(row: &PgRow) -> Result<SagaInstanceSummary,
     let direction: String = row.try_get("direction").map_err(map_database)?;
     let current_step: Option<String> = row.try_get("current_step").map_err(map_database)?;
     Ok(SagaInstanceSummary {
+        definition_digest: row.try_get("definition_digest").map_err(map_database)?,
+        control_version: row_u64(row, "control_version")?,
+        deadline_at_ms: row.try_get("deadline_at_ms").map_err(map_database)?,
+        traceparent: row.try_get("traceparent").map_err(map_database)?,
         saga_id: SagaId::new(saga_id).map_err(|_| corrupt("saga_id"))?,
         tenant: TenantId::new(tenant).map_err(|_| corrupt("tenant_id"))?,
         workflow: WorkflowName::new(workflow).map_err(|_| corrupt("workflow_name"))?,
@@ -93,6 +97,7 @@ pub(crate) fn parse_instance_summary(row: &PgRow) -> Result<SagaInstanceSummary,
         version: row_u64(row, "version")?,
         failure_code: row.try_get("failure_code").map_err(map_database)?,
         created_at_ms: row.try_get("created_at_ms").map_err(map_database)?,
+        created_at_cursor_us: row.try_get("created_at_cursor_us").map_err(map_database)?,
         updated_at_ms: row.try_get("updated_at_ms").map_err(map_database)?,
     })
 }

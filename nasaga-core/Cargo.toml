@@ -12,7 +12,9 @@ keywords = ["saga", "workflow", "compensation", "microservices", "state-machine"
 categories = ["asynchronous"]
 
 # 本 crate 是纯逻辑层：不依赖 MySQL、Kafka 或任何运行时，store 与 transport 由上层通过 trait 注入。
-# 依赖只保留确定性派生所需的摘要与 UUIDv5 能力，保证同一输入在任何进程算出同一身份。
+# 摘要、身份派生与正文编码保持纯计算，不依赖数据库或 transport。
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v5"] }

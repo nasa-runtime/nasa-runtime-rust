@@ -4,7 +4,7 @@
 //!
 //! 1. **创建是受保护事务**：实例 INSERT 与 `NONE -> RUNNING` 初始 transition 在同一
 //!    ambient 事务内落库，调用方在同一事务里追加首步命令 Outbox、durable timer 与 Audit，
-//!    全部原子 COMMIT。唯一键冲突时只返回已存在实例，绝不重复发布首步命令。
+//!    全部原子 COMMIT。唯一键冲突时复核实例身份与业务摘要，只为同一业务意图返回已有实例。
 //! 2. **推进走数据库 CAS**：`UPDATE ... WHERE version = ? AND status = ? AND control_state = 'ACTIVE'`
 //!    影响为 0 表示状态已被其它副本推进、结果已过期或已被暂停，调用方必须重新读取并按幂等规则裁决，
 //!    不得继续用旧快照写 Outbox。`transition_seq` 直接取 CAS 推进后的 `version`。
@@ -15,8 +15,8 @@ use crate::row::{
 };
 use crate::PgSagaStore;
 use nasaga_backend::{
-    CasOutcome, ControlCasOutcome, ControlTransitionSpec, ManagementAuditOutcome, NewSagaInstance,
-    SagaCreation, SagaInstanceQuery, TransitionSpec,
+    validate_saga_instance_query, CasOutcome, ControlCasOutcome, ControlTransitionSpec,
+    ManagementAuditOutcome, NewSagaInstance, SagaCreation, SagaInstanceQuery, TransitionSpec,
 };
 use nasaga_core::{
     check_transition, ControlState, Direction, SagaId, SagaStatus, StepName, TransitionGuard,
@@ -47,21 +47,25 @@ impl PgSagaStore {
     ///
     /// 在当前 ambient 事务内写入 `status = RUNNING, version = 1` 的实例行与
     /// `transition_seq = 1, NONE -> RUNNING` 的初始 transition；业务幂等键
-    /// `UNIQUE(tenant_id, workflow_name, business_key)` 冲突时不创建第二个实例，
-    /// 只查询并返回已存在实例。
+    /// `UNIQUE(tenant_id, workflow_name, business_key)` 冲突时不创建第二个实例。
+    /// 锁定读取优先复核请求 saga_id；身份已属于其它业务意图时拒绝，否则按业务键和摘要裁决重复。
     ///
     /// 参数说明：
     /// - `spec`: 创建请求的全部持久化输入。
     ///
     /// 返回：真实创建返回 [`SagaCreation::Created`]，调用方必须在**同一事务**内补齐
     /// 首步命令 Outbox、durable timer 与 Audit；幂等命中返回 [`SagaCreation::Existing`]，
-    /// 调用方不得再产生任何创建副作用。事务缺失、摘要/触发身份非法或底层失败返回错误。
+    /// 调用方不得再产生任何创建副作用。实例身份或请求摘要冲突时拒绝；事务缺失、
+    /// 摘要/触发身份非法或底层失败返回错误，不能把数据库失败解释为成功收据。
     pub async fn create_instance(
         &self,
         spec: &NewSagaInstance<'_>,
     ) -> Result<SagaCreation, SagaStoreError> {
         validate_digest(spec.definition_digest)?;
         validate_digest(spec.start_request_digest)?;
+        if let Some(digest) = spec.legacy_start_request_digest {
+            validate_digest(digest)?;
+        }
         validate_trigger_id(spec.trigger_id)?;
         if let Some(traceparent) = spec.traceparent {
             validate_traceparent(traceparent)?;
@@ -96,23 +100,60 @@ impl PgSagaStore {
         .await
         .map_err(map_database)?;
 
-        // 任一唯一键未插入时，必须用业务唯一键重读区分幂等命中与 saga_id 身份冲突。
+        // 两种唯一键可能分别命中不同实例；先核对请求身份，不能让业务键命中掩盖身份占用。
         if inserted.rows_affected() == 0 {
-            // natx 事务槽锁不可重入:必须先归还本方法持有的连接,
-            // 嵌套查询才能重新取得同一事务连接,否则自死锁。
-            drop(connection);
-            let existing = self
-                .find_instance(spec.tenant, spec.workflow, spec.business_key)
-                .await?
-                .ok_or_else(|| {
-                    // 业务幂等键查不到但插入仍冲突,说明 saga_id 与其它业务意图撞车,
-                    // 这是身份生成被破坏的信号,不能当作幂等命中静默吸收。
-                    SagaStoreError::new("saga_id collides with a different business intent")
-                })?;
+            // 唯一键等待后在原事务中锁定可见事实；共享锁保持身份稳定，
+            // 并允许同一请求的并发重放共同取得收据，隔离级别拒绝读取时继续保留数据库错误。
+            let mut identity_query =
+                sqlx::QueryBuilder::<sqlx::Postgres>::new(SELECT_INSTANCE_BY_ID_SQL);
+            let by_id = identity_query
+                .push(" FOR SHARE")
+                .build()
+                .bind(spec.saga_id.as_str())
+                .fetch_optional(connection.as_mut())
+                .await
+                .map_err(map_database)?;
+            let existing = if let Some(row) = by_id {
+                let existing = parse_instance_row(&row)?;
+                // saga_id 是全局持久身份；其它租户或业务槽位的占用只能返回冲突，不能返回其快照。
+                if existing.tenant != *spec.tenant
+                    || existing.workflow != *spec.workflow
+                    || existing.business_key != *spec.business_key
+                {
+                    return Err(SagaStoreError::conflict(
+                        "saga_id collides with a different business intent",
+                    ));
+                }
+                existing
+            } else {
+                // 未占用的传输身份允许重放原业务意图，但业务行也必须保持到当前事务结束。
+                let mut business_query =
+                    sqlx::QueryBuilder::<sqlx::Postgres>::new(SELECT_INSTANCE_BY_BUSINESS_SQL);
+                let row = business_query
+                    .push(" FOR SHARE")
+                    .build()
+                    .bind(spec.tenant.as_str())
+                    .bind(spec.workflow.as_str())
+                    .bind(spec.business_key.as_str())
+                    .fetch_optional(connection.as_mut())
+                    .await
+                    .map_err(map_database)?
+                    .ok_or_else(|| {
+                        // 冲突后没有可核验的持久事实，不能推断成功或签发另一实例的收据。
+                        SagaStoreError::conflict(
+                            "creation conflict has no matching business intent",
+                        )
+                    })?;
+                parse_instance_row(&row)?
+            };
             // business_key 只证明“同一业务槽位”，不能证明调用参数相同；摘要不一致
             // 若仍按幂等成功返回，会让调用方误以为新 payload/deadline 已被接受。
-            if existing.start_request_digest.as_deref() != Some(spec.start_request_digest) {
-                return Err(SagaStoreError::new(
+            if existing.start_request_digest.as_deref() != Some(spec.start_request_digest)
+                && !spec
+                    .legacy_start_request_digest
+                    .is_some_and(|digest| existing.start_request_digest.as_deref() == Some(digest))
+            {
+                return Err(SagaStoreError::conflict(
                     "business idempotency key was reused with a different start request",
                 ));
             }
@@ -178,33 +219,24 @@ impl PgSagaStore {
         self.list_non_terminal_after(None, limit).await
     }
 
-    /// 业务作用：租户受限的实例只读检索——按状态集合与创建时间窗过滤，saga_id keyset
-    /// 分页，服务运维定位待处置对象（此前只能直连数据库）。
+    /// 业务作用：租户受限的实例只读检索——按 workflow、状态集合与创建时间窗过滤，
+    /// saga_id keyset 分页，服务运维定位待处置对象（此前只能直连数据库）。
     ///
     /// 查询是纯读动作：不携带 payload，不改变任何状态；租户过滤在 SQL 层强制，
-    /// 不同租户的实例存在性不经本查询泄漏。全部可选条件以恒绑定参数表达
-    /// （`COALESCE`/哨兵值），避免动态拼接 SQL。
+    /// 不同租户的实例存在性不经本查询泄漏。SQL 结构只由封闭的条件组合决定，全部业务值
+    /// 仍使用绑定参数；时间查询沿 `(created_at, saga_id)` 复合索引顺序推进。
     ///
     /// 参数说明：
-    /// - `query`: 租户、状态集合、创建时间窗、cursor 与页大小。
+    /// - `query`: 租户、workflow、状态集合、创建时间窗、cursor 与页大小。
     ///
-    /// 返回：满足条件的实例摘要，按 saga_id 升序；页大小非法返回错误。
+    /// 返回：无时间条件时按 saga_id 升序；有时间条件时按创建时刻、saga_id 升序；公共参数
+    /// 约束或数据库读取失败时返回错误。
     pub async fn list_instances(
         &self,
         query: &SagaInstanceQuery<'_>,
     ) -> Result<Vec<SagaInstanceSummary>, SagaStoreError> {
-        if query.limit == 0 || query.limit > 1_000 {
-            return Err(SagaStoreError::new(
-                "instance query page size must be within 1..=1000",
-            ));
-        }
-        if let (Some(from), Some(to)) = (query.created_from_ms, query.created_to_ms) {
-            if from > to {
-                return Err(SagaStoreError::new(
-                    "instance query time window is inverted",
-                ));
-            }
-        }
+        validate_saga_instance_query(query)
+            .map_err(|error| SagaStoreError::new(error.to_string()))?;
         // 状态集合来自封闭枚举的稳定文本,逗号拼接后交由 PostgreSQL 数组比对;不存在把任意
         // 文本拼进语句的通道。
         let statuses = query.statuses.map(|set| {
@@ -216,28 +248,66 @@ impl PgSagaStore {
         let mut connection = natx_pgsql::conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        let rows = sqlx::query(
+        let has_time_window = query.created_from_ms.is_some() || query.created_to_ms.is_some();
+        let mut statement = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
-             status, control_state, direction, current_step, version, failure_code, \
+             status, control_state, control_version, definition_digest, deadline_at AS deadline_at_ms, traceparent, direction, current_step, version, failure_code, \
              (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at_ms, \
+             (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT AS created_at_cursor_us, \
              (EXTRACT(EPOCH FROM updated_at) * 1000)::BIGINT AS updated_at_ms \
-             FROM saga_instance \
-             WHERE tenant_id = $1 \
-             AND saga_id > COALESCE($2, '') \
-             AND ($3::BIGINT IS NULL OR created_at >= to_timestamp($3 / 1000.0)) \
-             AND ($4::BIGINT IS NULL OR created_at < to_timestamp($4 / 1000.0)) \
-             AND ($5::TEXT IS NULL OR status = ANY(string_to_array($5, ','))) \
-             ORDER BY saga_id ASC LIMIT $6",
-        )
-        .bind(query.tenant.as_str())
-        .bind(query.after.map(SagaId::as_str))
-        .bind(query.created_from_ms)
-        .bind(query.created_to_ms)
-        .bind(statuses.as_deref())
-        .bind(i64::from(query.limit))
-        .fetch_all(connection.as_mut())
-        .await
-        .map_err(map_database)?;
+             FROM saga_instance WHERE tenant_id = ",
+        );
+        statement.push_bind(query.tenant.as_str());
+        if let Some(workflow) = query.workflow {
+            statement
+                .push(" AND workflow_name = ")
+                .push_bind(workflow.as_str());
+        }
+        if has_time_window {
+            if let (Some(after_created_at_us), Some(after)) =
+                (query.after_created_at_us, query.after)
+            {
+                statement
+                    .push(" AND (created_at, saga_id) > (to_timestamp(")
+                    .push_bind(after_created_at_us)
+                    .push(" / 1000000.0), ")
+                    .push_bind(after.as_str())
+                    .push(")");
+            }
+        } else {
+            statement
+                .push(" AND saga_id > ")
+                .push_bind(query.after.map(SagaId::as_str).unwrap_or(""));
+        }
+        if let Some(created_from_ms) = query.created_from_ms {
+            statement
+                .push(" AND created_at >= to_timestamp(")
+                .push_bind(created_from_ms)
+                .push(" / 1000.0)");
+        }
+        if let Some(created_to_ms) = query.created_to_ms {
+            statement
+                .push(" AND created_at < to_timestamp(")
+                .push_bind(created_to_ms)
+                .push(" / 1000.0)");
+        }
+        if let Some(statuses) = statuses.as_deref() {
+            statement
+                .push(" AND status = ANY(string_to_array(")
+                .push_bind(statuses)
+                .push(", ','))");
+        }
+        if has_time_window {
+            statement.push(" ORDER BY created_at ASC, saga_id ASC LIMIT ");
+        } else {
+            statement.push(" ORDER BY saga_id ASC LIMIT ");
+        }
+        statement.push_bind(i64::from(query.limit));
+        let rows = statement
+            .build()
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?;
         rows.iter().map(parse_instance_summary).collect()
     }
 
@@ -552,7 +622,7 @@ impl PgSagaStore {
                 || prior_actor != spec.actor
                 || prior_reason != spec.reason
             {
-                return Err(SagaStoreError::new(
+                return Err(SagaStoreError::conflict(
                     "control operation id was reused with different audit facts",
                 ));
             }
@@ -646,7 +716,7 @@ impl PgSagaStore {
             let prior_actor: String = prior.try_get("actor").map_err(map_database)?;
             let prior_reason: String = prior.try_get("reason").map_err(map_database)?;
             if prior_action != action || prior_actor != actor || prior_reason != reason {
-                return Err(SagaStoreError::new(
+                return Err(SagaStoreError::conflict(
                     "management operation id was reused with different audit facts",
                 ));
             }

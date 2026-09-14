@@ -53,8 +53,45 @@ datasources:
 outbox:
   datasource_ref: workflow
 saga:
+  role: orchestrator
+  plan_mode: managed
+  service_identity: checkout-orchestrator
+  replica_identity: ${SAGA_REPLICA_ID}
   database_bootstrap: application
-  datasource_ref: workflow
+  orchestrator:
+    datasource_ref: workflow
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: workflow
+    activation_policy: validated
+    watch_interval_ms: 500
+    capability_registry_ref: saga-participant-capabilities
+    publisher_authorization_policy_ref: saga-definition-publishers
+  api:
+    page_token_key_ref: saga-api-page-token
+    http:
+      enabled: true
+      authorization_policy_ref: checkout-saga-http-rbac
+      callers:
+        order-api:
+          credential_ref: saga-order-client
+          tenants: [system]
+          permissions: [start, read]
+  transport:
+    address_policies:
+      saga-participant-routing:
+        http_schemes: [https]
+        http_hosts: [inventory.internal, payment.internal]
+        http_ports: [443]
+    command_result:
+      kind: http
+      http:
+        shared_replay_claim: saga-http-replay
+        command_credential_ref: saga-command
+        result_credential_ref: saga-result
+        routing:
+          mode: capability-registry
+          address_policy_ref: saga-participant-routing
 
 redis:
   properties:
@@ -151,25 +188,43 @@ YAML 中的 `migrations` 只定义门禁策略；Service 仍需在 UserHook 用
 会在 advisory lock 前复验目标身份。完整入口与 Batch 边界见
 [napp 的业务 migration 登记章节](napp/README.md#业务-migration-登记)。
 
-## 持久化 Saga 编排
+## 声明式受管 Saga
 
-本仓库提供面向生产故障语义的 Saga：用**本地 ACID + Outbox 至少一次 + Inbox 幂等 + 持久化状态机 +
-显式补偿**协调跨服务业务步骤。核心价值不是把远端调用包装成“分布式事务”，而是让进程崩溃、消息重投、
-结果未知和多副本竞争都收敛到可恢复、可审计的数据库事实。
+声明 Saga 组件后，Application 根据受信配置中的 saga.role 构造互斥运行角色。orchestrator 拥有全局实例、
+journal、timer、result Inbox 与 command Outbox；participant 只拥有本地 command Inbox、gate、业务事实
+与 result Outbox；client 只获得远程 start/query 能力，启用 reliable_start 时才创建本地 start-intent
+Outbox。业务 main 不构造 DefinitionRegistry、Orchestrator、SagaApplicationPlan 或 dispatcher。
+
+managed 数据面支持 HTTP、gRPC、Kafka 与 Redis Streams。Application 按角色自动构造 publisher、
+consumer、Inbox/Outbox、DLT、健康门禁与停机排空；HTTP 和 gRPC 还提供标准 start、get、query、audit、
+管理、Definition Registry 与 metrics API。参与方从已链接的 `#[saga]` descriptor 构造 handler，并通过
+独立 Registry 控制面自动续租 capability；HTTP descriptor 发布逐实例 `effective_saga_base_path`，其它
+数据面发布各自的 topic、stream 或 mTLS endpoint。route generation 由 Catalog 数据库在 capability
+主键行锁内单调分配并随登记收据回传，不使用参与方墙上时钟。流程所有者通过
+`#[nasa::saga_workflow]` 提供完整、
+有序且不可变的 definition，`napp` 使用独立 Ed25519 私钥形成 seal 并自动发布，Orchestrator YML 不枚举
+workflow、step 或 participant owner。
 
 ```text
-Orchestrator DB                    Participant DB
-Inbox + CAS/journal + timer        Inbox + gate + business fact
-          │                                      │
-          └─ command Outbox → transport → result Outbox ─┘
+workflow owner ── definition seal ──→ 持久 Definition Catalog
+participant ── capability lease ────→ owner/实例/path 路由
+                                            │
+client start-intent Outbox ──→ Orchestrator DB ── command Outbox
+                                            │             │
+                                            └─ result ← participant 本地事务
 ```
 
-流程定义摘要、稳定 `effect_id`、取消/裁决屏障、冻结补偿计划和 timer fencing 共同阻止定义漂移、重复
-副作用、未知结果误补偿与失权副本继续写入。Kafka 和 Redis Streams 提供受管消费接入；HTTP 可复用认证
-构件；gRPC 提供框架 generated command/result service、mTLS 身份绑定与封闭收据。Saga 不提供跨服务
-ACID、物理 exactly-once 或并发隔离，
-业务资源竞争仍需唯一键、条件更新或语义锁。接入入口见 [Saga 快速开始](docs/quickstart.md#saga-最小接线)，
-完整架构、迁移、运维与恢复边界见 [Saga 生产运行指南](docs/saga-production.md)。
+每次本地事务明确提交后，只发送按 driver、datasource_ref 与 lane 限定的轻量唤醒；统一 dispatcher
+仍按数据库中的最早持久前缀、claim、退避和收据规则投递，周期扫描只承担漏信号、跨进程写入和崩溃
+恢复。HTTP/gRPC 只有 Committed 或 Duplicate 允许 Outbox 前移，Kafka 需要 broker ACK，Redis Streams
+需要 XADD 收据；任何网络结果不明都保留原事件。
+
+nasaga-runtime-core 同时发布内部 saga_transport.proto 与业务 API saga_orchestrator.proto，并导出
+generated Rust 模块。capability/definition Registry 协议与 command/result 数据面彼此独立，因此 Kafka
+或 Redis Streams 数据面也可以选 HTTP 或 gRPC 作为控制面。Saga 不提供跨服务 ACID、物理 exactly-once
+或并发业务隔离。
+业务资源竞争仍需唯一键、条件更新或语义锁。配置与失败边界见 [napp Saga 受管模式](napp/README.md#saga-受管模式)，
+状态机与恢复语义见 [Saga 生产运行指南](docs/saga-production.md)。
 
 ## 稳定基础设施运行合同
 
@@ -407,14 +462,14 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | MySQL 事务 | `tx` | `nasa::tx::{transactional, run}` |
 | PostgreSQL 事务 | `tx-pgsql` | `nasa::tx::pgsql::{transactional, run}`；与 `application` 组合时启用 PostgreSQL 数据源生命周期 |
 | Saga 纯合同 | `saga` | `nasa::saga::{WorkflowDefinition, SagaOutcome}` |
-| Saga MySQL Runtime | `saga-runtime` | `nasa::saga::{Orchestrator, ParticipantRuntime, saga}`、`nasa::application::SagaApplicationPlan` |
-| Saga PostgreSQL Runtime | `saga-runtime-pgsql` | `nasa::saga::pgsql::{PgOrchestrator, PgParticipantRuntime, saga}`、同一 `SagaApplicationPlan` 生命周期 |
-| Saga Kafka command/result 托管 | `saga-kafka` | `nasa::saga::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
-| Saga PostgreSQL Kafka 托管 | `saga-kafka-pgsql` | `nasa::saga::pgsql::{SagaKafkaCommandConsumer, SagaKafkaResultConsumer}` |
+| Saga MySQL Runtime | `saga-runtime` | managed `#[nasa::application("saga", "web")]`、`SagaHandle`、`#[saga]`、`#[saga_workflow]` |
+| Saga PostgreSQL Runtime | `saga-runtime-pgsql` | 与 MySQL 相同的 managed 角色和四种数据面合同，数据源使用 PostgreSQL |
+| Saga Kafka 数据面 | `saga-kafka` | 受管 command/result topic、consumer、publisher、broker ACK 与耐久 DLT；也保留 custom connector |
+| Saga PostgreSQL Kafka 数据面 | `saga-kafka-pgsql` | PostgreSQL 角色使用相同受管 Kafka 合同 |
 | Saga Redis Streams command/result 托管 | `saga-redis-stream` | `SagaRedisStreamPublisher`、`SagaRedisStreamCommandConsumer`、`SagaRedisStreamResultConsumer` |
 | Saga PostgreSQL Redis Streams 托管 | `saga-redis-stream-pgsql` | `nasa::saga::pgsql` 下相同 transport 类型 |
-| Saga gRPC command/result transport | `saga-grpc` | `SagaApplicationPlan::with_grpc_command_service` / `with_grpc_result_service`、generated client、mTLS 身份绑定与封闭收据 |
-| Saga PostgreSQL gRPC transport | `saga-grpc-pgsql` | `with_pgsql_grpc_command_service` / `with_pgsql_grpc_result_service` |
+| Saga gRPC 协议与数据面 | `saga-grpc` | 两份原始 proto、generated client/server、mTLS 主体绑定、health 探测、封闭收据与受管装配 |
+| Saga PostgreSQL gRPC 数据面 | `saga-grpc-pgsql` | PostgreSQL 角色使用相同受管 gRPC 合同 |
 | 消费去重 Inbox | `inbox` | `nasa::inbox::MySqlInbox` |
 | PostgreSQL 消费去重 Inbox | `inbox-pgsql` | `nasa::inbox::pgsql::PgInbox` |
 | 受管事务 Outbox | `outbox` | `nasa::application::{OutboxApplicationPlan, OutboxHandle}` |
@@ -495,13 +550,50 @@ database:               # db 组件，多库使用 datasources.<name>
   url: ${APP_MYSQL_URL}
   max_connections: 16
 
-saga:                   # saga 组件；发布端由 SagaApplicationPlan 注入
+saga:                   # saga 组件；managed 模式由 Application 装配运行时与协议端点
+  role: orchestrator
+  plan_mode: managed
   database_bootstrap: application
-  datasource_ref: default
-  timer_poll_interval_ms: 500
-  timer_error_backoff_ms: 1000
-  timer_operation_timeout_ms: 5000
-  timer_failure_threshold: 3
+  service_identity: checkout-orchestrator
+  replica_identity: checkout-orchestrator-1
+  orchestrator:
+    datasource_ref: default
+    timer_poll_interval_ms: 500
+    timer_error_backoff_ms: 1000
+    timer_operation_timeout_ms: 5000
+    timer_failure_threshold: 3
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: default
+    activation_policy: validated
+    watch_interval_ms: 500
+    capability_registry_ref: saga-participant-capabilities
+    publisher_authorization_policy_ref: saga-definition-publishers
+  api:
+    page_token_key_ref: saga-api-page-token
+    http:
+      enabled: true
+      authorization_policy_ref: checkout-saga-http-rbac
+      callers:
+        order-api:
+          credential_ref: saga-order-client
+          tenants: [system]
+          permissions: [start, read]
+  transport:
+    address_policies:
+      saga-participant-routing:
+        http_schemes: [https]
+        http_hosts: [inventory.internal, payment.internal]
+        http_ports: [443]
+    command_result:
+      kind: http
+      http:
+        shared_replay_claim: saga-http-replay
+        command_credential_ref: saga-command
+        result_credential_ref: saga-result
+        routing:
+          mode: capability-registry
+          address_policy_ref: saga-participant-routing
 
 outbox:                 # outbox 组件，也由 saga 隐式纳入
   datasource_ref: default

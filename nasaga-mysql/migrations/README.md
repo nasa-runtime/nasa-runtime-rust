@@ -22,6 +22,12 @@
     仅观测模式同样依赖该表记账）
 13. Orchestrator 数据库执行 `saga_tenant_action_rate.up.sql`（须先于配置任何租户的管理
     动作速率上限;未配置速率的部署不读写该表）
+14. Orchestrator 数据库执行 `saga_global_audit_event.up.sql`（先创建按 Saga 隔离的提交 guard、统一事件表
+    与 trigger，再按稳定顺序取得待回填 Saga 的 guard，在同一事务内生成存量审计当前快照；须先于启用
+    全局 `audit_seq` 分页的二进制）
+15. Orchestrator 数据库执行 `saga_instance_management_query_indexes.up.sql`（须先于开放实例列表 API，
+    使租户 keyset 分页、可选 workflow、状态集合及稀疏创建时间窗均有匹配索引；状态集合按状态分别
+    有界读取并合并，因此四组 tenant/status 前导索引均属于查询合同）
 
 配额上限的启用纪律（存量库）：账本带初始化标记，仅 `reconcile_tenant_quota` 在事务内
 置位。给某租户配置上限前必须依次完成——① 全部写入方升级到记账版本（创建预留、终态释放
@@ -80,8 +86,9 @@ Orchestrator 与参与方的 raw binary collation SQL 只适用于停写维护�
 ## 回退边界
 
 `.down.sql` 只描述 binary 回退后的结构恢复步骤，不是日常自动回滚。删除
-`saga_control_transition`、`saga_management_audit` 或 `saga_conflict_fact` 会丢失控制操作幂等、主体
-归因或人工介入证据；执行前必须导出相关事实，并确认 replay horizon 内不会再接收对应 operation。
+`saga_control_transition`、`saga_management_audit`、`saga_conflict_fact`、`saga_audit_event` 或其 stream
+guard 会丢失控制操作幂等、主体归因、人工介入证据、全局断点位置或提交顺序门禁；执行前必须导出相关
+事实，并确认 replay horizon 内不会再接收对应 operation。
 
 任何迁移动作都不得输出连接凭据、业务 payload 或完整业务键。部署日志只记录迁移文件、目标逻辑库、
 批准单号、起止时间、影响行数和脱敏错误分类。

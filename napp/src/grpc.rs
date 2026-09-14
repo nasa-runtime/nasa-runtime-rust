@@ -166,7 +166,7 @@ impl Default for GrpcTlsSettings {
 
 /// Start 阶段已校验的 TLS locator 与时间边界；真实材料延迟到 Ready 从同代 secret 快照取得。
 #[derive(Clone)]
-struct GrpcTlsPlan {
+pub(crate) struct GrpcTlsPlan {
     mode: GrpcTlsMode,
     certificate_id: Arc<str>,
     private_key_id: Arc<str>,
@@ -503,6 +503,7 @@ fn valid_secret_locator_id(value: &str) -> bool {
 }
 
 /// Ready 阶段已复验的 TLS 时间事实；不包含任何 PEM 或 secret locator。
+#[derive(Clone)]
 struct PreparedTlsCertificate {
     expiry_timestamp: u64,
     warning_window: Duration,
@@ -520,6 +521,17 @@ fn prepare_tls_identity(
     plan: &GrpcTlsPlan,
     secrets: &nasecret::SecretSnapshot,
 ) -> ApplicationResult<(nagrpc::GrpcTlsIdentity, PreparedTlsCertificate)> {
+    prepare_tls_identity_with_ca(plan, secrets, &[])
+}
+
+/// 业务作用：用同代服务端身份和仍在重叠窗口内的客户端 CA 构造握手资源。
+/// 参数说明：`plan` 固定 TLS 边界，`secrets` 为同代材料，`previous_ca` 为获准暂存的旧信任根。
+/// 返回：身份、时间政策和 CA 均合法时返回完整身份与到期事实；任一材料非法时拒绝候选。
+fn prepare_tls_identity_with_ca(
+    plan: &GrpcTlsPlan,
+    secrets: &nasecret::SecretSnapshot,
+    previous_ca: &[Vec<u8>],
+) -> ApplicationResult<(nagrpc::GrpcTlsIdentity, PreparedTlsCertificate)> {
     let certificate = read_tls_secret(secrets, &plan.certificate_id)?;
     let private_key = read_tls_secret(secrets, &plan.private_key_id)?;
     let identity = match plan.mode {
@@ -531,7 +543,11 @@ fn prepare_tls_identity(
                     "gRPC mutual TLS client CA was not prepared",
                 )
             })?;
-            let client_ca = read_tls_secret(secrets, client_ca_id)?;
+            let mut client_ca = read_tls_secret(secrets, client_ca_id)?;
+            for ca in previous_ca {
+                client_ca.push(b'\n');
+                client_ca.extend_from_slice(ca);
+            }
             nagrpc::GrpcTlsIdentity::mutual(certificate, private_key, client_ca)
         }
         GrpcTlsMode::Disabled => {
@@ -567,6 +583,117 @@ fn prepare_tls_identity(
     ))
 }
 
+/// 业务作用：保存服务端 TLS 候选及旧 CA 的到期边界，请求路径只选择已完成校验的握手器。
+#[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+pub(crate) struct RotatingGrpcTlsSnapshot {
+    #[cfg(feature = "nacos-config")]
+    plan: GrpcTlsPlan,
+    secrets: Arc<nasecret::SecretSnapshot>,
+    current: nagrpc::GrpcTlsAcceptor,
+    certificate: PreparedTlsCertificate,
+    previous_ca: Vec<(Vec<u8>, std::time::Instant)>,
+    overlap_acceptors: Vec<(std::time::Instant, nagrpc::GrpcTlsAcceptor)>,
+}
+
+#[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+impl RotatingGrpcTlsSnapshot {
+    /// 业务作用：在配置发布前同时准备新服务端证书、私钥和所有有效客户端 CA 组合。
+    /// 参数说明：`plan` 是固定监听器政策，`secrets` 为候选秘密材料，`previous` 是已提交资源，`overlap` 限制旧 CA 接受时长。
+    /// 返回：全部握手器可构造时返回候选；缺失、过期、不匹配材料或超过八个重叠窗口时拒绝发布。
+    pub(crate) fn prepare(
+        plan: &GrpcTlsPlan,
+        secrets: Arc<nasecret::SecretSnapshot>,
+        previous: Option<&Self>,
+        overlap: Duration,
+    ) -> ApplicationResult<Self> {
+        let (identity, certificate) = prepare_tls_identity(plan, &secrets)?;
+        let prepare = |identity: &nagrpc::GrpcTlsIdentity| {
+            nagrpc::GrpcTlsAcceptor::prepare(identity).map_err(|_| {
+                grpc_error(
+                    ApplicationPhase::Running,
+                    "gRPC TLS rotation candidate cannot prepare a handshake",
+                )
+            })
+        };
+        let current = prepare(&identity)?;
+        let now = std::time::Instant::now();
+        let mut previous_ca = Vec::new();
+        if let (Some(reference), Some(previous)) = (&plan.client_ca_id, previous) {
+            let candidate_ca = read_tls_secret(&secrets, reference)?;
+            let old_ca = read_tls_secret(&previous.secrets, reference)?;
+            previous_ca = previous
+                .previous_ca
+                .iter()
+                .filter(|(ca, expires)| *expires > now && *ca != candidate_ca)
+                .cloned()
+                .collect();
+            if candidate_ca != old_ca {
+                previous_ca.retain(|(ca, _)| *ca != old_ca);
+                previous_ca.push((old_ca, now + overlap));
+            }
+        }
+        if previous_ca.len() > 8 {
+            return Err(grpc_error(
+                ApplicationPhase::Running,
+                "gRPC TLS rotation overlap capacity exceeded",
+            ));
+        }
+        previous_ca.sort_by_key(|(_, expires)| *expires);
+        let mut boundaries: Vec<_> = previous_ca.iter().map(|(_, expires)| *expires).collect();
+        boundaries.dedup();
+        let mut overlap_acceptors = Vec::new();
+        for boundary in boundaries {
+            let cas: Vec<_> = previous_ca
+                .iter()
+                .filter(|(_, expires)| *expires >= boundary)
+                .map(|(ca, _)| ca.clone())
+                .collect();
+            let (identity, _) = prepare_tls_identity_with_ca(plan, &secrets, &cas)?;
+            overlap_acceptors.push((boundary, prepare(&identity)?));
+        }
+        Ok(Self {
+            #[cfg(feature = "nacos-config")]
+            plan: plan.clone(),
+            secrets,
+            current,
+            certificate,
+            previous_ca,
+            overlap_acceptors,
+        })
+    }
+
+    /// 业务作用：用冻结的监听器政策验证下一代材料，保持地址与 TLS 模式不随秘密材料漂移。
+    /// 参数说明：`secrets` 是完整候选，`overlap` 是旧信任根的有界保留窗口。
+    /// 返回：可发布的完整资源；校验失败保持当前资源不变。
+    #[cfg(feature = "nacos-config")]
+    pub(crate) fn rotated(
+        &self,
+        secrets: Arc<nasecret::SecretSnapshot>,
+        overlap: Duration,
+    ) -> ApplicationResult<Self> {
+        Self::prepare(&self.plan, secrets, Some(self), overlap)
+    }
+
+    /// 业务作用：在新连接开始握手时固定一份尚未越过旧 CA 到期边界的信任集合。
+    /// 参数说明：无。
+    /// 返回：当前窗口的不可变握手器；旧 CA 到期后自动只采用剩余信任根。
+    pub(crate) fn acceptor(&self) -> nagrpc::GrpcTlsAcceptor {
+        let now = std::time::Instant::now();
+        self.overlap_acceptors
+            .iter()
+            .find(|(expires, _)| *expires > now)
+            .map(|(_, acceptor)| acceptor.clone())
+            .unwrap_or_else(|| self.current.clone())
+    }
+
+    /// 业务作用：让监控与实际握手身份使用相同证书到期事实。
+    /// 参数说明：无。
+    /// 返回：当前服务端证书链最早到期的 Unix 秒。
+    pub(crate) fn expiry_timestamp(&self) -> u64 {
+        self.certificate.expiry_timestamp
+    }
+}
+
 /// 业务作用：从冻结 secret 快照复制一份交给 TLS identity 独占的材料。
 ///
 /// 参数说明：
@@ -591,12 +718,14 @@ fn read_tls_secret(secrets: &nasecret::SecretSnapshot, id: &str) -> ApplicationR
 #[derive(Clone)]
 struct TlsCertificateRuntime {
     expiry_timestamp: u64,
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+    source: Option<Arc<crate::saga::security::ManagedGrpcTlsSource>>,
     warning_window: Duration,
     contributor: ReadinessContributor,
 }
 
 impl TlsCertificateRuntime {
-    /// 业务作用：把启动期冻结证书的剩余期投影为 Ready、Degraded 或 NotReady。
+    /// 业务作用：把当前握手证书的剩余期投影为 Ready、Degraded 或 NotReady。
     ///
     /// 参数说明: 无。
     ///
@@ -613,7 +742,15 @@ impl TlsCertificateRuntime {
                 )
             })?
             .as_secs();
-        if now >= self.expiry_timestamp {
+        let expiry_timestamp = self.expiry_timestamp;
+        #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+        let expiry_timestamp = self
+            .source
+            .as_ref()
+            .map(|source| source.expiry_timestamp())
+            .unwrap_or(expiry_timestamp);
+        // 证书到期后关闭业务准入，不能仅依赖新连接握手拒绝而让既有连接继续执行业务。
+        if now >= expiry_timestamp {
             self.contributor.observe(
                 DependencyState::NotReady,
                 reason::GRPC_TLS_CERTIFICATE_EXPIRED,
@@ -624,7 +761,7 @@ impl TlsCertificateRuntime {
                 "gRPC TLS certificate has expired",
             ));
         }
-        let remaining = self.expiry_timestamp.saturating_sub(now);
+        let remaining = expiry_timestamp.saturating_sub(now);
         let (state, reason) = if remaining <= self.warning_window.as_secs() {
             (
                 DependencyState::Degraded,
@@ -987,6 +1124,8 @@ pub(crate) struct GrpcRuntimeState {
 struct GrpcPublishedRuntime {
     observer: nagrpc::GrpcServerObserver,
     tls_certificate_expiry_timestamp: Option<u64>,
+    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+    tls_source: Option<Arc<crate::saga::security::ManagedGrpcTlsSource>>,
     #[cfg(feature = "nacos-discovery")]
     tls_mode: GrpcTlsMode,
     #[cfg(feature = "nacos-discovery")]
@@ -1120,6 +1259,9 @@ impl GrpcRuntimeState {
         tls_mode: GrpcTlsMode,
         tls_certificate_expiry_timestamp: Option<u64>,
         authority: Option<String>,
+        #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))] tls_source: Option<
+            Arc<crate::saga::security::ManagedGrpcTlsSource>,
+        >,
     ) -> ApplicationResult<()> {
         #[cfg(not(feature = "nacos-discovery"))]
         let _ = (tls_mode, authority);
@@ -1127,6 +1269,8 @@ impl GrpcRuntimeState {
             .set(GrpcPublishedRuntime {
                 observer,
                 tls_certificate_expiry_timestamp,
+                #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+                tls_source,
                 #[cfg(feature = "nacos-discovery")]
                 tls_mode,
                 #[cfg(feature = "nacos-discovery")]
@@ -1157,9 +1301,13 @@ impl GrpcRuntimeState {
     ///
     /// 返回：TLS 已启用且发布时返回 Unix 秒；明文或未 Ready 时返回 `None`。
     fn tls_certificate_expiry_timestamp(&self) -> Option<u64> {
-        self.published
-            .get()
-            .and_then(|published| published.tls_certificate_expiry_timestamp)
+        self.published.get().and_then(|published| {
+            #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+            if let Some(source) = &published.tls_source {
+                return Some(source.expiry_timestamp());
+            }
+            published.tls_certificate_expiry_timestamp
+        })
     }
 
     /// 业务作用：向服务发现组件提供 listener 已接流后的真实端口和 TLS endpoint 合同。
@@ -1363,8 +1511,19 @@ impl ApplicationComponent for GrpcComponent {
                 .health_only(self.health_only);
             if let Some(identity) = tls_identity {
                 // certificate 与 private key 已在 bind 前从同代 secret 快照取得并复验；
-                // 此后启动期冻结，不会在请求中混用两代身份。
+                // 每次握手固定一份完整身份，不在请求中混用两代材料。
                 plan = plan.tls(identity);
+            }
+            #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+            let tls_source = self
+                .tls
+                .as_ref()
+                .map(|tls| crate::saga::security::grpc_tls_source(context.application(), tls))
+                .transpose()?
+                .flatten();
+            #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+            if let Some(source) = &tls_source {
+                plan = plan.tls_source(source.clone());
             }
             let handle = plan.start(bind).await.map_err(|error| {
                 grpc_error_src(
@@ -1383,6 +1542,8 @@ impl ApplicationComponent for GrpcComponent {
             let tls_runtime = match (tls_prepared, self.tls_contributor.clone()) {
                 (Some(prepared), Some(tls_contributor)) => Some(TlsCertificateRuntime {
                     expiry_timestamp: prepared.expiry_timestamp,
+                    #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+                    source: tls_source.clone(),
                     warning_window: prepared.warning_window,
                     contributor: tls_contributor,
                 }),
@@ -1404,6 +1565,8 @@ impl ApplicationComponent for GrpcComponent {
                     .unwrap_or(GrpcTlsMode::Disabled),
                 tls_runtime.as_ref().map(|runtime| runtime.expiry_timestamp),
                 self.authority.clone(),
+                #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+                tls_source,
             ) {
                 let _ = handle.shutdown_with_timeout(context.remaining()).await;
                 return Err(error);

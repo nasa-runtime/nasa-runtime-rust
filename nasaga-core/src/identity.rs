@@ -20,11 +20,11 @@ use crate::error::{
 /// 必须通过新的 definition version 与显式迁移，而不是原地改命名空间。
 const SAGA_ID_NAMESPACE: Uuid = Uuid::from_bytes(*b"nasasaga-v1-idns");
 
-/// 结构性标识符长度上限；同时约束指标标签与外部命令载荷体积。
-const IDENTIFIER_MAX_LEN: usize = 128;
+/// 结构性标识符长度上限；持久层复合键容量必须从该合同推导。
+pub const STRUCTURED_IDENTIFIER_MAX_BYTES: usize = 128;
 
-/// 不透明业务标识符长度上限；业务主键可能较长，但仍需有界以免污染索引与日志。
-const OPAQUE_MAX_LEN: usize = 256;
+/// 不透明业务标识符长度上限；持久层复合键容量必须从该合同推导。
+pub const OPAQUE_IDENTIFIER_MAX_BYTES: usize = 256;
 
 /// 业务作用：按“进入指标标签与拓扑名称”的严格字符集校验结构性标识符，
 /// 防止 workflow/step 名称把任意字符带进指标、topic 或管理接口。
@@ -47,10 +47,10 @@ fn validate_identifier(raw: &str, kind: &str) -> ContractResult<String> {
             format!("{kind} must not be empty"),
         ));
     }
-    if raw.len() > IDENTIFIER_MAX_LEN {
+    if raw.len() > STRUCTURED_IDENTIFIER_MAX_BYTES {
         return Err(ContractViolation::new(
             CODE_IDENTIFIER_TOO_LONG,
-            format!("{kind} exceeds {IDENTIFIER_MAX_LEN} bytes"),
+            format!("{kind} exceeds {STRUCTURED_IDENTIFIER_MAX_BYTES} bytes"),
         ));
     }
     // 只允许 ASCII 字母数字与 `_`、`-`、`.`：这些名称会进入指标标签、topic 名称和
@@ -87,10 +87,10 @@ fn validate_opaque(raw: &str, kind: &str) -> ContractResult<String> {
             format!("{kind} must not be empty"),
         ));
     }
-    if raw.len() > OPAQUE_MAX_LEN {
+    if raw.len() > OPAQUE_IDENTIFIER_MAX_BYTES {
         return Err(ContractViolation::new(
             CODE_IDENTIFIER_TOO_LONG,
-            format!("{kind} exceeds {OPAQUE_MAX_LEN} bytes"),
+            format!("{kind} exceeds {OPAQUE_IDENTIFIER_MAX_BYTES} bytes"),
         ));
     }
     // 控制字符会破坏日志、审计与 CSV/JSON 导出的行边界，且可能被用于伪造管理面输出。

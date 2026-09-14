@@ -48,6 +48,18 @@ impl PgSagaStore {
         let mut connection = natx_pgsql::conn_for(&datasource)
             .await
             .map_err(map_connection)?;
+        Self::ensure_participant_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 PostgreSQL 连接创建并复验参与方 gate，使 schema
+    /// 互斥权覆盖完整 DDL 与摘要门禁。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：结构完整时成功；DDL 或历史摘要门禁失败时返回脱敏错误。
+    pub async fn ensure_participant_schema_on_connection(
+        connection: &mut natx_pgsql::PgConn,
+    ) -> Result<(), SagaStoreError> {
         // 自举与生产迁移必须共享 gate 约束，摘要门禁不能因入口不同而减弱。
         sqlx::raw_sql(CREATE_PARTICIPANT_SQL)
             .execute(connection.as_mut())

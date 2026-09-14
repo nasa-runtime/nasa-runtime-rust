@@ -2,7 +2,8 @@
 
 `naoutbox-mysql` 提供同事务 Outbox 写入和单 owner 轮询 dispatcher。写侧通过 `natx` 感知 ambient
 事务；投递侧使用绑定 MySQL session 的 advisory claim，保证同一数据库同一时刻只有一个 dispatcher。
-事务明确提交后会发送进程内代际通知，受管 dispatcher 立即尝试投递；配置的轮询周期只负责跨进程写入、
+事务明确提交后会发送按 MySQL driver、datasource_ref 与 lane 限定的进程内代际通知，对应受管
+dispatcher 立即尝试投递；配置的轮询周期只负责跨进程写入、
 进程重启和通知合并后的持久化兜底。
 
 业务通过 `nasa` 门面开启写侧与受管 dispatcher：

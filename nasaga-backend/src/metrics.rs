@@ -1,7 +1,7 @@
 //! Saga store 可重建低基数指标快照。
 
 /// 业务作用：表示任意数据库后端中可从已提交事实重建的 Saga 指标快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SagaStoreMetrics {
     /// 历史创建实例数。
     pub started_total: u64,
@@ -33,4 +33,23 @@ pub struct SagaStoreMetrics {
     pub lifecycle_duration_count: u64,
     /// 已终结实例生命周期累计微秒数。
     pub lifecycle_duration_micros_sum: u64,
+    /// 按 workflow 与 definition version 分组的端到端终态时延分位数。
+    pub lifecycle_quantiles: Vec<SagaLifecycleQuantiles>,
+}
+
+/// 业务作用：表示一个冻结流程版本的 start-to-terminal 持久时延分位数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaLifecycleQuantiles {
+    /// 流程名称；来源于已冻结 definition，不含租户或实例身份。
+    pub workflow: String,
+    /// 创建实例时冻结的定义版本。
+    pub definition_version: u32,
+    /// 本次有界读取纳入计算的终态实例数。
+    pub sample_count: u64,
+    /// 第 50 百分位生命周期，单位微秒。
+    pub p50_micros: u64,
+    /// 第 95 百分位生命周期，单位微秒。
+    pub p95_micros: u64,
+    /// 第 99 百分位生命周期，单位微秒。
+    pub p99_micros: u64,
 }

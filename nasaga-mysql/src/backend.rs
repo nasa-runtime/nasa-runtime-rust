@@ -6,12 +6,13 @@ use nasaga_backend::{
     CancelAdjudication, CasOutcome, CompensationAdmission, ControlCasOutcome,
     ControlTransitionSpec, ExecuteAdmission, ExternalCancelAdmission, ManagementAuditOutcome,
     NewSagaInstance, ParticipantGateKey, QuotaReservation, ResolutionAdmission, ResolutionTarget,
+    SagaAttemptAuditCursor, SagaAttemptAuditRow, SagaAuditEventCursor, SagaAuditEventRow,
     SagaAuditStore, SagaBackendError, SagaBackendErrorKind, SagaConflictFactRow,
     SagaControlAuditRow, SagaCreation, SagaGovernanceStore, SagaInstanceQuery, SagaInstanceRow,
     SagaInstanceStore, SagaInstanceSummary, SagaJournalStore, SagaManagementAuditRow,
-    SagaParticipantStore, SagaStepAttemptRow, SagaStepRow, SagaStoreMetrics, SagaTimerStore,
-    SagaTransitionAuditRow, StepJournalPatch, TimerClaimBatch, TimerFencing, TimerFencingToken,
-    TimerReschedule, TimerSchedule, TimerScope, TimerSpec, TransitionSpec,
+    SagaParticipantStore, SagaStepAttemptRow, SagaStepRow, SagaStoreMetrics, SagaTimedAuditCursor,
+    SagaTimerStore, SagaTransitionAuditRow, StepJournalPatch, TimerClaimBatch, TimerFencing,
+    TimerFencingToken, TimerReschedule, TimerSchedule, TimerScope, TimerSpec, TransitionSpec,
 };
 use nasaga_core::{
     AttemptNo, BusinessKey, CommandId, CompensationPlan, Direction, EffectId, SagaId, SagaStatus,
@@ -19,6 +20,7 @@ use nasaga_core::{
     StepPhase, StepResolutionStatus, TenantId, WorkflowDefinition, WorkflowName,
 };
 
+use crate::error::SagaStoreErrorKind;
 use crate::{MySqlSagaStore, SagaStoreError};
 
 /// 业务作用：把既有 MySQL store 的脱敏错误收敛到运行核心可穷举的保守分类。
@@ -28,19 +30,12 @@ use crate::{MySqlSagaStore, SagaStoreError};
 /// 返回：数据库语句和连接失败仅在 ambient transaction 内标记为可重试；身份冲突与
 /// 缺失事实分别归类，其余合同或配置异常归入基础设施失败。
 fn map_backend_error(error: SagaStoreError) -> SagaBackendError {
-    let kind = match error.reason.as_str() {
-        "connection unavailable" | "database operation failed" => SagaBackendErrorKind::Retryable,
-        reason
-            if reason.contains("collides")
-                || reason.contains("different identities")
-                || reason.contains("different start request") =>
-        {
-            SagaBackendErrorKind::Conflict
+    let kind = match error.kind() {
+        SagaStoreErrorKind::ConnectionUnavailable | SagaStoreErrorKind::DatabaseOperation => {
+            SagaBackendErrorKind::Retryable
         }
-        reason if reason.contains("missing") || reason.contains("vanished") => {
-            SagaBackendErrorKind::NotFound
-        }
-        _ => SagaBackendErrorKind::Infrastructure,
+        SagaStoreErrorKind::Conflict => SagaBackendErrorKind::Conflict,
+        SagaStoreErrorKind::Infrastructure => SagaBackendErrorKind::Infrastructure,
     };
     SagaBackendError::new(kind, error.reason)
 }
@@ -51,12 +46,11 @@ fn map_backend_error(error: SagaStoreError) -> SagaBackendError {
 ///
 /// 返回：连接获取失败可安全重试；语句执行或提交阶段统一按结果不确定停止盲目重执。
 fn map_autocommit_error(error: SagaStoreError) -> SagaBackendError {
-    let kind = if error.reason == "connection unavailable" {
-        SagaBackendErrorKind::Retryable
-    } else if error.reason == "database operation failed" {
-        SagaBackendErrorKind::OutcomeUnknown
-    } else {
-        SagaBackendErrorKind::Infrastructure
+    let kind = match error.kind() {
+        SagaStoreErrorKind::ConnectionUnavailable => SagaBackendErrorKind::Retryable,
+        SagaStoreErrorKind::DatabaseOperation => SagaBackendErrorKind::OutcomeUnknown,
+        SagaStoreErrorKind::Conflict => SagaBackendErrorKind::Conflict,
+        SagaStoreErrorKind::Infrastructure => SagaBackendErrorKind::Infrastructure,
     };
     SagaBackendError::new(kind, error.reason)
 }
@@ -547,13 +541,26 @@ impl SagaAuditStore for MySqlSagaStore {
             .map_err(map_backend_error)
     }
 
+    /// 业务作用：复用 MySQL 全局序号审计事件查询。
+    async fn load_audit_events(
+        &self,
+        saga_id: &SagaId,
+        after: SagaAuditEventCursor,
+        limit: u32,
+    ) -> Result<Vec<SagaAuditEventRow>, SagaBackendError> {
+        MySqlSagaStore::load_audit_events(self, saga_id, after, limit)
+            .await
+            .map_err(map_backend_error)
+    }
+
     /// 业务作用：复用既有 MySQL attempt 审计查询。
     async fn load_attempt_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaAttemptAuditCursor>,
         limit: u32,
-    ) -> Result<Vec<SagaStepAttemptRow>, SagaBackendError> {
-        MySqlSagaStore::load_attempt_audit(self, saga_id, limit)
+    ) -> Result<Vec<SagaAttemptAuditRow>, SagaBackendError> {
+        MySqlSagaStore::load_attempt_audit(self, saga_id, after, limit)
             .await
             .map_err(map_backend_error)
     }
@@ -586,9 +593,10 @@ impl SagaAuditStore for MySqlSagaStore {
     async fn load_management_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaManagementAuditRow>, SagaBackendError> {
-        MySqlSagaStore::load_management_audit(self, saga_id, limit)
+        MySqlSagaStore::load_management_audit(self, saga_id, after, limit)
             .await
             .map_err(map_backend_error)
     }
@@ -597,9 +605,10 @@ impl SagaAuditStore for MySqlSagaStore {
     async fn load_conflict_audit(
         &self,
         saga_id: &SagaId,
+        after: Option<&SagaTimedAuditCursor>,
         limit: u32,
     ) -> Result<Vec<SagaConflictFactRow>, SagaBackendError> {
-        MySqlSagaStore::load_conflict_audit(self, saga_id, limit)
+        MySqlSagaStore::load_conflict_audit(self, saga_id, after, limit)
             .await
             .map_err(map_backend_error)
     }

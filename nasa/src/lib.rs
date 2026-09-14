@@ -63,7 +63,7 @@
 ///
 /// `#[nasa::application("saga")]` 会隐式纳入 DB 与 Outbox；独立
 /// `#[nasa::application("outbox")]` 会隐式纳入 DB。Inbox 是事务内原语，不声明为生命周期组件；
-/// Kafka、Redis Streams 或 HTTP 等消息传输由业务按实际实现显式选择。
+/// Kafka、Redis Streams、HTTP 或 gRPC 消息传输由业务按实际实现显式选择。
 ///
 /// `#[nasa::initializer]` 静态项与 Service 启动 Hook 动态登记项合并后，在组件 `Prepare` 与
 /// `Seal` 之间执行全部 `before -> initialize -> after`。全部成功前不发布 Ready；外部已提交事实
@@ -87,6 +87,8 @@
 /// outbox:
 ///   datasource_ref: reporting
 /// saga:
+///   role: orchestrator
+///   plan_mode: custom
 ///   database_bootstrap: application
 ///   datasource_ref: reporting
 ///
@@ -113,7 +115,8 @@
 /// 单 client Kafka 省略 `client_name` 时默认为 `default`。业务通过 `default_datasource`/
 /// `datasource(name)`、`default_pg_datasource`/`pg_datasource(name)`、`default_redis`/`redis(name)`、
 /// `default_kafka`/`kafka(name)` 取得受管句柄。
-/// Outbox 与 Saga 用 `datasource_ref`，Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
+/// Outbox 用 `outbox.datasource_ref`；managed Saga 用角色作用域内的 `datasource_ref`，custom Saga
+/// 使用顶层 `saga.datasource_ref`。Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
 /// 引用不存在时在建连前拒绝，不会猜测唯一实例或回退默认源。
 /// `partition` 的 `partitions`、`queue_capacity` 与 `max_partitions` 字段描述默认 Runner；
 /// `partition.runners.<name>` 可以声明多个相互隔离的分区 Runner；每个字段都可省略并逐项使用
@@ -731,7 +734,7 @@ pub mod object {
 #[cfg(feature = "saga")]
 pub mod saga {
     #[cfg(feature = "saga-runtime")]
-    pub use nasaga_macro::saga;
+    pub use nasaga_macro::{saga, saga_workflow};
     pub use saga_core_impl::*;
     #[cfg(feature = "saga-runtime")]
     pub use saga_runtime_impl::*;
@@ -743,6 +746,10 @@ pub mod saga {
         pub use saga_runtime_pgsql_impl::*;
     }
 }
+
+/// 类型化 Saga workflow definition 的链接期登记宏。
+#[cfg(feature = "saga-runtime")]
+pub use nasaga_macro::saga_workflow;
 
 /// 稳定 gRPC codegen 门面、generated service registry、独立/Application listener 与有界排空。
 ///

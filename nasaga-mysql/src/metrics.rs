@@ -4,7 +4,9 @@
 //! COMMIT 前崩溃时留下虚假成功指标。查询只返回低基数聚合，不暴露 tenant、saga_id
 //! 或 step 等高基数标签。
 
-use nasaga_backend::SagaStoreMetrics;
+use std::collections::BTreeMap;
+
+use nasaga_backend::{SagaLifecycleQuantiles, SagaStoreMetrics};
 use sqlx::Row as _;
 
 use crate::error::{corrupt, map_connection, map_database, SagaStoreError};
@@ -53,6 +55,17 @@ impl MySqlSagaStore {
         .await
         .map_err(map_database)?;
 
+        let samples = sqlx::query(
+            "SELECT workflow_name AS workflow, definition_version, \
+             TIMESTAMPDIFF(MICROSECOND, created_at, updated_at) AS duration_micros \
+             FROM saga_instance \
+             WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED') \
+             ORDER BY updated_at DESC LIMIT 10000",
+        )
+        .fetch_all(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+
         Ok(SagaStoreMetrics {
             started_total: metric(&row, "started_total")?,
             completed_total: metric(&row, "completed_total")?,
@@ -69,8 +82,62 @@ impl MySqlSagaStore {
             due_timer_current: metric(&row, "due_timer_current")?,
             lifecycle_duration_count: metric(&row, "duration_count")?,
             lifecycle_duration_micros_sum: metric(&row, "duration_micros_sum")?,
+            lifecycle_quantiles: lifecycle_quantiles(samples)?,
         })
     }
+}
+
+/// 业务作用：把有界终态实例样本按冻结流程版本分组并计算稳定最近秩分位数。
+///
+/// 参数说明：`rows` 是按最近更新时间截取的终态生命周期样本。
+///
+/// 返回：样本字段合法时返回低基数流程分组；持久字段异常时返回损坏错误。
+fn lifecycle_quantiles(
+    rows: Vec<sqlx::mysql::MySqlRow>,
+) -> Result<Vec<SagaLifecycleQuantiles>, SagaStoreError> {
+    let mut grouped = BTreeMap::<(String, u32), Vec<u64>>::new();
+    for row in rows {
+        let workflow: String = row
+            .try_get("workflow")
+            .map_err(|_| corrupt("Saga lifecycle workflow"))?;
+        let version: u32 = row
+            .try_get("definition_version")
+            .map_err(|_| corrupt("Saga lifecycle definition version"))?;
+        let duration: i64 = row
+            .try_get("duration_micros")
+            .map_err(|_| corrupt("Saga lifecycle duration"))?;
+        grouped
+            .entry((workflow, version))
+            .or_default()
+            .push(u64::try_from(duration).map_err(|_| corrupt("Saga lifecycle duration"))?);
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|((workflow, definition_version), mut values)| {
+            values.sort_unstable();
+            SagaLifecycleQuantiles {
+                workflow,
+                definition_version,
+                sample_count: values.len() as u64,
+                p50_micros: percentile(&values, 50),
+                p95_micros: percentile(&values, 95),
+                p99_micros: percentile(&values, 99),
+            }
+        })
+        .collect())
+}
+
+/// 业务作用：按最近秩定义读取非空有序样本的整数百分位。
+///
+/// 参数说明：`values` 是升序微秒样本，`percent` 是 1 到 100 的固定观测百分位。
+///
+/// 返回：返回对应最近秩值；空输入返回零。
+fn percentile(values: &[u64], percent: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let rank = (values.len() * percent).div_ceil(100).saturating_sub(1);
+    values[rank.min(values.len() - 1)]
 }
 
 /// 业务作用：从 MySQL 聚合行中安全解码非负计数。

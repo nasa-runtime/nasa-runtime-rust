@@ -298,11 +298,36 @@ impl KafkaHandle {
         self.capability.client_name()
     }
 
+    /// 业务作用：向同一组件内的受管协议适配器暴露 Kafka 已冻结的 DLT 后缀。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：消费端实际按 `<source-topic><suffix>` 持久死信时使用的后缀。
+    #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
+    pub(crate) fn dead_letter_topic_suffix(&self) -> &str {
+        &self
+            .capability
+            .proxy
+            .config()
+            .behavior
+            .dead_letter_topic_suffix
+    }
+
+    /// 业务作用：读取 Kafka 消费端是否把 DLT 持久成功作为前移强制条件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：死信不可达时保留源 offset 则返回真；可用性优先跳过时返回假。
+    #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
+    pub(crate) fn dead_letter_required(&self) -> bool {
+        self.capability.proxy.config().behavior.dead_letter_required
+    }
+
     /// 业务作用：返回 Kafka 能力相对于统一 Application 的当前生命周期。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// Starting/Ready/Draining/Closed/Failed 之一，不暴露 nafka 内部状态机。
+    /// 返回：Starting/Ready/Draining/Closed/Failed 之一，不暴露 nafka 内部状态机。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         ComponentLifecycleState::from(self.application_state.load())
     }
@@ -1314,6 +1339,31 @@ impl NacosDiscoveryHandle {
         let session = self.session()?;
         let wants_registration = session.lock().await.wants_registration();
         Ok(wants_registration)
+    }
+
+    /// 业务作用：向受管协议适配器提供同一次发现查询中的完整实例记录，保持端点和元数据绑定。
+    /// 参数说明：`service` 是受信配置指定的注册服务名。
+    /// 返回：发现中心的健康实例集合；会话已关闭或查询失败时返回错误，不回退到历史地址。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) async fn saga_instances(
+        &self,
+        service: &str,
+    ) -> ApplicationResult<Vec<rest_discovery_nacos::Instance>> {
+        let session = self.session()?;
+        let instances = session
+            .lock()
+            .await
+            .discover_instances(service)
+            .await
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "cannot resolve Saga service instances",
+                    error,
+                )
+            })?;
+        Ok(instances)
     }
 
     /// 业务作用：从注册中心选择一条声明原生 gRPC 协议且 endpoint 合同完整的健康实例。

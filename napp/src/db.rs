@@ -210,13 +210,25 @@ impl ApplicationComponent for DbComponent {
         Box::pin(async move {
             let application = context.application().clone();
             #[cfg(feature = "saga")]
-            if application
+            let saga_declared = application
                 .ensure_component_declared(
                     ComponentId::Saga,
                     ApplicationPhase::Start,
                     "saga database bootstrap",
                 )
-                .is_ok()
+                .is_ok();
+            #[cfg(feature = "saga")]
+            if saga_declared
+                && crate::saga::is_managed_direct_client(&application, ApplicationPhase::Start)?
+                && application.config().value().get("database").is_none()
+                && application.config().value().get("datasources").is_none()
+            {
+                // direct client 不产生本地 Saga 事实；没有业务数据源配置时，隐式 DB 组件保持空闲，
+                // 避免为远程 start/query 权限创建无关连接池或数据库表。
+                return Ok(());
+            }
+            #[cfg(feature = "saga")]
+            if saga_declared
                 && crate::saga::database_bootstrap(&application, ApplicationPhase::Start)?
                     == crate::saga::SagaDatabaseBootstrap::UserHook
             {

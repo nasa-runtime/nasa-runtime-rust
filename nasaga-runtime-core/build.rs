@@ -9,6 +9,12 @@ fn main() {
     }
     nagrpc_build::Builder::new()
         .runtime_path("::nagrpc")
-        .compile(&["proto/saga_transport.proto"], &["proto"])
+        .compile(
+            &[
+                "proto/saga_transport.proto",
+                "proto/saga_orchestrator.proto",
+            ],
+            &["proto"],
+        )
         .expect("Saga gRPC transport 协议必须生成成功");
 }

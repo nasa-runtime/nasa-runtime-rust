@@ -107,9 +107,13 @@ MySQL、PostgreSQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参�
 
 | 资源 | 单源 YAML | 多源 YAML | 默认身份 | 被其它组件引用的字段 |
 | --- | --- | --- | --- | --- |
-| MySQL / PostgreSQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.datasource_ref` |
+| MySQL / PostgreSQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.orchestrator/participant/client.datasource_ref` |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | 持久身份 `primary`，查询兼容名 `default` | `cache.redis_ref`、`cache.invalidation.redis_ref`、`scheduling.redis_ref`、`redis.job.sources.<qualifier>` |
 | Kafka | `kafka` | `kafkas.<client>` | `client_name: default` | `configure_kafka(client, ...)`、`app.kafka(client)` 与 consumer 的 `client` |
+
+Saga 协调角色使用 `saga.orchestrator.datasource_ref`，参与方使用
+`saga.participant.datasource_ref` 或逐 binding 引用，可靠 client 使用 `saga.client.datasource_ref`；这些
+角色字段不会回退不存在的顶层 `saga.datasource_ref`。
 
 同一种资源的单源根和多源根互斥，不能在同一份配置中混用。显式 getter 只选择启动期已发布的句柄，
 不会在调用时建连；默认 getter 只查找上述默认身份，缺失时不会猜测唯一实例或第一个实例。运行期改变
@@ -134,9 +138,6 @@ database:
 
 # 只有声明了对应组件时才需要下面的段；省略 datasource_ref 也默认选择 default。
 outbox:
-  datasource_ref: default
-saga:
-  database_bootstrap: application
   datasource_ref: default
 ```
 
@@ -164,9 +165,6 @@ datasources:
       mode: validate
 
 outbox:
-  datasource_ref: reporting
-saga:
-  database_bootstrap: application
   datasource_ref: reporting
 ```
 
@@ -197,9 +195,6 @@ database:
     lock_timeout_ms: 30000
 
 outbox:
-  datasource_ref: default
-saga:
-  database_bootstrap: application
   datasource_ref: default
 ```
 
@@ -424,7 +419,7 @@ redis:
 `redis.job` 根字段是所有被引用 source 的默认值，`sources.<qualifier>` 只是稀疏覆盖；没有覆盖块的已托管
 source 仍可被任务使用。定义引用未知 source 或 `enabled: false` 的覆盖时启动失败，不会回退到
 `primary`。完整协议、独立 `RedisJobPlan`、Fanout、Cron 和观测合同见
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#redisjob)。
 
 ## 跨副本分布式业务配额
 
@@ -659,135 +654,281 @@ Application 不推断消息源的重投视界，也不自动创建或在线变�
 
 ## Saga 受管模式
 
-`"saga"` 是组合组件：宏会隐式加入 DB 与 Outbox，业务不再重复写 `"db"`、`"outbox"` 或手工
-dispatcher。Inbox claim 由 Orchestrator 和参与方在本地事务中直接调用，因此不存在单独的
-`"inbox"` 组件字符串；可选保留循环由 UserHook 显式登记到 Application。Kafka、Redis Streams、HTTP 等 transport 不由 Saga 猜测：业务明确
-选择 Kafka 托管消费时声明 `"kafka"` 并启用 `saga-kafka`；选择 Redis Streams 托管消费时声明
-`"redis"` 并启用 `saga-redis-stream`,经 `SagaApplicationPlan::with_redis_stream_transport`
-提交已构造的 result/command 消费者(`(stream, group, consumer)` 身份须唯一)。Redis 组件在
-Saga 之前建立、在其之后释放;Ready 前用真实客户端统一探测 PING/配置合同/group 幂等创建
-(兼 ACL 探测),失败拒绝 Ready;消费循环由 Runner 监督,停机先关领取、排空在途轮次、未确认
-消息留 PEL 交重启后重领。按冻结 (stream, group) 导出 `napp_saga_stream_*` 低基数指标
-(`Application::saga_stream_metrics_prometheus`),其中 `deleted_pending_total` 非零必须告警。
+声明 saga 会隐式加入 DB 与 Outbox 生命周期。saga.role 是部署取得权限的唯一开关，必须显式选择
+orchestrator、participant、client 或 combined；managed 是默认计划模式，业务调用 configure_saga
+只允许用于明确的 custom 模式。角色不是根据链接到二进制的 descriptor、Web 组件或端口形态推断的。
 
-Saga gRPC command/result transport 通过门面 `saga-grpc` 启用；该 feature 已包含 gRPC 类型门面，但
-不会因只使用出站 client 而隐式声明 listener。入站宿主显式声明 `"grpc"`，再由
-`SagaApplicationPlan::with_grpc_command_service` 提交 `#[saga]` Service 与 mTLS leaf 指纹；Application
-从单参与方计划冻结的信任投影生成 handler。Orchestrator 使用 `with_grpc_result_service`，只声明无法从
-多参与方定义推断的 producer/principal 绑定。Application 自动把框架 generated service 登记到唯一
-gRPC registry。业务不创建 `Arc` handler、generated server、第二个 Router、listener 或身份解析器。
-回包缺失和 `Retryable` 都让发布端保留 Outbox 行重投，不能按确定失败消耗死信预算。
+| 角色 | 本地持久资源 | 对外能力 | 不会取得的权限 |
+| --- | --- | --- | --- |
+| orchestrator | instance、journal、result Inbox、command Outbox、timer、Catalog、审计与配额 | start/query/audit/管理、result、Definition Registry、metrics | participant gate 与业务 handler |
+| participant | command Inbox、gate、业务事实与 result Outbox | command 入口、capability 自动续租 | 全局实例、timer 与协调管理面 |
+| client direct | 无 Saga 表 | 受管远程 start/query client | Orchestrator、participant 与本地 Outbox |
+| client reliable | 本地 start-intent Outbox | 事务内 enqueue_start 与远程 query | Orchestrator、participant |
+| combined | 两个数据角色的并集 | 两侧入口 | 未经 allow_combined_role 批准时不能启动 |
 
-为兼容显式依赖声明，`#[nasa::application("saga", "db")]` 和
-`#[nasa::application("saga", "db", "outbox")]` 都合法，并与只声明 `"saga"` 生成相同组件图；只有属性中
-把同一个字符串写两次才按重复声明拒绝。
+### 零装配入口
 
-业务在 UserHook 内装配 definition、运行角色和唯一发布端；Application 在 Ready 前完成流程合同、
-历史非终态实例、数据库与 Outbox 门禁，随后启动 timer 和 dispatcher：
+HTTP Orchestrator 的业务入口可以为空；Application 从配置、链接期 workflow artifact 与共享 Catalog
+构造运行时，业务 main 不创建 DefinitionRegistry、Orchestrator、SagaApplicationPlan、Router、签名器
+或 dispatcher。
 
-对应的门面依赖至少启用 `application` 与 `saga-runtime`；选用受管 Kafka transport 时再启用
-`saga-kafka`，选用受管 Redis Streams transport 时启用 `saga-redis-stream` 并声明 `"redis"`。
-
-```rust
-use std::sync::Arc;
-use nasa::application::SagaApplicationPlan;
-use nasa::saga::{DefinitionRegistry, Orchestrator, OrchestratorConfig};
-
-#[nasa::application("saga")]
-async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    let mut definitions = DefinitionRegistry::new();
-    definitions.register(checkout_definition()?)?;
-    let orchestrator = Arc::new(Orchestrator::new(
-        definitions,
-        OrchestratorConfig::default(),
-    )?);
-    let publisher = Arc::new(build_command_publisher()?);
-    app.configure_saga(
-        SagaApplicationPlan::orchestrator(orchestrator, "checkout-orchestrator-a")?
-            .with_event_publisher(publisher)?,
-    )?;
+~~~rust
+#[nasa::application("saga", "web")]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
     Ok(())
 }
-```
+~~~
 
-纯参与方使用 `SagaApplicationPlan::participant(name, runtime)`；同一进程承载多个参与方时使用
-`with_participant` 逐项追加。`app.saga()` 只在 Ready 门禁通过后返回能力，停机保护态拒绝新工作。
-`with_event_publisher` 接收 provider-neutral 的 `OutboxPublisher`。发布确认可以来自 Kafka、Redis Streams
-或 HTTP；未绑定发布端时组合组件拒绝 Ready，避免 Saga 已提交 command/result 却没有持续投递者。
-规范顺序为 `db -> saga -> kafka -> outbox -> web/ws`，反向停机时先关闭入口、停止 dispatcher 与消息
-消费，再关闭 Saga 能力和数据库。
+~~~yaml
+datasources:
+  saga-control:
+    driver: mysql
+    url: ${SAGA_DATABASE_URL}
 
-PostgreSQL 角色使用 `SagaApplicationPlan::pgsql_orchestrator`、`pgsql_participant`、
-`with_pgsql_orchestrator` 与 `with_pgsql_participant`。同一计划中的全部角色必须使用一种 driver 和一个
-datasource；混合 Application 可以同时受管其它 driver 的独立组件组，但不会把一次 Saga 原子链拆到
-两个数据库。PostgreSQL gRPC 自动装配入口为 `with_pgsql_grpc_command_service` 与
-`with_pgsql_grpc_result_service`，Redis Streams 与 Kafka 复用同一 envelope 和投递裁决。
+outbox:
+  datasource_ref: saga-control
 
-Saga 隐式 Outbox 默认采用 `Block`：首个未确认事件会阻塞同一 `outbox_event` 表的全部后续事件，避免
-把瞬态网络失败按固定次数误判为可以越过的 command/result。审计或其它事件若写入同一张表，绑定的唯一
-publisher 必须覆盖所有事件类型；否则应使用独立事务数据库和独立 Outbox 生命周期。`app.outbox()` 的
-`render_prometheus()` 输出无业务标签的积压、死信、发布量与失败轮次，必须接入值班告警。
-
-`saga` 配置段只控制宿主轮询预算：
-
-```yaml
 saga:
-  database_bootstrap: application
-  datasource_ref: workflow
-  timer_poll_interval_ms: 500
-  timer_error_backoff_ms: 1000
-  timer_operation_timeout_ms: 5000
-  timer_failure_threshold: 3
-```
+  role: orchestrator
+  plan_mode: managed
+  service_identity: checkout-orchestrator
+  replica_identity: ${SAGA_REPLICA_ID}
+  orchestrator:
+    datasource_ref: saga-control
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: saga-control
+    activation_policy: validated
+    watch_interval_ms: 500
+    capability_registry_ref: saga-participant-capabilities
+    publisher_authorization_policy_ref: saga-definition-publishers
+    signing_keys:
+      checkout-owner-key: checkout-owner-public-key
+  http:
+    base_path: /_nasa/saga
+  api:
+    page_token_key_ref: saga-api-page-token
+    http:
+      enabled: true
+      expose_admin: true
+      expose_definition_registry: true
+      authorization_policy_ref: checkout-saga-http-rbac
+      callers:
+        order-api:
+          credential_ref: saga-order-client
+          tenants: [system]
+          permissions: [start, read]
+        checkout-workflow-owner:
+          credential_ref: saga-definition-publisher
+          tenants: [system]
+          workflows: [order_checkout]
+          permissions: [registry]
+  transport:
+    address_policies:
+      saga-participant-routing:
+        http_schemes: [https]
+        http_hosts: [inventory.internal, payment.internal]
+        http_ports: [443]
+    command_result:
+      kind: http
+      http:
+        shared_replay_claim: saga-http-replay
+        command_credential_ref: saga-command
+        result_credential_ref: saga-result
+        routing:
+          mode: capability-registry
+          address_policy_ref: saga-participant-routing
+~~~
 
-`database_bootstrap` 默认为 `application`，DB 组件在 Start 阶段按 `database` 或 `datasources` 建池。
-`datasource_ref` 默认为 `default`，并必须与 UserHook 提交的全部 Orchestrator/Participant 以及
-`outbox.datasource_ref` 一致；Saga 的 Inbox、状态、timer、审计和 Outbox 只承诺该库内的本地事务。
-确实需要先创建隔离库的进程可设为 `user_hook`，启动钩子注入默认事务池后，DB 组件会在 Prepare 接管并
-完成连接探针与 migration 门禁；独立入口的 pool 所有权会原子转交给单源受管 registry，关闭所有权在
-Start 阶段预占，确保受监督任务退出后先撤销事务解析权威、再释放连接。Ready 后
-MySQL 用 `app.datasource("default")`、PostgreSQL 用 `app.pg_datasource("default")` 返回同一受管池，
-停机态拒绝新的借用。该模式不读取
-`database`/`datasources` 的连接设置并会记录提示，不能用来绕过数据库门禁。
+动态 Catalog 允许空定义启动；未知或未激活的 workflow 仍确定性拒绝。流程所有者通过
+`#[nasa::saga_workflow]` 提供完整 definition；`napp` 使用 `registry_client` 指定的 Ed25519 私钥对
+canonical artifact 签名并自动发布。Orchestrator 从 `signing_keys` 引用的独立公钥验签，不信任请求
+自带密钥。参与方通过 `managed=true` 的 `#[saga]` descriptor 自动登记并续租 capability。相同
+definition key 只有在 owner、canonical artifact、digest 与 seal 全部相同时幂等，任一事实不同都冲突；
+已创建实例始终冻结自己的 definition version 与 digest。HTTP/gRPC capability 登记在组件已启动且未停止时
+开放，参与方租约自然到期或编排端重启后仍可续租；该入口始终保留身份、租户、workflow、地址政策和
+协议认证中的 replay 检查。缺少 route 的 command 保留在 Outbox，Catalog 监督循环在全部 route 恢复前
+保持业务摘流；成功登记本身不会开放新 start/claim。
+definition deprecated 只关闭新实例准入；已提交 Start 的同摘要重放仍返回 Duplicate，不同摘要返回
+Conflict，运行中与终态实例均适用。重复请求继续接受认证、租户权限和事务执行资格检查，可靠 client
+可在首次回执丢失后凭 Duplicate 结清原 start-intent，不产生重复首步命令。
+HTTP 参与方的显式 `advertised_endpoint` 在构造时规范化；未指定时从已绑定 Web listener 推导，
+发布前统一验证完整 origin 和 Saga 路径合同。Catalog 在取得目录与能力行锁之后使用数据库时钟建立租约。
+HTTP/gRPC 发布端同时检查收据期限和本地请求预算，整批能力以最早到期时间约束 Ready；续租阻塞或失败
+不会延长已有就绪证据，全部能力重新取得有效收据后才恢复。
+协调副本在取得 generation 行和 replica 行控制权之后建立确认租约；本地以单调期限约束
+readiness 与业务入口。数据库调用阻塞不会延长资格，到期拒绝新业务，完整快照重新确认后才恢复。
+依赖 Catalog 资格的 HTTP 业务入口在异步认证之后复验资格。HTTP/gRPC start 在使用 definition 快照前冻结本次操作的期限和
+撤销标识，每次创建事务恢复执行及交给事务层提交前都重新检查；失权时通过事务层回滚已暂写的实例、
+配额和 Outbox。续租不会延长旧操作期限，新确认也不会恢复已撤销的操作。COMMIT 发出后的迟到结果
+仍按数据库提交收据或提交结果不明处理，调用方通过同一幂等请求核对，不能将其报告为确定回滚。
+capability 的 route generation 由 Catalog 数据库在主键行锁内分配并随收据回传；publisher 吸收该值后
+再复验 descriptor 摘要，因此主机时钟回拨和提交结果不确定都不会把稳定副本永久留在 NotReady。
+具有 `registry` permission 的 caller 还必须用非空 `workflows` 声明精确 workflow 或 `*`；tenant 与
+workflow 授权在读取任何 definition 或 capability 持久事实前共同复验。
 
-timer owner 不从共享配置推断，必须随计划提供逐副本唯一且重启稳定的 canonical 身份。
+Registry 的确定性参数、权限、存在性、前置条件和冲突分别映射为 HTTP 4xx 与对应 gRPC code；数据库
+断连、超时或事务结果不明统一映射为 HTTP 503 / gRPC `UNAVAILABLE`，自动发布和 capability 续租可保留
+相同请求重试。MySQL/PostgreSQL 编排角色在 schema 串行权威内迁移已识别的直接前代 Catalog，再逐项
+复验 CHECK 表达式、时间默认行为、identity/collation 和索引合同；未知结构或租户归属歧义阻止 Ready。
 
-`OrchestratorConfig` 也是 UserHook 前构造、提交后冻结的业务合同：`tenant_quotas` 限制每租户在飞实例，
-`tenant_action_rates` 限制 pause/resume/retry/manual-close 等变更动作，`enable_manual_close` 默认关闭并
-要求全部副本先升级为可解析 `MANUALLY_CLOSED` 的读者。它们不是 `saga:` YAML 热配置；精确用量只能
-通过有权限的管理查询读取，Prometheus 只导出无租户标签的拒绝总数。
+workflow owner 或 participant/client 链接了本地 workflow 时，应配置独立控制面。私钥 secret 只供
+发布端使用，HTTP HMAC 或 gRPC mTLS 凭据只证明在线主体，两者不能互相替代：
 
-完整事务、transport、迁移、恢复和生产批准边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
+~~~yaml
+saga:
+  definition_catalog:
+    mode: dynamic
+    activation_policy: validated
+    publish_tenants: [system]
+    registry_client:
+      protocol: http
+      discovery_ref: http://127.0.0.1:38080/app/_nasa/saga
+      credential_ref: saga-definition-publisher
+      definition_signing_key_id: checkout-owner-key
+      definition_signing_key_ref: checkout-owner-private-key
+~~~
 
-独立 Outbox 场景可显式声明 `#[nasa::application("outbox")]`，并在 UserHook 调用
-`app.configure_outbox(OutboxApplicationPlan::new(publisher))`。该声明会隐式加入 DB，但不会加入 Saga 或
-Inbox，适合领域事件、审计和缓存失效通知。事件所在事务确认提交后会立即唤醒本进程 dispatcher；
-`outbox.poll_interval_ms` 是跨进程写入、进程重启和漏通知恢复的兜底上限，不会固定消耗每条 Saga
-步骤的执行预算。下游失败时提交通知不能绕过 `error_backoff_ms`。
+### HTTP 路径与安全边界
 
-独立 Outbox 的 `outbox.datasource_ref` 同样默认为 `default`；配置命名库后，其启动探针、投递、保留
-清理、租户配额与指标查询不会回落到默认库。
+saga.http.base_path 是 Application context 内唯一 Saga 子路径，默认 /_nasa/saga。实际线上基础路径
+严格等于 server.context_path 与 base_path 各拼接一次。base_path 不能是根、不能带尾斜杠、重复斜杠、
+点段、percent encoding、query、fragment、模板或通配符。参与方 capability 发布逐实例 origin、
+effective_saga_base_path 与 route generation，发送端不从 service name 猜路径，也不跟随重定向。
 
-已投递行与死信的保留清理是显式子计划：`plan.with_retention(policy, interval_ms, archive)`。
-执行器绝不从"开启了 Outbox"推断保留期——未提交策略就没有任何删除；策略值不自洽、要求收据却
-缺归档端或间隔越界都在 UserHook 拒绝启动。行分类合同固定：待投递行（`dispatched=0 AND dead=0`）
-永不删除；已投递行达到最小保留期才可归档/删除；死信默认保留，只有独立批准标识、最小年龄与
-归档收据齐备才逐批清理。清理使用与 dispatcher 分离的 session-bound retention claim（同库同刻
-仅一个清理 owner，竞争即让路），按主键集合逐批独立提交删除，受批大小与单轮时间预算约束；
-若启用归档，先按 `event_id` 幂等写入并取得可重新验证的收据才删源行，回包不确定用收据重查恢复。
-清理停摆只体现在 `napp_outbox_retention_*` 指标与"最后成功时刻"上（严格治理 degraded 信号），
-绝不反向停止 dispatcher 投递。删除 `COMMIT` 的应答不确定会单独增加
-`napp_outbox_retention_commit_uncertain_total`，不虚增已确认删除数，也不刷新最近成功时刻；下一轮
-按数据库中的持久候选事实继续收敛。
+标准 Saga 路由由 Web 组件在保留前缀分支中装配，不进入业务 Router 的 middleware、fallback 或 nest。
+业务尝试注册保留前缀会在封口时拒绝。启用 Saga HTTP 入站时，原始 `configure_router` 变换因作用域
+不可验证而拒绝 Ready；手写端点使用 `configure_router_scoped("/ops", transform)` 等非根静态业务前缀。
+transform 内写相对作用域的路径，例如 `/status` 对外成为 `/ops/status`；同前缀变换按顺序组合，
+其 layer/fallback 只影响该前缀。所有内部路径都挂在作用域之下，作用域与 Saga 前缀相交或覆盖其父路径时拒绝 Ready。
+启用 `server.health` 时，Saga 前缀不得遮蔽框架 `/healthz`、`/readyz` 与已编入的 `/metrics`；
+冲突在绑定 Web listener 前拒绝。关闭该开关后，未挂载的框架入口不占用这些路径。
+自动 mapping 端点同时校验静态、参数与通配路径的交集。HTTP 请求使用实际规范路径和原始 body 做 HMAC，认证 producer、
+tenant 权限、nonce claim、body/并发上限和收据裁决均由 Saga 分支负责。Committed 与 Duplicate 才能
+推进 Outbox；连接失败、超时、限流、服务端故障或响应不明都保留原 event_id 重投。
 
-多通道分片是显式 opt-in：`plan.with_channel_lanes(routes, lanes)` 提交 aggregate_type → lane 的
-冻结路由与本进程 lane 集合（必须含默认 `global` lane）。写侧按路由稳定派生 lane——只依赖聚合类型，
-同一聚合根二元组自始至终同 lane；路由进程级冻结，运行期变更被拒绝。每个 lane 拥有独立
-session-bound claim、退避与指标，毒丸只停摆自己的 lane（`Block` 语义与"成功前缀才标记"不变，
-改变的只是停摆半径）；整体 readiness 在全部 lane 健康时 Ready，`napp_outbox_lane_*{channel=...}`
-区分单领域停摆与整体退出。启用分片后同库禁止再运行未分片 dispatcher（两种 claim 锁名不同，
-并行会双重发布）；上线顺序见对应数据库 Outbox 迁移说明（先加列回填、行为不变，再切按 lane 所有权）。
+definition activate/deprecate 的 HTTP body 必须包含 `expected_sha256`、`operation_id`、`reason`；管理写
+body 包含 `operation_id`、`reason`，并可包含 `expected_state_version`、`expected_control_version`。
+这些前置版本在持锁事务中复验，冲突请求不改变实例、审计或 Outbox；HTTP 与 gRPC 使用相同裁决。
+初次读取时控制态就不允许动作属于前置条件失败；初次快照允许动作而提交 CAS 失去竞争属于可重试并发，
+gRPC 分别返回 `FAILED_PRECONDITION` 与 `ABORTED`，客户端遇到后者应重新加载快照再裁决。
+同一 `operation_id` 和相同动作参数的已提交请求会在 expected version 复验前命中持久幂等事实，因此
+响应丢失后的原请求可直接重放；该分支也早于租户动作额度预留，不改变速率账本。新 operation 才预留
+额度，并仍须命中事务内版本才能产生状态或 Outbox 副作用；任一步失败时预算与动作共同回滚。
+
+HTTP audit 的签名 body 可携带 `page_size` 与上一页 `page_token`；gRPC `GetAuditTrail` 使用对应字段。
+两者都返回按数据库全局 `audit_seq` 递增的统一 records 和可选 `next_page_token`，不按类别或内存数组
+offset 定位。任何非空页都会返回末项 checkpoint；attempt 开始与终态变化分别形成不可变事件，运行中
+追加的任意类别事实都位于既有游标之后。数据库按 Saga 隔离的提交 guard 约束并发事务序号可见顺序，
+所有记录携带数据库生成的发生时间，历史超过 1000 条仍能继续读取。
+
+### client 发起等级
+
+direct client 不需要 database、datasources 或 outbox 配置。调用方生成稳定 saga_id、trigger_id、
+definition_version 与 business_key，使用 SagaRemoteClient::start 和 get；同步结果不明时保持同一请求
+重试。reliable_start 需要 client.datasource_ref，并在当前同源业务事务内调用 enqueue_start：业务事实
+与 SagaStartIntent 同时提交，after-commit 只唤醒 dispatcher，不在业务请求线程执行远端网络调用。
+
+~~~yaml
+saga:
+  role: client
+  plan_mode: managed
+  client:
+    service_identity: order-api
+    orchestrator_identity: checkout-orchestrator
+    orchestrator_discovery_ref: http://127.0.0.1:38080/app/_nasa/saga
+    credential_ref: saga-order-client
+    reliable_start: true
+    datasource_ref: orders
+~~~
+
+### 共享事务域的业务事件发布
+
+受管 Saga 和业务事件可以共用同一数据库 Outbox。业务在 UserHook 调用
+`Application::register_outbox_publisher(datasource, aggregate_type, event_type, publisher)`
+登记精确目标；Ready 将这些目标组合进该数据源已有计划，仅启动该计划的 dispatcher。
+订单与 Outbox 事件仍须在同一数据源事务中提交。未匹配事件交由原计划处理；
+以 `Saga` 开头的 aggregate type 和以 `saga.` 开头的 event type 保留给协议发布端。
+重复目标、非法名称或没有对应计划的数据源会拒绝启动。
+
+业务发布端继承该计划的顺序和毒丸策略，收到下游确认后才返回成功。
+网络超时等未确认结果应返回 `OutboxPublishError::transient`，保留事件重试；
+永久拒绝使用终态错误并由计划处理。额外业务目标不会创建第二个 dispatcher，
+也不改变 claim、至少一次投递和保留策略的边界。
+
+### 提交后即时投递
+
+数据库明确提交后，Outbox 只发布按 driver、datasource_ref 与 lane 限定的有界可合并唤醒。对应
+dispatcher 立即领取数据库中最早的有序前缀；唤醒不携带可替代数据库的事件事实，也不直接调用 HTTP、
+Kafka、Redis Streams 或 gRPC。信号丢失、跨进程追加和进程恢复由 poll_interval_ms 周期扫描兜底；
+瞬态失败继续遵守 error_backoff_ms，后续提交不能形成绕过退避的重试风暴。
+
+### 受管协议边界
+
+HTTP、gRPC、Kafka 与 Redis Streams command/result 数据面均由 `napp` 按角色构造。HTTP/gRPC 控制面
+负责 start/query/audit/admin、definition 发布和 capability 租约；控制面与数据面可独立选择。gRPC
+自动登记公开 Orchestrator、Definition Registry、result 或 command service，创建 generated client，
+并以标准 health Check 作为 Ready 与动态 route 切换门禁。Kafka 以 owner topic 和 broker ACK 为前移
+收据，`result_dlt_topic` 必须写成 `<result_topic>.{owner}<Kafka client DLT suffix>`；例如 suffix 为
+`.DLT` 时使用 `saga.results.{owner}.DLT`。Redis Streams 使用同槽 stream、consumer group、
+XAUTOCLAIM、HMAC keyring、XADD 收据和原子 DLT+XACK。
+
+动态 gRPC command 路由保留同一步骤的多个合法 replica endpoint；每个目标都独立验证地址政策、
+mTLS 和 deadline。health 逐成员并发检查，共享一轮绝对期限；只有明确 Serving 的成员参与轮询
+分流，业务直接复用该成员完成探测的 channel。单个 NotServing、连接失败或超时不否定其它成员的健康证据，全部不服务时关闭新投递并拒绝
+发布该步骤。后续 Catalog 轮次重新复验成员集合；恢复成员通过检查后才能重新参与投递。
+逐请求凭据/发现刷新在首个 Serving 响应后，将其余探测的收集窗口限制为当时剩余预算的一半；
+未完成成员留待后续复验，已确认成员保留实际投递及收据读取预算。
+共享 channel 的重叠请求可复用等锁期间完成的同代健康结果，每个请求仍重新核对发现与凭据。
+探测结束后再次核对成员和凭据，变化时重新探测；后续独立请求不沿用上轮健康结论。
+刷新发布串行执行，等锁超时只结束该请求；刷新请求取消会释放探测，等待者可在自己的原期限内接续。
+所有受管 gRPC client 的单次期限覆盖 channel 就绪、连接、响应头、流式正文与最终 trailers，
+正文到达不会重置预算。调用者更短的 `grpc-timeout` 继续生效，派发前向远端传播剩余预算；到期返回
+DeadlineExceeded，不把迟到或不完整的收据当作成功确认。每次连接建立也独立受配置上限约束。
+投递结果不明时仍保留相同 Outbox event，参与方副本必须共享其角色要求的持久幂等与业务事实。
+面向 Orchestrator 的 client、result 和 Registry `discovery_ref` 支持固定地址或 `saga.discovery` 中的
+受信 Nacos 服务引用，每次调用绑定同一实例的身份、origin、有效路径和代次。没有合法目标时保留原事件重试。
+HTTP HMAC 和 gRPC mTLS 随配置视图一次发布，`saga.credential_overlap_ms` 指定旧材料接受窗口；入站、
+出站、capability 续租和 Catalog 执行资格共同读取当前安全合同，非法候选保留上一份有效配置。动态 principal
+使用 `secret://certificate_ref`，既有连接在每个 RPC 上也要复验；静态 `sha256:...` 保持固定身份。
+完整发现配置、证书轮换和多副本收敛边界见 [Saga 生产指南](../docs/saga-production.md)。
+
+业务通过 `SagaHandle::orchestrator` 或 `pgsql_orchestrator` 取得 `SagaOrchestratorHandle`，可发起、查询、
+暂停实例和读取运行指标；每次业务调用复验组件资格。句柄不暴露底层 Arc、registry 替换、timer 领取或
+fencing 控制。独立宿主仍可显式构造 core Orchestrator，并自行承担其控制面权限。
+
+HTTP start 的 `payload` 与 gRPC `SagaPayload` 都保留 `content_type`、`schema_id` 和精确 `body` 字节。
+首步 definition、capability 和 handler 声明相同解释合同，schema 不匹配在业务执行前拒绝。摘要覆盖原始
+字节与合同，HTTP/gRPC 重投共用相同幂等事实。旧 HTTP `input` JSON 入口保持可用，与 `payload` 互斥。
+
+HTTP/gRPC 的权限、分页、start、管理动作和审计均由唯一内部 API 执行，支持创建时间过滤与跨协议 page token。
+Registry 提供发布、读取、激活、废弃和退休；退休在同一事务检查全部保留实例、审计、Outbox 与有效租约，
+不自动删除历史事实。`nasaga_stage_duration_seconds` 提供 handler、事务、transition 和 timer lateness 的
+固定标签直方图，`napp_outbox_oldest_pending_age_seconds` 提供数据库时钟下的最老待投递 Saga 事件年龄。
+
+Redis credential secret 是封闭 JSON。`signing_keys` 按逻辑服务身份提供当前发送 key，
+`verification_keys` 按 key id 绑定认证身份；发布端不能只持有验签表，消费端也不能接受未知 key id：
+
+~~~json
+{
+  "signing_keys": {
+    "checkout-orchestrator": {"key_id": "orchestrator-current", "key_hex": "<至少三十二字节的十六进制密钥>"},
+    "inventory-service": {"key_id": "inventory-current", "key_hex": "<至少三十二字节的十六进制密钥>"}
+  },
+  "verification_keys": {
+    "orchestrator-current": {"service_identity": "checkout-orchestrator", "key_hex": "<对应十六进制密钥>"},
+    "inventory-current": {"service_identity": "inventory-service", "key_hex": "<对应十六进制密钥>"}
+  }
+}
+~~~
+
+多 datasource participant 为每个 `participant.bindings.<name>.datasource_ref` 建立独立 runtime 和 Outbox
+dispatcher；每个 `#[saga(binding = "...")]` descriptor 必须且只能命中一个 binding。任一协议、路由、
+凭据、DLT、group、owner 或 datasource 不完整都会在 Ready 前拒绝，不会改走默认库或手工路径。
+
+Application 的停止顺序先关闭 Saga 新调用与管理写入口，再停止 timer、Catalog/capability 循环和
+dispatcher，最后由 Web、transport 与数据库组件反向释放资源。Saga 提供本地 ACID、至少一次投递、
+Inbox 幂等、持久状态机和显式补偿，不提供跨服务 ACID、物理 exactly-once 或多个并发 Saga 的业务隔离。
 
 ### Outbox 租户配额
 
@@ -1036,7 +1177,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 受管模式读取固定 `grpc` 根；字段、默认值和硬上限见
-[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md#application-受管模式)。
+[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md#application-受管模式)。
 缺少业务 service、重复或晚到登记、ABI/descriptor 冲突、未知方法策略、非法 TLS/容量配置或端口绑定
 失败都会阻止 Ready，且不会留下监听任务。显式 `grpc.health_only: true` 可启动只有标准 health 的
 基础设施 listener。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。
@@ -1060,8 +1201,10 @@ Prepare 会按实际业务方法、自动 health/reflection 方法、五种拒�
 
 非 loopback 明文默认拒绝；TLS/mTLS 只从 `secret://` locator 读取同代材料，证书与密钥在 bind 前
 复验。`methods.<完整RPC路径>` 可要求验证过的 `PeerIdentity`，并设置方法并发与 token bucket；策略
-只能收紧全局上限，未知路径直接阻止启动。该组件只托管一个 listener，不提供证书进程内热切、客户端
-连接池或负载均衡；需要独立所有权时使用 `nasa::grpc::ServerPlan`，不要同时声明 `"grpc"` 组件。
+只能收紧全局上限，未知路径直接阻止启动。该组件只托管一个 listener；Saga 结合 `nacos-config`
+启用完整安全快照时，新握手使用当前证书，旧 client CA 仅在有界重叠窗口内受信。通用业务 client
+仍由调用方拥有；Saga 的受管连接池与发现由 Saga 组件装配。需要独立 listener 所有权时使用
+`nasa::grpc::ServerPlan`，不要同时声明 `"grpc"` 组件。
 
 ## 业务 initializer
 
@@ -1142,11 +1285,13 @@ initializer 失败、panic、超时或取消都会停止后续阶段，不发布
 | `app.spawn_critical / spawn_background` | 启动 Hook | 受监督任务；critical 提前退出触发失败停机 |
 | `app.serve_when_ready` | Service 启动 Hook | 登记只在 Application Ready 后才构造与 poll 的自管 listener |
 | `app.register_initializer` | Service 启动 Hook | 登记运行时 initializer，与 `#[nasa::initializer]` 静态项合并冻结 |
-| `app.configure_router(...)` | 启动 Hook | Web 逃生舱：手写路由、全局中间件、`/hystrix.stream` 等 |
+| `app.configure_router(...)` | 启动 Hook | 手写路由和全局业务中间件；启用 Saga HTTP 入站时拒绝未声明作用域的变换 |
+| `app.configure_router_scoped(prefix, ...)` | 启动 Hook | 非根静态业务前缀内的手写路由和中间件；内部路径相对声明前缀，所有子路由均限定在该前缀之下 |
 | `app.configure_mapping(...)` | 启动 Hook | 手动 global/scope/selector、窄 State 与安全运行时计划；`global = true` 的 interceptor 无需在此重复登记 |
 | `app.configure_ws(...)` | 启动 Hook | 长连接逃生舱：`authorize`、endpoint 事件表、集群 notifier（声明 `ws` 组件时必须至少提供 `authorize`） |
-| `app.configure_saga(plan)` | 启动 Hook | 提交唯一 Orchestrator/参与方计划；Ready 取走后入口永久封口 |
+| `app.configure_saga(plan)` | 启动 Hook | 仅在 `saga.plan_mode=custom` 提交高级计划；managed 模式调用即拒绝 |
 | `app.configure_outbox(plan)` | 启动 Hook | 为脱离 Saga 的事件流提交唯一受管发布计划 |
+| `app.register_outbox_publisher(...)` | 启动 Hook | 为已有事务域计划登记精确业务事件发布目标，共享同一 dispatcher |
 | `app.configure_kafka(name, ...)` | 启动 Hook | 在自动收集项之后追加有状态 consumer；Ready 取走后入口永久封口 |
 | `app.configure_kafka_metrics(name, sink)` | 启动 Hook | 为指定 client 安装一次无阻塞指标出口；未设置时为 Noop |
 | `app.configure_redis_jobs(plan)` | 启动 Hook | 把唯一拥有式 RedisJob plan 交给独立组件；Prepare 后入口永久封口 |

@@ -132,6 +132,7 @@ pub(crate) struct DbComponent {
     drivers: BTreeMap<String, DatabaseDriver>,
     migrations: BTreeMap<String, MigrationPlan>,
     catalog: Option<Arc<DataSourceCatalog>>,
+    inactive_direct_client: bool,
     #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     deferred: Option<DeferredBootstrap>,
 }
@@ -159,6 +160,7 @@ impl DbComponent {
             drivers: BTreeMap::new(),
             migrations: BTreeMap::new(),
             catalog: None,
+            inactive_direct_client: false,
             #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
             deferred: None,
         }
@@ -262,6 +264,16 @@ impl ApplicationComponent for DbComponent {
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let application = context.application().clone();
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            if crate::saga::is_managed_direct_client(&application, ApplicationPhase::Start)?
+                && application.config().value().get("database").is_none()
+                && application.config().value().get("datasources").is_none()
+            {
+                // direct client 只访问远程 Orchestrator；未声明业务数据源时不创建空 catalog，
+                // 也不赋予该进程任何 Saga schema 或连接池权限。
+                self.inactive_direct_client = true;
+                return Ok(());
+            }
             #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
             if application
                 .ensure_component_declared(
@@ -564,6 +576,15 @@ impl ApplicationComponent for DbComponent {
         context: &'a mut crate::PrepareContext<'_>,
     ) -> ApplicationFuture<'a> {
         Box::pin(async move {
+            if self.inactive_direct_client {
+                if !context.application().take_migrations().is_empty() {
+                    return Err(db_error(
+                        ApplicationPhase::Prepare,
+                        "managed direct Saga client cannot register database migrations without a datasource",
+                    ));
+                }
+                return Ok(());
+            }
             #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
             if self.deferred.is_some() {
                 self.adopt_deferred(context).await?;

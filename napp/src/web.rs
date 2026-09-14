@@ -40,6 +40,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
+pub(crate) mod router_boundary;
+
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
 use crate::{web_handle::WebRuntimeState, RouteInfo};
 use crate::{
@@ -603,13 +605,9 @@ impl ApplicationComponent for WebComponent {
 
     /// 业务作用：在业务资源封存后构造路由、绑定端口并激活 Web 停机动作。
     ///
-    /// # 参数
+    /// 参数说明：`context` 提供统一 Application 状态和 active stack 写入口的 Ready 上下文。
     ///
-    /// - `context`：提供统一 Application 状态和 active stack 写入口的 Ready 上下文。
-    ///
-    /// # 返回
-    ///
-    /// 返回：路由、指标源、listener 与受监督 accept 任务成组建立后成功；任一步失败都阻止接流。
+    /// 返回：路由互斥门禁通过且指标源、listener 与受监督 accept 任务成组建立后成功；任一步失败都阻止接流。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let config = self.config.clone().ok_or_else(|| {
@@ -623,6 +621,43 @@ impl ApplicationComponent for WebComponent {
             let route_manifest = build_route_manifest(&routes, config.health);
 
             let application = context.application().clone();
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            let saga_branch = crate::saga::managed_http_router(&application, &config.context_path)?;
+            #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
+            let saga_branch: Option<(String, Router)> = None;
+            let reserved = saga_branch
+                .as_ref()
+                .map(|(prefix, _)| prefix.strip_prefix(&config.context_path).unwrap_or(prefix));
+            if let Some(prefix) = reserved {
+                // Saga 整段分派优先于子路由；已启用的框架入口必须先证明不被遮蔽，才能绑定 listener。
+                if config.health {
+                    let framework_paths = [
+                        "/healthz",
+                        "/readyz",
+                        #[cfg(any(feature = "kafka", feature = "web"))]
+                        "/metrics",
+                    ];
+                    if let Some(path) = framework_paths
+                        .iter()
+                        .find(|path| router_boundary::under_prefix(path, prefix))
+                    {
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            format!("reserved Saga HTTP prefix conflicts with enabled framework route `{path}`"),
+                        ));
+                    }
+                }
+                // 自动路由的模式也参与前缀门禁，参数和父级通配不能占用控制面地址。
+                if routes
+                    .iter()
+                    .any(|route| router_boundary::intersects_reserved(route.path, prefix))
+                {
+                    return Err(web_error(
+                        ApplicationPhase::Ready,
+                        "an automatic business route intersects the reserved Saga HTTP prefix",
+                    ));
+                }
+            }
             let factory = self.factory;
             // 手动 mapping 计划必须在自动路由工厂前封口；工厂随后合并
             // `#[interceptor(global = true)]` 的链接期自动 binding。二者共同参与
@@ -691,12 +726,44 @@ impl ApplicationComponent for WebComponent {
                 }));
             }
             // 取走即封口：此后业务再调 configure_router 会得到阶段错误，而不是被静默丢弃。
-            for transform in application.take_router_transforms() {
-                router = match catch_unwind(AssertUnwindSafe(move || transform(router))) {
+            let mut scoped = std::collections::BTreeMap::<String, Router<Application>>::new();
+            for registration in application.take_router_transforms() {
+                let scope = registration.scope;
+                // 原始 Router 不提供可枚举路由合同，无法证明整个保留前缀的互斥性，必须拒绝接流。
+                if reserved.is_some() && scope.is_none() {
+                    return Err(web_error(ApplicationPhase::Ready, "Saga HTTP requires configure_router_scoped; unscoped Router transformations cannot prove reserved-prefix isolation"));
+                }
+                if let Some(prefix) = scope.as_deref() {
+                    // 父级业务 scope 同样可能吞入 Saga 前缀，必须同时检查两个方向的包含关系。
+                    if reserved.is_some_and(|reserved| {
+                        router_boundary::intersects_reserved(prefix, reserved)
+                            || router_boundary::under_prefix(reserved, prefix)
+                    }) {
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            "a business router scope intersects the reserved Saga HTTP prefix",
+                        ));
+                    }
+                    if scoped.keys().any(|existing| {
+                        existing != prefix
+                            && (router_boundary::under_prefix(existing, prefix)
+                                || router_boundary::under_prefix(prefix, existing))
+                    }) {
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            "business router scopes must not overlap",
+                        ));
+                    }
+                }
+                let source = match scope.as_ref() {
+                    Some(prefix) => scoped.remove(prefix).unwrap_or_default(),
+                    None => std::mem::take(&mut router),
+                };
+                let transformed = match catch_unwind(AssertUnwindSafe(move || {
+                    (registration.transform)(source)
+                })) {
                     Ok(router) => router,
                     Err(payload) => {
-                        // Axum 对重复路由/非法路径是 panic 而非 Result；`panic=unwind` 下把它收敛成启动错误，
-                        // `panic=abort` 下无法恢复——这是文档明确记账的自定义 Router 边界。
                         std::mem::forget(payload);
                         return Err(web_error(
                             ApplicationPhase::Ready,
@@ -704,6 +771,24 @@ impl ApplicationComponent for WebComponent {
                         ));
                     }
                 };
+                match scope {
+                    Some(prefix) => {
+                        scoped.insert(prefix, transformed);
+                    }
+                    None => router = transformed,
+                }
+            }
+            for (prefix, subtree) in scoped {
+                router = catch_unwind(AssertUnwindSafe(|| {
+                    router_boundary::mount_business_scope(router, subtree, &prefix)
+                }))
+                .map_err(|payload| {
+                    std::mem::forget(payload);
+                    web_error(
+                        ApplicationPhase::Ready,
+                        "a scoped business router conflicts with an existing route",
+                    )
+                })?;
             }
             // configure_router 已封口并执行完成，此时安全 route 集合才完整。统一指标目录在同一
             // 线性化点冻结 route 注册并预留最坏序列，后续不能再扩张实际渲染面。
@@ -1003,6 +1088,11 @@ impl ApplicationComponent for WebComponent {
                 application.web_runtime(),
                 observe_web_request,
             ));
+
+            // 整个 Saga 前缀在业务 middleware 之外分派，静态路径优先级、method 合并和 fallback 都不能改变权限域。
+            if let Some((prefix, saga_router)) = saga_branch {
+                router = router_boundary::isolate_saga(router, saga_router, prefix);
+            }
 
             let listener = TcpListener::bind((config.host.as_str(), config.port))
                 .await

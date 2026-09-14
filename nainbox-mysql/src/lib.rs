@@ -138,6 +138,18 @@ impl MySqlInbox {
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), InboxStoreError> {
         let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
         let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
+        Self::ensure_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 MySQL 连接建立 Inbox 结构，使外层 schema 互斥权
+    /// 覆盖建表、索引收敛和最终判定。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：表和保留索引可用时完成；DDL 或结构冲突返回脱敏错误。
+    pub async fn ensure_schema_on_connection(
+        connection: &mut natx::Conn,
+    ) -> Result<(), InboxStoreError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS inbox_message ( \
              consumer_name VARCHAR(128) NOT NULL, message_id VARCHAR(190) NOT NULL, \

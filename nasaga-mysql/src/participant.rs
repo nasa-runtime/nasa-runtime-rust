@@ -71,6 +71,18 @@ impl MySqlSagaStore {
     ) -> Result<(), SagaStoreError> {
         let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
         let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
+        Self::ensure_participant_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 MySQL 连接创建并复验参与方 gate，使 schema 互斥权
+    /// 覆盖完整 DDL 与摘要门禁。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：结构完整时成功；DDL 或历史摘要门禁失败时返回脱敏错误。
+    pub async fn ensure_participant_schema_on_connection(
+        connection: &mut natx::Conn,
+    ) -> Result<(), SagaStoreError> {
         sqlx::query(CREATE_PARTICIPANT_SQL)
             .execute(connection.as_mut())
             .await

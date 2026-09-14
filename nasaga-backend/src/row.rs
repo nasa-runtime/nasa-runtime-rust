@@ -58,6 +58,14 @@ pub struct SagaInstanceSummary {
     pub business_key: BusinessKey,
     /// 固定到实例的 definition 版本。
     pub definition_version: DefinitionVersion,
+    /// 创建时冻结的完整 definition 摘要。
+    pub definition_digest: String,
+    /// 管理控制态的 CAS 版本，可作为后续管理请求的并发前置条件。
+    pub control_version: u64,
+    /// 实例级绝对业务期限。
+    pub deadline_at_ms: Option<i64>,
+    /// 已提交的因果链路上下文。
+    pub traceparent: Option<String>,
     /// 业务状态。
     pub status: SagaStatus,
     /// 管理控制状态。
@@ -72,6 +80,8 @@ pub struct SagaInstanceSummary {
     pub failure_code: Option<String>,
     /// 创建时刻。
     pub created_at_ms: i64,
+    /// 创建时刻的精确数据库排序坐标，仅用于构造不透明时间分页游标。
+    pub created_at_cursor_us: i64,
     /// 最近更新时刻。
     pub updated_at_ms: i64,
 }

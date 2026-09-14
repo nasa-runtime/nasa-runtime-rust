@@ -22,8 +22,8 @@ use nasaga_core::{DefinitionVersion, ServiceIdentity, StepName, WorkflowName};
 use natelemetry::TraceContext;
 use sha2::Sha256;
 
-use crate::canonical_bytes;
 use crate::transport_shared::{SagaCommandHandler, SagaResultHandler};
+use crate::{canonical_bytes, validate_redis_stream_route};
 use crate::{SagaCommandEnvelope, SagaResultEnvelope};
 
 /// entry 字段:事件类型。
@@ -52,6 +52,11 @@ pub enum SagaStreamAuth {
         /// HMAC 密钥字节。
         key: Vec<u8>,
     },
+    /// 消费端验证集：每个 key id 绑定唯一逻辑生产者，适用于多参与方共享 result stream。
+    HmacKeyring {
+        /// 受信 key id 到认证生产者与验签密钥的冻结映射。
+        keys: BTreeMap<String, SagaStreamVerificationKey>,
+    },
     /// producer 独占可写 stream：不写消息级签名，来源身份由部署层（ACL 独占写权限）
     /// 保证，route 配置仍显式绑定 owner。
     ExclusiveStream,
@@ -59,14 +64,41 @@ pub enum SagaStreamAuth {
 
 impl std::fmt::Debug for SagaStreamAuth {
     /// 业务作用：输出不含密钥字节的认证模式摘要。
+    ///
+    /// 参数说明：`formatter` 接收脱敏后的认证模式与稳定 key id，不接收密钥材料。
+    ///
+    /// 返回：摘要写入成功时返回成功；格式化目标拒绝写入时透传格式化错误。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Hmac { key_id, .. } => formatter
                 .debug_struct("Hmac")
                 .field("key_id", key_id)
                 .finish_non_exhaustive(),
+            Self::HmacKeyring { keys } => formatter
+                .debug_struct("HmacKeyring")
+                .field("key_ids", &keys.keys().collect::<Vec<_>>())
+                .finish_non_exhaustive(),
             Self::ExclusiveStream => formatter.write_str("ExclusiveStream"),
         }
+    }
+}
+
+/// 业务作用：把 Redis stream 验签 key 与它唯一代表的 `ServiceIdentity` 绑定。
+#[derive(Clone)]
+pub struct SagaStreamVerificationKey {
+    producer: ServiceIdentity,
+    key: Vec<u8>,
+}
+
+impl SagaStreamVerificationKey {
+    /// 业务作用：冻结一条可用于验证消息来源的生产者密钥。
+    ///
+    /// 参数说明：`producer` 是逻辑服务身份，`key` 是不进入配置快照和日志的 HMAC 密钥。
+    ///
+    /// 返回：密钥非空时返回不可变绑定；空密钥返回错误。
+    pub fn new(producer: ServiceIdentity, key: Vec<u8>) -> anyhow::Result<Self> {
+        anyhow::ensure!(!key.is_empty(), "saga stream verification key is empty");
+        Ok(Self { producer, key })
     }
 }
 
@@ -126,53 +158,6 @@ fn sign_entry(
     )
 }
 
-/// 业务作用：校验 stream/key 名与 cluster hash tag 合同——启用 tag 时 DLT、marker 与
-/// 源 stream 必须同槽，Lua 原子脚本才能在 Cluster 下合法执行。
-///
-/// 参数说明：
-/// - `name`: 待校验的 stream/key 名。
-/// - `key_tag`: Cluster 同槽 tag；`None` 表示单节点部署不作约束。
-///
-/// 返回：名称有界且满足同槽合同时返回真。
-fn valid_stream_name(name: &str, key_tag: Option<&str>) -> bool {
-    if name.is_empty() || name.len() > 190 || name.chars().any(char::is_control) {
-        return false;
-    }
-    match key_tag {
-        // 同槽判定必须用 Redis 实际采用的 hash tag,而不是"名字里出现过 {tag}":
-        // Redis 只取第一个含非空内容的 `{...}` 参与 slot 计算,`a{x}{tag}` 的槽由 `{x}`
-        // 决定——contains 校验会放行这类键,DLT Lua 到运行期才 CROSSSLOT 崩裂。
-        Some(tag) => {
-            !tag.is_empty()
-                && tag.len() <= 64
-                && !tag.contains(['{', '}'])
-                && !tag.chars().any(char::is_control)
-                && first_hash_tag(name) == Some(tag)
-        }
-        None => true,
-    }
-}
-
-/// 业务作用：按 Redis Cluster 的 slot 规则解析键名实际采用的 hash tag。
-///
-/// 规则与服务端一致:取第一个 `{` 与其后第一个 `}` 之间的内容,内容非空才生效;
-/// `{}` 或没有闭合的 `{` 都视为无 tag(整个键名参与 slot 计算)。
-///
-/// 参数说明：
-/// - `name`: 键名。
-///
-/// 返回：实际生效的 hash tag;不存在时返回 `None`。
-fn first_hash_tag(name: &str) -> Option<&str> {
-    let open = name.find('{')?;
-    let close = name[open + 1..].find('}')?;
-    if close == 0 {
-        // `{}`:Redis 视为无 tag。服务端遇到空 tag 后按整键计算 slot,不再看后续
-        // `{...}`,这里保持同一行为。
-        return None;
-    }
-    Some(&name[open + 1..open + 1 + close])
-}
-
 // ───────────────────────────── 发布端 ─────────────────────────────
 
 /// 业务作用：把 Outbox 事件按事件类型写入受信 stream 的发布端。
@@ -204,11 +189,15 @@ impl SagaRedisStreamPublisher {
         auth: SagaStreamAuth,
         key_tag: Option<&str>,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !matches!(auth, SagaStreamAuth::HmacKeyring { .. }),
+            "saga stream publisher cannot use a verification keyring"
+        );
         if streams.is_empty() {
             anyhow::bail!("saga stream publisher requires at least one event route");
         }
         for (event_type, stream) in &streams {
-            if event_type.is_empty() || !valid_stream_name(stream, key_tag) {
+            if event_type.is_empty() || validate_redis_stream_route(stream, key_tag).is_err() {
                 anyhow::bail!("saga stream route violates the naming or hash-tag contract");
             }
         }
@@ -452,9 +441,9 @@ impl SagaStreamConsumerConfig {
     /// 返回：合同满足返回 `Ok`；否则返回拒绝启动的错误。
     pub fn validate(&self) -> anyhow::Result<()> {
         let tag = self.key_tag.as_deref();
-        if !valid_stream_name(&self.stream, tag)
-            || !valid_stream_name(&self.dlt_stream, tag)
-            || !valid_stream_name(&self.marker_prefix, tag)
+        if validate_redis_stream_route(&self.stream, tag).is_err()
+            || validate_redis_stream_route(&self.dlt_stream, tag).is_err()
+            || validate_redis_stream_route(&self.marker_prefix, tag).is_err()
         {
             anyhow::bail!("saga stream consumer violates the naming or hash-tag contract");
         }
@@ -786,49 +775,51 @@ impl SagaStreamEntry {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：来源可信返回 `Ok`；缺字段、key id 不符或签名不匹配返回稳定原因。
-    fn verify_origin(&self) -> Result<(), &'static str> {
-        match &self.config.auth {
+    /// 返回：来源可信时返回 keyring 绑定的生产者；单 key/ACL 模式返回空；签名异常返回稳定原因。
+    fn verify_origin(&self) -> Result<Option<ServiceIdentity>, &'static str> {
+        let (key, producer) = match &self.config.auth {
             SagaStreamAuth::Hmac { key_id, key } => {
-                let presented_key = self
-                    .fields
-                    .get(FIELD_KEY_ID)
-                    .map(|bytes| String::from_utf8_lossy(bytes).to_string());
+                let presented_key = self.field_text(FIELD_KEY_ID);
                 if presented_key.as_deref() != Some(key_id.as_str()) {
                     return Err("saga_stream_signature_key_unknown");
                 }
-                let Some(signature) = self.fields.get(FIELD_SIGNATURE) else {
-                    return Err("saga_stream_signature_missing");
-                };
-                // 签名字段是十六进制文本:先解码回原始字节,再常量时间比对。解码失败
-                // 即视为签名非法,不进入比对。
-                let Some(decoded) = self
-                    .field_text(FIELD_SIGNATURE)
-                    .and_then(|hex_text| hex::decode(hex_text).ok())
-                else {
-                    let _ = signature;
-                    return Err("saga_stream_signature_invalid");
-                };
-                let event_id = self.field_text(FIELD_EVENT_ID).unwrap_or_default();
-                let event_type = self.field_text(FIELD_EVENT).unwrap_or_default();
-                let payload = self.fields.get(FIELD_PAYLOAD).cloned().unwrap_or_default();
-                // trace 字段按"实际在场的字节"参与验签:被篡改、增删的 trace 都会
-                // 使签名失配,伪造因果链的 entry 走确定性拒绝进 DLT。
-                let traceparent = self.fields.get(FIELD_TRACEPARENT).map(Vec::as_slice);
-                entry_mac(
-                    key,
-                    &self.config.stream,
-                    &event_id,
-                    &event_type,
-                    &payload,
-                    traceparent,
-                )
-                .verify_slice(&decoded)
-                .map_err(|_| "saga_stream_signature_invalid")?;
-                Ok(())
+                (key.as_slice(), None)
             }
-            SagaStreamAuth::ExclusiveStream => Ok(()),
+            SagaStreamAuth::HmacKeyring { keys } => {
+                let presented_key = self
+                    .field_text(FIELD_KEY_ID)
+                    .ok_or("saga_stream_signature_key_unknown")?;
+                let trusted = keys
+                    .get(&presented_key)
+                    .ok_or("saga_stream_signature_key_unknown")?;
+                (trusted.key.as_slice(), Some(trusted.producer.clone()))
+            }
+            SagaStreamAuth::ExclusiveStream => return Ok(None),
+        };
+        if !self.fields.contains_key(FIELD_SIGNATURE) {
+            return Err("saga_stream_signature_missing");
         }
+        // 签名字段先解码为原始字节，常量时间比对才不会泄露相等前缀。
+        let decoded = self
+            .field_text(FIELD_SIGNATURE)
+            .and_then(|hex_text| hex::decode(hex_text).ok())
+            .ok_or("saga_stream_signature_invalid")?;
+        let event_id = self.field_text(FIELD_EVENT_ID).unwrap_or_default();
+        let event_type = self.field_text(FIELD_EVENT).unwrap_or_default();
+        let payload = self.fields.get(FIELD_PAYLOAD).cloned().unwrap_or_default();
+        // trace 字段必须以实际在场字节参与验签，防止被替换后伪造因果链。
+        let traceparent = self.fields.get(FIELD_TRACEPARENT).map(Vec::as_slice);
+        entry_mac(
+            key,
+            &self.config.stream,
+            &event_id,
+            &event_type,
+            &payload,
+            traceparent,
+        )
+        .verify_slice(&decoded)
+        .map_err(|_| "saga_stream_signature_invalid")?;
+        Ok(producer)
     }
 
     /// 业务作用：读取文本字段。
@@ -913,16 +904,17 @@ impl<H: SagaResultHandler> SagaRedisStreamResultConsumer<H> {
         now_ms: i64,
     ) -> anyhow::Result<StreamPollReport> {
         let handler = Arc::clone(&self.handler);
-        let producer = self.core.config.producer.clone();
+        let configured_producer = self.core.config.producer.clone();
         let timeout = Duration::from_millis(self.core.config.handler_timeout_ms);
         self.core
             .poll_once(client, move |view| {
                 let handler = Arc::clone(&handler);
-                let producer = producer.clone();
+                let configured_producer = configured_producer.clone();
                 async move {
-                    if let Err(reason) = view.verify_origin() {
-                        return StreamVerdict::DeadLetter(reason);
-                    }
+                    let producer = match view.verify_origin() {
+                        Ok(producer) => producer.unwrap_or(configured_producer),
+                        Err(reason) => return StreamVerdict::DeadLetter(reason),
+                    };
                     let Some(payload) = view.fields.get(FIELD_PAYLOAD) else {
                         return StreamVerdict::DeadLetter("saga_stream_payload_missing");
                     };
@@ -1033,6 +1025,32 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
         })
     }
 
+    /// 业务作用：为只持有本地步骤 capability 的受管参与方构造版本级 command 消费者。
+    ///
+    /// 参数说明：`handler/config` 冻结事务与来源认证，`workflow/version/step` 定位参与方公开能力。
+    ///
+    /// 返回：配置合法时返回消费者；运行时仍由 `ParticipantRuntime` 复验生产者、workflow 与版本信任。
+    pub fn for_managed_capability(
+        handler: Arc<H>,
+        config: SagaStreamConsumerConfig,
+        workflow: WorkflowName,
+        version: DefinitionVersion,
+        step: StepName,
+    ) -> anyhow::Result<Self> {
+        config.validate()?;
+        Ok(Self {
+            handler,
+            core: StreamConsumerCore {
+                config: Arc::new(config),
+                reclaim_cursor: std::sync::Mutex::new("0-0".to_string()),
+            },
+            workflow,
+            version,
+            digest: String::new(),
+            step,
+        })
+    }
+
     /// 业务作用：幂等确保 consumer group 存在（Ready 前调用）。
     ///
     /// 参数说明：
@@ -1060,7 +1078,7 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
     /// 返回：本轮报告；Redis 往返失败返回错误（消息原位保留）。
     pub async fn poll_once(&self, client: &RedisClient) -> anyhow::Result<StreamPollReport> {
         let handler = Arc::clone(&self.handler);
-        let producer = self.core.config.producer.clone();
+        let configured_producer = self.core.config.producer.clone();
         let timeout = Duration::from_millis(self.core.config.handler_timeout_ms);
         let workflow = self.workflow.clone();
         let version = self.version;
@@ -1069,14 +1087,15 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
         self.core
             .poll_once(client, move |view| {
                 let handler = Arc::clone(&handler);
-                let producer = producer.clone();
+                let configured_producer = configured_producer.clone();
                 let workflow = workflow.clone();
                 let digest = digest.clone();
                 let step = step.clone();
                 async move {
-                    if let Err(reason) = view.verify_origin() {
-                        return StreamVerdict::DeadLetter(reason);
-                    }
+                    let producer = match view.verify_origin() {
+                        Ok(producer) => producer.unwrap_or(configured_producer),
+                        Err(reason) => return StreamVerdict::DeadLetter(reason),
+                    };
                     let Some(payload) = view.fields.get(FIELD_PAYLOAD) else {
                         return StreamVerdict::DeadLetter("saga_stream_payload_missing");
                     };
@@ -1092,7 +1111,7 @@ impl<H: SagaCommandHandler> SagaRedisStreamCommandConsumer<H> {
                     // 参与方;错配在 Inbox 前隔离。
                     if envelope.workflow != workflow.as_str()
                         || envelope.definition_version != version.get()
-                        || envelope.definition_digest != digest
+                        || (!digest.is_empty() && envelope.definition_digest != digest)
                         || envelope.step != step.as_str()
                     {
                         return StreamVerdict::DeadLetter("saga_command_route_unauthorized");

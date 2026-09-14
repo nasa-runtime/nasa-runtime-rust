@@ -67,95 +67,90 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## Saga 最小接线
 
-Orchestrator 服务启用 Application，并按 Saga 所在 datasource 的 driver 选择 MySQL
-`saga-runtime` 或 PostgreSQL `saga-runtime-pgsql`。Kafka、Redis Streams、HTTP 或 gRPC 按真实链路
-另选，不能只配置地址就假定已经具备消费、确认和 DLT 闭环。以下是 MySQL 接线：
+零装配路径可选择 managed HTTP、gRPC、Kafka 或 Redis Streams。MySQL 开启 saga-runtime，PostgreSQL
+开启 saga-runtime-pgsql；
+Application 依据角色作用域的 datasource_ref 选择 driver、创建角色所需结构并构造运行时。
 
-```toml
+~~~toml
 [dependencies]
 nasa = { version = "1.0.3", features = ["application", "saga-runtime", "web"] }
-```
+~~~
 
-```rust
-use std::sync::Arc;
-use nasa::application::SagaApplicationPlan;
-use nasa::saga::{DefinitionRegistry, Orchestrator, OrchestratorConfig};
+纯 Orchestrator 的业务入口可以为空：
 
+~~~rust
 #[nasa::application("saga", "web")]
-async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    let mut definitions = DefinitionRegistry::new();
-    definitions.register(checkout_definition()?)?;
-
-    let orchestrator = Arc::new(Orchestrator::new(
-        definitions,
-        OrchestratorConfig::default(),
-    )?);
-    let publisher = Arc::new(build_event_publisher(&app).await?);
-
-    app.configure_saga(
-        SagaApplicationPlan::orchestrator(orchestrator, "checkout-orchestrator-a")?
-            .with_event_publisher(publisher)?,
-    )?;
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
     Ok(())
 }
-```
+~~~
 
-PostgreSQL 使用相同状态机合同，只替换后端入口和受管计划构造：
+~~~yaml
+datasources:
+  saga-control:
+    driver: mysql
+    url: ${SAGA_DATABASE_URL}
 
-```toml
-[dependencies]
-nasa = { version = "1.0.3", features = ["application", "saga-runtime-pgsql", "web"] }
-```
+outbox:
+  datasource_ref: saga-control
 
-```rust
-use std::sync::Arc;
-use nasa::application::SagaApplicationPlan;
-use nasa::saga::pgsql::{DefinitionRegistry, OrchestratorConfig, PgOrchestrator};
+saga:
+  role: orchestrator
+  plan_mode: managed
+  service_identity: checkout-orchestrator
+  replica_identity: ${SAGA_REPLICA_ID}
+  orchestrator:
+    datasource_ref: saga-control
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: saga-control
+    activation_policy: validated
+    watch_interval_ms: 500
+    capability_registry_ref: saga-participant-capabilities
+    publisher_authorization_policy_ref: saga-definition-publishers
+  http:
+    base_path: /_nasa/saga
+  api:
+    page_token_key_ref: saga-api-page-token
+    http:
+      enabled: true
+      authorization_policy_ref: checkout-saga-http-rbac
+      callers:
+        order-api:
+          credential_ref: saga-order-client
+          tenants: [system]
+          permissions: [start, read]
+  transport:
+    address_policies:
+      saga-participant-routing:
+        http_schemes: [https]
+        http_hosts: [inventory.internal, payment.internal]
+        http_ports: [443]
+    command_result:
+      kind: http
+      http:
+        shared_replay_claim: saga-http-replay
+        command_credential_ref: saga-command
+        result_credential_ref: saga-result
+        routing:
+          mode: capability-registry
+          address_policy_ref: saga-participant-routing
+~~~
 
-#[nasa::application("saga", "web")]
-async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    let mut definitions = DefinitionRegistry::new();
-    definitions.register(checkout_definition()?)?;
+participant 使用相同 Application 声明，但配置 saga.role: participant，并明确 service_identity、
+consumer_identity、orchestrator_identity 与 datasource_ref。业务步骤使用 managed=true 的 #[saga]；
+框架负责 command 路由、HMAC/replay、Inbox/gate、本地事务、result Outbox 和 capability 续租，业务
+只实现 execute、compensate 以及需要的 resolve/cancel。workflow owner 使用 #[nasa::saga_workflow]
+返回完整有序 definition；main 不调用 register、publish 或 configure_saga。
 
-    let orchestrator = Arc::new(PgOrchestrator::new(
-        definitions,
-        OrchestratorConfig::default(),
-    )?);
-    let publisher = Arc::new(build_event_publisher(&app).await?);
+client 角色不构造 Orchestrator。direct 模式无需本地数据库，调用 SagaRemoteClient::start/get；
+reliable_start 模式必须声明 client.datasource_ref，并在当前同源业务事务内调用 enqueue_start，使业务
+事实和 start-intent Outbox 原子提交。远端暂不可用时事件保持待派发，恢复后由周期扫描或提交唤醒送达。
 
-    app.configure_saga(
-        SagaApplicationPlan::pgsql_orchestrator(orchestrator, "checkout-orchestrator-a")?
-            .with_event_publisher(publisher)?,
-    )?;
-    Ok(())
-}
-```
-
-`timer_owner` 必须逐副本唯一且重启稳定。纯参与方使用
-`SagaApplicationPlan::participant(name, runtime)`；同一进程同时承载 Orchestrator 与参与方时用
-`with_participant` 追加。发布端必须实现 `OutboxPublisher` 并且只在下游已经明确确认后返回成功。
-
-启动前必须按选定后端准备每个本地事务域：MySQL 执行
-[Saga 迁移顺序](../nasaga-mysql/migrations/README.md) 与
-[Outbox 迁移顺序](../naoutbox-mysql/migrations/README.md)；PostgreSQL 的 Orchestrator 执行
-[Saga 结构](../nasaga-pgsql/migrations/create_saga.sql)，参与方执行
-[Saga gate 结构](../nasaga-pgsql/migrations/create_saga_participant.sql)，两侧按需执行
-[Outbox 结构](../naoutbox-pgsql/migrations/create_outbox.sql)。Application 会在 Ready 前校验定义、
-descriptor、历史非终态实例、数据库结构、发布端和参与方信任；任何一项不完整都拒绝开放监听或消费。
-
-| transport | 需要的门面 feature | Application 声明 | 额外责任 |
-| --- | --- | --- | --- |
-| Kafka | MySQL `saga-kafka`；PostgreSQL `saga-kafka-pgsql` | 增加 `"kafka"` | topic owner、consumer group、ACL、DLT 与 broker 容量 |
-| Redis Streams | MySQL `saga-redis-stream`；PostgreSQL `saga-redis-stream-pgsql` | 增加 `"redis"` | group、consumer 身份、HMAC/独占写 ACL、PEL 与同槽 DLT key |
-| HTTP | MySQL `saga-runtime`；PostgreSQL `saga-runtime-pgsql` | 按宿主 listener | mTLS/HMAC、共享 nonce claim、路由、重试与 durable DLT |
-| gRPC | MySQL `saga-grpc`；PostgreSQL `saga-grpc-pgsql` | 入站增加 Application `"grpc"`；纯出站 client 不声明组件 | 框架 generated service/client、mTLS principal、deadline、资源上限、封闭收据与 drain |
-
-gRPC 入站不手工创建 tonic Router、generated server 或 `Arc` handler。单参与方在计划上调用
-`with_grpc_command_service(service, peer_principal)`，Application 从 Participant runtime 的冻结信任投影
-取得 producer；Orchestrator 调用 `with_grpc_result_service(producer, peer_principal)`。框架 service 自动
-进入唯一受管 listener。纯出站发布端使用 `nasa::saga::grpc_proto` 的 generated client，并自行拥有
-channel、deadline、重试和 Outbox 收据裁决。
-
+PostgreSQL 只需把 datasource driver 改为 postgresql 并开启 saga-runtime-pgsql；角色、Definition
+Catalog、收据和恢复语义相同。HTTP、gRPC、Kafka 与 Redis Streams 均可作为受管 command/result
+数据面；多 datasource participant 通过每个 descriptor 的显式 binding 精确选库。控制面可独立选择
+HTTP 或 gRPC，`saga_orchestrator.proto` 随 runtime core 发布，供非 Rust 客户端从同一协议源生成代码。
 ## 配置
 
 在业务进程工作目录提供 `zcf/application.yml`：

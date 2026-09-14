@@ -1475,7 +1475,8 @@ pub fn abort_managed_bootstrap(
 /// - `datasource`：业务请求的 qualifier。
 /// - `expected`：调用入口对应的 driver。
 ///
-/// 返回：standalone 或开放 managed catalog 允许该 driver 时返回规范引用；其它模式返回结构化错误。
+/// 返回：standalone、UserHook 延后引导期的同 driver `default`，或开放 managed catalog
+/// 允许该 driver 时返回规范引用；其它模式返回结构化错误。
 pub fn resolve_datasource(
     datasource: &str,
     expected: DatabaseDriver,
@@ -1484,6 +1485,15 @@ pub fn resolve_datasource(
         RegistryMode::Empty => {
             // 尚未安装任何 runtime 时只规范化名称，具体 typed registry 继续给出既有 NotFound 语义；
             // Bootstrapping 则必须保持不可读，不能把正在建立的权威误判成普通未初始化。
+            DatasourceRef::new(datasource).map_err(|_| DataSourceLookupError::InvalidName)
+        }
+        RegistryMode::Bootstrapping {
+            kind: BootstrapKind::DeferredDefault,
+            deferred_driver: Some(actual),
+            ..
+        } if *actual == expected && datasource == DEFAULT_DATASOURCE => {
+            // UserHook 只能在应用尚未 Ready 的窗口内使用刚注入的唯一 default；开放这条精确入口
+            // 才能完成 schema 自举与运行时装配，命名库、另一 driver 和其它引导模式仍保持不可读。
             DatasourceRef::new(datasource).map_err(|_| DataSourceLookupError::InvalidName)
         }
         RegistryMode::Bootstrapping { .. } => Err(DataSourceLookupError::RegistryUnavailable),

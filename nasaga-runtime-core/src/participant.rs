@@ -103,7 +103,7 @@ pub struct ParticipantCommandTrust {
     producer: ServiceIdentity,
     workflow: WorkflowName,
     definition_version: DefinitionVersion,
-    definition_digest: String,
+    definition_digest: Option<String>,
 }
 
 impl ParticipantCommandTrust {
@@ -130,8 +130,29 @@ impl ParticipantCommandTrust {
             producer,
             workflow,
             definition_version,
-            definition_digest,
+            definition_digest: Some(definition_digest),
         })
+    }
+
+    /// 业务作用：为动态 Catalog 参与方构造按 workflow/version 限定的 Orchestrator 授权边。
+    ///
+    /// participant 只发布自身 capability，不持有完整流程 seal；命令仍需通过 transport 身份认证、
+    /// envelope 派生复验与宏生成的精确步骤门禁，完整 digest 由 Orchestrator 的持久实例权威负责。
+    ///
+    /// 参数说明：`producer` 是获准协调者，`workflow` 与 `definition_version` 是本地 handler 支持范围。
+    ///
+    /// 返回：不依赖完整 workflow projection 的受限信任边。
+    pub fn for_definition_version(
+        producer: ServiceIdentity,
+        workflow: WorkflowName,
+        definition_version: DefinitionVersion,
+    ) -> Self {
+        Self {
+            producer,
+            workflow,
+            definition_version,
+            definition_digest: None,
+        }
     }
 }
 
@@ -142,7 +163,7 @@ pub struct ParticipantRuntime<B: SagaBackend> {
     backend: B,
     consumer: String,
     trusted_command_producers: BTreeSet<ServiceIdentity>,
-    command_trust: BTreeMap<(WorkflowName, DefinitionVersion, String), ServiceIdentity>,
+    command_trust: BTreeMap<(WorkflowName, DefinitionVersion, Option<String>), ServiceIdentity>,
 }
 
 /// 业务作用：表示已命中至少一条 Participant 信任投影的 command producer 能力。
@@ -364,6 +385,8 @@ where
         if identity.phase != StepPhase::Execute {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::ParticipantTransaction);
         crate::transaction::run_for(&self.backend, async {
             if matches!(
                 self.backend
@@ -401,10 +424,9 @@ where
                 }
                 ExecuteAdmission::Admitted => {
                     let context = self.context_of(&identity, envelope)?;
-                    let command: S::Command =
-                        serde_json::from_value(envelope.payload.clone().unwrap_or_default())
-                            .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
-                    match service.execute(&context, command).await {
+                    let command: S::Command = envelope.decode_payload()?;
+                    match crate::latency::measure_handler(service.execute(&context, command)).await
+                    {
                         Ok(SagaOutcome::Succeeded(_)) => {
                             self.backend
                                 .store()
@@ -551,6 +573,8 @@ where
         if identity.phase != StepPhase::Cancel {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::ParticipantTransaction);
         crate::transaction::run_for(&self.backend, async {
             if matches!(
                 self.backend
@@ -650,6 +674,8 @@ where
         if identity.phase != StepPhase::Cancel {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::ParticipantTransaction);
         crate::transaction::run_for(&self.backend, async {
             if matches!(
                 self.backend
@@ -694,11 +720,8 @@ where
                     let context = self
                         .context_of(&identity, envelope)?
                         .with_target_phase(StepPhase::Execute);
-                    let command: C::Command = serde_json::from_value(
-                        envelope.payload.clone().unwrap_or(serde_json::Value::Null),
-                    )
-                    .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
-                    match service.cancel(&context, command).await {
+                    let command: C::Command = envelope.decode_payload()?;
+                    match crate::latency::measure_handler(service.cancel(&context, command)).await {
                         Ok(outcome) => {
                             let (forward, cancel, status, terminal, reason) =
                                 external_cancel_result(outcome);
@@ -779,6 +802,8 @@ where
         if identity.phase != StepPhase::Compensate {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::ParticipantTransaction);
         crate::transaction::run_for(&self.backend, async {
             if matches!(
                 self.backend
@@ -837,10 +862,10 @@ where
                     let context = self.context_of(&identity, envelope)?;
                     // 补偿输入来自持久化事实(默认形态 (a)):命令只带身份,
                     // 业务按 saga_id + step 自行解析要撤销的内容。
-                    let command: S::Compensation =
-                        serde_json::from_value(envelope.payload.clone().unwrap_or_default())
-                            .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
-                    match service.compensate(&context, command).await {
+                    let command: S::Compensation = envelope.decode_payload()?;
+                    match crate::latency::measure_handler(service.compensate(&context, command))
+                        .await
+                    {
                         Ok(CompensationOutcome::Succeeded) => {
                             self.backend
                                 .store()
@@ -960,6 +985,8 @@ where
         if identity.phase != StepPhase::Resolve {
             return Err(crate::SagaCommandProcessingError::ContractInvalid.into());
         }
+        let _latency =
+            crate::latency::LatencyGuard::new(crate::latency::LatencyStage::ParticipantTransaction);
         crate::transaction::run_for(&self.backend, async {
             if matches!(
                 self.backend
@@ -1017,10 +1044,9 @@ where
                     let context = self
                         .context_of(&identity, envelope)?
                         .with_target_phase(target_phase);
-                    let command: R::Command =
-                        serde_json::from_value(envelope.payload.clone().unwrap_or_default())
-                            .map_err(|_| crate::SagaCommandProcessingError::ContractInvalid)?;
-                    match service.resolve(&context, command).await {
+                    let command: R::Command = envelope.decode_payload()?;
+                    match crate::latency::measure_handler(service.resolve(&context, command)).await
+                    {
                         Ok(SagaOutcome::Succeeded(_)) => {
                             self.backend
                                 .store()
@@ -1133,6 +1159,19 @@ where
             .verified()
             .map_err(|_| crate::SagaCommandProcessingError::IdentityInvalid)?;
         self.verify_command_producer(producer, &identity)?;
+        // 本地 descriptor 是正文 schema 的权威；缺少声明时只允许兼容 JSON，不能信任命令自报 schema。
+        let descriptor = crate::COLLECTED_SAGA_STEPS.iter().find(|descriptor| {
+            descriptor.workflow == envelope.workflow
+                && descriptor.definition_version == envelope.definition_version
+                && descriptor.step == envelope.step
+        });
+        let (content_type, schema_id) = descriptor.map_or(("application/json", ""), |descriptor| {
+            (
+                descriptor.payload_content_type,
+                descriptor.payload_schema_id,
+            )
+        });
+        envelope.verify_payload_contract(content_type, schema_id)?;
         Ok(identity)
     }
 
@@ -1151,9 +1190,12 @@ where
         let key = (
             identity.workflow.clone(),
             identity.definition_version,
-            identity.definition_digest.clone(),
+            Some(identity.definition_digest.clone()),
         );
-        if self.command_trust.get(&key) != Some(producer) {
+        let version_key = (identity.workflow.clone(), identity.definition_version, None);
+        if self.command_trust.get(&key) != Some(producer)
+            && self.command_trust.get(&version_key) != Some(producer)
+        {
             return Err(crate::SagaCommandProcessingError::ProducerUnauthorized.into());
         }
         Ok(())
@@ -1180,7 +1222,8 @@ where
             identity.step.clone(),
             identity.phase,
             identity.attempt,
-        ))
+        )
+        .with_payload(envelope.business_payload()?))
     }
 
     /// 业务作用：把处理结论以稳定身份写入结果 Outbox，与业务写同事务发布。

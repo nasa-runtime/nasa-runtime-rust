@@ -243,6 +243,8 @@ pub struct ConfigView {
     reload_statuses: Arc<HashMap<ReloadTarget, ReloadStatus>>,
     /// 与本代 config 同 generation 的已解析 secret 集合;真实值只在此。
     secrets: Arc<nasecret::SecretSnapshot>,
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    saga_security: Option<Arc<crate::saga::security::SagaSecuritySnapshot>>,
     /// 对**原始**候选树求得的私有 fingerprint,供 reload 无变化判断(不对外)。
     ///
     /// 只有 nacos-config reload 驱动读取它;无该特性的构建仍存储(始终随视图一起构造),故 allow。
@@ -266,6 +268,8 @@ impl ConfigView {
             snapshot,
             reload_statuses: Arc::new(reload_statuses),
             secrets: Arc::new(nasecret::SecretSnapshot::builder(generation).build()),
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            saga_security: None,
             candidate_fingerprint: [0; 32],
         }
     }
@@ -288,6 +292,8 @@ impl ConfigView {
             snapshot,
             reload_statuses: Arc::new(reload_statuses),
             secrets,
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            saga_security: None,
             candidate_fingerprint,
         }
     }
@@ -299,6 +305,34 @@ impl ConfigView {
     /// 本方法无参数;返回借用不能越过当前视图。secret 消费者据此取 material、判 `changed_ids`。
     pub fn secrets(&self) -> &Arc<nasecret::SecretSnapshot> {
         &self.secrets
+    }
+
+    /// 业务作用：读取与当前 secret 同代发布的全部 Saga 安全资源。
+    /// 参数说明：无。
+    /// 返回：已准备的凭据快照；初始装配期间为空，由组件持有初始材料。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn saga_security(&self) -> Option<Arc<crate::saga::security::SagaSecuritySnapshot>> {
+        self.saga_security.clone()
+    }
+
+    /// 业务作用：把已全部校验的 Saga 安全资源加入尚未发布的候选配置视图。
+    /// 参数说明：`security` 必须使用本视图的 secret 构建，不能来自另一个配置代次。
+    /// 返回：包含完整安全资源的新视图，原视图与运行中的请求保持不变。
+    #[cfg(all(
+        feature = "nacos-config",
+        any(feature = "saga", feature = "saga-pgsql")
+    ))]
+    pub(crate) fn with_saga_security(
+        &self,
+        security: Arc<crate::saga::security::SagaSecuritySnapshot>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: self.snapshot.clone(),
+            reload_statuses: self.reload_statuses.clone(),
+            secrets: self.secrets.clone(),
+            candidate_fingerprint: self.candidate_fingerprint,
+            saga_security: Some(security),
+        })
     }
 
     /// 业务作用：返回原始候选树的私有 fingerprint,供 reload 无变化判断。
@@ -335,6 +369,22 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
+    /// 业务作用：在同一个发布锁内复验候选来源并切换配置及其凭据资源，防止并发轮换覆盖新代次。
+    /// 参数说明：`expected` 是准备时观察到的配置代次，`next` 是完整候选视图。
+    /// 返回：来源仍为当前代次时发布并通知订阅者；已被其它候选替换时返回假且无副作用。
+    #[cfg(feature = "nacos-config")]
+    pub(crate) fn publish_if_version(&self, expected: u64, next: Arc<ConfigView>) -> bool {
+        let _gate = self
+            .publication_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.current.load().snapshot().version() != expected {
+            return false;
+        }
+        self.current.store(next.clone());
+        self.updates.send_replace(next);
+        true
+    }
     /// 业务作用：使用版本 1 视图初始化配置存储和 watch 通道。
     ///
     /// # 参数

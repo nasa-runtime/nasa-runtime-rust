@@ -46,10 +46,13 @@ assert_eq!(store.datasource_ref().as_str(), "workflow");
 | participant gate | 阶段准入、定义摘要与最终结果投影 | 与参与方 Inbox、业务事实、result Outbox 同事务 |
 | durable timer | deadline、取消、裁决与补偿恢复 | 领取独立提交；执行前复验租约、generation、版本与 token |
 | control / management / conflict audit | 可归因管理动作、幂等 operation 与互斥事实 | 与对应状态变化同事务 |
+| global audit event / stream guard | 跨类别全局序号、attempt 状态变化快照与同一 Saga 提交栅栏 | trigger 先递增按 Saga 隔离的 guard，再在同一事务追加事件 |
 | tenant quota / action rate | 在飞实例与变更类管理动作预算 | 预留和释放与业务动作同事务 |
 
 创建幂等由 `(tenant_id, workflow_name, business_key)` 唯一事实承担；同 key 的 canonical 请求摘要不一致
-时拒绝把新请求伪装成重复。attempt 身份、trigger 身份和 transition 序号各有唯一权威，不能由调用方
+时拒绝把新请求伪装成重复。请求 `saga_id` 已被其它业务意图占用时，即使业务键命中另一实例也返回冲突。
+两种身份在原事务内锁定核验；未占用的新 `saga_id` 可按相同业务键和请求摘要取得原实例的重复收据。
+attempt 身份、trigger 身份和 transition 序号各有唯一权威，不能由调用方
 另建第二套序列。
 
 ## YML 配置
@@ -67,14 +70,22 @@ datasources:
       mode: validate
 
 saga:
+  role: orchestrator
+  plan_mode: managed
+  service_identity: checkout-orchestrator
+  replica_identity: ${SAGA_REPLICA_ID}
   database_bootstrap: application
-  datasource_ref: workflow
+  orchestrator:
+    datasource_ref: workflow
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: workflow
 outbox:
   datasource_ref: workflow
 ```
 
-Application 的 `saga.datasource_ref`、`outbox.datasource_ref` 与 Orchestrator/Participant 构造参数必须
-一致；名称会在 Ready 前复验。连接池容量需要同时覆盖业务请求、消息消费、Outbox 投递和 timer 领取，
+Application 会复验当前角色作用域内的 `datasource_ref`、`outbox.datasource_ref` 与 runtime 绑定一致；
+业务不再提交 Orchestrator/Participant 构造参数。连接池容量需要同时覆盖业务请求、消息消费、Outbox 投递和 timer 领取，
 不能按单一路径估算。
 
 ## 启动校验与滚动升级
@@ -108,4 +119,4 @@ Application 的 `saga.datasource_ref`、`outbox.datasource_ref` 与 Orchestrator
 - 排序规则转换可能重建大表，执行方式和资源预算必须由部署负责人批准。
 
 完整运行边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。

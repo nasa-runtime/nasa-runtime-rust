@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use nasaga_backend::SagaStoreMetrics;
 
 /// 业务作用：聚合 Saga 已提交状态与当前进程 Kafka transport 指标。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SagaOperationalMetrics {
     /// 历史创建实例数。
     pub started_total: u64,
@@ -46,6 +46,8 @@ pub struct SagaOperationalMetrics {
     pub lifecycle_duration_count: u64,
     /// 终态生命周期累计微秒数。
     pub lifecycle_duration_micros_sum: u64,
+    /// 按冻结 workflow/definition version 分组的端到端终态时延分位数。
+    pub lifecycle_quantiles: Vec<nasaga_backend::SagaLifecycleQuantiles>,
     /// 当前进程处理 Saga result 次数。
     pub kafka_result_processing_total: u64,
     /// 当前进程处理 Saga result 累计微秒数。
@@ -141,6 +143,32 @@ impl SagaOperationalMetrics {
             self.lifecycle_duration_count,
             self.lifecycle_duration_micros_sum,
         );
+        for quantiles in &self.lifecycle_quantiles {
+            labeled_gauge(
+                &mut output,
+                "nasaga_lifecycle_duration_seconds",
+                &quantiles.workflow,
+                quantiles.definition_version,
+                "0.5",
+                quantiles.p50_micros,
+            );
+            labeled_gauge(
+                &mut output,
+                "nasaga_lifecycle_duration_seconds",
+                &quantiles.workflow,
+                quantiles.definition_version,
+                "0.95",
+                quantiles.p95_micros,
+            );
+            labeled_gauge(
+                &mut output,
+                "nasaga_lifecycle_duration_seconds",
+                &quantiles.workflow,
+                quantiles.definition_version,
+                "0.99",
+                quantiles.p99_micros,
+            );
+        }
         summary(
             &mut output,
             "nasaga_kafka_result_processing_duration_seconds",
@@ -193,6 +221,7 @@ impl SagaOperationalMetrics {
             "nasaga_kafka_command_duplicate_total",
             self.kafka_command_duplicate_total,
         );
+        output.push_str(&crate::render_saga_latency_metrics());
         output
     }
 }
@@ -224,6 +253,7 @@ impl From<SagaStoreMetrics> for SagaOperationalMetrics {
             due_timer_current: store.due_timer_current,
             lifecycle_duration_count: store.lifecycle_duration_count,
             lifecycle_duration_micros_sum: store.lifecycle_duration_micros_sum,
+            lifecycle_quantiles: store.lifecycle_quantiles,
             kafka_result_processing_total: process.kafka_result_processing_total,
             kafka_result_processing_micros_sum: process.kafka_result_processing_micros_sum,
             kafka_result_retry_total: process.kafka_result_retry_total,
@@ -238,6 +268,28 @@ impl From<SagaStoreMetrics> for SagaOperationalMetrics {
             kafka_command_duplicate_total: process.kafka_command_duplicate_total,
         }
     }
+}
+
+/// 业务作用：渲染带冻结流程版本和固定 quantile 的生命周期 gauge，保持标签集合低基数。
+///
+/// 参数说明：`output` 是目标文本，`name` 是固定指标名，`workflow` 与 `version` 来自 definition，
+/// `quantile` 是固定分位，`micros` 是持久样本值。
+///
+/// 返回：无返回值；格式写入内存字符串不会向调用方传播失败。
+fn labeled_gauge(
+    output: &mut String,
+    name: &str,
+    workflow: &str,
+    version: u32,
+    quantile: &str,
+    micros: u64,
+) {
+    let workflow = workflow.replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = writeln!(
+        output,
+        "{name}{{workflow=\"{workflow}\",definition_version=\"{version}\",quantile=\"{quantile}\"}} {}",
+        micros as f64 / 1_000_000.0
+    );
 }
 
 /// 业务作用：累计一次按租户配额拒绝的创建请求,供低基数观测面导出。

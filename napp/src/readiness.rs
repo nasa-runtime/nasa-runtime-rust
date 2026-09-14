@@ -199,10 +199,15 @@ struct EntryState {
     success_streak: u32,
     fail_streak: u32,
     last_observed: Option<Instant>,
+    valid_until: Option<Instant>,
 }
 
 impl EntryState {
     /// 业务作用：创建尚无观测的贡献项状态，并冻结组件身份与阈值策略。
+    ///
+    /// 参数说明：`component` 是组件身份，`policy` 决定依赖失败如何影响整体就绪。
+    ///
+    /// 返回：尚未取得观测或租约证据的 Unknown 状态。
     fn new(component: Arc<str>, policy: ReadinessPolicy) -> Self {
         Self {
             component,
@@ -212,12 +217,18 @@ impl EntryState {
             success_streak: 0,
             fail_streak: 0,
             last_observed: None,
+            valid_until: None,
         }
     }
 
-    /// 业务作用：按阈值推进已发布状态。`raw` 为本次原始观测,`observed_reason` 为其静态原因码。
+    /// 业务作用：按连续观测阈值推进依赖状态，并替换上轮观测证据。
+    ///
+    /// 参数说明：`raw` 是原始状态，`observed_reason` 是静态原因码，`now` 是本次观测的单调时刻。
+    ///
+    /// 返回：更新连续观测计数与发布状态；清除上轮期限，租约发布者在同一临界区设置本轮期限。
     fn advance(&mut self, raw: DependencyState, observed_reason: &'static str, now: Instant) {
         self.last_observed = Some(now);
+        self.valid_until = None;
         match raw {
             DependencyState::Ready => {
                 self.success_streak = self.success_streak.saturating_add(1);
@@ -254,13 +265,18 @@ impl EntryState {
         }
     }
 
-    /// 业务作用：计入 stale 后的有效状态与原因。
+    /// 业务作用：在读取依赖状态时复验观测新鲜度与租约，防止阻塞的发布任务延长就绪权威。
+    ///
+    /// 参数说明：`now` 是本次读取的单调时刻。
+    ///
+    /// 返回：证据有效时返回已发布状态；证据过期时按策略返回 NotReady 或 Degraded 及失效原因。
     fn effective(&self, now: Instant) -> (DependencyState, &'static str) {
         let stale = matches!(
             (self.policy.stale_after, self.last_observed),
             (Some(after), Some(at)) if now.saturating_duration_since(at) >= after
         );
-        if stale {
+        // 租约型依赖按绝对单调期限失效；即使续租任务阻塞，读取就绪状态也不能延长权威。
+        if stale || self.valid_until.is_some_and(|deadline| now >= deadline) {
             let state = if self.policy.affects_ready {
                 DependencyState::NotReady
             } else {
@@ -283,6 +299,27 @@ pub struct ReadinessContributor {
 }
 
 impl ReadinessContributor {
+    /// 业务作用：发布有租约期限的就绪证据，期限到达后由读取端独立摘流。
+    ///
+    /// 参数说明：`deadline` 是整批依赖最早失效的单调时刻。
+    ///
+    /// 返回：原子发布 Ready 与期限；已到期的证据立即按 NotReady 处理。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn observe_ready_until(&self, deadline: Instant) {
+        let mut entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        // 已过期的证据不能触发恢复阈值或短暂开放路由。
+        if deadline <= now {
+            entry.advance(DependencyState::NotReady, reason::NOT_READY, now);
+        } else {
+            entry.advance(DependencyState::Ready, reason::HEALTHY, now);
+            entry.valid_until = Some(deadline);
+        }
+    }
+
     /// 业务作用：发布一次原始观测,由策略阈值决定是否改变已发布状态。
     ///
     /// # 参数

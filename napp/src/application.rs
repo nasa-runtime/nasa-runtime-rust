@@ -29,6 +29,12 @@ use crate::{
 pub type RouterTransform =
     Box<dyn FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send>;
 
+#[cfg(feature = "web")]
+pub(crate) struct RouterRegistration {
+    pub(crate) transform: RouterTransform,
+    pub(crate) scope: Option<String>,
+}
+
 /// `configure_mapping` 登记的一次类型化拦截器/安全运行时计划变换。
 ///
 /// 该队列与 Router 逃生舱分离：这里登记的手动 binding 会与 `global = true` 自动 binding 一起参与
@@ -158,7 +164,7 @@ impl ApplicationInfo {
 /// Application 共享的所有权根，集中保存配置、资源、状态和控制通道。
 pub(crate) struct ApplicationInner {
     info: ApplicationInfo,
-    config: ConfigStore,
+    config: Arc<ConfigStore>,
     resources: ResourceRegistry,
     /// Service 装配窗口中受理、随后由 Runner 一次性冻结的业务 initializer。
     ///
@@ -217,7 +223,7 @@ pub(crate) struct ApplicationInner {
     /// `None` 表示队列已被 Web 组件在构造 Router 时一次性取走：此后再登记的定制不可能生效，
     /// 必须报阶段错误而不是静默丢弃。同步互斥锁只保护一次 push/take，不跨 await 持有。
     #[cfg(feature = "web")]
-    router_transforms: StdMutex<Option<Vec<RouterTransform>>>,
+    router_transforms: StdMutex<Option<Vec<RouterRegistration>>>,
     /// UserHook 登记的 mapping 计划变换；Ready 取走后永久封口。
     #[cfg(feature = "web")]
     mapping_transforms: StdMutex<Option<Vec<MappingTransform>>>,
@@ -345,7 +351,7 @@ impl Application {
         let application = Self {
             inner: Arc::new(ApplicationInner {
                 info,
-                config: ConfigStore::new(initial_config),
+                config: Arc::new(ConfigStore::new(initial_config)),
                 resources: ResourceRegistry::new(),
                 initializers: crate::initialization::InitializerRegistry::new(),
                 state: Arc::new(StateCell::new()),
@@ -514,6 +520,14 @@ impl Application {
     /// `changed_ids` 判轮换。
     pub fn secrets(&self) -> Arc<nasecret::SecretSnapshot> {
         Arc::clone(self.inner.config.load().secrets())
+    }
+
+    /// 业务作用：让受管凭据资源与公开配置读取共享同一个原子发布点。
+    /// 参数说明：无。
+    /// 返回：配置存储的共享所有权；资源不持有 Application，从而不形成生命周期引用环。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn saga_config_store(&self) -> Arc<ConfigStore> {
+        Arc::clone(&self.inner.config)
     }
 
     /// 业务作用：从当前单一快照反序列化完整强类型配置。
@@ -1795,6 +1809,7 @@ impl Application {
             ApplicationPhase::UserHook,
             "saga managed outbox configuration",
         )?;
+        crate::saga::validate_custom_plan_submission(self, &plan)?;
         // 先验证角色拓扑，再把 publisher 移交给 Outbox；否则空计划失败会留下无法由调用方重试
         // 覆盖的半配置 Outbox，破坏 UserHook 内一次纠错的原子性。
         plan.validate()?;
@@ -1814,8 +1829,9 @@ impl Application {
                 self.inner.grpc_runtime.register_boxed(service)?;
             }
         }
-        let outbox = plan.take_outbox_plan()?;
-        self.inner.outbox_runtime.configure(outbox)?;
+        for outbox in plan.take_outbox_plans()? {
+            self.inner.outbox_runtime.configure(outbox)?;
+        }
         self.inner.saga_runtime.configure(plan)
     }
 
@@ -1845,6 +1861,39 @@ impl Application {
             "outbox configuration",
         )?;
         self.inner.outbox_runtime.configure(plan)
+    }
+
+    /// 业务作用：为既有 Outbox 计划登记业务事件发布目标，使业务与 Saga 可以共享同一事务域和 dispatcher。
+    ///
+    /// 参数说明：`datasource` 对应计划的事务域；`aggregate_type` 与 `event_type` 精确匹配持久事件；`publisher` 负责下游确认。
+    ///
+    /// 返回：UserHook 内登记成功；重复、非法名称或覆盖 Saga 保留协议均拒绝。Ready 核对对应计划存在，封口后不可变更。
+    /// 业务目标继承计划的顺序、毒丸与重试策略；瞬态故障应返回 `OutboxPublishError::transient`。
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
+    pub fn register_outbox_publisher(
+        &self,
+        datasource: &str,
+        aggregate_type: &str,
+        event_type: &str,
+        publisher: Arc<dyn naoutbox_core::OutboxPublisher + Send + Sync>,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("outbox publisher registration")?;
+        self.ensure_component_declared(
+            ComponentId::Outbox,
+            ApplicationPhase::UserHook,
+            "outbox publisher registration",
+        )?;
+        self.inner.outbox_runtime.register_publisher(
+            datasource,
+            aggregate_type,
+            event_type,
+            publisher,
+        )
     }
 
     /// 业务作用：取得 Outbox Ready 后发布的只读积压与投递观测入口。
@@ -2016,11 +2065,39 @@ impl Application {
     /// 未声明 `web` 组件、调用时已离开 UserHook，或 Ready 已取走定制队列时返回阶段错误。
     /// transform 自身若在 Ready 构造路由时 panic，在 `panic = "unwind"` 构建中会被转换成 Web
     /// 启动错误；启用框架探针时，重复占用其保留路径也会拒绝启动。
+    /// 启用 Saga HTTP 入站时拒绝这种不透明变换；应使用 `configure_router_scoped` 提供可验证的业务作用域。
     #[cfg(feature = "web")]
     pub fn configure_router<F>(&self, transform: F) -> ApplicationResult<()>
     where
         F: FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send + 'static,
     {
+        self.register_router_transform(None, Box::new(transform))
+    }
+
+    /// 业务作用：把手写 Router 限定在静态业务前缀内，允许与 Saga 专用认证链共享 listener。
+    ///
+    /// 参数说明：`prefix` 是不含 context path 的非根静态路径，`transform` 使用相对于该前缀的路径构建子 Router，例如 /ops 作用域内的 /status。
+    /// 同一前缀的变换按登记顺序接收已有子路由；其它前缀和自动端点不会进入该变换。
+    ///
+    /// 返回：UserHook 期间登记成功返回 `Ok`；非法前缀或阶段错误拒绝，Ready 前复验与保留前缀的交集。
+    #[cfg(feature = "web")]
+    pub fn configure_router_scoped<F>(&self, prefix: &str, transform: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send + 'static,
+    {
+        crate::web::router_boundary::validate_business_scope(prefix)?;
+        self.register_router_transform(Some(prefix.to_owned()), Box::new(transform))
+    }
+
+    /// 业务作用：在统一登记门禁内保存路由变换及可证明的作用域，阻止 Ready 后修改服务图。
+    /// 参数说明：`scope` 为空表示不透明原始变换，非空表示只开放该业务前缀；`transform` 是一次性路由构造。
+    /// 返回：启动 Hook 开放时保存登记；组件缺失或队列封口时拒绝且不改变已发布路由。
+    #[cfg(feature = "web")]
+    fn register_router_transform(
+        &self,
+        scope: Option<String>,
+        transform: RouterTransform,
+    ) -> ApplicationResult<()> {
         let _gate = self
             .inner
             .user_registration_gate
@@ -2044,7 +2121,7 @@ impl Application {
                 "router configuration is closed; configure_router is only available while the application startup hook is running",
             ));
         };
-        transforms.push(Box::new(transform));
+        transforms.push(RouterRegistration { transform, scope });
         Ok(())
     }
 
@@ -2430,7 +2507,7 @@ impl Application {
     ///
     /// 本方法无参数；只有 Web 组件在 Ready 构造 Router 时调用一次。
     #[cfg(feature = "web")]
-    pub(crate) fn take_router_transforms(&self) -> Vec<RouterTransform> {
+    pub(crate) fn take_router_transforms(&self) -> Vec<RouterRegistration> {
         self.inner
             .router_transforms
             .lock()
@@ -3295,7 +3372,20 @@ impl Application {
                     error,
                 )
             })?;
-        self.publish_config(view);
+        #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+        let view = crate::saga::prepare_security_view(self, view)?;
+        // 配置、secret 与全部 Saga 凭据在同一发布点切换，旧请求保留自己的不可变快照。
+        if !self
+            .inner
+            .config
+            .publish_if_version(expected_current_version, view)
+        {
+            return Err(ApplicationError::new(
+                ComponentId::Config,
+                ApplicationPhase::Running,
+                "config view changed while credential resources were being prepared",
+            ));
+        }
         Ok(next)
     }
 

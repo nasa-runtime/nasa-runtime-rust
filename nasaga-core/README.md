@@ -8,6 +8,10 @@
 旧实例，结果未知不会被当成失败直接补偿，补偿计划也不会在运行中被迟到事件改写。该层不访问数据库
 或消息系统，因此 Orchestrator、参与方和自定义 adapter 可以复用同一份状态与身份合同。
 
+`SagaPayload` 保存原始业务字节、`content_type` 与 `schema_id`；步骤通过 `SagaPayloadContract`
+声明精确合同。默认合同是无 schema 的 JSON；非 JSON 字节无需转成 JSON，schema 标识也不会被忽略。
+合同参与 definition 摘要，运行时验证首步输入与参与方声明一致，业务负责按声明解析字节。
+
 ## 合同架构
 
 ```text
@@ -80,4 +84,4 @@ let definition = WorkflowDefinition::new(
 - 资源竞争仍需由业务唯一键、条件更新、语义锁或可交换操作保护。
 
 部署与恢复边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。

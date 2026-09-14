@@ -1,18 +1,118 @@
 //! 非 Kafka connector 的消息级身份绑定。
 //!
 //! 生产 Kafka adapter 以 SASL principal、ACL 与冻结 topic route 解析逻辑 producer；HTTP/gRPC
-//! 等自定义 connector 则必须在调用 authenticated runtime API 前提供等价证明。本模块给本地三服务
-//! 门禁提供 HMAC-SHA-256 收据，避免把可由请求方任意填写的 producer header 当成认证结果。
+//! 等 connector 则必须在调用 authenticated runtime API 前提供等价证明。本模块为 HTTP transport
+//! 提供 HMAC-SHA-256 收据，避免把可由请求方任意填写的 producer header 当成认证结果。
 
 use hmac::{Hmac, Mac as _};
 use nasaga_core::ServiceIdentity;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// 业务作用：保存当前出站 HMAC 与仅在重叠窗口内允许入站验签的历史材料。
+#[derive(Clone)]
+pub struct SagaHttpCredentials {
+    current: HmacSha256,
+    current_result_contract: String,
+    previous: Vec<(HmacSha256, String, Instant)>,
+}
+
+impl SagaHttpCredentials {
+    /// 业务作用：在配置准备阶段校验 HMAC 材料，避免无效候选影响当前请求。
+    /// 参数说明：`hex_key` 必须是 256 位小写十六进制 key。
+    /// 返回：合法材料对应的不可变凭据快照；非法编码返回脱敏配置错误。
+    pub fn from_hex_key(hex_key: &str) -> Result<Self, SagaHttpMessageAuthError> {
+        let key = decode_fixed_hex(hex_key).ok_or_else(SagaHttpMessageAuthError::configuration)?;
+        let current = HmacSha256::new_from_slice(&key)
+            .map_err(|_| SagaHttpMessageAuthError::configuration())?;
+        let domain = b"napp-saga-http-result";
+        let mut digest = Sha256::new();
+        digest.update((domain.len() as u64).to_be_bytes());
+        digest.update(domain);
+        digest.update((hex_key.len() as u64).to_be_bytes());
+        digest.update(hex_key.as_bytes());
+        Ok(Self {
+            current,
+            current_result_contract: encode_hex(&digest.finalize()),
+            previous: Vec::new(),
+        })
+    }
+
+    /// 业务作用：准备新出站凭据并保留有界的旧入站验签窗口，候选未发布时不改变当前权威。
+    /// 参数说明：`hex_key` 是新材料，`overlap` 为本地单调时钟上的旧 key 保留期限，最长一小时。
+    /// 返回：完整候选快照；非法 key、零期限或超过八份仍有效的旧材料时拒绝候选，不提前丢弃旧窗口。
+    pub fn rotated(
+        &self,
+        hex_key: &str,
+        overlap: Duration,
+    ) -> Result<Self, SagaHttpMessageAuthError> {
+        if overlap.is_zero() || overlap > Duration::from_secs(3600) {
+            return Err(SagaHttpMessageAuthError::configuration());
+        }
+        let mut next = Self::from_hex_key(hex_key)?;
+        let now = Instant::now();
+        next.previous = self
+            .previous
+            .iter()
+            .filter(|(_, _, expires)| *expires > now)
+            .cloned()
+            .collect();
+        if next.previous.len() >= 8 {
+            return Err(SagaHttpMessageAuthError::configuration());
+        }
+        next.previous.push((
+            self.current.clone(),
+            self.current_result_contract.clone(),
+            now + overlap,
+        ));
+        Ok(next)
+    }
+
+    /// 业务作用：让 capability 绑定当前实际出站 key 的不可逆合同摘要，避免 Registry 凭据掩盖结果凭据错配。
+    /// 参数说明：无。
+    /// 返回：当前 HMAC 材料的域分离 SHA-256，不暴露 key 或可重放的请求签名。
+    pub fn current_result_contract(&self) -> &str {
+        &self.current_result_contract
+    }
+
+    /// 业务作用：让 Catalog 使用与入站验签相同的旧 key 截止时刻判断结果凭据是否可接受。
+    /// 参数说明：无。
+    /// 返回：当前与尚在重叠窗口内的合同摘要；过期旧 key 不进入激活证据。
+    pub fn accepted_result_contracts(&self) -> BTreeSet<String> {
+        let now = Instant::now();
+        std::iter::once(self.current_result_contract.clone())
+            .chain(
+                self.previous
+                    .iter()
+                    .filter(|(_, _, expires)| *expires > now)
+                    .map(|(_, digest, _)| digest.clone()),
+            )
+            .collect()
+    }
+}
+
+/// 业务作用：让所有入站和出站认证器从同一受信配置快照读取当前凭据。
+pub trait SagaHttpCredentialSource: Send + Sync {
+    /// 业务作用：取得一次认证操作完整使用的不可变凭据集合。
+    /// 参数说明：无。
+    /// 返回：已通过配置准备校验的快照；调用期间不能混用两代 key。
+    fn credentials(&self) -> Arc<SagaHttpCredentials>;
+}
+
+impl SagaHttpCredentialSource for SagaHttpCredentials {
+    /// 业务作用：为固定 key 使用者提供与动态认证器一致的快照读取边界。
+    /// 参数说明：无。
+    /// 返回：当前固定凭据的独立不可变快照。
+    fn credentials(&self) -> Arc<SagaHttpCredentials> {
+        Arc::new(self.clone())
+    }
+}
 
 /// 业务作用：封装接收端实际观察到的签名字段，保证验签与 replay claim 消费同一份字节。
 pub struct SagaHttpSignedMessage<'a> {
@@ -55,14 +155,14 @@ impl<'a> SagaHttpSignedMessage<'a> {
     }
 }
 
-/// 业务作用：冻结单条 transport 信任边的 HMAC key 与允许时钟偏差。
+/// 业务作用：绑定单条 transport 信任边的凭据来源与允许时钟偏差。
 ///
 /// 同一实例只能代表一个已由部署配置绑定的 producer。签名覆盖 producer、HTTP path、时间戳、
 /// 一次性 nonce 和原始 body；接收方校验成功并占用 nonce 后，才能把该 producer 传给 runtime 的
 /// authenticated API。
 #[derive(Clone)]
 pub struct SagaHttpMessageAuthenticator {
-    template: HmacSha256,
+    source: Arc<dyn SagaHttpCredentialSource>,
     max_clock_skew_ms: u64,
 }
 
@@ -78,14 +178,24 @@ impl SagaHttpMessageAuthenticator {
         hex_key: &str,
         max_clock_skew_ms: u64,
     ) -> Result<Self, SagaHttpMessageAuthError> {
+        Self::from_source(
+            Arc::new(SagaHttpCredentials::from_hex_key(hex_key)?),
+            max_clock_skew_ms,
+        )
+    }
+
+    /// 业务作用：绑定受信凭据快照来源，使既有认证器克隆在下一次请求观察原子轮换。
+    /// 参数说明：`source` 只提供已校验材料，`max_clock_skew_ms` 限制签名时钟偏差。
+    /// 返回：偏差窗口非零时返回认证器；零窗口拒绝装配。
+    pub fn from_source(
+        source: Arc<dyn SagaHttpCredentialSource>,
+        max_clock_skew_ms: u64,
+    ) -> Result<Self, SagaHttpMessageAuthError> {
         if max_clock_skew_ms == 0 {
             return Err(SagaHttpMessageAuthError::configuration());
         }
-        let key = decode_fixed_hex(hex_key).ok_or_else(SagaHttpMessageAuthError::configuration)?;
-        let template = HmacSha256::new_from_slice(&key)
-            .map_err(|_| SagaHttpMessageAuthError::configuration())?;
         Ok(Self {
-            template,
+            source,
             max_clock_skew_ms,
         })
     }
@@ -108,23 +218,45 @@ impl SagaHttpMessageAuthenticator {
         nonce: &str,
         body: &[u8],
     ) -> String {
-        let mut mac = self.template.clone();
+        let mut mac = self.source.credentials().current.clone();
         update_mac(&mut mac, producer, path, timestamp_ms, nonce, body);
         encode_hex(&mac.finalize().into_bytes())
     }
 
-    /// 业务作用：在解析 envelope 和占用 Inbox 身份前校验 transport producer 收据。
+    /// 业务作用：在解析 envelope 前校验 transport producer 收据，但不占用 replay claim。
+    ///
+    /// 多副本接收端必须在本方法成功后、进入业务处理前占用共享强一致 nonce；单进程调用方
+    /// 应使用 [`SagaHttpReplayGuard::verify_once`]。只调用本方法不能构成完整的重放防护。
     ///
     /// 参数说明：
     /// - `message`: 冻结 producer/path/timestamp/nonce/body/signature 的原始收据。
     /// - `now_ms`: 接收端当前 Unix 毫秒。
     ///
     /// 返回：身份、路径、时间窗和 body 全部匹配时成功；任一不符返回同一脱敏错误。
-    fn verify(
+    pub fn verify(
         &self,
         message: &SagaHttpSignedMessage<'_>,
         now_ms: u64,
     ) -> Result<(), SagaHttpMessageAuthError> {
+        self.verify_replay_horizon_ms(message, now_ms).map(|_| ())
+    }
+
+    /// 业务作用：校验 transport producer 收据，并给共享 nonce 存储返回由签名时间窗决定的保留边界。
+    ///
+    /// 多副本接收端必须把返回值原样用于共享 claim，不能按接收时刻另算较短期限；否则未来偏移
+    /// 但仍合法的签名会在认证窗口结束前重新取得同一 nonce。
+    ///
+    /// 参数说明：
+    /// - `message`: 冻结 producer/path/timestamp/nonce/body/signature 的原始收据。
+    /// - `now_ms`: 接收端当前 Unix 毫秒。
+    ///
+    /// 返回：身份、路径、时间窗和 body 全部匹配时返回签名合法窗口的闭区间右端；任一不符返回
+    /// 同一脱敏错误。
+    pub fn verify_replay_horizon_ms(
+        &self,
+        message: &SagaHttpSignedMessage<'_>,
+        now_ms: u64,
+    ) -> Result<u64, SagaHttpMessageAuthError> {
         if message.timestamp_ms.abs_diff(now_ms) > self.max_clock_skew_ms
             || !valid_nonce(message.nonce)
         {
@@ -132,17 +264,32 @@ impl SagaHttpMessageAuthenticator {
         }
         let expected = decode_fixed_hex(message.signature)
             .ok_or_else(SagaHttpMessageAuthError::authentication)?;
-        let mut mac = self.template.clone();
-        update_mac(
-            &mut mac,
-            message.producer,
-            message.path,
-            message.timestamp_ms,
-            message.nonce,
-            message.body,
-        );
-        mac.verify_slice(&expected)
-            .map_err(|_| SagaHttpMessageAuthError::authentication())
+        let credentials = self.source.credentials();
+        let now = Instant::now();
+        let mut accepted = false;
+        // 只读取一次凭据快照；所有仍有效的 key 都参与常数时间 MAC 比较，旧材料到期立即失去验签权威。
+        for template in std::iter::once(&credentials.current).chain(
+            credentials
+                .previous
+                .iter()
+                .filter(|(_, _, expires)| *expires > now)
+                .map(|(key, _, _)| key),
+        ) {
+            let mut mac = template.clone();
+            update_mac(
+                &mut mac,
+                message.producer,
+                message.path,
+                message.timestamp_ms,
+                message.nonce,
+                message.body,
+            );
+            accepted |= mac.verify_slice(&expected).is_ok();
+        }
+        if !accepted {
+            return Err(SagaHttpMessageAuthError::authentication());
+        }
+        Ok(message.timestamp_ms.saturating_add(self.max_clock_skew_ms))
     }
 
     /// 业务作用：生成一条 transport 投递专用的不可预测 nonce，供 replay guard 建立一次性门禁。
@@ -413,10 +560,13 @@ impl SagaHttpReplayGuard {
         message: &SagaHttpSignedMessage<'_>,
         now_ms: u64,
     ) -> Result<(), SagaHttpMessageAuthError> {
-        if let Err(error) = authenticator.verify(message, now_ms) {
-            saturating_increment(&self.authentication_failed_total);
-            return Err(error);
-        }
+        let expires_at_ms = match authenticator.verify_replay_horizon_ms(message, now_ms) {
+            Ok(value) => value,
+            Err(error) => {
+                saturating_increment(&self.authentication_failed_total);
+                return Err(error);
+            }
+        };
 
         let mut claims = self.lock_claims();
         claims.remove_expired(now_ms);
@@ -431,9 +581,6 @@ impl SagaHttpReplayGuard {
         }
         // claim 必须保留到该签名时间窗的闭区间右端；若在等于右端时提前清理，原报文仍能通过
         // `abs_diff <= skew` 并获得第二次执行机会。未来偏移到窗口上沿的签名最多占用约 2×skew。
-        let expires_at_ms = message
-            .timestamp_ms
-            .saturating_add(authenticator.max_clock_skew_ms);
         claims.insert(key, expires_at_ms);
         saturating_increment(&self.accepted_total);
         Ok(())

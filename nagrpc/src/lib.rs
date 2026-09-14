@@ -106,6 +106,7 @@ struct ConnectionRuntimeConfig {
     process_control_frames_burst: u32,
     process_control_bucket: Arc<StdMutex<TokenBucket>>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    tls_source: Option<Arc<dyn GrpcTlsAcceptorSource>>,
 }
 
 impl From<&GrpcServerConfig> for ConnectionRuntimeConfig {
@@ -128,8 +129,34 @@ impl From<&GrpcServerConfig> for ConnectionRuntimeConfig {
                 config.process_control_frames_burst,
             ))),
             tls_acceptor: None,
+            tls_source: None,
         }
     }
+}
+
+/// 业务作用：封装已通过证书、私钥与信任根校验的不可变 TLS 接收资源。
+#[derive(Clone)]
+pub struct GrpcTlsAcceptor {
+    inner: tokio_rustls::TlsAcceptor,
+}
+
+impl GrpcTlsAcceptor {
+    /// 业务作用：在配置准备阶段完成 TLS 材料校验，保证发布后的新连接无需解析不可信候选。
+    /// 参数说明：`identity` 固定同一代证书、私钥、client CA 与有效期边界。
+    /// 返回：全部材料匹配时返回可接受连接的资源；非法材料返回脱敏错误。
+    pub fn prepare(identity: &GrpcTlsIdentity) -> Result<Self, GrpcServerError> {
+        Ok(Self {
+            inner: build_tls_acceptor(identity)?,
+        })
+    }
+}
+
+/// 业务作用：从受信配置的原子快照读取 TLS 接收资源，使轮换无需重新绑定 listener。
+pub trait GrpcTlsAcceptorSource: Send + Sync {
+    /// 业务作用：为一次新握手选取完整证书、私钥与信任根快照。
+    /// 参数说明：无。
+    /// 返回：已全部校验的接收资源；正在握手的连接保留其原始快照。
+    fn acceptor(&self) -> GrpcTlsAcceptor;
 }
 
 /// 业务作用：把已解析 PEM identity 构造成只协商 HTTP/2、最低 TLS 1.2 的 rustls acceptor。
@@ -169,8 +196,9 @@ fn build_tls_acceptor(
         if client_roots.is_empty() {
             return Err(GrpcServerError::TlsConfiguration);
         }
-        let (accepted, _) = roots.add_parsable_certificates(client_roots);
-        if accepted == 0 {
+        let (accepted, rejected) = roots.add_parsable_certificates(client_roots);
+        // 候选信任根必须完整可用，不能以部分解析成功掩盖失效或误配的 CA。
+        if accepted == 0 || rejected != 0 {
             return Err(GrpcServerError::TlsConfiguration);
         }
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
@@ -205,6 +233,18 @@ fn validate_certificate_lifetime(
     minimum_remaining: Duration,
     clock_skew: Duration,
 ) -> Result<u64, GrpcServerError> {
+    validate_certificate_purpose_lifetime(certificates, minimum_remaining, clock_skew, true)
+}
+
+/// 业务作用：按身份用途校验证书链的生效、到期与扩展用途，避免仅凭 PEM 可解析就接受候选。
+/// 参数说明：`certificates` 是有序证书链，`minimum_remaining` 和 `clock_skew` 限制时间窗口，`server` 选择 serverAuth 或 clientAuth。
+/// 返回：全部证书时间有效且叶证书允许对应用途时返回最早到期 Unix 秒，否则拒绝材料。
+fn validate_certificate_purpose_lifetime(
+    certificates: &[rustls::pki_types::CertificateDer<'_>],
+    minimum_remaining: Duration,
+    clock_skew: Duration,
+    server: bool,
+) -> Result<u64, GrpcServerError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| GrpcServerError::TlsConfiguration)?
@@ -234,7 +274,14 @@ fn validate_certificate_lifetime(
             && parsed
                 .extended_key_usage()
                 .map_err(|_| GrpcServerError::TlsConfiguration)?
-                .is_some_and(|usage| !usage.value.any && !usage.value.server_auth)
+                .is_some_and(|usage| {
+                    !usage.value.any
+                        && !(if server {
+                            usage.value.server_auth
+                        } else {
+                            usage.value.client_auth
+                        })
+                })
         {
             return Err(GrpcServerError::TlsConfiguration);
         }
@@ -490,6 +537,43 @@ impl PeerIdentity {
             principal: Arc::from(principal),
         }
     }
+}
+
+/// 业务作用：从 client 实际使用的 PEM certificate chain 派生与服务端 `PeerIdentity` 相同的身份。
+///
+/// 参数说明：`certificate_chain_pem` 的第一张证书必须是 client leaf certificate。
+///
+/// 返回：证书可解析且非空时返回 `sha256:<hex>` principal；其它输入返回 TLS 配置错误。
+pub fn client_certificate_principal(
+    certificate_chain_pem: &[u8],
+) -> Result<String, GrpcServerError> {
+    use std::fmt::Write as _;
+
+    client_certificate_expiry_timestamp(certificate_chain_pem)?;
+    let certificate = rustls_pemfile::certs(&mut BufReader::new(certificate_chain_pem))
+        .next()
+        .transpose()
+        .map_err(|_| GrpcServerError::TlsConfiguration)?
+        .ok_or(GrpcServerError::TlsConfiguration)?;
+    let digest = Sha256::digest(certificate.as_ref());
+    let mut principal = String::with_capacity(7 + digest.len() * 2);
+    principal.push_str("sha256:");
+    for byte in digest {
+        let _ = write!(&mut principal, "{byte:02x}");
+    }
+    Ok(principal)
+}
+
+/// 业务作用：在客户端凭据或入站身份映射发布前校验 clientAuth 证书链的时间边界。
+/// 参数说明：`certificate_chain_pem` 是从叶证书开始的 PEM 身份链。
+/// 返回：链完整可解析、已生效且允许客户端身份时返回最早到期 Unix 秒，否则返回脱敏配置错误。
+pub fn client_certificate_expiry_timestamp(
+    certificate_chain_pem: &[u8],
+) -> Result<u64, GrpcServerError> {
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(certificate_chain_pem))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| GrpcServerError::TlsConfiguration)?;
+    validate_certificate_purpose_lifetime(&certificates, Duration::ZERO, Duration::ZERO, false)
 }
 
 impl fmt::Debug for PeerIdentity {
@@ -2672,6 +2756,7 @@ pub struct ServerPlan {
     reflection_enabled: bool,
     health_only: bool,
     tls_identity: Option<GrpcTlsIdentity>,
+    tls_source: Option<Arc<dyn GrpcTlsAcceptorSource>>,
 }
 
 /// 标准 health 方法目录，使自动 service 与业务 service 使用同一公共请求边界。
@@ -2735,6 +2820,7 @@ impl Default for ServerPlan {
             reflection_enabled: false,
             health_only: false,
             tls_identity: None,
+            tls_source: None,
         }
     }
 }
@@ -2817,6 +2903,16 @@ impl ServerPlan {
     /// 返回：记录材料但尚未解析证书、绑定端口或执行握手的计划。
     pub fn tls(mut self, identity: GrpcTlsIdentity) -> Self {
         self.tls_identity = Some(identity);
+        self.tls_source = None;
+        self
+    }
+
+    /// 业务作用：把 listener 绑定到受信配置发布点，每条新连接使用最新完整 TLS 快照。
+    /// 参数说明：`source` 必须始终提供经过准备校验的接收资源。
+    /// 返回：采用动态 TLS 来源的计划；已有固定 identity 由该来源替代。
+    pub fn tls_source(mut self, source: Arc<dyn GrpcTlsAcceptorSource>) -> Self {
+        self.tls_source = Some(source);
+        self.tls_identity = None;
         self
     }
 
@@ -2919,6 +3015,7 @@ impl ServerPlan {
             bind,
             self.config,
             self.tls_identity,
+            self.tls_source,
             Some(health),
             rpc_metrics,
         )
@@ -3658,7 +3755,12 @@ impl LimitedConnection {
             metrics,
         };
         let accepted_at = tokio::time::Instant::now();
-        let (stream, peer_identity) = if let Some(acceptor) = &runtime.tls_acceptor {
+        let acceptor = runtime
+            .tls_source
+            .as_ref()
+            .map(|source| source.acceptor().inner)
+            .or_else(|| runtime.tls_acceptor.clone());
+        let (stream, peer_identity) = if let Some(acceptor) = acceptor {
             let tls = tokio::time::timeout_at(
                 accepted_at + runtime.handshake_timeout,
                 acceptor.accept(stream),
@@ -4014,6 +4116,7 @@ impl GrpcServerHandle {
     /// - `bind`: 需要绑定的本地 socket 地址。
     /// - `config`: 已在网络 I/O 前复验的完整 server 配置。
     /// - `tls_identity`: 可选的 server TLS/mTLS 启动期材料。
+    /// - `tls_source`: 可选的受信动态 TLS 资源来源，与固定 identity 互斥。
     /// - `health`: 与 listener 同生命周期的标准 health 状态 owner。
     /// - `rpc_metrics`: 由封口 descriptor 预创建且与 observer 共用的方法级会计目录。
     ///
@@ -4023,12 +4126,17 @@ impl GrpcServerHandle {
         bind: SocketAddr,
         config: GrpcServerConfig,
         tls_identity: Option<GrpcTlsIdentity>,
+        tls_source: Option<Arc<dyn GrpcTlsAcceptorSource>>,
         health: Option<ManagedHealth>,
         rpc_metrics: Arc<RpcMetrics>,
     ) -> Result<Self, GrpcServerError> {
         config.validate()?;
+        if tls_identity.is_some() && tls_source.is_some() {
+            return Err(GrpcServerError::TlsConfiguration);
+        }
         let mut transport = ConnectionRuntimeConfig::from(&config);
         transport.tls_acceptor = tls_identity.as_ref().map(build_tls_acceptor).transpose()?;
+        transport.tls_source = tls_source;
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .map_err(|_| GrpcServerError::BindFailed)?;
@@ -4346,6 +4454,8 @@ pub mod codegen {
     pub use tonic_prost;
 }
 
+/// 客户端平衡连接集合的成员变更，与 Endpoint 保持同一协议库类型身份。
+pub use tonic::transport::channel::Change as EndpointChange;
 /// 稳定请求、响应、状态、客户端连接和异步 trait 类型。
 pub use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 pub use tonic::{async_trait, Code, Request, Response, Status, Streaming};
@@ -4358,6 +4468,7 @@ pub mod health {
 
 /// 标准 gRPC server reflection v1 的探针客户端与消息类型；server 仅按最终配置开放。
 pub mod reflection {
+    /// gRPC server reflection v1 的 generated client、消息联合与请求响应类型。
     pub mod v1 {
         pub use tonic_reflection::pb::v1::{
             server_reflection_client, server_reflection_request, server_reflection_response,

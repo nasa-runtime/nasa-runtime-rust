@@ -169,6 +169,7 @@ where
                     trigger_kind: TriggerKind::Timer,
                     trigger_id: business_key.as_str(),
                     first_command_payload: item.first_command_payload.clone(),
+                    first_command_raw_payload: None,
                     now_ms: spec.now_ms,
                 })
                 .await;
@@ -178,7 +179,9 @@ where
                 Err(error) => {
                     // 同 key 摘要漂移是输入口径事故:继续逐对象重试只会重复失败,
                     // 停止本批;稳定原因并入错误链交给任务层告警(Err 路径不返回报告)。
-                    let code = if error.to_string().contains("different start request") {
+                    let code = if crate::StartSagaError::from_error(&error)
+                        == Some(crate::StartSagaError::RequestConflict)
+                    {
                         "scheduled_start_digest_drift"
                     } else {
                         "scheduled_start_failed"

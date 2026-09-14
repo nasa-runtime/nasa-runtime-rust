@@ -18,7 +18,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned as _;
-use syn::{parse_macro_input, Expr, ItemImpl, Lit, LitStr, Meta, Token, Type};
+use syn::{parse_macro_input, Expr, ItemFn, ItemImpl, Lit, LitStr, Meta, Token, Type};
 
 /// 解析后的 `#[saga(...)]` 属性参数。
 struct SagaArgs {
@@ -28,12 +28,20 @@ struct SagaArgs {
     version: u32,
     /// 步骤名称字面量。
     step: LitStr,
+    /// 多事务域参与方用于唯一选择本地数据库的 binding 名。
+    binding: Option<LitStr>,
+    /// 业务正文的规范媒体类型。
+    payload_content_type: LitStr,
+    /// 业务正文的稳定 schema 身份。
+    payload_schema_id: LitStr,
     /// 是否可补偿；默认 true。
     compensable: bool,
     /// 是否允许 Unknown；只对带类型化 Poll adapter 的外部步骤开放。
     allow_unknown: bool,
     /// 取消形态；当前开放 local-fenceable、resolve-only 与 externally-cancellable。
     cancel_mode: String,
+    /// 是否允许受管运行时用 `Default` 构造本步骤 Service。
+    managed: bool,
 }
 
 /// 业务作用：`#[saga]` 入口——校验合同并生成 descriptor 与 adapter。
@@ -75,6 +83,91 @@ pub fn saga_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// 业务作用：登记一份完整的类型化 workflow definition，由 Application 在 Prepare 阶段统一收集。
+///
+/// 被标注函数必须是无参数、同步、无泛型的自由函数；函数返回值必须可经 `?` 转换为
+/// `anyhow::Result<WorkflowDefinition>`。宏不调用 Catalog、不开启 transport，也不构造 Orchestrator。
+///
+/// 参数说明：`attr` 必须为空，`item` 是只读 definition factory。
+///
+/// 返回：形态合法时保留原函数并登记静态 factory；否则生成定位到声明处的编译错误。
+#[proc_macro_attribute]
+pub fn saga_workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = TokenStream2::from(attr);
+    let item_fn = parse_macro_input!(item as ItemFn);
+    let root = nasa_macro_support::runtime_root("saga", "nasaga-runtime")
+        .map_err(|message| syn::Error::new(proc_macro2::Span::call_site(), message));
+    match root.and_then(|root| expand_workflow(args, item_fn, root)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：校验 definition factory 形态并生成链接期只读登记项。
+///
+/// 参数说明：
+/// - `args`: 属性参数；当前合同不接受任何参数。
+/// - `item_fn`: 业务流程定义函数。
+/// - `root`: 宏展开可访问的 Saga 运行时根路径。
+///
+/// 返回：合法时返回原函数和 descriptor；形态不封闭时返回编译错误。
+fn expand_workflow(
+    args: TokenStream2,
+    item_fn: ItemFn,
+    root: TokenStream2,
+) -> syn::Result<TokenStream2> {
+    if !args.is_empty() {
+        return Err(syn::Error::new(
+            args.span(),
+            "#[saga_workflow] 不接受属性参数",
+        ));
+    }
+    if item_fn.sig.asyncness.is_some() {
+        return Err(syn::Error::new(
+            item_fn.sig.asyncness.span(),
+            "#[saga_workflow] 必须标注同步 definition factory",
+        ));
+    }
+    if !item_fn.sig.inputs.is_empty() {
+        return Err(syn::Error::new(
+            item_fn.sig.inputs.span(),
+            "#[saga_workflow] definition factory 不接受参数",
+        ));
+    }
+    if !item_fn.sig.generics.params.is_empty() || item_fn.sig.generics.where_clause.is_some() {
+        return Err(syn::Error::new(
+            item_fn.sig.generics.span(),
+            "#[saga_workflow] definition factory 不接受泛型",
+        ));
+    }
+    if matches!(item_fn.sig.output, syn::ReturnType::Default) {
+        return Err(syn::Error::new(
+            item_fn.sig.ident.span(),
+            "#[saga_workflow] 必须返回 WorkflowDefinition 结果",
+        ));
+    }
+    let function = &item_fn.sig.ident;
+    Ok(quote! {
+        #item_fn
+
+        const _: () = {
+            fn __nasa_saga_workflow_factory()
+                -> #root::__private::anyhow::Result<#root::__private::core::WorkflowDefinition>
+            {
+                Ok(#function()?)
+            }
+
+            #[#root::__private::linkme::distributed_slice(#root::COLLECTED_SAGA_WORKFLOWS)]
+            #[linkme(crate = #root::__private::linkme)]
+            static __NASA_SAGA_WORKFLOW_DESCRIPTOR: #root::SagaWorkflowDescriptor =
+                #root::SagaWorkflowDescriptor {
+                    factory: __nasa_saga_workflow_factory,
+                    source: concat!(file!(), ":", line!()),
+                };
+        };
+    })
+}
+
 /// 业务作用：完成属性解析、合同校验与代码生成的主流程。
 ///
 /// 参数说明：
@@ -95,7 +188,33 @@ fn expand(
     let workflow = &args.workflow;
     let version = args.version;
     let step = &args.step;
+    let binding = match args.binding.as_ref() {
+        Some(binding) => quote!(Some(#binding)),
+        None => quote!(None),
+    };
     let allow_unknown = args.allow_unknown;
+    let payload_content_type = &args.payload_content_type;
+    let payload_schema_id = &args.payload_schema_id;
+    let managed_factory = if args.managed {
+        quote! {
+            #[#root::__private::linkme::distributed_slice(#root::COLLECTED_MANAGED_SAGA_STEPS)]
+            #[linkme(crate = #root::__private::linkme)]
+            static __NASAGA_MANAGED_STEP_FACTORY: #root::ManagedSagaStepFactory =
+                #root::ManagedSagaStepFactory {
+                    workflow: #workflow,
+                    definition_version: #version,
+                    step: #step,
+                    binding: #binding,
+                    factory: |runtime| {
+                        let service = <#service_type as ::core::default::Default>::default();
+                        #root::managed_saga_step_handler(runtime, service)
+                    },
+                    source: concat!(file!(), ":", line!()),
+                };
+        }
+    } else {
+        TokenStream2::new()
+    };
     let compensation = if args.compensable {
         quote!(#root::__private::core::Compensation::Compensable)
     } else {
@@ -173,9 +292,12 @@ fn expand(
             #[linkme(crate = #root::__private::linkme)]
             static __NASAGA_STEP_DESCRIPTOR: #root::SagaStepDescriptor =
                 #root::SagaStepDescriptor {
+                    payload_content_type: #payload_content_type,
+                    payload_schema_id: #payload_schema_id,
                     workflow: #workflow,
                     definition_version: #version,
                     step: #step,
+                    binding: #binding,
                     service_type: #service_type_name,
                     compensation: #compensation,
                     cancel_mode: #cancel_mode,
@@ -183,6 +305,8 @@ fn expand(
                     resolution_mode: #resolution_mode,
                     source: concat!(file!(), ":", line!()),
                 };
+
+            #managed_factory
         };
 
         impl #service_type {
@@ -234,6 +358,7 @@ fn expand(
                 {
                     return Err(#root::SagaCommandProcessingError::RouteUnauthorized.into());
                 }
+                envelope.verify_payload_contract(#payload_content_type, #payload_schema_id)?;
                 match envelope.phase.as_str() {
                     "execute" => runtime.handle_authenticated_execute_traced(self, envelope, producer, receipt_trace, #allow_unknown).await,
                     "cancel" => #cancel_dispatch,
@@ -281,11 +406,15 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
     let mut workflow: Option<LitStr> = None;
     let mut version: Option<(u32, proc_macro2::Span)> = None;
     let mut step: Option<LitStr> = None;
+    let mut binding: Option<LitStr> = None;
     let mut compensable = true;
     let mut cancel_mode = "local-fenceable".to_string();
     let mut cancel_mode_span = proc_macro2::Span::call_site();
+    let mut payload_content_type = LitStr::new("application/json", proc_macro2::Span::call_site());
+    let mut payload_schema_id = LitStr::new("", proc_macro2::Span::call_site());
     let mut allow_unknown = false;
     let mut allow_unknown_span = proc_macro2::Span::call_site();
+    let mut managed = false;
     let mut seen = BTreeSet::new();
 
     for meta in metas {
@@ -311,6 +440,7 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
         match name.as_str() {
             "workflow" => workflow = Some(expect_str(&name_value.value, "workflow")?),
             "step" => step = Some(expect_str(&name_value.value, "step")?),
+            "binding" => binding = Some(expect_str(&name_value.value, "binding")?),
             "version" => {
                 version = Some((expect_u32(&name_value.value, "version")?, name_value.span()))
             }
@@ -320,10 +450,13 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
                 cancel_mode = lit.value();
                 cancel_mode_span = lit.span();
             }
+            "content_type" => payload_content_type = expect_str(&name_value.value, "content_type")?,
+            "schema_id" => payload_schema_id = expect_str(&name_value.value, "schema_id")?,
             "allow_unknown" => {
                 allow_unknown = expect_bool(&name_value.value, "allow_unknown")?;
                 allow_unknown_span = name_value.span();
             }
+            "managed" => managed = expect_bool(&name_value.value, "managed")?,
             other => {
                 return Err(syn::Error::new(
                     name_value.span(),
@@ -354,6 +487,9 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
 
     validate_identifier(&workflow, "workflow")?;
     validate_identifier(&step, "step")?;
+    if let Some(binding) = binding.as_ref() {
+        validate_identifier(binding, "binding")?;
+    }
     // 定义版本从 1 开始:0 会让“未设置”与首个版本混淆,definition 侧同样拒绝。
     if version == 0 {
         return Err(syn::Error::new(version_span, "version 必须从 1 开始"));
@@ -394,9 +530,13 @@ fn parse_args(metas: &Punctuated<Meta, Token![,]>) -> syn::Result<SagaArgs> {
         workflow,
         version,
         step,
+        binding,
         compensable,
+        payload_content_type,
+        payload_schema_id,
         allow_unknown,
         cancel_mode,
+        managed,
     })
 }
 

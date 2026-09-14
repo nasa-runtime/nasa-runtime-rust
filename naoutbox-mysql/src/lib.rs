@@ -27,7 +27,7 @@ pub use retention::{RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use naoutbox_core::{
     dispatch_in_order, DispatchReport, DurableOutboxAppend, DurableOutboxDispatch,
@@ -39,7 +39,9 @@ use sqlx::{pool::PoolConnection, MySql, MySqlConnection, Row as _};
 use tokio::sync::watch;
 
 /// 进程内提交代际只承担低延迟唤醒；数据库轮询仍是跨进程和崩溃恢复的最终事实来源。
-static COMMIT_SIGNAL: OnceLock<watch::Sender<u64>> = OnceLock::new();
+// 提交信号以 datasource 与 lane 共同定界，避免一个业务链的提交唤醒无关 dispatcher。
+type CommitSignalRegistry = BTreeMap<(String, String), watch::Sender<u64>>;
+static COMMIT_SIGNALS: OnceLock<Mutex<CommitSignalRegistry>> = OnceLock::new();
 
 /// 未路由 aggregate_type 的默认 lane；未安装任何路由时全部事件归入本 lane,
 /// 行为与未分片的单 dispatcher 完全一致(分片是显式 opt-in)。
@@ -408,7 +410,7 @@ impl DispatchClaim {
 
     /// 业务作用：借用绑定 named lock 的底层 MySQL session，确保领取、发布标记与释放使用同一会话。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：claim guard 独占持有的可变 MySQL 连接。
     fn connection(&mut self) -> &mut MySqlConnection {
@@ -419,7 +421,7 @@ impl DispatchClaim {
 
     /// 业务作用：在当前 session 明确没有取得 claim 时解除兜底关闭，让健康连接正常回池。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；本方法消费 guard 并归还连接所有权。
     fn disarm(mut self) {
@@ -428,7 +430,7 @@ impl DispatchClaim {
 
     /// 业务作用：显式释放 named lock；只有服务端确认释放成功才允许连接回池。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；释放结果不确定时保留关闭责任，由 `Drop` 关闭物理会话。
     async fn release(mut self) {
@@ -458,7 +460,7 @@ impl DispatchClaim {
 impl Drop for DispatchClaim {
     /// 业务作用：未确认 `RELEASE_LOCK` 时关闭物理连接，阻止 named lock 随池连接泄漏。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；只标记连接在析构时关闭，不执行阻塞 I/O。
     fn drop(&mut self) {
@@ -550,6 +552,18 @@ impl MySqlOutbox {
     pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), OutboxStoreError> {
         let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
         let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
+        Self::ensure_schema_on_connection(&mut conn).await
+    }
+
+    /// 业务作用：复用调用方已持有的 MySQL 连接建立当前 Outbox 结构，使外层 schema
+    /// 互斥权覆盖历史收敛与索引建立。
+    ///
+    /// 参数说明：`conn` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：表、列和索引达到运行合同时成功；DDL 或历史收敛失败时返回脱敏错误。
+    pub async fn ensure_schema_on_connection(
+        conn: &mut natx::Conn,
+    ) -> Result<(), OutboxStoreError> {
         sqlx::query(CREATE_TABLE_SQL)
             .execute(conn.as_mut())
             .await
@@ -649,9 +663,12 @@ impl MySqlOutbox {
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
         if transactional {
-            register_commit_notification()?;
+            register_commit_notification(
+                self.datasource.as_str(),
+                channel_of(&event.aggregate_type),
+            )?;
         } else {
-            notify_committed_append();
+            notify_committed_append(self.datasource.as_str(), channel_of(&event.aggregate_type));
         }
         Ok(())
     }
@@ -673,7 +690,7 @@ impl MySqlOutbox {
             .map_err(map_err)?;
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
-        register_commit_notification()?;
+        register_commit_notification(self.datasource.as_str(), channel_of(&event.aggregate_type))?;
         Ok(())
     }
 
@@ -743,7 +760,7 @@ impl MySqlOutbox {
         }
         Self::append_on_with_tenant(conn.as_mut(), event, context.tenant()).await?;
         drop(conn);
-        register_commit_notification()?;
+        register_commit_notification(self.datasource.as_str(), channel_of(&event.aggregate_type))?;
         Ok(())
     }
 
@@ -823,11 +840,11 @@ impl MySqlOutbox {
 
     /// 业务作用：订阅当前进程 Outbox 提交代际，使受管 dispatcher 在新事实提交后立即尝试投递。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`channel` 指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：初值为当前代际的接收端；通知只优化本进程延迟，调用方仍须保留数据库轮询兜底。
-    pub fn subscribe_committed_appends() -> watch::Receiver<u64> {
-        commit_signal().subscribe()
+    pub fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        commit_signal(self.datasource.as_str(), channel.unwrap_or("*")).subscribe()
     }
 
     /// 业务作用：在调用方提供的连接内写入完整 Outbox 事件，不改变连接的提交所有权。
@@ -1444,6 +1461,18 @@ impl DurableOutboxAppend for MySqlOutbox {
 
 #[async_trait::async_trait]
 impl DurableOutboxDispatch for MySqlOutbox {
+    /// 业务作用：从本数据源已提交事件计算指定合同的最老排队时间。
+    ///
+    /// 参数说明：`event_type` 是待观测的固定事件合同名。
+    ///
+    /// 返回：非负毫秒数；无待确认事件时为零，数据库失败时返回错误。
+    async fn oldest_pending_age_ms(&self, event_type: &str) -> Result<u64, OutboxStoreError> {
+        let mut connection = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        let age: i64 = sqlx::query_scalar("SELECT CAST(COALESCE(GREATEST(TIMESTAMPDIFF(MICROSECOND, MIN(created_at), CURRENT_TIMESTAMP(6)) DIV 1000, 0), 0) AS SIGNED) FROM outbox_event WHERE dispatched = 0 AND dead = 0 AND event_type = ?")
+            .bind(event_type).fetch_one(connection.as_mut()).await.map_err(map_err)?;
+        Ok(age.max(0) as u64)
+    }
+
     /// 业务作用：通过后端中立投递合同读取 MySQL 可投递积压。
     ///
     /// 参数说明: 无。
@@ -1588,42 +1617,62 @@ impl DurableOutboxRetention for MySqlOutbox {
 impl DurableOutboxWakeup for MySqlOutbox {
     /// 业务作用：通过后端中立唤醒合同订阅 MySQL 已确认提交代际。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`channel` 指定 lane 时隔离唤醒；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：当前进程共享的 watch 接收端；数据库轮询仍承担最终收敛。
-    fn subscribe_committed_appends(&self) -> watch::Receiver<u64> {
-        MySqlOutbox::subscribe_committed_appends()
+    fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        MySqlOutbox::subscribe_committed_appends(self, channel)
     }
 }
 
-/// 业务作用：取得进程唯一的提交代际发布端，供写侧和受管 dispatcher 共享唤醒事实。
+/// 业务作用：取得指定 datasource 与 lane 的提交代际发布端，供写侧和受管 dispatcher 共享唤醒事实。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：写侧和 dispatcher 共同使用的 datasource 身份。
+/// - `channel`：事件所属 lane，`*` 表示该 datasource 的全局订阅。
 ///
 /// 返回：惰性创建且进程内稳定的 watch 发布端。
-fn commit_signal() -> &'static watch::Sender<u64> {
-    COMMIT_SIGNAL.get_or_init(|| watch::channel(0).0)
+fn commit_signal(datasource: &str, channel: &str) -> watch::Sender<u64> {
+    let signals = COMMIT_SIGNALS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut signals = signals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    signals
+        .entry((datasource.to_owned(), channel.to_owned()))
+        .or_insert_with(|| watch::channel(0).0)
+        .clone()
 }
 
 /// 业务作用：在数据库提交已经确定后推进代际，缩短持久化事件进入 dispatcher 的等待时间。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际落库的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：无；接收端可合并连续代际，真实待投递集合始终以数据库为准。
-fn notify_committed_append() {
-    commit_signal().send_modify(|generation| {
+fn notify_committed_append(datasource: &str, channel: &str) {
+    commit_signal(datasource, channel).send_modify(|generation| {
         *generation = generation.wrapping_add(1);
     });
+    if channel != "*" {
+        commit_signal(datasource, "*").send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+    }
 }
 
 /// 业务作用：把 Outbox 唤醒挂到 ambient transaction 的提交确认之后，防止未提交事件提前触发投递。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际写入的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：成功登记时返回 `Ok`；事务上下文意外丢失时返回脱敏错误并让调用方回滚本次写入。
-fn register_commit_notification() -> Result<(), OutboxStoreError> {
-    natx::after_commit(|| async {
-        notify_committed_append();
+fn register_commit_notification(datasource: &str, channel: &str) -> Result<(), OutboxStoreError> {
+    let datasource = datasource.to_owned();
+    let channel = channel.to_owned();
+    natx::after_commit(move || async move {
+        notify_committed_append(&datasource, &channel);
     })
     .map_err(map_err)
 }

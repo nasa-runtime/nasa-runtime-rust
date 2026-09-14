@@ -88,6 +88,8 @@ use syn::{
 /// outbox:
 ///   datasource_ref: reporting
 /// saga:
+///   role: orchestrator
+///   plan_mode: custom
 ///   database_bootstrap: application
 ///   datasource_ref: reporting
 ///
@@ -109,8 +111,9 @@ use syn::{
 ///     bootstrap_servers: ${APP_AUDIT_KAFKA_BOOTSTRAP_SERVERS}
 /// ```
 ///
-/// `outbox.datasource_ref` 与 `saga.datasource_ref` 选择 `datasources`；Cache、缓存失效广播和 Scheduling
-/// 使用各自的 `redis_ref` 选择 `redis.properties`。Kafka consumer/producer 通过 client name 选择
+/// `outbox.datasource_ref` 选择 Outbox 数据源；managed Saga 使用角色作用域内的 `datasource_ref`，custom
+/// Saga 使用顶层 `saga.datasource_ref`。Cache、缓存失效广播和 Scheduling 使用各自的 `redis_ref`
+/// 选择 `redis.properties`。Kafka consumer/producer 通过 client name 选择
 /// `kafkas`。这些引用在首次网络握手前复验，不存在时不会回退到默认或唯一实例。UserHook 中的
 /// `configure_saga`、`configure_kafka`、`configure_redis_jobs` 等入口只提交业务定义和处理逻辑，
 /// 不负责建立基础设施 source。完整字段与单源示例见 `napp` README。

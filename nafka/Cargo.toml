@@ -33,12 +33,12 @@ futures = "0.3"
 # linkme 作为收集点宿主，#[kafka_consumer] 的静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
 # ProtocolBytes 是与上游既有实现逐字节兼容的 wire codec。
-naws-proto = { version = "1.0.0" }
-natelemetry = { version = "1.0.1" }
-nafka-macro = { version = "1.0.0", optional = true }
+naws-proto = { path = "../naws-proto", version = "1.0.0" }
+natelemetry = { path = "../natelemetry", version = "1.0.2" }
+nafka-macro = { path = "../nafka-macro", version = "1.0.0", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
-nasecret = { version = "1.0.0", optional = true }
+nasecret = { path = "../nasecret", version = "1.0.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 zeroize = { version = "1", optional = true }
 

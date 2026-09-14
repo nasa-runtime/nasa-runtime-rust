@@ -34,7 +34,7 @@ let event = OutboxEvent::new(
 - `DurableOutboxDispatch`：owner claim、成功前缀、死信和 lane 投递；
 - `DurableOutboxQuota`：租户在飞账本读取与事务内对账；
 - `DurableOutboxRetention`：收据门禁的有界归档与清理；
-- `DurableOutboxWakeup`：只在明确提交后推进的进程内唤醒代际。
+- `DurableOutboxWakeup`：只在明确提交后按 driver、datasource_ref 与 lane 推进的进程内唤醒代际。
 
 `DurableOutbox` 是上述能力的组合合同。具体 adapter 继续保留同名 inherent methods，业务可以渐进迁移，
 受管运行时则无需按数据库类型匹配方法名。

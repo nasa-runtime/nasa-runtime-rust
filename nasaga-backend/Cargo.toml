@@ -13,8 +13,8 @@ categories = ["asynchronous", "database"]
 
 [dependencies]
 async-trait = "0.1"
-nainbox-core = { version = "1.0.2" }
-nasaga-core = { version = "1.0.1" }
-natx-core = { version = "1.0.0" }
-naoutbox-core = { version = "1.0.2" }
+nainbox-core = { path = "../nainbox-core", version = "1.0.2" }
+nasaga-core = { path = "../nasaga-core", version = "1.0.1" }
+natx-core = { path = "../natx-core", version = "1.0.0" }
+naoutbox-core = { path = "../naoutbox-core", version = "1.0.2" }
 uuid = { version = "1", features = ["v4", "v5"] }

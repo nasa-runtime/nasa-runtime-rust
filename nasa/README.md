@@ -23,15 +23,20 @@ codegen ABI、受管多源 registry 和可选 Application 组件接成一张一�
 ```
 
 门面只组织公开类型和 feature，不持有额外运行状态，也不自动启动未在属性中声明的 listener 或消费端。
-业务仍负责协议与领域语义、实际容量、路由、凭据来源和外部系统治理；Application 负责已声明组件的
-Ready 门禁、监督和反向停机。
+业务仍负责领域定义、业务副作用、实际容量、凭据来源和外部系统治理；Application 负责已声明组件的
+配置门禁、受管协议路由、Ready 监督和反向停机。
 
 其中的 Saga 能力用本地事务、Outbox/Inbox、持久化状态机、稳定效果身份和显式补偿组成最终一致性
-闭环；进程崩溃、重复投递、Unknown 结果和 timer 多副本竞争均从已提交事实恢复。它不把远端调用
-伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。业务通常启用 `application`，再按
-datasource driver 选择 `saga-runtime` 或 `saga-runtime-pgsql`，并显式选择 Kafka、Redis Streams、
-HTTP 或 gRPC transport；完整合同见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
+闭环。声明 #[nasa::application("saga", "web")] 后，配置中的 saga.role 明确选择 orchestrator、
+participant 或 client；managed 模式支持 HTTP、gRPC、Kafka 与 Redis Streams command/result 数据面，
+并由 Application 构造标准 API、Catalog、签名 definition 发布、capability 续租、timer 与 dispatcher，
+普通业务不提交运行计划。Saga 不把远端调用伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。
+完整合同见 [napp Saga 受管模式](../napp/README.md#saga-受管模式)。
+
+Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与 schema 合同，以及 Nacos
+协调侧服务发现。HTTP HMAC 与 gRPC mTLS 可通过完整配置快照热轮换；definition 退休保留实例、
+消息与审计引用门禁。部署、轮换与观测配置见
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
 
 门面还提供四项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter、
 可独立运行或交给 Application 托管的 gRPC listener，以及由 Application 独占的受管 Web listener。
@@ -110,7 +115,7 @@ consumer/producer 使用 client name。引用不存在时会在 Ready 前失败�
 `nasa::saga::pgsql`。同一原子链必须使用相同
 qualifier；不同 datasource 之间不构成一个事务。source 集合、endpoint、凭据和身份字段在运行期
 保持冻结，变化后必须重启。完整 YAML 与生命周期合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#yaml-创建单源与多源)。
 
 ### Inbox 保留治理
 
@@ -122,7 +127,7 @@ qualifier；不同 datasource 之间不构成一个事务。source 集合、endp
 `Application::inbox_retention_snapshot()` 与统一指标端点公开轮次、删除、owner 争用、预算耗尽、失败
 轮次和最老候选年龄的无标签聚合账目。该能力只清理已经提交且超过安全窗口的去重标记，不创建生产
 索引，不延长消息系统实际可重投的期限，也不改变 Inbox 仅覆盖同一数据库事务内副作用的边界。完整
-配置入口和指标名见 [napp Inbox 章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#inbox-去重标记保留)。
+配置入口和指标名见 [napp Inbox 章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#inbox-去重标记保留)。
 
 ## 应用入口
 
@@ -140,12 +145,13 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 声明组件时必须启用对应 feature。`auth` 必须与 `web` 同时声明；`hystrix`、`grafana`、`mapper`、
 `openapi` 等是函数级或门面能力，不是组件字符串。完整生命周期合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md)。
 
 `#[nasa::application("saga")]` 隐式纳入 DB 与 Outbox，业务无需再声明 `"db"` 或 `"outbox"`；
 `#[nasa::application("outbox")]` 可脱离 Saga 独立运行，并隐式纳入 DB。Inbox 是事务内原语，没有独立
-组件字符串。Kafka、Redis Streams 或 HTTP 等 transport 不由 Saga 猜测，业务必须按发布端和消费端的
-真实实现显式选择。显式同时写出 `"saga"`、`"db"` 与 `"outbox"` 也合法，并与只声明 `"saga"` 等价。
+组件字符串。Saga 角色、角色数据源、API 暴露、command/result transport、安全引用与运行预算必须在
+受信配置中显式给出；缺失时不会按链接内容或唯一数据源猜测。direct client 是唯一不创建本地 DB/Outbox
+资源的 managed 角色。
 
 ## RedisJob 门面
 
@@ -179,8 +185,8 @@ Application Ready 后，业务控制面通过 `app.redis_job_control(qualifier)`
 `app.redis_job_query(qualifier)` 显式选 source；未知或已停止准入的 source 返回结构化错误，不会回退到
 `primary`。取得的门面不拥有 shutdown 权限，停机仍由 Application 唯一编排。多 source 配置、独立
 `RedisJobPlan` 与完整运行边界见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redisjob-受管模式) 和
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#redisjob-受管模式) 和
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#redisjob)。
 
 ## 跨副本业务配额门面
 
@@ -210,7 +216,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 选择 fail-closed。与 `web` 同时启用后，`distributed_rate_limit` 可按已解析客户端 IP、已验证
 Principal 的 tenant 或 subject/client_id，以及摘要后的 API key 计量；来源缺失时按冻结策略放行或
 拒绝，超额返回 `429` / `Retry-After`。完整装配顺序、窗口上限和键空间合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#跨副本分布式业务配额)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#跨副本分布式业务配额)。
 
 ## 业务初始化屏障
 
@@ -229,7 +235,7 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 配置，执行与条件工厂共同消费 `application.startup_timeout_ms` 的全局绝对预算。
 
 完整元数据、`one-shot`/`hosted` 任务激活、指标与幂等边界见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务-initializer)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务-initializer)。
 
 ## 稳定基础设施合同
 
@@ -249,10 +255,10 @@ Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构�
 `"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。Web 只有在同时启用 `application,web`
 并声明 `"web"` 时才读取 `server` 配置和创建 listener；单独启用 `web` 只提供路由与安全门面。
 
-完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#schema-registry)、
-[naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naobject/README.md) 和
-[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)，以及
-[napp Web listener](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#web-http-listener-受管模式)。
+完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafka/README.md#schema-registry)、
+[naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/naobject/README.md) 和
+[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md)，以及
+[napp Web listener](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#web-http-listener-受管模式)。
 
 ### gRPC 完整接入
 
@@ -281,7 +287,7 @@ readiness、发现 metadata、指标和反向停机；`nasa::grpc` 是业务运�
 并连接 codegen ABI 和 `ManagedGrpcService` 适配，使运行时能在 bind 前验证 service/method 目录、冲突和
 方法策略。协议已由独立 contract crate 发布时，应用不再需要自己的 `build.rs`，只依赖 `nasa` 与该
 contract crate。完整配置、安全、发现、指标、兼容门禁和独立模式见
-[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)。
+[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md)。
 
 ## Feature 总表
 
@@ -411,7 +417,7 @@ datasources:
 driver mismatch；显式配置 PostgreSQL `schema` 时，它同时设置业务连接的 `search_path` 与 migration
 对象作用域，且目标 schema 必须预先存在。省略时业务连接保留服务端默认 `search_path`，受管 migration
 默认使用 `public`；需要两者严格一致时应显式配置。两种事务不能嵌套，也不提供跨库原子提交。`full-pgsql` 是 PostgreSQL-only 的稳定能力
-集合，包含受管 Application、事务、Mapper、Inbox、Outbox、幂等、审计、Saga 及三种 Saga transport；
+集合，包含受管 Application、事务、Mapper、Inbox、Outbox、幂等、审计、Saga 及四种 Saga transport；
 其依赖图不包含 MySQL runtime。需要混配时同时开启实际使用的 MySQL 与 PostgreSQL feature。
 
 `migrations` 配置只决定 `disabled`、`validate`、`apply`、锁等待和 PostgreSQL session topology，不会
@@ -441,11 +447,49 @@ database:
   max_connections: 16
 
 saga:
+  role: orchestrator
+  plan_mode: managed
   database_bootstrap: application
-  timer_poll_interval_ms: 500
-  timer_error_backoff_ms: 1000
-  timer_operation_timeout_ms: 5000
-  timer_failure_threshold: 3
+  service_identity: checkout-orchestrator
+  replica_identity: checkout-orchestrator-1
+  orchestrator:
+    datasource_ref: default
+    timer_poll_interval_ms: 500
+    timer_error_backoff_ms: 1000
+    timer_operation_timeout_ms: 5000
+    timer_failure_threshold: 3
+  definition_catalog:
+    mode: dynamic
+    datasource_ref: default
+    activation_policy: validated
+    watch_interval_ms: 500
+    capability_registry_ref: saga-participant-capabilities
+    publisher_authorization_policy_ref: saga-definition-publishers
+  api:
+    page_token_key_ref: saga-api-page-token
+    http:
+      enabled: true
+      authorization_policy_ref: checkout-saga-http-rbac
+      callers:
+        order-api:
+          credential_ref: saga-order-client
+          tenants: [system]
+          permissions: [start, read]
+  transport:
+    address_policies:
+      saga-participant-routing:
+        http_schemes: [https]
+        http_hosts: [inventory.internal, payment.internal]
+        http_ports: [443]
+    command_result:
+      kind: http
+      http:
+        shared_replay_claim: saga-http-replay
+        command_credential_ref: saga-command
+        result_credential_ref: saga-result
+        routing:
+          mode: capability-registry
+          address_policy_ref: saga-participant-routing
 
 outbox:
   poll_interval_ms: 500
