@@ -3,12 +3,12 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA managed application lifecycle with multi-source registries, request security, trace propagation, supervised listeners, and bounded shutdown"
+description = "NASA managed lifecycle with ordered initializers, priority-ordered graceful shutdown, multi-source registries, request security, trace propagation, and supervised services"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "lifecycle", "initializer", "microservices", "http2"]
+keywords = ["runtime", "lifecycle", "initializer", "graceful-shutdown", "microservices"]
 categories.workspace = true
 
 [features]
@@ -80,6 +80,8 @@ scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]
 
 [dependencies]
 anyhow = "1"
+unicode-normalization = "0.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 arc-swap = "1"
 base64 = { version = "0.22", optional = true }
 axum = { version = "0.8", optional = true }

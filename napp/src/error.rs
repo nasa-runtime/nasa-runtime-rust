@@ -146,6 +146,27 @@ pub struct ApplicationError {
     reported: bool,
 }
 
+impl Drop for ApplicationError {
+    /// 业务作用：独立释放底层业务错误，避免其析构异常改变已经确定的应用终态或截断其它错误释放。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；底层错误的单次展开被隔离并输出固定分类，异常正文不进入诊断通道。
+    fn drop(&mut self) {
+        // 先移走所有权再进入独立展开边界，防止外层集合释放时重复析构或因单项异常跳过后续项。
+        let source = self.source.take();
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(source)))
+        {
+            crate::shutdown::release_shutdown_panic_payload(payload);
+            crate::report::write_stderr(&format!(
+                "application error release warning: component={} phase={} outcome=panicked\n",
+                self.component, self.phase,
+            ));
+        }
+    }
+}
+
 impl ApplicationError {
     /// 业务作用：创建没有底层错误链的框架错误。
     ///

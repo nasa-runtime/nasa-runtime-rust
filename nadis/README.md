@@ -306,6 +306,10 @@ struct UserDoc {
 
 ## 生产注意
 
+Application 受管 Redis 客户端由 `"redis"` 组件关闭，业务一次性收尾可以在其关闭前使用
+`app.register_graceful_shutdown`，不应重复关闭同一个受管客户端。业务自己启动的 Stream、Partition 或
+其它长期消费循环，应先由对应 owner 停止准入并确认退出；一次性 future 不能替代运行期间的任务监督。
+
 - `RedisConfig` 的 `url` 在 Debug 输出中会脱敏，但不要把明文连接串写进仓库。
 - `RustV2` 和 `LegacyV1` 的分区/锁/stream 协议不要混同一 namespace。
 - 非幂等命令遇到 Redis IO 错误时，框架不会透明重试；调用方要按业务处理“执行状态未知”。

@@ -16,6 +16,15 @@
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
 //! 才开放监听、消费与服务发现；依赖边优先于 `order`，失败会阻止 Ready 并进入逆序清理。
 //!
+//! # 业务优雅停机
+//!
+//! `application` feature 同时提供 `Application::register_graceful_shutdown`。Service 与 Batch
+//! 在 UserHook 移交一次性收尾 future；受监督任务先收口，再按 priority 和同级登记顺序执行收尾，
+//! 随后释放 UserHook 业务资源。Service 的 initializer 在业务任务之前清理，Batch 的静态
+//! initializer 在业务资源之后清理。所有步骤共享绝对期限，单项失败不覆盖首次终止原因。
+//! 已接管 future 的释放具有一次性析构隔离；直接取消 Runner 不保证执行异步收尾或产生退出报告。
+//! 此能力不替代受管组件的关闭 owner，也不提供跨进程崩溃的持久执行保证。
+//!
 //! # 受管基础设施
 //!
 //! `kafka-schema-registry` 提供有界 Schema Registry client 与批准 ID 门禁；`object-store` 提供有界
@@ -59,7 +68,7 @@
 // ============================================================================
 #![forbid(unsafe_code)]
 
-/// 应用运行时：生命周期、Ready 前业务初始化屏障、配置快照、类型资源容器和受管任务。
+/// 应用运行时：Ready 前业务初始化、有序业务停机任务、配置快照、类型资源容器和受管任务。
 ///
 /// `#[nasa::application("saga")]` 会隐式纳入 DB 与 Outbox；独立
 /// `#[nasa::application("outbox")]` 会隐式纳入 DB。Inbox 是事务内原语，不声明为生命周期组件；
@@ -146,7 +155,7 @@ pub mod application {
 }
 
 #[cfg(feature = "application")]
-pub use application_impl::Application;
+pub use application_impl::{Application, ShutdownTaskOutput};
 #[cfg(feature = "redis-job")]
 pub use application_macro::redis_job;
 #[cfg(feature = "application")]

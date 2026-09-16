@@ -15,6 +15,7 @@ use crate::{
     config::{ConfigStore, ConfigView},
     global,
     resources::ResourceRegistry,
+    shutdown::ShutdownTaskOutput,
     state::{StateCell, TerminalCell, TerminalIntent},
     supervisor::{ManagedTaskFuture, SupervisorClient, TaskKind, TaskSupervisor},
     ApplicationError, ApplicationMode, ApplicationPhase, ApplicationResult, ApplicationState,
@@ -171,6 +172,8 @@ pub(crate) struct ApplicationInner {
     /// 登记还必须通过 `user_registration_gate` 和 `user_hook_open`，因此计划关闭与
     /// UserHook 关闭共享同一线性化边界，不借用资源封口表示 initializer 状态。
     initializers: crate::initialization::InitializerRegistry,
+    /// UserHook 期间登记、Seal 后冻结并在业务资源释放前执行的一次性业务停机任务。
+    shutdown_tasks: crate::shutdown::ShutdownTaskRegistry,
     state: Arc<StateCell>,
     terminal: TerminalCell,
     shutdown_requested: CancellationToken,
@@ -354,6 +357,7 @@ impl Application {
                 config: Arc::new(ConfigStore::new(initial_config)),
                 resources: ResourceRegistry::new(),
                 initializers: crate::initialization::InitializerRegistry::new(),
+                shutdown_tasks: crate::shutdown::ShutdownTaskRegistry::new(),
                 state: Arc::new(StateCell::new()),
                 terminal: TerminalCell::new(),
                 shutdown_requested: CancellationToken::new(),
@@ -635,6 +639,60 @@ impl Application {
         self.inner
             .resources
             .register_named_managed(qualifier, value)
+    }
+
+    /// 业务作用：在 UserHook 期间登记一个只在应用停机阶段执行一次的异步业务任务。
+    ///
+    /// 任务所有权在登记成功后立即交给 Application；Runner 会在受监督任务收口之后、业务资源释放
+    /// 之前按优先级顺序执行，并将单项失败、超时或 panic 隔离到停机报告中。
+    /// 已接管 future 在注册表、待执行列表和执行中均隔离单次析构展开；外层直接取消时只同步告警，
+    /// 不保证运行异步停机主体，也不生成正常停机报告。
+    ///
+    /// 参数说明：
+    /// - `priority`：业务停机任务集合内的顺序，数值越小越先执行。
+    /// - `name`：应用内唯一的稳定任务名；首尾空白会被去除，名称不能为空、超长、含控制字符、URL、
+    ///   凭据语义词或明显随机标识。调用方必须使用固定业务名称，不能拼接对象身份或秘密。
+    /// - `task`：已经构造完成、只在停机阶段由 Runner 执行一次的异步任务；任务不能执行阻塞 I/O。
+    ///
+    /// 返回：任务完整写入当前 Application 的登记集合时成功；UserHook 尚未开放或已经关闭、名称非法、
+    /// 重名、达到数量上限或拒绝后析构发生 panic 时返回错误，失败登记不会把 future 留在容器中。
+    pub fn register_graceful_shutdown<N, F, O>(
+        &self,
+        priority: i32,
+        name: N,
+        task: F,
+    ) -> ApplicationResult<()>
+    where
+        N: Into<Arc<str>>,
+        F: std::future::Future<Output = O> + Send + 'static,
+        O: ShutdownTaskOutput,
+    {
+        let name = name.into();
+        let future: crate::shutdown::ShutdownTaskFuture =
+            Box::pin(async move { task.await.into_shutdown_task_result() });
+        let mut future = Some(future);
+        let result = {
+            let _gate = self
+                .inner
+                .user_registration_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_user_hook_open("graceful shutdown task registration")
+                .and_then(|()| {
+                    self.inner
+                        .shutdown_tasks
+                        .register(priority, name, &mut future)
+                })
+        };
+        // 名称转换与拒绝后的析构都可能重入 Application；必须位于登记门之外，避免业务代码自锁。
+        if future.is_some_and(crate::shutdown::release_shutdown_task) {
+            return Err(ApplicationError::new(
+                ComponentId::Application,
+                ApplicationPhase::UserHook,
+                "rejected graceful shutdown task panicked while being released",
+            ));
+        }
+        result
     }
 
     /// 业务作用：在 Service UserHook 装配窗口登记一个运行时 initializer。
@@ -3249,14 +3307,14 @@ impl Application {
         self.inner.initializers.freeze()
     }
 
-    /// 业务作用：在 Runner 首次观察到 Hook 终止事件后关闭公共登记入口。
+    /// 业务作用：在 Runner 观察到 Hook 终止或被直接释放时关闭公共登记入口。
     ///
     /// 关闭先于任务通道收口、资源封存和反向清理。这样仍在运行的业务 future 即使晚一步获得调度，
     /// 也只能得到阶段错误，不能在清理开始后继续增加资源或任务。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；重复关闭安全。
+    /// 返回：无返回值；重复关闭安全，返回后已通过登记检查的同步写入均已完成。
     pub(crate) fn close_user_hook(&self) {
         // 关闭与全部同步登记共用一个临界区；取得锁之后没有已通过检查但尚未写入的调用。
         let _gate = self
@@ -3280,6 +3338,40 @@ impl Application {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+    }
+
+    /// 业务作用：冻结业务停机任务登记，使停机计划与 UserHook 的结束边界保持一致。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首次封存或重复封存均成功；已经进入执行或关闭阶段时保持现有状态。
+    pub(crate) fn seal_shutdown_tasks(&self) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.inner.shutdown_tasks.seal()
+    }
+
+    /// 业务作用：一次性移交业务停机任务所有权给 Runner。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首次调用返回按稳定顺序排列的任务；重复调用返回空集合，未封口时返回阶段错误。
+    pub(crate) fn take_shutdown_tasks(
+        &self,
+    ) -> ApplicationResult<Vec<crate::shutdown::ShutdownTaskEntry>> {
+        self.inner.shutdown_tasks.take_for_shutdown()
+    }
+
+    /// 业务作用：关闭业务停机任务注册表并释放容器仍持有的任务 future。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：释放任务时收集的次要错误；重复调用安全，任务 future 在同步锁释放后逐项隔离析构。
+    pub(crate) fn close_shutdown_tasks(&self) -> Vec<ApplicationError> {
+        self.inner.shutdown_tasks.close()
     }
 
     /// 业务作用：返回 Runner 和组件使用的资源注册表。

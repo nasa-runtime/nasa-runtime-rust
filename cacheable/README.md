@@ -132,6 +132,10 @@ cache:
 
 ## 主要边界
 
+Application 中业务停机任务先于 `"cache"` 与 `"redis"` 组件的最终关闭，可在共享预算内完成业务缓存
+收尾；cache runtime 的卸载和广播停止仍由组件负责。不要把同一 `CacheRuntimeGuard` 的关闭责任同时
+放入业务停机 future 和其它受管资源，否则无法保持唯一 owner。
+
 - `mode: disabled` 不建连、不安装 backend，但仍执行 scene 静态合同审计。
 - `two_level` 必须在 `redis_ref` 与 `redis_url` 中选择一个；同时配置也会被拒绝。
 - `redis_ref` 要求同时声明 `"redis"`，容器固定按 `redis -> cache` 顺序启动。

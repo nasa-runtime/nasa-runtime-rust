@@ -39,6 +39,10 @@ provider-neutral 出口时，`SecurityMetrics::structured_snapshot()` 返回同�
 端口监听、HTTP/1/h2c 协议选择、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，
 不属于 `naweb`。
 
+Application 的 `register_graceful_shutdown` 在受管 listener 摘流和在途请求收口之后、业务资源关闭
+之前执行业务一次性收尾；它不延长 listener 的接流窗口，也不提供第二个 listener 关闭 owner。
+独立装配 Router 的项目仍须自行管理信号、HTTP 服务退出和资源顺序。
+
 业务代码不要依赖 `naweb::__private`，它只服务于宏展开。
 
 `#[nasa::application("web")]` 的项目**不要**再手写 `mvc_router!`：属性入口会在 crate 根自动生成收集端（再手写会因 `crate::__mvc` 重复定义而编译失败），路由装配、监听与优雅停机由应用运行时接管，业务定制经 `app.configure_router(...)` 注入。

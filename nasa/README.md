@@ -2,6 +2,8 @@
 
 `nasa` 是 `nasa-runtime-rust` 的唯一业务门面。应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+启用 `application` 后，业务初始化与优雅停机收尾进入同一生命周期：Ready 前执行初始化屏障，
+受监督任务结束后按优先级执行一次性收尾，最后释放业务资源。
 
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
@@ -31,7 +33,8 @@ codegen ABI、受管多源 registry 和可选 Application 组件接成一张一�
 participant 或 client；managed 模式支持 HTTP、gRPC、Kafka 与 Redis Streams command/result 数据面，
 并由 Application 构造标准 API、Catalog、签名 definition 发布、capability 续租、timer 与 dispatcher，
 普通业务不提交运行计划。Saga 不把远端调用伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。
-完整合同见 [napp Saga 受管模式](../napp/README.md#saga-受管模式)。
+完整合同见
+[napp Saga 受管模式](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#saga-受管模式)。
 
 Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与 schema 合同，以及 Nacos
 协调侧服务发现。HTTP HMAC 与 gRPC mTLS 可通过完整配置快照热轮换；definition 退休保留实例、
@@ -236,6 +239,36 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 
 完整元数据、`one-shot`/`hosted` 任务激活、指标与幂等边界见
 [napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务-initializer)。
+
+## 业务优雅停机任务
+
+通过 `application` feature 使用 `nasa::Application` 时，业务可在 UserHook 登记只执行一次的异步收尾：
+
+```rust
+let stop = client.clone();
+app.register_graceful_shutdown(100, "orders-client", async move {
+    stop.close().await
+})?;
+```
+
+任务按 `priority` 升序执行，同一优先级按登记顺序执行。名称在当前 Application 内唯一，必须是非空、无控制
+字符、URL、地址、凭据语义 token 或明显动态身份且不超过 128 个 UTF-8 字节。形态门禁不能证明实际业务基数，
+也不按普通身份词前缀猜测未知字母串；调用方必须使用固定业务名称，不得拼接租户、请求或对象身份。
+单个 Application 最多 256 项。Service 和 Batch 都可登记，但 UserHook
+关闭后、Seal 后或进入运行期再登记会返回错误。两种模式都先收口受监督任务，再执行业务停机任务，随后
+释放 UserHook 登记的业务资源。Service 在业务任务前完成 NotReady、入口摘流和 initializer action
+清理；Batch 的静态 initializer 则在业务任务和业务资源之后清理，遵守各自启动栈的反序。所有任务共享
+`application.shutdown_timeout_ms`，单项失败、超时或 panic 只增加停机报告并继续后续项；未取得执行机会的
+任务标为 `Abandoned`。任务不能承担长期循环、阻塞 I/O 或内置组件底层对象的关闭责任。
+
+任务可以在执行时通过 Application 查找尚未清理的业务资源；initializer/component 的局部清理不提前
+关闭其它 owner 的查找。取得资源后应在任务返回前归还借用，避免后续关闭等待自身持有的资源。
+任务从登记到执行始终具有一次性析构隔离。直接取消 Runner 只关闭登记并释放所有权，不等同于请求
+优雅停机，不保证执行异步收尾或产生退出报告；此时的析构异常同步告警，不追改摘要。
+`panic=abort`、同步阻塞和析构自身展开期间的未隔离再次 panic 不属于可隔离范围。
+
+完整 API 签名、生命周期位置、名称边界和资源所有权约束见
+[napp 的业务优雅停机任务章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务优雅停机任务)。
 
 ## 稳定基础设施合同
 

@@ -3,6 +3,8 @@
 NASA Rust 共享库是一组按特性组合的基础设施包。
 **业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、RedisJob、跨副本业务配额、WebSocket、配置、服务发现等特性。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
+Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭前的有序异步收尾；业务不需要另建信号处理
+或停机 callback 集合。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
@@ -26,6 +28,30 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 
 Application 不提供跨数据库原子事务，也不会替业务推断租户身份、授权关系、消息投递闭环或生产容量。
 独立组件可以脱离 Application 显式装配；此时连接、启动门禁、停机顺序和可观测性由调用方负责。
+
+## 业务优雅停机与所有权
+
+Service 与 Batch 都可在 UserHook 调用 `app.register_graceful_shutdown(priority, name, future)`，
+登记一次性的 close、flush、归还或注销。成功登记即移交 future 所有权；UserHook 结束后不再接收任务。
+两种模式都先收口受监督任务，再执行业务停机任务，随后释放 UserHook 登记的业务资源。
+Service 在业务任务前完成入口摘流、Ready action 与 initializer 清理；Batch 在工作负载之前初始化，
+因此在业务任务和业务资源之后才撤销静态 initializer，最后释放更早启动的组件资源。
+任务可以执行时再查找尚未清理的资源，不必提前长期占用借用。
+
+| 业务需求 | 入口 | 所有权与边界 |
+| --- | --- | --- |
+| Ready 前初始化 | `#[nasa::initializer]` / `register_initializer` | migration 后执行全局屏障，失败不接流 |
+| 一次性异步收尾 | `register_graceful_shutdown` | 在任务组内按 priority 升序、同优先级按登记顺序执行 |
+| 资源本体的关闭 | `register_managed` | 由资源所属的生命周期步骤关闭，同一对象只保留一个关闭 owner |
+
+任务共享 `application.shutdown_timeout_ms` 的绝对期限，组内公平分配剩余预算并为后续清理预留时间。
+单项错误、超时或可隔离的展开不覆盖首次终止原因；有剩余预算时继续后续项，未开始项计为 `Abandoned`。
+直接取消 Runner 不是优雅停机请求：只关闭登记并释放已接管所有权，不保证执行异步收尾或生成退出报告。
+同步阻塞、非协作 poll、`panic=abort` 和析构自身展开期间的未隔离再次 panic 不受异步期限保护。
+
+名称、容量、资源借用、析构隔离和诊断计数的完整合同见
+[napp 业务优雅停机任务](napp/README.md#业务优雅停机任务)；运行期判断见
+[运维指南](docs/operations.md#业务停机任务)。
 
 ## 受管多源运行时
 
@@ -293,6 +319,15 @@ pub async fn save_user() -> anyhow::Result<()> {
 `application` 同时提供业务初始化屏障：静态 `#[nasa::initializer]` 与启动 Hook 动态登记的
 initializer 先合并冻结为一份依赖计划；migration 和出站依赖准备完成后再严格执行全部
 `before -> initialize -> after` 三轮。全部成功前不开放入站监听、消费循环或服务发现。
+
+需要在受监督任务结束后做一次性异步业务收尾时，可在 UserHook 使用
+`app.register_graceful_shutdown(priority, name, future)`。数值越小越先执行，同一优先级按登记顺序执行；
+任务集合只属于当前 Application，UserHook 关闭后不再接受新登记，Seal 时封存，并在业务资源释放前共享全局停机预算。任务
+失败、超时或 panic 会进入停机报告并继续执行后续项，不覆盖已经确定的主错误。名称唯一、非空、不含控制
+字符、URL、地址、凭据语义 token 或明显动态身份且不超过 128 个 UTF-8 字节。形态门禁不能证明实际业务基数，
+也不按普通身份词前缀猜测未知字母串；调用方必须使用固定业务名称，不得拼接租户、请求或对象身份。
+单个 Application 最多登记 256 项。完整执行位置和边界见
+[napp 的业务优雅停机任务章节](napp/README.md#业务优雅停机任务)。
 
 ```toml
 [dependencies]

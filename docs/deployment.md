@@ -52,6 +52,17 @@ ENTRYPOINT ["/app/order-service"]
 首次终止信号触发正常停机；Stopping 阶段再次收到终止信号会立即退出。监督器依据退出码和 Ready 状态
 决定重启，不能只判断端口是否存在。
 
+业务异步 close、flush、归还和注销应在 UserHook 通过 `register_graceful_shutdown` 登记，并由上述同一个
+信号入口驱动。Service 先摘流、收口受监督任务与 initializer，再按 priority 执行业务停机任务，随后关闭
+业务资源和更早启动的组件。Batch 正常完成工作负载也会进入收口，不需要额外信号；它在受监督任务之后
+执行业务停机任务、释放业务资源，再清理静态 initializer 和更早启动的组件。
+业务任务组会为资源清理预留尾部预算；增加任务数量不会增加总停机时长上限。
+摘要中的 `business_shutdown_abandoned`、`business_shutdown_timed_out`、`business_shutdown_panicked`
+非零表示收尾不完整；不能仅凭 Service 正常信号退出码 0 判断所有业务操作已完成。
+
+SIGKILL、进程 abort、同步阻塞或直接丢弃 Runner 不能视为优雅停机。析构保护不保证业务 future 已执行，
+需要跨崩溃保证的副作用仍应依赖持久事务、Outbox/Inbox 或可恢复业务状态，而不是内存中的退出 callback。
+
 ## 健康端点
 
 声明 `web` 组件且 `server.health=true` 时，运行时提供：

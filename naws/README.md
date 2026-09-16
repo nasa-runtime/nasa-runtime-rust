@@ -11,6 +11,14 @@ nasa = { version = "1", features = ["ws"] }
 
 ## 服务端
 
+启用 `application,ws` 并声明 `#[nasa::application("ws")]` 时，通过 `app.configure_ws` 提交鉴权与
+endpoint 定制，由组件统一拥有监听、会话排空和关闭。业务一次性收尾可在 UserHook 使用
+`register_graceful_shutdown`；其执行晚于入站会话收口，不能再依靠这些会话发送必须成功的最后一条消息，
+也不应重复关闭受管 server。确有最终通知需求时，应放在会话自身的可确认协议或排空合同中。
+
+以下为独立服务端装配，调用方持有 `RunningServer` 并负责显式等待有预算的关闭；不要与受管组件同时
+创建相同 listener。
+
 ```rust
 use nasa::ws::{AuthResult, Endpoint, Server};
 

@@ -1,6 +1,9 @@
 # napp
 
-`napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、组件启动/停机编排、任务监督、信号处理与退出码；声明 `"web"` 时还独占具备确定 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目**不要直接依赖本 crate**，经 `nasa` 门面开启 `application` feature 使用；使用入口与生命周期约束见仓库的快速开始和运维指南。
+`napp` 是 `#[nasa::application]` 属性入口背后的应用生命周期运行时：统一配置装载、Ready 前业务初始化、
+按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
+HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
+使用，不需要为异步业务收尾另建信号监听或 callback 集合。
 
 ## 核心价值与生命周期架构
 
@@ -9,10 +12,15 @@ initializer、listener、消费循环、readiness、关键任务和停机编排�
 组件另写启动顺序、信号处理、后台任务脱离检测或 shutdown glue。
 
 ```text
-配置装载 → Start 出站资源 → UserHook 提交计划 → Prepare / initializer 屏障
+Service 配置装载 → Start 出站资源 → UserHook 提交计划 → Prepare / initializer 屏障
          → Ready 绑定入站与发布发现 → Running 监督关键任务
-         → NotReady / 摘流 → 反向有界排空 → Stopped
+         → NotReady / 摘流 → 受监督任务与 initializer 收口
+         → 业务停机任务 → 业务资源与更早启动的组件 → Stopped
 ```
+
+Batch 先完成 Prepare，再执行静态 initializer，最后运行作为工作负载的 UserHook；Hook 中同样可以登记
+业务停机任务，工作结束或失败后依次收口受监督任务、业务停机任务、业务资源、静态 initializer 与
+更早启动的组件。`priority` 只排序业务任务，不改变组件 active stack。
 
 initializer 是 Ready 前的初始化屏障：migration 与出站依赖完成后统一执行静态宏和运行时登记项的
 `before -> initialize -> after` 三轮。任何阶段失败都不会开放监听、消费或服务发现，已经启动的资源按
@@ -891,7 +899,8 @@ DeadlineExceeded，不把迟到或不完整的收据当作成功确认。每次�
 HTTP HMAC 和 gRPC mTLS 随配置视图一次发布，`saga.credential_overlap_ms` 指定旧材料接受窗口；入站、
 出站、capability 续租和 Catalog 执行资格共同读取当前安全合同，非法候选保留上一份有效配置。动态 principal
 使用 `secret://certificate_ref`，既有连接在每个 RPC 上也要复验；静态 `sha256:...` 保持固定身份。
-完整发现配置、证书轮换和多副本收敛边界见 [Saga 生产指南](../docs/saga-production.md)。
+完整发现配置、证书轮换和多副本收敛边界见
+[Saga 生产指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
 
 业务通过 `SagaHandle::orchestrator` 或 `pgsql_orchestrator` 取得 `SagaOrchestratorHandle`，可发起、查询、
 暂停实例和读取运行指标；每次业务调用复验组件资格。句柄不暴露底层 Arc、registry 替换、timer 领取或
@@ -1267,6 +1276,79 @@ initializer 失败、panic、超时或取消都会停止后续阶段，不发布
 撤销 action 和关闭受管资源。已提交的 DB/Redis/Kafka 外部事实无法由本地回滚，因此实现必须可安全重跑：
 单库多步写使用事务，跨资源事实使用稳定幂等键或与 Outbox 同事务提交。
 
+## 业务优雅停机任务
+
+业务需要在受监督任务收口后执行一次性的异步 close、flush、归还或注销时，可以在 Service 或 Batch 的
+UserHook 中调用 `Application::register_graceful_shutdown`。登记成功后，future 的所有权交给当前
+`Application`，业务不再监听进程信号或保存停机 callback 集合：
+
+```rust
+let consumer = consumer.clone();
+app.register_graceful_shutdown(100, "orders-consumer", async move {
+    consumer.stop_and_drain().await
+})?;
+
+let client = client.clone();
+app.register_graceful_shutdown(200, "orders-client", async move {
+    client.close().await
+})?;
+```
+
+`priority` 只决定业务任务集合内部的顺序，数值越小越早执行；同一优先级按登记顺序执行。任务名在
+当前 Application 内唯一，首尾空白会去除，名称必须非空、不含控制字符、不可见格式控制、URL、地址、凭据语义 token 或明显动态身份，且不超过
+128 个 UTF-8 字节；单个 Application 最多登记 256 项。任务可以返回 `()` 或 `Result<(), E>`，其中
+`E: Into<anyhow::Error>`。
+凭据按 camelCase、acronym、常见分隔符和明确凭据后缀识别，不受业务前缀影响；普通复合词和操作词不依赖白名单。
+全角及其它可兼容分解为 ASCII 字母数字的字形使用同一比较规则；名称拒绝 Unicode Format 类、组合字形连接符和
+变体选择符，包括零宽及双向格式控制；Unicode 行、段分隔符也不能进入单行诊断身份。
+正常可见的多语言业务名称和普通组合音标仍可使用。
+门禁拒绝点分四段 IPv4 形态（每段十进制值不超过 255，允许前导零）及完整可解析的 IPv6 候选，
+不从普通单词中截取十六进制子串，因此 `cache::flush` 等 namespace 名称可用。带值的独立
+`id`、`uid`、`uuid` 字段同样拒绝；词边界处大写 `ID`、`UID`、`UUID` 直接拼接小写 ASCII 字母、数字
+或非 ASCII 字母数字值采用保守拒绝策略（如 `requestIDabc`、`requestIDαβ`）。`Id`、`Uid`、`Uuid`
+直接拼接数字或非 ASCII 字母数字值也会拒绝，但不从 `Identity` 等普通 ASCII 单词中猜测身份字段。
+缩写组合与该保守规则重合时应使用分隔符表达稳定名称，例如 `client-ui-driver`，而不是二义性的
+`clientUIDriver`；运行时无法区分后者的 `UI + Driver` 与 `UID + river`。连续四位及以上 Unicode 十进制数字（含混合书写系统）、UUID、ULID、
+连续 16 位十六进制串，以及长度至少 16 且含至少四个数字的字母数字混合段同样拒绝。短固定编号可以使用。
+这些形态检查不能证明名称的业务基数；调用方仍必须使用固定业务名称，不得拼接租户、请求、对象身份或秘密，
+包括形态上无法与普通单词区分的纯字母标识。
+UserHook 结束、Seal、Ready 或停机开始后登记都会失败。
+
+Service 停机时，运行时先让入口变为 NotReady、关闭 Ready action、收口受监督任务并撤销 initializer action，
+再按优先级执行业务停机任务，之后才释放 UserHook 登记的业务资源和更早启动的组件资源。
+Batch 的静态初始化早于工作负载：收口受监督任务后，先执行业务停机任务、释放业务资源，再撤销静态
+initializer action 与其资源，最后清理更早启动的组件；不会套用 Service 的 initializer 清理位置。
+两种模式都只允许查找尚未撤销的资源，不得假设 Service 的 initializer 资源仍可用于业务收尾。所有任务共享
+`application.shutdown_timeout_ms` 的绝对期限；任务组会为后续资源清理预留尾部，组内按剩余时间和未执行项数
+分配公平份额。单项失败、超时或 panic 不截断后续任务，也不覆盖更早的 primary error；期限耗尽时未开始的
+任务标为 `Abandoned` 并释放其 future。任务必须是可让出执行权的异步操作，不能包含阻塞 I/O、无界 CPU
+循环或阻塞式析构。取消和放弃时的单次析构 panic 也会被隔离；已尝试项计入 `Panicked`，未开始项仍计入
+`Abandoned` 并附加析构错误。panic payload 正文不会被读取，首次异常对象在独立的展开边界内尝试析构；
+只有该析构再次 panic 时才保留第二个异常对象及其持有的资源，避免无限展开。
+从登记接管开始，future 在注册表、待执行列表和当前执行项中始终保留一次性析构隔离。
+Runner 被释放时先关闭公共登记门，再在锁外清理注册表；即使 UserHook 或任务仍持有 Application 副本，
+也不依赖最后一个副本析构才能释放任务。析构中的重入登记会被拒绝。
+直接取消并释放 Runner 不等同于请求优雅停机，不保证执行异步任务主体或产生退出报告；
+因所有权释放而发生的任务析构异常只同步输出固定告警，不阻止其它已接管任务释放，不伪造或追改摘要。
+同步阻塞、`panic=abort` 以及同一次展开中的再次 panic 不在可隔离范围内。
+返回错误对象的 `Display`、`source` 和 `Drop` 也在独立展开边界内调用。错误链重复节点或超过 32 层时停止展开，
+累计保留的正文最多 16 KiB；格式化超出剩余接收预算或未完整返回时，正文被丢弃并替换为稳定分类。
+同步错误报告先脱敏，再将正文的控制字符、Unicode 行/段分隔符及不可见格式字符编码为可见转义；
+反斜杠也转义，普通多语言可见文本和错误链分隔信息保留。框架只追加一个末尾 LF，单条报告连同固定前缀
+最多 2 KiB，截断不拆开 UTF-8 字符或转义。采集端应按物理行的固定前缀识别报告，不把正文内的同名文字当成摘要。
+Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏，内部引号与参数逗号不会提前终止脱敏。
+边界为外层 JSON 字符串或当前 header 行；Digest 的扩展参数与同一行尾部字段无法可靠区分时一并隐藏，
+需要保留的公开诊断应放在独立字段或下一行。
+独立 PEM 私钥块也会整体隐藏，不要求外层字段前缀；明确私钥缺少匹配结束标记时保守隐藏剩余正文，
+普通 PEM 证书与公钥不因块标记被隐藏。
+错误对象在所有者释放时逐项隔离析构，晚于 shutdown summary 的异常输出 `application error release warning`，
+不追改任务结果计数、首次原因或退出码。错误回调必须在有限时间内返回；同步死循环、阻塞或忽略格式化写入错误的
+无限输出无法由异步 deadline 抢占，仍需进程级强制终止兜底。
+
+长期运行的循环继续使用 `spawn_critical`、`spawn_background` 或 `serve_when_ready`；需要运行期借用和
+明确资源所有权的对象继续使用 `register_managed`。同一个对象只能有一个最终关闭 owner，业务停机任务也
+不能关闭由数据库、Redis、Kafka、Web、gRPC 或日志组件拥有的底层对象。
+
 ## 生命周期要点
 
 - `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写只记 `RestartRequired`。
@@ -1275,13 +1357,14 @@ initializer 失败、panic、超时或取消都会停止后续阶段，不发布
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
 - 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
 - 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化如实记 `RestartRequired`。`app.config_view()` 保证快照与状态表同版本。
-- 错误报告统一脱敏（URI userinfo、常见敏感键）后输出完整错误链；进程级 panic hook 只写受控 location marker，不读 payload。
+- 错误报告有界展开错误链并统一脱敏（URI userinfo、常见敏感键）；敏感键比较忽略不可见格式控制并识别 ASCII 字母数字兼容字形，替换坐标保持原文。兼容标点不产生新的值结束边界；这不是任意视觉混淆字符检测。进程级 panic hook 只写受控 location marker，不读 payload。
 
 ## 业务扩展点
 
 | 入口 | 开放窗口 | 用途 |
 | --- | --- | --- |
 | `app.register / register_named / register_managed` | 启动 Hook | 把业务资源所有权交给容器；运行期只读借用 `app.resource::<T>()` |
+| `app.register_graceful_shutdown` | 启动 Hook | 登记一次性业务异步收尾；在受监督任务之后、业务资源之前按 priority 执行 |
 | `app.spawn_critical / spawn_background` | 启动 Hook | 受监督任务；critical 提前退出触发失败停机 |
 | `app.serve_when_ready` | Service 启动 Hook | 登记只在 Application Ready 后才构造与 poll 的自管 listener |
 | `app.register_initializer` | Service 启动 Hook | 登记运行时 initializer，与 `#[nasa::initializer]` 静态项合并冻结 |
@@ -1386,6 +1469,24 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 `spawn_critical` 或 `spawn_background`。需要热更新时，通过 `subscribe_config()` 在受监督任务中解析新快照、
 校验成功后替换依赖内部状态；运行时不会猜测外部库的重应用协议。若某依赖必须早于内置组件 Start，
 则应实现正式 `ApplicationComponent` 并进入声明顺序，而不是放在启动 Hook 中抢时序。
+
+业务、组件和 initializer 拥有的受管资源使用相同的逆登记清理与异常隔离：`shutdown` 同步创建 future、
+future 的 poll、future 释放以及资源值的析构分别置于独立展开边界。单项返回错误、超时或展开式 panic
+记录为次要失败，在剩余预算内继续后续资源及 active stack，不覆盖首次停机原因或退出码。
+清理 future 先释放对资源的借用，再释放资源值；已有 `ResourceRef` 必须先归还，超时仍被借用的资源不会被强行关闭。
+外层取消或最后一个借用延迟归还时的析构异常单独同步告警，不追改已经发布的摘要。关闭容器先撤销新登记和借用，
+再在注册表锁外释放所有权。同步回调与析构必须有限时间返回；阻塞、不让出执行权、`panic=abort` 和同一次展开
+中的再次 panic 无法由异步期限或展开隔离强制终止。
+
+initializer 或组件的局部资源清理只撤销该所有者的 key，不提前关闭其它资源的查找。业务停机任务仍可通过
+`Application::resource` 借用尚未清理的业务和组件资源；任务结束并进入业务资源步骤后，注册表才进入全局
+`Closing`，拒绝全部新借用。异步取锁完成后会复验 key 与阶段，已经撤销的条目不会因排队查找重新发布。
+
+组件与 initializer 的 `ShutdownAction` 共用异常隔离执行器，分别保护 `label`、future 创建、poll、future
+释放及 action 本体释放。`label` 展开时不再调用该 action 的 `shutdown`；其余异常保留为次要失败，在预算
+仍可用时继续下一步骤。未执行的 action 在预算耗尽后只释放所有权，不计作已尝试；取消时先释放 future，
+再释放 action，无法纳入报告的析构异常单独同步告警。所有同步回调和析构必须有限时间返回，阻塞、不协作
+future、`panic=abort` 与同一次展开中的再次 panic 不在可抢占范围内。
 
 ## 发布边界
 

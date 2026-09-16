@@ -314,6 +314,10 @@ async fn start(
 `shutdown_scheduled()` 会 abort 非 cron 后台 loop、关闭 cron scheduler，并复位启动指纹。手工装配时
 由唯一生命周期 owner 在优雅停机阶段调用；受管 `"scheduling"` 组件会自动执行。
 
+Service 模式下 Application 的调度收口先于 UserHook 登记的业务停机任务。`register_graceful_shutdown` 用于一次性
+业务 close/flush，不用于承载 cron 或周期循环，也不应再次调用受管调度器的关闭入口。
+独立模式仍由调用方拥有调度生命周期，不能把释放某个业务句柄当作任务已经退出的证明。
+
 ```rust
 nasa::scheduling::shutdown_scheduled().await?;
 ```

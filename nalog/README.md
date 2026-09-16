@@ -127,6 +127,10 @@ appender 生命周期配置，通常随进程重启生效。
 
 ## 主要边界
 
+Application 的 `"log"` 组件持有文件 guard，业务停机任务和资源清理先于日志收口。业务自有日志适配器
+可由唯一 owner 管理，但不要再用 `register_graceful_shutdown` 重复关闭受管 appender。
+停机失败与最终摘要使用运行时独立的同步诊断通道，不依赖日志组件继续存活。
+
 - 初始化 owner 只能有一个；重复安装 subscriber 或文件 appender 会返回明确错误。
 - 运行期只热切 level，目录、pattern 和滚动策略需要重启后生效。
 - 日志字段不得包含 secret、token、连接串、请求正文或未脱敏身份信息。

@@ -71,6 +71,10 @@ session.shutdown_runtime().await?;
 
 `#[application]` 的 `nacos-discovery` 组件即按这三段编排（Start 装 runtime / Ready 注册 / 停机反序）；`init_from_config` 保留给不使用应用运行时的项目。
 
+Application 的业务停机任务晚于本实例注销和入站排空，但早于出站 runtime 的最终关闭，可用于有界的
+外部业务注销或通知。它不恢复本实例接流资格，也不能再次接管同一 `DiscoverySession` 的 deregister
+或 shutdown owner。独立模式需要调用方自行维持上述先摘流、后关闭客户端的顺序。
+
 ## 协议端点元数据
 
 一个实例同时开放 HTTP 与 gRPC 等多个端口时，`registration.port` 继续表示主服务端口；其它协议通过

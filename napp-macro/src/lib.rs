@@ -4,6 +4,9 @@
 //! `#[initializer]` 把完整 `Initialization` trait impl 登记到同一二进制的静态集合。运行时会把
 //! 静态项与 Service 启动 Hook 动态登记项冻结为统一依赖计划，在 `Prepare` 后、`Seal` 前严格执行
 //! 全部 `before -> initialize -> after` 三轮，全部成功前不开放入站能力。
+//!
+//! 生成的 UserHook 可通过 Application 登记一次性业务停机 future，不需要额外属性或组件字符串。
+//! 宏不创建第二个信号或关闭 owner；任务顺序、共享预算、失败报告与取消后的所有权释放由运行时负责。
 
 use std::collections::HashSet;
 

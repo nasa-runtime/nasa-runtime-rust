@@ -174,6 +174,11 @@ Ready 前等待真实 join/assignment 或 producer metadata。
 `KafkaProxy`、`consumers()`、admin 写操作或关闭权。独立批处理与运维工具继续使用本 README 其他章节的
 显式 `KafkaProxy` 模式，不声明 Application 的 `"kafka"` 组件。
 
+业务自有收尾可在 UserHook 使用 `app.register_graceful_shutdown`：受管 consumer 已在 Ready action
+收口，业务任务在最终 producer flush 和关闭之前执行，可以继续使用已取得的受管发布句柄。
+任务结果不会替代 broker 的真实确认；期限内没有取得确认仍属结果未知。不要再次登记 KafkaProxy 的
+shutdown，否则会与组件的两段关闭 owner 重叠。
+
 ### 两段停机 API
 
 容器使用接收绝对 deadline 的入口，保证所有 action 共享同一预算：

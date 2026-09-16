@@ -70,6 +70,22 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 
 虽然源码按 `web, cache, redis, log` 书写，生成的规范启动顺序仍是 `log -> redis -> cache -> web`。
 
+## 业务优雅停机任务
+
+生成的启动 Hook 接收同一个 `Application`，可直接调用
+`app.register_graceful_shutdown(priority, name, future)`；不需要增加宏属性、组件字符串或 feature。
+登记只在 Service 或 Batch 的 UserHook 开放，Hook 结束后名称和任务集合封口。
+
+宏不执行停机 future，也不另外生成信号处理器。Runner 在受监督任务收口后、UserHook 业务资源
+释放前执行任务；Service 的 initializer 先清理，Batch 的静态 initializer 则在业务资源之后清理。
+数值较小的 priority 先执行，同优先级按登记顺序执行。任务返回 `()` 或
+`Result<(), E>`，其中 `E: Into<anyhow::Error>`；错误、超时和可隔离展开只记为次要失败。
+初始化失败时，已经成功登记的任务仍沿统一停机路径处理；预算耗尽的未开始项不再 poll。
+直接取消 Runner 不等同于请求优雅停机，析构隔离也不保证执行异步收尾。
+
+完整名称、数量、共享期限和资源所有权约束见
+[业务优雅停机任务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务优雅停机任务)。
+
 ## `#[nasa::initializer]`
 
 属性入口适合无需在启动 Hook 中手工构造的静态 initializer。省略 `name` 时，宏从实现类型名派生

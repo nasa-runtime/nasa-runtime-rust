@@ -86,6 +86,10 @@ telemetry:
 
 ## 主要边界
 
+Application 的 telemetry owner 在业务停机任务和业务资源收口后执行最终 flush；业务不应再用
+`register_graceful_shutdown` 提前关闭同一 exporter。最终导出仍受剩余全局预算约束，不能因安排了
+收尾任务就宣称所有 span 必然送达远端。
+
 - 请求路径只做 `try_send`；队列满或关闭时丢弃并计数，不反向阻塞业务。
 - `BoundedSpanExporter::channel` 的非 fallible 容量参数收敛到 `1..=Semaphore::MAX_PERMITS`，
   零值或极端值不会让 Tokio channel 构造 panic。

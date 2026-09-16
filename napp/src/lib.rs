@@ -9,6 +9,18 @@
 //! action、资源和任务沿 active stack 逆序关闭。外部系统中已经提交的事实不属于本地回滚能力，
 //! initializer 必须通过事务或稳定幂等键保证可安全重跑。
 //!
+//! # 业务优雅停机
+//!
+//! Service 与 Batch 的 UserHook 可通过 [`Application::register_graceful_shutdown`] 移交一次性收尾
+//! future。运行时在受监督任务收口之后、UserHook 业务资源释放之前，按 priority 升序和同级
+//! 登记顺序执行。Service 在任务前清理 initializer；Batch 在业务任务和业务资源之后清理静态
+//! initializer。任务组公平分配剩余预算并预留资源清理时间，单项错误不覆盖首次终止原因。
+//! 尚未清理的资源可在任务执行时查找；局部 owner 清理不会提前关闭其它资源的查找。
+//!
+//! 已接管任务从登记到执行持续隔离单次析构展开。直接取消 Runner 时先关闭登记，再释放所有权，
+//! 不保证执行异步收尾或生成退出报告。同步阻塞、非协作 poll、`panic=abort` 和析构自身展开期间
+//! 的未隔离再次 panic 不在保护范围内；一个对象只能有一个最终关闭 owner。
+//!
 //! 启用 Saga 组件时，Application 隐式拥有 DB 与 Outbox 生命周期，在 Ready 前校验 definition、
 //! descriptor、历史非终态实例和参与方信任投影，再监督 durable timer 与所选受管消费循环。
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
@@ -300,7 +312,7 @@ pub use saga::{
     SagaRemoteSnapshot, SagaRemoteStartDisposition, SagaRemoteStartReceipt, SagaRemoteStartRequest,
     SagaRole,
 };
-pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal};
+pub use shutdown::{ShutdownContext, ShutdownReason, ShutdownSignal, ShutdownTaskOutput};
 pub use spec::ApplicationSpec;
 #[cfg(feature = "web")]
 pub use spec::{RouteMeta, WebBuildContext, WebRouteMetaFactory, WebRouterFactory};

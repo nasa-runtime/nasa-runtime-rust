@@ -283,6 +283,33 @@ async fn health() -> &'static str {
 声明 `web` 后运行时提供统一监听、readiness、排空和停机。业务路由、数据源和后台任务应从
 `nasa::Application` 取得受管能力，不自行复制生命周期。
 
+## 一次性业务收尾
+
+业务自有客户端需要 close、flush、归还或注销时，在 UserHook 把收尾 future 交给 Application。
+下面的 `client` 表示由业务创建且尚未交给其它关闭 owner 的客户端：
+
+```rust
+let shutdown_client = client.clone();
+app.register_graceful_shutdown(100, "orders-client", async move {
+    shutdown_client.flush().await
+})?;
+```
+
+任务返回 `()` 或 `Result<(), E>`，其中 `E: Into<anyhow::Error>`。数值越小越早执行；同优先级保持登记
+顺序。任务名是固定业务名称，不能拼接租户、请求或对象身份，单个 Application 最多 256 项。
+Service 与 Batch 都可登记，但只能在 UserHook 内完成；登记失败会释放传入的 future。
+
+两种模式都先收口受监督任务，随后执行业务停机任务，再释放 UserHook 业务资源。
+Service 的 initializer 在业务任务之前清理；Batch 的静态 initializer 在业务资源之后清理。
+任务可以执行时再调用 `Application::resource` 查找尚未撤销的资源，借用应在任务返回前释放。同一对象只保留一个最终关闭
+owner：已经使用 `register_managed` 的对象，或 Application 拥有的数据库、Redis、Kafka、listener 等
+组件，不再另登记重复关闭任务。
+
+所有清理共享 `application.shutdown_timeout_ms`，单项不能阻塞或无限循环。失败、超时和可隔离展开不
+覆盖首次终止原因；期限耗尽时未开始项记为 `Abandoned`。直接取消 Runner 只释放已接管所有权，
+不能替代 Service 的 `app.shutdown()` 或进程 SIGTERM。完整限制见
+[业务优雅停机任务](../napp/README.md#业务优雅停机任务)。
+
 ## 后续阅读
 
 | 需求 | 文档 |

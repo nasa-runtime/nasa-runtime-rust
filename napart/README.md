@@ -248,6 +248,10 @@ readiness，关键性和无损超时后是否允许有损收口由各自计划�
 参数；Runner 在 UserHook 返回后的 Prepare 才启动，因此同一 Hook 不能立即取得业务句柄。UserHook
 结束后计划入口关闭，Running 阶段不能再向受管集合追加名称。
 
+Application 的一次性业务停机任务不持有受管 Runner 的启停权。`register_graceful_shutdown` 只安排
+业务收尾，不能再次调用受管 Runner 的 stop 或 force_stop，也不能把 future 已释放当作该 Runner
+全部任务已 join 的证明；退出证明仍由 partition 组件依据上述状态机取得。
+
 ## standalone 兼容入口
 
 `PartitionExecutor::new`、`with_partitions`、`with_limits` 和既有 `submit*` 入口仍可用。包装内部创建一个

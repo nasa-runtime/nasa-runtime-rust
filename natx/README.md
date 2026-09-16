@@ -58,6 +58,10 @@ nasa::tx::try_init(pool)?;
 再显式关闭这些池。
 `DataSourceConfig` 的诊断格式会对连接串脱敏，可安全写入日志。
 
+Application 的一次性业务停机任务先于数据库组件最终关闭，可以在任务执行时按 datasource 名称取得
+连接并完成有界事务。任务必须在返回前归还连接与资源借用；不能把数据库 pool 的 close 再登记为业务
+停机任务。共享停机期限不是提交确认，COMMIT 应答不确定仍按事务结果分类处理，不自动重放业务写。
+
 关键规则：
 
 - 想加入 `#[transactional]` 的访问必须用 `nasa::tx::conn()` 或

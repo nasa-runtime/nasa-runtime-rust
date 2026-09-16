@@ -1,11 +1,14 @@
 # 交付就绪清单
 
-生成公开归档或生产制品前，逐项确认当前能力、资产边界和运行前提。
+生成公开归档或生产制品前，逐项确认当前能力、内容边界和运行前提。
 
 ## 仓库内容
 
-- [ ] `LICENSE`、`LICENSE-MIT`、`LICENSE-APACHE` 与 `NOTICE` 完整，并进入每个公开归档。
+- [ ] 根目录保留双许可证说明 `LICENSE`；每个公开归档包含完整的 `LICENSE-MIT`、`LICENSE-APACHE`
+      和 `NOTICE`，与 manifest 的 `MIT OR Apache-2.0` 一致，不能只携带指向仓库外文件的说明。
 - [ ] 根 README 能索引全部组件，组件 README 均包含用途、接入、初始化、yml 和主要边界。
+- [ ] 从业务使用者视角逐项说明解决的问题、核心价值、运行架构、安全与顺序不变量、非目标和观测方式；
+      不能用零散指标、API 名称或一句实现摘要代替核心能力的独立说明。
 - [ ] `SECURITY.md`、`CONTRIBUTING.md` 与当前实现一致。
 - [ ] 公开文档、rustdoc、源码注释和 manifest 注释准确描述当前业务能力、配置、边界和失败后果。
 - [ ] 全部公开文本通过仓库文本规则检查，不含问题处置标签、内部里程碑、工作流水、工具归因、外部
@@ -16,6 +19,8 @@
 ## 归档与依赖
 
 - [ ] 每个公开 crate 的离线归档构建成功，归档内容仅包含产品源码、公开文档和再分发所需文件。
+- [ ] 使用 `cargo package` 生成真实归档，直接核对文件清单、README、规范化 manifest、许可证与版本；
+      `cargo package --list` 或工作树内容不能代替最终归档检查，离线依赖缺失时不得宣称归档已完成。
 - [ ] 直接从每个 `.crate` 归档读取 README 和规范化 manifest；核心价值在 README 首屏、独立架构章节、
       crate rustdoc 与 description 中一致，keywords/categories 能支持正确搜索与选型。
 - [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
@@ -50,6 +55,10 @@
       部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
       使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] 业务停机任务在根 README、门面、运行时、宏入口和运维文档中的合同一致：UserHook 登记、稳定名称、
+      priority 顺序、共享绝对期限、先任务后业务资源、失败计数和直接取消边界均有明确描述。
+- [ ] 一次性收尾、受管资源关闭与组件关闭责任不重叠；析构隔离不被描述为持久执行保证，也不掩盖
+      `panic=abort`、同步阻塞、未归还借用和全局期限耗尽的后果。
 - [ ] `rate-limit` feature、`full` 组合、门面路径和 README 一致；跨副本配额显式复用受管 Redis，没有
       隐式组件字符串或配置根。默认 fail-open、键空间上界、主体身份和 `429` / `Retry-After` 映射符合
       业务风险选择，且不与单实例令牌桶混为同一计数。

@@ -1,28 +1,112 @@
 use std::{
     collections::HashSet,
+    panic::{catch_unwind, AssertUnwindSafe},
     time::{Duration, Instant},
 };
 
 use crate::{
-    Application, ApplicationFuture, ApplicationResult, ComponentId, ManagedResource,
-    ShutdownContext,
+    Application, ApplicationError, ApplicationFuture, ApplicationPhase, ApplicationResult,
+    ComponentId, ManagedResource, ShutdownContext,
 };
 
-/// 一个已成功产生副作用的可逆步骤。实现者的 `Drop` 必须非阻塞。
+/// 一个已成功产生副作用的可逆步骤。同步回调和 `Drop` 必须有限时间返回。
+/// Runner 分别隔离 label、future 创建、poll、future 释放和 action 释放的单次展开式 panic；
+/// 同步阻塞、`panic=abort` 或同一次展开中的再次 panic 无法安全抢占。
 pub trait ShutdownAction: Send {
     /// 业务作用：返回用于清理报告的稳定 action 名称。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；名称不得包含配置值或业务秘密。
+    /// 返回：不包含配置值或业务秘密的静态名称；展开时 Runner 跳过该 action 的 shutdown 并释放所有权。
     fn label(&self) -> &'static str;
 
     /// 业务作用：在共享全局 deadline 内撤销该 action 已成功产生的副作用。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `context`：携带首次停机原因和剩余预算的统一清理上下文。
+    ///
+    /// 返回：成功表示副作用已撤销；错误、超时或单次展开记为次要失败，不覆盖首次终止原因。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a>;
+}
+
+/// 从激活入栈到清理结束持续持有 action 或其 future 的一次性受控释放权。
+pub(crate) struct ShutdownActionCleanup<T> {
+    value: Option<T>,
+    component: ComponentId,
+    operation: &'static str,
+}
+
+impl<T> ShutdownActionCleanup<T> {
+    /// 业务作用：接管 action 或 future，使尚未执行、外层取消和正常结束共用析构隔离边界。
+    ///
+    /// 参数说明：`value` 为被接管对象，`component` 为稳定组件归因，`operation` 为框架固定释放阶段。
+    ///
+    /// 返回：持有唯一释放权的守卫，不调用业务方法。
+    pub(crate) fn new(value: T, component: ComponentId, operation: &'static str) -> Self {
+        Self {
+            value: Some(value),
+            component,
+            operation,
+        }
+    }
+
+    /// 业务作用：向隔离执行器借出仍由守卫拥有的对象，不移交析构责任。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：显式 release 之前的独占借用；已释放后调用属于内部状态错误。
+    pub(crate) fn value_mut(&mut self) -> &mut T {
+        self.value
+            .as_mut()
+            .expect("shutdown action ownership is retained")
+    }
+
+    /// 业务作用：一次性释放所有权，并把单次析构展开转成可累计的次要失败。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：正常或重复释放返回 None；异常返回固定阶段错误，不读取 panic payload。
+    pub(crate) fn release(&mut self) -> Option<ApplicationError> {
+        // 先撤销守卫的所有权，析构展开后 Drop 也不能再次释放同一对象。
+        let value = self.value.take();
+        match catch_unwind(AssertUnwindSafe(|| drop(value))) {
+            Ok(()) => None,
+            Err(payload) => {
+                crate::shutdown::release_shutdown_panic_payload(payload);
+                Some(action_panic_error(self.component, self.operation))
+            }
+        }
+    }
+}
+
+impl<T> Drop for ShutdownActionCleanup<T> {
+    /// 业务作用：在执行器被取消或激活栈被放弃时隔离析构，避免异常截断其它所有权释放。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；无法纳入退出报告的异常同步告警，不追改已经发布的摘要。
+    fn drop(&mut self) {
+        if let Some(error) = self.release() {
+            crate::report::report_shutdown(&error);
+        }
+    }
+}
+
+/// 业务作用：为 action 展开生成稳定归因，不调用业务 label 或访问异常正文。
+///
+/// 参数说明：`component` 是所属组件，`operation` 是框架固定的失败阶段。
+///
+/// 返回：Stopping 阶段的次要错误，不替换首次终止原因。
+pub(crate) fn action_panic_error(
+    component: ComponentId,
+    operation: &'static str,
+) -> ApplicationError {
+    ApplicationError::new(
+        component,
+        ApplicationPhase::Stopping,
+        format!("shutdown action panicked while {operation}"),
+    )
 }
 
 /// 内置组件的受管生命周期协议；boxed future 保持 trait object-safe。
@@ -99,15 +183,16 @@ pub trait ApplicationComponent: Send {
 pub(crate) enum ActiveStep {
     Action {
         component: ComponentId,
-        action: Box<dyn ShutdownAction>,
+        action: ShutdownActionCleanup<Box<dyn ShutdownAction>>,
     },
     InitializerAction {
         initializer: std::sync::Arc<str>,
-        action: Box<dyn ShutdownAction>,
+        action: ShutdownActionCleanup<Box<dyn ShutdownAction>>,
     },
     ComponentResources(ComponentId),
     InitializerResources(std::sync::Arc<str>),
     BusinessResources,
+    BusinessShutdownTasks,
     InitializerTasks,
     UserTasks,
 }
@@ -140,6 +225,16 @@ impl ActiveStack {
     /// 本方法无参数；提前压栈保证部分登记也能回滚。
     pub(crate) fn push_business_resources(&mut self) {
         self.steps.push(ActiveStep::BusinessResources);
+    }
+
+    /// 业务作用：在 UserHook 前压入业务停机任务清理步骤，保证部分登记也能进入统一收口链。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；该步骤位于 UserTasks 之下、BusinessResources 之上，停机时先收割受管任务，
+    /// 再执行一次性业务停机任务，最后释放业务资源。
+    pub(crate) fn push_business_shutdown_tasks(&mut self) {
+        self.steps.push(ActiveStep::BusinessShutdownTasks);
     }
 
     /// 业务作用：在 poll UserHook 前压入动态用户任务清理步骤。
@@ -181,12 +276,17 @@ impl ActiveStack {
 
     /// 业务作用：把组件已经成功形成的可逆副作用压栈。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `component`：产生该副作用的组件身份。
     /// - `action`：拥有清理所需句柄的 object-safe action。
+    ///
+    /// 返回：无返回值；从入栈起隔离 action 析构，覆盖尚未执行就被放弃的路径。
     fn activate(&mut self, component: ComponentId, action: Box<dyn ShutdownAction>) {
-        self.steps.push(ActiveStep::Action { component, action });
+        self.steps.push(ActiveStep::Action {
+            component,
+            action: ShutdownActionCleanup::new(action, component, "releasing its action"),
+        });
     }
 
     /// 业务作用：为组件首次资源登记建立唯一清理步骤。
@@ -214,7 +314,11 @@ impl ActiveStack {
     ) {
         self.steps.push(ActiveStep::InitializerAction {
             initializer,
-            action,
+            action: ShutdownActionCleanup::new(
+                action,
+                ComponentId::Application,
+                "releasing its action",
+            ),
         });
     }
 

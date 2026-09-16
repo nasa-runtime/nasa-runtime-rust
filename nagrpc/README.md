@@ -129,6 +129,10 @@ UserHook 登记 generated service
   -> 两阶段 GOAWAY 排空，超时后终止 serve task
 ```
 
+Application 的业务停机任务在 listener 与受监督任务收口后执行，不能用于维持入站 RPC 继续接流。
+业务自有的出站客户端可按独立所有权登记一次性收尾，但不得再次关闭 `"grpc"` 组件拥有的 listener。
+直接取消 Runner 的析构保护不等同于完成上述异步 drain。
+
 最小配置只需绑定地址；其它字段都有有界默认值：
 
 ```yaml

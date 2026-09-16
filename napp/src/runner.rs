@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    panic::AssertUnwindSafe,
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
     time::{Duration, Instant as StdInstant},
 };
@@ -9,12 +9,15 @@ use futures_util::FutureExt;
 use tokio::time::{timeout, Instant};
 
 use crate::{
-    component::{ActiveStack, ActiveStep},
+    component::{action_panic_error, ActiveStack, ActiveStep, ShutdownActionCleanup},
     initialization::{
         freeze_plan, order_enabled, EnabledInitializer, FrozenInitializer, FrozenInitializerPlan,
         InitializerFailure, InitializerFailureKind, InitializerStage, StagedInitializerTask,
     },
     report::{report_shutdown, report_shutdown_summary, ShutdownSummary},
+    shutdown::{
+        release_shutdown_panic_payload, ShutdownTaskEntry, ShutdownTaskOutcome, ShutdownTaskReport,
+    },
     signal::{SignalBroker, SignalEvent, SignalMode},
     state::TerminalIntent,
     supervisor::{
@@ -22,8 +25,8 @@ use crate::{
     },
     Application, ApplicationComponent, ApplicationError, ApplicationInfo, ApplicationMode,
     ApplicationPhase, ApplicationResult, ApplicationState, BootstrapContext, ComponentId,
-    ConfigView, InitializationContext, PrepareContext, ReadyContext, ShutdownContext,
-    ShutdownReason, ShutdownSignal, StartContext,
+    ConfigView, InitializationContext, PrepareContext, ReadyContext, ShutdownAction,
+    ShutdownContext, ShutdownReason, ShutdownSignal, StartContext,
 };
 
 /// 生命周期全局启动/停机预算的硬上限；避免外部 `u64` 毫秒配置在 `Instant` 加法处溢出。
@@ -116,6 +119,22 @@ pub struct ApplicationRunner {
     signal_mode: SignalMode,
     startup_timeout: Duration,
     shutdown_timeout: Duration,
+}
+
+impl Drop for ApplicationRunner {
+    /// 业务作用：在生命周期执行器被直接释放时关闭业务登记并归还尚未移交的停机任务所有权。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；正常结束后的重复清理为空，直接取消时的析构异常仅同步告警。
+    fn drop(&mut self) {
+        // UserHook 的中止由执行器稍后完成，其 Application 副本或任务捕获的副本可能仍然存活。
+        // 先关闭登记门，再在锁外释放任务，不能依赖最后一个 Application 副本的析构来收口。
+        self.application.close_user_hook();
+        for error in self.application.close_shutdown_tasks() {
+            report_shutdown(&error);
+        }
+    }
 }
 
 impl ApplicationRunner {
@@ -287,6 +306,7 @@ impl ApplicationRunner {
 
                 // 工作负载可登记现有业务资源/任务，但 initializer 登记门从未开放。
                 self.active.push_business_resources();
+                self.active.push_business_shutdown_tasks();
                 self.active.push_user_tasks();
                 if let Err(stop) = self
                     .run_user_hook(user_hook, false, startup_deadline, &mut broker)
@@ -314,6 +334,7 @@ impl ApplicationRunner {
             ApplicationMode::Service => {
                 // 动态步骤在 poll hook 之前入栈，保证部分装配也能走同一回滚链。
                 self.active.push_business_resources();
+                self.active.push_business_shutdown_tasks();
                 self.active.push_user_tasks();
                 if let Err(stop) = self
                     .run_user_hook(user_hook, true, startup_deadline, &mut broker)
@@ -748,6 +769,16 @@ impl ApplicationRunner {
     ///
     /// 返回：资源容器首次封存成功时返回成功；重复或非法阶段返回 Seal 错误。
     fn seal_initialization(&self) -> ApplicationResult<()> {
+        // 业务停机任务必须与资源表在同一 Seal 边界冻结，Ready 之后的调用不能把新 future
+        // 插入已经确定的停机顺序。
+        self.application.seal_shutdown_tasks().map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::Application,
+                ApplicationPhase::Seal,
+                "failed to seal graceful shutdown tasks after initialization",
+                error,
+            )
+        })?;
         self.application.resources().seal().map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Application,
@@ -1248,9 +1279,17 @@ impl ApplicationRunner {
         let planned_steps = self.active.len();
         let mut failures = Vec::new();
         let mut counts = ShutdownStepCounts::default();
+        let mut business_shutdown_report = ShutdownTaskReport::default();
         let mut attempted_steps = 0_usize;
+        let mut shutdown_sequence = 0_usize;
         let mut abandoned_steps = 0_usize;
         let mut task_abort_attempted = false;
+
+        // 启动失败可能发生在正常 Seal 之前；先关闭登记集合，才能保证已经成功 ACK 的任务进入
+        // 本次回滚，同时阻止任何晚到的 UserHook 调用改变停机计划。
+        if let Err(error) = self.application.seal_shutdown_tasks() {
+            failures.push(error);
+        }
         while let Some(step) = self.active.pop() {
             if context.is_expired() {
                 // 当前步骤已经出栈但尚未执行；连同仍在栈内的步骤统一计入放弃数，避免摘要谎报完成。
@@ -1259,43 +1298,31 @@ impl ApplicationRunner {
                     ApplicationPhase::Stopping,
                     "global shutdown deadline expired; remaining active steps were abandoned",
                 ));
+                // 放弃不再调用业务 label 或 shutdown，但必须在摘要前逐一释放 action，
+                // 将析构异常保留为次要失败，不能推迟到 Runner 普通析构时才展开。
+                release_abandoned_action(step, &mut failures);
+                while let Some(remaining) = self.active.pop() {
+                    release_abandoned_action(remaining, &mut failures);
+                }
                 break;
             }
 
-            let sequence = attempted_steps + 1;
             let step_started = StdInstant::now();
             let failures_before = failures.len();
             match step {
-                ActiveStep::Action {
-                    component,
-                    mut action,
-                } => {
+                ActiveStep::Action { component, action } => {
                     counts.component_actions += 1;
-                    let label = action.label();
                     // 任一 action 都是公开扩展点，Runner 必须在外层强制预留后续逆序清理预算；
                     // 即使实现方误用全部 remaining，也不能阻断其后的资源释放。
                     let action_context = context.child_context(Duration::MAX);
-                    match timeout(action_context.remaining(), action.shutdown(&action_context))
-                        .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => failures.push(ApplicationError::with_source(
-                            component,
-                            ApplicationPhase::Stopping,
-                            format!("shutdown action `{label}` failed"),
-                            error,
-                        )),
-                        Err(_) => failures.push(ApplicationError::new(
-                            component,
-                            ApplicationPhase::Stopping,
-                            format!("shutdown action `{label}` exceeded its derived deadline"),
-                        )),
-                    }
+                    let (label, action_failures) =
+                        shutdown_action(action, component, None, &action_context).await;
+                    failures.extend(action_failures);
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "component-action",
                         component,
-                        Some(label),
+                        label,
                         step_started,
                         failures_before,
                         failures.len(),
@@ -1303,41 +1330,25 @@ impl ApplicationRunner {
                 }
                 ActiveStep::InitializerAction {
                     initializer,
-                    mut action,
+                    action,
                 } => {
                     counts.initializer_actions += 1;
-                    let label = action.label();
                     // initializer action 与框架 action 共享同一安全边界，不能因来源不同获得耗尽
                     // 全局 deadline 的权限。
                     let action_context = context.child_context(Duration::MAX);
-                    match timeout(
-                        action_context.remaining(),
-                        action.shutdown(&action_context),
+                    let (label, action_failures) = shutdown_action(
+                        action,
+                        ComponentId::Application,
+                        Some(initializer.as_ref()),
+                        &action_context,
                     )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => failures.push(ApplicationError::with_source(
-                            ComponentId::Application,
-                            ApplicationPhase::Stopping,
-                            format!(
-                                "initializer `{initializer}` shutdown action `{label}` failed"
-                            ),
-                            error,
-                        )),
-                        Err(_) => failures.push(ApplicationError::new(
-                            ComponentId::Application,
-                            ApplicationPhase::Stopping,
-                            format!(
-                                "initializer `{initializer}` shutdown action `{label}` exceeded its derived deadline"
-                            ),
-                        )),
-                    }
+                    .await;
+                    failures.extend(action_failures);
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "initializer-action",
                         initializer.as_ref(),
-                        Some(label),
+                        label,
                         step_started,
                         failures_before,
                         failures.len(),
@@ -1382,9 +1393,27 @@ impl ApplicationRunner {
                         }
                     }
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "task-gate",
                         "supervisor",
+                        None,
+                        step_started,
+                        failures_before,
+                        failures.len(),
+                    );
+                }
+                ActiveStep::BusinessShutdownTasks => {
+                    self.shutdown_business_tasks(
+                        context,
+                        &mut business_shutdown_report,
+                        &mut failures,
+                        &mut shutdown_sequence,
+                    )
+                    .await;
+                    log_shutdown_step(
+                        next_shutdown_sequence(&mut shutdown_sequence),
+                        "business-shutdown-tasks",
+                        "application",
                         None,
                         step_started,
                         failures_before,
@@ -1413,7 +1442,7 @@ impl ApplicationRunner {
                         )),
                     }
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "business-resources",
                         "application",
                         None,
@@ -1441,7 +1470,7 @@ impl ApplicationRunner {
                         )),
                     }
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "component-resources",
                         component,
                         None,
@@ -1471,7 +1500,7 @@ impl ApplicationRunner {
                         )),
                     }
                     log_shutdown_step(
-                        sequence,
+                        next_shutdown_sequence(&mut shutdown_sequence),
                         "initializer-resources",
                         initializer.as_ref(),
                         None,
@@ -1498,7 +1527,24 @@ impl ApplicationRunner {
                 ));
             }
         }
+        // 高层 action 可能已经耗尽预算，使 BusinessShutdownTasks 尚未取得执行机会；仍需移交并
+        // 释放剩余 future，明确记为 Abandoned，不能让容器析构掩盖任务从未执行的事实。
+        match self.application.take_shutdown_tasks() {
+            Ok(remaining) if !remaining.is_empty() => {
+                business_shutdown_report.registered += remaining.len();
+                business_shutdown_report.record_abandoned(remaining.len());
+                release_abandoned_shutdown_tasks(remaining, &mut failures);
+                failures.push(runner_error(
+                    ApplicationPhase::Stopping,
+                    "business shutdown tasks were abandoned after the group deadline expired",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => failures.push(error),
+        }
+        failures.extend(self.application.close_shutdown_tasks());
         let deadline_exhausted = abandoned_steps > 0
+            || business_shutdown_report.abandoned > 0
             || task_abort_attempted
             || (context.is_expired() && (!failures.is_empty() || self.supervisor.has_tasks()));
         report_shutdown_summary(&ShutdownSummary {
@@ -1512,6 +1558,13 @@ impl ApplicationRunner {
             business_resources: counts.business_resources,
             component_resources: counts.component_resources,
             initializer_resources: counts.initializer_resources,
+            business_shutdown_registered: business_shutdown_report.registered,
+            business_shutdown_attempted: business_shutdown_report.attempted,
+            business_shutdown_completed: business_shutdown_report.completed,
+            business_shutdown_failed: business_shutdown_report.failed,
+            business_shutdown_timed_out: business_shutdown_report.timed_out,
+            business_shutdown_panicked: business_shutdown_report.panicked,
+            business_shutdown_abandoned: business_shutdown_report.abandoned,
             failures: failures.len(),
             task_abort_attempted,
             deadline_exhausted,
@@ -1519,12 +1572,279 @@ impl ApplicationRunner {
         });
         failures
     }
+
+    /// 业务作用：在业务停机任务组的绝对子截止时间内按优先级顺序执行所有任务，并隔离单项终态。
+    ///
+    /// 参数说明：
+    /// - `context`：完整 active stack 共享的停机上下文；业务任务只能消费其派生的更早截止时间。
+    /// - `report`：接收登记数、实际尝试数和各终态计数的低基数报告。
+    /// - `failures`：接收业务任务失败、超时、panic 或整体放弃的次要错误。
+    /// - `shutdown_sequence`：本次停机事件流的单调序号，由 active step 与业务任务共同递增。
+    ///
+    /// 返回：无返回值；任务所有权在函数内被逐项消费，函数结束后注册表不再持有任何业务 future。
+    async fn shutdown_business_tasks(
+        &mut self,
+        context: &ShutdownContext,
+        report: &mut ShutdownTaskReport,
+        failures: &mut Vec<ApplicationError>,
+        shutdown_sequence: &mut usize,
+    ) {
+        let mut tasks = match self.application.take_shutdown_tasks() {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                failures.push(error);
+                failures.extend(self.application.close_shutdown_tasks());
+                return;
+            }
+        };
+        report.registered = tasks.len();
+        if tasks.is_empty() {
+            failures.extend(self.application.close_shutdown_tasks());
+            return;
+        }
+
+        // 业务任务组单独提前收口，为后续 BusinessResources 和更早启动的组件保留尾部预算。
+        let group_context = context.child_context(Duration::MAX);
+        while !tasks.is_empty() {
+            if group_context.is_expired() || context.is_expired() {
+                let abandoned = tasks.len();
+                report.record_abandoned(abandoned);
+                release_abandoned_shutdown_tasks(std::mem::take(&mut tasks), failures);
+                failures.push(runner_error(
+                    ApplicationPhase::Stopping,
+                    "business shutdown tasks were abandoned after the group deadline expired",
+                ));
+                break;
+            }
+
+            let remaining_count = tasks.len();
+            let fair_share = group_context.remaining() / remaining_count as u32;
+            if fair_share.is_zero() {
+                let abandoned = tasks.len();
+                report.record_abandoned(abandoned);
+                release_abandoned_shutdown_tasks(std::mem::take(&mut tasks), failures);
+                failures.push(runner_error(
+                    ApplicationPhase::Stopping,
+                    "business shutdown tasks had no remaining execution budget",
+                ));
+                break;
+            }
+
+            let mut entry = tasks.remove(0);
+            let task_name = entry.name.clone();
+            let task_priority = entry.priority;
+            let task_context = group_context.fair_child_context(fair_share);
+            if task_context.is_expired() {
+                // 子预算不足以取得一次可靠 poll 时，当前项及其后续项都直接释放，避免把未执行项记成失败。
+                report.record_abandoned(remaining_count);
+                release_abandoned_shutdown_tasks(
+                    std::iter::once(entry).chain(std::mem::take(&mut tasks)),
+                    failures,
+                );
+                failures.push(runner_error(
+                    ApplicationPhase::Stopping,
+                    "business shutdown tasks had no remaining fair-share budget",
+                ));
+                break;
+            }
+
+            let step_started = StdInstant::now();
+            let failures_before = failures.len();
+            // timeout 只借用 future；超时包装器释放时不能顺带在隔离边界之外析构业务捕获对象。
+            let task_result = timeout(
+                task_context.remaining(),
+                AssertUnwindSafe(&mut entry.task).catch_unwind(),
+            )
+            .await;
+            let (mut outcome, source) = match task_result {
+                Ok(Ok(Ok(()))) => (ShutdownTaskOutcome::Completed, None),
+                Ok(Ok(Err(error))) => (ShutdownTaskOutcome::Failed, Some(error)),
+                Ok(Err(payload)) => {
+                    // 异常对象也可能持有业务资源；在新的展开边界内释放，不读取不受信任的正文。
+                    release_shutdown_panic_payload(payload);
+                    (ShutdownTaskOutcome::Panicked, None)
+                }
+                Err(_) => (ShutdownTaskOutcome::TimedOut, None),
+            };
+            match (outcome, source) {
+                (ShutdownTaskOutcome::Completed, None) => {}
+                (ShutdownTaskOutcome::Failed, Some(error)) => {
+                    failures.push(ApplicationError::with_source(
+                        ComponentId::Application,
+                        ApplicationPhase::Stopping,
+                        format!("business shutdown task `{task_name}` failed"),
+                        error,
+                    ));
+                }
+                (ShutdownTaskOutcome::TimedOut, None) => failures.push(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Stopping,
+                    format!(
+                        "business shutdown task `{task_name}` exceeded its fair shutdown budget"
+                    ),
+                )),
+                (ShutdownTaskOutcome::Panicked, None) => failures.push(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Stopping,
+                    format!("business shutdown task `{task_name}` panicked during shutdown"),
+                )),
+                _ => unreachable!("shutdown task result and error source must match"),
+            }
+            // poll 已结束才释放所有权；单项析构失败归入 Panicked，原始超时或业务错误仍保留为次要证据。
+            if entry.task.release() {
+                outcome = ShutdownTaskOutcome::Panicked;
+                failures.push(runner_error(
+                    ApplicationPhase::Stopping,
+                    format!("business shutdown task `{task_name}` panicked while being released"),
+                ));
+            }
+            report.record(outcome);
+            log_business_shutdown_task(
+                next_shutdown_sequence(shutdown_sequence),
+                task_name.as_ref(),
+                task_priority,
+                step_started,
+                outcome_label(outcome),
+                failures_before,
+                failures.len(),
+            );
+        }
+        failures.extend(self.application.close_shutdown_tasks());
+    }
+}
+
+/// 业务作用：在同一执行边界隔离两类 action 的业务回调与所有权释放，保留后续逆序清理机会。
+///
+/// 参数说明：
+/// - `action`：从 active stack 移交的受控所有权。
+/// - `component`：组件 action 的稳定身份，initializer action 使用 Application。
+/// - `initializer`：可选的冻结 initializer 名称，用于普通错误归因。
+/// - `context`：已为后续步骤预留预算的绝对清理上下文。
+///
+/// 返回：成功取得的静态 label 和累计次要失败；label 展开时不再调用该 action 的 shutdown。
+/// 外层取消时先释放 future 借用，再释放 action，无法回传的析构异常由守卫单独报告。
+async fn shutdown_action(
+    mut action: ShutdownActionCleanup<Box<dyn ShutdownAction>>,
+    component: ComponentId,
+    initializer: Option<&str>,
+    context: &ShutdownContext,
+) -> (Option<&'static str>, Vec<ApplicationError>) {
+    let mut failures = Vec::new();
+    let label = match catch_unwind(AssertUnwindSafe(|| action.value_mut().label())) {
+        Ok(label) => Some(label),
+        Err(payload) => {
+            release_shutdown_panic_payload(payload);
+            failures.push(action_panic_error(component, "reading its label"));
+            None
+        }
+    };
+    if let Some(label) = label {
+        let description = match initializer {
+            Some(initializer) => format!("initializer `{initializer}` shutdown action `{label}`"),
+            None => format!("shutdown action `{label}`"),
+        };
+        // future 工厂也是业务代码；先建立同步展开边界，再让执行包装器仅借用 future。
+        // 单独保留所有权，避免 timeout 或 catch_unwind 的析构在保护边界外释放捕获对象。
+        let borrowed = action.value_mut();
+        match catch_unwind(AssertUnwindSafe(move || {
+            let owned_borrow = borrowed;
+            owned_borrow.shutdown(context)
+        })) {
+            Ok(future) => {
+                let mut future =
+                    ShutdownActionCleanup::new(future, component, "releasing its shutdown future");
+                let result = timeout(
+                    context.remaining(),
+                    AssertUnwindSafe(future.value_mut()).catch_unwind(),
+                )
+                .await;
+                match result {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => failures.push(ApplicationError::with_source(
+                        component,
+                        ApplicationPhase::Stopping,
+                        format!("{description} failed"),
+                        error,
+                    )),
+                    Ok(Err(payload)) => {
+                        release_shutdown_panic_payload(payload);
+                        failures.push(action_panic_error(component, "polling its shutdown future"));
+                    }
+                    Err(_) => failures.push(ApplicationError::new(
+                        component,
+                        ApplicationPhase::Stopping,
+                        format!("{description} exceeded its derived deadline"),
+                    )),
+                }
+                // 原错误或超时与析构异常是独立事实，逐项累计，不能用后者覆盖前者。
+                failures.extend(future.release());
+            }
+            Err(payload) => {
+                release_shutdown_panic_payload(payload);
+                failures.push(action_panic_error(
+                    component,
+                    "creating its shutdown future",
+                ));
+            }
+        }
+    }
+    // future 已释放并归还独占借用，才能释放 action 本体；两处析构分别拥有展开边界。
+    failures.extend(action.release());
+    (label, failures)
+}
+
+/// 业务作用：释放因全局预算耗尽而未执行的 action，不调用业务回调或冒充已尝试步骤。
+///
+/// 参数说明：`step` 是已经出栈的放弃步骤，`failures` 接收独立的 action 析构异常。
+///
+/// 返回：无返回值；非 action 步骤不执行，资源所有权仍由注册表收口。
+fn release_abandoned_action(step: ActiveStep, failures: &mut Vec<ApplicationError>) {
+    match step {
+        ActiveStep::Action { mut action, .. }
+        | ActiveStep::InitializerAction { mut action, .. } => failures.extend(action.release()),
+        _ => {}
+    }
+}
+
+/// 业务作用：逐项释放未取得 poll 机会的停机任务，保证某个捕获对象的析构异常不阻止其它资源释放。
+///
+/// 参数说明：
+/// - `tasks`：已从注册表移出的未执行任务，调用方已经将其计入 Abandoned。
+/// - `failures`：接收每项析构异常的次要错误，不改变未执行任务的计数。
+///
+/// 返回：无返回值；所有任务均尝试释放，析构异常不向外展开。
+fn release_abandoned_shutdown_tasks(
+    tasks: impl IntoIterator<Item = ShutdownTaskEntry>,
+    failures: &mut Vec<ApplicationError>,
+) {
+    for mut entry in tasks {
+        if entry.task.release() {
+            failures.push(runner_error(
+                ApplicationPhase::Stopping,
+                format!(
+                    "business shutdown task `{}` panicked while being released",
+                    entry.name
+                ),
+            ));
+        }
+    }
+}
+
+/// 业务作用：为停机事件分配严格递增的序号，统一 active step 与业务任务的观测顺序。
+///
+/// 参数说明：
+/// - `sequence`：本次停机事件流当前已分配的最大序号。
+///
+/// 返回：递增后的序号；计数到达 `usize` 上限时饱和，避免诊断路径反向中断清理。
+fn next_shutdown_sequence(sequence: &mut usize) -> usize {
+    *sequence = sequence.saturating_add(1);
+    *sequence
 }
 
 /// 业务作用：把一个已尝试的 active step 记录为带严格序号的结构化 debug 事件，供停机顺序复盘。
 ///
 /// 参数说明：
-/// - `sequence`：本次反向清理中从 1 开始、严格递增的执行序号。
+/// - `sequence`：本次停机事件流中从 1 开始、与业务任务事件共同递增的序号。
 /// - `step_kind`：固定集合内的步骤类型。
 /// - `owner`：稳定组件名、canonical initializer 名或框架所有者名。
 /// - `action`：`ShutdownAction::label()` 返回的静态名称；资源和任务门没有 action 名。
@@ -1553,6 +1873,55 @@ fn log_shutdown_step(
         outcome = if failures_added == 0 { "completed" } else { "failed" },
         "application shutdown step completed"
     );
+}
+
+/// 业务作用：记录一次实际取得 poll 机会的业务停机任务，供排查任务顺序与公平预算分配。
+///
+/// 参数说明：
+/// - `sequence`：本次停机事件流内从 1 开始、与 active step 事件共同递增的序号。
+/// - `name`：启动期校验后的稳定任务名。
+/// - `priority`：启动期登记的业务优先级。
+/// - `started`：当前任务开始执行的单调时钟。
+/// - `outcome`：固定集合内的任务终态名称。
+/// - `failures_before`：当前任务执行前的累计失败数。
+/// - `failures_after`：当前任务执行后的累计失败数。
+///
+/// 返回：无返回值；日志关闭时不影响任务结果。
+fn log_business_shutdown_task(
+    sequence: usize,
+    name: &str,
+    priority: i32,
+    started: StdInstant,
+    outcome: &'static str,
+    failures_before: usize,
+    failures_after: usize,
+) {
+    tracing::debug!(
+        shutdown_sequence = sequence,
+        shutdown_step = "business-shutdown-task",
+        shutdown_task = name,
+        shutdown_priority = priority,
+        duration_seconds = started.elapsed().as_secs_f64(),
+        failures_added = failures_after.saturating_sub(failures_before),
+        outcome,
+        "business shutdown task completed"
+    );
+}
+
+/// 业务作用：把业务停机任务终态映射为固定观测名称。
+///
+/// 参数说明：
+/// - `outcome`：Runner 归一化的业务停机任务终态。
+///
+/// 返回：不含任务名、错误正文或捕获值的稳定分类。
+fn outcome_label(outcome: ShutdownTaskOutcome) -> &'static str {
+    match outcome {
+        ShutdownTaskOutcome::Completed => "completed",
+        ShutdownTaskOutcome::Failed => "failed",
+        ShutdownTaskOutcome::TimedOut => "timed_out",
+        ShutdownTaskOutcome::Panicked => "panicked",
+        ShutdownTaskOutcome::Abandoned => "abandoned",
+    }
 }
 
 /// 业务作用：把首次停机原因映射为固定、无业务输入的摘要分类。
@@ -1856,14 +2225,23 @@ fn classify_startup_completion(completion: TaskCompletion) -> Result<(), Startup
 /// 成功完成同样会移出监督表，但无需产生告警；失败和 panic 使用稳定任务名与统一脱敏管道记录，
 /// 使“继续运行”不等于“静默丢失故障”。
 ///
-/// # 参数
-///
+/// 参数说明：
 /// - `completion`：监督器收割到的后台任务身份与退出结果。
+///
+/// 返回：无返回值；业务错误报告及释放的单次 panic 不得把可降级退出升级为应用主失败。
 fn report_background_completion(completion: TaskCompletion) {
     match completion.outcome {
         TaskOutcome::Completed | TaskOutcome::Cancelled => {}
         TaskOutcome::Failed(error) => {
-            let summary = crate::report::redact(&error.to_string());
+            // 可降级任务的错误对象同样来自业务；先纳入统一所有权边界，避免报告或析构异常击穿 Runner。
+            let error = ApplicationError::with_source(
+                ComponentId::Supervisor,
+                ApplicationPhase::Running,
+                "background managed task failed",
+                error,
+            );
+            let summary =
+                crate::report::bounded(&crate::report::redact(&crate::report::error_chain(&error)));
             tracing::warn!(
                 "background managed task `{}` (id={}) failed and was removed: {summary}",
                 completion.name,

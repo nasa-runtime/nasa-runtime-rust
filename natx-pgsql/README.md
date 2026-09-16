@@ -59,6 +59,10 @@ natx_pgsql::try_init(pool)?;
 共享进程模式门禁，不能同时成为全局权威；双后端并存只允许由同一 owner、同一 catalog 的受管编排入口
 完成。
 
+Application 的业务停机任务在受管数据库关闭之前执行，可通过 PostgreSQL datasource 入口发起有界
+事务；任务返回前应归还连接和资源借用。pool 的最终关闭属于 Application，不再另登记重复关闭 future。
+若全局停机期限内未取得 COMMIT 的明确结果，不能把任务结束视为事务已提交，也不能盲目重放业务闭包。
+
 ## 事务与失败语义
 
 - `run` / `run_for` 保持 `anyhow::Result` 便利语义；`run_decided_for_checked` 分离结构化 datasource
