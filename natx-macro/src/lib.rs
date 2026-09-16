@@ -38,21 +38,21 @@ use syn::{parse_macro_input, ItemFn, LitStr};
 ///
 /// # ⚠️ 三条使用纪律(ambient 实现的代价,务必看)
 /// 1. **同一事务内绝不并发查询**(别 `tokio::join!` 两个都查库的调用)——事务=单连接,物理上也并发不了。
-/// 2. **绝不在持有一个 `conn()` 句柄时,再去调用也要 `conn()` 的代码**——`tx::conn()` 用的是非重入
-///    `tokio::Mutex`,嵌套获取会【死锁】。正确:一条 query 取-用-丢(让 `Conn` 立刻离开作用域),再下一条。
+/// 2. **绝不在持有一个 `conn()` 句柄时,再去调用也要 `conn()` 的代码**——嵌套获取会立即返回连接
+///    占用错误。正确:一条 query 取-用-丢(让 `Conn` 立刻离开作用域),再下一条。
 /// 3. 事务函数保持短小、命名点明,弥补"签名看不出在事务里"的可读性损失。
 ///
 /// # 第 2 条什么时候真会咬人?
 /// - **常规分层(service→repo 的 CRUD)不会咬**:`#[transactional]` 的 service 只编排、【不直接写 `conn()`】;
 ///   `conn()` 只在最底层 repo 的一条自包含查询里"取-用-丢"。所以 a 调 b 时谁都没攥着 conn → 安全。
-///   死锁 ≠ "a 没 commit",而是 = "调别人时手里还攥着一个活的 conn 句柄"。常规写法不会出现。
+///   是否提交与连接占用无关；只有调用内层方法时仍持有活的 `Conn` 才会被拒绝。
 /// - **唯一现实陷阱:repo 里【流式游标 fetch 边读边写】**——`fetch()` 返回的流会长时间攥着连接,
-///   这期间又对每行调另一个 `conn()` 的写操作 → 死锁。示意:
+///   这期间又对每行调另一个 `conn()` 的写操作会返回连接占用错误。示意:
 ///   ```ignore
 ///   let mut c = tx::conn().await?;
 ///   let mut rows = sqlx::query("SELECT id FROM t").fetch(c.as_mut()); // c 被流借住到读完
 ///   while let Some(row) = rows.next().await {
-///       other_repo::update(id).await?;  // ❌ c 还攥着 → update 内部 conn() 死锁
+///       other_repo::update(id).await?;  // c 仍被流持有，update 内部 conn() 返回错误
 ///   }
 ///   ```
 ///
@@ -63,7 +63,7 @@ use syn::{parse_macro_input, ItemFn, LitStr};
 /// repo::insert_e(&mut *tx, ..).await?;   // 显式传;a 调 b 就 b(&mut *tx)
 /// tx.commit().await?;                    // 出错 ? 上抛 → tx drop 自动 ROLLBACK
 /// ```
-/// 上面那个"流式边读边写"的死锁,显式版会变成【编译错误】(不能同时两次 `&mut *tx`)——
+/// 上面的流式边读边写冲突在显式版中会变成【编译错误】(不能同时两次 `&mut *tx`)——
 /// 同一个"单连接不能同时干两件事"的限制,借用检查器在编译期就拦住了。详见
 /// 展开代码遵守 ambient transaction 传播边界，避免生成调用绕过当前事务上下文。
 ///

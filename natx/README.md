@@ -76,19 +76,57 @@ Application 的一次性业务停机任务先于数据库组件最终关闭，�
 - `DatasourceRef::new` 继续返回 `anyhow::Result`；需要结构化名称错误的新代码使用
   `DatasourceRef::try_new`。
 
-## 事务语义
+## 事务裁决
 
 - 嵌套 `run` 复用外层事务、一起提交;内层 body 返回 Err 会标记 **rollback-only**——即便外层吞掉错误返回 Ok,最外层提交前整体回滚并返回 `RollbackOnly` 错误(`err.downcast_ref::<nasa::tx::RollbackOnly>()` 可识别)。
 - `after_commit` 仅事务内可注册(事务外返回 Err);提交成功后执行一次,回滚 / rollback-only 时全部丢弃。
 - `mandatory_conn` 无事务直接 Err,不回退池连接。
 - 事务内任一 SQL 执行错误使整个事务回滚;未注册 datasource 的 `run_for` / `pool_for_datasource` 返回 Err。
-- `tokio::spawn` 出的任务不继承 ambient 事务;同一作用域不要同时持有两个 `Conn`(会互等池连接)。
+- `tokio::spawn` 出的任务不继承 ambient 事务。同一作用域不要同时持有两个 `Conn`：已有 `Conn` 尚未
+  离开作用域时，内层再次取连接会立即返回连接占用错误；先用代码块结束已有 `Conn` 的作用域，内层
+  调用即可继续复用同一个物理事务。
 - `#[transactional(never)]`(运行时入口 `run_never`):拒绝任一数据库 driver 的 ambient 事务且不开启事务——供"绝不能
   被外层事务包住"的路径(自治审计写、对外即时可见的副作用)把违规调用变成进入前的显式错误,
   而不是静默入伙随外层回滚;`never` 与 `datasource` 互斥。
 - 提交/回滚前对事务连接槽做 fail-fast 独占:业务体已返回却仍被持有的连接句柄(未消费完的事务内
   `MapperStream`、被移出事务体的 `Conn`)会让事务以 "transaction connection is still held at
   commit" 显式失败,而不是在槽锁上永久卡死。
+
+持有连接调用内层事务方法会立即返回错误：
+
+```rust,ignore
+#[transactional]
+async fn outer() -> anyhow::Result<()> {
+    let mut conn = natx::conn().await?;
+    sqlx::query("UPDATE account SET status = ? WHERE id = ?")
+        .bind("active")
+        .bind(7_i64)
+        .execute(conn.as_mut())
+        .await?;
+
+    inner().await?; // inner 再取连接时返回连接占用错误
+    Ok(())
+}
+```
+
+先结束连接作用域，内层方法会继续复用同一个物理事务：
+
+```rust,ignore
+#[transactional]
+async fn outer() -> anyhow::Result<()> {
+    {
+        let mut conn = natx::conn().await?;
+        sqlx::query("UPDATE account SET status = ? WHERE id = ?")
+            .bind("active")
+            .bind(7_i64)
+            .execute(conn.as_mut())
+            .await?;
+    }
+
+    inner().await?;
+    Ok(())
+}
+```
 
 ## YML 配置与使用
 

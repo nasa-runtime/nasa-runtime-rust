@@ -17,7 +17,7 @@
 //        需要时按真实业务场景单独提案,勿当作"已实现"使用。
 //   安全性依赖调用方纪律:① 要进事务的 SQL 必须走 natx::conn()/natx::mandatory_conn(),用 &self.pool 会绕过;
 //        ② 事务内 tokio::spawn 出的 task 不继承事务(写入会 autocommit、不随回滚);
-//        ③ 不可在持有一个 Conn 时再取 Conn(非重入 Mutex 会卡)。彻底免疫请用显式 &mut Transaction。
+//        ③ 不可在持有一个 Conn 时再取 Conn；重复取得会立即返回连接占用错误。
 //
 // ── 推荐用法 ──
 //   · 启动 main:natx::try_init(pool)?(fail-fast;旧 natx::init 仅兼容、重复初始化只打日志)。
@@ -1445,14 +1445,19 @@ pub async fn conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn> {
     natx_core::ensure_driver(DatabaseDriver::MySql).map_err(anyhow::Error::new)?;
     let datasource = DatasourceRef::new(datasource)?;
     match CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())) {
-        // 在事务里:锁住槽(OwnedMutexGuard 需要 Arc<Mutex>,故用 lock_owned),持有它到 query 跑完
+        // 在事务里持有槽守卫直到 query 完成；已有守卫时立即拒绝，避免当前任务等待自己释放连接。
         Ok((tx_datasource, slot)) => {
             if tx_datasource != datasource {
                 return Err(anyhow::anyhow!(
                     "当前事务 datasource=`{tx_datasource}` 不能获取 datasource=`{datasource}` 的连接"
                 ));
             }
-            Ok(Conn::Tx(slot.lock_owned().await))
+            match slot.try_lock_owned() {
+                Ok(connection) => Ok(Conn::Tx(connection)),
+                Err(_) => anyhow::bail!(
+                    "当前事务连接已被持有；必须先让已有 Conn 离开作用域，再调用 conn()"
+                ),
+            }
         }
         // 不在事务里:从池取一条独立连接
         Err(_) => Ok(Conn::Pool(pool_for(datasource.as_str())?.acquire().await?)),
@@ -1490,7 +1495,12 @@ pub async fn mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<C
             "当前事务 datasource=`{tx_datasource}` 不能获取 datasource=`{datasource}` 的 mandatory 连接"
         ));
     }
-    Ok(Conn::Tx(slot.lock_owned().await))
+    match slot.try_lock_owned() {
+        Ok(connection) => Ok(Conn::Tx(connection)),
+        Err(_) => {
+            anyhow::bail!("当前事务连接已被持有；必须先让已有 Conn 离开作用域，再调用 conn()")
+        }
+    }
 }
 
 /// 业务作用：获取默认 datasource 的非事务连接，拒绝在 ambient 事务内调用(`tx = "never"` 的连接入口)。
@@ -1525,7 +1535,7 @@ pub async fn never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<Conn>
 
 /// "当前连接"句柄。两种来源统一暴露成 `&mut MySqlConnection`(它实现了 sqlx::Executor):
 ///   · 事务连接:Transaction 与 PoolConnection 都 DerefMut 到 MySqlConnection,故能统一。
-/// ⚠️ 同一段代码里【不要同时持有两个 conn() 句柄】:事务分支会锁同一把 Mutex,嵌套持有会死锁。
+/// ⚠️ 同一段代码里【不要同时持有两个 conn() 句柄】:事务分支的第二次取得会立即返回连接占用错误。
 ///    正确用法是 query 跑完即让 Conn 离开作用域(锁随之释放),下一条 query 再 conn()。
 pub enum Conn {
     /// 事务连接:持有槽的 OwnedMutexGuard(锁),内含 Transaction。

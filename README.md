@@ -338,6 +338,11 @@ pub async fn save_user() -> anyhow::Result<()> {
 }
 ```
 
+`#[transactional]` 嵌套调用默认复用外层 MySQL 事务。外层仍持有 `Conn` 时，内层再次取连接会立即
+返回连接占用错误，避免当前任务等待自己释放连接守卫；应先让 `Conn` 离开代码块作用域或显式
+`drop(conn)`，再调用需要数据库连接的内层事务方法。完整事务传播、rollback-only 和连接生命周期
+规则见 [natx](natx/README.md#事务裁决)。
+
 ### 应用入口：`#[nasa::application]`
 
 服务型项目推荐用声明式入口替代手写 main 装配：配置装载、组件启动/停机顺序、信号处理、优雅停机、
