@@ -99,8 +99,17 @@ UserHook 结束时关闭登记门，Seal 时封存任务集合；名称是当前
 业务停机 future 从登记接管到最终释放持续具有一次性析构隔离，覆盖尚在注册表、尚未执行和正在执行的项。
 直接取消 Runner 不等同于优雅停机请求，不保证运行异步任务主体或返回退出报告；此时任务析构异常只输出
 固定的 `application shutdown warning`，不截断其它任务释放，也不生成或追改 shutdown summary。
-Runner 先同步关闭登记门，再在锁外释放注册表中的任务，不等待 UserHook 或任务捕获的 Application
-副本全部销毁。没有 summary 的直接取消不能按正常停机计数解释；持久副作用是否完成仍需查询业务事实。
+Runner 先同步关闭登记门，将 Starting/Ready 置为 Stopping，再沿实际激活栈逆序释放剩余 action、
+停机任务和所属资源。Service 的 initializer 先于业务停机任务释放，Batch 的静态 initializer 晚于
+业务资源释放；两种模式均保持停机任务先于业务资源，不取决于 Application 副本数量。
+任务门已经出栈但尚未完成时仍然约束后续释放：存活的受监督 future 接管剩余栈和组件所有权，
+最后一个 future 析构后才释放尾部；取消调用方不等待 join，也不创建额外异步清理任务。
+延迟释放前立即关闭新资源借用并清除本实例全局入口，尾部析构不能发起新借用；没有存活任务时
+在栈清理后撤销入口。不让出执行权的任务会同时延迟 abort 和依赖释放。已有 Stopped/Failed 保持不变，
+保留的 Application 不再接受新资源借用，也不继续占用全局槽。
+已借出的资源随借用归还释放；此前复制的外部客户端句柄不在同步撤销范围内。
+Stopping 表示异步收尾结果未获确认。没有 summary 的直接取消不能按正常停机计数解释；持久副作用
+是否完成仍需查询业务事实。
 
 错误对象的 `Display`、`source` 和 `Drop` 的单次 panic 被独立隔离，不覆盖已经确定的退出语义。
 重复错误链、超过 32 层或接收正文超过 16 KiB 会输出固定分类；不完整格式化正文不进入报告。
@@ -152,10 +161,19 @@ Digest 尾部字段保守一并隐藏，因此需要保留的诊断信息应使�
 | 声明组件但提示 feature 缺失 | 业务 manifest 是否开启对应门面 feature |
 | listener 启动超时 | 地址、端口和业务就绪屏障 |
 | 数据库或缓存失败 | 脱敏目标主机、端口、模式和超时 |
+| 可靠 Saga client 提示数据源冲突 | `saga.client.datasource_ref` 与显式 `outbox.datasource_ref` 必须相同；只需轮询预算时省略后者 |
 | Ready 后很快退出 | 首个 critical task 错误 |
 | SIGTERM 后超过预算 | 未 join 任务、长期资源借用、无限流式响应或阻塞析构 |
 
 ## Saga 值班
+
+可靠 client 的启动诊断若同时指出 `saga.client.datasource_ref` 和 `outbox.datasource_ref`，先统一
+写入与扫描的事务域，再重新启动；给另一个库建同名表不能消除配置冲突。受管可靠计划固定绑定 client
+指定库，省略 Outbox 数据源或仅配置预算不会改变扫描目标。
+
+运行期应区分本地已受理、事件已投递和远端流程完成。`enqueue_start` 返回后还需等待外层事务明确
+提交才能表示本地已受理；Ready 200 与业务 202 都不证明远端已完成。远端不可用或收据丢失时保留原
+事件身份，结合下列指标及远端实例状态确认恢复，不手工标记 dispatched 或删除 intent。
 
 先查看 `nasaga_manual_intervention`、`nasaga_waiting_resolution`、`nasaga_due_timer`、
 `nasaga_conflict_total`、`napp_outbox_pending`、`napp_outbox_dead`、`napp_outbox_published_total`、

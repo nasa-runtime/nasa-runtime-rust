@@ -4,6 +4,8 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+直接取消 Runner 时，仍存活的受监督任务保留其依赖资源，直至任务 future 析构；受管可靠 Saga client
+则把业务事务、发起意图和 dispatcher 绑定同一数据源，在开放流量前拒绝显式配置冲突。
 
 ## 核心价值与生命周期架构
 
@@ -144,7 +146,7 @@ database:
     lock_timeout_ms: 30000
     allow_dirty: false
 
-# 只有声明了对应组件时才需要下面的段；省略 datasource_ref 也默认选择 default。
+# 独立 Outbox 未绑定发布计划时默认选择 default；可靠 Saga client 使用自己的角色数据源。
 outbox:
   datasource_ref: default
 ```
@@ -836,6 +838,22 @@ direct client 不需要 database、datasources 或 outbox 配置。调用方生�
 definition_version 与 business_key，使用 SagaRemoteClient::start 和 get；同步结果不明时保持同一请求
 重试。reliable_start 需要 client.datasource_ref，并在当前同源业务事务内调用 enqueue_start：业务事实
 与 SagaStartIntent 同时提交，after-commit 只唤醒 dispatcher，不在业务请求线程执行远端网络调用。
+可靠 client 的 dispatcher 固定绑定 `saga.client.datasource_ref`，不继承全局 Outbox 默认数据源。
+若显式配置 `outbox.datasource_ref`，它必须与 client 数据源一致，否则启动配置校验失败，应用不会进入
+Ready；省略该字段或只设置 Outbox 轮询预算不改变此绑定。MySQL 与 PostgreSQL 遵循相同约束。
+
+| Outbox 配置 | 可靠 client 的扫描数据源 | 启动结果 |
+| --- | --- | --- |
+| 未设置 Outbox 段 | `saga.client.datasource_ref` | 继续执行其它 Ready 门禁 |
+| 仅设置轮询、批量或超时预算 | `saga.client.datasource_ref` | 继续执行其它 Ready 门禁 |
+| 显式数据源与 client 相同 | `saga.client.datasource_ref` | 继续执行其它 Ready 门禁 |
+| 显式数据源与 client 不同 | 不发布 dispatcher | 配置校验失败，不开放业务流量 |
+
+`enqueue_start` 返回稳定 `event_id` 表示已向当前事务追加意图，不表示外层事务已提交。调用方必须等
+外层事务明确成功后才能返回本地已受理；业务事实和意图任一失败都应回滚整个事务。远端调用不在该
+事务内执行，只有 `Committed` 或 `Duplicate` 收据允许 dispatcher 标记完成；超时、连接失败和收据
+丢失都保留原事件重投。Ready 不是远端完成证明，应同时观测 `napp_outbox_pending`、
+`napp_outbox_published_total` 和远端实例状态；确定性拒绝还需关注 `napp_outbox_dead`。
 
 ~~~yaml
 saga:
@@ -1326,9 +1344,19 @@ initializer action 与其资源，最后清理更早启动的组件；不会套�
 `Abandoned` 并附加析构错误。panic payload 正文不会被读取，首次异常对象在独立的展开边界内尝试析构；
 只有该析构再次 panic 时才保留第二个异常对象及其持有的资源，避免无限展开。
 从登记接管开始，future 在注册表、待执行列表和当前执行项中始终保留一次性析构隔离。
-Runner 被释放时先关闭公共登记门，再在锁外清理注册表；即使 UserHook 或任务仍持有 Application 副本，
-也不依赖最后一个副本析构才能释放任务。析构中的重入登记会被拒绝。
+Runner 被释放时先关闭公共登记门，再随业务停机步骤于锁外清理注册表；后续释放受已接管任务 future
+的存活约束，不取决于 Application 副本数量。析构中的重入登记会被拒绝。
 直接取消并释放 Runner 不等同于请求优雅停机，不保证执行异步任务主体或产生退出报告；
+执行器会同步关闭登记，将尚处于 Starting/Ready 的实例置为 Stopping，再沿实际激活栈逆序释放剩余
+action、停机任务与各自所属资源。任务门已出栈但仍在等待时也保留约束：若受监督 future 尚未析构，
+执行器请求 abort，并把剩余栈和组件所有权交给任务存活守卫；最后一个 future 析构后才同步释放尾部。
+此时新资源借用和全局入口立即撤销，不等待任务退出，也不创建额外异步清理任务；尾部析构不能再发起
+新资源借用。若没有存活任务，则在逆序释放后关闭资源表并撤销全局入口。Service 的 initializer
+先于业务停机任务释放，Batch 的静态 initializer 晚于业务资源释放；两种模式均保持停机任务先于业务资源。
+已有 Stopped/Failed 保持不变；Stopping 表示异步收尾结果未获确认。
+保留的 Application 副本不能发起新的资源借用，也不会继续占用全局槽；已借出的资源随借用归还释放，
+此前复制的外部客户端句柄不在同步撤销范围内。
+不让出执行权的任务会延迟 abort 及依赖释放；执行器不会为了提前归还资源而破坏仍存活任务的依赖顺序。
 因所有权释放而发生的任务析构异常只同步输出固定告警，不阻止其它已接管任务释放，不伪造或追改摘要。
 同步阻塞、`panic=abort` 以及同一次展开中的再次 panic 不在可隔离范围内。
 返回错误对象的 `Display`、`source` 和 `Drop` 也在独立展开边界内调用。错误链重复节点或超过 32 层时停止展开，

@@ -4,6 +4,8 @@
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
 启用 `application` 后，业务初始化与优雅停机收尾进入同一生命周期：Ready 前执行初始化屏障，
 受监督任务结束后按优先级执行一次性收尾，最后释放业务资源。
+可靠 Saga client 把业务事实、start-intent 与 dispatcher 固定到同一事务域，配置冲突在接流前失败；
+直接取消 Runner 也不会先释放仍存活任务所依赖的资源。
 
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
@@ -155,6 +157,20 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 组件字符串。Saga 角色、角色数据源、API 暴露、command/result transport、安全引用与运行预算必须在
 受信配置中显式给出；缺失时不会按链接内容或唯一数据源猜测。direct client 是唯一不创建本地 DB/Outbox
 资源的 managed 角色。
+可靠 client 的业务事务、start-intent 和 dispatcher 必须同源，发布计划固定绑定
+`saga.client.datasource_ref`。显式 `outbox.datasource_ref` 与之冲突时配置校验失败，应用不会进入
+Ready；未设置该字段时不影响 client 的数据源绑定。
+
+### 可靠 Saga client
+
+`app.saga()?.remote_client()?.enqueue_start(...)` 必须在 client 指定数据源的业务事务内调用。
+返回 `event_id` 只确认事务内追加，外层事务明确提交后才可对外返回本地已受理；此时远端仍可能尚未
+创建 Saga。dispatcher 使用同一数据库持续投递，HTTP/gRPC 收据丢失时保持原事件身份重投，只有
+`Committed` 或 `Duplicate` 才标记投递完成。省略 Outbox 段或只配置轮询预算不会改变扫描数据源。
+
+该能力不建立跨库事务，不把 Ready 当作流程完成证明；运行中应同时关注 `napp_outbox_pending`、
+`napp_outbox_published_total`、`napp_outbox_dead` 和远端实例查询。完整配置见
+[client 发起等级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#client-发起等级)。
 
 ## RedisJob 门面
 
@@ -263,8 +279,16 @@ app.register_graceful_shutdown(100, "orders-client", async move {
 
 任务可以在执行时通过 Application 查找尚未清理的业务资源；initializer/component 的局部清理不提前
 关闭其它 owner 的查找。取得资源后应在任务返回前归还借用，避免后续关闭等待自身持有的资源。
-任务从登记到执行始终具有一次性析构隔离。直接取消 Runner 只关闭登记并释放所有权，不等同于请求
-优雅停机，不保证执行异步收尾或产生退出报告；此时的析构异常同步告警，不追改摘要。
+任务从登记到执行始终具有一次性析构隔离。直接取消 Runner 会同步关闭登记，将 Starting/Ready 置为
+Stopping，沿实际激活栈逆序释放剩余 action、停机任务和所属资源。经过任务门时，若受监督 future
+尚未析构，则立即撤销新借用和全局入口，并将剩余清理所有权保留到最后一个 future 析构；
+不等待任务退出，也不创建额外异步清理任务。没有存活任务时在栈清理后撤销入口。
+Service 的 initializer 先于业务停机任务释放，Batch 的静态 initializer 晚于业务资源释放；
+两种模式均保持停机任务先于业务资源。已有 Stopped/Failed 保持不变。
+保留 Application 不再允许新资源借用，也不继续占用全局槽；已借出的资源随借用归还释放，
+此前复制的外部客户端句柄不在同步撤销范围内。Stopping 表示异步收尾结果未获确认，直接取消不保证
+执行异步收尾或产生退出报告；此时的析构异常同步告警，不追改摘要。
+延迟释放期间的析构不能发起新资源借用；任务不让出执行权时，abort 与依赖释放都会延后。
 `panic=abort`、同步阻塞和析构自身展开期间的未隔离再次 panic 不属于可隔离范围。
 
 完整 API 签名、生命周期位置、名称边界和资源所有权约束见

@@ -54,6 +54,10 @@
 同源事务要求和停机边界见
 [napp 的单源与多源章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#yaml-创建单源与多源)。
 
+Saga 的 managed 角色与 datasource 由运行时读取最终配置，宏不推断默认库。可靠 client 的 append
+和 dispatcher 使用同一 `saga.client.datasource_ref`；显式 `outbox.datasource_ref` 冲突在 Ready 前
+拒绝。宏只生成组件图，不能绕过运行期同源门禁。
+
 ## 使用示例
 
 ```toml
@@ -82,6 +86,8 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 `Result<(), E>`，其中 `E: Into<anyhow::Error>`；错误、超时和可隔离展开只记为次要失败。
 初始化失败时，已经成功登记的任务仍沿统一停机路径处理；预算耗尽的未开始项不再 poll。
 直接取消 Runner 不等同于请求优雅停机，析构隔离也不保证执行异步收尾。
+此时实例退出 Ready 并撤销新资源借用和本实例全局入口；经过任务门时仍存活的受监督 future 保留后续
+清理所有权，最后一个 future 析构后才释放依赖。保留 Application 副本不会重新开放入口。
 
 完整名称、数量、共享期限和资源所有权约束见
 [业务优雅停机任务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务优雅停机任务)。

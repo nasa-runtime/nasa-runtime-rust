@@ -5,6 +5,8 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭前的有序异步收尾；业务不需要另建信号处理
 或停机 callback 集合。
+可靠 Saga client 将业务事实与发起意图放在同一数据库事务，并让 dispatcher 固定扫描该事务域；
+远端不可用或收据丢失时保留原事件，显式数据源冲突在 Ready 前拒绝。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
@@ -46,7 +48,12 @@ Service 在业务任务前完成入口摘流、Ready action 与 initializer 清�
 
 任务共享 `application.shutdown_timeout_ms` 的绝对期限，组内公平分配剩余预算并为后续清理预留时间。
 单项错误、超时或可隔离的展开不覆盖首次终止原因；有剩余预算时继续后续项，未开始项计为 `Abandoned`。
-直接取消 Runner 不是优雅停机请求：只关闭登记并释放已接管所有权，不保证执行异步收尾或生成退出报告。
+直接取消 Runner 会同步撤销本实例的全局入口和新资源借用，将 Starting/Ready 置为 Stopping，
+已有 Stopped/Failed 保持不变。已借出的资源随借用归还释放，此前复制的外部客户端句柄不在撤销范围内。
+已激活 action、停机任务与所属资源按实际激活栈逆序同步释放，保持 Service/Batch 各自的 initializer 位置。
+经过任务门时，仍存活的受监督 future 接管后续释放责任，最后一个 future 析构后才释放清理尾部；
+取消调用方不等待这一过程，全局入口和新借用立即撤销。任务不让出执行权时，依赖也必须继续保留。
+直接取消不保证执行异步收尾或生成退出报告，Stopping 也不表示异步清理完成。
 同步阻塞、非协作 poll、`panic=abort` 和析构自身展开期间的未隔离再次 panic 不受异步期限保护。
 
 名称、容量、资源借用、析构隔离和诊断计数的完整合同见
@@ -251,6 +258,26 @@ generated Rust 模块。capability/definition Registry 协议与 command/result 
 或并发业务隔离。
 业务资源竞争仍需唯一键、条件更新或语义锁。配置与失败边界见 [napp Saga 受管模式](napp/README.md#saga-受管模式)，
 状态机与恢复语义见 [Saga 生产运行指南](docs/saga-production.md)。
+
+### 可靠发起与同源投递
+
+启用 `saga.client.reliable_start` 后，业务在 `saga.client.datasource_ref` 对应事务中写入业务事实，
+再调用 `SagaRemoteClient::enqueue_start` 追加 start-intent。方法返回稳定 `event_id` 只表示事务内
+追加成功；必须等外层事务明确提交后才能向调用方表示本地已受理，不能据此宣称远端 Saga 已创建。
+
+```text
+client 指定数据库：业务事实 + start-intent ── 同一事务提交
+                              │
+                              v
+                    同源 dispatcher ──→ 远端 Orchestrator
+                              └─ 结果不明：保留原 event_id 重投
+```
+
+dispatcher 不继承全局 Outbox 默认数据源。显式 `outbox.datasource_ref` 必须等于
+`saga.client.datasource_ref`，即使两个数据库都已建表也不能混用；冲突时配置校验给出这两个键的诊断，
+不进入 Ready。省略 Outbox 段或只设置轮询预算不改变绑定，MySQL 与 PostgreSQL 规则相同。
+只有远端返回 `Committed` 或 `Duplicate` 才确认事件已投递；Ready 与 HTTP 已受理响应都不代表流程
+完成，积压需结合 `napp_outbox_pending`、发布量和远端实例状态判断。
 
 ## 稳定基础设施运行合同
 

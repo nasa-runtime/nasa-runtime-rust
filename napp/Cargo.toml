@@ -3,12 +3,12 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA managed lifecycle with ordered initializers, priority-ordered graceful shutdown, multi-source registries, request security, trace propagation, and supervised services"
+description = "NASA managed lifecycle with ordered initializers, graceful shutdown, cancellation-safe resource lifetimes, and datasource-bound Saga clients"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "lifecycle", "initializer", "graceful-shutdown", "microservices"]
+keywords = ["runtime", "lifecycle", "initializer", "graceful-shutdown", "saga"]
 categories.workspace = true
 
 [features]
@@ -46,8 +46,8 @@ outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql", "dep:asyn
 # Inbox retention：业务显式提交保留策略后，由 Application 串行执行清理轮次并发布统一指标。
 inbox = ["db", "dep:nainbox-core", "dep:nainbox-mysql"]
 inbox-pgsql = ["db-pgsql", "dep:nainbox-core", "dep:nainbox-pgsql"]
-# Saga：在 UserHook 接收已完成业务定义装配的运行时，Ready 前执行合同与历史实例门禁，
-# 并由 Application 监督 durable timer 轮询。数据库可以由 db 组件或业务 Hook 初始化。
+# Saga：managed 按受信角色配置自动装配，custom 才在 UserHook 接收显式运行计划。
+# Ready 前执行角色合同门禁；数据角色监督 timer/消费循环，可靠 client 的 append 与 dispatcher 绑定同源。
 saga = ["db", "inbox", "outbox", "dep:nasaga-runtime", "dep:async-trait", "dep:reqwest", "dep:ncrypto", "dep:hex"]
 saga-pgsql = ["db-pgsql", "inbox-pgsql", "outbox-pgsql", "dep:nasaga-runtime-pgsql", "dep:async-trait", "dep:reqwest", "dep:ncrypto", "dep:hex"]
 # Saga Kafka 受管 transport：Saga 在 Kafka Ready 前登记消费者，并从同一 client 构造 Outbox 发布端。

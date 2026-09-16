@@ -3,6 +3,15 @@
 //! 唯一状态机位于 `nasaga-runtime-core`；本 crate 只把 PostgreSQL Saga store、Inbox、
 //! Outbox 与 ambient transaction 组合为同源后端。运行边界是本地 ACID、至少一次投递、
 //! Inbox 幂等和显式补偿，不提供跨服务 ACID 或跨 datasource 原子事务。
+//!
+//! # 运行架构与可靠发起
+//!
+//! Orchestrator 在一个 PostgreSQL 事务中提交 result Inbox、实例 CAS、journal、timer 和 command
+//! Outbox；参与方在自己的事务中提交 command Inbox、gate、业务事实和 result Outbox。`napp` 拥有
+//! 受管角色装配、Ready、listener、后台循环与停机，本 crate 不独立启动这些生命周期动作。
+//! 受管可靠 client 的业务事实、start-intent 与 dispatcher 固定使用 `saga.client.datasource_ref`；
+//! 显式 `outbox.datasource_ref` 冲突时在 Ready 前拒绝，省略该字段不改变扫描目标。事务内追加返回的
+//! 事件身份不是外层提交证明；本地已受理后，远端不可用或收据丢失仍保留原事件重投，不宣称流程已完成。
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

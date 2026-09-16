@@ -18,6 +18,13 @@
 //! 入站计划把 service 自动登记进唯一 `nagrpc` registry；独立宿主仍显式拥有 listener、deadline 与
 //! drain。`TraceContext` 只作为已验证的显式输入传播，不读取 ambient 状态，也不是投递前置条件。
 //!
+//! # 受管可靠 client
+//!
+//! `napp` 为 client 角色构造远程发起入口：业务事实与 start-intent 使用
+//! `saga.client.datasource_ref` 对应 MySQL 事务，dispatcher 固定扫描同一库。显式
+//! `outbox.datasource_ref` 不一致时在 Ready 前拒绝；省略该字段不改变绑定。事务内追加成功不等于
+//! 外层提交成功，本地已受理也不等于远端完成；远端不可用或收据丢失时保持原事件身份重投。
+//!
 //! # 能力范围与明确不承诺
 //!
 //! - Orchestration、带不可变版本的严格串行步骤、MySQL store、Outbox/Inbox 可靠通道；

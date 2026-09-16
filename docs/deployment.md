@@ -106,11 +106,17 @@ server:
 
 ## Saga 部署
 
-`#[nasa::application("saga")]` 会隐式纳入 DB 与受管 Outbox；业务只提交 Saga 运行计划和发布端。
-Kafka 仅在选用 Kafka 托管消息适配器时声明 `"kafka"`；Redis Streams 托管模式声明 `"redis"` 并
-提交 `SagaRedisTransportPlan`。HTTP listener 由宿主拥有；Saga gRPC 入站通过计划自动把框架 generated
-service 登记到 `"grpc"` Application 组件的唯一 listener，纯出站 client 不声明该组件。transport 不是
-Saga 的隐式运行时 owner，发布和消费两端必须成对具备确认、重领、认证与 durable DLT/收据语义。
+`#[nasa::application("saga")]` 会隐式纳入 DB 与受管 Outbox；managed 模式按 `saga.role` 和受信配置
+自动构造运行计划与发布端，业务通过步骤和 workflow descriptor 提供领域定义。direct client 不创建
+本地 DB/Outbox；可靠 client 的业务事实、start-intent 与 dispatcher 固定使用
+`saga.client.datasource_ref`，显式 `outbox.datasource_ref` 冲突时在 Ready 前拒绝。省略后者或只设置
+轮询预算不改变绑定，两个数据源都已建表也不允许拆开写入与扫描。
+
+Kafka 数据面声明 `"kafka"`，Redis Streams 数据面声明 `"redis"` 并开启对应门面 feature；managed
+模式不再由业务提交 transport 计划。HTTP 入站由 `"web"` 组件拥有；Saga gRPC 入站自动把框架
+generated service 登记到 `"grpc"` 组件的唯一 listener，纯出站 client 不声明该组件。选择 custom
+模式或独立宿主时，调用方才自行提交计划并拥有 transport、Ready 和停机。发布和消费两端必须成对
+具备确认、重领、认证与 durable DLT/收据语义。
 
 Saga 采用 expand-first，部署顺序固定为：
 

@@ -57,6 +57,8 @@
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
 - [ ] 业务停机任务在根 README、门面、运行时、宏入口和运维文档中的合同一致：UserHook 登记、稳定名称、
       priority 顺序、共享绝对期限、先任务后业务资源、失败计数和直接取消边界均有明确描述。
+- [ ] Runner 直接取消会撤销本实例全局入口和新资源借用；经过任务门时仍存活的受监督 future 保留
+      后续资源依赖，最后一个 future 析构后才释放尾部，不将 Stopping 描述成异步收尾完成。
 - [ ] 一次性收尾、受管资源关闭与组件关闭责任不重叠；析构隔离不被描述为持久执行保证，也不掩盖
       `panic=abort`、同步阻塞、未归还借用和全局期限耗尽的后果。
 - [ ] `rate-limit` feature、`full` 组合、门面路径和 README 一致；跨副本配额显式复用受管 Redis，没有
@@ -71,6 +73,10 @@
 ## Saga 运行条件
 
 - [ ] Orchestrator、参与方、Inbox、Outbox 和业务表按本地事务边界部署，不存在伪跨库原子提交。
+- [ ] 可靠 client 的业务事务、start-intent 与 dispatcher 固定绑定 `saga.client.datasource_ref`；
+      显式 `outbox.datasource_ref` 冲突在 Ready 前拒绝，省略该字段或只设置轮询预算不改变绑定。
+- [ ] 发起入口明确区分事务内追加、外层事务提交、事件投递与远端流程完成；不以 `event_id`、Ready
+      或本地已受理响应代替远端完成证明，收据丢失时保留原事件身份重投。
 - [ ] 所有活跃流程定义来自同一受信、不可变快照；Ready 前完成摘要和 descriptor 对齐。
 - [ ] command、result 与 DLT topic 的 owner、路由、consumer group 和默认拒绝 ACL 已批准。
 - [ ] ACK 只发生在 COMMIT 明确成功或 Inbox 明确重复之后；提交结果不确定时保留原消息。

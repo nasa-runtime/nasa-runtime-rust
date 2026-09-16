@@ -908,7 +908,8 @@ impl SagaRemoteClient {
     ///
     /// 参数说明：`request` 必须在重试中保持相同 Saga/trigger 身份，`traceparent` 是可选的受信链路上下文。
     ///
-    /// 返回：意图与当前业务事务完成原子追加时返回稳定事件身份；direct 模式、缺失事务、跨数据源或持久化失败时返回错误。
+    /// 返回：意图已追加到当前业务事务时返回稳定事件身份；外层事务仍须明确提交，返回值不表示远端已受理或完成。
+    /// direct 模式、缺失事务、跨数据源或持久化失败时返回错误；dispatcher 固定扫描 client 指定的数据源。
     pub async fn enqueue_start(
         &self,
         request: &SagaRemoteStartRequest,
@@ -6100,7 +6101,7 @@ impl SagaComponent {
 ///
 /// 参数说明：`application` 提供受信 secret 快照，`settings` 提供调用身份、Orchestrator 地址和可靠发起等级。
 ///
-/// 返回：所选 HTTP/gRPC 地址、身份和凭据完整时返回远程 client 计划；可靠发起缺少事务内 start-intent 合同时拒绝 Ready。
+/// 返回：所选 HTTP/gRPC 地址、身份和凭据完整时返回远程 client 计划；可靠发起的写入与投递共享指定事务域，缺少 start-intent 合同时拒绝 Ready。
 async fn build_managed_client_plan(
     application: &Application,
     settings: &SagaSettings,
@@ -6257,10 +6258,12 @@ async fn build_managed_client_plan(
             }
         };
         start_intent = Some(Arc::clone(&append));
+        // start-intent 与 dispatcher 必须使用同一事务域，不能因全局 Outbox 默认值而留下无人扫描的已受理事件。
         plan = plan.with_event_publisher_plan(
             crate::outbox::OutboxApplicationPlan::new(Arc::new(SagaStartIntentPublisher {
                 transport: transport.clone(),
             }))
+            .with_datasource_ref(datasource)?
             .dead_letter_after(1)?,
         )?;
     }
@@ -15409,13 +15412,13 @@ async fn run_timer_loop(
     }
 }
 
-/// 业务作用：读取并校验 Saga 配置段，缺失时使用保守默认预算。
+/// 业务作用：从同一配置快照读取 Saga 段并校验角色、预算与可靠发起的事务域约束。
 ///
 /// 参数说明：
 /// - `application`：提供同版本不可变配置快照。
 /// - `phase`：错误发生的真实生命周期阶段。
 ///
-/// 返回：预算均在安全范围内时返回设置；未知字段、零值或过大预算返回阶段错误。
+/// 返回：角色与预算合法且可靠发起的 Outbox 配置同源时返回设置；缺少配置、字段非法或事务域冲突返回阶段错误。
 fn read_saga_settings(
     application: &Application,
     phase: ApplicationPhase,
@@ -15433,16 +15436,17 @@ fn read_saga_settings(
         }
     };
     validate_settings(&settings, phase)?;
+    validate_reliable_client_outbox_binding(snapshot.value(), &settings, phase)?;
     Ok(settings)
 }
 
-/// 业务作用：在配置发布前验证 Saga 段，确保热刷新候选不会携带不可执行预算。
+/// 业务作用：在配置发布前验证 Saga 段，阻止不可执行预算与可靠发起的跨事务域配置进入运行快照。
 ///
 /// 参数说明：
 /// - `tree`：合并完成但尚未发布的候选配置树。
 /// - `phase`：启动或运行期配置校验阶段。
 ///
-/// 返回：段缺失或设置合法时成功；反序列化和预算错误拒绝整帧配置。
+/// 返回：段缺失或设置合法时成功；反序列化、预算和可靠发起的事务域冲突拒绝整帧配置。
 pub(crate) fn validate_saga_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
@@ -15453,7 +15457,40 @@ pub(crate) fn validate_saga_section(
         })?,
         None => return Ok(()),
     };
-    validate_settings(&settings, phase)
+    validate_settings(&settings, phase)?;
+    validate_reliable_client_outbox_binding(tree, &settings, phase)
+}
+
+/// 业务作用：拒绝可靠 client 的显式 Outbox 数据源歧义，保证已受理事件的写入与扫描归属一致。
+///
+/// 参数说明：
+/// - `tree`：包含 Saga 与 Outbox 段的同一配置快照。
+/// - `settings`：已通过角色和字段校验的 Saga 设置。
+/// - `phase`：配置校验所在的生命周期阶段。
+///
+/// 返回：非受管可靠 client 或显式数据源一致时成功；冲突时返回配置键诊断，不发布该配置。
+fn validate_reliable_client_outbox_binding(
+    tree: &serde_json::Value,
+    settings: &SagaSettings,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    if settings.plan_mode != SagaPlanMode::Managed
+        || settings.role != Some(SagaRole::Client)
+        || !settings.client.reliable_start
+    {
+        return Ok(());
+    }
+    // 仅轮询预算不声明数据源；可靠计划始终绑定 client 事务域。显式冲突必须在发布能力前拒绝，
+    // 避免把配置错误隐藏为 Ready 后永久滞留的可靠事件。
+    if let Some(datasource) = tree.pointer("/outbox/datasource_ref") {
+        if datasource.as_str() != settings.client.datasource_ref.as_deref() {
+            return Err(saga_error(
+                phase,
+                "reliable Saga client requires outbox.datasource_ref to match saga.client.datasource_ref when explicitly configured",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 业务作用：约束 timer 周期和失败阈值，防止忙循环或超长失联窗口。

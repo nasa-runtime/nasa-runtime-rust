@@ -11,6 +11,10 @@
 //! 让重复投递、Unknown 结果、进程崩溃和多副本竞争从已提交事实收敛。Kafka 和 Redis Streams
 //! 提供受管 connector；HTTP 使用显式认证构件；gRPC 提供框架 generated command/result service、
 //! mTLS principal 绑定和封闭收据。Saga 不提供跨服务 ACID、物理 exactly-once 或并发隔离。
+//! 受管可靠 client 在 `saga.client.datasource_ref` 对应事务内原子追加业务事实与 start-intent，
+//! dispatcher 固定扫描同一数据源。显式 `outbox.datasource_ref` 与之冲突时在 Ready 前拒绝；
+//! 省略该字段或只配置轮询预算不改变绑定。`enqueue_start` 返回事件身份不等于外层事务已提交，
+//! 本地已受理也不等于远端流程完成；收据不明时保留原事件继续投递。
 //!
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功
@@ -22,7 +26,12 @@
 //! 在 UserHook 移交一次性收尾 future；受监督任务先收口，再按 priority 和同级登记顺序执行收尾，
 //! 随后释放 UserHook 业务资源。Service 的 initializer 在业务任务之前清理，Batch 的静态
 //! initializer 在业务资源之后清理。所有步骤共享绝对期限，单项失败不覆盖首次终止原因。
-//! 已接管 future 的释放具有一次性析构隔离；直接取消 Runner 不保证执行异步收尾或产生退出报告。
+//! 已接管 future 的释放具有一次性析构隔离；直接取消 Runner 同步撤销本实例的全局入口和新资源借用，
+//! 将 Starting/Ready 置为 Stopping，沿实际激活栈逆序释放 action、停机任务与所属资源，保持上述
+//! Service/Batch 顺序；已有 Stopped/Failed 不变。已借出的资源随借用归还释放，
+//! 任务门上尚未析构的受监督 future 会保留后续清理所有权，最后一个 future 释放后才归还依赖，
+//! 不等待该过程，也不保留全局入口或新资源借用权限。
+//! 此前复制的外部客户端句柄不在撤销范围内；不保证执行异步收尾或产生退出报告。
 //! 此能力不替代受管组件的关闭 owner，也不提供跨进程崩溃的持久执行保证。
 //!
 //! # 受管基础设施

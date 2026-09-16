@@ -15,6 +15,7 @@ use crate::{
         InitializerFailure, InitializerFailureKind, InitializerStage, StagedInitializerTask,
     },
     report::{report_shutdown, report_shutdown_summary, ShutdownSummary},
+    resources::ResourceOwner,
     shutdown::{
         release_shutdown_panic_payload, ShutdownTaskEntry, ShutdownTaskOutcome, ShutdownTaskReport,
     },
@@ -116,34 +117,144 @@ pub struct ApplicationRunner {
     supervisor: TaskSupervisor,
     components: Vec<Box<dyn ApplicationComponent>>,
     active: ActiveStack,
+    // 出栈不代表任务已退出；跨 await 保留任务门，外层取消时仍约束资源释放。
+    task_gate_in_progress: bool,
     signal_mode: SignalMode,
     startup_timeout: Duration,
     shutdown_timeout: Duration,
 }
 
 impl Drop for ApplicationRunner {
-    /// 业务作用：在生命周期执行器被直接释放时关闭业务登记并归还尚未移交的停机任务所有权。
+    /// 业务作用：在生命周期执行器被直接释放时撤销运行权威，并沿激活栈逆序释放已接管所有权。
     ///
     /// 参数说明：无。
     ///
-    /// 返回：无返回值；正常结束后的重复清理为空，直接取消时的析构异常仅同步告警。
+    /// 返回：无返回值；直接取消留下 Stopping，关闭全局入口与新资源借用，不承诺异步收尾；
+    /// 任务尚未析构时由其存活守卫接管清理尾部；已有 Stopped/Failed 保持不变，析构异常仅同步告警。
     fn drop(&mut self) {
         // UserHook 的中止由执行器稍后完成，其 Application 副本或任务捕获的副本可能仍然存活。
         // 先关闭登记门，再在锁外释放任务，不能依赖最后一个 Application 副本的析构来收口。
         self.application.close_user_hook();
+        if matches!(
+            self.application.state(),
+            ApplicationState::Starting | ApplicationState::Ready
+        ) {
+            // 外层取消没有异步执行器继续推进生命周期；先保留首次终止意图，再撤下 Ready，
+            // 使基础设施 getter 和状态观察者拒绝把保留句柄视为仍可服务的实例。
+            // 异步 action 与资源 shutdown 未必执行，因此保持 Stopping，不发布 Stopped。
+            self.application.set_terminal(TerminalIntent::Failure);
+            if let Err(error) = self.begin_stopping() {
+                report_shutdown(&error);
+            }
+        }
+        let mut cleanup = CancelledRunnerCleanup {
+            application: self.application.clone(),
+            active: std::mem::replace(&mut self.active, ActiveStack::new()),
+            _components: std::mem::take(&mut self.components),
+        };
+        // 正在等待的任务门已不在栈里，必须先恢复它的释放约束，不能越过它处理 initializer 或业务资源。
+        if self.task_gate_in_progress {
+            self.supervisor.cancel_for_drop();
+            if self.supervisor.has_live_futures() {
+                self.defer_cancelled_cleanup(cleanup);
+                return;
+            }
+        }
+        while let Some(step) = cleanup.active.pop() {
+            if matches!(step, ActiveStep::UserTasks | ActiveStep::InitializerTasks) {
+                self.supervisor.cancel_for_drop();
+                if self.supervisor.has_live_futures() {
+                    self.defer_cancelled_cleanup(cleanup);
+                    return;
+                }
+            } else {
+                release_cancelled_step(&cleanup.application, step);
+            }
+        }
+        self.supervisor.cancel_for_drop();
+    }
+}
+
+/// 任务门之后尚未释放的生命周期所有权，不包含监督器，避免与任务存活守卫形成保留环。
+struct CancelledRunnerCleanup {
+    application: Application,
+    active: ActiveStack,
+    _components: Vec<Box<dyn ApplicationComponent>>,
+}
+
+impl Drop for CancelledRunnerCleanup {
+    /// 业务作用：在同步安全边界或最后一个受管 future 释放后，沿剩余栈逆序归还依赖所有权。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；仅执行同步释放，不调用异步 shutdown、不发布终态或正常停机摘要。
+    fn drop(&mut self) {
+        while let Some(step) = self.active.pop() {
+            release_cancelled_step(&self.application, step);
+        }
+        // 部分启动或已经出栈的步骤仍需兜底封口；重复调用不重放已移交的所有权。
         for error in self.application.close_shutdown_tasks() {
             report_shutdown(&error);
         }
+        self.application.resources().close();
+        // 延迟释放期间可能已有替代实例发布；只能清除属于本实例的全局入口。
+        self.application.clear_global();
+    }
+}
+
+/// 业务作用：按单个已激活步骤同步释放 action、停机任务或所属资源，保留真实依赖顺序。
+///
+/// 参数说明：
+/// - `application`：拥有本实例停机登记和资源表的句柄。
+/// - `step`：从激活栈逆序移出的单个步骤；任务门由调用者先确认或移交保留权。
+///
+/// 返回：无返回值；单项析构异常独立告警，不截断其余步骤，不调用业务异步主体。
+fn release_cancelled_step(application: &Application, step: ActiveStep) {
+    match step {
+        ActiveStep::Action { mut action, .. }
+        | ActiveStep::InitializerAction { mut action, .. } => {
+            if let Some(error) = action.release() {
+                report_shutdown(&error);
+            }
+        }
+        ActiveStep::BusinessShutdownTasks => {
+            for error in application.close_shutdown_tasks() {
+                report_shutdown(&error);
+            }
+        }
+        ActiveStep::BusinessResources => application
+            .resources()
+            .release_owner(ResourceOwner::Business),
+        ActiveStep::ComponentResources(component) => application
+            .resources()
+            .release_owner(ResourceOwner::Component(component)),
+        ActiveStep::InitializerResources(initializer) => application
+            .resources()
+            .release_owner(ResourceOwner::Initializer(initializer)),
+        ActiveStep::UserTasks | ActiveStep::InitializerTasks => {}
     }
 }
 
 impl ApplicationRunner {
+    /// 业务作用：外层取消时立即撤销公共入口，并把任务门之后的资源释放责任交给任务存活边界。
+    ///
+    /// 参数说明：`cleanup` 持有尚未消费的 active stack、资源表和组件所有权。
+    ///
+    /// 返回：无返回值；不等待任务退出，最后一个任务 future 析构后才释放清理尾部。
+    fn defer_cancelled_cleanup(&mut self, cleanup: CancelledRunnerCleanup) {
+        // 资源继续存活不等于实例仍可服务；先关闭新借用和全局入口，再移交延迟释放责任。
+        self.application.resources().close_borrowing();
+        self.application.clear_global();
+        self.supervisor.retain_until_tasks_release(cleanup);
+    }
+
     /// 业务作用：使用已完成同步预检的应用信息和配置视图创建 Runner。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `info`：已经固定名称、profile 和 Service/Batch 模式的进程元数据。
     /// - `initial_config`：版本为 1 的不可变配置视图。
+    ///
+    /// 返回：尚未启动组件或任务的执行器；任务门和激活栈从空状态开始，由 run 推进生命周期。
     #[doc(hidden)]
     pub fn new(info: ApplicationInfo, initial_config: Arc<ConfigView>) -> Self {
         let (application, supervisor) = Application::create(info, initial_config);
@@ -152,6 +263,7 @@ impl ApplicationRunner {
             supervisor,
             components: Vec::new(),
             active: ActiveStack::new(),
+            task_gate_in_progress: false,
             signal_mode: SignalMode::Disabled,
             startup_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(15),
@@ -1356,6 +1468,8 @@ impl ApplicationRunner {
                 }
                 ActiveStep::UserTasks | ActiveStep::InitializerTasks => {
                     counts.task_gates += 1;
+                    // 跨 await 保留门禁，取消等待 future 不能使后续资源失去任务存活约束。
+                    self.task_gate_in_progress = true;
                     // 先切状态再 cancel，Runner 随后收割到的 critical exit 才不会被误判成运行期故障。
                     self.supervisor.begin_stopping();
                     // 任务主体由业务提供，收割与强制中止同样必须预留后续资源和组件动作的预算。
@@ -1392,6 +1506,7 @@ impl ApplicationRunner {
                             ));
                         }
                     }
+                    self.task_gate_in_progress = false;
                     log_shutdown_step(
                         next_shutdown_sequence(&mut shutdown_sequence),
                         "task-gate",

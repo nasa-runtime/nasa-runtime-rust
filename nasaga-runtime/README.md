@@ -2,6 +2,8 @@
 
 `nasaga-runtime` 将 `nasaga-core` 合同与 MySQL store 组装为持久化 Orchestrator、参与方事务
 adapter、管理与恢复入口、运行指标以及可选 transport connector。业务通过 `nasa` 门面启用。
+在 Application 受管模式下，可靠 client 的业务事实与 start-intent 在同一 MySQL 事务提交，
+dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两个独立边界。
 
 共享核心保留 `SagaPayload` 的原始字节、媒体类型与 schema；MySQL Catalog 支持完整 definition
 生命周期。`deprecated → retired` 必须确认实例、迟到结果所依赖的事实、保留 Outbox 与审计均无引用，
@@ -48,6 +50,8 @@ Orchestrator ──同一本地事务── Inbox + CAS/journal + timer + comman
 orchestrator 启动时会在精确 MySQL datasource 上确保全局状态、result Inbox、command Outbox、timer、
 Definition Catalog、capability registry、管理审计与配额结构；participant 只确保 command Inbox、gate
 与 result Outbox；reliable client 只确保 start-intent Outbox。角色不需要的全局表不会成为启动依赖。
+可靠 client 的写入与 dispatcher 固定使用 `saga.client.datasource_ref`；显式
+`outbox.datasource_ref` 必须与之相同，冲突在 Ready 前拒绝，省略该字段不改变扫描数据源。
 Orchestrator 与 participant 的全部受管 DDL、回填和最终复验复用取得 schema lock 的同一连接，
 `max_connections = 1` 的合法低资源池不会因启动门禁再申请第二条连接。
 Catalog 自举会在 schema 锁内迁移已识别的直接前代列、tenant 主键与审计字段，再核对命名 CHECK 的
@@ -73,6 +77,18 @@ Streams 的认证、RBAC、publisher、consumer、listener、readiness 与停机
 提交幂等事实、instance、首条 command
 Outbox 和 timer；result 重复由 Inbox 吸收，状态迁移、下一条 command 与 timer 同事务提交。网络结果
 不明不改变源 Outbox，只有明确的 Committed 或 Duplicate 收据允许发送端前移。
+
+## 可靠 client 的事务与恢复
+
+可靠 client 由 `napp` 构造，不在本进程创建 Orchestrator。业务通过门面取得 `SagaRemoteClient`，在
+`saga.client.datasource_ref` 对应事务中先写业务事实，再调用 `enqueue_start`；二者同时提交或回滚。
+返回的稳定 `event_id` 表示事务内追加成功，只有外层事务明确提交后才可表示本地已受理。
+
+dispatcher 与 append 固定使用同一 MySQL 数据源。显式 `outbox.datasource_ref` 不一致时在 Ready 前
+拒绝；省略该字段或仅配置轮询预算不改变绑定。远端不可用或已提交收据丢失时保持原事件重投，只有
+`Committed` 或 `Duplicate` 才标记投递完成，不重新创建本地业务事实。
+`napp_outbox_pending`、`napp_outbox_published_total` 与 `napp_outbox_dead` 描述投递侧状态，远端查询
+描述流程状态；Ready 不保证队列为空或流程完成。独立宿主须自行维护相同的事务与扫描边界。
 
 ## 独立与 custom 使用
 

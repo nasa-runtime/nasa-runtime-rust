@@ -146,6 +146,10 @@ consumer_identity、orchestrator_identity 与 datasource_ref。业务步骤使�
 client 角色不构造 Orchestrator。direct 模式无需本地数据库，调用 SagaRemoteClient::start/get；
 reliable_start 模式必须声明 client.datasource_ref，并在当前同源业务事务内调用 enqueue_start，使业务
 事实和 start-intent Outbox 原子提交。远端暂不可用时事件保持待派发，恢复后由周期扫描或提交唤醒送达。
+dispatcher 同样固定使用 `saga.client.datasource_ref`；显式 `outbox.datasource_ref` 若与它冲突，应用
+会在 Ready 前拒绝启动。仅设置 Outbox 轮询预算不改变扫描数据源。
+`enqueue_start` 返回 `event_id` 后还需等待外层业务事务明确提交，才能返回本地已受理；远端是否创建
+或完成须查收据及实例状态，不能由 Ready 或已受理响应推断。
 
 PostgreSQL 只需把 datasource driver 改为 postgresql 并开启 saga-runtime-pgsql；角色、Definition
 Catalog、收据和恢复语义相同。HTTP、gRPC、Kafka 与 Redis Streams 均可作为受管 command/result
@@ -306,8 +310,13 @@ owner：已经使用 `register_managed` 的对象，或 Application 拥有的数
 组件，不再另登记重复关闭任务。
 
 所有清理共享 `application.shutdown_timeout_ms`，单项不能阻塞或无限循环。失败、超时和可隔离展开不
-覆盖首次终止原因；期限耗尽时未开始项记为 `Abandoned`。直接取消 Runner 只释放已接管所有权，
-不能替代 Service 的 `app.shutdown()` 或进程 SIGTERM。完整限制见
+覆盖首次终止原因；期限耗尽时未开始项记为 `Abandoned`。直接取消 Runner 会撤销本实例的全局入口和
+新资源借用，将 Starting/Ready 置为 Stopping，已有 Stopped/Failed 不变；不保证执行异步收尾。
+剩余 action、停机任务与所属资源按实际激活栈逆序同步释放，保持 Service/Batch 各自的 initializer 位置。
+任务门上尚未析构的受监督 future 会保留后续清理所有权，最后一个 future 释放后才归还依赖；
+全局入口与新借用立即撤销，取消调用方不等待这个过程，任务不让出执行权时资源会继续保留。
+已借出的资源随借用归还释放，此前复制的外部客户端句柄不在撤销范围内。
+需要完整优雅停机时应使用 Service 的 `app.shutdown()` 或进程 SIGTERM。完整限制见
 [业务优雅停机任务](../napp/README.md#业务优雅停机任务)。
 
 ## 后续阅读

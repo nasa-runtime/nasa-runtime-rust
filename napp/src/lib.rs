@@ -17,12 +17,23 @@
 //! initializer。任务组公平分配剩余预算并预留资源清理时间，单项错误不覆盖首次终止原因。
 //! 尚未清理的资源可在任务执行时查找；局部 owner 清理不会提前关闭其它资源的查找。
 //!
-//! 已接管任务从登记到执行持续隔离单次析构展开。直接取消 Runner 时先关闭登记，再释放所有权，
-//! 不保证执行异步收尾或生成退出报告。同步阻塞、非协作 poll、`panic=abort` 和析构自身展开期间
+//! 已接管任务从登记到执行持续隔离单次析构展开。直接取消 Runner 时同步关闭登记，将 Starting/Ready
+//! 置为 Stopping，沿实际激活栈逆序释放剩余 action、停机任务和所属资源，保持上述 Service/Batch 顺序，
+//! 若经过任务门时仍有受监督 future 存活，立即撤销新借用与全局入口，将剩余清理交给任务存活守卫，
+//! 最后一个 future 析构后才释放尾部；否则在栈清理后撤销入口。已有 Stopped/Failed 不变。
+//! 保留句柄不能再借用资源，已借出的资源随借用归还释放；此前复制的外部客户端句柄不在撤销范围内。
+//! Stopping 不表示异步收尾完成；直接取消不保证执行异步收尾或生成退出报告。
+//! 同步阻塞、非协作 poll、`panic=abort` 和析构自身展开期间
 //! 的未隔离再次 panic 不在保护范围内；一个对象只能有一个最终关闭 owner。
 //!
-//! 启用 Saga 组件时，Application 隐式拥有 DB 与 Outbox 生命周期，在 Ready 前校验 definition、
+//! # Saga 角色与同源投递
+//!
+//! 启用 Saga 组件时，Application 按角色构造运行能力；数据角色在 Ready 前校验 definition、
 //! descriptor、历史非终态实例和参与方信任投影，再监督 durable timer 与所选受管消费循环。
+//! direct client 不创建本地数据库或 Outbox。可靠 client 在 `saga.client.datasource_ref` 的业务事务内
+//! 追加 start-intent，并把 dispatcher 固定绑定同一数据源；显式 `outbox.datasource_ref` 不一致时
+//! 在 Ready 前拒绝，省略该字段或只配置轮询预算不改变绑定。`enqueue_start` 返回事件身份仅表示
+//! 事务内追加成功，外层事务提交后才可表示本地已受理；远端收据不明时保留原事件，Ready 不代表流程完成。
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
 //! 当前数据库对应的 `nasaga-runtime` 或 `nasaga-runtime-pgsql` 持久合同承担。
 //!

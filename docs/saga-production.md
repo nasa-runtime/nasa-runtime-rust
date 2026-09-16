@@ -240,6 +240,17 @@ reliable_start 要求 client.datasource_ref。业务在当前同源事务内先�
 已创建；事件恢复投递后只有 Committed 或 Duplicate 才标记完成。超过业务发起期限的积压需要告警或
 人工处置。
 
+可靠 client 的 Outbox dispatcher 与业务事实、start-intent 共同绑定 `saga.client.datasource_ref`。
+显式 `outbox.datasource_ref` 必须与之相同，冲突时配置校验返回包含这两个配置键的错误，并在 Ready
+前终止启动；省略该字段或只配置轮询预算时仍扫描 client 指定库。MySQL 与 PostgreSQL 使用同一规则。
+即使两个库都已具备合法 Outbox 表，也不能使用不同名称拆分写入与扫描。该规则在组件副作用与业务
+Hook 之前校验，运行期候选配置也必须满足同一约束。
+
+`enqueue_start` 的成功返回只确认事务内追加；外层事务提交前不能向调用方确认本地已受理。确认后
+仍须区分三个状态：本地事实已提交、start-intent 已投递、远端 Saga 已到终态。远端已提交但收据丢失
+时，dispatcher 保留原 `event_id` 重投，由远端稳定请求身份消除重复。Ready 不保证积压为零，
+`napp_outbox_pending` 持续增长时须结合发布量、死信和远端查询判断，不能通过删除意图解除积压。
+
 ## 状态推进、补偿与超时
 
 - effect_id 跨 attempt 稳定，参与方和真实副作用目标用它做业务幂等；command_id 只标识一次投递。

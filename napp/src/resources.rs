@@ -41,7 +41,7 @@ pub enum ResourcePhase {
     Open,
     /// 禁止继续登记,但仍允许借用已发布资源。
     Sealed,
-    /// 业务停机任务已结束，正在全局关闭并拒绝新的资源借用。
+    /// 拒绝新的资源借用，正在清理或等待受管任务归还依赖保留权。
     Closing,
     /// 资源清理已经完成。
     Closed,
@@ -540,6 +540,32 @@ impl ResourceRegistry {
         drop(entries);
     }
 
+    /// 业务作用：直接取消且任务尚未释放时立即撤销新借用，但保留资源供已有任务安全析构。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：登记与借用均关闭，条目所有权仍按后续 active stack 步骤释放；Closed 不会被重新开放。
+    pub(crate) fn close_borrowing(&self) {
+        let mut state = write_unpoisoned(&self.state);
+        // 必须先封住排队查找的复验边界，再把资源释放责任移交给任务存活守卫。
+        if state.phase != ResourcePhase::Closed {
+            state.phase = ResourcePhase::Closing;
+        }
+    }
+
+    /// 业务作用：在 Runner 直接取消时按当前激活步骤同步归还指定所有者的资源。
+    ///
+    /// 参数说明：
+    /// - `owner`：当前步骤拥有的资源集合，不影响更早步骤仍需持有的其它资源。
+    ///
+    /// 返回：撤销本批次 key 后在锁外按逆登记顺序释放容器所有权，不调用异步 shutdown；
+    /// 已有借用可延迟最终析构，单项析构异常由资源守卫隔离并同步告警。
+    pub(crate) fn release_owner(&self, owner: ResourceOwner) {
+        for entry in self.take_matching(owner) {
+            drop(entry);
+        }
+    }
+
     /// 业务作用：在同一写锁临界区完成阶段检查、重复检查和顺序号分配。
     ///
     /// 参数说明：
@@ -660,20 +686,14 @@ impl ResourceRegistry {
         })
     }
 
-    /// 业务作用：原子移除指定所有者条目，再在锁外按逆序执行显式清理。
-    ///
-    /// 先从 key 集合移除可以关闭新查找；随后写锁等待保证已有 ResourceRef 先释放。
+    /// 业务作用：为正常停机与直接取消提供同一资源撤销边界，按逆登记顺序移交指定所有者条目。
     ///
     /// 参数说明：
     /// - `owner`：本次 active step 负责清理的资源所有者。
-    /// - `context`：所有条目共享的绝对清理预算。
     ///
-    /// 返回：按逆序收集锁等待、显式清理失败、单项超时与展开式 panic；单项异常不截断同批次后续清理。
-    async fn shutdown_matching(
-        &self,
-        owner: ResourceOwner,
-        context: &ShutdownContext,
-    ) -> Vec<ApplicationError> {
+    /// 返回：已在写锁内撤销 key 的逆序条目；局部步骤保留其它资源查找，业务资源步骤关闭全部新借用，
+    /// 已关闭时返回空集合。调用者在锁外决定异步清理或同步释放，已有借用不会被强制撤销。
+    fn take_matching(&self, owner: ResourceOwner) -> Vec<ResourceEntry> {
         let mut entries = {
             let mut state = write_unpoisoned(&self.state);
             // 已关闭时不能重新取得清理权，也不能退回允许借用的阶段。
@@ -697,6 +717,24 @@ impl ResourceRegistry {
                 .collect::<Vec<_>>()
         };
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.registration_order));
+        entries
+    }
+
+    /// 业务作用：原子移除指定所有者条目，再在锁外按逆序执行显式清理。
+    ///
+    /// 先从 key 集合移除可以关闭新查找；随后写锁等待保证已有 ResourceRef 先释放。
+    ///
+    /// 参数说明：
+    /// - `owner`：本次 active step 负责清理的资源所有者。
+    /// - `context`：所有条目共享的绝对清理预算。
+    ///
+    /// 返回：按逆序收集锁等待、显式清理失败、单项超时与展开式 panic；单项异常不截断同批次后续清理。
+    async fn shutdown_matching(
+        &self,
+        owner: ResourceOwner,
+        context: &ShutdownContext,
+    ) -> Vec<ApplicationError> {
+        let entries = self.take_matching(owner);
 
         let entry_count = entries.len();
         let mut failures = Vec::new();
