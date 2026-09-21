@@ -3,11 +3,13 @@
 //! 事务运行时本身只消费现成的 `MySqlPool`；本模块把"从配置造池"这件事收敛到 natx，
 //! 让应用运行时只做编排，不再各自复制 SQLx 建池细节，也不必直接依赖 SQLx。
 
+use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{Connection, MySqlConnection, MySqlPool};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::{ConnectOptions, Connection, MySqlConnection, MySqlPool};
 
+pub use natx_core::observability::StatementLogging;
 pub use natx_core::DataSourcePoolConfig;
 
 /// 单个数据源的连接与池化参数。
@@ -223,4 +225,64 @@ pub fn build_pool(config: &DataSourceConfig) -> anyhow::Result<MySqlPool> {
         .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
         .connect_lazy(&config.url)?;
     Ok(pool)
+}
+
+/// 业务作用：按受管语句日志策略探测真实 MySQL 连接。
+/// 参数说明：`config` 是连接配置；`logging` 控制 SQLx 语句事件。
+/// 返回：握手和关闭成功时完成；非法配置或连接失败返回错误。
+pub async fn probe_with_logging(
+    config: &DataSourceConfig,
+    logging: StatementLogging,
+) -> anyhow::Result<()> {
+    config.validate()?;
+    let options = logging_options(config, logging)?;
+    let connection = tokio::time::timeout(
+        Duration::from_millis(config.connect_timeout_ms),
+        MySqlConnection::connect_with(&options),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("MySQL datasource connection timeout"))?
+    .map_err(|_| anyhow::anyhow!("MySQL datasource connection failed"))?;
+    // 探测会话不会进入业务池，成功后立即关闭，避免持有池外连接。
+    connection
+        .close()
+        .await
+        .map_err(|_| anyhow::anyhow!("MySQL datasource probe close failed"))?;
+    Ok(())
+}
+
+/// 业务作用：建立由应用统一控制语句日志的 MySQL Pool。
+/// 参数说明：`config` 是池配置；`logging` 是启动期冻结的日志开关。
+/// 返回：配置合法时交出惰性池；调用方负责停机关闭。
+pub fn build_pool_with_logging(
+    config: &DataSourceConfig,
+    logging: StatementLogging,
+) -> anyhow::Result<MySqlPool> {
+    config.validate()?;
+    let options = logging_options(config, logging)?;
+    Ok(MySqlPoolOptions::new()
+        .max_connections(config.max_connections)
+        .min_connections(config.min_connections)
+        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+        .connect_lazy_with(options))
+}
+
+/// 业务作用：统一逐条语句事件并关闭 SQLx 自身的独立慢语句升级。
+/// 参数说明：`config` 是待解析连接配置；`logging` 指定关闭或语句事件级别。
+/// 返回：不保留 SQLx 默认慢日志策略的连接选项，URL 错误不包含凭据。
+fn logging_options(
+    config: &DataSourceConfig,
+    logging: StatementLogging,
+) -> anyhow::Result<MySqlConnectOptions> {
+    let options = MySqlConnectOptions::from_str(&config.url)
+        .map_err(|_| anyhow::anyhow!("MySQL datasource URL 无法解析"))?;
+    let level = match logging {
+        StatementLogging::Disabled => return Ok(options.disable_statement_logging()),
+        StatementLogging::Debug => log::LevelFilter::Debug,
+        StatementLogging::Trace => log::LevelFilter::Trace,
+    };
+    // 慢操作由 Mapper 业务阈值拥有，避免 SQLx 再输出一次不同级别的慢日志。
+    Ok(options
+        .log_statements(level)
+        .log_slow_statements(level, Duration::MAX))
 }

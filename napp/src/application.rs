@@ -1816,7 +1816,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：已声明组件且 listener 已绑定时返回地址、状态、连接、accept 失败计数与持续时长视图；
-    /// 否则返回阶段错误。
+    /// 否则返回阶段错误。Bound 只表示预绑定；全应用放行后才会转为 Running，句柄存在不是接流证明。
     #[cfg(feature = "grpc")]
     pub fn grpc(&self) -> ApplicationResult<nagrpc::GrpcServerObserver> {
         self.ensure_component_declared(
@@ -2723,13 +2723,54 @@ impl Application {
         Arc::clone(&self.inner.metrics_hub)
     }
 
+    /// 业务作用：在 UserHook 窗口为可选的 YAML 命名引用登记通知渠道，由框架调度投递。
+    /// 进程默认通知使用 nanotify_core::init，不需要本入口；default 为保留名称。
+    /// 参数说明：`provider_ref` 必须指向已启用的 custom provider，`provider` 为渠道实现。
+    /// 返回：登记成功；非 UserHook、重复或未配置引用拒绝，登记本身不发送消息。
+    #[cfg(feature = "mapper-observability")]
+    pub async fn register_notify_provider(
+        &self,
+        provider_ref: &str,
+        provider: Arc<dyn nanotify_core::Notify>,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("notification provider registration")?;
+        let runtime = self
+            .resources()
+            .get::<Arc<crate::sql_observability::SqlObservabilityRuntime>>()
+            .await?;
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 资源读取经过 await，必须在注册锁内重新确认窗口，封口后不允许追加入站渠道。
+        self.ensure_user_hook_open("notification provider registration")?;
+        runtime.register_custom(provider_ref, provider)
+    }
+
+    /// 业务作用：提供当前实际使用的 SQL 观测策略，业务无需读取可能等待重启的候选配置。
+    /// 参数说明：`datasource` 为冻结数据源名，`method` 为可选完整 Mapper 方法身份。
+    /// 返回：逐叶继承后的脱敏策略；未启用组件或目录外身份返回错误。
+    #[cfg(feature = "mapper-observability")]
+    pub async fn sql_observability_effective(
+        &self,
+        datasource: &str,
+        method: Option<&str>,
+    ) -> ApplicationResult<namapper_core::observability::config::EffectivePolicy> {
+        let runtime = self
+            .resources()
+            .get::<Arc<crate::sql_observability::SqlObservabilityRuntime>>()
+            .await?;
+        runtime.effective(datasource, method)
+    }
+
     /// 业务作用：在统一文本或 OTLP 快照前请求刷新已提交外部事实；各源按自身低频窗口复用缓存。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：所有已声明外部源的缓存可用或完整发布新快照时成功；查询失败时返回对应组件错误、
     /// 保留上一份值并更新源级失败与快照年龄指标，调用出口不得据此丢弃无关指标族。
-    #[cfg(any(feature = "telemetry", feature = "web"))]
+    #[cfg(any(feature = "telemetry", feature = "web", feature = "observability"))]
     pub(crate) async fn refresh_metric_sources(&self) -> ApplicationResult<()> {
         #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
         if self
@@ -3692,6 +3733,8 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::Outbox => 18,
         ComponentId::Partition => 19,
         ComponentId::Grpc => 20,
+        ComponentId::SqlObservability => 22,
+        ComponentId::Observability => 23,
     }
 }
 
@@ -3700,7 +3743,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 22] = [
+    const ALL: [ComponentId; 24] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
@@ -3723,6 +3766,8 @@ const _: () = {
         ComponentId::Outbox,
         ComponentId::Partition,
         ComponentId::Grpc,
+        ComponentId::SqlObservability,
+        ComponentId::Observability,
     ];
     let mut i = 0;
     while i < ALL.len() {

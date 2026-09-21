@@ -31,6 +31,19 @@ let report = run_gate(
 
 ## 连接合同
 
+### 连接观测与锁预算
+
+池入口以 `purpose=migration` 记录真实 Pool acquire，取到连接后即结束计时；schema 身份查询、
+advisory lock 竞争和 migration 执行不计入连接等待，也不作为 Mapper 方法计量。
+`run_gate_with_evidence_for` 与 `verify_target_identity_for` 接受命名数据源身份；不带 `_for` 的
+池入口使用 `default`。直接交入专有连接不会伪造一次 Pool acquire。
+
+受管等待日志与通知由 `sql.observability` 配置。连接超时通知默认只选 `mapper`，需要迁移通知时
+显式将 `migration` 加入 `alerts.acquire_timeout.purposes` 并安装业务 `Notify`。通知失败不改变
+门禁结果，也不延长从获取连接开始计算的原始锁预算。
+
+### Session 与失败后果
+
 `run_gate` 只适用于 PostgreSQL 直连或保证 session affinity 的会话级代理。事务级池化代理可能让相邻
 操作落到不同 backend，不能承载 session advisory lock。此时应通过直连或会话级 migration endpoint
 建立专有 `PgConnection`，并调用消费该连接的 `run_gate_on_connection`。

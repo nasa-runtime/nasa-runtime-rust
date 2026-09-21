@@ -1,6 +1,11 @@
 //! SQL mapper 运行时与公共类型。
 //!
 //! 提供 mapper 宏展开依赖的连接获取、事务桥接、枚举/排序辅助和可选 Redis L2 缓存适配能力。
+//! 所有生成方法通过固定原子单元分别记录逻辑调用与数据库结果；受管应用由 YAML 装配日志、
+//! 开发参数显示、通知及指标出口，默认不输出 bind 值，通知失败不改变 SQL 或事务结果。
+//! 原始 SQL 耗时达到或超过有效阈值时命中慢规则，连接等待与 Stream 消费者处理另计。
+//! 业务初始化 `Notify`、启用告警并设 `cooldown_ms=0` 后逐条尝试入队，不依赖慢日志开关；
+//! 发送由受管 worker 完成，缺失实现忽略，容量或投递失败不构成业务失败。
 #![forbid(unsafe_code)]
 
 use std::ops::Deref;
@@ -9,6 +14,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub use async_trait::async_trait;
+pub use namapper_core::observability;
+pub use natx::{mapper_conn_for, mapper_mandatory_conn_for, mapper_never_conn_for};
+
+mod observation;
 pub use namapper_core::{
     apply_sql_trim, assert_l2_cache_installed_for_cached_queries, batch_chunks,
     cache_clear_targets, cache_hash_key, cache_hash_key_with_suffix, cache_value_needs_rewrite,
@@ -31,6 +40,7 @@ pub use namapper_core::{
 pub use namapper_macro::{
     Delete, Execute, Insert, Mapper, MapperEnum, MapperOrderField, Query, StreamQuery, Update,
 };
+pub use observation::{classify_method_result, classify_sqlx_result};
 pub use sqlx::types::Json;
 
 /// Mapper 流式查询返回类型。
@@ -40,6 +50,7 @@ pub use sqlx::types::Json;
 /// 丢弃——流存活期间同一事务不得发出其它语句,未释放就返回事务体会在提交门禁处显式失败。
 pub struct MapperStream<T> {
     inner: Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>,
+    observation: Option<observability::MapperStreamGuard>,
 }
 
 impl<T> MapperStream<T> {
@@ -48,33 +59,66 @@ impl<T> MapperStream<T> {
     /// # 参数
     /// - `stream`: 由 `sqlx::query_as(...).fetch(...)` 等调用返回的 owned stream；
     ///   生成代码会把 datasource pool 生命周期一起移动进 stream，避免借用外部连接。
+    ///
+    /// 返回：不附加方法观测的手动结果流；宏使用 observed 绑定静态方法身份。
     pub fn new<S>(stream: S) -> Self
     where
         S: futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static,
     {
         Self {
             inner: Box::pin(stream),
+            observation: None,
         }
     }
 
-    /// 业务作用：读取下一行。
-    ///
-    /// 对业务侧而言这等价于逐行消费查询结果；返回 `None` 表示数据库结果集已经结束。
+    /// 业务作用：将宏生成的结果流与独立生命周期观测绑定，保留从未 poll 的丢弃事实。
+    /// 参数说明：`stream` 为拥有型 SQLx 行流，`observation` 为构造时创建的守卫。
+    /// 返回：连接和守卫共同随 EOF、错误或 Drop 收口的结果流。
+    pub fn observed<S>(stream: S, observation: observability::MapperStreamGuard) -> Self
+    where
+        S: futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+            observation: Some(observation),
+        }
+    }
+
+    /// 业务作用：经同一轮询边界读取下一行，使显式 next 与 StreamExt 保持一致的观测语义。
+    /// 参数说明：无。
+    /// 返回：行值或 SQLx 错误；None 表示结果集结束并完成终态计量。
     pub async fn next(&mut self) -> Option<Result<T, sqlx::Error>> {
-        futures_util::StreamExt::next(&mut self.inner).await
+        futures_util::StreamExt::next(self).await
     }
 }
 
 impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
-    /// 业务作用：将外层 `MapperStream` 的轮询转发给内部 boxed stream。
-    ///
-    /// # 参数
-    /// - `self`: 当前被 pin 住的 Mapper stream。
-    /// - `cx`: 异步运行时传入的唤醒上下文。
+    /// 业务作用：围绕底层取行记录活跃等待、首行和唯一终态，不把消费者间隔算入数据库耗时。
+    /// 参数说明：`cx` 为异步运行时的唤醒上下文。
+    /// 返回：保留内部流的行、错误或等待状态；EOF 和错误只结算一次观测。
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().inner.as_mut().poll_next(cx)
+        let this = self.get_mut();
+        if let Some(guard) = &mut this.observation {
+            guard.poll_started();
+        }
+        let polled = this.inner.as_mut().poll_next(cx);
+        if let Some(guard) = &mut this.observation {
+            match &polled {
+                Poll::Ready(Some(Ok(_))) => guard.row(),
+                Poll::Ready(Some(Err(error))) => {
+                    let code = guard
+                        .database_code_enabled()
+                        .then(|| error.as_database_error().and_then(|error| error.code()))
+                        .flatten();
+                    guard.finish(observation::classify_error(error), code.as_deref());
+                }
+                Poll::Ready(None) => guard.finish(observability::DbOutcome::Ok, None),
+                Poll::Pending => {}
+            }
+        }
+        polled
     }
 }
 

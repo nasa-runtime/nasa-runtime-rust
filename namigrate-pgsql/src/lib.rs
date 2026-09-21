@@ -3,6 +3,8 @@
 //! advisory lock、catalog、apply/validate 和 unlock 始终绑定同一物理 session。池入口只适用于直连或
 //! 会话级池化；事务级池化必须使用独立的 session-affine endpoint，并在取锁前通过
 //! [`verify_target_identity`] 确认它与业务 pool 的 database/schema 身份一致。
+//! 池获取按 `purpose=migration` 计量，取得连接后结束，不混入身份查询、锁竞争或 migration 执行。
+//! 具名入口保留 datasource 身份，专有连接不伪造 Pool acquire；通知失败不改变门禁与锁预算。
 
 #![forbid(unsafe_code)]
 
@@ -105,6 +107,20 @@ pub async fn run_gate_with_evidence(
     settings: &MigrationSettings,
     evidence: &[&dyn NonTransactionalEvidence],
 ) -> Result<MigrationReport, MigrationError> {
+    run_gate_with_evidence_for(pool, "default", schema, migrator, settings, evidence).await
+}
+
+/// 业务作用：按数据源身份执行 PostgreSQL 门禁并单独记录 migration 池等待。
+/// 参数说明：`pool`、`datasource` 指定池身份；`schema`、`migrator`、`settings` 定义门禁；`evidence` 提供非事务完成证据。
+/// 返回：门禁摘要或稳定失败；连接等待不包含后续 advisory lock 竞争时间。
+pub async fn run_gate_with_evidence_for(
+    pool: &PgPool,
+    datasource: &str,
+    schema: &str,
+    migrator: &Migrator,
+    settings: &MigrationSettings,
+    evidence: &[&dyn NonTransactionalEvidence],
+) -> Result<MigrationReport, MigrationError> {
     settings.validate()?;
     validate_schema(schema)?;
     if settings.mode == MigrationMode::Disabled {
@@ -112,7 +128,8 @@ pub async fn run_gate_with_evidence(
     }
 
     let deadline = deadline(settings.lock_timeout_ms);
-    let connection = wait_until(deadline, settings.lock_timeout_ms, pool.acquire()).await?;
+    let connection =
+        acquire_connection(pool, datasource, deadline, settings.lock_timeout_ms).await?;
     let mut session = PooledSession::new(connection);
     let mut safe_to_reuse = false;
     let result = run_on_session(
@@ -190,8 +207,20 @@ pub async fn verify_target_identity(
     migration_connection: &mut PgConnection,
     schema: &str,
 ) -> Result<(), MigrationError> {
+    verify_target_identity_for(business_pool, "default", migration_connection, schema).await
+}
+
+/// 业务作用：在专有 session 取锁前复验业务池身份，并保留 migration 用途的池等待事实。
+/// 参数说明：`business_pool`、`datasource` 指定业务池身份；`migration_connection` 为专有连接，`schema` 为共同目标。
+/// 返回：身份一致时成功；差异在任何 advisory lock 之前拒绝，不把身份查询计入池等待。
+pub async fn verify_target_identity_for(
+    business_pool: &PgPool,
+    datasource: &str,
+    migration_connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), MigrationError> {
     validate_schema(schema)?;
-    let mut business = business_pool.acquire().await.map_err(backend)?;
+    let mut business = acquire_connection(business_pool, datasource, None, 0).await?;
     let business_identity = target_identity(&mut business, schema).await?;
     let migration_identity = target_identity(migration_connection, schema).await?;
     if business_identity == migration_identity {
@@ -199,6 +228,39 @@ pub async fn verify_target_identity(
     } else {
         Err(MigrationError::TargetMismatch)
     }
+}
+
+/// 业务作用：在擦除 SQLx 错误前记录 migration 的真实池等待，保持锁的端到端预算。
+/// 参数说明：`pool`、`datasource` 指定池身份，`deadline`、`timeout_ms` 为可选锁预算。
+/// 返回：池连接或原有门禁错误；外部取消只产生取消事实，不输出日志或通知。
+async fn acquire_connection(
+    pool: &PgPool,
+    datasource: &str,
+    deadline: Option<tokio::time::Instant>,
+    timeout_ms: u64,
+) -> Result<PoolConnection<Postgres>, MigrationError> {
+    use natx_core::observability::{connection_slot, AcquireOutcome, ConnectionPurpose};
+    let mut observation = connection_slot(natx_core::DatabaseDriver::PostgreSql, datasource)
+        .acquire(ConnectionPurpose::Migration);
+    let result = match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, pool.acquire()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // 锁预算若在获取池连接时耗尽，等待结果仍属于连接超时，而非数据库锁争用。
+                observation.finish(AcquireOutcome::Timeout);
+                return Err(MigrationError::LockTimeout(timeout_ms));
+            }
+        },
+        None => pool.acquire().await,
+    };
+    observation.finish(match &result {
+        Ok(_) => AcquireOutcome::Ok,
+        Err(sqlx::Error::PoolTimedOut) => AcquireOutcome::Timeout,
+        Err(sqlx::Error::PoolClosed) => AcquireOutcome::Closed,
+        Err(sqlx::Error::WorkerCrashed) => AcquireOutcome::Worker,
+        Err(_) => AcquireOutcome::Other,
+    });
+    result.map_err(backend)
 }
 
 /// 池连接守卫；只有 unlock 被服务端确认后才允许连接回池。

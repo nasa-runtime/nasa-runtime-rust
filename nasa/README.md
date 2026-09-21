@@ -6,6 +6,10 @@
 受监督任务结束后按优先级执行一次性收尾，最后释放业务资源。
 可靠 Saga client 把业务事实、start-intent 与 dispatcher 固定到同一事务域，配置冲突在接流前失败；
 直接取消 Runner 也不会先释放仍存活任务所依赖的资源。
+与 `mapper`/`mapper-pgsql` 组合时，Application 自动装配 SQL 原子指标、受控日志、有界通知和指标
+出口，业务通过同一份 YAML 配置；参数默认不输出，通知故障不会改变 SQL 与事务结果。
+业务通过 `nasa::application::notifications::init(Arc<dyn Notify>)` 安装进程通知实现；没有实现就忽略，
+默认不要求 provider 配置。通知微服务的协议与客户端由业务实现，框架不连接具体消息渠道。
 
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
@@ -26,7 +30,8 @@ codegen ABI、受管多源 registry 和可选 Application 组件接成一张一�
 实现 crate / 宏 crate / Application 唯一组件 owner
 ```
 
-门面只组织公开类型和 feature，不持有额外运行状态，也不自动启动未在属性中声明的 listener 或消费端。
+门面只组织公开类型和 feature，不持有额外运行状态。业务 listener 与消费端由属性声明；编入观测
+能力后，其 source 自动登记，通知与指标 listener 仍必须由 YAML 显式启用。
 业务仍负责领域定义、业务副作用、实际容量、凭据来源和外部系统治理；Application 负责已声明组件的
 配置门禁、受管协议路由、Ready 监督和反向停机。
 
@@ -49,6 +54,37 @@ Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与
 YAML 中设置 `server.http2.enabled=true`，同一明文端口即接受 h2c prior knowledge 并继续兼容
 HTTP/1，其它 transport 参数均可省略并采用受校验默认值。四项能力保持独立 feature 以控制依赖面，
 同时纳入 `full`；所有权、运行边界和非目标在下文单独说明。
+
+## SQL 阈值通知与观测架构
+
+同时启用 `application` 与 `mapper`/`mapper-pgsql`，Application 会自动登记方法、数据库执行、连接
+等待、Pool 与通知指标。完成路径只更新原子事实并尝试入队；受管 worker 调用业务实现，指标出口
+读取统一快照。无需业务编写 Mapper Hook 或周期采集任务。
+
+业务实现 `nasa::application::notifications::Notify`，通过同模块的 `init(Arc<dyn Notify>)` 安装一次。
+没有实现时忽略通知，稍后初始化不会补发；重复安装返回错误。适配器可以调用独立 `telegram-bot`
+微服务，HTTP REST/gRPC、鉴权和最终发送由业务负责，框架不连接机器人。
+
+```yaml
+sql:
+  observability:
+    slow_sql:
+      threshold_ms: 1000
+    alerts:
+      slow_sql:
+        enabled: true
+        cooldown_ms: 0
+```
+
+原始 SQL 耗时达到或超过阈值时命中；默认 60000 ms 冷却不适用于逐条通知。日志开关与通知开关
+独立，Stream 使用底层活跃取行耗时而非消费者等待。队列满、下游失败和进程退出可能丢失通知，
+不会改变 SQL 返回或事务裁决；直接调用 `notify` 不自动获得受管队列、超时和异常隔离。
+
+`grafana.observability` 显式启用独立/Web 抓取或 remote write，关闭出口不停止内部采集。
+平台资源由独立 controller 管理，remote write 失联只引用平台提供的期望实例指标。
+完整配置见 [SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)、
+[通知接口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md) 和
+[观测出口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafana/OBSERVABILITY.md)。
 
 ## 请求安全与链路传播
 
@@ -311,6 +347,9 @@ Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构�
 只能登记一个 owner，多实例使用 `metrics_source_many`。gRPC 只有在同时启用 `application` 并声明
 `"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。Web 只有在同时启用 `application,web`
 并声明 `"web"` 时才读取 `server` 配置和创建 listener；单独启用 `web` 只提供路由与安全门面。
+受管 Web/gRPC 可以在 Ready 装配阶段预绑定，但必须等全部任务工厂、最终检查和启动预算通过，
+并发布 Application Ready 后统一接流。gRPC 的 `Bound` 观察状态不是 health Serving；发现注册确认
+之前动态 readiness 仍不可用。独立 gRPC 可用 `ServerPlan::bind` 与一次性激活权接入自己的启动屏障。
 
 完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafka/README.md#schema-registry)、
 [naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/naobject/README.md) 和

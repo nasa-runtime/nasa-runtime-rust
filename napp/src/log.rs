@@ -83,6 +83,14 @@ impl ApplicationComponent for LogComponent {
             let application = context.application();
             let snapshot = application.config();
             let cfg = log_config_or_default(snapshot.value(), ApplicationPhase::Start)?;
+            #[cfg(feature = "mapper-observability")]
+            let sql_directive = sql_log_directive(snapshot.value(), ApplicationPhase::Start)?;
+            #[cfg(feature = "mapper-observability")]
+            let cfg = {
+                let mut cfg = cfg;
+                merge_sql_directive(&mut cfg.level, &sql_directive);
+                cfg
+            };
             let app_name = application.info().name().to_owned();
             let manager = self.manager.clone().ok_or_else(|| {
                 ApplicationError::new(
@@ -92,9 +100,14 @@ impl ApplicationComponent for LogComponent {
                 )
             })?;
             apply_log_config(&manager, &cfg, &app_name, ApplicationPhase::Start)?;
-            // 日志是 V1 唯一的可热刷组件：把共享运行态交给配置热刷新驱动，
+            // 日志运行态交给配置热刷新驱动，SQL 连接策略保持启动时冻结值，
             // 运行期 `log` 段变化由它重应用并如实记入 ReloadStatus。
-            application.register_config_applier(Arc::new(LogReloadApplier { manager, app_name }));
+            application.register_config_applier(Arc::new(LogReloadApplier {
+                manager,
+                app_name,
+                #[cfg(feature = "mapper-observability")]
+                sql_directive,
+            }));
             Ok(())
         })
     }
@@ -159,6 +172,8 @@ impl ShutdownAction for LogShutdown {
 struct LogReloadApplier {
     manager: Arc<StdMutex<LogManager>>,
     app_name: String,
+    #[cfg(feature = "mapper-observability")]
+    sql_directive: String,
 }
 
 impl ConfigApplier for LogReloadApplier {
@@ -178,6 +193,12 @@ impl ConfigApplier for LogReloadApplier {
     /// - `candidate`：已通过整帧校验、尚未发布的候选配置树。
     fn apply(&self, candidate: &Value) -> ApplicationResult<()> {
         let cfg = log_config_or_default(candidate, ApplicationPhase::Running)?;
+        #[cfg(feature = "mapper-observability")]
+        let cfg = {
+            let mut cfg = cfg;
+            merge_sql_directive(&mut cfg.level, &self.sql_directive);
+            cfg
+        };
         apply_log_config(
             &self.manager,
             &cfg,
@@ -226,6 +247,8 @@ fn apply_log_config(
 /// - `tree`：合并、插值完成但尚未发布的候选配置树。
 /// - `phase`：本次无副作用校验所属的生命周期阶段。
 pub(crate) fn validate_log_section(tree: &Value, phase: ApplicationPhase) -> ApplicationResult<()> {
+    #[cfg(feature = "mapper-observability")]
+    sql_log_directive(tree, phase)?;
     let Some(section) = tree.get("log") else {
         return Ok(());
     };
@@ -239,6 +262,31 @@ pub(crate) fn validate_log_section(tree: &Value, phase: ApplicationPhase) -> App
                 error,
             )
         })
+}
+
+/// 业务作用：从 YAML 派生统一 SQL target 过滤条件，配置冲突在 I/O 前失败。
+/// 参数说明：`tree` 为完整配置，`phase` 决定安全错误所属阶段。
+/// 返回：不含输入材料的固定 SQLx 指令或配置错误。
+#[cfg(feature = "mapper-observability")]
+fn sql_log_directive(tree: &Value, phase: ApplicationPhase) -> ApplicationResult<String> {
+    namapper_core::observability::config::console_directive(tree)
+        .map_err(|message| ApplicationError::new(ComponentId::Log, phase, message))
+}
+
+/// 业务作用：热刷新全局日志时保留冻结的 SQL 输出门禁，避免把连接事件打开后意外屏蔽。
+/// 参数说明：`filter` 为业务日志过滤串，`directive` 为启动冻结的 SQLx target 指令。
+/// 返回：原地合并过滤串；其它 target 保持业务配置。
+#[cfg(feature = "mapper-observability")]
+fn merge_sql_directive(filter: &mut String, directive: &str) {
+    let mut entries: Vec<_> = filter
+        .split(',')
+        .filter(|entry| !entry.trim().starts_with("sqlx::query="))
+        .map(str::to_owned)
+        .collect();
+    entries.push(directive.to_owned());
+    // 参数补充事件与连接语句使用同一开关，不能因全局 info 而静默丢弃。
+    entries.push(directive.replace("sqlx::query=", "namapper::parameters="));
+    *filter = entries.join(",");
 }
 
 /// 业务作用：从配置树读取可选的 `log` 段；段缺失时返回 `None`。

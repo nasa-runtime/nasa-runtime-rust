@@ -87,17 +87,27 @@ enum ManagedPool {
 impl ManagedPool {
     /// 业务作用：以统一方式探测一种受管数据库池是否仍可取得连接。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`datasource` 为冻结目录中的数据源身份。
     ///
     /// 返回：取得并立即释放连接时成功；池关闭或后端不可达时返回基础设施错误。
-    async fn acquire(&self) -> anyhow::Result<()> {
+    async fn acquire(&self, datasource: &str) -> anyhow::Result<()> {
         match self {
             #[cfg(feature = "db")]
             Self::MySql(pool) => {
-                pool.acquire().await?;
+                natx::observed_pool_acquire(
+                    datasource,
+                    natx_core::observability::ConnectionPurpose::Probe,
+                    pool,
+                )
+                .await?;
             }
             Self::PostgreSql(pool) => {
-                pool.acquire().await?;
+                natx_pgsql::observed_pool_acquire(
+                    datasource,
+                    natx_core::observability::ConnectionPurpose::Probe,
+                    pool,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -119,6 +129,7 @@ impl ManagedPool {
 
 /// 业务作用：把受管数据库池与其唯一 readiness 更新句柄移交健康监控循环。
 struct DbMonitorInput {
+    name: String,
     pool: ManagedPool,
     contributor: ReadinessContributor,
 }
@@ -224,7 +235,7 @@ async fn run_db_monitor(
                     }
                     continue 'monitor;
                 }
-                result = input.pool.acquire() => result.is_ok(),
+                result = input.pool.acquire(&input.name) => result.is_ok(),
             };
             let state = if acquired {
                 (DependencyState::Ready, reason::HEALTHY)
@@ -328,11 +339,19 @@ impl ApplicationComponent for DbComponent {
 
             for source in sources {
                 let name = source.name.clone();
+                #[cfg(feature = "mapper-observability")]
+                let logging =
+                    crate::sql_observability::statement_logging(&application, &name).await?;
                 let pool = match source.config {
                     #[cfg(feature = "db")]
                     DriverConfig::MySql(config) => {
                         if config.probe_on_start {
-                            natx::datasource::probe(&config).await.map_err(|error| {
+                            #[cfg(feature = "mapper-observability")]
+                            let probe =
+                                natx::datasource::probe_with_logging(&config, logging).await;
+                            #[cfg(not(feature = "mapper-observability"))]
+                            let probe = natx::datasource::probe(&config).await;
+                            probe.map_err(|error| {
                                 db_error_src(
                                     ApplicationPhase::Start,
                                     format!(
@@ -343,7 +362,11 @@ impl ApplicationComponent for DbComponent {
                                 )
                             })?;
                         }
-                        let pool = natx::datasource::build_pool(&config).map_err(|error| {
+                        #[cfg(feature = "mapper-observability")]
+                        let pool = natx::datasource::build_pool_with_logging(&config, logging);
+                        #[cfg(not(feature = "mapper-observability"))]
+                        let pool = natx::datasource::build_pool(&config);
+                        let pool = pool.map_err(|error| {
                             db_error_src(
                                 ApplicationPhase::Start,
                                 format!("cannot create datasource `{name}` MySQL pool"),
@@ -355,6 +378,20 @@ impl ApplicationComponent for DbComponent {
                     }
                     DriverConfig::PostgreSql { config, schema } => {
                         if config.probe_on_start {
+                            #[cfg(feature = "mapper-observability")]
+                            let probe = match schema.as_deref() {
+                                Some(schema) => {
+                                    natx_pgsql::datasource::probe_in_schema_with_logging(
+                                        &config, schema, logging,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    natx_pgsql::datasource::probe_with_logging(&config, logging)
+                                        .await
+                                }
+                            };
+                            #[cfg(not(feature = "mapper-observability"))]
                             let probe = match schema.as_deref() {
                                 Some(schema) => {
                                     natx_pgsql::datasource::probe_in_schema(&config, schema).await
@@ -372,13 +409,25 @@ impl ApplicationComponent for DbComponent {
                                 )
                             })?;
                         }
+                        #[cfg(feature = "mapper-observability")]
+                        let pool = match schema.as_deref() {
+                            Some(schema) => {
+                                natx_pgsql::datasource::build_pool_in_schema_with_logging(
+                                    &config, schema, logging,
+                                )
+                            }
+                            None => {
+                                natx_pgsql::datasource::build_pool_with_logging(&config, logging)
+                            }
+                        };
+                        #[cfg(not(feature = "mapper-observability"))]
                         let pool = match schema.as_deref() {
                             Some(schema) => {
                                 natx_pgsql::datasource::build_pool_in_schema(&config, schema)
                             }
                             None => natx_pgsql::datasource::build_pool(&config),
-                        }
-                        .map_err(|error| {
+                        };
+                        let pool = pool.map_err(|error| {
                             db_error_src(
                                 ApplicationPhase::Start,
                                 format!("cannot create datasource `{name}` PostgreSQL pool"),
@@ -397,6 +446,17 @@ impl ApplicationComponent for DbComponent {
                 if let Some(migration) = source.migration {
                     self.migrations.insert(name, migration);
                 }
+            }
+
+            #[cfg(all(feature = "mapper-observability", feature = "db"))]
+            if !self.mysql_pools.is_empty() {
+                crate::sql_observability::install_mysql_pools(&application, &self.mysql_pools)
+                    .await?;
+            }
+            #[cfg(feature = "mapper-observability")]
+            if !self.pg_pools.is_empty() {
+                crate::sql_observability::install_postgres_pools(&application, &self.pg_pools)
+                    .await?;
             }
 
             let catalog = Arc::new(
@@ -614,7 +674,7 @@ impl ApplicationComponent for DbComponent {
                             let pool = self.mysql_pools.get(&name).ok_or_else(|| {
                                 db_error(ApplicationPhase::Prepare, "MySQL pool is unavailable")
                             })?;
-                            namigrate::run_gate(pool, &migrator, &plan.settings)
+                            namigrate::run_gate_for(pool, &name, &migrator, &plan.settings)
                                 .await
                                 .map_err(|error| {
                                     db_error(
@@ -647,11 +707,13 @@ impl ApplicationComponent for DbComponent {
                             ));
                         }
                         if plan.settings.mode == namigrate_core::MigrationMode::Disabled {
-                            namigrate_pgsql::run_gate(
+                            namigrate_pgsql::run_gate_with_evidence_for(
                                 business_pool,
+                                &name,
                                 &plan.schema,
                                 &migrator,
                                 &plan.settings,
+                                &[],
                             )
                             .await
                             .map_err(|error| {
@@ -669,19 +731,29 @@ impl ApplicationComponent for DbComponent {
                                 connect_timeout_ms: 5_000,
                                 probe_on_start: true,
                             };
-                            let pool =
-                                natx_pgsql::datasource::build_pool(&config).map_err(|error| {
-                                    db_error_src(
-                                        ApplicationPhase::Prepare,
-                                        format!(
-                                            "datasource `{name}` migration session pool is invalid"
-                                        ),
-                                        error,
-                                    )
-                                })?;
+                            #[cfg(feature = "mapper-observability")]
+                            let pool = natx_pgsql::datasource::build_pool_with_logging(
+                                &config,
+                                crate::sql_observability::statement_logging(&application, &name)
+                                    .await?,
+                            );
+                            #[cfg(not(feature = "mapper-observability"))]
+                            let pool = natx_pgsql::datasource::build_pool(&config);
+                            let pool = pool.map_err(|error| {
+                                db_error_src(
+                                    ApplicationPhase::Prepare,
+                                    format!(
+                                        "datasource `{name}` migration session pool is invalid"
+                                    ),
+                                    error,
+                                )
+                            })?;
                             let result: ApplicationResult<()> = async {
-                                let mut migration_connection = pool
-                                    .acquire()
+                                let mut migration_connection = natx_pgsql::observed_pool_acquire(
+                                    &name,
+                                    natx_core::observability::ConnectionPurpose::Migration,
+                                    &pool,
+                                )
                                     .await
                                     .map_err(|error| {
                                         db_error_src(
@@ -695,8 +767,9 @@ impl ApplicationComponent for DbComponent {
                                     .detach();
                                 // 独立 endpoint 可能因配置漂移指向另一 database 或 schema；必须在取得
                                 // advisory lock 前与业务池复验身份，避免在错误目标上通过门禁。
-                                namigrate_pgsql::verify_target_identity(
+                                namigrate_pgsql::verify_target_identity_for(
                                     business_pool,
+                                    &name,
                                     &mut migration_connection,
                                     &plan.schema,
                                 )
@@ -731,11 +804,13 @@ impl ApplicationComponent for DbComponent {
                             pool.close().await;
                             result?;
                         } else {
-                            namigrate_pgsql::run_gate(
+                            namigrate_pgsql::run_gate_with_evidence_for(
                                 business_pool,
+                                &name,
                                 &plan.schema,
                                 &migrator,
                                 &plan.settings,
+                                &[],
                             )
                             .await
                             .map_err(|error| {
@@ -887,6 +962,16 @@ impl DbComponent {
             mysql: mysql_registry.clone(),
             pgsql: pg_registry.clone(),
         }));
+        #[cfg(all(feature = "mapper-observability", feature = "db"))]
+        if !self.mysql_pools.is_empty() {
+            crate::sql_observability::install_mysql_pools(context.application(), &self.mysql_pools)
+                .await?;
+        }
+        #[cfg(feature = "mapper-observability")]
+        if !self.pg_pools.is_empty() {
+            crate::sql_observability::install_postgres_pools(context.application(), &self.pg_pools)
+                .await?;
+        }
         natx_core::install_managed_catalog(&deferred.token, &catalog).map_err(|error| {
             db_error_src(
                 ApplicationPhase::Prepare,
@@ -964,7 +1049,7 @@ impl DbComponent {
         })?;
         self.drivers.insert(DEFAULT_DATASOURCE.to_owned(), driver);
         self.catalog = Some(catalog);
-        pool.acquire().await.map_err(|error| {
+        pool.acquire(DEFAULT_DATASOURCE).await.map_err(|error| {
             db_error_src(
                 ApplicationPhase::Prepare,
                 "deferred datasource probe failed",
@@ -977,6 +1062,7 @@ impl DbComponent {
         self.critical_task = Some(Box::pin(run_db_monitor(
             context.application().clone(),
             vec![DbMonitorInput {
+                name: DEFAULT_DATASOURCE.to_owned(),
                 pool,
                 contributor: deferred.contributor,
             }],
@@ -1034,7 +1120,11 @@ fn build_monitor_inputs(
                     .clone(),
             ),
         };
-        inputs.push(DbMonitorInput { pool, contributor });
+        inputs.push(DbMonitorInput {
+            name: name.clone(),
+            pool,
+            contributor,
+        });
     }
     Ok(inputs)
 }

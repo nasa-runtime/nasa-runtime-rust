@@ -4,6 +4,8 @@
 收进一个稳定合同。业务只定义 proto、实现生成的 trait，并把生成的 server 登记给
 `#[nasa::application("grpc")]`；业务不构造 tonic Router，不逐个 service 套消息限制，也不直接选择
 `tonic`、`prost`、codec 或 build crate 的版本。
+socket 绑定与接流授权分离：受管启动先完成 `Bound` 装配，待所有初始化与最终检查成功后统一激活；
+端口可连接不代表 RPC 已开放，注册发现前还须确认 listener 已运行。
 
 ```toml
 [dependencies]
@@ -94,7 +96,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 登记动作没有网络副作用。Application 在 Prepare 封口 registry，等全部 initializer 成功后才在 Ready
-阶段校验 descriptor 与方法策略、装配 health/reflection、绑定 listener 并开放 readiness。缺少业务
+阶段校验 descriptor 与方法策略、装配 health/reflection 并绑定 listener；此时为 `Bound`，尚未接流。
+全部组件、initializer 任务工厂和最终检查成功后，Application 发布 Ready 并统一放行，gRPC 才发布
+Running / health Serving。缺少业务
 service、重复 service、codegen ABI 不一致、descriptor 冲突、未知方法策略或端口绑定失败都会在接流前
 拒绝启动。`grpc.health_only: true` 是显式允许没有业务 service 的唯一例外。
 
@@ -124,7 +128,9 @@ UserHook 登记 generated service
   -> Prepare 封口 registry
   -> initializer 全部成功
   -> Ready 校验 descriptor/策略并装配 health、reflection、TLS
-  -> 预绑定 listener，发布 readiness、observer 与发现 metadata
+  -> 预绑定 listener，发布 Bound observer，准备发现 metadata，不 accept
+  -> Application 完成所有任务工厂与最终检查，发布 Ready 并统一放行
+  -> 发布 Running / health Serving，随后注册发现 endpoint
   -> 停机先从发现中心注销，再关闭新连接准入
   -> 两阶段 GOAWAY 排空，超时后终止 serve task
 ```
@@ -207,7 +213,10 @@ grpc:
 
 ## 服务发现
 
-同时声明 `"nacos-discovery"` 时，gRPC listener 必须先 Ready，随后注册组件才发布实际端口。Web 与
+同时声明 `"nacos-discovery"` 时，Ready 只冻结实际端口与注册计划；Application 统一放行且 gRPC
+listener 确认 Running 后才对外注册。注册确认之前 `app.is_ready()` 与 `/readyz` 仍不可用，不能仅以
+Application 的 Ready 状态代替动态依赖证据。注册仍受原启动 deadline 约束，失败或超时触发统一停机。
+Web 与
 gRPC 共存时，实例主端口保持 Web 端口，gRPC 端点只通过固定 metadata 发布：
 
 | metadata | 含义 |
@@ -280,6 +289,14 @@ let observer = handle.observer();
 // 进程收到自己的停机信号后：
 handle.shutdown().await?;
 ```
+
+需要把 gRPC 纳入自己的启动屏障时，使用 `ServerPlan::bind(address).await?` 取得
+`(GrpcServerHandle, GrpcServerActivation)`。前者持有唯一停机权；后者通过
+`activate().await?` 一次性授权接流，并等待 Running 确认。直接 `start` 等价于绑定后立即激活。
+激活前状态为 `Bound`，不会 accept、执行 TLS 握手或返回 health/RPC 响应；操作系统 TCP backlog
+仍可能完成连接，因此 TCP connect 成功不是就绪证明。丢弃未消费的激活权会关闭 listener。
+激活请求发出后取消等待不撤回许可，仍须由 handle 关闭；激活与正常停机的状态发布串行化，停机
+先撤销 health 再取消准入，不能被并发激活重新开放。
 
 独立 TLS 通过 `GrpcTlsIdentity::server(...)` 或 `GrpcTlsIdentity::mutual(...)` 提交已解析 PEM；调用方负责
 secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同步 Drop 只负责停止准入和终止任务的

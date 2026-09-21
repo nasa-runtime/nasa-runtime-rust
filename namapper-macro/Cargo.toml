@@ -4,11 +4,11 @@ name = "namapper-macro"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[Mapper]/#[Query]/#[Insert]/#[Update]/#[Delete]/#[Execute] proc macros"
+description = "Declarative SQL mapper macros with static method catalogs and query lifecycle observability"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["mapper", "sql", "macro", "database", "async"]
+keywords = ["mapper", "sql", "macro", "database", "observability"]
 categories = ["development-tools::procedural-macro-helpers", "database"]
 
 [lib]

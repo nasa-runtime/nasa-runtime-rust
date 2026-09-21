@@ -3,6 +3,16 @@
 //! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL 事务、
 //! Inbox、Outbox、Saga、消息传输、缓存、跨副本业务配额、路由、调度、配置、发现和工具模块。
 //!
+//! # SQL 观测与业务通知
+//!
+//! `application` 与 `mapper`/`mapper-pgsql` 自动装配 SQL、连接与 Pool 指标；YAML 控制开发日志、
+//! 阈值通知与统一出口。原始执行耗时达到或超过阈值即命中，不计连接等待和 Stream 消费者处理。
+//! 业务通过 `nasa::application::notifications::init` 安装 `Notify`，未安装则忽略；逐条通知需启用
+//! 慢告警并设 `cooldown_ms=0`。SQL 路径只尝试入队，worker 调用业务适配器，框架不指定通知微服务
+//! 协议或连接机器人。通知拥塞、超时与失败不改变 SQL 或事务结果，也不构成持久送达保证。
+//! 指标出口由 `grafana.observability` 显式开启，平台 controller 独立拥有外部资源；期望实例指标由
+//! 外部平台持续提供，框架只引用，不维护静态实例清单。
+//!
 //! # 持久化 Saga
 //!
 //! `saga-runtime` / `saga-runtime-pgsql` 将所选数据库的本地 ACID、Outbox 至少一次、Inbox 幂等、
@@ -183,212 +193,8 @@ pub mod grafana {
     pub use grafana_impl::*;
     pub use grafana_macro::{global_fallback, grafana};
 
-    /// nafana → napp 统一 hub 兼容源。
-    ///
-    /// napp 不直接依赖 nafana(避免倒置分层),故在门面层把 nafana 全局 registry 的 Prometheus 渲染
-    /// 包成 `LegacyMetricsSource`。业务在 UserHook 一行接入:
-    /// `app.register_metrics_source(nasa::grafana::metrics_source())?`——nafana 的族随框架统一
-    /// `/metrics` 一并渲染,并纳入 descriptor 冲突审计,无需再单独挂 `nafana::metrics`。
-    ///
-    /// 需同时启用 `application` 与 `web`(统一 `/metrics` 由 napp 的 Web 组件暴露)。
-    #[cfg(all(feature = "application", feature = "web"))]
-    mod hub_source {
-        use std::sync::Arc;
-
-        use application_impl::{LegacyMetricsSource, MetricDescriptor, MetricKind};
-
-        macro_rules! nafana_desc {
-            ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr) => {
-                nafana_desc!($ident, $name, $help, $kind, $labels, &[]);
-            };
-            ($ident:ident, $name:literal, $help:literal, $kind:expr, $labels:expr, $bounds:expr) => {
-                static $ident: MetricDescriptor = MetricDescriptor {
-                    name: $name,
-                    help: $help,
-                    unit: "",
-                    kind: $kind,
-                    label_names: $labels,
-                    histogram_bounds: $bounds,
-                };
-            };
-        }
-
-        nafana_desc!(
-            REQUESTS_TOTAL,
-            "nafana_requests_total",
-            "接口请求结局单调计数(success/failure/timeout/rejected/canceled)。",
-            MetricKind::Counter,
-            &["command", "group", "outcome"]
-        );
-        nafana_desc!(
-            FALLBACK_TOTAL,
-            "nafana_fallback_total",
-            "拒绝/超时分支产出降级响应的单调计数。",
-            MetricKind::Counter,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            GLOBAL_FALLBACK_TOTAL,
-            "nafana_global_fallback_total",
-            "全局降级处理器结局单调计数。",
-            MetricKind::Counter,
-            &["command", "group", "outcome"]
-        );
-        nafana_desc!(
-            TPS_TOTAL,
-            "nafana_tps_total",
-            "TPS 单调计数:每请求按 tps_weight 累加。",
-            MetricKind::Counter,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            INFLIGHT,
-            "nafana_inflight",
-            "当前执行区并发。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            INFLIGHT_ROLLING_MAX,
-            "nafana_inflight_rolling_max",
-            "10s 滚动窗口内并发峰值(随窗口回落)。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            INFLIGHT_LIFETIME_MAX,
-            "nafana_inflight_lifetime_max",
-            "进程生命周期并发峰值(只增不减)。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            MAX_CONCURRENT,
-            "nafana_max_concurrent",
-            "bulkhead 容量;0 = 不限并发。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            TIMEOUT_MS,
-            "nafana_timeout_ms",
-            "单请求超时毫秒;0 = 不超时。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        nafana_desc!(
-            TPS_WEIGHT,
-            "nafana_tps_weight",
-            "TPS 权重;0 = 未标 TPS 或权重 0。",
-            MetricKind::Gauge,
-            &["command", "group"]
-        );
-        static LATENCY: MetricDescriptor = MetricDescriptor {
-            name: "nafana_latency_seconds",
-            help: "执行延迟直方图(秒);rejected/canceled 不进延迟统计。",
-            unit: "seconds",
-            kind: MetricKind::Histogram,
-            label_names: &["command", "group"],
-            histogram_bounds: &[
-                0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-            ],
-        };
-        nafana_desc!(
-            COMMAND_INFO,
-            "nafana_command_info",
-            "命令展示元信息(path = 真实路由)。",
-            MetricKind::Gauge,
-            &["command", "group", "path"]
-        );
-
-        /// nafana 全部指标族的静态 descriptor manifest。
-        static NAFANA_DESCRIPTORS: [&MetricDescriptor; 12] = [
-            &REQUESTS_TOTAL,
-            &FALLBACK_TOTAL,
-            &GLOBAL_FALLBACK_TOTAL,
-            &TPS_TOTAL,
-            &INFLIGHT,
-            &INFLIGHT_ROLLING_MAX,
-            &INFLIGHT_LIFETIME_MAX,
-            &MAX_CONCURRENT,
-            &TIMEOUT_MS,
-            &TPS_WEIGHT,
-            &LATENCY,
-            &COMMAND_INFO,
-        ];
-
-        /// 把 nafana 全局 registry 的 Prometheus 渲染包成兼容源。
-        struct NafanaMetricsSource;
-
-        impl LegacyMetricsSource for NafanaMetricsSource {
-            /// 业务作用：返回 nafana 兼容源拥有的静态指标族目录。
-            ///
-            /// 参数说明: 无。
-            ///
-            /// 返回：启动期冲突审计和结构化校验共用的全部 nafana descriptor。
-            fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
-                &NAFANA_DESCRIPTORS
-            }
-
-            /// 业务作用：把 nafana 全局 registry 的结构化快照映射到统一指标样本。
-            ///
-            /// 参数说明: 无。
-            ///
-            /// 返回：始终为 `Some`，其中保留 command、group、结局与直方图形状的
-            /// provider-neutral 样本。
-            fn snapshot(&self) -> Option<Vec<application_impl::MetricSample>> {
-                Some(
-                    super::structured_metrics_snapshot()
-                        .into_iter()
-                        .map(|sample| application_impl::MetricSample {
-                            name: sample.name,
-                            labels: sample.labels,
-                            value: match sample.value {
-                                super::PrometheusMetricValue::Counter(value) => {
-                                    application_impl::MetricValue::Counter(value)
-                                }
-                                super::PrometheusMetricValue::Gauge(value) => {
-                                    application_impl::MetricValue::Gauge(value)
-                                }
-                                super::PrometheusMetricValue::Histogram {
-                                    buckets,
-                                    sum,
-                                    count,
-                                } => application_impl::MetricValue::Histogram {
-                                    bounds: LATENCY.histogram_bounds,
-                                    buckets,
-                                    sum,
-                                    count,
-                                },
-                            },
-                        })
-                        .collect(),
-                )
-            }
-
-            /// 业务作用：读取 nafana 全局 registry 当前快照并追加 Prometheus exposition。
-            ///
-            /// 参数说明：
-            /// - `output`: 接收旧源文本的缓冲区。
-            ///
-            /// 返回：无；该入口仅保留给显式选择文本旧源模式的兼容调用方。
-            fn render_prometheus(&self, output: &mut String) {
-                output.push_str(&super::render_metrics());
-            }
-        }
-
-        /// 业务作用：返回 nafana 兼容源,供 `Application::register_metrics_source` 并入统一 hub。
-        ///
-        /// 参数说明: 无。
-        ///
-        /// 返回：无状态源；每次快照读取 nafana 进程级全局 registry 的当前值。
-        pub fn metrics_source() -> Arc<dyn LegacyMetricsSource> {
-            Arc::new(NafanaMetricsSource)
-        }
-    }
-
-    #[cfg(all(feature = "application", feature = "web"))]
-    pub use hub_source::metrics_source;
+    /// 接口指标源由 nafana 提供；受管 Application 自动登记，独立宿主可以显式复用。
+    pub use grafana_impl::metrics_source;
 }
 
 /// 两级缓存(L1 moka + L2 Redis 三防)+ `#[cached]` / `#[cache_invalidate]`。

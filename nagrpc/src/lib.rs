@@ -6,6 +6,8 @@
 //! 交给唯一 registry。`ServerPlan` 自动装配 health、可选 reflection、HTTP/2 安全参数和有预算的 drain；
 //! 业务不构造 Router，也不直接选择 tonic/prost 版本。Application 组合入口由 `napp` 持有同一 registry
 //! 与 shutdown owner，独立入口只把最终 owner 交给调用方。
+//! [`ServerPlan::bind`] 分离 socket 所有权与一次性接流许可，Bound 状态不处理协议；
+//! 上层屏障通过后消费 [`GrpcServerActivation`] 才接流。直接 [`ServerPlan::start`] 立即绑定并激活。
 //!
 //! listener 在 bind 前冻结 service/method 目录、TLS 与容量；运行期按连接、RPC、stream 和消息分别
 //! 执行有界准入，并以固定原因和结局导出观测事实。停机先停止新准入，再发送 HTTP/2 GOAWAY 并在
@@ -28,7 +30,7 @@ use std::time::{Duration, Instant};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -2622,6 +2624,8 @@ impl GrpcServerConfig {
 /// listener 运行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrpcServerState {
+    /// listener 已绑定，尚无接流许可；不执行 accept、TLS 握手或 RPC，也不发布 Serving。
+    Bound,
     /// listener 已绑定且 serve 任务仍持有接流所有权；持续 accept 失败需结合观察句柄判断。
     Running,
     /// 已停止准入，正在排空。
@@ -2640,6 +2644,7 @@ impl GrpcServerState {
     /// 返回：与公开状态一一对应的内部整数。
     fn encode(self) -> u8 {
         match self {
+            Self::Bound => 0,
             Self::Running => 1,
             Self::Draining => 2,
             Self::Closed => 3,
@@ -2655,6 +2660,7 @@ impl GrpcServerState {
     /// 返回：已知映射对应的状态；未知值返回 `Failed`。
     fn decode(value: u8) -> Self {
         match value {
+            0 => Self::Bound,
             1 => Self::Running,
             2 => Self::Draining,
             3 => Self::Closed,
@@ -2923,6 +2929,19 @@ impl ServerPlan {
     ///
     /// 返回：端口、路由和 health 状态都成功移交给 serve task 后返回 owner；任一门禁失败时不开放端口。
     pub async fn start(self, bind: SocketAddr) -> Result<GrpcServerHandle, GrpcServerError> {
+        let (handle, activation) = self.bind(bind).await?;
+        activation.activate().await?;
+        Ok(handle)
+    }
+
+    /// 业务作用：冻结路由、TLS 与容量并预绑定 socket，将接流许可交给上层启动屏障。
+    /// 参数说明：`bind` 为本地监听地址，可使用端口 0 取得操作系统分配的地址。
+    /// 返回：成功得到唯一 shutdown owner 与一次性激活权；激活前仅为 Bound，丢弃激活权会关闭 listener。
+    /// TCP backlog 可能完成连接建立，但未激活时不会 accept、处理协议或返回 health/RPC 响应。
+    pub async fn bind(
+        self,
+        bind: SocketAddr,
+    ) -> Result<(GrpcServerHandle, GrpcServerActivation), GrpcServerError> {
         self.config.validate()?;
         if self.registry.is_empty() && !self.health_only {
             return Err(GrpcServerError::MissingService);
@@ -3010,7 +3029,7 @@ impl ServerPlan {
             ));
         }
 
-        GrpcServerHandle::start_managed(
+        GrpcServerHandle::bind_managed(
             routes.routes(),
             bind,
             self.config,
@@ -3033,6 +3052,8 @@ struct Inner {
     join: Mutex<Option<JoinHandle<Result<(), GrpcServerError>>>>,
     drain_timeout: Duration,
     health: Option<ManagedHealth>,
+    /// 接流发布与正常停机共享互斥边界，防止撤销 health 后又被并发激活改回 Serving。
+    admission: Arc<Mutex<()>>,
 }
 
 /// listener 观测量的互斥状态；连接受理、释放与失败段更新在同一临界区提交。
@@ -3103,7 +3124,7 @@ impl GrpcServerObserver {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：Running、Draining、Closed 或 Failed 的原子快照。
+    /// 返回：Bound、Running、Draining、Closed 或 Failed 的原子快照。
     pub fn state(&self) -> GrpcServerState {
         GrpcServerState::decode(self.state.load(Ordering::Acquire))
     }
@@ -4103,13 +4124,32 @@ async fn drive_managed_connection(
     }
 }
 
+/// listener 的一次性接流许可；只有上层全部启动门禁通过后才能消费。
+pub struct GrpcServerActivation {
+    requested: oneshot::Sender<()>,
+    started: oneshot::Receiver<()>,
+}
+
+impl GrpcServerActivation {
+    /// 业务作用：允许已绑定 listener 发布 Serving 并开始接流，等待所有权确认。
+    /// 参数说明：无。
+    /// 返回：serve owner 已接受许可且发布 Running 时成功；owner 已关闭时失败。
+    /// 请求发出后取消等待不撤回许可，调用方仍须通过 GrpcServerHandle 关闭 listener。
+    pub async fn activate(self) -> Result<(), GrpcServerError> {
+        self.requested
+            .send(())
+            .map_err(|_| GrpcServerError::ServeFailed)?;
+        self.started.await.map_err(|_| GrpcServerError::ServeFailed)
+    }
+}
+
 /// 唯一 shutdown owner 的 gRPC server handle。
 pub struct GrpcServerHandle {
     inner: Arc<Inner>,
 }
 
 impl GrpcServerHandle {
-    /// 业务作用：预绑定稳定 ServerPlan listener，并由框架逐连接持有 HTTP/2 driver 与 GOAWAY 权限。
+    /// 业务作用：预绑定稳定 ServerPlan listener，在一次性许可到达后才取得 HTTP/2 driver 与 GOAWAY 权限。
     ///
     /// 参数说明：
     /// - `routes`: 已自动装配业务 service、health 与可选 reflection 的封口路由。
@@ -4120,8 +4160,8 @@ impl GrpcServerHandle {
     /// - `health`: 与 listener 同生命周期的标准 health 状态 owner。
     /// - `rpc_metrics`: 由封口 descriptor 预创建且与 observer 共用的方法级会计目录。
     ///
-    /// 返回：listener、accept 循环和逐连接 driver 全部建立后返回唯一停机 owner；失败时不遗留任务。
-    async fn start_managed(
+    /// 返回：listener 的停机 owner 与激活权；等待期间不 accept，失败或放弃许可时不遗留接流任务。
+    async fn bind_managed(
         routes: tonic::service::Routes,
         bind: SocketAddr,
         config: GrpcServerConfig,
@@ -4129,7 +4169,7 @@ impl GrpcServerHandle {
         tls_source: Option<Arc<dyn GrpcTlsAcceptorSource>>,
         health: Option<ManagedHealth>,
         rpc_metrics: Arc<RpcMetrics>,
-    ) -> Result<Self, GrpcServerError> {
+    ) -> Result<(Self, GrpcServerActivation), GrpcServerError> {
         config.validate()?;
         if tls_identity.is_some() && tls_source.is_some() {
             return Err(GrpcServerError::TlsConfiguration);
@@ -4145,7 +4185,7 @@ impl GrpcServerHandle {
             .map_err(|_| GrpcServerError::BindFailed)?;
         let shutdown = CancellationToken::new();
         let task_shutdown = shutdown.clone();
-        let state = Arc::new(AtomicU8::new(GrpcServerState::Running.encode()));
+        let state = Arc::new(AtomicU8::new(GrpcServerState::Bound.encode()));
         let task_state = Arc::clone(&state);
         let metrics = Arc::new(StdMutex::new(GrpcServerMetrics::default()));
         let task_metrics = Arc::clone(&metrics);
@@ -4153,12 +4193,37 @@ impl GrpcServerHandle {
         let task_rpc_metrics = Arc::clone(&rpc_metrics);
         let connection_slots = Arc::new(Semaphore::new(config.max_connections));
         let drain_timeout = config.drain_timeout;
+        let (requested, activation) = oneshot::channel();
+        let (started, confirmation) = oneshot::channel();
+        let admission = Arc::new(Mutex::new(()));
+        let task_admission = admission.clone();
+        let task_health = health.clone();
         let join = tokio::spawn(async move {
+            // socket 所有权先就位，接流权来自上层统一屏障；关闭或丢弃许可不能被当成成功激活。
+            let activate = tokio::select! {
+                biased;
+                _ = task_shutdown.cancelled() => false,
+                result = activation => result.is_ok(),
+            };
+            {
+                let _admission = task_admission.lock().await;
+                if !activate || task_shutdown.is_cancelled() {
+                    publish_state(&task_state, &serve_metrics, GrpcServerState::Closed);
+                    return Ok(());
+                }
+                // 正常停机先取得同一边界再摘流，不能与 Serving 发布交错而重新开放已撤销的 listener。
+                if let Some(health) = &task_health {
+                    health.mark_serving().await;
+                }
+                publish_state(&task_state, &serve_metrics, GrpcServerState::Running);
+                let _ = started.send(());
+            }
             let mut connections = tokio::task::JoinSet::new();
             let mut accept_backoff = ACCEPT_RETRY_INITIAL_BACKOFF;
             let serve_result = loop {
                 // permit 必须先于 accept 取得；停机信号可以取消容量等待，避免 listener owner 卡在空槽。
                 let permit = tokio::select! {
+                    biased;
                     _ = task_shutdown.cancelled() => break Ok(()),
                     permit = Arc::clone(&connection_slots).acquire_owned() => {
                         match permit {
@@ -4168,6 +4233,7 @@ impl GrpcServerHandle {
                     }
                 };
                 let accepted = tokio::select! {
+                    biased;
                     _ = task_shutdown.cancelled() => {
                         drop(permit);
                         break Ok(());
@@ -4286,13 +4352,16 @@ impl GrpcServerHandle {
                 join: Mutex::new(Some(join)),
                 drain_timeout,
                 health,
+                admission,
             }),
         };
-        if let Some(health) = &handle.inner.health {
-            // health 只在 listener 已绑定且 accept/driver owner 就位后对外发布 Serving。
-            health.mark_serving().await;
-        }
-        Ok(handle)
+        Ok((
+            handle,
+            GrpcServerActivation {
+                requested,
+                started: confirmation,
+            },
+        ))
     }
 
     /// 业务作用：返回 listener 实际取得的绑定地址。
@@ -4308,7 +4377,7 @@ impl GrpcServerHandle {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：Running、Draining、Closed 或 Failed 的原子快照。
+    /// 返回：Bound、Running、Draining、Closed 或 Failed 的原子快照。
     pub fn state(&self) -> GrpcServerState {
         GrpcServerState::decode(self.inner.state.load(Ordering::Acquire))
     }
@@ -4351,16 +4420,19 @@ impl GrpcServerHandle {
         let Some(join) = guard.as_mut() else {
             return Err(GrpcServerError::AlreadyClosed);
         };
-        if let Some(health) = &self.inner.health {
-            // 停止准入前先摘除 health，给上游负载均衡留出停止派发新 RPC 的因果边界。
-            health.mark_not_serving().await;
+        {
+            let _admission = self.inner.admission.lock().await;
+            if let Some(health) = &self.inner.health {
+                // 停止准入前先摘除 health，给上游负载均衡留出停止派发新 RPC 的因果边界。
+                health.mark_not_serving().await;
+            }
+            publish_state(
+                &self.inner.state,
+                &self.inner.metrics,
+                GrpcServerState::Draining,
+            );
+            self.inner.shutdown.cancel();
         }
-        publish_state(
-            &self.inner.state,
-            &self.inner.metrics,
-            GrpcServerState::Draining,
-        );
-        self.inner.shutdown.cancel();
         // JoinHandle 必须留在共享 slot 里直到 await 真正结束。若调用方的 shutdown future 被外层
         // deadline/cancellation 丢弃，MutexGuard 会释放但 slot 仍是 Some；后续 shutdown 可继续
         // drain，最终 handle 的 Drop 也仍能 abort。先 take 再 await 会把取消变成 detached listener。

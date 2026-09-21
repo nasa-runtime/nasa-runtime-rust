@@ -2,6 +2,32 @@
 
 `namapper-pgsql` 提供 PostgreSQL 声明式 Mapper 运行时，使用 `$1..$n` prepared 占位符，并接入
 `natx-pgsql` 的命名 datasource 与 ambient transaction。
+所有生成方法默认采集调用与数据库原子指标，区分连接等待、缓存命中、真实执行与流消费；
+受管应用通过 YAML 开启开发 SQL/参数日志、慢操作告警、异步通知和指标出口。
+
+## SQL 观测
+
+同时启用 `nasa` 的 `application` 与 `mapper-pgsql` 时，观测 source、连接选项、通知 worker 和指标
+出口自动进入 Application 生命周期。所有可调策略均有 YAML 入口，非必要项递归补齐默认值。
+逐条 SQL 与参数默认关闭；参数只允许显式开发环境，敏感名字强制脱敏，未知类型用占位。
+
+MySQL/PostgreSQL 使用同一固定词表、指标桶和通知规则，但 driver 与数据源身份严格区分。
+SQLx 错误在擦除前分类；通知失败不改变 SQL 返回、事务结果或数据库 readiness。
+完整默认配置与边界见 [后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+
+### 阈值通知与执行边界
+
+宏冻结方法身份，运行时先经过事务与连接门禁，再围绕真实 SQLx 调用记录耗时。逻辑方法包含缓存
+处理，数据库执行不包含连接等待；Stream 只把底层活跃取行时间用于慢阈值，消费者处理另计生命周期。
+缓存命中和未 poll 的流不伪造数据库调用。
+
+业务通过 `nasa::application::notifications::init` 安装 `Notify`，配置
+`sql.observability.slow_sql.threshold_ms`、`alerts.slow_sql.enabled=true` 与
+`alerts.slow_sql.cooldown_ms=0`，即可让每次原始耗时达到或超过阈值的 SQL 尝试入队。
+默认阈值为 1000 ms，通知冷却为 60000 ms；慢日志开关独立。未安装实现则忽略，队列满、下游失败
+或停机可能丢弃通知。发送发生于受管 worker，通知微服务的协议由业务适配器负责。
+
+## SQL 与返回能力
 
 它支持静态 SQL、`if`/`choose`/`foreach`/`trim` 动态 SQL、列表 bind、`RETURNING`、分页、白名单排序、
 流式结果、`EnumOrdinal`、JSON 和 L2 cache。占位符只由结构化 bind 节点产生；字符串、quoted identifier、

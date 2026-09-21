@@ -10,7 +10,8 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
                                                         └────→ Failed
 ```
 
-- `Ready` 只在组件启动、业务 Hook 成功、资源封存和必要 listener 绑定后提交。
+- 生命周期 `Ready` 在组件装配、业务 Hook、initializer 工厂与最终静态检查完成且共享启动预算有效时提交，
+  随后统一放行受管终端任务。gRPC `Bound` 不是 Running，服务注册待确认时 `app.is_ready()` 仍为 false。
 - 任一关键任务在 Running 阶段意外结束会提交失败意图，进程进入统一停机。
 - 进入 Stopping 后 readiness 先变为 false，再摘流、停止 accept、排空任务并反向释放资源。
 - `Failed` 是终态，不会回到 Running。
@@ -37,6 +38,34 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
 - 数据库池、缓存、配置监听和服务发现处于最后一次成功状态。
 - 配置刷新没有 `ApplyFailed` 或 `RestartRequired` 长时间未处理。
 - 日志中没有连接串、访问令牌、业务 payload 或控制 token。
+
+## SQL、通知与指标出口
+
+SQL 日志、阈值与通知策略在启动时冻结，按 `method > datasource > global` 逐叶覆盖；可以通过
+`app.sql_observability_effective(datasource, method).await` 查询有效值。日志级别热刷新不能改变已建
+连接的 SQLx 选项。Mapper 方法耗时、真实数据库调用、Pool acquire、事务连接槽和流生命周期不能混算。
+
+发现慢 SQL 未通知时，依次检查业务是否已经 `init(Notify)`、告警是否启用、有效阈值与冷却、队列
+丢弃和 provider 投递结果。默认慢通知冷却为 60000 ms；逐条通知必须设为 0，且原始耗时达到阈值
+即命中。错误通知路由启用时，同一次慢失败按错误规则及其冷却裁决，不重复发送慢通知。
+`RowNotFound` 不触发执行错误通知，取消与析构不发送通知；裸 SQLx 不产生 Mapper 慢 SQL 通知。
+非零冷却在入队前占用，即使实现缺失或队列满也不撤销，稍后安装实现不会清零冷却。
+冷却抑制没有进入队列，不应从 `nanotify_dropped_total` 寻找对应丢弃。命名路由未提交实现时，
+worker 会忽略已入队的候选，需区分默认路由的入队前忽略与命名路由的消费时忽略。
+
+`nanotify_enqueued_total` 只表示入队，`nanotify_deliveries_total{outcome="accepted"}` 只表示业务
+适配器确认接受，均不是最终用户收件证明。结合 `nanotify_dropped_total`、队列深度与容量、投递
+耗时判断阻塞点，不通过让 SQL 等待下游或无限重试掩盖通知故障。
+投递耗时与 `delivery_timeout_ms` 都从 worker 开始处理时计算，不包含排队或启动屏障等待。
+队列没有消息 TTL，单条投递预算不是端到端收件期限。
+
+统一出口通过 `grafana.observability` 显式启用，不由 `server.health` 自动开放。scrape 失败、
+remote write 失败、无调用和无数据需要区分。remote write 失联信号不能区分进程退出、网络中断
+与 receiver 拒绝；应检查外部平台期望指标是否持续更新，期望源缺失不能解释为实例全部退役。
+平台资源只由独立 controller 写入，业务副本不需要 Grafana token 或 Kubernetes 写权限。
+
+详细默认值见 [SQL 观测](../namapper-core/README.md#sql-观测与配置)，出口与平台含义见
+[统一观测说明](../nafana/OBSERVABILITY.md)。
 
 ## 授权与链路观测
 

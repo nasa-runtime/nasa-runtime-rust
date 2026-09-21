@@ -136,6 +136,8 @@ fn build_component(
         ComponentId::Scheduling => build_scheduling_component(),
         ComponentId::NacosDiscovery => build_nacos_discovery_component(),
         ComponentId::Application
+        | ComponentId::SqlObservability
+        | ComponentId::Observability
         | ComponentId::Config
         | ComponentId::Resources
         | ComponentId::Supervisor
@@ -481,7 +483,63 @@ fn install_fallback_subscriber() {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    #[cfg(feature = "mapper-observability")]
+    {
+        let base = filter.to_string();
+        let builder = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_filter_reloading();
+        let handle = builder.reload_handle();
+        if builder.try_init().is_ok() {
+            let _ = FALLBACK_FILTER.set((base, handle));
+        }
+    }
+    #[cfg(not(feature = "mapper-observability"))]
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(feature = "mapper-observability")]
+type FallbackFilter = tracing_subscriber::reload::Handle<
+    tracing_subscriber::EnvFilter,
+    tracing_subscriber::fmt::Formatter,
+>;
+#[cfg(feature = "mapper-observability")]
+static FALLBACK_FILTER: std::sync::OnceLock<(String, FallbackFilter)> = std::sync::OnceLock::new();
+
+/// 业务作用：没有文件日志组件时也让 YAML 的 SQL console 开关作用于框架控制台。
+/// 参数说明：`root` 为已经合并的最终配置，过滤器只归框架 fallback subscriber 所有。
+/// 返回：固定 SQL target 合并成功；外部自定义 subscriber 不被替换，非法指令拒绝启动。
+#[cfg(feature = "mapper-observability")]
+pub(crate) fn configure_fallback_sql_logging(
+    root: &serde_json::Value,
+) -> crate::ApplicationResult<()> {
+    let Some((base, handle)) = FALLBACK_FILTER.get() else {
+        return Ok(());
+    };
+    let directive =
+        namapper_core::observability::config::console_directive(root).map_err(|message| {
+            ApplicationError::new(
+                ComponentId::SqlObservability,
+                ApplicationPhase::Start,
+                message,
+            )
+        })?;
+    let parameters = directive.replace("sqlx::query=", "namapper::parameters=");
+    let filter = tracing_subscriber::EnvFilter::try_new(format!("{base},{directive},{parameters}"))
+        .map_err(|_| {
+            ApplicationError::new(
+                ComponentId::SqlObservability,
+                ApplicationPhase::Start,
+                "invalid effective SQL console filter",
+            )
+        })?;
+    handle.reload(filter).map_err(|_| {
+        ApplicationError::new(
+            ComponentId::SqlObservability,
+            ApplicationPhase::Start,
+            "SQL console filter is unavailable",
+        )
+    })
 }
 
 /// 业务作用：创建由同步入口独占的多线程 runtime。

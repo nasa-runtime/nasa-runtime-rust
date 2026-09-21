@@ -9,6 +9,19 @@
 //! action、资源和任务沿 active stack 逆序关闭。外部系统中已经提交的事实不属于本地回滚能力，
 //! initializer 必须通过事务或稳定幂等键保证可安全重跑。
 //!
+//! # SQL 观测与统一放行
+//!
+//! `mapper-observability` 在 DB 建连前冻结目录与 YAML 策略，自动登记方法、连接、Pool 和通知源。
+//! 业务主动安装进程 `Notify`，缺失则忽略；慢 SQL 原始耗时达到阈值且告警开启时尝试入队，逐条通知
+//! 需关闭默认冷却。worker 调用业务通知微服务适配器，不在 SQL 路径执行用户代码或网络请求。
+//! `observability` 从同一 MetricHub 导出，失败不改变 SQL、事务或数据库 readiness。
+//!
+//! Service 完成全部 Ready 装配与 initializer 任务工厂后，执行只读静态检查并复验共享启动期限；
+//! 发布 Application Ready 后统一放行组件与 initializer 终端主体。Batch 只在工作负载前放行观测
+//! 任务，不发布 Service Ready。通知队列非持久、容量有限，不提供绝对送达或跨副本去重。
+//! UserHook 中普通 `spawn_background` / `spawn_critical` 不隐式等待 Ready；自管 listener 应使用
+//! `serve_when_ready`。initializer 任务工厂只构造 future，不自行开放入口或派生脱离屏障的任务。
+//!
 //! # 业务优雅停机
 //!
 //! Service 与 Batch 的 UserHook 可通过 [`Application::register_graceful_shutdown`] 移交一次性收尾
@@ -55,6 +68,8 @@
 //!
 //! 启用 gRPC 组件时，UserHook 只登记统一 codegen 生成的业务 service，Prepare 永久封口 registry，
 //! 全部 initializer 成功后的 Ready 才自动装配 Router、health、可选 reflection 并绑定 listener。
+//! 绑定只发布 Bound；全部任务工厂与最终检查通过、Application Ready 发布后统一放行接流，
+//! 随后才允许服务发现注册。注册确认前动态 readiness 保持不可用。
 //! 组件独占 shutdown，持续 accept 失败会摘除 readiness 并保持有界恢复，serve 所有权丢失则触发
 //! 统一失败停机。启用 Saga gRPC 入站计划时，generated command/result service 也在同一封口前自动
 //! 登记，不建立第二个 Router、身份解析或停机 owner。
@@ -127,6 +142,19 @@ mod mapper_cache;
 mod mapping_handle;
 #[cfg(any(feature = "kafka", feature = "web-security"))]
 mod metrics;
+#[cfg(feature = "observability")]
+mod observability;
+#[cfg(feature = "mapper-observability")]
+mod sql_notifications;
+#[cfg(feature = "mapper-observability")]
+mod sql_observability;
+
+/// 与 SQL 执行结果隔离的通知 provider 合同。
+/// 业务通过 init 安装进程默认实现，未安装时忽略；默认不要求命名 provider 配置。
+#[cfg(feature = "mapper-observability")]
+pub mod notifications {
+    pub use nanotify_core::*;
+}
 
 /// 统一指标接入所需的 nametrics-core 公共类型再导出。
 ///

@@ -1,5 +1,14 @@
 # nafana Dashboard 部署清单
 
+受管 Application 使用 [统一观测出口与平台适配](../OBSERVABILITY.md)：独立 controller 根据同一 YAML
+生成稳定 Dashboard 与聚合规则，使用 `$__rate_interval`，不需要复制本目录文件或执行导入脚本。
+以下静态接口墙文件和手工命令仅适用于独立 Axum 接入，不能与 controller 管理的资源混用。
+
+受管面板先选择环境与集群，再下钻服务、方法和实例；方法耗时、数据库执行、连接等待和 Stream
+生命周期采用不同口径。通知面板的 `accepted` 仅代表业务适配器接受，不代表终端用户收件。
+remote write 的失联依据是应用心跳与外部平台期望实例指标，不能从应用自报实例推断期望拓扑。
+平台须持续供应同一查询数据源中的期望指标，缺失时面板不能以零值表示健康。
+
 本目录提供 Prometheus 抓取模板和 Grafana 集群接口墙。Dashboard 仅使用 Grafana 内置 Text、Stat、
 Time series、RowsLayout 和 AutoGridLayout，不需要安装第三方插件。
 
@@ -22,7 +31,7 @@ Dashboard 的速率和最近状态查询使用 10 秒窗口，因此目标 job �
 
 ## 2. 兼容性
 
-Dashboard 在 Grafana **12.1.0** 验证，使用该版本的实验性
+静态 Dashboard 面向 Grafana **12.1.0**，使用该版本的实验性
 `dashboard.grafana.app/v2alpha1` schema。Grafana 12.1.0 需要启用：
 
 ```text

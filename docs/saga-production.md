@@ -172,7 +172,8 @@ Registry 的参数、权限、不存在、业务前置条件与摘要/操作身�
 全部 Saga HTTP 路由复用 Application Web listener。saga.http.base_path 是 context 内唯一子路径，默认
 /_nasa/saga；实际基础路径严格等于 server.context_path 与 base_path 各拼接一次。base_path 不能是根、
 不能包含尾斜杠、重复斜杠、点段、percent encoding、query、fragment、模板或通配符。
-当 `server.health` 启用时，Saga 前缀不得遮蔽框架 `/healthz`、`/readyz` 和已编入的 `/metrics`；
+当 `server.health` 启用时，Saga 前缀不得遮蔽框架 `/healthz`、`/readyz`。统一观测配置的 Web 指标
+路径独立于 health 开关保留；未编入统一观测能力时，health 才联动保留 `/metrics`。
 冲突在绑定 Web listener 与发布 Ready 前拒绝。未启用的框架入口不参与路径保留。
 
 标准路由包括 instances、results、query、audit、pause、resume、retry-compensation、retry-resolution、

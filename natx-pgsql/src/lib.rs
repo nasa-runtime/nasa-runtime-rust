@@ -6,6 +6,9 @@
 //!
 //! `tokio::spawn` 不继承事务和 driver task-local。需要耐久跨 driver 收敛的写入应使用同源
 //! Outbox 与目标侧 Inbox，after-commit hook 只适合不要求耐久保证的派生动作。
+//!
+//! Pool acquire 与事务槽等待按固定用途独立计量，执行前拒绝不冒充数据库失败；Pool 状态为近似
+//! 快照，裸 Pool acquire 不在连接守卫覆盖范围内。受管日志与有界通知不改变连接或事务裁决。
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -16,6 +19,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 pub mod datasource;
+pub use natx_core::observability;
 
 pub use natx_core::{
     redact_url, redacted_endpoint, BootstrapKind, CommitOutcome, DataSourceCatalog,
@@ -111,6 +115,9 @@ impl PgDataSourceRegistry {
             !registry.is_empty(),
             "managed datasource registry cannot be empty"
         );
+        for name in registry.keys() {
+            observability::register_datasource(DatabaseDriver::PostgreSql, name.as_str())?;
+        }
         Ok(Self {
             pools: registry,
             accepting: AtomicBool::new(true),
@@ -396,6 +403,7 @@ pub fn try_init(pool: PgPool) -> anyhow::Result<()> {
             current.is_none(),
             "natx_pgsql::init/try_init 重复调用:连接池已初始化,不能替换"
         );
+        observability::register_datasource(DatabaseDriver::PostgreSql, DEFAULT_DATASOURCE)?;
         *current = Some(pool);
         Ok(())
     })
@@ -430,6 +438,7 @@ pub fn try_init_datasource(name: impl Into<String>, pool: PgPool) -> anyhow::Res
                 "natx_pgsql::try_init_datasource 重复调用:datasource `{name}` 已初始化,不能替换"
             ));
         }
+        observability::register_datasource(DatabaseDriver::PostgreSql, &name)?;
         pools.insert(name, pool);
         Ok(())
     })
@@ -1222,9 +1231,21 @@ where
             reason: error.to_string(),
         })?,
     };
-    let transaction = pool.begin().await.map_err(|_| TxRunError::Infrastructure {
-        reason: "transaction begin failed".to_string(),
+    let connection = observed_pool_acquire(
+        datasource.as_str(),
+        observability::ConnectionPurpose::Direct,
+        &pool,
+    )
+    .await
+    .map_err(|_| TxRunError::Infrastructure {
+        reason: "transaction connection acquisition failed".to_string(),
     })?;
+    let transaction =
+        Transaction::begin(connection, None)
+            .await
+            .map_err(|_| TxRunError::Infrastructure {
+                reason: "transaction begin failed".to_string(),
+            })?;
     let slot: TxSlot = Arc::new(Mutex::new(Some(transaction)));
     let ctx: TxCtx = Arc::new(TxContext {
         tx: slot.clone(),
@@ -1380,23 +1401,12 @@ pub async fn conn() -> anyhow::Result<PgConn> {
 ///
 /// 返回：事务内返回同 datasource 的事务连接，事务外返回池连接；名称、归属或获取失败返回错误。
 pub async fn conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
-    natx_core::ensure_driver(DatabaseDriver::PostgreSql).map_err(anyhow::Error::new)?;
-    let datasource = DatasourceRef::new(datasource)?;
-    match CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())) {
-        // 在事务里:锁住槽(OwnedMutexGuard 需要 Arc<Mutex>,故用 lock_owned),持有它到 query 跑完
-        Ok((tx_datasource, slot)) => {
-            if tx_datasource != datasource {
-                return Err(anyhow::anyhow!(
-                    "当前事务 datasource=`{tx_datasource}` 不能获取 datasource=`{datasource}` 的连接"
-                ));
-            }
-            Ok(PgConn::Tx(slot.lock_owned().await))
-        }
-        // 不在事务里:从池取一条独立连接
-        Err(_) => Ok(PgConn::Pool(
-            pool_for(datasource.as_str())?.acquire().await?,
-        )),
-    }
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Direct,
+        ConnectionMode::Optional,
+    )
+    .await
 }
 
 /// 业务作用：获取默认 datasource 的强制事务连接，阻止关键写在上下文丢失后降级为 autocommit。
@@ -1420,17 +1430,12 @@ pub async fn mandatory_conn() -> anyhow::Result<PgConn> {
 ///
 /// 返回：ambient transaction 存在且 datasource 一致时返回连接；否则返回错误且绝不 fallback。
 pub async fn mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
-    natx_core::ensure_driver(DatabaseDriver::PostgreSql).map_err(anyhow::Error::new)?;
-    let datasource = DatasourceRef::new(datasource)?;
-    let (tx_datasource, slot) = CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())).map_err(|_| {
-        anyhow::anyhow!("mandatory_conn_for({datasource}):当前不在 #[transactional] 事务中(关键写必须在事务内)")
-    })?;
-    if tx_datasource != datasource {
-        return Err(anyhow::anyhow!(
-            "当前事务 datasource=`{tx_datasource}` 不能获取 datasource=`{datasource}` 的 mandatory 连接"
-        ));
-    }
-    Ok(PgConn::Tx(slot.lock_owned().await))
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Direct,
+        ConnectionMode::Mandatory,
+    )
+    .await
 }
 
 /// 业务作用：获取默认 datasource 的非事务连接，拒绝在 ambient 事务内调用(`tx = "never"` 的连接入口)。
@@ -1452,17 +1457,198 @@ pub async fn never_conn() -> anyhow::Result<PgConn> {
 ///
 /// 返回：无 ambient 事务时返回该 datasource 的池连接；处于事务内返回携带事务 datasource 的错误。
 pub async fn never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
-    natx_core::ensure_driver(DatabaseDriver::PostgreSql).map_err(anyhow::Error::new)?;
-    let datasource = DatasourceRef::new(datasource)?;
-    if let Some(current) = current_datasource() {
-        anyhow::bail!(
-            "tx=never 的语句拒绝在 ambient 事务内执行(当前事务 datasource=`{current}`);\
-             该语句的副作用不允许随外层事务回滚,请在事务外调用"
-        );
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Direct,
+        ConnectionMode::Never,
+    )
+    .await
+}
+
+/// 业务作用：为 Mapper 获取连接并明确标记连接用途。
+/// 参数说明：`datasource` 是静态 Mapper 绑定的数据源。
+/// 返回：同源事务连接或池连接；拒绝和等待保持原有事务语义。
+pub async fn mapper_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Mapper,
+        ConnectionMode::Optional,
+    )
+    .await
+}
+
+/// 业务作用：为关键 Mapper 写强制取得同源事务连接。
+/// 参数说明：`datasource` 是 Mapper 的数据源。
+/// 返回：事务存在且同源时返回连接；不会回落到 autocommit。
+pub async fn mapper_mandatory_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Mapper,
+        ConnectionMode::Mandatory,
+    )
+    .await
+}
+
+/// 业务作用：为不允许进入事务的 Mapper 获取池连接。
+/// 参数说明：`datasource` 是 Mapper 的数据源。
+/// 返回：没有 ambient transaction 时返回池连接；存在事务时拒绝。
+pub async fn mapper_never_conn_for(datasource: impl AsRef<str>) -> anyhow::Result<PgConn> {
+    observed_conn_for(
+        datasource.as_ref(),
+        observability::ConnectionPurpose::Mapper,
+        ConnectionMode::Never,
+    )
+    .await
+}
+
+/// 业务作用：允许框架调用方显式区分迁移、探测和直接连接用途。
+/// 参数说明：`datasource` 指定库；`purpose` 是固定用途。
+/// 返回：沿用同源 ambient 事务选择规则的受观测连接。
+pub async fn conn_for_with_purpose(
+    datasource: impl AsRef<str>,
+    purpose: observability::ConnectionPurpose,
+) -> anyhow::Result<PgConn> {
+    observed_conn_for(datasource.as_ref(), purpose, ConnectionMode::Optional).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionMode {
+    Optional,
+    Mandatory,
+    Never,
+}
+
+/// 业务作用：在连接权威边界统一门禁、池等待与事务槽等待。
+/// 参数说明：`datasource` 是目标库；`purpose` 是用途；`mode` 固定事务要求。
+/// 返回：只在全部门禁通过后取得连接，失败不会伪装成数据库执行错误。
+async fn observed_conn_for(
+    datasource: &str,
+    purpose: observability::ConnectionPurpose,
+    mode: ConnectionMode,
+) -> anyhow::Result<PgConn> {
+    use observability::{AcquireOutcome, ConnectionRejection as Rejection};
+    let observation = observability::connection_slot(DatabaseDriver::PostgreSql, datasource);
+    // 跨后端请求在获取任何连接之前拒绝，避免事务内绕过既有控制权威。
+    natx_core::ensure_driver(DatabaseDriver::PostgreSql).map_err(|error| {
+        observation.reject(Rejection::CrossDriver);
+        anyhow::Error::new(error)
+    })?;
+    let reference = DatasourceRef::new(datasource).inspect_err(|_| {
+        observation.reject(Rejection::UnknownDatasource);
+    })?;
+    match CUR_TX.try_with(|ctx| (ctx.datasource.clone(), ctx.tx.clone())) {
+        Ok((tx_datasource, slot)) => {
+            // 自治语句不能悄然加入外层事务，否则副作用可见性会随回滚改变。
+            if mode == ConnectionMode::Never {
+                observation.reject(Rejection::TxForbidden);
+                anyhow::bail!("tx=never 的语句拒绝在 ambient 事务内执行(当前事务 datasource=`{tx_datasource}`)");
+            }
+            // 连接归属必须与事务一致，绝不能把跨库访问伪装成同一个本地事务。
+            if tx_datasource != reference {
+                observation.reject(Rejection::CrossDatasource);
+                anyhow::bail!("当前事务 datasource=`{tx_datasource}` 不能获取 datasource=`{reference}` 的连接");
+            }
+            let mut wait = observation.transaction_slot();
+            match slot.try_lock_owned() {
+                Ok(connection) => {
+                    wait.finish(AcquireOutcome::Ok);
+                    Ok(PgConn::Tx(connection))
+                }
+                Err(_) => {
+                    // 同一事务只持有一条物理连接；等待当前作用域释放已有守卫会形成自等待，必须立即拒绝。
+                    wait.finish(AcquireOutcome::Other);
+                    observation.reject(Rejection::TxConnectionBusy);
+                    anyhow::bail!(
+                        "当前事务连接已被持有；必须先让已有 Conn 离开作用域，再调用 conn()"
+                    )
+                }
+            }
+        }
+        Err(_) => {
+            // 强制事务操作失去上下文时必须拒绝，不能降级到立即提交的连接。
+            if mode == ConnectionMode::Mandatory {
+                observation.reject(Rejection::TxRequired);
+                anyhow::bail!("mandatory_conn_for({reference}):当前不在 #[transactional] 事务中(关键写必须在事务内)");
+            }
+            let pool = pool_for(datasource).map_err(|error| {
+                observation.reject(match error {
+                    DataSourceLookupError::DriverMismatch { .. } => Rejection::CrossDriver,
+                    DataSourceLookupError::InvalidName | DataSourceLookupError::NotFound { .. } => {
+                        Rejection::UnknownDatasource
+                    }
+                    _ => Rejection::RegistryUnavailable,
+                });
+                anyhow::Error::new(error)
+            })?;
+            Ok(PgConn::Pool(
+                observed_pool_acquire(datasource, purpose, &pool).await?,
+            ))
+        }
     }
-    Ok(PgConn::Pool(
-        pool_for(datasource.as_str())?.acquire().await?,
-    ))
+}
+
+/// 业务作用：只计量 Pool 获取阶段，避免把 SQL 执行时间混入等待。
+/// 参数说明：`datasource` 与 `purpose` 是固定身份；`pool` 是已通过门禁的池。
+/// 返回：成功时交出池连接；失败在类型擦除前记录稳定分类。此入口不加入 ambient 事务，调用方负责池的控制权威。
+pub async fn observed_pool_acquire(
+    datasource: &str,
+    purpose: observability::ConnectionPurpose,
+    pool: &PgPool,
+) -> Result<sqlx::pool::PoolConnection<Postgres>, sqlx::Error> {
+    let mut wait =
+        observability::connection_slot(DatabaseDriver::PostgreSql, datasource).acquire(purpose);
+    let result = pool.acquire().await;
+    wait.finish(match &result {
+        Ok(_) => observability::AcquireOutcome::Ok,
+        Err(error) => classify_acquire_error(error),
+    });
+    result
+}
+
+/// 业务作用：把连接获取错误映射为不依赖错误原文的稳定分类。
+/// 参数说明：`error` 是 SQLx 获取阶段的类型化错误。
+/// 返回：超时、关闭、worker 或其它固定分类。
+pub fn classify_acquire_error(error: &sqlx::Error) -> observability::AcquireOutcome {
+    use observability::AcquireOutcome;
+    match error {
+        sqlx::Error::PoolTimedOut => AcquireOutcome::Timeout,
+        sqlx::Error::PoolClosed => AcquireOutcome::Closed,
+        sqlx::Error::WorkerCrashed => AcquireOutcome::Worker,
+        _ => AcquireOutcome::Other,
+    }
+}
+
+/// 业务作用：为已冻结的 PostgreSQL Pool 目录建立抓取侧状态源。
+/// 参数说明：`pools` 为数据源名称与对应池句柄。
+/// 返回：身份全部合法时返回近似 Pool 快照源，不创建采样 worker。
+pub fn pool_metrics_source(
+    pools: impl IntoIterator<Item = (String, PgPool)>,
+) -> anyhow::Result<observability::PoolMetricsSource> {
+    struct PoolReader(PgPool);
+    impl observability::PoolSnapshot for PoolReader {
+        /// 业务作用：读取 PostgreSQL Pool 的近似当前状态。
+        /// 参数说明：无。
+        /// 返回：连接总量、空闲量和配置上限。
+        fn snapshot(&self) -> observability::PoolState {
+            observability::PoolState {
+                total: self.0.size(),
+                idle: self.0.num_idle().min(u32::MAX as usize) as u32,
+                max: self.0.options().get_max_connections(),
+            }
+        }
+    }
+    observability::PoolMetricsSource::new(
+        DatabaseDriver::PostgreSql,
+        pools
+            .into_iter()
+            .map(|(name, pool)| {
+                (
+                    name,
+                    Arc::new(PoolReader(pool)) as Arc<dyn observability::PoolSnapshot>,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// 业务作用：把 PostgreSQL SQLSTATE 映射为不依赖错误文本的稳定业务分类。

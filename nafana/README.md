@@ -1,7 +1,37 @@
 # nafana
 
-`nafana` 为 Axum 接口提供监控、并发隔离、超时和降级能力，并通过 Prometheus 指标与 Grafana
-接口墙展示运行状态。它不依赖 Grafana 第三方插件，也不输出 SSE。
+`nafana` 为 Axum 接口提供监控、并发隔离、超时和降级能力，并为接口、Mapper、连接池与通知提供
+按环境和集群聚合的 Grafana Dashboard。受管 Application 通过同一份 YAML 建立指标出口；独立
+`nafana-controller` 负责逐实例采集与平台资源，业务副本不持有 Grafana 控制面凭据。
+
+受管应用无需编写 metrics Router、采集配置或 Dashboard 导入脚本。配置、递归默认与安全边界见
+[统一观测出口与平台适配](OBSERVABILITY.md)。下文手动 Router 示例用于独立 Axum 接入。
+
+## 受管观测与单 owner 平台
+
+`grafana.observability` 默认关闭外部出口，不停止内部指标。显式开启后，`napp` 自动托管独立端口、
+受管 Web 路由或有界 remote write；所有出口读取同一份 MetricHub 累计快照，失败不改变 SQL 结果
+或数据库 readiness。Dashboard 先选环境和集群，再按服务、方法与实例下钻。
+
+平台 controller 消费同一 YAML，只更新具有自身 owner 标记的资源。Kubernetes 以 Lease 复验领导权
+并建立 PodMonitor；Compose 以共享文件锁约束唯一 owner，通过容器 DNS 发现独立地址。已有平台
+可以使用 `discovery: existing`，保留原采集所有权。Prometheus HA 必须由平台提供去重查询入口。
+
+controller 在判断启用状态前按标准优先级合并主文件、profile、启用的配置中心 imports 和 `APP__` 覆盖；
+服务身份与 Grafana 凭据取同一有效树。读取 Nacos 时显式启用 `controller-nacos`，不要求业务指标出口编入该传输。
+remote write 在全部 Ready 静态登记和 initializer 任务工厂构造完成后、出口和业务终端任务开始前核对容量，计入显式预留与已创建
+原生序列，包括 initializer histogram 和 Web 静态源。容量不足时拒绝启动并释放暂存任务。
+
+### 应用、通知与平台的边界
+
+应用冻结 SQL 阈值并记录单次事实；命中的离散通知经有界队列调用业务安装的 `Notify`。controller
+只管理具有自身 owner 标记的平台资源，错误率、P99 等窗口规则由监控后端聚合，不在 SQL 路径查询。
+通知微服务客户端、消息协议与机器人连接均由业务负责，controller 也不创建通知渠道。
+
+remote write 没有 scrape `up`：失联规则引用平台持续提供的 `platform_expected_instance_info`
+或配置的等价指标，框架不生成库存、抓取库存 API 或维护静态 instance_id 清单。期望源必须独立于
+应用心跳；期望源缺失时保持 NoData，不能宣称实例健康。身份标签、更新责任和失联含义见
+[期望实例指标合同](OBSERVABILITY.md#remote-write)。
 
 ## 1. 能力与边界
 
@@ -46,7 +76,7 @@ axum = "0.8"
 use nasa::grafana::grafana;
 ```
 
-### 2.1 纯宏接入
+### 2.1 独立 Axum 宏接入
 
 纯 `#[grafana]` handler 只需暴露指标入口，不要求挂 `dispatch`：
 

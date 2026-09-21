@@ -273,6 +273,43 @@ PostgreSQL 使用 `nasa::mapper::pgsql::{Mapper, Query}` 与
 `nasa::tx::pgsql::transactional`。Mapper 生成 `$1..$n` bind；两种 ambient transaction 不能嵌套，
 同一业务原子链中的 Inbox、业务事实和 Outbox 必须使用同一 driver 与 datasource。
 
+## SQL 日志与阈值通知
+
+前述 `application + mapper` 组合已自动采集方法、SQL 执行、连接与 Pool 指标，无需追加组件字符串。
+开发时在 YAML 显式声明环境后可开启 SQL 与参数输出：
+
+```yaml
+environment: local
+sql:
+  observability:
+    console:
+      enabled: true
+      include_parameters: true
+    slow_sql:
+      threshold_ms: 1000
+    alerts:
+      slow_sql:
+        enabled: true
+        cooldown_ms: 0
+```
+
+SQLx 输出 prepared SQL，Mapper 的 `Parameters` 事件提供方法、数据源和受限参数；敏感名字强制
+脱敏，未知类型使用占位。生产保留 `include_parameters=false`，且不要同时配置 `log.level` 中的
+`sqlx::query` 指令。裸 SQLx 可受同一连接日志选项控制，但没有 Mapper 方法与阈值通知。
+
+通知还需要业务实现 `nasa::application::notifications::Notify` 并主动安装：
+
+```rust,ignore
+nasa::application::notifications::init(std::sync::Arc::new(business_notifier))?;
+```
+
+将该调用放在启动前或业务初始化阶段。没有实现时忽略、不补发；重复安装返回错误。上例让每条
+原始 SQL 耗时达到或超过 1000 ms 的事件尝试入队，关闭慢日志也不关闭通知。受管 worker 放行后
+异步调用业务实现；独立通知微服务的协议和机器人连接由业务负责，队列不保证故障下可靠送达。
+
+导出指标须另外启用 `grafana.observability`。完整字段与默认值见
+[SQL 观测](../namapper-core/README.md#sql-观测与配置) 和 [统一指标出口](../nafana/OBSERVABILITY.md)。
+
 ## 路由
 
 ```rust

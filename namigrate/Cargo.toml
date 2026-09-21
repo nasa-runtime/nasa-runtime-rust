@@ -12,5 +12,6 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 namigrate-core = { version = "1.0.0" }
+natx-core = { path = "../natx-core", version = "1.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "migrate"] }
 tokio = { version = "1", features = ["time"] }

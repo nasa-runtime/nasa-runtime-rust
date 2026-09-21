@@ -16,14 +16,18 @@
 //!
 //! Prometheus 文本和 OTLP adapter 都读取同一次结构化快照，不各自维护 registry。label 形状、单值
 //! 大小、value kind、histogram 结构或基数不满足目录合同时拒绝当前样本，并以固定 `source/reason`
-//! 计数，不把动态 label 内容写进诊断。未声明最坏序列数的旧兼容源不在容量保证内。
+//! 计数，不把动态 label 内容写进诊断。动态结构化兼容源只使用扣除原生序列与显式预留后的余量，
+//! 按 family/label 排序逐个接纳完整样本。仅文本的旧兼容源不在结构化容量保证内。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-/// 进程内全部原生 cell 与显式预留导出序列共享的硬上限。
+/// 固定桶与原子采集，供低开销领域 source 复用。
+pub mod atomic;
+
+/// 进程内原生、结构化兼容源与诊断按 histogram 展开后的公开序列硬上限。
 pub const MAX_METRIC_SERIES: usize = 100_000;
 /// 统一目录自身按两种来源和七种拒绝原因展开后的固定诊断序列数。
 const INTERNAL_METRIC_SERIES: usize = 2 * SAMPLE_REJECTION_REASONS.len();
@@ -326,6 +330,12 @@ enum Cell {
     },
 }
 
+#[derive(Clone)]
+struct RegisteredSource {
+    source: Arc<dyn LegacyMetricsSource>,
+    budget: Option<usize>,
+}
+
 /// 唯一进程级指标 backend:descriptor catalog(带冲突审计)+ 进程内记录 + 结构化/Prometheus 导出。
 pub struct MetricHub {
     descriptors: RwLock<BTreeMap<&'static str, &'static MetricDescriptor>>,
@@ -333,7 +343,9 @@ pub struct MetricHub {
     cells: RwLock<BTreeMap<(&'static str, Vec<String>), Cell>>,
     /// 兼容领域源(nafana/naweb 等)的 registry；其 descriptor 已并入 catalog，结构化快照由
     /// hub 统一导出，只有明确不支持结构化快照的旧源才使用自身 Prometheus 文本入口。
-    sources: RwLock<Vec<Arc<dyn LegacyMetricsSource>>>,
+    sources: RwLock<Vec<RegisteredSource>>,
+    /// 原生 cell 展开为公开序列后的占用；写入与 cell 创建共用 cells 写锁。
+    native_series: AtomicUsize,
     /// 启动期已由受管指标源原子提交的最坏导出序列数；与运行期原生 cell 共用进程硬上限。
     reserved_series: Mutex<usize>,
     /// 所有拒绝原因均为固定低基数 label；不保存被拒样本的动态内容。
@@ -353,6 +365,7 @@ impl MetricHub {
             descriptors: RwLock::new(descriptors),
             cells: RwLock::new(BTreeMap::new()),
             sources: RwLock::new(Vec::new()),
+            native_series: AtomicUsize::new(0),
             // 内部拒绝族必须在任何业务预留之前占位，保证目录满载时仍能解释后续拒绝。
             reserved_series: Mutex::new(INTERNAL_METRIC_SERIES),
             rejections: SampleRejectionCounters::new(),
@@ -402,6 +415,10 @@ impl MetricHub {
     /// 只进入 `render_prometheus` 回落路径。原生渲染循环跳过文本旧源声明的族名，避免重复
     /// HELP/TYPE。
     ///
+    /// 参数说明：`source` 为拥有独立 family 的兼容指标源。
+    ///
+    /// 返回：目录无冲突时登记；结构化快照只使用全进程预留之外的动态余量，超额样本在导出时拒绝。
+    ///
     /// # 错误
     ///
     /// 任一 descriptor 与已注册项冲突时返回首个 [`MetricConflict`],此时源不会被保存。
@@ -416,7 +433,7 @@ impl MetricHub {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if sources
                 .iter()
-                .any(|existing| Arc::ptr_eq(existing, &source))
+                .any(|existing| Arc::ptr_eq(&existing.source, &source))
             {
                 return Ok(());
             }
@@ -445,7 +462,10 @@ impl MetricHub {
         self.sources
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(source);
+            .push(RegisteredSource {
+                source,
+                budget: None,
+            });
         Ok(())
     }
 
@@ -476,7 +496,7 @@ impl MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if sources
             .iter()
-            .any(|existing| Arc::ptr_eq(existing, &source))
+            .any(|existing| Arc::ptr_eq(&existing.source, &source))
         {
             return Ok(());
         }
@@ -499,7 +519,11 @@ impl MetricHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next = reserved
             .checked_add(worst_case_series)
-            .and_then(|total| total.checked_add(cells.len()).map(|used| (total, used)))
+            .and_then(|total| {
+                total
+                    .checked_add(self.native_series.load(Ordering::Relaxed))
+                    .map(|used| (total, used))
+            })
             .filter(|(_, used)| *used <= MAX_METRIC_SERIES)
             .map(|(total, _)| total)
             .ok_or(MetricSourceRegistrationError::SeriesBudgetExceeded)?;
@@ -508,7 +532,11 @@ impl MetricHub {
         for descriptor in candidates {
             descriptors.insert(descriptor.name, descriptor);
         }
-        sources.push(source);
+        sources.push(RegisteredSource {
+            source,
+            budget: Some(worst_case_series),
+        });
+        drop(cells);
         *reserved = next;
         Ok(())
     }
@@ -517,12 +545,32 @@ impl MetricHub {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：目录自身诊断族与所有使用原子登记入口的指标源预留之和，不包含尚未创建的原生动态 cell。
+    /// 返回：目录自身诊断族与显式登记源的预留之和；原生 cell 的实际展开占用另行参与同一总量门禁。
     pub fn reserved_series(&self) -> usize {
         *self
             .reserved_series
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 业务作用：为出口启动门禁读取已承诺的完整公开序列占用，包含已创建的原生指标。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：内部诊断与显式源的最坏预留，加上原生 cell 的展开占用；histogram 包含全部桶、sum 和 count。
+    /// 无预留的兼容源与检查之后新增的原生 label 不在此值内，调用方仍需单独约束动态增长。
+    pub fn committed_series(&self) -> usize {
+        // 沿用创建 cell 和登记 source 的 cells → reserved 锁顺序，保证两个占用来自同一时刻，
+        // 不能让并发登记或原生首次写入在 Ready 核对时落入两个读数之间的空隙。
+        let _cells = self
+            .cells
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reserved = self
+            .reserved_series
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reserved.saturating_add(self.native_series.load(Ordering::Relaxed))
     }
 
     /// 业务作用：校验直接记录入口的 label 数量与单值内存上限。
@@ -565,11 +613,17 @@ impl MetricHub {
             .is_some_and(|registered| registered.semantically_eq(descriptor))
     }
 
-    /// 业务作用：只允许更新现有序列或在全局基数预算内创建新 label 组合。
+    /// 业务作用：在原生 cell 写锁内核对并占用完整公开序列预算，histogram 不能只按一个 cell 计费。
+    /// 参数说明：
+    /// - `cells/key`: 已锁定的存量与本次 label 组合。
+    /// - `descriptor`: 决定本次创建需要占用的完整展开序列数。
+    ///
+    /// 返回：存量更新不再占用；新组合容量不足时拒绝且不改变占用。
     fn can_insert_cell(
         &self,
         cells: &BTreeMap<(&'static str, Vec<String>), Cell>,
         key: &(&'static str, Vec<String>),
+        descriptor: &MetricDescriptor,
     ) -> bool {
         if cells.contains_key(key) {
             return true;
@@ -578,10 +632,18 @@ impl MetricHub {
             .reserved_series
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cells
-            .len()
-            .checked_add(reserved)
-            .is_some_and(|total| total < MAX_METRIC_SERIES)
+        let used = self.native_series.load(Ordering::Relaxed);
+        let cost = descriptor_series(descriptor);
+        // 完整 histogram 在创建前一次性占位，避免桶、sum、count 越过进程硬限。
+        if used
+            .checked_add(cost)
+            .and_then(|total| total.checked_add(reserved))
+            .is_none_or(|total| total > MAX_METRIC_SERIES)
+        {
+            return false;
+        }
+        self.native_series.store(used + cost, Ordering::Relaxed);
+        true
     }
 
     /// 业务作用：将 descriptor 名与借用 label 值固化为 hub 的有序 cell key。
@@ -599,7 +661,8 @@ impl MetricHub {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：按 family 与 label 有序的完整当前快照；读取不会清零计数或 histogram。
+    /// 返回：按 family 与 label 有序且符合全局公开序列预算的当前快照；拒绝事实在同次快照中可见，
+    /// 读取不会清零计数或 histogram。
     pub fn snapshot(&self) -> Vec<MetricSample> {
         self.collect_snapshot().0
     }
@@ -618,8 +681,23 @@ impl MetricHub {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        for source in sources {
-            let Some(samples) = source.snapshot() else {
+        let native = self.native_snapshot();
+        let native_count = native
+            .iter()
+            .filter(|sample| sample.name != SAMPLE_REJECTIONS_TOTAL.name)
+            .map(sample_series)
+            .sum::<usize>();
+        let reserved = sources
+            .iter()
+            .filter_map(|entry| entry.budget)
+            .sum::<usize>();
+        let mut remaining = MAX_METRIC_SERIES
+            .saturating_sub(INTERNAL_METRIC_SERIES)
+            .saturating_sub(native_count)
+            .saturating_sub(reserved);
+        for entry in sources {
+            let source = entry.source;
+            let Some(mut samples) = source.snapshot() else {
                 text_only_sources.push(source);
                 continue;
             };
@@ -628,6 +706,13 @@ impl MetricHub {
                 .iter()
                 .map(|descriptor| (descriptor.name, *descriptor))
                 .collect();
+            // 固定排序使容量拒绝不依赖兼容源的枚举顺序；受管源不能挤占其它源已承诺的预算。
+            samples.sort_by(|left, right| {
+                left.name
+                    .cmp(right.name)
+                    .then_with(|| left.labels.cmp(&right.labels))
+            });
+            let mut available = entry.budget.unwrap_or(remaining);
             for sample in samples {
                 let Some(descriptor) = owned.get(sample.name).copied() else {
                     self.rejections.increment(
@@ -637,14 +722,35 @@ impl MetricHub {
                     continue;
                 };
                 match validate_sample(&sample, descriptor) {
-                    Ok(()) => out.push(sample),
+                    Ok(()) => {
+                        let cost = sample_series(&sample);
+                        // 容量不足时拒绝整个样本，不能发布缺少部分桶或 sum/count 的 histogram。
+                        if cost > available {
+                            self.rejections.increment(
+                                SampleRejectionSource::Legacy,
+                                SampleRejectionReason::CardinalityLimit,
+                            );
+                            continue;
+                        }
+                        available -= cost;
+                        out.push(sample);
+                    }
                     Err(reason) => self
                         .rejections
                         .increment(SampleRejectionSource::Legacy, reason),
                 }
             }
+            if entry.budget.is_none() {
+                remaining = available;
+            }
         }
-        out.extend(self.native_snapshot());
+        out.extend(
+            native
+                .into_iter()
+                .filter(|sample| sample.name != SAMPLE_REJECTIONS_TOTAL.name),
+        );
+        // 拒绝发生后再读固定诊断，使本次导出本身就能解释容量损失。
+        out.extend(self.rejections.snapshot());
         out.sort_by(|left, right| {
             left.name
                 .cmp(right.name)
@@ -787,6 +893,27 @@ impl MetricHub {
     }
 }
 
+/// 业务作用：计算 descriptor 的一个 label 组合占用的公开序列数。
+/// 参数说明：`descriptor` 为已校验的静态指标语义。
+/// 返回：普通样本占一条，histogram 包括所有有限桶、+Inf、sum 和 count。
+fn descriptor_series(descriptor: &MetricDescriptor) -> usize {
+    if descriptor.kind == MetricKind::Histogram {
+        descriptor.histogram_bounds.len() + 3
+    } else {
+        1
+    }
+}
+
+/// 业务作用：按实际样本结构核算出口容量。
+/// 参数说明：`sample` 为已经过 descriptor 校验的完整样本。
+/// 返回：与 Prometheus 展开结果一致的序列数。
+fn sample_series(sample: &MetricSample) -> usize {
+    match &sample.value {
+        MetricValue::Histogram { bounds, .. } => bounds.len() + 3,
+        _ => 1,
+    }
+}
+
 /// 业务作用：验证兼容源样本与启动期 descriptor 的名称、label 顺序、资源上限和 value kind 完全一致。
 ///
 /// 参数说明：
@@ -874,7 +1001,7 @@ impl MetricRecorder for MetricHub {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
-        if !self.can_insert_cell(&cells, &key) {
+        if !self.can_insert_cell(&cells, &key, descriptor) {
             self.rejections.increment(
                 SampleRejectionSource::Native,
                 SampleRejectionReason::CardinalityLimit,
@@ -913,7 +1040,7 @@ impl MetricRecorder for MetricHub {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
-        if !self.can_insert_cell(&cells, &key) {
+        if !self.can_insert_cell(&cells, &key, descriptor) {
             self.rejections.increment(
                 SampleRejectionSource::Native,
                 SampleRejectionReason::CardinalityLimit,
@@ -953,7 +1080,7 @@ impl MetricRecorder for MetricHub {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(descriptor, labels);
-        if !self.can_insert_cell(&cells, &key) {
+        if !self.can_insert_cell(&cells, &key, descriptor) {
             self.rejections.increment(
                 SampleRejectionSource::Native,
                 SampleRejectionReason::CardinalityLimit,

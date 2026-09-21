@@ -332,6 +332,55 @@ impl ApplicationRunner {
         self
     }
 
+    /// 业务作用：将已编入的观测能力纳入相同生命周期，不要求业务额外声明组件。
+    /// 参数说明：无。
+    /// 返回：在数据库 I/O 与业务路由之前插入配置冻结节点，保留已有组件相对顺序。
+    fn attach_observability_components(&mut self) {
+        #[cfg(feature = "mapper-observability")]
+        if !self
+            .components
+            .iter()
+            .any(|component| component.id() == ComponentId::SqlObservability)
+        {
+            if let Some(index) = self
+                .components
+                .iter()
+                .position(|component| component.id() == ComponentId::Db)
+            {
+                // 策略与系列预算必须先于连接探测冻结，避免启动半途才发现观测配置无效。
+                self.application
+                    .mark_component_declared(ComponentId::SqlObservability);
+                self.components.insert(
+                    index,
+                    Box::new(crate::sql_observability::SqlObservabilityComponent::new()),
+                );
+            }
+        }
+        #[cfg(feature = "observability")]
+        if !self
+            .components
+            .iter()
+            .any(|component| component.id() == ComponentId::Observability)
+        {
+            let index = self
+                .components
+                .iter()
+                .position(|component| {
+                    matches!(
+                        component.id(),
+                        ComponentId::SqlObservability | ComponentId::Db | ComponentId::Web
+                    )
+                })
+                .unwrap_or(self.components.len());
+            self.application
+                .mark_component_declared(ComponentId::Observability);
+            self.components.insert(
+                index,
+                Box::new(crate::observability::ObservabilityComponent::new()),
+            );
+        }
+    }
+
     /// 业务作用：原子替换当前配置视图并通知订阅者。
     ///
     /// # 参数
@@ -361,6 +410,7 @@ impl ApplicationRunner {
         // 之前安装——catch_unwind 在 hook 之后才生效,拦不住默认 hook 先把 payload
         // 写进 stderr。重复安装由 Once 收敛。
         crate::panic_hook::install_process_panic_hook();
+        self.attach_observability_components();
         // handler ready ACK 是所有异步组件的前置屏障，确保启动卡住时仍可被终止。
         let signal_mode = std::mem::replace(&mut self.signal_mode, SignalMode::Disabled);
         let mut broker = match SignalBroker::start(signal_mode, self.application.clone()).await {
@@ -417,6 +467,18 @@ impl ApplicationRunner {
                 }
 
                 // 工作负载可登记现有业务资源/任务，但 initializer 登记门从未开放。
+                // Batch 不开放业务入口，但采集出口必须先就位，才能覆盖整个工作负载。
+                if let Err(stop) = self.ready_components(startup_deadline, &mut broker).await {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                if let Err(stop) = self
+                    .final_startup_check(startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+                // Batch 不发布 Service Ready；只统一放行已完成门禁的观测任务，以覆盖后续工作负载。
+                self.supervisor.release_startup_tasks();
                 self.active.push_business_resources();
                 self.active.push_business_shutdown_tasks();
                 self.active.push_user_tasks();
@@ -515,11 +577,19 @@ impl ApplicationRunner {
                 {
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
+                if let Err(stop) = self
+                    .final_startup_check(startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
                 if let Err(error) = self.application.mark_ready() {
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
                 }
+                // 所有工厂构造、任务登记和预算复验成功后，先发布 Ready，再用同一个信号开放全部终端。
+                self.supervisor.release_startup_tasks();
 
                 match self.wait_for_service_terminal(&mut broker).await {
                     ServiceTerminal::Requested => {
@@ -904,14 +974,14 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 业务作用：在全部组件 Ready action 成功后激活 initializer 暂存的受管任务。
+    /// 业务作用：在全部组件 Ready action 成功后构造 initializer 暂存任务，并移交监督所有权但不放行执行。
     ///
     /// 参数说明：
     /// - `tasks`：`stage_*` 保存的一次性任务工厂。
     /// - `deadline`：激活仍必须遵守的共享启动截止时刻。
     /// - `broker`：每个任务激活边界都复验的启动信号控制面。
     ///
-    /// 返回：全部任务已加入 Supervisor 时成功；超时、工厂 panic 或名称冲突时停止接流。
+    /// 返回：全部任务已加入 Supervisor 的关闭屏障时成功；超时、工厂 panic 或名称冲突时保持未接流并清理。
     async fn activate_initializer_tasks(
         &mut self,
         tasks: Vec<StagedInitializerTask>,
@@ -1003,30 +1073,8 @@ impl ApplicationRunner {
                             None,
                         ))
                     })?;
-            let application = self.application.clone();
-            let guarded = Box::pin(async move {
-                let mut states = application.subscribe_state();
-                loop {
-                    match *states.borrow() {
-                        ApplicationState::Starting => {}
-                        ApplicationState::Ready => break,
-                        ApplicationState::Stopping
-                        | ApplicationState::Stopped
-                        | ApplicationState::Failed => return Ok(()),
-                    }
-                    tokio::select! {
-                        _ = token.cancelled() => return Ok(()),
-                        changed = states.changed() => {
-                            if changed.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                future.await
-            });
             self.supervisor
-                .spawn_initializer_task(task.name, task.kind, guarded)
+                .spawn_initializer_task(task.name, task.kind, future)
                 .map_err(|error| {
                     crate::initialization::record_failure(
                         &self.application,
@@ -1057,19 +1105,30 @@ impl ApplicationRunner {
         Ok(())
     }
 
-    /// 业务作用：按声明顺序执行 Service 组件的 Ready 阶段，同时监督已经登记的关键任务。
-    ///
-    /// # 参数
+    /// 业务作用：按声明顺序装配组件并移交终端所有权；任务主体等待全应用屏障，Batch 不开放业务 listener。
+    /// 参数说明：
     ///
     /// - `deadline`：与 Bootstrap、Start、UserHook、Prepare 和 Initialization 共享的启动截止时间。
     /// - `broker`：持续观察启动中断信号的控制面。
+    ///
+    /// 返回：全部 Ready 装配成功且所有权登记完成时成功；失败由调用方收割未执行任务并反向清理资源。
     async fn ready_components(
         &mut self,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop> {
+        let batch = self.application.info().mode() == ApplicationMode::Batch;
+        let mut staged_tasks = Vec::new();
         for component in &mut self.components {
             let component_id = component.id();
+            if batch
+                && !matches!(
+                    component_id,
+                    ComponentId::Observability | ComponentId::SqlObservability
+                )
+            {
+                continue;
+            }
             let mut context = ReadyContext::new(
                 &self.application,
                 component_id,
@@ -1100,15 +1159,70 @@ impl ApplicationRunner {
                 }
             }
             if let Some((name, task)) = component.take_critical_task() {
-                // Ready action 已经压栈后才加入监督集合，保证任务即刻退出时仍存在完整回滚路径。
-                self.supervisor
-                    .spawn_component_critical(
-                        name,
-                        Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
-                    )
-                    .map_err(StartupStop::Failure)?;
+                // 后置组件仍可登记静态指标源；先持有但不 poll，防止出口或业务监听越过最终容量门禁。
+                staged_tasks.push((name, task));
             }
         }
+        // 这里只移交所有权；所有 initializer 工厂构造与最终复验之前，Supervisor 禁止主体 poll。
+        for (name, task) in staged_tasks {
+            self.supervisor
+                .spawn_component_critical(
+                    name,
+                    Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
+                )
+                .map_err(StartupStop::Failure)?;
+        }
+        Ok(())
+    }
+
+    /// 业务作用：在全部任务工厂构造后复验最终静态条件、预算、取消及既有任务失败，保护唯一启动发布点。
+    /// 参数说明：`deadline` 是全局启动截止时刻，`broker` 提供待处理停止信号。
+    /// 返回：仍可发布执行许可时成功；终止证据存在时保持屏障关闭并进入统一清理。
+    async fn final_startup_check(
+        &mut self,
+        deadline: Instant,
+        broker: &mut SignalBroker,
+    ) -> Result<(), StartupStop> {
+        let batch = self.application.info().mode() == ApplicationMode::Batch;
+        for component in &self.components {
+            if batch
+                && !matches!(
+                    component.id(),
+                    ComponentId::Observability | ComponentId::SqlObservability
+                )
+            {
+                continue;
+            }
+            startup_remaining(deadline, ApplicationPhase::Ready)?;
+            // 扩展实现的同步异常必须收敛到启动失败，不能绕过未执行任务收割和反向清理。
+            match catch_unwind(AssertUnwindSafe(|| component.validate_ready())) {
+                Ok(result) => result.map_err(StartupStop::Failure)?,
+                Err(payload) => {
+                    release_shutdown_panic_payload(payload);
+                    return Err(StartupStop::Failure(ApplicationError::new(
+                        component.id(),
+                        ApplicationPhase::Ready,
+                        "component final readiness check panicked",
+                    )));
+                }
+            }
+            // 同步检查无法被异步 timeout 抢占；返回后必须复验，尤其不能漏掉最后一个检查的耗时。
+            startup_remaining(deadline, ApplicationPhase::Ready)?;
+        }
+        let cancellation = self.application.cancellation_token();
+        loop {
+            startup_remaining(deadline, ApplicationPhase::Ready)?;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                    if let Some(completion) = completion { classify_startup_completion(completion)?; }
+                }
+                _ = tokio::task::yield_now() => break,
+            }
+        }
+        startup_remaining(deadline, ApplicationPhase::Ready)?;
         Ok(())
     }
 

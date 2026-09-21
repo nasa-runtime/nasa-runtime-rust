@@ -34,7 +34,7 @@ application:
 - `mode: batch` 用于任务完成后正常退出的批处理。
 - `mode: auto` 在声明 Saga、Kafka、Outbox、Web、长连接、服务发现或调度组件时解析为常驻服务；
   其它组合解析为批处理。
-- `startup_timeout_ms` 约束组件与业务 Hook 启动。
+- `startup_timeout_ms` 是组件、业务 Hook、initializer、最终检查和延后服务注册共享的启动期限。
 - `shutdown_timeout_ms` 是全部反向清理共享的总预算。
 
 配置优先级从低到高为主文件、显式 profile、远端 overlay 和 `APP__...` 环境覆盖。凭据只通过部署
@@ -73,6 +73,11 @@ SIGKILL、进程 abort、同步阻塞或直接丢弃 Runner 不能视为优雅�
 readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中托管 HTTP 服务的项目不会自动获得
 这些端点，必须提供自己的管理入口或等价健康信号。
 
+Service 在所有 Ready 装配、initializer 任务工厂和最终静态检查成功后，发布生命周期 Ready 并统一
+放行受管终端任务。gRPC 绑定状态 `Bound` 只表示占有端口，不处理 health 或业务 RPC；Nacos 只在
+统一放行后注册，gRPC 端点还须等待 Running。远端注册确认前动态 readiness 仍不可用，不能用
+生命周期 Ready、TCP connect 成功或单个组件 Ready 代替接流证据。
+
 `server.port: 0` 的真实端口在 bind 后产生，可通过应用运行时的监听地址能力读取；需要固定服务端口的
 部署不应使用该设置。
 
@@ -90,9 +95,27 @@ server:
 连接、stream、流控、header/frame、发送缓冲、reset 与 PING 参数均有受校验默认值，业务通常无需配置。
 该 listener 不实现 `Upgrade: h2c`，也不终止 TLS；h2 over TLS 由具备证书与 ALPN 合同的上游代理终止。
 停机先停止 accept，再对 HTTP/1 关闭 keep-alive、对 HTTP/2 发送 GOAWAY，并在组件与 Application 共享的
-预算内等待已接纳请求结束。滚动部署必须给该预算预留足够的强制终止宽限期。`server.health=true`
-时，协议、连接、容量拒绝和连接错误指标由 `<context_path>/metrics` 暴露；完整字段、范围和指标合同见
+预算内等待已接纳请求结束。滚动部署必须给该预算预留足够的强制终止宽限期。
+编入统一观测能力时，协议、连接、容量拒绝和连接错误指标由 `grafana.observability` 配置的出口暴露，
+与 `server.health` 独立。未编入该能力时，`server.health=true` 才提供兼容的 `<context_path>/metrics`。
+完整字段、范围和指标合同见
 [napp Web listener 受管模式](../napp/README.md#web-http-listener-受管模式)。
+
+## SQL 通知与监控平台
+
+部署前为通知适配器提供业务配置，在启动前或初始化阶段调用
+`nasa::application::notifications::init`。框架不保存机器人凭据、不选择 HTTP REST/gRPC，也不
+安装通知微服务。未提供实现时忽略通知，不阻断应用启动；若业务要求通知必须可用，应由业务
+初始化检查承担该条件，不能依赖可选接口隐式保证。
+
+逐条慢 SQL 通知需开启 `sql.observability.alerts.slow_sql.enabled` 并设 `cooldown_ms=0`；
+阈值由 `slow_sql.threshold_ms` 决定，达到或超过即命中。生产保持参数输出关闭。队列与下游失败
+不影响数据库 readiness，需单独观察通知丢弃与失败指标。
+
+`grafana.observability.enabled` 默认 false。开启后选择独立或 Web scrape、remote write，并配置
+环境、集群与实例身份；平台 controller 单独部署，只给它 Grafana 与控制面写权限。
+remote write 失联规则引用外部平台的期望实例指标，平台负责随扩缩容更新并保障其连续性；
+框架不维护期望实例列表。权限和完整 YAML 见 [观测出口与平台适配](../nafana/OBSERVABILITY.md)。
 
 ## 部署顺序
 

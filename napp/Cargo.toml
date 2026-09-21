@@ -3,12 +3,12 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA managed lifecycle with ordered initializers, graceful shutdown, cancellation-safe resource lifetimes, and datasource-bound Saga clients"
+description = "Managed lifecycle with gated activation, ordered shutdown, cancellation-safe resources, datasource-bound Saga, SQL observability and business notifications"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "lifecycle", "initializer", "graceful-shutdown", "saga"]
+keywords = ["runtime", "lifecycle", "observability", "graceful-shutdown", "saga"]
 categories.workspace = true
 
 [features]
@@ -16,6 +16,9 @@ default = []
 # 每个内置组件按需拉取其重实现依赖，避免 web-only 应用编译 log/db/redis/nacos 等重依赖
 # 并由 nasa 门面经 `application_impl?/<组件>` 弱依赖桥打开。
 log = ["dep:nalog"]
+# Mapper 的固定指标、连接策略和有界通知由运行时自动装配。
+mapper-observability = ["dep:namapper-core", "dep:natx-core", "dep:nanotify-core"]
+observability = ["dep:nafana", "tokio/net"]
 # nacos-config 配置中心：API 编入即可用 disabled 本地路径；真实连接由 nacos-config-sdk 打开 nanacos 后端。
 nacos-config = ["dep:config-boot", "dep:nanacos"]
 nacos-config-sdk = ["nacos-config", "nanacos/nacos"]
@@ -96,6 +99,8 @@ naweb = { version = "1.0.2", optional = true }
 matchit = { version = "0.8", optional = true }
 naml = { version = "1.0.3" }
 nametrics-core = { version = "1.0.2" }
+nanotify-core = { path = "../nanotify-core", version = "1.0.0", optional = true }
+nafana = { path = "../nafana", version = "1.0.2", optional = true }
 nabudget = { version = "1.0.1" }
 nasecret = { version = "1.0.1" }
 naidempotency = { version = "1.0.2" }

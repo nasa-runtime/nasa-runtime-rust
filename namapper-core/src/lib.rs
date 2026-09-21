@@ -1,6 +1,11 @@
 //! 后端中立 Mapper 合同。
 //!
-//! 本 crate 承载结构化 SQL bind 渲染、分页、排序、缓存与观测合同，不依赖 SQLx 或具体数据库事务运行时。
+//! 本 crate 承载结构化 SQL bind 渲染、分页、排序、缓存、静态方法目录与原子观测合同，
+//! 不依赖 SQLx 或具体数据库事务运行时。观测策略支持递归默认、逐叶覆盖和冻结；
+//! 数据库完成路径只记录低基数事实，命中通知规则时提交有界队列，不调用通知 provider。
+//! 慢指标、慢日志和通知统一比较原始耗时与阈值，相等也命中；连接等待和消费者处理不计入 SQL。
+//! 业务主动安装 `Notify` 并启用告警；需要逐条通知时设 `cooldown_ms=0`。缺失实现则忽略，队列
+//! 拥塞或下游失败不改变数据库结果；通知协议由业务微服务适配器负责。
 
 #![forbid(unsafe_code)]
 
@@ -12,6 +17,8 @@ pub use async_trait::async_trait;
 
 mod cache_runtime;
 pub use cache_runtime::*;
+
+pub mod observability;
 
 /// 已选择动态分支后的后端中立 SQL 节点。
 #[derive(Debug, Clone, PartialEq, Eq)]

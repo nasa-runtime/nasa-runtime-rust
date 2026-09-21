@@ -1,6 +1,7 @@
 # natx
 
-`natx` 提供基于 `tokio::task_local!` 的 ambient MySQL 事务。业务一般通过门面使用：
+`natx` 提供基于 `tokio::task_local!` 的 ambient MySQL 事务，并将连接池获取、事务连接槽取得和
+执行前拒绝分别计量，帮助区分池饱和与事务内连接竞争。业务一般通过门面使用：
 
 ```toml
 [dependencies]
@@ -76,6 +77,34 @@ Application 的一次性业务停机任务先于数据库组件最终关闭，�
 - `DatasourceRef::new` 继续返回 `anyhow::Result`；需要结构化名称错误的新代码使用
   `DatasourceRef::try_new`。
 
+## 连接观测与语句日志
+
+`conn_*` 保持原有事务选择与返回语义，连接用途记为 `direct`；Mapper 使用专用的
+`mapper_conn_for`、`mapper_mandatory_conn_for`、`mapper_never_conn_for`，用途记为 `mapper`。
+显式迁移、探测调用可使用 `conn_for_with_purpose` 声明用途。原始 Pool 的 `acquire()` 不经过这些
+入口，因此不会自动产生连接等待指标。
+
+Pool acquire 与 ambient transaction 连接槽取得分别记录 counter、固定桶耗时与 in-flight。
+取消会收口在途计数且只记录一次；缺少强制事务、禁止事务、跨库、跨后端和未知 datasource 都作为
+执行前拒绝，不计入数据库操作失败。同一事务已有 `Conn` 时再次取连接会立即返回错误，并记录
+`tx_connection_busy`，不会等待当前任务释放自己持有的守卫。`PoolTimedOut` 只表示连接获取预算耗尽，
+不能据此推断究竟是池排队还是反复握手失败。未知 datasource 共用固定回退身份，不按业务输入创建标签。
+
+`observability::ConnectionMetricsSource` 与 `pool_metrics_source` 提供 MetricHub 结构化快照。
+Pool total、idle、in_use 为近似瞬时状态，使用数以饱和减法计算；source 不创建周期采样线程。
+等待日志默认关闭，开启后只在成功等待达到阈值时输出稳定字段；连接超时可向具体有界通知队列投递，
+队列满、停机和渠道失败不会改写 SQL 返回或事务裁决。观测策略在启动期冻结，变更需要重启。
+`acquire_wait.threshold_ms` 与 `transaction_slot_wait.threshold_ms` 控制各自的等待日志，
+不使用 Mapper 的 `slow_sql.threshold_ms`。连接超时通知通过 `alerts.acquire_timeout` 启用，默认
+只包含 `mapper` 用途；`migration/probe/direct` 需显式加入 `purposes`。业务须先安装 `Notify`，
+没有实现时忽略。完整配置见
+[SQL 与连接观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+
+受管应用通过 `sql.observability.console.enabled` 控制逐条 SQL 日志；底层建池和探测适配使用
+`datasource::build_pool_with_logging` 与 `probe_with_logging`。关闭时 SQLx 不产生语句事件；开启时
+可选择语句日志级别，独立慢语句升级被关闭，慢操作统一由 Mapper 阈值裁决。SQLx statement 日志
+本身不打印 bind 参数。原有 `build_pool`、`probe` 保留独立使用时的 SQLx 默认行为。
+
 ## 事务裁决
 
 - 嵌套 `run` 复用外层事务、一起提交;内层 body 返回 Err 会标记 **rollback-only**——即便外层吞掉错误返回 Ok,最外层提交前整体回滚并返回 `RollbackOnly` 错误(`err.downcast_ref::<nasa::tx::RollbackOnly>()` 可识别)。
@@ -83,8 +112,8 @@ Application 的一次性业务停机任务先于数据库组件最终关闭，�
 - `mandatory_conn` 无事务直接 Err,不回退池连接。
 - 事务内任一 SQL 执行错误使整个事务回滚;未注册 datasource 的 `run_for` / `pool_for_datasource` 返回 Err。
 - `tokio::spawn` 出的任务不继承 ambient 事务。同一作用域不要同时持有两个 `Conn`：已有 `Conn` 尚未
-  离开作用域时，内层再次取连接会立即返回连接占用错误；先用代码块结束已有 `Conn` 的作用域，内层
-  调用即可继续复用同一个物理事务。
+  离开作用域时，内层再次取连接会立即返回 `tx_connection_busy`；先用代码块结束已有 `Conn` 的作用域，
+  内层调用即可继续复用同一个物理事务。
 - `#[transactional(never)]`(运行时入口 `run_never`):拒绝任一数据库 driver 的 ambient 事务且不开启事务——供"绝不能
   被外层事务包住"的路径(自治审计写、对外即时可见的副作用)把违规调用变成进入前的显式错误,
   而不是静默入伙随外层回滚;`never` 与 `datasource` 互斥。

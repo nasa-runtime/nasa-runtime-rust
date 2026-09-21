@@ -69,7 +69,11 @@ session.deregister().await?;
 session.shutdown_runtime().await?;
 ```
 
-`#[application]` 的 `nacos-discovery` 组件即按这三段编排（Start 装 runtime / Ready 注册 / 停机反序）；`init_from_config` 保留给不使用应用运行时的项目。
+`#[application]` 的 `nacos-discovery` 组件在 Start 装出站 runtime，Ready 冻结实际端口与注册计划。
+全部组件、initializer 工厂和最终检查通过后统一放行，再执行远端注册；gRPC 端点还须等待
+listener Running。注册确认前 `app.is_ready()` 保持不可用，即使生命周期已经发布 Ready。
+注册受同一个原始启动 deadline 约束，失败触发统一停机；停机先注销、后关闭 runtime。
+`init_from_config` 保留给不使用应用运行时的项目，调用方负责确保实际接流后才注册。
 
 Application 的业务停机任务晚于本实例注销和入站排空，但早于出站 runtime 的最终关闭，可用于有界的
 外部业务注销或通知。它不恢复本实例接流资格，也不能再次接管同一 `DiscoverySession` 的 deregister

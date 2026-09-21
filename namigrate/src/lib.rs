@@ -1,6 +1,6 @@
 //! DB migration 版本门禁。
 //!
-//! 业务 migration 属**业务 schema**,不放进共享 runtime;本 crate 只提供 provider-neutral 的**门禁**:
+//! 业务 migration 属**业务 schema**,不放进共享 runtime;本 crate 提供 MySQL session 上的**门禁**:
 //! 给定业务嵌入的 [`Migrator`](`sqlx::migrate!("./migrations")` 或运行期 `Migrator::new(path)`)与配置,
 //! 在 listener Ready **之前**按 mode 裁决:
 //!
@@ -11,6 +11,8 @@
 //! - `apply`:应用未决 migration(仅本地/单实例/专门 Job)。
 //!
 //! 失败只输出**版本号与稳定 reason**,不输出 SQL 正文。多 datasource 由调用方分别登记、限制顺序。
+//! 池获取按 `purpose=migration` 记录，取得连接即结束等待计时，不包含锁竞争、catalog 查询或 DDL。
+//! [`run_gate_for`] 保留命名数据源身份；等待通知不改变门禁结果或原始锁预算。
 
 #![forbid(unsafe_code)]
 
@@ -118,18 +120,18 @@ struct MigrationLock {
 
 impl MigrationLock {
     /// 业务作用: 在单一端到端预算内取得池连接、计算 SQLx lock ID 并竞争 MySQL advisory lock。
-    async fn acquire(pool: &MySqlPool, timeout_ms: u64) -> Result<Self, MigrationError> {
+    /// 参数说明：`pool` 为目标池，`datasource` 为冻结目录身份，`timeout_ms` 为完整取锁预算。
+    /// 返回：持有专有 session 的锁；获取失败保持稳定门禁分类。
+    async fn acquire(
+        pool: &MySqlPool,
+        datasource: &str,
+        timeout_ms: u64,
+    ) -> Result<Self, MigrationError> {
         let deadline = (timeout_ms != 0)
             .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
         // `lock_timeout_ms` 覆盖连接池获取、握手、lock ID 计算和 GET_LOCK 全链路；若只限制
         // GET_LOCK，连接池耗尽或握手缓慢仍可能在数据库锁计时开始前无限等待。
-        let connection = match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, pool.acquire())
-                .await
-                .map_err(|_| MigrationError::LockTimeout(timeout_ms))?
-                .map_err(backend)?,
-            None => pool.acquire().await.map_err(backend)?,
-        };
+        let connection = acquire_connection(pool, datasource, deadline, timeout_ms).await?;
         let mut guard = Self {
             connection: Some(connection),
             lock_id: String::new(),
@@ -233,6 +235,18 @@ pub async fn run_gate(
     migrator: &Migrator,
     settings: &MigrationSettings,
 ) -> Result<MigrationReport, MigrationError> {
+    run_gate_for(pool, "default", migrator, settings).await
+}
+
+/// 业务作用：按数据源身份运行 MySQL migration 门禁，并把真实池等待归入 migration 用途。
+/// 参数说明：`pool` 是目标池，`datasource` 为冻结目录身份，`migrator` 为业务迁移，`settings` 为门禁策略。
+/// 返回：门禁摘要或原有稳定失败；观测不会改变门禁结果，advisory lock 等待不计入池等待。
+pub async fn run_gate_for(
+    pool: &MySqlPool,
+    datasource: &str,
+    migrator: &Migrator,
+    settings: &MigrationSettings,
+) -> Result<MigrationReport, MigrationError> {
     settings.validate()?;
     let ups = embedded_ups(migrator);
     match settings.mode {
@@ -242,7 +256,7 @@ pub async fn run_gate(
             applied: 0,
         }),
         MigrationMode::Validate => {
-            let mut connection = pool.acquire().await.map_err(backend)?;
+            let mut connection = acquire_connection(pool, datasource, None, 0).await?;
             let state = applied_state(&mut connection).await?;
             namigrate_core::compare_migrations(&ups, &state)
                 .ensure_valid(migrator.ignore_missing)?;
@@ -254,7 +268,8 @@ pub async fn run_gate(
         }
         MigrationMode::Apply => {
             // 先取得 SQLx-compatible 有界 advisory lock；状态读取、apply 与记录都复用同一连接。
-            let mut lock = MigrationLock::acquire(pool, settings.lock_timeout_ms).await?;
+            let mut lock =
+                MigrationLock::acquire(pool, datasource, settings.lock_timeout_ms).await?;
             let state = applied_state(lock.connection()).await?;
             let comparison = namigrate_core::compare_migrations(&ups, &state);
             comparison.ensure_applicable(migrator.ignore_missing)?;
@@ -272,6 +287,39 @@ pub async fn run_gate(
             })
         }
     }
+}
+
+/// 业务作用：在擦除 SQLx 错误前记录 migration 的真实连接池等待，保留外层锁预算。
+/// 参数说明：`pool`、`datasource` 指定连接身份；`deadline`、`timeout_ms` 表达可选端到端预算。
+/// 返回：池连接或脱敏门禁错误；取消由观测守卫记录，取得连接后立即结束等待计时。
+async fn acquire_connection(
+    pool: &MySqlPool,
+    datasource: &str,
+    deadline: Option<tokio::time::Instant>,
+    timeout_ms: u64,
+) -> Result<PoolConnection<MySql>, MigrationError> {
+    use natx_core::observability::{connection_slot, AcquireOutcome, ConnectionPurpose};
+    let mut observation = connection_slot(natx_core::DatabaseDriver::MySql, datasource)
+        .acquire(ConnectionPurpose::Migration);
+    let result = match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, pool.acquire()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // 完整锁预算在池等待阶段耗尽，不能将它误记为 advisory lock 竞争或取消。
+                observation.finish(AcquireOutcome::Timeout);
+                return Err(MigrationError::LockTimeout(timeout_ms));
+            }
+        },
+        None => pool.acquire().await,
+    };
+    observation.finish(match &result {
+        Ok(_) => AcquireOutcome::Ok,
+        Err(sqlx::Error::PoolTimedOut) => AcquireOutcome::Timeout,
+        Err(sqlx::Error::PoolClosed) => AcquireOutcome::Closed,
+        Err(sqlx::Error::WorkerCrashed) => AcquireOutcome::Worker,
+        Err(_) => AcquireOutcome::Other,
+    });
+    result.map_err(backend)
 }
 
 /// 业务作用: 把 sqlx `MigrateError` 脱敏映射(checksum 漂移单列,其余归 Backend)。

@@ -2,6 +2,8 @@
 //!
 //! 本 crate 不创建连接，也不依赖 SQLx 的数据库 feature。MySQL 与 PostgreSQL driver crate
 //! 通过同一进程协调器发布 typed registry，确保同一 Application 只有一张名称与 driver catalog。
+//! 连接观测按固定 datasource 与 purpose 区分 Pool acquire、事务槽等待和执行前拒绝；取消只收口
+//! 一次终态，Pool 状态为近似快照。等待日志与有界通知不能改变连接结果，不计作 Mapper 执行耗时。
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -10,6 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// 默认 datasource 的规范名称。
 pub const DEFAULT_DATASOURCE: &str = "default";
+
+pub mod observability;
 /// datasource qualifier 的最大 UTF-8 字节数。
 pub const MAX_DATASOURCE_NAME_BYTES: usize = 128;
 /// 单个受管 Application 可发布的 datasource 总数上限。

@@ -4,10 +4,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use natx::{
-    datasource::{build_pool, probe, DataSourceConfig},
-    DataSourceRegistry, MySqlPool,
-};
+#[cfg(not(feature = "mapper-observability"))]
+use natx::datasource::{build_pool, probe};
+use natx::{datasource::DataSourceConfig, DataSourceRegistry, MySqlPool};
 use serde::Deserialize;
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
@@ -91,6 +90,7 @@ impl DbComponent {
 
 /// 单个数据源健康 monitor 的不可变输入。
 struct DbMonitorInput {
+    name: String,
     pool: MySqlPool,
     contributor: ReadinessContributor,
 }
@@ -157,7 +157,7 @@ async fn run_db_monitor(
                     }
                     continue 'monitor;
                 }
-                result = input.pool.acquire() => result,
+                result = natx::observed_pool_acquire(&input.name, natx::observability::ConnectionPurpose::Probe, &input.pool) => result,
             };
             match acquired {
                 Ok(_conn) => {
@@ -280,9 +280,16 @@ impl ApplicationComponent for DbComponent {
             }
             let mut monitor_inputs: Vec<DbMonitorInput> = Vec::new();
             for (name, config, migrations) in sources {
+                #[cfg(feature = "mapper-observability")]
+                let logging =
+                    crate::sql_observability::statement_logging(&application, &name).await?;
                 // 无条件单连接握手探针先于建池：启动期需要保留鉴权、库缺失或拒绝连接等真实根因，
                 // 不能退化成连接池获取超时。endpoint 只暴露 host、port 与 database，凭据不进入错误正文。
-                probe(&config).await.map_err(|error| {
+                #[cfg(feature = "mapper-observability")]
+                let probe_result = natx::datasource::probe_with_logging(&config, logging).await;
+                #[cfg(not(feature = "mapper-observability"))]
+                let probe_result = probe(&config).await;
+                probe_result.map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
                         format!(
@@ -292,7 +299,11 @@ impl ApplicationComponent for DbComponent {
                         error,
                     )
                 })?;
-                let pool = build_pool(&config).map_err(|error| {
+                #[cfg(feature = "mapper-observability")]
+                let pool_result = natx::datasource::build_pool_with_logging(&config, logging);
+                #[cfg(not(feature = "mapper-observability"))]
+                let pool_result = build_pool(&config);
+                let pool = pool_result.map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
                         format!(
@@ -318,6 +329,7 @@ impl ApplicationComponent for DbComponent {
                 )?;
                 contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 monitor_inputs.push(DbMonitorInput {
+                    name: name.clone(),
                     pool: pool.clone(),
                     contributor,
                 });
@@ -329,6 +341,9 @@ impl ApplicationComponent for DbComponent {
                     self.migration_settings.insert(name.clone(), settings);
                 }
             }
+
+            #[cfg(feature = "mapper-observability")]
+            crate::sql_observability::install_mysql_pools(&application, &self.pools).await?;
 
             // 全部 pool 建立并登记后才冻结命名表；事务、Mapper 和持久适配器只能看到
             // 这一次完整发布，任一前置失败都不会留下可读的半张资源表。
@@ -424,7 +439,13 @@ impl ApplicationComponent for DbComponent {
                     }
                     *slot = Some((Arc::clone(&registry), pool.clone()));
                 }
-                pool.acquire().await.map_err(|error| {
+                natx::observed_pool_acquire(
+                    DEFAULT_DATASOURCE,
+                    natx::observability::ConnectionPurpose::Probe,
+                    &pool,
+                )
+                .await
+                .map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Prepare,
                         "saga user-hook database probe failed",
@@ -443,12 +464,18 @@ impl ApplicationComponent for DbComponent {
                 context.register_resource(None, Arc::clone(&registry))?;
                 self.pools
                     .insert(DEFAULT_DATASOURCE.to_owned(), pool.clone());
+                #[cfg(feature = "mapper-observability")]
+                crate::sql_observability::install_mysql_pools(&application, &self.pools).await?;
                 // 统一资源视图先完成发布，健康状态才可对 Runner 可见；即使后续 migration 门禁拒绝，
                 // 启动失败也会按既有清理栈撤销资源并显式关闭连接池。
                 contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 self.critical_task = Some(Box::pin(run_db_monitor(
                     application.clone(),
-                    vec![DbMonitorInput { pool, contributor }],
+                    vec![DbMonitorInput {
+                        name: DEFAULT_DATASOURCE.to_owned(),
+                        pool,
+                        contributor,
+                    }],
                 )));
             }
             let registrations = application.take_migrations();
@@ -468,7 +495,7 @@ impl ApplicationComponent for DbComponent {
                     .get(name)
                     .cloned()
                     .unwrap_or_default();
-                let report = namigrate::run_gate(pool, migrator, &settings)
+                let report = namigrate::run_gate_for(pool, name, migrator, &settings)
                     .await
                     .map_err(|error| {
                         // MigrationError 的 Display 已脱敏(只含版本与稳定 reason,无 SQL);不接源链,

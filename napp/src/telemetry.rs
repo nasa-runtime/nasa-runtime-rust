@@ -143,6 +143,9 @@ struct TelemetryConfig {
     service_name: String,
     /// OTLP resource `service.instance.id`；空值由 Application 按进程启动事实生成。
     service_instance_id: String,
+    /// 同一观测身份派生的环境、集群与地域属性，不接受独立配置覆盖。
+    #[serde(skip)]
+    resource_attributes: Vec<(String, String)>,
     /// 有界导出队列容量;缺省 2048,必须 ≥ 1。
     queue_capacity: usize,
     /// OTLP/HTTP traces 端点(如 `http://collector:4318/v1/traces`);设置即 sink 换成 OTLP 导出器,
@@ -172,6 +175,7 @@ impl Default for TelemetryConfig {
             enabled: true,
             service_name: String::new(),
             service_instance_id: String::new(),
+            resource_attributes: Vec::new(),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             otlp_endpoint: None,
             otlp_metrics_endpoint: None,
@@ -412,7 +416,10 @@ impl ApplicationComponent for TelemetryComponent {
 /// span 导出目的地:日志 sink(交付「日志 trace-id 关联」)或 OTLP/HTTP JSON wire exporter。
 enum SpanSink {
     /// 结构化日志 sink:每条 span 打 `trace_id`/`span_id`/`name`,不含 payload/属性正文。
-    Log,
+    Log {
+        service_name: String,
+        service_instance_id: String,
+    },
     /// OTLP/HTTP exporter:批量 POST `ExportTraceServiceRequest`(JSON 或 protobuf 编码)到 collector。
     Otlp {
         /// 复用的 reqwest 客户端(已设超时)。
@@ -423,6 +430,8 @@ enum SpanSink {
         service_name: String,
         /// resource `service.instance.id`。
         service_instance_id: String,
+        /// 与指标出口一致的冻结部署身份。
+        resource_attributes: Vec<(String, String)>,
         /// 载荷编码(JSON / protobuf)。
         encoding: OtlpEncoding,
     },
@@ -437,13 +446,18 @@ impl SpanSink {
     /// 返回：日志写入或 collector 确认成功时返回 `true`；网络或 HTTP 失败时返回 `false`。
     async fn ship(&self, batch: &[SpanRecord]) -> bool {
         match self {
-            SpanSink::Log => {
+            SpanSink::Log {
+                service_name,
+                service_instance_id,
+            } => {
                 for span in batch {
                     tracing::debug!(
                         target: "telemetry",
                         trace_id = %span.trace_id_hex,
                         span_id = %span.span_id_hex,
                         name = %span.name,
+                        service_name = %service_name,
+                        service_instance_id = %service_instance_id,
                         "span"
                     );
                 }
@@ -454,16 +468,28 @@ impl SpanSink {
                 endpoint,
                 service_name,
                 service_instance_id,
+                resource_attributes,
                 encoding,
             } => {
                 let (content_type, body): (&str, Vec<u8>) = match encoding {
                     OtlpEncoding::Json => (
                         "application/json",
-                        otlp_traces_json(batch, service_name, service_instance_id).into_bytes(),
+                        otlp_traces_json(
+                            batch,
+                            service_name,
+                            service_instance_id,
+                            resource_attributes,
+                        )
+                        .into_bytes(),
                     ),
                     OtlpEncoding::Protobuf => (
                         "application/x-protobuf",
-                        otlp_traces_protobuf(batch, service_name, service_instance_id),
+                        otlp_traces_protobuf(
+                            batch,
+                            service_name,
+                            service_instance_id,
+                            resource_attributes,
+                        ),
                     ),
                 };
                 match client
@@ -524,10 +550,14 @@ fn build_span_sink(config: &TelemetryConfig) -> ApplicationResult<SpanSink> {
                 endpoint: endpoint.to_owned(),
                 service_name: config.service_name.clone(),
                 service_instance_id: config.service_instance_id.clone(),
+                resource_attributes: config.resource_attributes.clone(),
                 encoding: config.otlp_encoding,
             })
         }
-        None => Ok(SpanSink::Log),
+        None => Ok(SpanSink::Log {
+            service_name: config.service_name.clone(),
+            service_instance_id: config.service_instance_id.clone(),
+        }),
     }
 }
 
@@ -537,6 +567,7 @@ struct MetricsSink {
     endpoint: String,
     service_name: String,
     service_instance_id: String,
+    resource_attributes: Vec<(String, String)>,
     encoding: OtlpEncoding,
     interval: Duration,
     state: Arc<OtlpMetricsState>,
@@ -571,6 +602,7 @@ impl MetricsSink {
                     families,
                     &self.service_name,
                     &self.service_instance_id,
+                    &self.resource_attributes,
                     start_time_unix_nano,
                     time_unix_nano,
                 )
@@ -582,6 +614,7 @@ impl MetricsSink {
                     families,
                     &self.service_name,
                     &self.service_instance_id,
+                    &self.resource_attributes,
                     start_time_unix_nano,
                     time_unix_nano,
                 ),
@@ -647,6 +680,7 @@ fn build_metrics_sink(config: &TelemetryConfig) -> ApplicationResult<Option<Metr
         endpoint: endpoint.to_owned(),
         service_name: config.service_name.clone(),
         service_instance_id: config.service_instance_id.clone(),
+        resource_attributes: config.resource_attributes.clone(),
         encoding: config.otlp_encoding,
         interval: Duration::from_millis(config.metrics_interval_ms),
         state: Arc::new(OtlpMetricsState::new()),
@@ -746,11 +780,14 @@ async fn export_metrics_once(
 /// - `start_time_unix_nano`: 累计起点。
 /// - `time_unix_nano`: 快照时刻。
 ///
+/// - `resource_attributes`：由启动配置冻结的共享部署身份。
+///
 /// 返回：符合 proto3 JSON 映射的 `ExportMetricsServiceRequest` 字符串。
 fn otlp_metrics_json(
     families: &[nametrics_core::MetricFamilySnapshot],
     service_name: &str,
     service_instance_id: &str,
+    resource_attributes: &[(String, String)],
     start_time_unix_nano: u64,
     time_unix_nano: u64,
 ) -> String {
@@ -832,7 +869,7 @@ fn otlp_metrics_json(
     serde_json::json!({
         "resourceMetrics": [{
             "resource": {
-                "attributes": resource_attributes_json(service_name, service_instance_id)
+                "attributes": resource_attributes_json(service_name, service_instance_id, resource_attributes)
             },
             "scopeMetrics": [{
                 "scope": { "name": "nasa" },
@@ -867,12 +904,15 @@ fn metric_attributes_json(labels: &[(&'static str, String)]) -> Vec<serde_json::
 /// - `service_name`: 稳定服务名。
 /// - `service_instance_id`: 本次进程实例身份。
 ///
-/// 返回：按 `service.name`、`service.instance.id` 顺序排列的两个 `KeyValue`。
+/// - `resource_attributes`：与统一观测身份同源的可选环境、集群和地域属性。
+///
+/// 返回：服务与实例属性在前，其余部署属性按冻结顺序追加。
 fn resource_attributes_json(
     service_name: &str,
     service_instance_id: &str,
+    resource_attributes: &[(String, String)],
 ) -> Vec<serde_json::Value> {
-    vec![
+    let mut attributes = vec![
         serde_json::json!({
             "key": "service.name",
             "value": { "stringValue": service_name }
@@ -881,7 +921,13 @@ fn resource_attributes_json(
             "key": "service.instance.id",
             "value": { "stringValue": service_instance_id }
         }),
-    ]
+    ];
+    attributes.extend(
+        resource_attributes
+            .iter()
+            .map(|(key, value)| serde_json::json!({"key":key,"value":{"stringValue":value}})),
+    );
+    attributes
 }
 
 /// 业务作用：按 proto3 JSON 规则表示有限值与特殊浮点值。
@@ -913,8 +959,15 @@ fn otlp_json_double(value: f64) -> serde_json::Value {
 /// - `service_name`: resource `service.name` 属性值。
 /// - `service_instance_id`: resource `service.instance.id` 属性值。
 ///
-/// 返回：包含服务与实例 resource 身份且不含业务正文的 proto3 JSON 字符串。
-fn otlp_traces_json(batch: &[SpanRecord], service_name: &str, service_instance_id: &str) -> String {
+/// - `resource_attributes`：与统一观测身份同源的可选部署属性。
+///
+/// 返回：包含统一 resource 身份且不含业务正文的 proto3 JSON 字符串。
+fn otlp_traces_json(
+    batch: &[SpanRecord],
+    service_name: &str,
+    service_instance_id: &str,
+    resource_attributes: &[(String, String)],
+) -> String {
     let spans: Vec<serde_json::Value> = batch
         .iter()
         .map(|span| {
@@ -951,7 +1004,7 @@ fn otlp_traces_json(batch: &[SpanRecord], service_name: &str, service_instance_i
     serde_json::json!({
         "resourceSpans": [{
             "resource": {
-                "attributes": resource_attributes_json(service_name, service_instance_id)
+                "attributes": resource_attributes_json(service_name, service_instance_id, resource_attributes)
             },
             "scopeSpans": [{
                 "scope": { "name": "nasa" },
@@ -1116,8 +1169,14 @@ fn string_key_value_protobuf(key: &str, value: &str) -> Vec<u8> {
 /// - `service_name`: 稳定服务名。
 /// - `service_instance_id`: 本次进程实例身份。
 ///
-/// 返回：含 `service.name` 与 `service.instance.id` 两个属性的 `Resource` 字节。
-fn resource_protobuf(service_name: &str, service_instance_id: &str) -> Vec<u8> {
+/// - `resource_attributes`：与统一观测身份同源的可选部署属性。
+///
+/// 返回：包含服务、实例及可选部署属性的 `Resource` 字节。
+fn resource_protobuf(
+    service_name: &str,
+    service_instance_id: &str,
+    resource_attributes: &[(String, String)],
+) -> Vec<u8> {
     let mut resource = Vec::new();
     put_len_field(
         &mut resource,
@@ -1129,6 +1188,9 @@ fn resource_protobuf(service_name: &str, service_instance_id: &str) -> Vec<u8> {
         1,
         &string_key_value_protobuf("service.instance.id", service_instance_id),
     );
+    for (key, value) in resource_attributes {
+        put_len_field(&mut resource, 1, &string_key_value_protobuf(key, value));
+    }
     resource
 }
 
@@ -1184,13 +1246,16 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 /// - `service_name`: resource `service.name` 属性值。
 /// - `service_instance_id`: resource `service.instance.id` 属性值。
 ///
-/// 返回：包含服务与实例 resource 身份且不含业务正文的 protobuf wire 字节。
+/// - `resource_attributes`：由启动配置冻结的共享部署身份。
+///
+/// 返回：包含统一 resource 身份且不含业务正文的 protobuf wire 字节。
 fn otlp_traces_protobuf(
     batch: &[SpanRecord],
     service_name: &str,
     service_instance_id: &str,
+    resource_attributes: &[(String, String)],
 ) -> Vec<u8> {
-    let resource = resource_protobuf(service_name, service_instance_id);
+    let resource = resource_protobuf(service_name, service_instance_id, resource_attributes);
 
     // ScopeSpans{ scope=1: InstrumentationScope{ name="nasa" }, spans=2: repeated Span }
     let mut scope = Vec::new();
@@ -1252,15 +1317,18 @@ fn otlp_traces_protobuf(
 /// - `start_time_unix_nano`: 累计起点。
 /// - `time_unix_nano`: 快照时刻。
 ///
+/// - `resource_attributes`：由启动配置冻结的共享部署身份。
+///
 /// 返回：`ExportMetricsServiceRequest` 的 protobuf wire 字节。
 fn otlp_metrics_protobuf(
     families: &[nametrics_core::MetricFamilySnapshot],
     service_name: &str,
     service_instance_id: &str,
+    resource_attributes: &[(String, String)],
     start_time_unix_nano: u64,
     time_unix_nano: u64,
 ) -> Vec<u8> {
-    let resource = resource_protobuf(service_name, service_instance_id);
+    let resource = resource_protobuf(service_name, service_instance_id, resource_attributes);
     let mut scope = Vec::new();
     put_len_field(&mut scope, 1, b"nasa");
     let mut scope_metrics = Vec::new();
@@ -1534,6 +1602,32 @@ fn read_telemetry_config(application: &Application) -> ApplicationResult<Telemet
             )
         })?;
     let mut config = root.telemetry.unwrap_or_default();
+    #[cfg(feature = "observability")]
+    if let Some(identity) = crate::observability::application_identity(application)? {
+        config.service_name = identity
+            .labels
+            .get("service_name")
+            .cloned()
+            .unwrap_or_default();
+        config.service_instance_id = identity
+            .labels
+            .get("service_instance_id")
+            .cloned()
+            .unwrap_or_default();
+        for (label, attribute) in [
+            ("deployment_environment", "deployment.environment.name"),
+            ("cluster", "cluster"),
+            ("region", "cloud.region"),
+            ("zone", "cloud.availability_zone"),
+            ("service_version", "service.version"),
+        ] {
+            if let Some(value) = identity.labels.get(label) {
+                config
+                    .resource_attributes
+                    .push((attribute.into(), value.clone()));
+            }
+        }
+    }
     if config.service_name.trim().is_empty() {
         config.service_name = application.info().name().to_owned();
     }

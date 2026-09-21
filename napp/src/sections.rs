@@ -21,6 +21,9 @@ const RESERVED_SECTIONS: &[(&str, ComponentId)] = &[
     ("nacos", ComponentId::NacosConfig),
     ("database", ComponentId::Db),
     ("datasources", ComponentId::Db),
+    ("sql", ComponentId::SqlObservability),
+    ("notifications", ComponentId::SqlObservability),
+    ("grafana.observability", ComponentId::Observability),
     ("redis", ComponentId::Redis),
     ("redis.job", ComponentId::RedisJob),
     ("telemetry", ComponentId::Telemetry),
@@ -87,6 +90,16 @@ pub(crate) fn validate_declared_sections(
             ComponentId::NacosConfig => crate::nacos_config::validate_nacos_section(tree, phase)?,
             #[cfg(any(feature = "db", feature = "db-pgsql"))]
             ComponentId::Db => crate::db::validate_datasource_sections(tree, phase)?,
+            #[cfg(feature = "mapper-observability")]
+            ComponentId::SqlObservability => {
+                crate::sql_observability::validate_section(tree, phase)?
+            }
+            #[cfg(feature = "observability")]
+            ComponentId::Observability => {
+                nafana::observability::ObservabilityConfig::from_root(tree).map_err(|message| {
+                    crate::ApplicationError::new(ComponentId::Observability, phase, message)
+                })?;
+            }
             #[cfg(feature = "redis")]
             ComponentId::Redis => crate::redis::validate_redis_section(tree, phase)?,
             #[cfg(feature = "redis-job")]

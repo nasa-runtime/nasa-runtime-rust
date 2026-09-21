@@ -4,8 +4,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
 
+pub use natx_core::observability::StatementLogging;
 pub use natx_core::DataSourcePoolConfig;
 
 /// 业务作用：承载 PostgreSQL datasource 的连接串与公共池参数。
@@ -212,6 +213,120 @@ fn configured_options(config: &DataSourceConfig, schema: &str) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("PostgreSQL datasource URL 无法解析"))?;
     // schema 必须在握手阶段成为 session 默认值，避免 migration 成功后业务 SQL 回落到 `public`。
     Ok(options.options([("search_path", schema)]))
+}
+
+/// 业务作用：按统一语句日志策略探测 PostgreSQL，并保留服务端默认 schema。
+/// 参数说明：`config` 是连接配置；`logging` 控制 SQLx 语句事件。
+/// 返回：握手和关闭均成功时完成，否则返回不包含凭据的错误。
+pub async fn probe_with_logging(
+    config: &DataSourceConfig,
+    logging: StatementLogging,
+) -> anyhow::Result<()> {
+    probe_logging(config, None, logging).await
+}
+
+/// 业务作用：在指定业务 schema 下按统一日志策略探测 PostgreSQL。
+/// 参数说明：`config` 为连接配置；`schema` 为目标作用域；`logging` 控制语句日志。
+/// 返回：真实连接与 schema 均可用时成功，否则返回脱敏错误。
+pub async fn probe_in_schema_with_logging(
+    config: &DataSourceConfig,
+    schema: &str,
+    logging: StatementLogging,
+) -> anyhow::Result<()> {
+    probe_logging(config, Some(schema), logging).await
+}
+
+/// 业务作用：复用一个关闭路径完成受管探测和可选 schema 验证。
+/// 参数说明：`config`、`schema` 和 `logging` 为启动期固定配置。
+/// 返回：探测连接总会尝试关闭；握手、schema 或关闭失败返回错误。
+async fn probe_logging(
+    config: &DataSourceConfig,
+    schema: Option<&str>,
+    logging: StatementLogging,
+) -> anyhow::Result<()> {
+    let options = logging_options(config, schema, logging)?;
+    let mut connection = tokio::time::timeout(
+        Duration::from_millis(config.connect_timeout_ms),
+        PgConnection::connect_with(&options),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("PostgreSQL datasource connection timeout"))?
+    .map_err(|_| anyhow::anyhow!("PostgreSQL datasource connection failed"))?;
+    let result = if let Some(schema) = schema {
+        verify_current_schema(&mut connection, schema)
+            .await
+            .map_err(|_| anyhow::anyhow!("PostgreSQL datasource schema 不存在或不可用"))
+    } else {
+        Ok(())
+    };
+    // schema 不可用也必须关闭探测会话，不能把半完成初始化保留到运行期。
+    connection
+        .close()
+        .await
+        .map_err(|_| anyhow::anyhow!("PostgreSQL datasource probe close failed"))?;
+    result
+}
+
+/// 业务作用：以受管语句策略创建 PostgreSQL Pool，保留服务端默认 schema。
+/// 参数说明：`config` 是池配置；`logging` 是启动期冻结的语句开关。
+/// 返回：配置合法时返回惰性池，调用方负责关闭。
+pub fn build_pool_with_logging(
+    config: &DataSourceConfig,
+    logging: StatementLogging,
+) -> anyhow::Result<PgPool> {
+    let options = logging_options(config, None, logging)?;
+    Ok(PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .min_connections(config.min_connections)
+        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+        .connect_lazy_with(options))
+}
+
+/// 业务作用：同时冻结 PostgreSQL schema 与受管语句日志策略。
+/// 参数说明：`config` 是池配置；`schema` 是业务对象作用域；`logging` 控制语句事件。
+/// 返回：惰性池在每条连接进入池前确认 schema，不合格连接不会发放。
+pub fn build_pool_in_schema_with_logging(
+    config: &DataSourceConfig,
+    schema: &str,
+    logging: StatementLogging,
+) -> anyhow::Result<PgPool> {
+    let options = logging_options(config, Some(schema), logging)?;
+    let schema = schema.to_owned();
+    Ok(PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .min_connections(config.min_connections)
+        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+        .after_connect(move |connection, _metadata| {
+            let schema = schema.clone();
+            Box::pin(async move { verify_current_schema(connection, &schema).await })
+        })
+        .connect_lazy_with(options))
+}
+
+/// 业务作用：将日志策略与可选 schema 合成为受管 PostgreSQL 连接选项。
+/// 参数说明：`config`、`schema`、`logging` 均来自启动期已解析配置。
+/// 返回：完整校验成功的连接选项，关闭独立 SQLx 慢日志升级。
+fn logging_options(
+    config: &DataSourceConfig,
+    schema: Option<&str>,
+    logging: StatementLogging,
+) -> anyhow::Result<PgConnectOptions> {
+    config.validate()?;
+    let options = if let Some(schema) = schema {
+        configured_options(config, schema)?
+    } else {
+        PgConnectOptions::from_str(&config.url)
+            .map_err(|_| anyhow::anyhow!("PostgreSQL datasource URL 无法解析"))?
+    };
+    let level = match logging {
+        StatementLogging::Disabled => return Ok(options.disable_statement_logging()),
+        StatementLogging::Debug => log::LevelFilter::Debug,
+        StatementLogging::Trace => log::LevelFilter::Trace,
+    };
+    // 慢操作只由上层业务阈值裁决，不能由驱动默认阈值再输出一条日志。
+    Ok(options
+        .log_statements(level)
+        .log_slow_statements(level, Duration::MAX))
 }
 
 /// 业务作用：复验服务端实际选择的 schema，阻止不存在的 search_path 以成功连接进入业务池。

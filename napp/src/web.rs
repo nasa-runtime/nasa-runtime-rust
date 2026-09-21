@@ -616,8 +616,21 @@ impl ApplicationComponent for WebComponent {
                     "web configuration was not prepared during start",
                 )
             })?;
+            #[cfg(feature = "observability")]
+            let metrics_path = {
+                let settings = nafana::observability::ObservabilityConfig::from_root(
+                    context.application().config().value(),
+                )
+                .map_err(|message| web_error(ApplicationPhase::Ready, message))?;
+                (settings.scrape_enabled()
+                    && settings.prometheus.scrape.listener
+                        == nafana::observability::ListenerMode::Web)
+                    .then_some(settings.prometheus.scrape.path)
+            };
+            #[cfg(not(feature = "observability"))]
+            let metrics_path = config.health.then(|| "/metrics".to_owned());
             let mut routes = (self.route_meta)();
-            validate_routes(&mut routes, config.health)?;
+            validate_routes(&mut routes, config.health, metrics_path.as_deref())?;
             let route_manifest = build_route_manifest(&routes, config.health);
 
             let application = context.application().clone();
@@ -630,13 +643,14 @@ impl ApplicationComponent for WebComponent {
                 .map(|(prefix, _)| prefix.strip_prefix(&config.context_path).unwrap_or(prefix));
             if let Some(prefix) = reserved {
                 // Saga 整段分派优先于子路由；已启用的框架入口必须先证明不被遮蔽，才能绑定 listener。
-                if config.health {
-                    let framework_paths = [
-                        "/healthz",
-                        "/readyz",
-                        #[cfg(any(feature = "kafka", feature = "web"))]
-                        "/metrics",
-                    ];
+                {
+                    let mut framework_paths = Vec::new();
+                    if config.health {
+                        framework_paths.extend(["/healthz", "/readyz"]);
+                    }
+                    if let Some(path) = metrics_path.as_deref() {
+                        framework_paths.push(path);
+                    }
                     if let Some(path) = framework_paths
                         .iter()
                         .find(|path| router_boundary::under_prefix(path, prefix))
@@ -833,9 +847,8 @@ impl ApplicationComponent for WebComponent {
                         ));
                     }
                 };
-                // 统一指标端点与探针同属框架 observability 出口,复用 health 开关一并挂载。
-                // 仅当进程级 hub 存在(kafka / web-security 编入)时才有内容可暴露。
-                #[cfg(any(feature = "kafka", feature = "web"))]
+                // 未编入统一观测配置的已有应用保持原端点行为；新入口完全由独立配置控制。
+                #[cfg(not(feature = "observability"))]
                 {
                     router = match catch_unwind(AssertUnwindSafe(move || {
                         router.route("/metrics", get(metrics_endpoint))
@@ -850,6 +863,23 @@ impl ApplicationComponent for WebComponent {
                         }
                     };
                 }
+            }
+            #[cfg(feature = "observability")]
+            if let Some(metrics_router) =
+                crate::observability::web_metrics_router(&application).await?
+            {
+                // 指标认证不借用业务 JWT；路由冲突必须在绑定前阻止半完成管理面。
+                router = match catch_unwind(AssertUnwindSafe(move || router.merge(metrics_router)))
+                {
+                    Ok(router) => router,
+                    Err(payload) => {
+                        std::mem::forget(payload);
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            "a business customization conflicts with the configured metrics path",
+                        ));
+                    }
+                };
             }
             let mut router = router.with_state(application.clone());
             if !config.context_path.is_empty() {
@@ -951,9 +981,10 @@ impl ApplicationComponent for WebComponent {
                 if config.health {
                     unmatched_exempt.insert(format!("GET {exempt_prefix}/healthz"));
                     unmatched_exempt.insert(format!("GET {exempt_prefix}/readyz"));
-                    // 与上方 /metrics 挂载条件同 cfg:未编入指标出口时不虚增豁免面。
-                    #[cfg(any(feature = "kafka", feature = "web"))]
-                    unmatched_exempt.insert(format!("GET {exempt_prefix}/metrics"));
+                }
+                if let Some(path) = metrics_path.as_deref() {
+                    unmatched_exempt.insert(format!("GET {exempt_prefix}{path}"));
+                    unmatched_exempt.insert(format!("HEAD {exempt_prefix}{path}"));
                 }
                 let (object_authorizer, object_timeout) = object_authorizer
                     .map(|(provider, timeout)| (Some(provider), timeout))
@@ -971,9 +1002,17 @@ impl ApplicationComponent for WebComponent {
             // 授权。校验 Bearer JWT 通过则把已验证 Principal 写入扩展供 authz 判定;无头匿名放行;校验失败
             // 401。默认零行为。
             if let Some(authenticator) = application.authenticator() {
+                let exempt_prefix = if config.context_path == "/" {
+                    ""
+                } else {
+                    config.context_path.as_str()
+                };
+                let metrics_full_path = metrics_path
+                    .as_ref()
+                    .map(|path| format!("{exempt_prefix}{path}"));
                 router = router.layer(from_fn_with_state(
-                    authenticator,
-                    crate::authn::authenticate,
+                    (authenticator, metrics_full_path),
+                    authenticate_business_or_metrics,
                 ));
             }
             if let Some(limit) = config.request_body_limit_bytes {
@@ -1359,7 +1398,14 @@ impl Drop for WebMappingMonitorShutdown {
 ///
 /// - `routes`：业务二进制投影出的全部静态路由元数据。
 /// - `health_enabled`：是否需要为存活和就绪探针保留完整路径。
-fn validate_routes(routes: &mut [RouteMeta], health_enabled: bool) -> ApplicationResult<()> {
+/// - `metrics_path`：当前确实启用的指标路径，不存在时不占用业务地址。
+///
+/// 返回：全部业务路由与启用的框架地址互斥时成功，否则在绑定 listener 前拒绝。
+fn validate_routes(
+    routes: &mut [RouteMeta],
+    health_enabled: bool,
+    metrics_path: Option<&str>,
+) -> ApplicationResult<()> {
     routes.sort_by_key(|route| (route.path, route.method, route.handler));
     let mut path_tree = matchit::Router::new();
     let mut exact = HashMap::<&'static str, HashMap<&'static str, &'static str>>::new();
@@ -1376,14 +1422,24 @@ fn validate_routes(routes: &mut [RouteMeta], health_enabled: bool) -> Applicatio
                 })?;
         }
     }
+    if let Some(path) = metrics_path {
+        path_tree.insert(path, "application-metrics").map_err(|_| {
+            web_error(
+                ApplicationPhase::Ready,
+                "configured metrics path conflicts with a health path",
+            )
+        })?;
+    }
 
     for route in routes.iter().copied() {
         validate_route_path(&route)?;
-        if health_enabled && matches!(route.path, "/healthz" | "/readyz") {
+        if (health_enabled && matches!(route.path, "/healthz" | "/readyz"))
+            || metrics_path == Some(route.path)
+        {
             return Err(web_error(
                 ApplicationPhase::Ready,
                 format!(
-                    "route `{}` from `{}` conflicts with a reserved health path",
+                    "route `{}` from `{}` conflicts with a reserved framework path",
                     route.path, route.handler
                 ),
             ));
@@ -1496,7 +1552,7 @@ async fn readiness(State(application): State<Application>) -> StatusCode {
 /// # 参数
 ///
 /// - `application`：当前 Web Router 持有的统一 Application 状态,经它取进程级 hub。
-#[cfg(any(feature = "kafka", feature = "web"))]
+#[cfg(not(feature = "observability"))]
 async fn metrics_endpoint(State(application): State<Application>) -> axum::response::Response {
     use axum::response::IntoResponse as _;
     // 外部事实源失败时仍发布其它独立指标族与该源的 last-good 快照；源自身必须同时暴露
@@ -1512,6 +1568,28 @@ async fn metrics_endpoint(State(application): State<Application>) -> axum::respo
         body,
     )
         .into_response()
+}
+
+/// 业务作用：只让实际指标 GET/HEAD 走独立 bearer 校验，业务请求继续遵守 JWT 认证。
+/// 参数说明：`state` 为业务认证器及完整指标路径，`request/next` 为当前 HTTP 调用链。
+/// 返回：指标请求交给其专用认证；其它路径保留原业务认证结果。
+async fn authenticate_business_or_metrics(
+    State((authenticator, metrics_path)): State<(
+        crate::authn::SharedAuthenticator,
+        Option<String>,
+    )>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if metrics_path.as_deref() == Some(request.uri().path())
+        && matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return next.run(request).await;
+    }
+    crate::authn::authenticate(State(authenticator), request, next).await
 }
 
 /// 业务作用：在最外层 Web 边界记录请求进入、响应状态和在途数量。

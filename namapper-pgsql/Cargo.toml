@@ -3,11 +3,11 @@ name = "namapper-pgsql"
 version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Declarative PostgreSQL mapper runtime for SQLx and ambient transactions"
+description = "Declarative PostgreSQL mapper with ambient transactions, atomic SQL metrics, and bounded threshold notifications"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postgresql", "mapper", "sql", "database"]
+keywords = ["postgresql", "mapper", "sql", "database", "observability"]
 categories = ["database", "asynchronous"]
 readme = "README.md"
 

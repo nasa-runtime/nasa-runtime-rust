@@ -7,6 +7,10 @@ Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭�
 或停机 callback 集合。
 可靠 Saga client 将业务事实与发起意图放在同一数据库事务，并让 dispatcher 固定扫描该事务域；
 远端不可用或收据丢失时保留原事件，显式数据源冲突在 Ready 前拒绝。
+Mapper 同时提供默认采集的 SQL 指标，区分逻辑方法、真实数据库执行、连接等待和流消费；业务通过
+同一份 YAML 配置开发 SQL/参数输出、慢操作与错误通知及指标出口，通知故障不影响业务事务。
+慢 SQL 以原始耗时达到或超过配置阈值为准；业务安装 `Notify`、启用告警并关闭通知冷却后，每次命中
+均尝试进入有界通知队列，发送协议与独立通知微服务由业务实现。
 
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
@@ -17,19 +21,65 @@ Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭�
 需要的能力，同时保留各基础设施组件的真实事务、租约和故障边界。核心价值是让配置错误、资源缺失和
 安全门禁在开放流量前失败，并让运行中的权威变化、队列背压和停机排空保持可观测、可控。
 
+Service 的受管主流程如下；Batch 在工作负载前仅放行观测任务，不发布 Service Ready：
+
 ```text
 本地配置 + 远端配置
         │
         v
-最终 YAML ──→ 全量校验与资源探测 ──→ 冻结 Application 快照 ──→ Ready / 业务流量
-                                              │
-                                              ├─ Web / Redis / Kafka / DB
-                                              └─ Saga / 调度 / 长连接 / 可观测性
+最终 YAML → 全量校验与资源探测 → initializer 初始化 → Ready 装配与任务工厂构造
+                                                        │
+                                     最终静态检查与共享启动预算复验
+                                                        │
+                                     发布 Ready → 统一放行受管终端任务
 停机信号 ──→ 关闭业务入口 ──→ 停止新后台动作 ──→ 反向排空 ──→ 释放资源
 ```
 
 Application 不提供跨数据库原子事务，也不会替业务推断租户身份、授权关系、消息投递闭环或生产容量。
 独立组件可以脱离 Application 显式装配；此时连接、启动门禁、停机顺序和可观测性由调用方负责。
+端口绑定不代表已经接流；受管 gRPC 在 `Bound` 阶段不处理 RPC。服务发现只在统一放行后注册，
+注册确认前 `app.is_ready()` 与 `/readyz` 仍不可用，不能只凭生命周期状态或 TCP connect 判断就绪。
+统一放行约束组件交出的终端任务与 initializer 暂存任务，不延迟 UserHook 中普通
+`spawn_background` / `spawn_critical`。业务自管 listener 使用 `serve_when_ready`；initializer 的任务
+工厂应只构造 future，不自行启动监听或派生任务。
+
+## SQL 观测与统一配置
+
+`application + mapper` 或 `application + mapper-pgsql` 自动把方法指标、连接与 Pool 指标、有界通知
+和统一指标出口纳入运行时，不需要业务实现 Mapper Hook、周期采集任务或 metrics Router。
+所有可调策略支持 YAML，非必要项递归提供默认值，未知字段、目录外引用和越界配置在启动时拒绝。
+
+`sql.observability` 控制逐条 SQL、开发参数、慢日志、错误日志、等待阈值与通知；基础指标始终采集。
+业务实现 `Notify` 并通过 `nasa::application::notifications::init` 主动安装，未安装时忽略通知；
+默认不需要 `notifications.providers` 或 `provider_ref`。多命名渠道可选，通知微服务的调用协议由业务
+决定，框架不内置消息渠道客户端。
+`grafana.observability` 控制独立/Web 抓取、remote write、身份与平台期望资源。应用只持有数据面所需
+凭据，平台资源由独立 controller 调和，不从业务副本调用 Grafana 或 Kubernetes 写 API。
+remote write 失联规则只引用外部平台持续提供的期望实例指标，不维护实例清单，也不把应用心跳当成
+“本应在线”的依据。
+
+以下配置以 1000 ms 为慢 SQL 阈值，并关闭重复通知冷却；业务还须在启动前或初始化阶段安装 `Notify`：
+
+```yaml
+sql:
+  observability:
+    slow_sql:
+      threshold_ms: 1000
+    alerts:
+      slow_sql:
+        enabled: true
+        cooldown_ms: 0
+```
+
+关闭慢日志不关闭通知；阈值不包含连接等待、缓存处理或 Stream 消费者处理时间。默认通知冷却为
+60000 ms，需要逐条通知时必须显式设为 0。同次执行既慢又失败且已启用错误通知路由时，优先按错误
+规则发送并保留 `slow` 事实，不重复发送两类事件。
+
+逐条 SQL 与参数默认关闭；参数仅允许显式开发环境、强制敏感名字脱敏并限制数量和长度。
+通知投递不持久化、不提供跨副本去重，队列满、超时与渠道失败均不改变 SQL 结果、事务裁决或数据库
+readiness。集群失败率与分位数告警由监控后端聚合。
+完整字段与默认值见 [SQL 观测](namapper-core/README.md#sql-观测与配置)，
+出口与平台边界见 [nafana](nafana/README.md)，通知扩展合同见 [nanotify-core](nanotify-core/README.md)。
 
 ## 业务优雅停机与所有权
 
@@ -454,7 +504,8 @@ initializer 适合装配动态路由与注册表、恢复业务状态、回填�
 ```text
 UserHook 登记 -> InitializerFreeze -> Prepare（migration / 出站门禁）
               -> before 全局轮 -> initialize 全局轮 -> after 全局轮
-              -> Seal -> Ready（监听、消费与服务发现）
+              -> Seal -> Ready 装配 -> 任务工厂与最终检查
+              -> 发布 Ready / 统一放行 -> 监听、消费与服务发现注册
 ```
 
 属性入口可省略 `name` 和 `order`：默认名称从实现类型派生 canonical kebab-case，默认顺序为
@@ -710,9 +761,10 @@ rest_discovery:         # nacos-discovery 组件
 2. `nalog` 初始化日志。
 3. `nadis` 初始化 Redis；`natx` / `natx-pgsql` 按实际 driver 初始化 MySQL/PostgreSQL pool。
 4. `namapper`、`cacheable` 注入缓存和数据源。
-5. `nanacos`、`rest-discovery` 初始化注册发现和 REST 负载均衡。
+5. `nanacos`、`rest-discovery` 准备出站服务发现和 REST 负载均衡，此时不注册本实例。
 6. `naweb` 装配路由，业务自行拥有 HTTP listener、协议选择与排空；`naws` 启动长连接服务，`nasched`
-   启动调度器。
+   启动调度器。完成所有启动门禁、确认本实例 listener 实际可接流后，再向注册中心发布实例；
+   不能只凭端口已绑定提前注册。
 
 `#[nasa::application]` 按规范组件顺序自动完成上述全部步骤，并补齐手工装配普遍缺失的部分：
 信号处理、启动失败反向回滚、统一停机预算与配置热刷新；声明 `"web"` 时由 `napp` Web 组件启动受管

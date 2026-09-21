@@ -158,22 +158,32 @@ pub trait ApplicationComponent: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// 业务作用：在 Prepare、业务初始化与 Seal 全部成功后激活对外服务或调度终端。
-    ///
-    /// # 参数
+    /// 业务作用：在 Prepare、业务初始化与 Seal 全部成功后装配对外服务或调度终端。
+    /// 参数说明：
     ///
     /// - `_context`：提供 Application、组件资源登记和 action 激活能力的阶段上下文。
+    ///
+    /// 返回：装配成功时等待全表复验；失败由 Runner 反向清理，暂存终端任务尚未执行。
     fn ready<'a>(&'a mut self, _context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async { Ok(()) })
     }
 
-    /// 业务作用：取出 Ready 成功后必须由 Runner 监督的关键任务。
+    /// 业务作用：在所有 Ready 装配及 initializer 任务工厂构造后，核对启动终端所需的最终静态条件。
+    /// 参数说明：无。
+    /// 返回：允许激活时成功；失败使所有暂存终端任务未经 poll 即释放，并反向清理已登记 action。
+    /// 本入口必须是短时、非阻塞的只读检查，不新增资源、静态登记或外部副作用；Batch 仅检查观测组件。
+    /// 同步执行不能被 timeout 抢占；Runner 在返回后复验截止时刻，panic 按 Ready 失败执行统一清理。
+    fn validate_ready(&self) -> ApplicationResult<()> {
+        Ok(())
+    }
+
+    /// 业务作用：取出 Ready 装配成功后需要由 Runner 暂存并监督的关键任务。
     ///
-    /// 每个组件至多返回一次；任务在 active action 已压栈后加入监督集合，提前退出会触发失败停机。
+    /// 每个组件至多返回一次；先由监督器接管所有权，全部工厂与最终检查成功并发布 Ready 后才执行主体。
+    /// Batch 仅放行观测任务而不发布 Service Ready；提前退出仍触发失败停机。
     ///
-    /// # 参数
-    ///
-    /// 本方法无参数；默认组件没有需要持续运行的终端任务。
+    /// 参数说明：无。
+    /// 返回：尚未执行的终端任务及固定名称；默认或已经移交时为 None。
     fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
         None
     }

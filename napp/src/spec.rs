@@ -356,6 +356,8 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     }
 
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::SqlObservability, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::Observability, ComponentId::Web)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Redis)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::RedisJob)?;

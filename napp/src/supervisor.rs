@@ -11,7 +11,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::{Id as TokioTaskId, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -220,6 +220,8 @@ pub(crate) struct TaskSupervisor {
     task_group_token: CancellationToken,
     // 放在任务集合与接收队列之后；监督器离开时，最后一个业务 future 接续持有清理尾部。
     task_lifetime: Arc<TaskLifetime>,
+    /// 组件与 initializer 共用单次放行信号；登记成功不代表可以执行终端副作用。
+    activation: watch::Sender<bool>,
 }
 
 impl TaskSupervisor {
@@ -250,6 +252,7 @@ impl TaskSupervisor {
                 task_group_state: TaskGroupState::Running,
                 task_group_token,
                 task_lifetime,
+                activation: watch::channel(false).0,
             },
         )
     }
@@ -321,7 +324,7 @@ impl TaskSupervisor {
     /// - `name`：组件关键任务在应用内唯一的稳定名称。
     /// - `future`：拥有终端运行资源并在停止通知后结束的任务主体。
     ///
-    /// 返回：名称有效且唯一时加入监督集合并返回标识；否则拒绝，不启动任务。
+    /// 返回：名称有效且唯一时接管所有权并返回标识；实际主体等待统一放行，否则拒绝且不启动任务。
     pub(crate) fn spawn_component_critical(
         &mut self,
         name: &'static str,
@@ -336,18 +339,19 @@ impl TaskSupervisor {
                 "managed task `{name}` is already registered"
             )));
         }
+        let future = self.guard_activation(future);
         let future = bind_task_lifetime(future, self.task_lifetime.clone());
         Ok(self.spawn_task(name, TaskKind::Critical, future))
     }
 
-    /// 业务作用：在 Ready 完成后由 Runner 直接激活 initializer 暂存的受管任务。
+    /// 业务作用：在组件 Ready 完成后接管 initializer 暂存任务，主体等待统一启动许可。
     ///
     /// 参数说明：
     /// - `name`：已限定为 `initializer/{initializer}/{task}` 的全局稳定名称。
     /// - `kind`：后台或关键任务的运行期退出分类。
-    /// - `future`：只在 Ready 激活边界后才构造的任务主体。
+    /// - `future`：全部组件 Ready 装配完成后构造、尚未 poll 的任务主体。
     ///
-    /// 返回：名称唯一时返回真实 `TaskId`；重名或非法 UserHook 类型时返回错误。
+    /// 返回：名称唯一时接管所有权并返回真实 `TaskId`，实际主体等待统一放行；重名或非法类型返回错误。
     pub(crate) fn spawn_initializer_task(
         &mut self,
         name: Arc<str>,
@@ -364,8 +368,43 @@ impl TaskSupervisor {
                 "managed task `{name}` is already registered"
             )));
         }
+        let future = self.guard_activation(future);
         let future = bind_task_lifetime(future, self.task_lifetime.clone());
         Ok(self.spawn_task(name, kind, future))
+    }
+
+    /// 业务作用：把终端主体隔离在组件与 initializer 共用的启动屏障后，避免逐项登记造成部分执行。
+    /// 参数说明：`future` 为已经构造但尚未 poll 的终端主体。
+    /// 返回：等待统一放行的受管任务；组级取消或 owner 消失时释放主体而不执行它。
+    fn guard_activation(&self, future: ManagedTaskFuture) -> ManagedTaskFuture {
+        let mut activation = self.activation.subscribe();
+        let stop = self.task_group_token.clone();
+        Box::pin(async move {
+            loop {
+                // 停机优先于放行；失败清理也会唤醒尚未开始工作的任务，归还其资源所有权。
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
+                if *activation.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => return Ok(()),
+                    changed = activation.changed() => {
+                        if changed.is_err() { return Ok(()); }
+                    }
+                }
+            }
+            future.await
+        })
+    }
+
+    /// 业务作用：一次发布全部受管终端的执行许可，不再按任务逐个开放副作用。
+    /// 参数说明：无。
+    /// 返回：唤醒全部等待任务；Service 必须已发布 Application Ready，Batch 必须已完成观测静态门禁。
+    pub(crate) fn release_startup_tasks(&self) {
+        self.activation.send_replace(true);
     }
 
     /// 业务作用：接受并确认一个注册请求，或把拒绝原因回传给调用方。

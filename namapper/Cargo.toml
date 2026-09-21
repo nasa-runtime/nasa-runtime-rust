@@ -4,11 +4,11 @@ name = "namapper"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Declarative mapper runtime for SQLx and ambient transactions"
+description = "Declarative MySQL mapper with ambient transactions, atomic SQL metrics, and bounded threshold notifications"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["mysql", "mapper", "sql", "database", "async"]
+keywords = ["mysql", "mapper", "sql", "database", "observability"]
 categories = ["database", "asynchronous"]
 
 [lib]

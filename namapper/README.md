@@ -2,6 +2,51 @@
 
 `namapper` 是声明式 Mapper。业务用 `trait + 属性宏` 声明 SQL，宏生成 `*Client`，运行时基于
 `sqlx` 执行 MySQL SQL，并接入 `natx` / `nasa::tx` ambient 事务和可选二级缓存。
+所有生成方法默认记录低开销的调用与数据库指标，区分缓存命中、连接等待、SQL 执行和流消费；
+与 Application 组合后通过 YAML 控制开发 SQL/参数日志、慢操作与失败日志、有界异步通知及指标出口。
+
+## SQL 观测
+
+同时启用 `application` 和 `mapper` 时自动装配，无需业务 Hook、定时任务或 metrics Router。
+基础采集始终开启，逐条 SQL 与参数输出默认关闭。所有可调策略支持 YAML，省略父级、空对象与只配置
+一个叶子均按递归默认值补齐；覆盖按方法、数据源、全局顺序继承。
+
+```yaml
+sql:
+  observability:
+    console:
+      enabled: true
+      include_parameters: true
+```
+
+上例要求应用明确运行在 `local`、`development`、`dev` 或 `test` 环境；参数名命中凭据语义时强制脱敏，
+未知类型使用占位，不增加 Mapper 参数的必需 trait bound。生产保持参数输出关闭。
+完整字段、默认值、指标口径、覆盖规则和失败边界见
+[后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+通知失败不改变 SQL 返回、事务结果或数据库 readiness；原有 `MapperMetrics` 仍只承担兼容缓存事件。
+
+### 阈值通知的运行路径
+
+宏登记方法身份 → 连接与事务门禁 → SQLx 实际执行 → 原子终态、日志与有界通知入队。
+方法总耗时和 SQL 执行耗时分别记录；缓存命中不增加数据库调用，连接等待、缓存后处理与 Stream
+消费者处理时间不计入慢 SQL 阈值。数据库客户端计时不等于服务端纯执行时间。
+
+业务先通过 `nasa::application::notifications::init` 安装 `Notify`，再开启通知：
+
+```yaml
+sql:
+  observability:
+    slow_sql:
+      threshold_ms: 1000
+    alerts:
+      slow_sql:
+        enabled: true
+        cooldown_ms: 0
+```
+
+原始耗时达到或超过阈值即命中，关闭慢日志仍可通知。默认冷却为 60000 ms，设为 0 后每次命中均尝试
+入队；没有业务实现则忽略，队列满或下游失败可能丢失。worker 统一放行后调用业务实现，HTTP REST、
+gRPC 或其它通知微服务协议均由业务决定，SQL 路径不等待网络发送。
 
 推荐业务项目通过门面 crate 使用：
 
@@ -1166,9 +1211,11 @@ trait UserMapper {
 let mapper = UserRepository::new();
 ```
 
-## 场景 34：Mapper 指标（可观测）
+## 场景 34：兼容缓存事件指标
 
-Mapper 在缓存相关路径会发出指标事件。实现 `MapperMetrics` 可接入 Prometheus、日志或诊断探针，用 `set_default_mapper_metrics` 进程级安装一次即可（`record` 内部应避免 panic 和长阻塞）。
+`MapperMetrics` 仅接收缓存事件，不是 SQL 基础指标或慢通知的安装入口。SQL 观测自动采集，无需实现
+该 trait。需要额外消费缓存事件时，用 `set_default_mapper_metrics` 进程级安装一次即可，`record`
+内部应避免 panic 和长阻塞。
 
 ```rust
 use std::sync::Arc;

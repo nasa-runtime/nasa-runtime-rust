@@ -1,6 +1,8 @@
 //! SQL mapper 声明式过程宏。
 //!
 //! `#[Mapper]` 读取 trait 方法上的 SQL 注解，在编译期生成基于 `sqlx`、事务运行时和可选 L2 缓存的实现。
+//! 同时生成静态方法身份与生命周期守卫，逻辑调用、真实数据库执行和 Stream 终态分别计量。
+//! YAML 策略由宿主冻结，宏不创建指标出口或通知任务，也不要求参数实现额外的日志 trait。
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote};
@@ -661,6 +663,20 @@ struct MethodPlan {
 }
 
 type ParsedSqlTemplate = (String, Vec<String>, Vec<BindInfo>, Option<DynamicSqlPlan>);
+
+/// 业务作用：为静态元数据编码无歧义的 Rust 名称片段，保留大小写、下划线和 Unicode 的区别。
+/// 参数说明：`ident` 是 trait 或方法的原始标识符。
+/// 返回：逐 UTF-8 字节的定宽大写十六进制字符串，组合时不会因分隔符或大小写折叠产生碰撞。
+fn metadata_ident_component(ident: &Ident) -> String {
+    use std::fmt::Write;
+    let spelling = ident.to_string();
+    let mut encoded = String::with_capacity(spelling.len() * 2);
+    for byte in spelling.bytes() {
+        let _ = write!(encoded, "{byte:02X}");
+    }
+    encoded
+}
+
 /// 业务作用：完成 Mapper 宏 `mapper_impl` 的编译期转换步骤，并把失败定位到调用方源码。
 /// # 参数
 /// - `attr`: 属性宏括号内的 token stream。
@@ -707,7 +723,7 @@ fn mapper_impl(
     );
     let meta_ident = format_ident!(
         "__{}_MAPPER_CACHE_META",
-        trait_ident.to_string().to_ascii_uppercase()
+        metadata_ident_component(&trait_ident)
     );
 
     let mut plans = Vec::new();
@@ -749,12 +765,48 @@ fn mapper_impl(
     );
     let trait_cache_codec = cache_codec_factory_tokens(trait_args.cache_codec.as_ref());
 
-    let impl_methods = plans
-        .iter()
-        .map(|plan| gen_method(&root, &key_expr, plan))
-        .collect::<syn::Result<Vec<_>>>()?;
+    let mut method_metadata = Vec::new();
+    let mut impl_methods = Vec::new();
+    for plan in &plans {
+        let method = &plan.method.sig.ident;
+        let method_meta = format_ident!(
+            "__{}_{}_OBSERVATION",
+            metadata_ident_component(&trait_ident),
+            metadata_ident_component(method)
+        );
+        let registration = format_ident!("{}_REGISTRATION", method_meta);
+        let datasource = plan.datasource.as_deref().unwrap_or("default");
+        let driver = match plan.backend {
+            MapperBackend::MySql => "mysql",
+            MapperBackend::PostgreSql => "postgresql",
+        };
+        let operation = match plan.kind {
+            SqlKind::Query => "query",
+            SqlKind::StreamQuery => "stream",
+            SqlKind::Insert => "insert",
+            SqlKind::Update => "update",
+            SqlKind::Delete => "delete",
+            SqlKind::Execute => "execute",
+        };
+        let tx_mode = match plan.tx {
+            TxMode::Auto => "auto",
+            TxMode::Mandatory => "mandatory",
+            TxMode::Never => "never",
+        };
+        let sql = &plan.normalized_sql;
+        method_metadata.push(quote! {
+            static #method_meta: #root::observability::MapperMethodMeta = #root::observability::MapperMethodMeta::new(
+                concat!(module_path!(), "::", stringify!(#trait_ident), "::", stringify!(#method)),
+                concat!(module_path!(), "::", stringify!(#trait_ident)), #driver, #datasource, #operation, #tx_mode, #sql);
+            #[#root::__private::linkme::distributed_slice(#root::observability::MAPPER_METHOD_META)]
+            #[linkme(crate = #root::__private::linkme)]
+            static #registration: &'static #root::observability::MapperMethodMeta = &#method_meta;
+        });
+        impl_methods.push(gen_method(&root, &key_expr, plan, &method_meta)?);
+    }
 
     let expanded = quote! {
+        #(#method_metadata)*
         #[#root::__private::async_trait::async_trait]
         #input
 
@@ -3190,23 +3242,39 @@ fn collect_tokens_used_params(
         }
     }
 }
-/// 业务作用：生成 Mapper 宏 `gen_method` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+/// 业务作用：在原方法体外建立唯一逻辑调用边界，收口缓存提前返回、执行前拒绝及取消。
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `key_expr`: 业务 key 或 Redis key,用于定位数据。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
+/// - `metadata`: 当前方法的静态观测单元。
+///
+/// 返回：保留原签名与返回值的实现；无法生成合法 Rust 方法时给出宏期错误。
 fn gen_method(
     root: &TokenStream2,
     key_expr: &TokenStream2,
     plan: &MethodPlan,
+    metadata: &Ident,
 ) -> syn::Result<TokenStream2> {
-    if plan.kind.is_stream() {
+    let generated = if plan.kind.is_stream() {
         gen_stream_method(root, plan)
     } else if plan.kind.is_query() {
         gen_query_method(root, key_expr, plan)
     } else {
         gen_write_method(root, key_expr, plan)
-    }
+    }?;
+    let mut method: syn::ImplItemFn = syn::parse2(generated)?;
+    let body = &method.block;
+    method.block = syn::parse_quote!({
+        let __mapper_meta = &#metadata;
+        let mut __mapper_guard = #root::observability::MapperCallGuard::start(__mapper_meta);
+        let __mapper_call = &__mapper_guard;
+        // 内层提前返回只结束本次逻辑调用；外层仍统一结算缓存、连接失败和数据库结果。
+        let __mapper_outcome = async { #body }.await;
+        __mapper_guard.finish(#root::classify_method_result(&__mapper_outcome));
+        __mapper_outcome
+    });
+    Ok(quote! { #method })
 }
 /// 业务作用：生成 Mapper 宏 `gen_query_method` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
@@ -3279,6 +3347,9 @@ fn gen_query_method(
             let __mapper_in_transaction = #root::in_transaction();
             let __mapper_cache_enabled = __mapper_has_l2_cache
                 && (!__mapper_in_transaction || #cache_in_tx);
+            if __mapper_cache_enabled {
+                __mapper_call.path(#root::observability::CallPath::Cache);
+            }
 
             let __mapper_hash_key = if __mapper_cache_enabled {
                 #build_hash
@@ -3299,7 +3370,6 @@ fn gen_query_method(
                     component = "mapper",
                     event = "cache_bypass",
                     mapper_key = %__mapper_l2_key,
-                    sql = %__mapper_normalized_sql.as_ref(),
                     reason = %__mapper_cache_bypass_detail,
                     "mapper cache bypass"
                 );
@@ -3346,6 +3416,7 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
             // 事务内流存活期间同一事务不得发出其它语句，未释放就返回事务体会在提交门禁显式失败。
             let mut __mapper_conn = #conn;
             let __mapper_query = #query;
+            let __mapper_stream_guard = #root::observability::MapperStreamGuard::new(__mapper_meta, __mapper_normalized_sql.as_ref());
             let __mapper_stream = #root::__private::async_stream::try_stream! {
                 let mut __mapper_rows = __mapper_query.fetch(__mapper_conn.as_mut());
                 while let ::core::option::Option::Some(__mapper_row) =
@@ -3354,7 +3425,7 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
                     yield __mapper_row;
                 }
             };
-            ::core::result::Result::Ok(#root::MapperStream::new(__mapper_stream))
+            ::core::result::Result::Ok(#root::MapperStream::observed(__mapper_stream, __mapper_stream_guard))
         }
     })
 }
@@ -3372,6 +3443,18 @@ fn gen_write_method(
     let result_ty = result_inner(&sig.output)?;
     let sql_init = sql_init_tokens(root, plan, sig.ident.span());
     let query = write_query_tokens(root, plan)?;
+    let execute = quote! {
+        {
+            __mapper_call.path(#root::observability::CallPath::Database);
+            let __mapper_prepared_query = #query;
+            let mut __mapper_db_guard = #root::observability::MapperDbGuard::start(__mapper_meta);
+            let __mapper_db_result = __mapper_prepared_query.execute(__mapper_conn.as_mut()).await;
+            let __mapper_rows = __mapper_db_result.as_ref().map(|value| value.rows_affected()).unwrap_or(0);
+            let __mapper_code = __mapper_meta.database_code_enabled().then(|| __mapper_db_result.as_ref().err().and_then(|error| error.as_database_error()).and_then(|error| error.code())).flatten();
+            __mapper_db_guard.finish(#root::classify_sqlx_result(&__mapper_db_result), __mapper_rows, __mapper_normalized_sql.as_ref(), __mapper_code.as_deref());
+            __mapper_db_result?
+        }
+    };
     let conn = conn_tokens(root, plan.tx, plan.datasource.as_deref());
     let clear = clear_tokens(root, key_expr, plan.flush_cache, plan.flush_refs);
 
@@ -3381,7 +3464,7 @@ fn gen_write_method(
                 #sql_init
                 {
                     let mut __mapper_conn = #conn;
-                    #query.execute(__mapper_conn.as_mut()).await?;
+                    #execute;
                 }
                 #clear
                 ::core::result::Result::Ok(())
@@ -3393,7 +3476,7 @@ fn gen_write_method(
                 #sql_init
                 let __mapper_rows_affected = {
                     let mut __mapper_conn = #conn;
-                    #query.execute(__mapper_conn.as_mut()).await?.rows_affected()
+                    #execute.rows_affected()
                 };
                 #clear
                 ::core::result::Result::Ok(__mapper_rows_affected)
@@ -3405,7 +3488,7 @@ fn gen_write_method(
                 #sql_init
                 let __mapper_result = {
                     let mut __mapper_conn = #conn;
-                    #query.execute(__mapper_conn.as_mut()).await?
+                    #execute
                 };
                 #clear
                 ::core::result::Result::Ok(__mapper_result)
@@ -3496,11 +3579,13 @@ fn reject_container_fetch_ty(ty: &Type, msg: &str) -> syn::Result<()> {
     }
     Ok(())
 }
-/// 业务作用：生成 Mapper 宏 `query_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+/// 业务作用：只围绕真实 SQLx future 记录数据库时长、原始错误类别与准确返回行数。
+/// 参数说明：
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
-/// - `fetch`: 本次发现或 HTTP 取数操作的结果。
+/// - `fetch`: all、optional、one 或 scalar 的取数形态。
+///
+/// 返回：尚未 poll 的执行表达式；参数或返回类型不满足 Mapper 合同时产生宏期错误。
 fn query_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
@@ -3511,13 +3596,30 @@ fn query_tokens(
     } else {
         query_builder_tokens(root, plan, fetch)?
     };
-    Ok(match fetch {
-        FetchMode::All(_) => quote! { #query.fetch_all(__mapper_conn.as_mut()) },
-        FetchMode::Optional(_) => quote! { #query.fetch_optional(__mapper_conn.as_mut()) },
-        FetchMode::One(_) | FetchMode::Scalar(_) => {
-            quote! { #query.fetch_one(__mapper_conn.as_mut()) }
+    let execution = match fetch {
+        FetchMode::All(_) => quote! { __mapper_prepared_query.fetch_all(__mapper_conn.as_mut()) },
+        FetchMode::Optional(_) => {
+            quote! { __mapper_prepared_query.fetch_optional(__mapper_conn.as_mut()) }
         }
-    })
+        FetchMode::One(_) | FetchMode::Scalar(_) => {
+            quote! { __mapper_prepared_query.fetch_one(__mapper_conn.as_mut()) }
+        }
+    };
+    let rows = match fetch {
+        FetchMode::All(_) => quote! { __mapper_value.len() as u64 },
+        FetchMode::Optional(_) => quote! { u64::from(__mapper_value.is_some()) },
+        FetchMode::One(_) | FetchMode::Scalar(_) => quote! { 1u64 },
+    };
+    Ok(quote! { async {
+        __mapper_call.path(#root::observability::CallPath::Database);
+        let __mapper_prepared_query = #query;
+        let mut __mapper_db_guard = #root::observability::MapperDbGuard::start(__mapper_meta);
+        let __mapper_db_result = #execution.await;
+        let __mapper_rows = __mapper_db_result.as_ref().map(|__mapper_value| #rows).unwrap_or(0);
+        let __mapper_code = __mapper_meta.database_code_enabled().then(|| __mapper_db_result.as_ref().err().and_then(|error| error.as_database_error()).and_then(|error| error.code())).flatten();
+        __mapper_db_guard.finish(#root::classify_sqlx_result(&__mapper_db_result), __mapper_rows, __mapper_normalized_sql.as_ref(), __mapper_code.as_deref());
+        __mapper_db_result
+    } })
 }
 /// 业务作用：生成 Mapper 宏 `query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
@@ -3550,7 +3652,7 @@ fn query_builder_tokens(
     } else {
         apply_binds_tokens(query, &plan.binds, &plan.params)?
     };
-    Ok(query)
+    Ok(parameter_query_tokens(root, query))
 }
 /// 业务作用：生成 Mapper 宏 `checked_query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
@@ -3566,9 +3668,16 @@ fn checked_query_builder_tokens(
     let args = plan
         .binds
         .iter()
-        .map(|bind| bind_expr(bind, &plan.params))
+        .map(|bind| {
+            let expr = bind_expr(bind, &plan.params)?;
+            let name = &bind.name;
+            Ok(quote! {{ let __mapper_bind_value = #expr;
+                (&__MapperCapture(&__mapper_bind_value)).capture(&mut __mapper_parameters, #name);
+                __mapper_bind_value
+            }})
+        })
         .collect::<syn::Result<Vec<_>>>()?;
-    Ok(match fetch {
+    let query = match fetch {
         FetchMode::Scalar(_) => {
             quote! {
                 #root::__private::sqlx::query_scalar!(#sql, #(#args),*)
@@ -3579,7 +3688,8 @@ fn checked_query_builder_tokens(
                 #root::__private::sqlx::query_as!(#row_ty, #sql, #(#args),*)
             }
         }
-    })
+    };
+    Ok(parameter_query_tokens(root, query))
 }
 /// 业务作用：生成 Mapper 宏 `stream_query_builder_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
@@ -3596,7 +3706,10 @@ fn stream_query_builder_tokens(
             #root::__private::sqlx::AssertSqlSafe(__mapper_normalized_sql.clone())
         )
     };
-    apply_stream_binds_tokens(query, &plan.binds, &plan.params)
+    Ok(parameter_query_tokens(
+        root,
+        apply_stream_binds_tokens(query, &plan.binds, &plan.params)?,
+    ))
 }
 /// 业务作用：生成 Mapper 宏 `write_query_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
@@ -3608,27 +3721,50 @@ fn write_query_tokens(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Tok
             #root::__private::sqlx::AssertSqlSafe(__mapper_normalized_sql.clone())
         )
     };
-    if let Some(dynamic) = &plan.dynamic {
+    let query = if let Some(dynamic) = &plan.dynamic {
         apply_dynamic_binds_tokens(query, dynamic, &plan.params)
     } else {
         apply_binds_tokens(query, &plan.binds, &plan.params)
-    }
+    }?;
+    Ok(parameter_query_tokens(root, query))
 }
-/// 业务作用：生成 Mapper 宏 `apply_binds_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+
+/// 业务作用：为实际构造的 prepared query 提供独立参数预算，不在缓存命中路径格式化参数。
+/// 参数说明：`root` 为运行时路径，`query` 为原有 SQLx 查询构造表达式。
+/// 返回：保持查询类型和参数所有权不变的表达式，绑定完成后发送开发参数事件。
+fn parameter_query_tokens(root: &TokenStream2, query: TokenStream2) -> TokenStream2 {
+    quote! {{
+        #[allow(unused_imports)]
+        use #root::observability::console::{CaptureParameter as _, Capture as __MapperCapture};
+        let mut __mapper_parameters = #root::observability::console::ParameterBuffer::new(__mapper_meta);
+        let __mapper_built_query = #query;
+        __mapper_parameters.emit();
+        __mapper_built_query
+    }}
+}
+/// 业务作用：按 prepared 占位符顺序绑定标量或列表，并在不重复求值的前提下采集开发参数。
+/// 参数说明：
 /// - `query`: 查询对象或 query 参数集合。
 /// - `binds`: SQL 动态片段收集出的绑定列表。
 /// - `params`: 已解析的函数参数或宏参数列表。
+///
+/// 返回：查询构造表达式；非法字段引用在编译期拒绝，不为原参数新增显示 trait 约束。
 fn apply_binds_tokens(
     mut query: TokenStream2,
     binds: &[BindInfo],
     params: &[ParamInfo],
 ) -> syn::Result<TokenStream2> {
     for bind in binds {
+        let name = &bind.name;
         match bind.kind {
             BindKind::Scalar => {
                 let expr = bind_expr(bind, params)?;
-                query = quote! { #query.bind(#expr) };
+                query = quote! {{
+                    let __mapper_query = #query;
+                    let __mapper_bind_value = #expr;
+                    (&__MapperCapture(&__mapper_bind_value)).capture(&mut __mapper_parameters, #name);
+                    __mapper_query.bind(__mapper_bind_value)
+                }};
             }
             BindKind::List => {
                 let ident = &bind.root;
@@ -3636,6 +3772,7 @@ fn apply_binds_tokens(
                     {
                         let mut __mapper_query = #query;
                         for __mapper_item in #ident.iter() {
+                            (&__MapperCapture(&__mapper_item)).capture(&mut __mapper_parameters, #name);
                             __mapper_query = __mapper_query.bind(__mapper_item);
                         }
                         __mapper_query
@@ -3646,11 +3783,13 @@ fn apply_binds_tokens(
     }
     Ok(query)
 }
-/// 业务作用：生成 Mapper 宏 `apply_stream_binds_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+/// 业务作用：让结果流拥有其 bind 材料，并保持开发显示不改变传入 SQLx 的值。
+/// 参数说明：
 /// - `query`: 查询对象或 query 参数集合。
 /// - `binds`: SQL 动态片段收集出的绑定列表。
 /// - `params`: 已解析的函数参数或宏参数列表。
+///
+/// 返回：拥有型查询构造表达式；无法安全形成流式 bind 时给出编译期错误。
 fn apply_stream_binds_tokens(
     mut query: TokenStream2,
     binds: &[BindInfo],
@@ -3658,7 +3797,13 @@ fn apply_stream_binds_tokens(
 ) -> syn::Result<TokenStream2> {
     for bind in binds {
         let expr = stream_bind_expr(bind, params)?;
-        query = quote! { #query.bind(#expr) };
+        let name = &bind.name;
+        query = quote! {{
+            let __mapper_query = #query;
+            let __mapper_bind_value = #expr;
+            (&__MapperCapture(&__mapper_bind_value)).capture(&mut __mapper_parameters, #name);
+            __mapper_query.bind(__mapper_bind_value)
+        }};
     }
     Ok(query)
 }
@@ -3745,16 +3890,19 @@ fn dynamic_bind_steps_tokens(
     }
     Ok(quote! { #(#steps)* })
 }
-/// 业务作用：生成 Mapper 宏 `dynamic_bind_one_token` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
-/// # 参数
+/// 业务作用：对已选中的动态 SQL 节点绑定真实参数，仅将实际进入查询的值记入开发事件。
+/// 参数说明：
 /// - `bind`: SQL 占位符绑定信息。
 /// - `params`: 已解析的函数参数或宏参数列表。
 /// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
+///
+/// 返回：不重复求值的绑定语句；字段引用不合法时在宏展开期拒绝。
 fn dynamic_bind_one_token(
     bind: &BindInfo,
     params: &[ParamInfo],
     local_items: &[Ident],
 ) -> syn::Result<TokenStream2> {
+    let name = &bind.name;
     match bind.kind {
         BindKind::Scalar => {
             let expr = if local_items.contains(&bind.root) {
@@ -3763,13 +3911,16 @@ fn dynamic_bind_one_token(
                 bind_expr(bind, params)?
             };
             Ok(quote! {
-                __mapper_query = __mapper_query.bind(#expr);
+                let __mapper_bind_value = #expr;
+                (&__MapperCapture(&__mapper_bind_value)).capture(&mut __mapper_parameters, #name);
+                __mapper_query = __mapper_query.bind(__mapper_bind_value);
             })
         }
         BindKind::List => {
             let ident = &bind.root;
             Ok(quote! {
                 for __mapper_item in #ident.iter() {
+                    (&__MapperCapture(&__mapper_item)).capture(&mut __mapper_parameters, #name);
                     __mapper_query = __mapper_query.bind(__mapper_item);
                 }
             })
@@ -4062,8 +4213,6 @@ fn build_hash_key_tokens(root: &TokenStream2, plan: &MethodPlan) -> TokenStream2
                 component = "mapper",
                 event = "cache_hash_key_error",
                 mapper_key = %__mapper_l2_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache hash_key build failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4081,8 +4230,6 @@ fn build_hash_key_tokens(root: &TokenStream2, plan: &MethodPlan) -> TokenStream2
                 component = "mapper",
                 event = "cache_hash_key_error",
                 mapper_key = %__mapper_l2_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache hash_key build failed, bypass"
             );
             ::core::option::Option::None
@@ -4228,9 +4375,6 @@ fn cache_get_or_load_tokens(
                 component = "mapper",
                 event = "cache_load_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache get_or_load failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4248,9 +4392,6 @@ fn cache_get_or_load_tokens(
                 component = "mapper",
                 event = "cache_load_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache get_or_load failed, bypass"
             );
         }
@@ -4279,9 +4420,6 @@ fn cache_get_or_load_tokens(
                 component = "mapper",
                 event = "cache_decode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache decode failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4299,9 +4437,6 @@ fn cache_get_or_load_tokens(
                 component = "mapper",
                 event = "cache_decode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache decode failed, bypass"
             );
         }
@@ -4373,8 +4508,6 @@ fn cache_get_or_load_tokens(
                                     component = "mapper",
                                     event = "cache_rewrite",
                                     mapper_key = %__mapper_l2_key,
-                                    hash_key = %hash_key,
-                                    sql = %__mapper_normalized_sql.as_ref(),
                                     ttl_ms = ?__mapper_cache_ttl_ms,
                                     "mapper cache value rewritten with current codec"
                                 );
@@ -4391,9 +4524,6 @@ fn cache_get_or_load_tokens(
                                     component = "mapper",
                                     event = "cache_rewrite_put_error",
                                     mapper_key = %__mapper_l2_key,
-                                    hash_key = %hash_key,
-                                    sql = %__mapper_normalized_sql.as_ref(),
-                                    error = %e,
                                     "mapper cache rewrite put failed"
                                 );
                             }
@@ -4411,9 +4541,6 @@ fn cache_get_or_load_tokens(
                             component = "mapper",
                             event = "cache_rewrite_encode_error",
                             mapper_key = %__mapper_l2_key,
-                            hash_key = %hash_key,
-                            sql = %__mapper_normalized_sql.as_ref(),
-                            error = %e,
                             "mapper cache rewrite encode failed"
                         );
                     }
@@ -4489,8 +4616,6 @@ fn cache_get_or_load_tokens(
                                 component = "mapper",
                                 event = "cache_load",
                                 mapper_key = %__mapper_l2_key,
-                                hash_key = %hash_key,
-                                sql = %__mapper_normalized_sql.as_ref(),
                                 state = ?__mapper_load.state,
                                 "mapper cache get_or_load"
                             );
@@ -4542,8 +4667,6 @@ fn cache_get_or_load_tokens(
                                 component = "mapper",
                                 event = __mapper_cache_event,
                                 mapper_key = %__mapper_l2_key,
-                                hash_key = %hash_key,
-                                sql = %__mapper_normalized_sql.as_ref(),
                                 state = ?__mapper_load.state,
                                 "mapper cache get_or_load"
                             );
@@ -4586,9 +4709,6 @@ fn cache_get_tokens(
                 component = "mapper",
                 event = "cache_get_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache get failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4606,9 +4726,6 @@ fn cache_get_tokens(
                 component = "mapper",
                 event = "cache_get_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache get failed, bypass"
             );
         }
@@ -4626,9 +4743,6 @@ fn cache_get_tokens(
                 component = "mapper",
                 event = "cache_decode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache decode failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4646,9 +4760,6 @@ fn cache_get_tokens(
                 component = "mapper",
                 event = "cache_decode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache decode failed, bypass"
             );
         }
@@ -4675,8 +4786,6 @@ fn cache_get_tokens(
                                 component = "mapper",
                                 event = "cache_hit",
                                 mapper_key = %__mapper_l2_key,
-                                hash_key = %hash_key,
-                                sql = %__mapper_normalized_sql.as_ref(),
                                 "mapper cache hit"
                             );
                             return ::core::result::Result::Ok(value);
@@ -4698,8 +4807,6 @@ fn cache_get_tokens(
                         component = "mapper",
                         event = "cache_miss",
                         mapper_key = %__mapper_l2_key,
-                        hash_key = %hash_key,
-                        sql = %__mapper_normalized_sql.as_ref(),
                         "mapper cache miss"
                     );
                 }
@@ -4729,9 +4836,6 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
                 component = "mapper",
                 event = "cache_encode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache encode failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4749,9 +4853,6 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
                 component = "mapper",
                 event = "cache_encode_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache encode failed, return source value"
             );
         }
@@ -4769,9 +4870,6 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
                 component = "mapper",
                 event = "cache_put_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache put failed"
             );
             return ::core::result::Result::Err(e.into());
@@ -4789,9 +4887,6 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
                 component = "mapper",
                 event = "cache_put_error",
                 mapper_key = %__mapper_l2_key,
-                hash_key = %hash_key,
-                sql = %__mapper_normalized_sql.as_ref(),
-                error = %e,
                 "mapper cache put failed, return source value"
             );
         }
@@ -4818,8 +4913,6 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
                                 component = "mapper",
                                 event = "cache_put",
                                 mapper_key = %__mapper_l2_key,
-                                hash_key = %hash_key,
-                                sql = %__mapper_normalized_sql.as_ref(),
                                 ttl_ms = ?__mapper_cache_ttl_ms,
                                 "mapper cache put"
                             );
@@ -4865,23 +4958,18 @@ fn clear_tokens(
 ///
 /// 返回：按事务模式和 datasource 选定默认、强制事务或拒绝事务连接入口的 token。
 fn conn_tokens(root: &TokenStream2, tx: TxMode, datasource: Option<&str>) -> TokenStream2 {
-    match (tx, datasource) {
-        (TxMode::Auto, Some(datasource)) => {
-            let datasource = LitStr::new(datasource, proc_macro2::Span::call_site());
-            quote! { #root::conn_for(#datasource).await? }
-        }
-        (TxMode::Auto, None) => quote! { #root::conn().await? },
-        (TxMode::Mandatory, Some(datasource)) => {
-            let datasource = LitStr::new(datasource, proc_macro2::Span::call_site());
-            quote! { #root::mandatory_conn_for(#datasource).await? }
-        }
-        (TxMode::Mandatory, None) => quote! { #root::mandatory_conn().await? },
-        (TxMode::Never, Some(datasource)) => {
-            let datasource = LitStr::new(datasource, proc_macro2::Span::call_site());
-            quote! { #root::never_conn_for(#datasource).await? }
-        }
-        (TxMode::Never, None) => quote! { #root::never_conn().await? },
-    }
+    let datasource = datasource.unwrap_or("default");
+    let acquire = match tx {
+        TxMode::Auto => quote! { #root::mapper_conn_for(#datasource).await? },
+        TxMode::Mandatory => quote! { #root::mapper_mandatory_conn_for(#datasource).await? },
+        TxMode::Never => quote! { #root::mapper_never_conn_for(#datasource).await? },
+    };
+    quote! {{
+        __mapper_call.path(#root::observability::CallPath::PreExecution);
+        let __mapper_connection = #acquire;
+        __mapper_call.path(#root::observability::CallPath::Database);
+        __mapper_connection
+    }}
 }
 /// 业务作用：完成 Mapper 宏 `bind_expr` 的编译期转换步骤，并把失败定位到调用方源码。
 /// # 参数

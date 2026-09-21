@@ -6,6 +6,43 @@ HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
 直接取消 Runner 时，仍存活的受监督任务保留其依赖资源，直至任务 future 析构；受管可靠 Saga client
 则把业务事务、发起意图和 dispatcher 绑定同一数据源，在开放流量前拒绝显式配置冲突。
+受管 Mapper 自动登记 SQL、连接与 Pool 指标，并按 YAML 装配开发 SQL/参数输出、离散通知与指标
+出口。所有可调参数有 YAML 入口，非必要项递归补齐默认值，观测故障与 SQL/事务结果隔离。
+慢 SQL 达到配置阈值后可经业务主动安装的 `Notify` 发送；关闭通知冷却即可逐条提交，框架不选择
+通知微服务协议或持有机器人连接。
+
+## SQL 观测与通知
+
+门面同时启用 `application` 与 `mapper`/`mapper-pgsql` 后，在 DB 建连前冻结方法目录与观测策略，
+预留所有低基数指标系列；UserHook 已能查询本地指标和有效配置。无需添加新的组件字符串。
+直接依赖本 crate 时使用 `mapper-observability`，统一出口使用 `observability`。关闭通知不创建队列；
+渠道客户端由业务提供，框架不包含具体消息渠道实现。关闭外送不停止基础计量。
+
+`sql.observability` 统一控制 console、行数、慢 SQL、执行失败、Pool acquire 与事务槽等待、告警和
+dispatcher。覆盖按 `method > datasource > global` 逐叶继承，空对象不会重置上层值。
+逐条慢 SQL 通知需同时满足业务已安装 `Notify`、`alerts.slow_sql.enabled=true` 和
+`alerts.slow_sql.cooldown_ms=0`；默认冷却为 60000 ms。判定使用原始耗时 `>= slow_sql.threshold_ms`，
+不包含连接等待与消费者处理时间，也不依赖 `slow_sql.log_enabled`。有界队列不承诺故障下绝对送达。
+策略在启动时冻结；日志级别可热刷新，但不能借此改变 SQL 连接选项。完整默认 YAML、范围、生产
+数据边界及指标口径见 [SQL 观测合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+
+业务实现 `nanotify_core::Notify` 并调用 `nanotify_core::init(Arc<dyn Notify>)` 安装进程实现。
+告警省略 `provider_ref` 即使用默认实现，无需声明 `notifications.providers`；未初始化时忽略通知，
+不阻断启动、不入队也不记为失败。Service UserHook 期间已初始化的通知只允许候选入队，全部
+Ready 门禁通过后 worker 才投递。通知通过有界并发、总超时和有限安全重试隔离第三方行为，通知失败、
+队列满或停机丢弃不能改变 SQL 返回、事务裁决或数据库 readiness。它不是持久事件投递系统。
+停机先摘流，再关闭新通知、按预算排空，最后释放 Pool。
+Batch 在工作负载前激活指标出口和默认通知 worker，不执行业务组件 Ready；业务可在工作负载内
+调用 `init`，之后触发的通知正常投递。进程实现只允许初始化一次，多个 Application 共用，不会自动重置。
+需要多路由时仍可声明 `kind: custom` 并在 Service UserHook 调用
+`app.register_notify_provider(provider_ref, provider).await`；命名目录在 Prepare 冻结，缺失实现忽略投递。
+Batch 不支持活跃命名路由；显式命名引用不存在或禁用仍拒绝启动，`default` 保留给进程实现。
+
+`app.sql_observability_effective(datasource, method).await` 返回冻结的有效配置，不包含 SQL、URL 或
+凭据。外部注入 Pool 的已有 SQLx 日志选项不由 Application 追溯修改，调用方须在建池时设置。
+通知 provider 配置与通信边界见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md)，
+独立或 Web 指标出口、remote write 与 controller 边界见
+[nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafana/README.md)。
 
 ## 核心价值与生命周期架构
 
@@ -15,7 +52,8 @@ initializer、listener、消费循环、readiness、关键任务和停机编排�
 
 ```text
 Service 配置装载 → Start 出站资源 → UserHook 提交计划 → Prepare / initializer 屏障
-         → Ready 绑定入站与发布发现 → Running 监督关键任务
+         → Ready 装配与静态登记 → initializer 任务工厂构造 → 全表与预算复验
+         → 发布 Ready 并统一放行终端任务 → Running 监督关键任务
          → NotReady / 摘流 → 受监督任务与 initializer 收口
          → 业务停机任务 → 业务资源与更早启动的组件 → Stopped
 ```
@@ -24,9 +62,21 @@ Batch 先完成 Prepare，再执行静态 initializer，最后运行作为工作
 业务停机任务，工作结束或失败后依次收口受监督任务、业务停机任务、业务资源、静态 initializer 与
 更早启动的组件。`priority` 只排序业务任务，不改变组件 active stack。
 
+组件 Ready 按声明顺序装配并登记可逆 action，交出的关键任务先暂存、未经 poll。
+所有参与 Ready 的组件完成、initializer 暂存任务工厂全部构造成功后，统一执行 `validate_ready()`，
+其中 remote write 核对最终静态指标容量。任务所有权可以先登记进 Supervisor，但组件与 initializer
+主体共用一个关闭的执行屏障；全部检查通过并发布 Application Ready 后才统一放行。
+检查失败、工厂异常、超时或中断时屏障保持关闭，主体未经 poll，由统一清理释放任务与反向关闭 action。
+同步复验必须短时、只读、非阻塞，不添加登记或外部副作用；panic 收敛到启动失败，每次返回后及最终
+放行前都复验共享 deadline。同步代码不能被异步 timeout 抢占，超时后返回也不会再发布 Ready。
+Batch 只让观测组件参与该屏障，在工作负载前放行，不发布 Service Ready，也不开放业务 listener。
+该屏障只约束组件交出的终端主体和 initializer 暂存任务，不会延迟 UserHook 中普通
+`spawn_background` / `spawn_critical`，也不能拦截业务自行派生的任务或 I/O。initializer 任务工厂
+只负责构造 future，不能在工厂执行期间开放入口；自管 listener 使用 `serve_when_ready`。
+
 initializer 是 Ready 前的初始化屏障：migration 与出站依赖完成后统一执行静态宏和运行时登记项的
 `before -> initialize -> after` 三轮。任何阶段失败都不会开放监听、消费或服务发现，已经启动的资源按
-active stack 反向释放。Application 只拥有业务显式声明的组件，不猜测外部 transport，也不替业务决定
+active stack 反向释放。Application 拥有业务声明的组件与 feature 对应的自动观测节点，不猜测外部 transport，也不替业务决定
 事务边界、路由、鉴权主体、容量值或重试/DLT 策略。
 
 gRPC 入站同样遵守这个模型：业务登记 generated service 或提交 Saga gRPC handler，Application 在
@@ -85,7 +135,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"auth"` | `web`，并同时声明 `"web"`；直接使用 OAuth 类型再开 `oauth` | `auth` | 静态/远程 JWKS 首拉、刷新、认证器发布和 readiness | Web 安全流水线消费 |
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、HTTP/1/h2c 监听、探针与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
-| `"nacos-discovery"` | `nacos-discovery`；真实 provider 再加 `nacos-sdk` | `rest_discovery` | Start 装出站客户端、Ready 注册、停机先摘流后关客户端 | `app.nacos_discovery()` |
+| `"nacos-discovery"` | `nacos-discovery`；真实 provider 再加 `nacos-sdk` | `rest_discovery` | Start 装出站客户端、Ready 冻结注册计划、统一放行后注册、停机先摘流后关客户端 | `app.nacos_discovery()` |
 | `"scheduling"` | `scheduling`；选主模式使用 `scheduling-cluster` | `scheduling` | Ready 末尾启动已收集任务；选主模式复用已声明的 Redis 客户端 | `app.scheduling()` |
 
 只用部分能力时只填写需要的字符串。例如纯 Web 应用写 `#[nasa::application("web")]`；本地配置的
@@ -811,8 +861,9 @@ effective_saga_base_path 与 route generation，发送端不从 service name 猜
 不可验证而拒绝 Ready；手写端点使用 `configure_router_scoped("/ops", transform)` 等非根静态业务前缀。
 transform 内写相对作用域的路径，例如 `/status` 对外成为 `/ops/status`；同前缀变换按顺序组合，
 其 layer/fallback 只影响该前缀。所有内部路径都挂在作用域之下，作用域与 Saga 前缀相交或覆盖其父路径时拒绝 Ready。
-启用 `server.health` 时，Saga 前缀不得遮蔽框架 `/healthz`、`/readyz` 与已编入的 `/metrics`；
-冲突在绑定 Web listener 前拒绝。关闭该开关后，未挂载的框架入口不占用这些路径。
+启用 `server.health` 时，Saga 前缀不得遮蔽 `/healthz`、`/readyz`。统一观测选择 Web 抓取时，配置的
+指标路径独立保留，不受 health 开关控制；未编入统一观测能力时，health 才联动保留 `/metrics`。
+冲突在绑定 Web listener 前拒绝，未挂载的框架入口不占用路径。
 自动 mapping 端点同时校验静态、参数与通配路径的交集。HTTP 请求使用实际规范路径和原始 body 做 HMAC，认证 producer、
 tenant 权限、nonce claim、body/并发上限和收据裁决均由 Saga 分支负责。Committed 与 Duplicate 才能
 推进 Outbox；连接失败、超时、限流、服务端故障或响应不明都保留原 event_id 重投。
@@ -1113,7 +1164,9 @@ server:
 `graceful_shutdown_timeout_ms` 子预算，未配置时由 Application 全局停机预算兜底。子预算耗尽会终止
 剩余连接任务，尚未完成的请求不再等待。
 
-`server.health=true`（默认值）时，`<context_path>/metrics` 公开以下 transport 指标；标签取值固定，
+下列 transport 指标进入统一 MetricHub。编入 `observability` 时，通过 `grafana.observability`
+显式配置独立/Web 抓取或 remote write；Web 抓取与 `server.health` 独立，默认关闭外部出口。
+未编入该能力时，`server.health=true` 才提供兼容的 `<context_path>/metrics`。标签取值固定，
 不包含地址、路由或客户端输入：
 
 | 指标 | 语义 |
@@ -1147,9 +1200,10 @@ route 未命中任何策略时按三态缺省裁决，词表 `permit`/`observe`/
 
 豁免与启动门禁：
 
-- 声明公开(`auth_required=false`)的路由与框架探针(`/healthz`、`/readyz`、`/metrics`)不受
+- 声明公开(`auth_required=false`)的路由、已启用的框架探针与实际配置的指标路径不受
   `observe`/`deny` 收紧；该豁免随覆盖合同进入 registry 与单请求安全快照，Web、registry 便捷入口和
   handler 复用 `RequestSecurityContext` 时得到同一结果；未命中真实路由的请求交 router 兜底 `404`；
+- 指标路径不借用业务 JWT；统一抓取配置的 bearer 鉴权仍独立执行，不能把策略豁免解释为无鉴权；
 - 悬空策略(route_id 不指向任何有效路由)阻断 Ready；
 - `deny` 下仍存在未命中策略的鉴权 route 时阻断 Ready——漏配在部署期显形，而不是上线后全量
   `403`；
@@ -1181,7 +1235,9 @@ UserHook 登记 generated service
   -> 全部 initializer 成功
   -> Ready 校验 descriptor 和方法策略
   -> 自动装配 Router、health、可选 reflection 与 TLS
-  -> 预绑定 listener，发布 observer、readiness 和发现 metadata
+  -> 预绑定 listener 并发布 Bound observer，准备发现 metadata，不 accept
+  -> 全部任务工厂和最终检查成功，Application Ready 后统一放行
+  -> gRPC 发布 Running / health Serving，随后注册发现 endpoint
   -> 停机先注销发现实例，再停止准入并在全局剩余预算内排空
 ```
 
@@ -1208,6 +1264,11 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 缺少业务 service、重复或晚到登记、ABI/descriptor 冲突、未知方法策略、非法 TLS/容量配置或端口绑定
 失败都会阻止 Ready，且不会留下监听任务。显式 `grpc.health_only: true` 可启动只有标准 health 的
 基础设施 listener。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。
+
+观察句柄存在不等于已接流：`Bound` 仅表示 socket 所有权已取得；此时 TCP backlog 可能完成连接，
+但没有 accept、TLS 握手或 RPC 响应。`grpc:listener` 在激活确认前保持 NotReady。
+服务发现也等待统一放行以及 gRPC Running 后才登记，注册失败或超过原启动 deadline 会触发关键任务
+失败停机；确认之前 `app.is_ready()` 与 `/readyz` 不可用，即使生命周期状态已为 Ready。
 
 listener 成功发布后，Application 指标目录提供 `napp_grpc_serving`、连接/TLS 事实，以及由 sealed
 descriptor 固定 label 的 active、started、rejected、completed RPC 指标。`rejected` 以封闭 `reason`
@@ -1287,7 +1348,8 @@ canonical kebab-case，例如 `RoutesInitialization` 得到 `routes-initializati
 
 `one-shot` 只做有界初始化。`hosted` 只允许 Service，可通过 `register_readiness`、
 `stage_background` 和 `stage_critical` 暂存长期能力；任务在所有 initializer、Seal 和组件 Ready action
-成功后才交给 Supervisor，任务主体等到 Application 发布 Ready 才开始。业务自管 listener 应使用
+成功后构造并交给 Supervisor，全部工厂和最终检查通过后，主体与组件任务在 Application Ready 后统一放行。
+业务自管 listener 应使用
 `app.serve_when_ready(...)`，这会保证启动失败或停机时根本不调用 listener 工厂。
 
 initializer 失败、panic、超时或取消都会停止后续阶段，不发布 Ready，并严格逆序停止任务、
@@ -1393,7 +1455,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 | --- | --- | --- |
 | `app.register / register_named / register_managed` | 启动 Hook | 把业务资源所有权交给容器；运行期只读借用 `app.resource::<T>()` |
 | `app.register_graceful_shutdown` | 启动 Hook | 登记一次性业务异步收尾；在受监督任务之后、业务资源之前按 priority 执行 |
-| `app.spawn_critical / spawn_background` | 启动 Hook | 受监督任务；critical 提前退出触发失败停机 |
+| `app.spawn_critical / spawn_background` | 启动 Hook | 登记后即可受监督执行，不隐式等待 Ready；critical 提前退出触发失败停机 |
 | `app.serve_when_ready` | Service 启动 Hook | 登记只在 Application Ready 后才构造与 poll 的自管 listener |
 | `app.register_initializer` | Service 启动 Hook | 登记运行时 initializer，与 `#[nasa::initializer]` 静态项合并冻结 |
 | `app.configure_router(...)` | 启动 Hook | 手写路由和全局业务中间件；启用 Saga HTTP 入站时拒绝未声明作用域的变换 |

@@ -7,12 +7,12 @@ name = "nasa"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed lifecycle, ordered graceful shutdown, durable Saga, request security, trace propagation, messaging, gRPC, and HTTP services"
+description = "NASA Rust facade for managed lifecycle, graceful shutdown, durable Saga, SQL threshold notifications, observability, security, messaging, gRPC, and HTTP"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "saga", "grpc", "lifecycle", "http2"]
+keywords = ["runtime", "saga", "grpc", "lifecycle", "observability"]
 categories.workspace = true
 
 [features]
@@ -25,7 +25,7 @@ application = ["dep:application_impl", "dep:application_macro"]
 hystrix = ["dep:hystrix_impl", "dep:hystrix_macro"]
 # 接口级隔离监控(nafana):bulkhead、超时、降级与 Prometheus/Grafana 观测。
 # 出口 = Prometheus `/metrics` + Grafana 面板。
-grafana = ["dep:grafana_impl", "dep:grafana_macro"]
+grafana = ["dep:grafana_impl", "dep:grafana_macro", "application_impl?/observability"]
 cache = ["dep:cache_impl", "dep:nacache_macro", "application_impl?/cache"]
 # 弱依赖桥：同时启用 application 时把 napp 的 db 组件编入，使 #[application("db", ...)] 生效。
 tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
@@ -88,9 +88,9 @@ web-crypto = ["web", "web_impl/crypto"]
 web-crypto-legacy-rsa = ["web-crypto", "web_impl/legacy-rsa-private"]
 # 端点固定流水线的完整能力，同时启用身份与密码处理。
 web-security = ["web-auth", "web-crypto", "application_impl?/web-security"]
-mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
+mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
 # PostgreSQL Mapper 使用独立 typed API；与 application 组合时复用受管 PostgreSQL datasource。
-mapper-pgsql = ["tx-pgsql", "dep:mapper_pgsql_impl", "dep:namapper_macro"]
+mapper-pgsql = ["tx-pgsql", "dep:mapper_pgsql_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 mapper-cache-grouped-pgsql = ["mapper-pgsql", "cache", "mapper_pgsql_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。

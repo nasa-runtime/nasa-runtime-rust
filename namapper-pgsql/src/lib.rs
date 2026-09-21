@@ -2,6 +2,10 @@
 //!
 //! 宏展开代码通过本 crate 获取 `natx-pgsql` 连接、PostgreSQL enum 编解码、流式读取和后端中立缓存
 //! 合同。普通文本中的 `?` 不参与占位符处理，prepared bind 只由结构节点产生 `$1..$n`。
+//! 方法调用、实际数据库执行与流消费分开采集；受管 YAML 控制日志、开发参数与有界通知。
+//! 参数默认不输出，通知拥塞或失败不改变 SQL 返回与事务裁决。
+//! 慢规则比较原始活跃执行耗时，相等也命中，不计连接等待和消费者处理。
+//! 业务初始化 `Notify`、启用告警并将冷却设为 0 后逐条尝试入队；日志开关独立，框架不选择通知协议。
 
 #![forbid(unsafe_code)]
 
@@ -11,10 +15,13 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub use namapper_core::*;
+pub use natx_pgsql::{mapper_conn_for, mapper_mandatory_conn_for, mapper_never_conn_for};
+mod observation;
 pub use namapper_macro::{
     Delete, Execute, Insert, PgMapper as Mapper, PgMapperEnum as MapperEnum,
     PgMapperOrderField as MapperOrderField, Query, StreamQuery, Update,
 };
+pub use observation::{classify_method_result, classify_sqlx_result};
 pub use sqlx::types::Json;
 
 /// PostgreSQL Mapper 流式查询返回类型。
@@ -24,6 +31,7 @@ pub use sqlx::types::Json;
 /// 门禁处显式失败。
 pub struct MapperStream<T> {
     inner: Pin<Box<dyn futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static>>,
+    observation: Option<observability::MapperStreamGuard>,
 }
 
 impl<T> MapperStream<T> {
@@ -39,6 +47,20 @@ impl<T> MapperStream<T> {
     {
         Self {
             inner: Box::pin(stream),
+            observation: None,
+        }
+    }
+
+    /// 业务作用：将 PostgreSQL 行流绑定独立状态机，区分数据库读取和消费者间隔。
+    /// 参数说明：`stream` 为拥有型行流，`observation` 为构造时建立的守卫。
+    /// 返回：终止时只记一次事实的受观测结果流。
+    pub fn observed<S>(stream: S, observation: observability::MapperStreamGuard) -> Self
+    where
+        S: futures_core::Stream<Item = Result<T, sqlx::Error>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+            observation: Some(observation),
         }
     }
 
@@ -48,22 +70,37 @@ impl<T> MapperStream<T> {
     ///
     /// 返回: 行值或 SQLx 错误；结果集结束时返回 `None`。
     pub async fn next(&mut self) -> Option<Result<T, sqlx::Error>> {
-        futures_util::StreamExt::next(&mut self.inner).await
+        futures_util::StreamExt::next(self).await
     }
 }
 
 impl<T> futures_core::Stream for MapperStream<T> {
     type Item = Result<T, sqlx::Error>;
 
-    /// 业务作用: 将外层 Mapper stream 的轮询转发给内部拥有型 PostgreSQL 行流。
-    ///
-    /// # 参数
-    /// - `self`: 当前被 pin 的 stream。
-    /// - `context`: 异步运行时唤醒上下文。
-    ///
-    /// 返回: 内部流的当前轮询状态。
+    /// 业务作用：按底层取行边界采集 PostgreSQL 活跃耗时、首行与终态，排除消费者停顿。
+    /// 参数说明：`context` 为异步运行时唤醒上下文。
+    /// 返回：保留内部流的轮询结果，在错误被擦除前完成分类且不重复计量。
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().inner.as_mut().poll_next(context)
+        let this = self.get_mut();
+        if let Some(guard) = &mut this.observation {
+            guard.poll_started();
+        }
+        let polled = this.inner.as_mut().poll_next(context);
+        if let Some(guard) = &mut this.observation {
+            match &polled {
+                Poll::Ready(Some(Ok(_))) => guard.row(),
+                Poll::Ready(Some(Err(error))) => {
+                    let code = guard
+                        .database_code_enabled()
+                        .then(|| error.as_database_error().and_then(|error| error.code()))
+                        .flatten();
+                    guard.finish(observation::classify_error(error), code.as_deref());
+                }
+                Poll::Ready(None) => guard.finish(observability::DbOutcome::Ok, None),
+                Poll::Pending => {}
+            }
+        }
+        polled
     }
 }
 

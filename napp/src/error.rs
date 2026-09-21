@@ -13,6 +13,10 @@ pub enum ComponentId {
     NacosConfig,
     /// 数据库连接与事务资源。
     Db,
+    /// SQL 原子指标、日志策略与有界异步通知。
+    SqlObservability,
+    /// 与业务健康隔离的指标抓取与外送。
+    Observability,
     /// Redis 连接和协议能力。
     Redis,
     /// RedisJob 调度、执行、Fanout 与停机生命周期。
@@ -63,6 +67,8 @@ impl fmt::Display for ComponentId {
             Self::Log => "log",
             Self::NacosConfig => "nacos-config",
             Self::Db => "db",
+            Self::SqlObservability => "sql-observability",
+            Self::Observability => "observability",
             Self::Redis => "redis",
             Self::RedisJob => "redis-job",
             Self::Telemetry => "telemetry",

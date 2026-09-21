@@ -1244,7 +1244,7 @@ impl GrpcRuntimeState {
         }
     }
 
-    /// 业务作用：在停机 action 已建立后发布只读 listener 观察句柄。
+    /// 业务作用：预绑定后发布只读 listener 观察句柄，不向观察者授予接流或关闭权限。
     ///
     /// 参数说明：
     /// - `observer`: 不含 shutdown 权限的地址、状态与连接计数视图。
@@ -1310,11 +1310,11 @@ impl GrpcRuntimeState {
         })
     }
 
-    /// 业务作用：向服务发现组件提供 listener 已接流后的真实端口和 TLS endpoint 合同。
+    /// 业务作用：向服务发现组件提供预绑定端口与 TLS 注册计划，外部发布必须等待 Running。
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：Ready 已发布时返回只含固定协议事实的注册投影；listener 尚未发布时返回 `None`。
+    /// 返回：预绑定观察面存在时返回固定协议事实；尚未绑定时返回 None，本投影本身不证明可接流。
     #[cfg(feature = "nacos-discovery")]
     pub(crate) fn endpoint_registration(&self) -> Option<GrpcEndpointRegistration> {
         self.published.get().map(|published| {
@@ -1469,12 +1469,12 @@ impl ApplicationComponent for GrpcComponent {
         })
     }
 
-    /// 业务作用：在全部 initializer 成功后自动装配受管路由、绑定端口、发布 Ready 并建立停机所有权。
+    /// 业务作用：装配受管路由、预绑定端口并建立停机所有权，接流许可由全应用屏障控制。
     ///
     /// 参数说明：
     /// - `context`: 提供共享 Application、启动剩余预算和 active stack 的 Ready 上下文。
     ///
-    /// 返回：listener 已绑定、观察句柄已发布且 shutdown action 已压栈时成功；registry、
+    /// 返回：listener 为 Bound、观察句柄已发布且 shutdown action 已压栈时成功；registry、
     /// reflection、绑定或发布失败时完整关闭新 listener 后返回错误。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
@@ -1525,10 +1525,10 @@ impl ApplicationComponent for GrpcComponent {
             if let Some(source) = &tls_source {
                 plan = plan.tls_source(source.clone());
             }
-            let handle = plan.start(bind).await.map_err(|error| {
+            let (handle, activation) = plan.bind(bind).await.map_err(|error| {
                 grpc_error_src(
                     ApplicationPhase::Ready,
-                    "gRPC listener could not start",
+                    "gRPC listener could not bind",
                     error,
                 )
             })?;
@@ -1572,19 +1572,27 @@ impl ApplicationComponent for GrpcComponent {
                 return Err(error);
             }
             contributor.observe(
-                DependencyState::Ready,
-                reason::HEALTHY,
+                DependencyState::NotReady,
+                reason::NOT_READY,
                 std::time::Instant::now(),
             );
             if let Some(runtime) = &tls_runtime {
                 runtime.observe()?;
             }
-            self.critical_task = Some(Box::pin(run_health_monitor(
-                context.application().clone(),
-                observer,
-                contributor.clone(),
-                tls_runtime.clone(),
-            )));
+            let application = context.application().clone();
+            let monitor_contributor = contributor.clone();
+            let monitor_tls = tls_runtime.clone();
+            self.critical_task = Some(Box::pin(async move {
+                // 此主体只在 Application Ready 与统一执行许可发布后 poll；monitor 不再绕过其监督对象的准入门禁。
+                activation.activate().await.map_err(|error| {
+                    grpc_error_src(
+                        ApplicationPhase::Running,
+                        "gRPC listener could not activate",
+                        error,
+                    )
+                })?;
+                run_health_monitor(application, observer, monitor_contributor, monitor_tls).await
+            }));
             // 地址和观察面成功发布后才压入 shutdown owner；此后任一失败都先停止 gRPC 准入，
             // 再按反向顺序释放 handler 依赖的数据库、消息 transport 与业务资源。
             context.activate(Box::new(GrpcShutdown {
@@ -1596,7 +1604,7 @@ impl ApplicationComponent for GrpcComponent {
         })
     }
 
-    /// 业务作用：把 listener 状态 monitor 移交 Runner，serve 异常退出会触发统一失败停机。
+    /// 业务作用：把 listener 激活权与状态 monitor 一起移交 Runner，放行前不 accept，运行失败统一停机。
     ///
     /// 参数说明: 无。
     ///
@@ -1666,7 +1674,8 @@ async fn run_health_monitor(
                     );
                 }
             }
-            nagrpc::GrpcServerState::Draining
+            nagrpc::GrpcServerState::Bound
+            | nagrpc::GrpcServerState::Draining
             | nagrpc::GrpcServerState::Closed
             | nagrpc::GrpcServerState::Failed => {
                 contributor.observe(

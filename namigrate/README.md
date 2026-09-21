@@ -5,7 +5,21 @@
 串行化多个实例。
 
 版本、checksum 与已应用状态的比较由 `namigrate-core` 提供；`namigrate` 保留 MySQL catalog、锁和执行，
-现有 `run_gate`、配置类型与返回类型路径不变。
+`run_gate` 使用默认数据源身份，`run_gate_for` 接受显式名称以区分受管连接观测。
+
+## 门禁架构与连接观测
+
+`validate` 取得池连接后只读 catalog 并校验，不获取 advisory lock、不执行迁移。
+`apply` 先取得池连接和 advisory lock，再在同一 session 读取 catalog、校验并执行迁移；
+仅在确认解锁后归还连接，未确认解锁的路径关闭物理连接，避免把 session lock 带回连接池。
+池获取按 `purpose=migration` 记录等待、结果与取消；取得连接即结束等待计时，不把 catalog 查询、
+锁竞争或 DDL 执行混入连接耗时，也不产生 Mapper 方法指标。
+
+Application 从 `sql.observability` 装配等待日志与连接超时通知。超时通知默认只选 `mapper`，需要
+迁移通知时显式在 `alerts.acquire_timeout.purposes` 加入 `migration` 并安装业务 `Notify`。
+通知失败不改变 migration 门禁结果；锁预算仍从获取池连接开始计算，不因观测重置。
+
+## 初始化与使用
 
 直接依赖并在开放业务流量前执行门禁：
 

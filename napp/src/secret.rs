@@ -21,6 +21,7 @@
 //! ```
 
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -298,8 +299,15 @@ pub fn resolve_and_redact(
     generation: u64,
 ) -> Result<SecretResolution, SecretResolveError> {
     let specs = parse_specs(raw)?;
-    let snapshot = SecretSnapshot::resolve(generation, &specs, |path| lookup_scalar(raw, path))
-        .map_err(SecretResolveError::Resolve)?;
+    let excluded = inactive_component_secrets(raw)?;
+    let snapshot = SecretSnapshot::resolve(
+        generation,
+        specs
+            .iter()
+            .filter(|spec| !excluded.contains(spec.id.as_ref())),
+        |path| lookup_scalar(raw, path),
+    )
+    .map_err(SecretResolveError::Resolve)?;
 
     let mut redacted = raw.clone();
     for spec in &specs {
@@ -316,4 +324,109 @@ pub fn resolve_and_redact(
         redacted,
         candidate_fingerprint,
     })
+}
+
+/// 业务作用：按组件用途投影新观测凭据，使应用不物化 controller 或未启用出口的材料。
+/// 参数说明：`raw` 为同代完整配置；框架用途之外的业务 locator 按活跃消费者处理。
+/// 返回：只有非活跃组件引用且没有活跃消费者的 secret ID；所有 config_path 仍统一脱敏。
+fn inactive_component_secrets(raw: &Value) -> Result<BTreeSet<String>, SecretResolveError> {
+    let mut classified = BTreeSet::new();
+    let mut active = BTreeSet::new();
+    let observability = raw.pointer("/grafana/observability");
+    if let Some(value) = observability {
+        collect_locators(value, &mut classified);
+    }
+    if let Some(value) =
+        observability.filter(|v| v.get("enabled").and_then(Value::as_bool) == Some(true))
+    {
+        let mode = value
+            .pointer("/prometheus/export_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("scrape");
+        for (path, used) in [
+            ("/prometheus/scrape/auth", mode != "remote_write"),
+            ("/prometheus/remote_write/auth", mode != "scrape"),
+        ] {
+            if used {
+                if let Some(auth) = value
+                    .pointer(path)
+                    .filter(|auth| auth.get("mode").and_then(Value::as_str) == Some("bearer"))
+                {
+                    collect_locators(auth, &mut active);
+                }
+            }
+        }
+    }
+    #[cfg(feature = "mapper-observability")]
+    {
+        crate::sql_observability::active_provider_refs(raw).map_err(|_| {
+            SecretResolveError::MalformedSpec {
+                id: Arc::from("notifications"),
+                detail: "invalid SQL notification policy".into(),
+            }
+        })?;
+        crate::sql_notifications::NotificationsConfig::parse(raw.get("notifications")).map_err(
+            |_| SecretResolveError::MalformedSpec {
+                id: Arc::from("notifications"),
+                detail: "invalid notification provider configuration".into(),
+            },
+        )?;
+    }
+    // secret ID 可以被多个用途引用；未启用组件不能撤销其它业务子树明确声明的材料需求。
+    collect_business_locators(raw, &mut active);
+    // 只有独属于 controller 或其它非活跃用途的材料被排除，platform mode 自身不会取得控制面凭据。
+    classified.retain(|id| !active.contains(id));
+    Ok(classified)
+}
+
+/// 业务作用：保留框架观测用途之外的业务凭据引用，避免按 ID 排除时误伤共享材料。
+/// 参数说明：`raw` 是完整候选树；`ids` 接收业务显式引用的 ID。
+/// 返回：不读取材料；跳过 secret 定义及已单独裁决的观测、provider 子树。
+fn collect_business_locators(raw: &Value, ids: &mut BTreeSet<String>) {
+    let Some(root) = raw.as_object() else {
+        return;
+    };
+    for (name, value) in root {
+        let excluded_child = match name.as_str() {
+            "secrets" => continue,
+            "grafana" => Some("observability"),
+            "notifications" => Some("providers"),
+            _ => None,
+        };
+        if let Some(excluded_child) = excluded_child {
+            if let Some(children) = value.as_object() {
+                for (child, value) in children {
+                    if child != excluded_child {
+                        collect_locators(value, ids);
+                    }
+                }
+            }
+        } else {
+            collect_locators(value, ids);
+        }
+    }
+}
+
+/// 业务作用：收集声明中的 secret locator，不读取环境或文件内容。
+/// 参数说明：`value` 为用途限定子树，`ids` 接收稳定 ID。
+/// 返回：无返回值；非 locator 字符串不被解释为材料。
+fn collect_locators(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::String(value) => {
+            if let Some(id) = value.strip_prefix("secret://") {
+                ids.insert(id.to_owned());
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_locators(value, ids);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_locators(value, ids);
+            }
+        }
+        _ => {}
+    }
 }
