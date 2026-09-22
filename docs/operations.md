@@ -80,6 +80,31 @@ remote write 失败、无调用和无数据需要区分。remote write 失联信
 - `ExporterSnapshot` 的 pending 持续接近队列上限或 dropped 增长时，优先检查 OTLP endpoint、停机
   预算和采样率；不得把 payload、完整业务身份或凭据加入 span 属性辅助排查。
 
+## Redis 分区消费观测
+
+先从 `RunningPartition::snapshot()` 读取 `executor_scope` 与 `execution_domains`，确认隔离
+粒度及各域的固定份额。聚合计数表示整个源实例的责任，各域计数用于定位积压；同一域的空闲额度
+不会自动借给其它域。不同 Redis 源的 Runner、预算和停止控制相互独立。
+
+| 观测事实 | 含义与处理边界 |
+| --- | --- |
+| 某域 record、payload 或 batch 达到份额 | 本域背压；检查批量大小、解码权重和 handler 延迟，不能仅增加 Runner 数就期望总容量扩大 |
+| `unknown_commits` 持续非零 | 已进入 ACK 阶段但确认结果未知，可能来自成功业务、毒消息 Drop 或 tombstone 清理；保留提交对账，不据此重放业务 |
+| `parked_sources` / `parked_records` 非零 | 来源被人工处置门禁冻结；同计划同 key 后继仍等待，按管理 API 处置 |
+| `runner_degraded` 或域降级 | 所属来源停止接纳新业务，已有成功责任仍需收口；整体消费 readiness 为 false |
+| `record_debt` 或协议异常 | 读取合同失效；保留责任，停止并重建运行时，不能靠清零 gauge 恢复准入 |
+| `async_delete_pending()` 持续积压 | ACK 后空间回收背压；检查删除 owner 与 Redis 可用性，不能据此再次执行业务 |
+| `delete_retained_records` 增长 | 删除 owner 退出后正文可能留存；ACK 事实不撤销，回收依赖保留策略或运维处理 |
+
+执行域共享 Redis 客户端、外部后端和 Tokio runtime。多个域同时变慢时需检查共享连接、Redis
+响应和同步阻塞；同 key 跨域等待也可能是预期的顺序屏障。消费器的 `snapshot().ready` 不自动改变
+Application `/readyz`，业务必须显式接入健康策略。
+
+正常停机在关闭 Redis 客户端前调用 `shutdown_until(deadline)`，检查 `converged` 与 `remaining`。
+未收敛可再次等待同一操作；只有明确接受中止后果时才使用 `force_shutdown_until`。
+直接 Drop、发出 cancel 或停止续租都不能代替 handler、I/O 和锁的退出证明。
+详细状态与配置见 [Redis 分区消费](../nadis/docs/partition.md)。
+
 ## 配置刷新
 
 配置视图把期望快照和每个组件的应用状态放在同一次发布动作中。运维必须同时查看配置修订与状态：

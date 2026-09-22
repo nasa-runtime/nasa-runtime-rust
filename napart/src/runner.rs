@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -561,6 +561,48 @@ impl PartitionRunner {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        self.submit_with_route(|| crate::RouteHash::from_key(&key), spec, task)
+    }
+
+    /// 业务作用：直接使用已冻结摘要非阻塞提交，使调用方的顺序门禁与 Runner 共用路由。
+    ///
+    /// 参数说明：
+    /// - `route`: 由业务 key 冻结的本地摘要，不再进行第二次哈希。
+    /// - `spec`: 当前 Runner 内稳定的任务类型和顺序策略。
+    /// - `task`: 受理后在监督边界执行的异步任务工厂。
+    ///
+    /// 返回：成功返回稳定 `Submission`；容量、保留类型、停机和失权使用普通提交的拒绝语义。
+    pub fn submit_routed_typed<F, Fut>(
+        &self,
+        route: crate::RouteHash,
+        spec: TaskSpec,
+        task: F,
+    ) -> Result<Submission, SubmitRejection>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.submit_with_route(|| route, spec, task)
+    }
+
+    /// 业务作用：统一两种提交入口的拒绝与容量逻辑，在门禁通过后才求值路由。
+    ///
+    /// 参数说明：
+    /// - `route`: 普通 key 的摘要工厂或已经冻结的路由值。
+    /// - `spec`: 任务类型和顺序合同。
+    /// - `task`: 受理后移交给任务监督边界的工厂。
+    ///
+    /// 返回：成功时返回稳定票据；拒绝不执行任务，保留类型或停止门禁也不调用业务 Hash。
+    fn submit_with_route<F, Fut>(
+        &self,
+        route: impl FnOnce() -> crate::RouteHash,
+        spec: TaskSpec,
+        task: F,
+    ) -> Result<Submission, SubmitRejection>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         if spec.ty == LEGACY_TYPE {
             if let Some(inner) = self.current_inner() {
                 inner
@@ -572,7 +614,7 @@ impl PartitionRunner {
         }
         let inner = self.accepting_inner()?;
         inner.submit_now(
-            hash_key(key),
+            route().0,
             spec,
             Box::pin(async move { task().await }),
             false,
@@ -4123,7 +4165,11 @@ async fn supervise(inner: Arc<RunnerInner>) {
                     .unwrap_or_else(|e| e.into_inner())
                     .is_some();
                 inner.phase.store(
-                    if failed { PHASE_FAILED } else { PHASE_STOPPED },
+                    if failed {
+                        PHASE_FAILED
+                    } else {
+                        PHASE_STOPPED
+                    },
                     Ordering::Release,
                 );
                 inner.operation.finish(report);
@@ -4320,9 +4366,7 @@ fn map_supervisor_start(_error: SupervisorStartError) -> StartError {
 ///
 /// 返回：仅用于当前进程和 generation 选择原始 slot 的 64 位哈希值。
 fn hash_key(key: impl Hash) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
+    crate::RouteHash::from_key(&key).0
 }
 
 /// 业务作用：把底层队列关门、耗尽或失权统一映射为当前类型不可安全接纳。

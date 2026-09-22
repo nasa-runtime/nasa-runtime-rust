@@ -11,19 +11,21 @@
 // │ parked 索引        : {prefix}:parked:{p} = park_id (新 owner 接管时恢复停拉)   │
 // └────────────────────────────────────────────────────────────────────────┘
 //
-// marker 状态机包含 ResumeIndeterminate 与 ForceRepublish：
-//   (无) → Parked → ResumePublishing → Resumed(终态,带 TTL 保留供对账)
-//                  ↘ Dropped(终态)
+// marker 的在途状态保存可重入意图，终态在清理后附带 TTL：
+//   (无) → Parked → ResumePublishing → Resumed / ResumeIndeterminate
+//                  ↘ DlqPublishing → Dlqed / DlqIndeterminate
+//                  ↘ Dropping → Dropped
+//   ResumeIndeterminate → ForcePublishing → Resumed
 //
 // fenced PARK_LUA:单脚本原子执行——
 //   ①校验分区锁 holder(防旧 owner 失锁后迟到 park 冻结新 owner 的分区);
 //   ②校验目标 ID 仍在本组 PEL(XPENDING 精确查;不在 = 状态已变,拒绝);
 //   ③payload 转存 quarantine(确定性 HASH,源 stream 此后可随意 trim);
 //   ④XACK 源消息;⑤写 marker(Parked)+ parked 索引。
-//   注意:Lua 运行时错误不回滚(实测)——本脚本写入顺序经过设计:
+//   Lua 运行时错误不回滚，持久副作用按恢复数据优先的顺序写入：
 //   quarantine 先于 XACK(源被 ACK 前 payload 必有副本),重入按 park_id 幂等覆盖。
 //
-// resume = planned-ID reservations 协议(定稿):
+// resume = planned-ID reservations 协议：
 //   ①读 last-generated-id,为批内每条预约【严格递增的显式 ID】(seq 溢出进位 ms+1,
 //     StreamIdExhausted 不 wrapping—— 算法封口);
 //   ②planned_ids[] **先整体持久化进 marker**,再逐条 `XADD 显式 ID`;
@@ -34,8 +36,8 @@
 //   ④任一 Indeterminate → marker=ResumeIndeterminate{uncertain_indexes},分区保持 Parked;
 //     仅 `force_republish`(显式接受重复风险)可为缺失 index 分配全新 planned 推进到
 //     Resumed{forced=1, audit};
-//   ⑤全部确认 → 删 quarantine → Resumed{new_ids}(payload 对账用 quarantine 原文逐字节
-//     比对——quarantine 删除发生在全部确认之后,对账期原文恒可得,无需 digest)。
+//   ⑤全部确认 → 写 new_ids 和 Resumed 终态 → 删 parked index → 最后删 quarantine。
+//     payload 对账使用 quarantine 原文；终态提交前始终保留恢复数据。
 // ============================================================================
 
 use std::sync::Arc;
@@ -108,6 +110,18 @@ pub struct OwnerLease<'a> {
 }
 
 impl OwnerLease<'_> {
+    /// 业务作用：为不启用 fencing 的协议提供同槽 Lua 占位 key，保持 Cluster 路由合法。
+    /// 参数说明: 无。
+    /// 返回：启用 fencing 时返回 fence key；否则返回当前锁 key，脚本仍由 has_fence 禁止读取 fence 字段。
+    fn lua_fence_key(&self) -> &str {
+        if self.fence_key.is_empty() {
+            // Cluster 在脚本执行前校验全部 KEYS，未启用的分支也不能传入跨槽的空字符串。
+            self.lock_key
+        } else {
+            self.fence_key
+        }
+    }
+
     /// 业务作用：返回本次管理转换是否携带 V2 fence 的序列化标记。
     ///
     /// Lua 脚本用 `"1"`/`"0"` 区分严格 fence 校验和原实现 V1 holder-only 校验。
@@ -129,6 +143,7 @@ impl OwnerLease<'_> {
 /// - `expected`: 协议或状态机期望值。
 /// - `new_state`: 分区处置 marker 即将写入的新状态。
 /// - `lease`: 当前 owner lease 与 fencing 信息。
+/// 返回：当前 owner 成功取得状态转换时返回递增版本；失权、状态冲突或协议错误拒绝转换。
 async fn claim_transition(
     client: &Arc<RedisClient>,
     marker: &str,
@@ -139,7 +154,7 @@ async fn claim_transition(
     let v: redis::Value = redis::Script::new(CLAIM_TRANSITION_FENCED_LUA)
         .key(marker)
         .key(lease.lock_key)
-        .key(lease.fence_key)
+        .key(lease.lua_fence_key())
         .arg(expected)
         .arg(new_state)
         .arg(lease.holder)
@@ -217,10 +232,11 @@ return 'OK'
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
 /// - `lease`: 当前 owner lease 与 fencing 信息。
+/// 返回：持锁者和已启用的 fencing 凭据均匹配时成功，否则不授予管理副作用权限。
 async fn verify_owner_fenced(client: &Arc<RedisClient>, lease: &OwnerLease<'_>) -> Result<()> {
     let tag: String = redis::Script::new(VERIFY_OWNER_LUA)
         .key(lease.lock_key)
-        .key(lease.fence_key)
+        .key(lease.lua_fence_key())
         .arg(lease.holder)
         .arg(lease.has_fence())
         .arg(lease.round.to_string())
@@ -259,9 +275,8 @@ async fn assert_op_owns(client: &Arc<RedisClient>, marker: &str, op_id: &str) ->
 }
 
 /// 业务作用：**auto-poison 处置的 operation_id**，用于 liveness-takeover 与 auto-DLQ 崩溃恢复。
-/// auto-DLQ 由 owner **内部**触发(非 producer/admin 命令),无外部重提主体——若 publish 中途崩溃,
-/// 旧实现用一次性 `park_id` 作 op,接管方无从续作 → 分区永久冻结。
-/// 改用**可识别 + 稳定**的 `auto:{p}:{park_id}`:① `auto:` 前缀让接管方识别"这是 auto 处置、可自动续作"
+/// auto-DLQ 由 owner 触发，没有外部重提主体；operation 必须可由接管方识别和重建。
+/// 使用稳定的 `auto:{p}:{park_id}`：① `auto:` 前缀让接管方识别自动处置并继续推进
 /// (区别于 producer 的 `op-{uuid}` / direct 的 `direct:{...}` —— 那些要等原 op 重提,不自动续);
 /// ② 稳定可由 `(p, park_id)` 重导出 / 直接从 marker 读回,重入 `assert_op_owns` 必同 op。
 ///
@@ -557,24 +572,36 @@ const DISPOSITION_NON_TERMINAL: &[&str] = &[
 ];
 const DISPOSITION_TERMINAL: &[&str] = &["Resumed", "Dlqed", "Dropped"];
 
-/// 业务作用：接管时归约 disposition marker + parked index(marker 权威,index 仅校验)。
-/// 任一读失败上抛(调用方 fail-closed 放弃接管)。
-///
-/// # 参数
-/// - `client`: 读取 marker/index 的 Redis 客户端。
-/// - `layout`: 分区组 key 布局。
-/// - `p`: 分区编号。
+// marker 与 index 必须来自同一 Redis 执行时刻，避免把合法的原子 Park 转换拼成元数据缺失。
+// Redis 空值以 false 占位，使返回数组始终保留四个字段；同组布局保证两 key 位于同一 slot。
+const DISPOSITION_SNAPSHOT_LUA: &str = r#"
+return {
+    redis.call('HGET', KEYS[1], 'state'),
+    redis.call('HGET', KEYS[1], 'park_id'),
+    redis.call('HGET', KEYS[1], 'transition_operation_id'),
+    redis.call('GET', KEYS[2])
+}
+"#;
+
+/// 业务作用：以原子快照归约接管时的 disposition，marker 为权威，index 仅校验。
+/// 参数说明：`client` 为 Redis 客户端；`layout` 为同槽分区组布局；`p` 为物理分区编号。
+/// 返回：完整快照决定冻结、续作或放行；状态损坏返回 Inconsistent，读取失败上抛并拒绝接管。
 pub async fn takeover_disposition(
     client: &Arc<RedisClient>,
     layout: &KeyLayout,
     p: u32,
 ) -> Result<TakeoverDisposition> {
-    let mkey = marker_key(layout, p);
-    let mstate: Option<String> = client.h_get(&mkey, "state").await?;
-    let mpark: Option<String> = client.h_get(&mkey, "park_id").await?;
-    let mop: Option<String> = client.h_get(&mkey, "transition_operation_id").await?;
-    // index 读失败(含 WRONGTYPE)会上抛 → 调用方 fail-closed
-    let index: Option<String> = client.get(&parked_index_key(layout, p)).await?;
+    // 任何字段读取失败（含 WRONGTYPE）都拒绝本次快照，不能凭部分信息开放业务来源。
+    let (mstate, mpark, mop, index): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = redis::Script::new(DISPOSITION_SNAPSHOT_LUA)
+        .key(marker_key(layout, p))
+        .key(parked_index_key(layout, p))
+        .invoke_async(&mut client.conn())
+        .await?;
 
     match mstate.as_deref() {
         // marker 非终态:**冻结**(marker 权威,无论 index 是否一致)。但 park_id 缺失/为空时
@@ -1030,11 +1057,8 @@ async fn publish_reserved(
         )));
     }
 
-    // 全部确认 → 收尾。**先提交稳定终态事实,再删唯一恢复数据(quarantine)**。
-    // 旧顺序(先 DEL quarantine 再写终态)在两步之间 crash 会留下"*Publishing + 无 payload"——
-    // 重入无法对账、永久冻结。新顺序:写 new_ids → 切终态 → 删 index → **最后**删 quarantine;
-    // 任一步后 crash,重入都落到终态分支(Resumed/Dlqed)幂等补删 index+quarantine。
-    // (TTL 仍最后设:终态事实在 cleanup 完成前不会被 TTL 抹掉。)
+    // 全部确认后先写 new_ids 与稳定终态，再删 index 和 quarantine，最后设置终态 TTL。
+    // 终态提交前保留完整恢复数据；终态提交后的中断由重入分支幂等完成清理。
     client
         .h_set(marker, "new_ids", planned.join(",").as_str())
         .await?;
@@ -1136,7 +1160,7 @@ pub async fn dlq_from_parked(
     }
 }
 
-/// 业务作用：ForceRepublish:仅 ResumeIndeterminate 可调;为不确定的 index 分配**全新 planned**
+/// 业务作用：从 ResumeIndeterminate 发起显式重发，或按同一 operation 重入 ForcePublishing；为不确定的 index 分配**全新 planned**
 /// 重发——显式接受"可能重复、相对顺序改变"的风险(审计字段记录新旧 planned 对照)。
 ///
 /// # 参数
@@ -1164,8 +1188,7 @@ pub async fn force_republish(
         assert_op_owns(client, &marker, lease.operation_id).await?;
     }
 
-    // ── **只读预检，绝不改状态**（旧实现先切 ForcePublishing 再校验，
-    //    损坏 marker 会被状态污染)。任一校验失败 → Err,marker 仍停 ResumeIndeterminate ──
+    // 先只读校验恢复数据再转换状态；证据不完整时保留当前状态，禁止登记无法继续的发布意图。
     let park_id: String = client.h_get(&marker, "park_id").await?.unwrap_or_default();
     if park_id.is_empty() {
         return Err(NasaRedisError::ProtocolMarker(format!(
@@ -1199,8 +1222,7 @@ pub async fn force_republish(
             "分区 {p} force: uncertain 为空,不应进入 force(marker 语义不一致)"
         )));
     }
-    //**拒绝重复 uncertain index**(实测 `[0,0]` 会对同一 payload 重发两次);同时
-    // 校验越界(否则 `planned[i]` panic)
+    // 重复 index 会让同一 payload 被重发多次，越界则无法取得原 planned ID，均在副作用前拒绝。
     let mut seen = std::collections::HashSet::with_capacity(uncertain.len());
     for &i in &uncertain {
         if i >= planned.len() {
@@ -1304,8 +1326,7 @@ pub async fn force_republish(
         final_ids[i] = target;
     }
 
-    // 收尾必须**先写完整 terminal 事实，再删除唯一恢复数据 quarantine**。
-    //    旧顺序先 DEL quarantine,crash 在写终态前 → 无 payload + ForcePublishing 永久冻结 ──
+    // 先写完整终态事实，再删除 quarantine，确保发布途中崩溃仍有正文可对账和恢复。
     client.h_set(&marker, "forced", "1").await?;
     client
         .h_set(
@@ -1388,9 +1409,7 @@ pub async fn drop_parked(
     let (Some(state), Some(park_id)) = (state, park_id) else {
         return Err(NasaRedisError::Config(format!("分区 {p} 无 Park 记录")));
     };
-    //Drop 改 `Parked → Dropping(intent) → Dropped(cleanup_done)`,清理可重入。
-    // 旧实现直接 CAS 进终态 Dropped,认领后崩溃在清理前 → 重入因"非 Parked"被拒,quarantine/
-    // index 永久残留。现在:Parked 先 CAS 认领进 Dropping;Dropping/Dropped 都幂等续清理。
+    // Parked 先认领为 Dropping 再清理，完成后写 Dropped；中断重入根据持久意图继续清理。
     match state.as_str() {
         "Parked" => {
             claim_transition(client, &marker, "Parked", "Dropping", lease).await?;

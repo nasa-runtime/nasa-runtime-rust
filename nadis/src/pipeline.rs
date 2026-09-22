@@ -8,9 +8,8 @@
 //   · move 语义:`execute(self)` 收尾会话(等齐已 flush 各段 + 发最后一段)——原实现 的 execTag 配对/
 //     openNested 在 Rust 是编译期事实;Drop 未 execute = 最后一段未发(NotSent)+ warn,已 auto-flush 段已提交;
 //   · typed ticket:入队返回 Ticket<T>,execute 后 `ticket.await_result()` 取各自类型化结果;
-//   · **保序 + 一批一写 + 逐命令隔离**(此前逐命令
-//     tokio::spawn,task 调度顺序 ≠ 入队顺序,实测 2000 轮出现 6 次乱序——撤回):
-//     现经 `MultiplexedConnection::send_packed_commands(&Pipeline, 0, n)` 单条消息进
+//   · **保序 + 一批一写 + 逐命令隔离**：
+//     经 `MultiplexedConnection::send_packed_commands(&Pipeline, 0, n)` 单条消息进
 //     driver、单次 flush、严格按入队顺序;返回裸 `Vec<Value>`,server error 以
 //     `Value::ServerError` **逐槽位内联**；聚合成整批 Err 只发生在
 //     `Pipeline::query_async` 包装层,绕开包装层即得逐命令隔离)。
@@ -343,13 +342,13 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    // ── Phase-1 常用命令 typed helper(API 完整性审;命名对齐 commands.rs,
+    // ── 常用命令 typed helper(命名对齐 commands.rs,
     //    底座仍是 enqueue;cluster 多 key 命令的跨 slot 由 Redis loud CROSSSLOT 兜底)──
 
     // key / string
     /// 业务作用：相对过期 → `PEXPIRE`(毫秒)。对照 原实现 `LettucePipeline.expire(key, millis)`(= `OP_EXPIRE`→pexpire)
-    /// **与 direct `commands.rs::expire(Duration)` 同源**(此前误用 `EXPIRE` 秒,
-    /// 比 原实现 放大 1000×)。入参取 `Duration` 消除单位歧义;非零下界 1ms(亚毫秒不塌成 `PEXPIRE 0` 删 key)。
+    /// **与 direct `commands.rs::expire(Duration)` 同源**。入参取 `Duration` 消除单位歧义；
+    /// 非零下界 1ms，避免亚毫秒时长变成 `PEXPIRE 0` 而删除 key。
     ///
     /// # 参数
     ///
@@ -914,7 +913,7 @@ impl PipelineSession {
     }
 
     /// 业务作用：XTRIM MAXLEN(**精确**)→ 删除数。对照 原实现 `xTrimMaxlen`(= `c.xtrim(s, l)`,无 `~`)与 direct
-    /// `commands.rs::x_trim_maxlen_exact`(此前误用 `~` 近似,小 stream 完全不裁)。
+    /// `commands.rs::x_trim_maxlen_exact`，按指定长度精确裁剪。
     ///
     /// # 参数
     ///
@@ -1809,7 +1808,6 @@ impl PipelineSession {
 
     // stream / script / pubsub(其余)
     /// 业务作用：XTRIM MINID(**精确**)→ 删除数。对照 原实现 `xTrimMinId`(= `XTrimArgs.minId(minId)`,无 `~`)。
-    ///此前误用 `~` 近似。
     ///
     /// # 参数
     ///
@@ -2325,9 +2323,8 @@ impl PipelineSession {
         self.enqueue(redis::cmd("JSON.DEL").arg(key).arg(path).to_owned())
     }
 
-    /// 业务作用：JSON.NUMINCRBY(**整数** delta)。对照 原实现 `jsonNumIncrBy(long delta)`(撮合部分成交/持仓加减热路径,
-    /// 数量是整数)。此前用 `f64` 会把 `5.0` 原样下发,RedisJSON 把整数字段写成浮点 shape
-    /// (`"qty":6.0`),后续 typed `i64/u64` 文档 serde 读回失败(`invalid type: floating point`)。
+    /// 业务作用：以整数 delta 执行 JSON.NUMINCRBY，保持数量字段的整数表示。
+    /// 整数增量不经过 f64，避免 RedisJSON 将字段转为浮点表示后无法解码为 `i64/u64`。
     /// 浮点自增请显式用 [`Self::json_num_incr_by_f64`]。
     ///
     /// # 参数
@@ -2654,9 +2651,8 @@ pub struct AutoPipeline {
     /// 单命令字节上限(0=不限),入队前检查(从 `MicroBatchCfg` 复制)。
     max_command_bytes: usize,
     handle: std::sync::Mutex<Option<JoinHandle<()>>>,
-    /// drain 完成信号(`AutoPipeline` 是 `Arc` 共享,多持有者并发 `shutdown()` 时
-    /// 只有抢到 handle 的那个 await drain,其余此前 take 到 None **立即返回**误以为 drain 完成。改:抢到的
-    /// drain 完后 `send(true)`,其余 await 此 watch 直到 true——**所有调用者都等到同一 drain 完成**)。
+    /// 多个持有者共享同一个 drain 完成信号；取得 handle 的调用者等待后台退出后发布 true，
+    /// 其它调用者等待 watch，不能以 handle 已被取走作为排干完成的证明。
     drained: tokio::sync::watch::Sender<bool>,
 }
 
@@ -2834,19 +2830,16 @@ async fn flush_loop(
     }
 }
 
-// Sends one flushed batch to Redis and completes tickets.
-///
-/// # 参数
-/// 业务作用：- `client`: 底层客户端或连接句柄。
-/// - `batch`: 一次性提交到 Redis 的批量命令。
+/// 业务作用：派发自动微批并让各 ticket 独立接收执行结果。
+/// 参数说明：`client` 为目标 Redis 客户端；`batch` 为同一窗口收集的命令。
+/// 返回：无；成功、命令错误或传输未知分别通过各 ticket 回执。
 async fn flush_batch(client: &Arc<RedisClient>, batch: Vec<BatchJob>) {
     // AutoPipeline fire-and-forget:逐 ticket 结果已由 dispatch_jobs 回执,整体 Result 忽略。
     let _ = dispatch_jobs(client, batch).await;
 }
 
 /// 业务作用：**统一的 cluster 感知派发**(显式 `PipelineSession::execute` 与
-/// AutoPipeline `flush_batch` **共用同一路径**——此前只有 AutoPipeline 分桶,显式会话 `save_all`
-/// 跨 slot 写确定性失败)。standalone 走单条 pipeline(保序);cluster **按 key slot 分桶**:同桶
+/// AutoPipeline `flush_batch` **共用同一路径**)。standalone 走单条 pipeline(保序);cluster **按 key slot 分桶**:同桶
 /// 同 slot 不 CROSSSLOT、一条 sub-pipeline 并行发,各 ticket 独立回执。返回 `Err` = 至少一个(桶的)
 /// 传输/响应数异常 → ExecutionUnknown(per-ticket 结果仍精确;cluster 下"传输失败"细化到 slot 桶级)。
 ///

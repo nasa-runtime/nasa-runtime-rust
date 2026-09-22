@@ -14,6 +14,10 @@
 //!
 //! # 背压、延迟与观测
 //!
+//! 接入层可通过 [`RouteHash::from_key`] 冻结业务键，再调用
+//! [`PartitionRunner::submit_routed_typed`]；路由摘要只用于本地执行，不是持久分片协议。
+//! 不同 Runner 不自动建立顺序关系；持久消息接入层须另外维护跨域 ACK、重试与顺序门禁。
+//!
 //! 每个 Runner 分别限制类型排队量、全局在飞量、类型状态数和目标入站盗洞数。非阻塞提交会以
 //! 稳定 [`SubmitRejection`] 表示容量或控制门禁；等待型提交按固定次序取得许可并保持取消安全。
 //! [`PartitionRunner::submit_after`] 登记时只占全局许可，到期后才竞争类型容量，因此登记成功的
@@ -60,6 +64,7 @@ mod observer;
 mod queue;
 mod registry;
 mod route;
+mod route_hash;
 mod runner;
 mod shutdown;
 mod slot;
@@ -80,6 +85,7 @@ pub use registry::{
     RunnerRegistryError, StopAllEntry, StopAllReport, DEFAULT_RUNNER,
 };
 pub use route::{TaskOrdering, TaskSpec, TaskType};
+pub use route_hash::RouteHash;
 pub use runner::{PartitionRunner, RunnerHealth, RunnerPhase, SubmitError, SubmitRejection};
 pub use shutdown::{ForceStopError, ShutdownReport, StartError, StopError};
 

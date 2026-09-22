@@ -343,6 +343,22 @@ scheduling:
 `app.default_redis().await`、`app.redis("default").await` 与 `app.redis("primary").await` 返回同一个
 `Arc<RedisClient>`；协议 marker、key 空间和指标仍使用 `primary`，不会写入本地兼容别名。
 
+### Redis 分区消费生命周期
+
+`"redis"` 组件只拥有受管客户端。业务通过 `nasa::redis::PreparedPartition` 登记 handler 并启动
+`RunningPartition`，后者拥有独立 napart Runner 集合；不会复用 Application 的 `"partition"`
+组件或自动取得它的停机权威。无需仅为 Redis 分区消费而声明 `"partition"`。
+
+每个 Redis 源的 `partition.executor.scope` 可选 `source`（默认）、`group`、`stream`，分别按
+源实例、逻辑组、物理 Stream 划分执行与固定容量份额。各源注册表与预算独立；跨域同计划同 key
+仍受消费器的 ACK、重试和 Park 顺序门禁约束。
+
+创建消费器的业务须保留运行期 owner，并在受管 Redis 客户端关闭前停止消费、检查排干报告。
+可以在 UserHook 登记业务优雅停机任务来等待 `shutdown_until(deadline)`；报告未收敛时不能宣称
+业务任务、I/O 和租约已经退出，也不能通过再次关闭共享客户端替代这些证明。
+完整合同见
+[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/docs/partition.md)。
+
 ### Redis 多源
 
 多源把每个完整客户端配置放在 `redis.properties` 下；`primary` 是推荐的默认键，也可以只写

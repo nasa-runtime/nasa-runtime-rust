@@ -9,7 +9,7 @@
 // │   不等到发命令)                                                           │
 // │ · 查询 = 类型化 AST + renderer(query.rs;字段/类型构建期校验,tag 值转义) │
 // │ · IndexPolicy{ValidateOnly|CreateIfMissing|RecreateExplicitly},FT.INFO    │
-// │   实测归一化比较,**禁自动 DROP**(actuator.rs)                            │
+// │   服务端结构归一化比较，**禁自动 DROP**(actuator.rs)                      │
 // │ · capability 探测(缺 FT/JSON 模块给明确错误,非协议错)                   │
 // │ · DataType::Hash / Json 两形态(id 直达 + FT.SEARCH 查询)                 │
 // ├─ 数组与聚合能力 ─────────────────────────────────────────────────┤
@@ -295,7 +295,6 @@ impl DocMeta {
         let mut rest = self.prefix.as_str();
         while let Some(open) = rest.find('{') {
             //`{` 之前的 literal 片段含孤立 '}' = 未配对(会破坏 Cluster hash tag 解析);
-            // 此前只检查"无 { 的整串"和"末尾 rest",漏了首个 `{` 之前的 '}'。
             if rest[..open].contains('}') {
                 return Err(NasaRedisError::Config(format!(
                     "DocMeta: prefix \"{}\" 含未配对的 '}}'",

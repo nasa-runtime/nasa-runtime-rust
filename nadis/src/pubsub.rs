@@ -169,7 +169,7 @@ impl RedisClient {
     ///
     /// ⚠ **cluster 下返回值不可作为全局订阅者数**:classic Pub/Sub 消息能跨节点传播
     /// 到订阅者,但 `PUBLISH` 的 integer reply 在 redis-rs cluster 路由下只反映**被路由到的那个节点视角**
-    /// 的订阅者数(实测 cluster 返回 0、单机返回 1)。**不要**用它判断"是否无人在线 / 全局 delivery 数";
+    /// 的订阅者数。**不要**用它判断"是否无人在线 / 全局 delivery 数";
     /// 需要全局在线/送达计数请走 socket/registry 侧在线表或业务 ACK。单机下返回值即本机订阅者数,可用。
     ///
     /// # 参数

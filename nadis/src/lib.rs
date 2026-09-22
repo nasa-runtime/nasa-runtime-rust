@@ -1,5 +1,11 @@
 //! Redis 客户端、分布式锁、管线、发布订阅和分区消费基础层。
 //!
+//! 分区消费通过 Redis 租约与 PEL 完成持久接管，由实例独占的 napart Runner 集合执行业务键有序任务。
+//! 本地调度支持 source、group、stream 隔离，跨执行域的同计划同业务键仍保持顺序屏障。
+//! 成功业务与 ACK 分离，未知确认保留提交责任；源级总预算覆盖读取、执行、重试和发布，
+//! group/stream 将消费容量划为固定域份额，跨域不借用；发布仍使用源级独立预算。
+//! 正常停机报告未收敛时可以继续等待同一操作，显式强停才请求有损中止。
+//!
 //! 业务通常通过 `nasa::redis` 门面接入；本 crate 承载单点/集群 Redis 的类型化命令、
 //! 连接治理和分布式协作能力。
 // 核心模块分别拥有连接与拓扑、类型化命令、显式 pipeline、锁、分区消费和搜索边界。
@@ -63,7 +69,9 @@ pub use lock::{DistributedLock, HoldStatus, LockGuard};
 pub use nadis_derive::RedisDocument;
 pub use partition::{
     compat_double_to_string, compat_long_hash, compat_string_hash, route_i64, route_str,
-    PreparedPartition, RunningPartition,
+    ExecutionDomainSnapshot, PartitionExecutorCfg, PartitionExecutorScope, PartitionLimits,
+    PartitionRecord, PartitionShutdownReport, PartitionSnapshot, PreparedPartition,
+    PublisherSnapshot, RecordIdentity, RunningPartition,
 };
 pub use pipeline::{AutoPipeline, MicroBatchCfg, PipelineSession, Ticket};
 pub use proxy::{PreparedProxy, ProxyCfg, ProxyPoison, ProxyStartOffset, RunningProxy};

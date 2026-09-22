@@ -5,7 +5,7 @@
 // 红线:
 //   · capability 探测:缺 FT(或 JSON 模式缺 ReJSON)→ 明确的 NotSupported 错误,
 //     不是一串协议错(缺模块给明确错误)
-//   · 索引校验以 **FT.INFO 实测**为准(schema hash 只是缓存思想——这里直接归一化比较),
+//   · 索引校验以 **FT.INFO 返回的实际结构**为准，归一化后比较，
 //     IndexPolicy{ValidateOnly|CreateIfMissing|RecreateExplicitly},**禁自动 DROP**:
 //     发现漂移 ValidateOnly 报错带 diff,Recreate 必须显式选择;
 //   · 双通道(对照 原实现):本 actuator = 查询/管理通道;批量写并入 PipelineSession
@@ -97,8 +97,7 @@ impl<T: RedisDocument> SearchActuator<T> {
                     )));
                 }
                 //**非 unknown command 的错误(网络/权限/超时)不静默忽略**
-                // ——此前 fall through 到 Ok 会误判模块可用;改为上抛(JSON.TYPE 对缺失 key 返回
-                // nil=Ok,正常探测不该出别的错;出错 = 真异常)。
+                // JSON.TYPE 对缺失 key 返回 nil；其它错误不能证明模块可用，绑定阶段必须拒绝。
                 return Err(e.into());
             }
         }
@@ -116,7 +115,7 @@ impl<T: RedisDocument> SearchActuator<T> {
 
     // ─────────────────────── 索引管理 ───────────────────────
 
-    /// 业务作用：按策略确保索引(校验以 FT.INFO 实测为准;漂移 diff 进错误文本)。
+    /// 业务作用：按策略确保索引，以 FT.INFO 返回结构校验漂移，并在错误中报告差异。
     ///
     /// # 参数
     /// - `policy`: 索引存在性和漂移处理策略,决定仅校验、缺失创建还是显式重建。
@@ -193,15 +192,15 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(())
     }
 
-    /// 业务作用：将 FT.INFO 实测结果归一化后与 meta 期望全量比较。
+    /// 业务作用：将 FT.INFO 返回结构归一化后与 meta 期望全量比较。
     /// 抓四类漂移(任一不符即 fail-fast,**禁自动 DROP**,引导 RecreateExplicitly):
     ///   ① ON HASH/JSON(key_type 不符 → save 写进去也建不进倒排,查询恒空);
-    ///   ② PREFIX(literal head 不在实测 prefixes → 文档不被索引拾取);
-    ///   ③ 字段集合 + 类型(原有);
+    ///   ② PREFIX(literal head 不在返回的 prefixes 中 → 文档不被索引拾取);
+    ///   ③ 字段集合 + 类型;
     ///   ④ 字段修饰:SORTABLE(影响 SORTBY 可用性)、WEIGHT(打分)、SEPARATOR(TAG 分词)、
     ///      CASESENSITIVE/NOSTEM/NOINDEX —— 与建索引时不一致会让排序/匹配静默失真。
     /// 各版本 FT.INFO 可能缺 key_type/prefixes/WEIGHT 等键:**缺则该项放行**(只比能比的,
-    /// 不因版本差异误报),但只要实测给出了值且与期望不符就一定上抛。
+    /// 不因版本差异误报),但只要响应给出了值且与期望不符就一定上抛。
     async fn validate_schema(&self) -> Result<()> {
         let info: redis::Value = redis::cmd("FT.INFO")
             .arg(&self.meta.index)
@@ -228,7 +227,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             )));
         }
 
-        // ② PREFIX:实测 prefixes 必须含我们声明的 literal head
+        // ② PREFIX：返回的 prefixes 必须包含声明的 literal head，否则文档无法进入索引。
         let want_prefix = self.meta.literal_prefix();
         if !prof.prefixes.is_empty() && !prof.prefixes.iter().any(|p| p == want_prefix) {
             return Err(drift(format!(
@@ -665,7 +664,6 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
         //**复用 `render_args`**(而非手写 LIMIT)——保留 `SORTBY` + 排序字段存在性/SORTABLE
         // 校验(NOCONTENT 只跳 RETURN,不是跳 SORTBY 的理由,对齐 原实现 findKeys/remove 用 renderArgs)。
-        // 此前手写 `LIMIT offset limit` 丢了 SORTBY → 排序+分页时返回错误 top-N,且非法 sort 字段不报错。
         // offset/limit 由调用方覆盖(find_keys 显式分页或默认大上限;remove 大上限)。
         let q_for_keys = q.clone().limit(offset, limit);
         let mut cmd = redis::cmd("FT.SEARCH");
@@ -1014,8 +1012,7 @@ fn resp3_row_fields(row: &redis::Value) -> HashMap<String, String> {
     map
 }
 
-/// 业务作用：从 Value 取文本(★FT.INFO 的键值是 **SimpleString**(`+`),不是 BulkString——
-/// Redis 8 实测;两形态都要兼容,只匹配 BulkString 会解析出空表)。
+/// 业务作用：从 FT.INFO 的字符串值提取文本，同时接受 SimpleString 和 BulkString，避免遗漏合法字段。
 ///
 /// # 参数
 /// - `v`: 待转换的值。
@@ -1079,7 +1076,7 @@ pub fn normalize_attributes(info: &redis::Value) -> HashMap<String, String> {
     out
 }
 
-/// 一个字段的 FT.INFO 实测画像，用于比较 type、修饰 flag、WEIGHT 与 SEPARATOR 漂移。
+/// 一个字段的 FT.INFO 返回结构，用于比较 type、修饰 flag、WEIGHT 与 SEPARATOR 漂移。
 #[derive(Debug, Default, Clone)]
 pub struct AttrInfo {
     /// RediSearch 字段类型。

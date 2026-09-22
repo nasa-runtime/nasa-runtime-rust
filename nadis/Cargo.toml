@@ -1,4 +1,4 @@
-# nadis：对齐既有工具包、cache 与 Redis 五件套公开语义的基础层。
+# nadis：Redis 命令、幂等管线、分布式协作和业务键有序分区消费基础层。
 # 本 crate 提供 client、commands、codec、keytag、显式 PipelineSession、分布式锁、
 # partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
@@ -6,17 +6,20 @@ name = "nadis"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Redis 基础层：类型化命令、nonce 幂等 Pipeline、锁、Stream、可观测 Fanout 背压与 RedisJob"
+description = "Redis 基础层：业务键有序分区消费、源/组/Stream 执行隔离、有界背压、幂等管线、锁与 RedisJob"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["redis", "stream", "partition", "async", "backpressure"]
+categories = ["asynchronous", "concurrency", "database"]
+readme = "README.md"
+documentation = "https://docs.rs/nadis"
 include = [
     "src/**/*.rs",
     "src/**/*.lua",
     "Cargo.toml",
     "README.md",
+    "docs/**/*.md",
     "LICENSE-APACHE",
     "LICENSE-MIT",
     "NOTICE",
@@ -47,6 +50,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # 触发引擎的命名时区解析（如 "UTC"、"Asia/Shanghai"）；仅 job feature 启用。
 chrono-tz = { version = "0.10", optional = true }
 nabase = { path = "../nabase", package = "nabase", version = "1.0.1" }
+napart = { path = "../napart", version = "1.1.2" }
 nadis-derive = { path = "../nadis-derive", package = "nadis-derive", version = "1.0.0", optional = true }
 redis = { version = "1", features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }

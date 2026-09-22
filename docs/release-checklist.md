@@ -55,6 +55,10 @@
       部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
       使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] Redis 分区消费的 source/group/stream 模式、源间独立性、固定域份额、全源业务键顺序、ACK
+      不确定与停机失败语义在根 README、nadis、napart、门面、rustdoc 和 manifest 元数据中一致。
+- [ ] 分区消费的域数与总槽数按完整拓扑有界；每域整批预算充足，未持锁来源仍计入份额，解码权重
+      与线格式上限分别说明。观测入口不得把消费器本地 readiness 描述为自动接入 Application。
 - [ ] 业务停机任务在根 README、门面、运行时、宏入口和运维文档中的合同一致：UserHook 登记、稳定名称、
       priority 顺序、共享绝对期限、先任务后业务资源、失败计数和直接取消边界均有明确描述。
 - [ ] Runner 直接取消会撤销本实例全局入口和新资源借用；经过任务门时仍存活的受监督 future 保留

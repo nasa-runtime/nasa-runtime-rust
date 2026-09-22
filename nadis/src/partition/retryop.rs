@@ -10,17 +10,17 @@
 //
 // 协议(**按 operation_id 键控**,消除 per-partition 单 marker 串扰)
 //   marker = {prefix}:retryop:{p}:{op_id}(HASH + TTL 600s)
-//   op_id  = fnv1a64(sorted(ids) | group | consumer(node_id) | claim_term=slot.generation)
-//            —— 同一批重试稳定(找回同 marker 重放)、跨 dispatch 周期(generation 变)新建
+//   op_id  = fnv1a64(sorted(ids) | group | consumer 身份与来源任期 | ticket revision)
+//            —— 同一票据网络重放稳定；新的业务失败创建新的操作身份
 //   字段:state=Pending;ids=JSON [{"id":"1-0","desired":2},...]
 //
 //   首次:逐 ID XPENDING 查 count → desired = count+1 → 整体写 Pending + TTL
-//        → 逐 ID 执行 CAS Lua → finish 删 marker;
+//        → 本地票据冻结意图 → 逐 ID 执行 CAS Lua；终态可删除 marker，残留由 TTL 清理;
 //   重放(上次 Unknown 中断,同 op_id 的 marker 仍 Pending):读回 ids+desired → 逐 ID 同一
 //        CAS Lua ——desired 来自 marker,不重算,结果幂等(防 crash/响应丢失二次递增);
-//   op_id 键控后不同 operation 各自独立 marker,**不再有覆盖/串扰**。
+//   不同 operation 按 op_id 使用独立 marker，同一分区的并行操作不覆盖彼此的意图。
 //
-// CAS 五规则(单 ID Lua, 判定表):
+// 单 ID CAS 判定表：
 //   owner ≠ expected            → 'OWNER'     (OwnershipChanged,绝不 XCLAIM)
 //   count == desired - 1        → XCLAIM RETRYCOUNT desired,返回 payload('CLAIMED')
 //   count == desired            → 仅 XRANGE 取 payload,**不再 XCLAIM**('HAVE')
@@ -50,14 +50,9 @@ pub fn marker_key(layout: &KeyLayout, p: u32, op_id: &str) -> String {
 }
 
 /// 业务作用：计算 operation_id:对(排序后的 target ids + group + consumer + claim_term)做 FNV-1a64。
-/// **同一批重试稳定**(ids/term 不变)→ 重放找回同 marker;**跨 dispatch 周期**(claim_term
-/// 即 slot.generation 变)→ 新 operation 新 marker。
-///
-/// # 参数
-/// - `layout`: 分区组 key 布局,提供 consumer group 名。
-/// - `consumer`: 当前 owner consumer 名。
-/// - `claim_term`: 本轮 claim term,通常来自 slot generation。
-/// - `ids`: 本轮要重投归约的 stream entry ID 列表。
+/// 参数说明：`layout` 提供组身份；`consumer` 包含节点身份、来源任期和操作身份；
+/// `claim_term` 为同一票据稳定的 revision；`ids` 为本次精确重投坐标。
+/// 返回：同一票据的网络重放得到相同摘要，不同业务失败使用不同操作身份。
 pub fn operation_id(layout: &KeyLayout, consumer: &str, claim_term: u64, ids: &[String]) -> String {
     let mut sorted: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
     sorted.sort_unstable();
@@ -89,7 +84,7 @@ pub enum RetryOutcome {
     Claimed(Vec<u8>),
     /// 前次已执行(count == desired):仅取回 payload,未再递增。
     Have(Vec<u8>),
-    /// 已不在 PEL(AlreadyResolved / EntryDeleted)。
+    /// 已不在 PEL，或脚本未取得 data 正文；调用方须精确读取以区分 tombstone 与缺字段记录。
     Resolved,
     /// owner 已变(被 reaper/新 owner 接管):放弃该 ID。
     OwnershipChanged,
@@ -99,18 +94,9 @@ pub enum RetryOutcome {
     Corrupt,
 }
 
-/// 单 ID CAS Lua。
-/// KEYS[1]=stream;ARGV[1]=group ARGV[2]=consumer ARGV[3]=id ARGV[4]=desired
-/// 返回:{'CLAIMED', payload} | {'HAVE', payload} | {'RESOLVED'} | {'OWNER'}
-///       | {'SUPERSEDED'} | {'CORRUPT'}
-/// (payload = entry 中 data field 的值;entry 已被 XDEL 而 PEL 仍在时 payload 为 false
-///  → 按 RESOLVED 处理:tombstone 语义。**注**:RESOLVED 当前**不 XACK**
-///  ——该 ID 直接被本宗放弃(从 records 缺席),PEL 中的 tombstone 引用保留(无 payload,
-///  无害);若来自 XAUTOCLAIM 的 deleted 段,Redis 已自动移出 PEL,无残留。fenced
-/// tombstone ACK 清理 PEL 时按 EntryDeleted 墓碑终态处理。
-/// owner/fence 凭据:retry-op CAS 改 PEL 前必须证明本节点持锁 + 任期最新
-/// ——此前只比 PEL consumer 名,失锁后旧 owner 仍能 XCLAIM RETRYCOUNT 跨 owner 改 PEL(实测)。
-/// `fence_key` 空 = 原实现V1(holder-only)。
+/// retry-op CAS 的 holder 与可选 fencing 凭据，修改 PEL 前须证明来源仍有当前任期权限。
+/// PEL consumer 名不能单独证明当前来源仍有权修改 delivery count。
+/// `fence_key` 为空表示 LegacyV1 的 holder-only 校验。
 pub struct FenceArgs<'a> {
     pub holder: &'a str,
     pub lock_key: &'a str,
@@ -120,6 +106,7 @@ pub struct FenceArgs<'a> {
     pub counter: u64,
 }
 
+// CAS 本身不执行 XACK；RESOLVED 仍由调用方精确检查正文，确认 tombstone 后才交给提交监督清理 PEL。
 const RETRY_CAS_LUA: &str = r#"
 -- owner/fence 前缀：KEYS[2]=lock KEYS[3]=fence；ARGV[5]=holder ARGV[6]=has_fence
 --   ARGV[7]=round ARGV[8]=nonce ARGV[9]=p ARGV[10]=counter。任一不符 → 'OWNER'(交新 owner)。
@@ -179,9 +166,8 @@ return {'CLAIMED', pl}
 /// 业务作用：确保 Pending 意图已持久化(**按 op_id 键控**):marker 不存在 → 按当前 PEL 算
 /// desired 写新 Pending + TTL;已 Pending(同 op_id = 同 operation,op_id 由 ids 派生)→
 /// 读回沿用已落盘 desired(重放幂等,不重算)。
-/// op_id 键控后**不再有“per-partition 单 marker 被不同 operation 覆盖或串扰”的问题**，
-/// 因此只保留 op_id 碰撞防御(marker ids 与请求不一致 →
-/// fail-closed)。
+/// 不同 operation 的 marker 独立；同一 op_id 的 marker ids 与请求不一致时拒绝执行，
+/// 防止操作身份碰撞让调用方继承其它记录的重投意图。
 ///
 /// # 参数
 /// - `client`: 读写 retry marker 与 PEL 状态的 Redis 客户端。
@@ -196,8 +182,7 @@ pub async fn ensure_pending(
     op_id: &str,
     ids: &[String],
 ) -> Result<Vec<RetryIntent>> {
-    //**显式拒绝**请求中的重复 ID(旧实现靠 BTreeSet 静默去重,会让
-    // "同一 ID 出现两次"的非法输入被掩盖,且 op_id 含重复元素)。
+    // 重复 ID 破坏一次 operation 对应一组唯一坐标的合同，必须在登记意图前拒绝。
     let uniq: std::collections::BTreeSet<&str> = ids.iter().map(|s| s.as_str()).collect();
     if uniq.len() != ids.len() {
         return Err(NasaRedisError::ProtocolMarker(format!(
@@ -238,8 +223,7 @@ pub async fn ensure_pending(
     if intents.is_empty() {
         return Ok(intents); // 全部已出 PEL:无宗可立
     }
-    //意图落盘 + TTL 必须**原子**(单 Lua:HSET ids/state + PEXPIRE)——
-    // 旧实现三条裸命令,崩在中间会留半 marker(有 ids 无 state)或永久 marker(无 TTL)。
+    // 意图、状态与 TTL 在同一 Lua 写入，避免崩溃留下缺少状态或无法到期的 marker。
     let json = serde_json::to_string(&intents).map_err(|e| NasaRedisError::Codec(e.to_string()))?;
     let _: redis::Value = redis::Script::new(ENSURE_PENDING_LUA)
         .key(&mkey)
@@ -277,13 +261,22 @@ pub async fn execute(
 ) -> Result<Vec<(String, RetryOutcome)>> {
     let stream = layout.stream(p);
     let lua = redis::Script::new(RETRY_CAS_LUA);
-    let has_fence = if fence.fence_key.is_empty() { "0" } else { "1" };
+    let has_fence = if fence.fence_key.is_empty() {
+        "0"
+    } else {
+        "1"
+    };
     let mut out = Vec::with_capacity(intents.len());
     for it in intents {
         let v: redis::Value = lua
             .key(&stream)
             .key(fence.lock_key)
-            .key(fence.fence_key)
+            // LegacyV1 不读取 fencing key，但 Lua 声明的全部 KEYS 仍必须与 Stream 同槽。
+            .key(if fence.fence_key.is_empty() {
+                stream.as_str()
+            } else {
+                fence.fence_key
+            })
             .arg(layout.group())
             .arg(consumer)
             .arg(&it.id)

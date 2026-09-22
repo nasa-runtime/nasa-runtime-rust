@@ -202,6 +202,14 @@ impl RedisConfig {
     /// 业务作用：启动期校验(connect 内调用)。
     ///
     pub fn validate(&self) -> crate::error::Result<()> {
+        if self.partition.enabled {
+            self.partition.limits.validate(self.stream.batch_size)?;
+            for group in self.partition.groups.values() {
+                self.partition
+                    .limits
+                    .validate(group.resolved_stream(&self.stream).batch_size)?;
+            }
+        }
         let semaphore_max = tokio::sync::Semaphore::MAX_PERMITS;
         if self.url.is_empty() {
             return Err(crate::error::NasaRedisError::Config("url 为空".into()));
@@ -425,7 +433,7 @@ impl RedisConfig {
                         group = %logical,
                         drain_timeout_ms = resolved_drain,
                         handler_timeout_ms = resolved_handler,
-                        "隔离组 drain_timeout_ms < handler_timeout_ms：停机时在途 handler 可能在优雅排水完成前被中断"
+                        "隔离组 drain_timeout_ms < handler_timeout_ms：普通停机可能先返回未收敛报告，后台继续等待当前业务"
                     );
                 }
                 let topics: Vec<&str> = if g.topics.is_empty() {
@@ -453,6 +461,11 @@ impl RedisConfig {
                         ));
                     }
                 }
+            }
+            if self.partition.enabled
+                && (self.partition.limits.max_read_waiters as u64) < total_partitions
+            {
+                return cfg("partition.limits.max_read_waiters 必须覆盖全部可持有物理来源".into());
             }
         }
         if self.partition.rebalance_ms == 0 {
@@ -499,20 +512,16 @@ impl RedisConfig {
             ));
         }
         //`max_redeliver=0` 会让每条消息首投(deliveries>=1)即判毒 → 全量进毒处置(与
-        // `ProxyCfg.max_redeliver` 同纪律,retry.rs 用 `effective > max_redeliver` 判毒)。fail-fast。
+        // `ProxyCfg.max_redeliver` 同纪律，精确重试以有效投递次数超过上限为毒消息处置条件)。fail-fast。
         if self.partition.max_redeliver == 0 {
             return cfg("partition.max_redeliver 必须 >= 1(否则首投即判毒)".into());
         }
-        //`handler_timeout_ms` 是 **per-bucket(每个 (topic,event) 桶)**,非
-        // per-batch——一批 K 个桶最坏占用 K×handler_timeout。若 `drain_timeout_ms < handler_timeout_ms`,
-        // 停机时只要有在途批次,优雅 drain 的绝对 deadline 必先到 → worker 被硬中断留 PEL,"优雅排水"
-        // 退化为硬中断。这是软关系(不 fail-fast,部署可能有意如此),仅 warn 提示。
+        // 等待窗口短于 handler 超时可能先返回未收敛，既有排干操作仍必须继续受监督。
         if self.partition.drain_timeout_ms < self.partition.handler_timeout_ms {
             tracing::warn!(
                 drain_timeout_ms = self.partition.drain_timeout_ms,
                 handler_timeout_ms = self.partition.handler_timeout_ms,
-                "drain_timeout_ms < handler_timeout_ms:停机时在途 handler 未结束 drain 即到点硬中断留 PEL,\
-                 优雅排水会退化为硬中断(handler_timeout 还是 per-bucket,一批多桶更易触发)"
+                "drain_timeout_ms < handler_timeout_ms:停机等待可能先返回未收敛，已登记任务继续排干"
             );
         }
         if self.stream.batch_size == 0 {
@@ -659,10 +668,9 @@ impl Default for LockCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamCfg {
-    /// 托管模式 = 冷流再 poll 间隔(NOBLOCK);仅非 group XREAD 才是 BLOCK 参数。原实现 默认 500。
-    /// **已接线**:冷流 Backoff / coordinator loop 等待。
+    /// 分区消费的冷流轮询间隔(NOBLOCK)；普通非 group XREAD 使用此值作为 BLOCK 时长。
     pub poll_timeout_ms: u64,
-    /// XREADGROUP COUNT。**已接线**。
+    /// 单次 XREADGROUP 的 COUNT，消费器据此预留完整响应及后继责任。
     pub batch_size: usize,
     /// 自动裁剪保留窗，既有默认值为 1 小时。leader 每 `auto_trim_rate_ms`
     /// 对各分区 stream `XTRIM MINID ~ {now-本值}`。`auto_trim_rate_ms=0` 时本值不生效(裁剪禁用)。
@@ -673,13 +681,13 @@ pub struct StreamCfg {
     /// 下一周期，停机在业务 drain 后做末次 flush。**0 = 禁用**，此时 entry 留在 stream；
     /// 只有 autoTrim 同时启用时才会按其保留窗回收。
     pub async_del_record_period_ms: u64,
-    /// 全局在飞批次预算上界。**已接线**:= coordinator budget Semaphore 容量。
+    /// 当前物理组同时进行的读取批次上限，仍受全部组共享的 partition.limits 约束。
     pub inflight_max: usize,
 }
 impl Default for StreamCfg {
     /// 业务作用：构造 stream 消费默认配置。
     ///
-    /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行,并设置全局在飞批次预算。
+    /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行，并限制组内同时读取的批次数。
     fn default() -> Self {
         Self {
             poll_timeout_ms: 500,
@@ -710,6 +718,10 @@ pub enum PoisonPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionCfg {
+    /// 本源全部消费组的责任总预算；执行隔离模式在此总额内划分固定域份额。
+    pub limits: crate::partition::PartitionLimits,
+    /// 当前 RedisPartition 专属的本地执行器配置。
+    pub executor: crate::partition::PartitionExecutorCfg,
     /// 是否启用 partition 消费。
     pub enabled: bool,
     /// 默认消费组名称。
@@ -724,20 +736,17 @@ pub struct PartitionCfg {
     pub holds_check_interval_ms: u64,
     /// 停机 drain 等待毫秒数。
     pub drain_timeout_ms: u64,
-    /// 同一批次连续失败的重投上限;超过即触发 poison_policy。
+    /// 单条记录的重投上限，结合精确 PEL delivery count 判定毒消息。
     pub max_redeliver: u32,
-    /// handler 强制 timeout ms(文档 handler 契约:超时一律按失败留 PEL)。
-    /// ⚠ **per-bucket(每个 (topic,event) 桶各套一次),非 per-batch**:一批含
-    /// K 个桶时最坏占用 ≈K×handler_timeout。配 `drain_timeout_ms` 时务必 ≥ 本值,否则停机优雅 drain
-    /// 会被在途 handler 拖到硬中断(validate 已 warn)。
-    /// 注意:对**纯 CPU、不 yield** 的 handler 无效(async 无法中断不让出的同步块),那类
-    /// 业务须自行 spawn_blocking / 自带超时;本 timeout 兜住会 await 的慢 handler。
+    /// 单次 handler 超时：单记录计划按条计时，兼容批量计划按一次 Vec 调用计时。
+    /// 超时保留 PEL 进入精确重试；正常停机等待期限不自动升级为强停。
+    /// handler 必须协作让出，不能派生脱离监督的副作用任务；不让出的同步代码不能由异步超时证明终止。
     pub handler_timeout_ms: u64,
     /// 毒消息策略(默认 Park——fail-closed:停拉隔离等运维处置,**不自动删数据**;
     ///文档 V2 默认即 Park,Drop 是显式选择的不可恢复丢弃)。
     pub poison_policy: PoisonPolicy,
     /// **隔离组**(对照 原实现 `partition.groups.{逻辑名}`):把高频/重 topic 隔离到独立 stream 组,
-    /// 与默认组及其它组**互不阻塞消费**(高频/低频、高高频/高低频隔离)。空 = 仅默认组(向后兼容)。
+    /// 各组具有独立物理 Stream 和读取参数，执行与容量隔离由 `executor.scope` 决定；空配置仅启用默认组。
     /// key = 逻辑短名(不含 default_group 前缀;不得为空/含 `{`/`}`)。实际 stream 前缀 =
     /// `{default_group}:{逻辑名}`(对照 原实现 streamPrefix)。
     #[serde(default)]
@@ -749,14 +758,15 @@ impl Default for PartitionCfg {
     /// 默认关闭 partition,但保留原实现的默认组名、64 分区、10s 再平衡和 Park 毒消息策略。
     fn default() -> Self {
         Self {
+            limits: Default::default(),
+            executor: Default::default(),
             enabled: false,
             default_group: "SINGLE-CONSUME".into(),
             count: 64,
             rebalance_ms: 10_000,
             min_idle_ms: 30_000,
             holds_check_interval_ms: 5_000,
-            // 停机预算必须长于默认的单桶处理超时，否则默认配置下每个仍在处理慢任务的实例都会被
-            // 强制中断，无法兑现先排空再退出的生命周期语义。
+            // 默认等待窗口覆盖一次业务超时；窗口到达只结束本次等待，后台责任继续排干。
             drain_timeout_ms: 35_000,
             max_redeliver: 5,
             handler_timeout_ms: 30_000,
@@ -797,7 +807,7 @@ pub struct PartitionGroupCfg {
     pub batch_size: Option<usize>,
     /// 冷流再 poll 间隔 ms(继承 `stream.poll_timeout_ms`)。
     pub poll_timeout_ms: Option<u64>,
-    /// 全局在飞批次预算(继承 `stream.inflight_max`)。
+    /// 本组同时读取的批次数上限（继承 `stream.inflight_max`）。
     pub inflight_max: Option<usize>,
 }
 
@@ -806,6 +816,8 @@ impl PartitionGroupCfg {
     /// 用于 `GroupRuntime`:`cfg.groups` 清空(per-group 无嵌套组),`enabled/default_group` 沿父级(runtime 不读)。
     pub(crate) fn resolved_partition(&self, parent: &PartitionCfg, count: u32) -> PartitionCfg {
         PartitionCfg {
+            limits: parent.limits.clone(),
+            executor: parent.executor.clone(),
             enabled: parent.enabled,
             default_group: parent.default_group.clone(),
             count,

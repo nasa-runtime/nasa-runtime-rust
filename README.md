@@ -5,6 +5,8 @@ NASA Rust 共享库是一组按特性组合的基础设施包。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭前的有序异步收尾；业务不需要另建信号处理
 或停机 callback 集合。
+Redis 分区消费把持久接管与本地执行分开：不同 Redis 源始终使用独立 Runner，同源可按
+`source`、`group`、`stream` 划分调度与容量；业务键顺序覆盖 handler、ACK 和精确重试。
 可靠 Saga client 将业务事实与发起意图放在同一数据库事务，并让 dispatcher 固定扫描该事务域；
 远端不可用或收据丢失时保留原事件，显式数据源冲突在 Ready 前拒绝。
 Mapper 同时提供默认采集的 SQL 指标，区分逻辑方法、真实数据库执行、连接等待和流消费；业务通过
@@ -42,6 +44,42 @@ Application 不提供跨数据库原子事务，也不会替业务推断租户�
 统一放行约束组件交出的终端任务与 initializer 暂存任务，不延迟 UserHook 中普通
 `spawn_background` / `spawn_critical`。业务自管 listener 使用 `serve_when_ready`；initializer 的任务
 工厂应只构造 future，不自行启动监听或派生任务。
+
+## Redis 分区消费与执行隔离
+
+`nasa::redis::PreparedPartition` 先准备物理 Stream 并冻结消费计划，`start` 返回拥有消费生命周期的
+`RunningPartition`。Redis 租约、PEL 和 fencing 决定跨进程接管权；实例专属的 napart Runner 集合
+负责本地调度。读取前预留记录、正文和后继责任，handler 成功后由提交监督完成 ACK；ACK 结果
+不确定只进行对账，不重跑已成功的 handler。
+
+```text
+Redis 来源租约与 PEL → 有界读取 → 共享账本与业务键顺序门禁
+                                      ↓
+                             来源所属 napart Runner
+                                      ↓
+                          业务结果 → ACK 或精确重试
+```
+
+| `redis.partition.executor.scope` | 本源实例的执行归属 | 适用场景 |
+| --- | --- | --- |
+| `source`（默认） | 全部组和物理 Stream 共用一个 Runner | 统一调度，使用完整源级预算 |
+| `group` | 每个默认组或隔离组独立 Runner | 按业务组隔离慢任务和积压 |
+| `stream` | 每个 `(逻辑组, 物理分区编号)` 独立 Runner | 同组内各物理 Stream 也需要独立推进 |
+
+不同 Redis 源不共享注册表、容量或停机控制。`group`、`stream` 的域表按完整配置拓扑冻结，
+记录、正文、读取批次和待删 ID 在源级总额内分为固定、不借出的份额；预算不足以覆盖每域一批读取
+时拒绝启动。Redis 物理分区数由 `partition.count` 和组覆盖决定，本地槽数由
+`partition.executor.partitions` 决定，两者含义不同。
+
+同一实例、同一消费计划、同一业务键仍跨域保序，不能通过拆 Runner 绕过 ACK、重试或 Park。
+需要跨进程同 key 串行时，生产者须把规范化业务键路由到同一物理 Stream；交付仍为至少一次，
+业务必须幂等。各域共享 Tokio runtime 和 Redis 客户端，执行隔离不等于线程、连接或后端服务隔离。
+
+这些 Runner 由消费器拥有，与 Application 的 `partition.runners` 分属不同生命周期。
+`snapshot().execution_domains` 提供各域容量和运行状态；正常停机须检查
+`shutdown_until(deadline)` 的 `converged`，超时可继续等待同一排干操作。
+接入、容量计算与故障边界见 [nadis](nadis/README.md#业务键有序分区消费) 和
+[分区消费说明](nadis/docs/partition.md)，调度内核见 [napart 运行架构](napart/README.md#运行架构)。
 
 ## SQL 观测与统一配置
 
@@ -439,6 +477,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ### Partition YAML 属性
 
+本节配置 Application 自己拥有的本地执行器。Redis 分区消费使用各 Redis 源配置内的
+`partition.executor`，其 Runner 不进入这里的命名集合。
+
 `partition` 支持命名 Runner 映射，也兼容把单个 default Runner 的字段直接写在根下。Runner 字段全部
 可省略：省略项逐字段采用有界默认值，显式配置只覆盖对应字段；不同 Runner 的默认值和覆盖值互不影响。
 
@@ -802,7 +843,7 @@ HTTP/1/h2c listener。
 | [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` / `saga-grpc` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略 |
 | [nasaga-runtime-pgsql](nasaga-runtime-pgsql/README.md) | `saga-runtime-pgsql` 及 PostgreSQL transport feature | 组合 PostgreSQL Store/Inbox/Outbox/事务并复用唯一 Saga 状态机 | 可独立运行，也可交给 Application 托管 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
-| [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、流水线、数据流、锁与分布式任务 | `redis.*`、`redis.job.*` |
+| [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、流水线、业务键有序分区消费、锁与分布式任务 | `redis.*`、`redis.partition.*`、`redis.job.*`；分区消费支持 source/group/stream 隔离，不复用 Application 命名执行域 |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
 | [cacheable](cacheable/README.md) | `cache` | L1/L2 缓存、刷新保护、失效广播 | `cache.*`、`redis.*` |
 | [nacache-macro](nacache-macro/README.md) | `cache` | `#[cached]`、`#[cache_invalidate]` | 由 `cacheable` 运行时读取 |

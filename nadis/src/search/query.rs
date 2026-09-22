@@ -621,7 +621,11 @@ impl Query {
             }
             args.push("SORTBY".into());
             args.push(f.alias_or_name().to_string());
-            args.push(if *desc { "DESC".into() } else { "ASC".into() });
+            args.push(if *desc {
+                "DESC".into()
+            } else {
+                "ASC".into()
+            });
         }
         args.push("LIMIT".into());
         args.push(self.offset.to_string());
@@ -1025,8 +1029,7 @@ impl Aggregate {
                         .to_string(),
                 );
             }
-            //LOAD 的字段也进入管道、可被 SORTBY 引用(此前漏算 → `load(["price"])
-            // .sort_desc("price")` 被误拒,比 原实现 严)。LOAD 字段名原样可作 SORTBY 别名。
+            // LOAD 字段进入聚合管道后可按原名被 SORTBY 引用，校验时须保留这些合法别名。
             valid.extend(self.load.iter().cloned());
             // 多字段 SORTBY:`SORTBY {2*n} @f1 DIR1 @f2 DIR2 ...`
             args.push("SORTBY".into());
@@ -1038,7 +1041,11 @@ impl Aggregate {
                     )));
                 }
                 args.push(format!("@{alias}"));
-                args.push(if *desc { "DESC".into() } else { "ASC".into() });
+                args.push(if *desc {
+                    "DESC".into()
+                } else {
+                    "ASC".into()
+                });
             }
         }
         if let Some((offset, limit)) = self.limit {
@@ -1055,11 +1062,10 @@ impl Aggregate {
 /// RedisJSON JSONPath **不处理包裹引号内的 `\` 转义**(`\"` 不认、`\'` 同样不认)——所以不能靠转义引号,
 /// 只能选一个**值里不出现的**引号来包裹:
 ///   · 值不含 `'` → **单引号**包裹(默认);
-///   · 含 `'` 不含 `"` → **双引号**包裹(实测 `@.cat=="it's"` 命中);
+///   · 含 `'` 不含 `"` → **双引号**包裹，例如 `@.cat=="it's"`;
 ///   · 两者都含 → 引号字面量无法表达 → **fail-fast**(引导改 FT 索引模式或避免该值);
 /// 包裹引号选定后值里必不含它,故**值原样写入、不做任何 `\` 转义**。控制字符(<0x20)会让 parser 报
 /// "unknown error" 且无法转义嵌入 → 一并 fail-fast。
-/// (此前 单引号 + `\'` 转义只是把唯一不可匹配字符从 `"` 换成 `'`,实测含 `'` 的值仍漏,未根治。)
 pub(crate) fn json_path_literal(s: &str) -> Result<String> {
     if let Some(c) = s.chars().find(|c| (*c as u32) < 0x20) {
         return Err(NasaRedisError::Config(format!(
@@ -1105,8 +1111,7 @@ fn escape_tag(v: &str) -> String {
 ///
 /// **关键:标点/结构符一律转成空格,而非反斜杠转义。** 因为 RediSearch 默认分词把标点当**分隔符剥离**
 /// (`(beta)` 索引成 token `beta`、`C++` 索引成 `c`),若把标点反斜杠转义查**字面** token(`\(beta\)`、
-/// `C\+\+`)在倒排里根本不存在 → **静默漏匹配**(实测 `@name:(alpha \(beta\))`=0、`@name:(C\+\+)`=0 vs
-/// 标点→空格 `(alpha  beta )`/`(C  )`=命中)。转空格既对齐"标点=词边界"的默认分词语义,又同样防注入
+/// `C\+\+`)会寻找索引中不存在的字面 token。转空格既对齐"标点=词边界"的默认分词语义，又防止注入
 /// (空格不构成任何查询算子,无法越出 `@field:(...)` 组)。保留:`[A-Za-z0-9_]` + CJK + 空格原样
 /// (`_`/CJK 是 RediSearch 默认词字符,不分隔)。短语精确匹配走 text_phrase;TAG 仍用 escape_tag(空格是值的一部分)。
 ///
@@ -1119,7 +1124,11 @@ fn escape_text(v: &str) -> String {
             || ch.is_ascii_alphanumeric()
             || ch == '_'
             || ('\u{4e00}'..='\u{9fa5}').contains(&ch);
-        out.push(if keep { ch } else { ' ' });
+        out.push(if keep {
+            ch
+        } else {
+            ' '
+        });
     }
     out
 }

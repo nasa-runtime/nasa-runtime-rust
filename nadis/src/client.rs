@@ -116,7 +116,7 @@ fn naming_config_canonical(cfg: &RedisConfig) -> String {
 /// 的 topic 会注入碰撞 fail-open;JSON 转义单射)。形态 `{default:<runtime>, groups:{逻辑名:<topics+runtime>}}`:
 /// - **`default`**:默认组 resolved runtime(= 父级 PartitionCfg + 全局 StreamCfg;默认组也消费
 ///   所有未隔离 topic,其 rebalance/min_idle/drain/batch 等不一致同样致跨节点 liveness/背压/drain 判定分裂,
-///   故必须进 marker——此前只序列化隔离组 = 默认组运行参数 fail-open)。
+///   故默认组运行参数也必须进入 marker)。
 /// - **`groups`**:各隔离组 resolved(topics 排序 + 空 topics 归一逻辑名 + count/runtime 取 override→父级/全局)。
 ///
 /// 所有字段 resolved(`0 继承`与显式父级值同 canonical,不误 fail-closed);BTreeMap 排序键稳定。
@@ -183,7 +183,11 @@ fn canonical_groups(cfg: &RedisConfig) -> String {
             CanonGroup {
                 topics,
                 rt: CanonRuntime {
-                    count: if g.count > 0 { g.count } else { p.count },
+                    count: if g.count > 0 {
+                        g.count
+                    } else {
+                        p.count
+                    },
                     rebalance_ms: g.rebalance_ms.unwrap_or(p.rebalance_ms),
                     min_idle_ms: g.min_idle_ms.unwrap_or(p.min_idle_ms),
                     holds_check_interval_ms: g
@@ -382,10 +386,8 @@ impl RedisClient {
 
         //`cluster_enabled:1` 在 **`INFO`(cluster 段)**(不在 `CLUSTER INFO`)。
         // 检测到 Cluster 后必须使用 `cluster_async::ClusterConnection` 跟随 MOVED/ASK。
-        //**INFO 失败 = 连接故障,不是 standalone 信号**——实测健康 standalone 的
-        // `INFO cluster` 成功返回 `cluster_enabled:0`(不报错),故 INFO 报错/超时只能是 unreachable/超时/
-        // ACL 禁 INFO。此前"INFO 失败→静默当 standalone"会把连接故障误判成拓扑决策(目标实为 cluster 时
-        // 建出不跟 MOVED 的 Single → 运行期 MOVED 风暴)。改:**重试 3 次容忍瞬时抖动,仍失败则 fail-closed 拒启**。
+        // standalone 也须通过 INFO 明确返回 cluster_enabled:0；连接异常或 ACL 拒绝不构成拓扑证据。
+        // 探测重试三次仍失败时拒绝启动，避免给 Cluster 建立无法处理 MOVED 的 Single 连接。
         let is_cluster = {
             let mut last_err = None;
             let mut detected = None;
@@ -680,7 +682,7 @@ impl RedisClient {
     }
 
     /// 业务作用：派生一条**独立 transport**(与主连接同款建法),供 stream 阻塞订阅等【阻塞命令】专用。
-    /// 关键:XREAD/XREADGROUP `BLOCK` 若走共享 `conn()` 会把并发命令排在阻塞响应之后(实测吞吐退化到 ~1/s),
+    /// 关键:XREAD/XREADGROUP `BLOCK` 若走共享 `conn()` 会把并发命令排在阻塞响应之后，
     /// 故订阅任务持有自己的一条连接。cluster 下是独立 `ClusterConnection`(按 stream key slot 路由,非 seed 单连接)。
     /// 连接级 `response_timeout_ms`(默认 30s)照常生效——远大于典型 `block_ms`(500ms),不会误杀 `BLOCK`,
     /// 但网络真断时能让阻塞读返错、订阅任务据此重建连接。

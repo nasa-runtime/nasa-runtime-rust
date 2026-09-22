@@ -2,16 +2,19 @@ use super::*;
 use std::time::Duration;
 
 /// 业务作用：周期执行分区再平衡，并在单轮失败后等待下一轮重试。
+/// 参数说明：`rt` 为物理分区组的运行状态。
+/// 返回：后台停止时退出；失败轮次不改变已持有来源的提交责任。
 pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
     let period = Duration::from_millis(rt.cfg.rebalance_ms);
-    // 直接使用配置周期(原 period.min(1s) 把生产默认 10s 反写成
-    // 1s,心跳/ZREM/抢锁扫描放大 10 倍;开发想要快节奏就显式配小 rebalance_ms)
     let mut tick = tokio::time::interval(period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = rt.bg_cancel.cancelled() => return,
-            _ = tick.tick() => {}
+            _ = rt.bg_cancel.cancelled() => {
+                return;
+            }
+            _ = tick.tick() => {
+            }
         }
         if let Err(e) = rebalance_once(&rt).await {
             tracing::warn!(err = %e, "再平衡轮次失败,下轮重试");
@@ -19,23 +22,17 @@ pub(super) async fn rebalance_loop(rt: Arc<GroupRuntime>) {
     }
 }
 
-/// 业务作用：单轮再平衡(也被 wake 触发调用):
-/// ①心跳:ZADD nodes score=墙钟 now+3*period(V1 语义,与 原实现 混跑兼容);
-/// ②清过期成员(score < now)→ ZCARD = alive;③fair = ceil(count/alive);
-/// ④欠额:扫描未持有分区 tryLock 抢占(锁互斥保证全集群唯一 owner);
-/// ⑤超额:发 ReleaseExcess 给 coordinator(释放后 pub wake 让兄弟立刻接管)。
+/// 业务作用：刷新组心跳并按存活节点分配份额，取得来源或提交幂等的保留目标。
+/// 参数说明：`rt` 为周期或 wake 触发再平衡的物理分区组。
+/// 返回：Redis 失败时上抛；锁释放由 coordinator 在来源排干后完成。
 pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
-    //single-flight——周期任务与 wake 任务都会调本函数,拿不到守卫说明
-    // 已有一轮在跑,本次合并跳过(避免并发心跳/抢锁/重复 ReleaseExcess)。
+    // 周期与 wake 共用单轮互斥，合并并发触发，避免同时发布相互竞争的持有决策。
     let _guard = match rt.rebalance_lock.try_lock() {
         Ok(g) => g,
         Err(_) => return Ok(()),
     };
     let nodes_key = rt.layout.nodes();
-    // 心跳时钟按 profile 分流
-    //   原实现V1 = 墙钟(与 原实现 节点混跑时 score 语义必须一致);
-    //   RustV2 = Redis TIME(全集群同一时钟源,节点墙钟漂移不再误判存活——
-    //            每轮多 1 个 TIME RTT,rebalance 周期 10s 量级可忽略)。
+    // LegacyV1 与 Java 节点共享墙钟 score；RustV2 使用 Redis TIME 避免节点时钟漂移影响存活判断。
     let now_ms: f64 = if rt.client.profile() == crate::config::CompatibilityProfile::RustV2 {
         super::command::redis_now(&rt.client).await? as f64
     } else {
@@ -76,18 +73,14 @@ pub(super) async fn rebalance_once(rt: &Arc<GroupRuntime>) -> Result<()> {
             }
         }
     } else if (owned.len() as u32) > fair {
-        // ⑤ 超额让出:只把 ReleaseExcess 交给 coordinator。**wake 由 coordinator 在
-        //   victim 真正 unlock 之后发布**,本任务不再在此 pub wake
-        //   ——否则锁还没释放就唤醒兄弟,抢锁必失败。
-        let excess = owned.len() as u32 - fair;
+        // claimed 包含仍在排干的持锁来源，只能用来触发份额归约，不能据此重复指定让出数量。
+        // coordinator 以当前 Active 数量执行保留目标，并在真实 unlock 后发布 wake。
         let _ = rt
             .event_tx
-            .send(Event::ReleaseExcess { n: excess as usize })
+            .send(Event::RetainShare {
+                target: fair as usize,
+            })
             .await;
     }
     Ok(())
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// 管理命令 control loop(协议见 command.rs 文件头)
-// ─────────────────────────────────────────────────────────────────────────

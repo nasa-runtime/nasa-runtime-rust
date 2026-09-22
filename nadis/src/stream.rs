@@ -1,5 +1,5 @@
 // ============================================================================
-// src/stream.rs -- ordinary stream publish / subscribe for the event-field wire.
+// src/stream.rs —— event-field 线格式的普通 Stream 发布与订阅。
 //
 // wire = **event-field**:`XADD <stream> * <event> <Envelope JSON>`,event 作 entry 的 field 名,
 // value 是 `{"topic":<stream>,"data":<message>[,"passthrough":..]}` 信封。
@@ -9,8 +9,8 @@
 //   · Broadcast(XREAD):每个订阅者独立游标,所有节点都收到每条(如 init:coin 每节点各建引擎)。
 //   · Group(XREADGROUP):同组负载均衡,一条只一个消费者处理 + XACK(如 kline-sync 一请求一节点应答)。
 //
-// 两个关键规避(实测踩过):
-//   1. 阻塞读走【专用连接】(client.dedicated_conn),不占共享 conn——否则 XREAD BLOCK 把并发 publish 卡到 ~1/s。
+// 连接与游标边界：
+//   1. 阻塞读走【专用连接】(client.dedicated_conn)，避免 XREAD BLOCK 阻塞共享连接上的并发发布。
 //   2. 起点用【具体 id】(Now = XREVRANGE 取最后一条已有 entry id,空/不存在则 0-0),之后只按读到的 id 推进——
 //      不用会重求值为"最新"的 "$",否则两轮读之间到达的 entry 被跳过。
 // ============================================================================

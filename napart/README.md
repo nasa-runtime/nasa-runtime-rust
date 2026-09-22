@@ -94,6 +94,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 运行架构
 
+需要先按业务键分桶、再异步提交的接入层，可以用 `RouteHash::from_key(&key)` 冻结路由，并调用
+`PartitionRunner::submit_routed_typed(route, spec, task)`。该入口直接使用摘要，不再哈希；与
+`submit_typed(key, spec, task)` 共用容量、取消、严格顺序和拒绝逻辑。`RouteHash::unordered()`
+选择固定 home slot 0，通常配合独立 relaxed `TaskType` 使用。
+
+`RouteHash` 不提供数值构造器，不写入 Redis 或其它持久化协议，也不是跨进程路由合同。
+摘要碰撞会保守合并本地顺序域；它不提供持久队列的 ACK、失败重试门禁或分布式 key 互斥。
+
 ```text
 PartitionRunnerRegistry
   ├─ settlement ─> PartitionRunner
@@ -151,6 +159,23 @@ Local -> Migrating -> Stolen
 
 迁移、归还和业务执行只在严格任务边界切换位置。超时、owner 冲突、队列失权或代次不一致会冻结该
 严格类型；其它类型、slot 和 Runner 在自身顺序证明完整时继续服务。
+
+## 持久消息接入与隔离边界
+
+接入层可用 `RouteHash::from_key` 在解码时冻结业务键，随后经 `submit_routed_typed` 提交。
+预计算与直接提交共用同一许可、拒绝和稳定终态合同；必须保留 `Submission` 并检查终态，
+不能把闭包返回或收到唤醒当成全部执行责任已结算。
+
+Runner 名称只在所属注册表内有效。不同数据源需要独立执行与停机时，由各源生命周期 owner
+持有私有注册表；同源也可以按固定业务组或物理来源建立多个 Runner。每个 Runner 的类型顺序、
+窃取、容量和健康分别推进，但共享调用方的 Tokio runtime，长时间不让出的同步代码仍会占用线程。
+
+Redis 分区消费由 `nadis::RunningPartition` 建立这些执行域，提供 `source`、`group`、`stream`
+三种模式。接入层另外保存跨域业务键 gate、持久 ACK 与重试责任，因此同计划同 key 不会因为拆成
+不同 Runner 而绕过前序确认。napart 本身不接管 Redis、PEL 或分布式租约，也不跨 Runner 建立
+顺序关系；其 `TaskStatus::Completed` 不能替代持久消息 ACK。
+具体源级预算和失败语义见
+[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/docs/partition.md)。
 
 ## 提交、背压与取消
 

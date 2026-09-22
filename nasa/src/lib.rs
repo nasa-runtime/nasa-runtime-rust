@@ -3,6 +3,16 @@
 //! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL 事务、
 //! Inbox、Outbox、Saga、消息传输、缓存、跨副本业务配额、路由、调度、配置、发现和工具模块。
 //!
+//! # Redis 分区消费
+//!
+//! `redis` 提供 `PreparedPartition`、`PartitionRecord` 和 `RunningPartition`。Redis 租约与 PEL
+//! 负责持久接管，实例私有的 napart Runner 集合负责本地执行。不同 Redis 源始终独立，同源通过
+//! `partition.executor.scope` 选择 source、group 或 stream；域内容量来自源级总额的固定份额。
+//! 同计划同业务键的顺序跨域覆盖 handler、ACK 和精确重试；ACK 不确定保留提交责任，不重跑成功
+//! handler。交付仍为至少一次，不提供跨进程业务键锁或共享 Redis 后端隔离。
+//! 消费器不复用 Application 的命名 Runner，由创建它的业务在 Redis 客户端关闭前等待排干报告；
+//! 普通等待超时可继续等待同一操作，显式强停才请求有损中止。
+//!
 //! # SQL 观测与业务通知
 //!
 //! `application` 与 `mapper`/`mapper-pgsql` 自动装配 SQL、连接与 Pool 指标；YAML 控制开发日志、
@@ -654,8 +664,9 @@ pub mod mapper {
 /// `"partition"` 组件则改由 YAML 或 Service UserHook 提交启动期计划，Prepare 统一启动并接管 readiness
 /// 与停机，但不会在 Running 阶段追加 Runner。
 ///
-/// 该模块与 `nasa::redis::partition` 的 `PollCoordinator` 含义不同：这里管理单进程任务执行，
-/// Redis 模块管理分布式分区消费。命名 Runner 共享进程内 Tokio runtime，不提供 CPU 或进程内存硬隔离。
+/// Redis 分区消费由 `nasa::redis::partition::RunningPartition` 自行管理独占 Runner 集合，
+/// 支持按 source、group 或 stream 划分执行与容量；跨域同业务键仍遵守消费顺序屏障。
+/// 不复用本模块的 Application 命名执行域。命名 Runner 共享 Tokio runtime，不提供 CPU 或内存硬隔离。
 ///
 /// ```
 /// use nasa::partition::{PartitionRunnerRegistry, RunnerConfig};

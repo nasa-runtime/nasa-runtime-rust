@@ -117,6 +117,23 @@ server:
 remote write 失联规则引用外部平台的期望实例指标，平台负责随扩缩容更新并保障其连续性；
 框架不维护期望实例列表。权限和完整 YAML 见 [观测出口与平台适配](../nafana/OBSERVABILITY.md)。
 
+## Redis 分区消费容量
+
+按每个 Redis 源分别选择 `partition.executor.scope`：`source` 默认共享一个 Runner，`group`
+按逻辑组隔离，`stream` 按物理 Stream 隔离。多源配置放在
+`redis.properties.<qualifier>.partition` 下，不与 Application 根级 `partition.runners` 混用。
+
+容量规划使用完整配置拓扑，包括当前未持锁的分区。Runner 数不得超过 `max_runners`，每 Runner
+规范化槽数之和不得超过 `max_total_partitions`。所有域合计至少需要各域一批记录及
+`batch_size × max_record_bytes` 正文，还需每域一个读取批次和删除位置；不足时启动失败。
+最低正文预留只覆盖线格式，需按解码对象权重留出执行余量。固定份额不借出，调整后须重建运行时。
+
+生产者须以相同规范化业务键路由到同一物理 Stream，才能依赖跨进程的分区顺序；业务副作用保持
+幂等。执行隔离不会隔离共享 Redis 后端或阻塞线程。业务创建的 `RunningPartition` 必须在受管
+Redis 客户端释放前收口，停机期限不足不能宣告消费责任已完成。
+配置示例与容量算法见 [nadis](../nadis/README.md#执行域与消费架构) 和
+[分区消费说明](../nadis/docs/partition.md#容量与配置)。
+
 ## 部署顺序
 
 1. 使用锁文件在受控依赖源中完成构建。

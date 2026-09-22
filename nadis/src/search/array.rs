@@ -144,8 +144,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
                 )));
             }
             //**非 unknown command 的错误(ACL 禁 JSON.TYPE/超时/READONLY/代理异常)不静默忽略**
-            // ——与 `SearchActuator::bind`(actuator.rs)对齐;此前 fall through 到 Ok 会误判模块可用,bind
-            // fail-fast 失效,首次 save/find 才暴露。JSON.TYPE 对缺失 key 返回 nil=Ok,出别的错 = 真异常,上抛。
+            // JSON.TYPE 对缺失 key 返回 nil；其它错误无法证明模块可用，必须在绑定阶段上抛。
             return Err(e.into());
         }
         Ok(Self {
@@ -445,15 +444,11 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         }
     }
 
-    // Deletes JSON values matching the array filter.
-    ///
-    /// # 参数
-    /// 业务作用：- `key`: 当前 Redis 命令操作的 key。
-    /// - `filter`: 待应用的查询、日志或字段过滤条件。
+    /// 业务作用：删除数组过滤条件选中的 JSON 值，缺失 key 按幂等删除处理。
+    /// 参数说明：`key` 为文档 key；`filter` 为已构造的 JSONPath 过滤条件。
+    /// 返回：成功时返回删除数量；连接或 RedisJSON 命令失败时上抛错误。
     async fn json_del(&self, key: &str, filter: &str) -> Result<u64> {
-        // `JSON.DEL` 对 missing key 返回 0 而不报错，因此此前前置
-        // `EXISTS` 既无必要、又引入两步非原子的 TOCTTOU 窗口(EXISTS 后、DEL 前被并发删)。直接 `JSON.DEL`
-        // (本就幂等)单条 RTT。
+        // JSON.DEL 对缺失 key 返回 0，直接执行即可维持幂等语义并避免检查与删除之间的竞态。
         let n: i64 = redis::cmd("JSON.DEL")
             .arg(key)
             .arg(filter)

@@ -311,13 +311,9 @@ impl DistributedLock {
                                 tracing::warn!(key = %wd.lock_key, "看门狗:服务端确认锁已丢失,停止续期");
                                 break;
                             }
-                            //(CLIENT PAUSE 实测修正):RENEW 报错/超时 = **Unknown**,
-                            // **绝不判 lost、绝不 break**,只 log + 下轮继续续租(对齐 原实现:网络异常只重试)。
-                            // 原"连续 2 失败降级 lost + break"会:① 对覆盖 ≤lease 的瞬时抖动**误报 lost**→
-                            // coordinator 误下健康分区致 rebalance 抖动;② break 后永不恢复续租,把可恢复抖动
-                            // 变成不可逆丢锁(被暂停的 RENEW 在 pause 结束后仍会迟到执行、续上锁,实测锁仍在)。
-                            // 真分区下本节点也连不上 Redis、无法造成双写危害(且 RustV2 fencing 兜底陈旧写),
-                            // 分区愈合后 RENEW 会返回 1（锁仍在）或 0（已被抢占），返回 0 时再判定 lost。
+                            // RENEW 报错或超时只能证明结果未知，迟到的命令仍可能完成续租。
+                            // 保留看门狗并重试，直到服务端明确返回失权；调用方仍须在业务副作用前复验
+                            // holder，RustV2 写入还受 fencing 约束，不能把 Unknown 当作持锁证明。
                             Ok(Err(e)) => tracing::warn!(key = %wd.lock_key, err = %e, "看门狗续期异常(Unknown),继续重试"),
                             Err(_) => tracing::warn!(key = %wd.lock_key, "看门狗续期超时(Unknown),继续重试"),
                         }
@@ -331,8 +327,7 @@ impl DistributedLock {
     /// 业务作用：阻塞式加锁。TOCTOU 防御:订阅就绪后立即再抢,再 select!(通知, PTTL 兜底)。
     ///
     ///`timeout` 是**绝对 deadline**,覆盖整个获取过程——try_lock(SET NX)、
-    /// `get_async_pubsub`、`subscribe`、`PTTL`、等待**全部**纳入。此前 deadline 只在等待 select!
-    /// 内生效,任一 Redis await 挂死(连接抖动/重连)会让 `lock(key, Some(1s))` 远超 1s。
+    /// `get_async_pubsub`、`subscribe`、`PTTL` 和等待均受同一期限约束，连接重试不能重新开始计时。
     ///
     /// # 参数
     /// - `key`: 业务锁 key;可传未加前缀的业务 key 或已完整加前缀的锁 key。
@@ -525,6 +520,16 @@ impl DistributedLock {
 }
 
 impl LockGuard {
+    /// 业务作用：缺少任务退出证明时只停止续租，禁止析构路径提前主动解锁。
+    /// 参数说明: 无。
+    /// 返回：消费守卫但不发送 UNLOCK，服务端租约按自身期限结束。
+    pub(crate) fn abandon(mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.cancel.cancel();
+            inner.released.store(true, Ordering::Release);
+        }
+    }
+
     /// 业务作用：取内部共享态。`inner` 只在 `unlock`/`Drop` 消费 self 时被 `take()`,而那两处消费后不再访问
     /// self,故常规方法调用期间恒为 `Some`;`expect` 是不可达的编程错误兜底。
     #[inline]
@@ -584,8 +589,7 @@ impl LockGuard {
     /// 服务端锁未动);最后一个 permit → 停看门狗 + 服务端 UNLOCK + pub 唤醒等锁者。
     pub async fn unlock(mut self) -> Result<()> {
         // 把 Arc move 出(self.inner 置 None):本方法负责这一份 permit 的 depth 递减,
-        // 随后 self 走 Drop 时因 inner 为 None 不再重复递减。`inner` 在函数结束时正好释放一份引用,
-        // 无泄漏(旧实现 clone+forget 会净泄漏一份)。
+        // 随后 self 走 Drop 时因 inner 为 None 不再重复递减，`inner` 在函数结束时释放这一份引用。
         let inner = self
             .inner
             .take()

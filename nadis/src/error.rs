@@ -15,6 +15,15 @@ use thiserror::Error;
 /// 前者表示可能已写到 Redis,后者表示本地确认尚未发出。
 #[derive(Debug, Error)]
 pub enum NasaRedisError {
+    /// 启动未提交，清理操作仍在后台持有尚未排干的资源。
+    #[error("partition start rollback not converged: {cause}; remaining: {remaining:?}")]
+    StartRollbackNotConverged {
+        cause: String,
+        remaining: Box<crate::partition::PartitionShutdownReport>,
+    },
+    /// XADD 已交给发送监督者，但客户端未能取得确定结果；调用方重发可能产生重复记录。
+    #[error("partition publish outcome unknown: {0}")]
+    PublishOutcomeUnknown(String),
     /// 配置错误(profile 缺失、namespace 为空等)——启动期 fail-fast。
     #[error("配置错误: {0}")]
     Config(String),

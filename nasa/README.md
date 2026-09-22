@@ -4,6 +4,8 @@
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
 启用 `application` 后，业务初始化与优雅停机收尾进入同一生命周期：Ready 前执行初始化屏障，
 受监督任务结束后按优先级执行一次性收尾，最后释放业务资源。
+`redis` 提供业务键有序分区消费：不同 Redis 源独立执行，同源支持 `source`、`group`、`stream`
+隔离；ACK 不确定保留提交责任，跨域同业务键仍等待前序确认或重试收口。
 可靠 Saga client 把业务事实、start-intent 与 dispatcher 固定到同一事务域，配置冲突在接流前失败；
 直接取消 Runner 也不会先释放仍存活任务所依赖的资源。
 与 `mapper`/`mapper-pgsql` 组合时，Application 自动装配 SQL 原子指标、受控日志、有界通知和指标
@@ -208,6 +210,29 @@ Ready；未设置该字段时不影响 client 的数据源绑定。
 `napp_outbox_published_total`、`napp_outbox_dead` 和远端实例查询。完整配置见
 [client 发起等级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#client-发起等级)。
 
+## Redis 分区消费门面
+
+启用 `redis` 后，通过 `nasa::redis::{PreparedPartition, PartitionRecord, RunningPartition}` 登记
+不可变消费计划并显式启动。Redis 租约与 PEL 承担持久接管，消费器私有的 napart Runner 集合承担
+本地执行；消费器不复用 `nasa::partition` 中 Application 的命名 Runner，也不要求业务额外声明
+Application 的 `"partition"` 组件。
+
+`redis.partition.executor.scope` 默认 `source`，同源全部组共享一个 Runner；`group` 按默认组和
+隔离组拆分，`stream` 按 `(逻辑组, 物理分区编号)` 拆分。多源配置把对应字段放在
+`redis.properties.<qualifier>.partition.executor` 下，不同源始终拥有各自的注册表和容量。
+`group`、`stream` 在源级总预算内切出固定份额，未满足每域整批读取下限时拒绝启动。
+
+同一实例、同一计划、同一业务键的顺序覆盖 handler、ACK、精确重试和 Park，即使它们跨越不同
+Runner。进程崩溃后的交付仍为至少一次，需要业务幂等；同步阻塞和共享 Redis 后端故障不在本地
+执行隔离的保证内。观测使用 `snapshot()`、`publisher_snapshot()` 与 `async_delete_pending()`。
+
+Application 的 `"redis"` 组件拥有客户端，`RunningPartition` 由创建它的业务负责消费生命周期；
+单独声明 `"redis"` 不会自动注册 handler 或启动分区消费。业务应在客户端关闭前等待
+`shutdown_until(deadline)` 并检查 `converged`；超时可继续等待同一操作，只有显式
+`force_shutdown_until` 才请求有损中止。
+完整配置、逐条注册和容量算法见
+[nadis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#业务键有序分区消费)。
+
 ## RedisJob 门面
 
 启用 `redis-job` 后，业务从 `nasa::redis::job` 使用定义、上下文、结果、控制和查询类型，并用
@@ -410,7 +435,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `audit` | `nasa::audit` | 与业务写同事务的 Outbox 审计 |
 | `audit-pgsql` | `nasa::audit::pgsql` | 与 PostgreSQL 业务写同事务的 Outbox 审计 |
 | `openapi` | `nasa::openapi` | 静态 mapping 与显式动态路由的确定性 OpenAPI 3.1 合同；path 包含 Application `context_path` |
-| `redis` | `nasa::redis` | Redis 命令、pipeline、stream、lock |
+| `redis` | `nasa::redis` | Redis 命令、pipeline、stream、lock；分区消费支持 source/group/stream 执行隔离，跨域业务键顺序覆盖 handler、ACK 和精确重试，停机返回可继续等待的排干报告 |
 | `redis-job` | `nasa::redis::job`、`nasa::redis_job` | 多 source RedisJob 状态机、`#[redis_job]` 与受管生命周期；蕴含 `application` 和 `redis` |
 | `rate-limit` | `nasa::application` | 基于共享 Redis 原子计数的跨副本业务配额；蕴含 `application` 与 `redis`，无组件字符串，后端故障默认 fail-open，进入 `full` |
 | `redis-search` / `redis-derive` | `nasa::redis` | 搜索封装和文档派生 |

@@ -115,8 +115,7 @@ pub enum ProxyPoison {
 /// 新建 consumer group 的起始位点(**仅首次建组生效**;BUSYGROUP 已存在则不变)。
 /// 传给 [`PreparedProxy::prepare_with_offset`];[`PreparedProxy::prepare`] 默认用 `New`。
 ///对齐 原实现 `RedisProxy` 的 PROXY 语义——原实现 PROXY 路径用 `ReadOffset.latest()`(`$`)
-/// 只消费组建后的新消息(live-subscribe),`from("0-0")` 仅 partition(durable 工作队列)用。Rust proxy
-/// 此前误用 `0-0`,会让新 proxy 部署到**有 backlog 的 stream** 时重放全部历史(事件洪泛 footgun)。
+/// 只消费组建后的新消息(live-subscribe)；显式选择 `History` 才会读取已有 backlog。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyStartOffset {
     /// `$`:只消费组建后的新消息([`prepare`](PreparedProxy::prepare) 的默认;对齐 原实现 PROXY=live-subscribe)。
@@ -561,16 +560,12 @@ async fn consumer_pending_counts(
     Ok(out)
 }
 
-/// 解析失败的 entry(无 `data` 字段 / `data` 非 Envelope JSON)。**此前 parser
-/// 直接“跳过”坏 entry,但 entry 已被 XREADGROUP/XAUTOCLAIM 交付进 PEL,跳过后既不 ACK 也不 poison →
-/// **永久 pending 泄漏**(且每轮 reclaim 重复占用前几个名额)。改为保留坏 entry 的 id + reason + 原始字段,
-/// 走 [`dispose_bad`] 立即处置(Dlq 转存原始字段 / Drop XACK),与旧文档“缺 data 即 tombstone,避免无限重投”
-/// 的意图一致。坏 entry **确定性不可解析**(重读必再失败),故立即处置、不耗 max_redeliver 重投。
+/// 无 `data` 字段或无法解码 Envelope 的 entry；保留身份、失败原因和原始字段交给 [`dispose_bad`]。
+/// 此类 entry 已进入 PEL，确定性解析失败时直接按毒消息策略处置，避免无效重投长期占用回收名额。
 struct BadEntry {
     id: String,
     reason: String,
-    /// 原始 field/value 字节对(**lossless**:保序、保重复 field、保二进制字节),供 DLQ 完整复盘
-    /// (此前 lossy-utf8 + JSON map 会丢二进制 + 覆盖重复 field)。
+    /// 原始 field/value 字节对，保留顺序、重复 field 和二进制字节，供 DLQ 完整还原消息。
     raw: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -1085,11 +1080,11 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// 业务作用：处置**不可解析**的坏 entry（无 `data` 字段或 `data` 不是 Envelope JSON）：
-/// 此前坏 entry 被 parser 静默跳过 → 永久卡 PEL。坏 entry 确定性不可解析(重读必再失败),故
+/// 坏 entry 确定性不可解析，重复读取无法改变结果，因此
 /// **立即处置不重投**:`Drop` → XACK 丢弃;`Dlq` → 把 `{reason, stream, group, id, raw 字段}` 转存
 /// `{stream}:dlq` 后 XACK 源(原始字段 lossless 保留供运维复盘)。Dlq 转存失败 → 不 ACK,留 PEL 待下轮重试(不丢)。
 ///
-/// ⚠ **at-least-once 转存**(同 [`handle_poison`] 的 DLQ,本轮):XADD→XACK 非事务,XADD 成功
+/// ⚠ **at-least-once 转存**(同 [`handle_poison`] 的 DLQ):XADD→XACK 非事务,XADD 成功
 /// 但 XACK 失败时该 entry 下轮会**再次写 DLQ**(DLQ 重复)。DLQ body 带 `stream/group/id/reason` 足够做
 /// 幂等去重 key。若需精确一次转存须 Lua 化 XADD+XACK(cluster 下还要 source 与 dlq 同 slot,留 backlog)。
 ///
