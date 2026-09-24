@@ -111,6 +111,8 @@ pub enum StartupPolicy {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RestWatchOptions {
+    /// 当前运行时允许保留的服务订阅身份上限，达到后拒绝新服务。
+    pub max_services: usize,
     /// 传给后端 watch 的轮询兜底间隔(调小换「删到空」的新鲜度)。
     pub poll_interval: Duration,
     /// watch 失败降级时,discover 结果的 TTL。
@@ -127,6 +129,7 @@ impl Default for RestWatchOptions {
     /// 业务作用：返回默认配置；用于未显式设置时提供稳定基线。
     fn default() -> Self {
         Self {
+            max_services: 1024,
             poll_interval: Duration::from_secs(2),
             ttl_fallback: Duration::from_secs(3),
             stale_if_error: Duration::from_secs(10),
@@ -725,6 +728,11 @@ fn validate_resilience(resilience: &RestResilienceOptions) -> Result<()> {
 /// # 参数
 /// - `watch`: 实例轮询、过期兜底和 watch 重建退避配置。
 fn validate_watch(watch: &RestWatchOptions) -> Result<()> {
+    if watch.max_services == 0 || watch.max_services > 65536 {
+        return Err(invalid_options(
+            "watch.max_services must be between 1 and 65536",
+        ));
+    }
     if watch.poll_interval.is_zero() {
         return Err(invalid_options(
             "watch.poll_interval 必须 > 0(0 会让轮询 panic)",

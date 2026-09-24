@@ -83,7 +83,7 @@ pub enum ImageError {
     Encode(String),
     /// 不支持的操作 / 格式。
     Unsupported(String),
-    /// 非法参数(对照 原实现 thumbnailator fail-fast:scale<=0 / width|height<=0 / quality 越界都抛异常)。
+    /// 非法参数。
     InvalidArgument(String),
 }
 
@@ -107,9 +107,9 @@ impl std::error::Error for ImageError {}
 /// 本 crate 统一 `Result`。
 pub type Result<T> = core::result::Result<T, ImageError>;
 
-/// 业务作用: 主入口:字节入 → 字节出。`format = None` 保留输入格式(对照历史图片处理路径),`Some(f)` 显式覆盖。
-///
-/// 对照 原实现 `compress(InputStream, ...)` 全家族。缩放规则:`width&&height` 优先,否则 `scale`,都无则不缩放。
+/// 业务作用：解码输入图片，按目标尺寸或比例缩放，再编码为所选格式。
+/// 同时配置宽高时优先使用宽高，否则使用 scale；两者都未配置时保持尺寸。
+/// 返回：编码后的图片字节；参数、输入格式、解码或编码失败时返回错误。
 ///
 /// # 参数
 /// - `data`: 原始图片编码字节,函数会先识别格式再解码。
@@ -172,7 +172,7 @@ fn resize_target_dims(src_w: u32, src_h: u32, opts: &CompressOpts) -> (u32, u32)
     }
 }
 
-/// 业务作用: 便捷:质量 + 等比缩放(对照 原实现 `compress(is, compSize, scale, os)`)。
+/// 业务作用: 便捷:质量 + 等比缩放。
 ///
 /// # 参数
 /// - `data`: 原始图片编码字节。
@@ -193,7 +193,7 @@ pub fn compress_scale(
     compress(data, &opts, format)
 }
 
-/// 业务作用: 便捷:质量 + 定宽高 + keepAspectRatio(对照 原实现 `compress(is, compSize, width, height, keepAspectRatio, os)`)。
+/// 业务作用: 便捷:质量 + 定宽高 + keepAspectRatio。
 ///
 /// # 参数
 /// - `data`: 原始图片编码字节。
@@ -222,11 +222,9 @@ pub fn compress_size(
 
 // ==================== 内部 ====================
 
-/// 业务作用: 参数校验,**对齐 原实现 thumbnailator 的 fail-fast**(非法参数不静默修正)。
-/// - `quality`:`Some` 时须有限且 ∈ `0.0..=1.0`(原实现 `outputQuality` 同界;注:`0.0` 合法,JPEG 编码器侧会落到
-///   最低质量 1,见 [`encode`])。
-/// - `scale`:`Some` 时须有限且 `> 0`(`1.0` 合法=no-op,同 原实现 `scale(1.0)`)。
-/// - `width`/`height`:显式给出时须 `> 0`(原实现 `size(w,h)` 对 `<=0` 抛异常)。
+/// 业务作用：在解码和缩放之前拒绝无效的图片处理参数。
+/// quality 必须有限且位于 0..=1，scale 必须有限且大于零，显式宽高必须大于零。
+/// 返回：有效参数通过；无效值返回参数错误，不静默改为默认值。
 ///
 /// # 参数
 /// - `opts`: 调用方传入的压缩和缩放选项。
@@ -302,9 +300,8 @@ fn resize(img: DynamicImage, opts: &CompressOpts) -> DynamicImage {
 fn encode(img: &DynamicImage, format: ImageFormat, quality: Option<f32>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     if format == ImageFormat::Jpeg {
-        // JPEG:质量参数生效;JPEG 不支持 alpha → 转 rgb8。
-        // quality 已由 validate_opts 保证 ∈ 0.0..=1.0;`q*100` ∈ [0,100],clamp(1,100) 仅把 原实现 合法的 `0.0`
-        // 落到编码器最低质量 1(JPEG encoder 不接受 0),其余原样。
+        // JPEG 不支持透明通道，因此转换为 RGB；合法质量零映射到编码器最低质量 1。
+        // 其它质量按百分比转换并限制到编码器允许的 1..=100。
         let q = quality
             .map(|q| ((q * 100.0).round() as i32).clamp(1, 100) as u8)
             .unwrap_or(85);

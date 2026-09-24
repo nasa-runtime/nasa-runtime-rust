@@ -10,9 +10,9 @@
 
 ```toml
 [dependencies]
-naidempotency = "1"
-naidempotency-pgsql = "1"
-natx-pgsql = "1"
+naidempotency = "1.0.2"
+naidempotency-pgsql = "1.0.0"
+natx-pgsql = "1.0.0"
 ```
 
 业务经门面使用时开启 `idempotency-pgsql`，从 `nasa::idempotency::pgsql` 取得 store，并从
@@ -35,7 +35,7 @@ let _ = outcome;
 
 生产结构由 migration 创建；`ensure_schema` 只用于显式自举，不读取 Application YAML。
 
-本 crate 不新增配置根或后台任务。调用方按 `FirstExecution`、`Replay`、`ConcurrentInFlight`、
+独立 adapter 不读取配置或创建后台任务。调用方按 `FirstExecution`、`Replay`、`ConcurrentInFlight`、
 `FingerprintConflict` 与事务结果分类观测业务结论；tenant、subject、route 与 client key 不应直接作为
 无限指标 label。
 
@@ -52,3 +52,31 @@ let _ = outcome;
 - 时间以数据库生成的 epoch 毫秒保存，不引入 session 时区语义。
 - store 不记录 SQL、连接信息、请求体或响应内容；数据库失败只返回脱敏分类。
 - 请求体与可重放响应大小仍由使用 `naidempotency` 公共合同的治理层限制，adapter 不扩大这些上限。
+
+## Application 接入
+
+开启 `application,idempotency-pgsql` 并声明 `"db"`，用命名计划绑定来源。数据源 driver 使用
+`postgresql`，store driver 使用 `pgsql`。
+
+```yaml
+datasources:
+  identity:
+    driver: postgresql
+    url: ${APP_IDENTITY_POSTGRES_URL}
+    migrations:
+      mode: validate
+idempotency_stores:
+  requests:
+    enabled: true
+    driver: pgsql
+    source: identity
+```
+
+Application 在迁移门禁之后只读验证 schema，通过 `app.idempotency_store_named("requests").await`
+提供句柄。Service 在 initializer 或 Ready 后使用，无 Web 的 Batch 在工作负载前完成装配；Batch
+静态迁移使用 `MIGRATION_PLANS`。关闭后旧受管句柄拒绝新调用。
+
+声明 Web 时可设置 `web_default: true`，不能再手工重复安装。HTTP 取消不证明业务回滚，不自动
+`abort` 占位；提交结果未知的处理仍遵守上述事务边界。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

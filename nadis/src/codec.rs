@@ -1,20 +1,8 @@
-// ============================================================================
-// src/codec.rs —— 值编码(文档)。
+// Redis 值编码以 bytes/string 为基础，JSON 由 Json<T> 显式选择。
+// 计数器、ZSet member 和 Hash field 不自动包装为 JSON 文档。
 //
-// 红线:bytes/string 原语为基础,**JSON 是显式选择**——`Json<T>` 包装类型,
-// 不让所有 Redis 值默认走 serde(计数器/ZSet member/Hash field 与 JSON 文档语义不同)。
-//
-// 不支持 Jackson `default-typing=true`(NON_FINAL)。`Json<T>` 用
-// 标准 serde_json(写出裸 `{"id":7,...}`,无 `@class`/类名包装)。
-// **⚠ 重要:原实现 框架(`NasaLettuceConfig`/`RedisProxy`)
-// default-typing 默认是 `true`**(写出 `["类名",{...}]` 的**多态包装数组**)——要与本框架标准 JSON
-// 互通,**部署方必须主动在 原实现 侧关闭 default-typing**(不是既成事实)。本框架对此**无运行期强制**。
-// 行为澄清:`Json<T>`(期望对象)读到 原实现 default-typing 的**数组** `["类名",{...}]` → serde **会
-// 报错** `invalid type: sequence`(非"静默忽略"——`deny_unknown_fields=false` 只对"对象多字段"
-// 生效,对"数组 vs 对象"形态不匹配不生效)。即真出错时会报错(好),但**不要**指望它静默兼容。
-// `codec-jackson-compat` feature 已撤销不交付。跨语言共享 key 前必须 golden-bytes 验证 原实现 实际
-// 写的是标准 JSON(关闭 default-typing)。
-// ============================================================================
+// Json<T> 使用标准 serde_json，不写入或自动展开类名包装。共享 key 的生产者必须使用相同结构；
+// 解码按目标 T 的 Deserialize 合同执行，不根据输入中的类型元数据选择业务类型。
 
 use redis::{FromRedisValue, ParsingError, RedisWrite, ToRedisArgs, ToSingleRedisArg, Value};
 use serde::de::DeserializeOwned;
@@ -33,36 +21,34 @@ impl<T> Json<T> {
 }
 
 impl<T: Serialize> Json<T> {
-    /// 业务作用：**可失败序列化**:`ToRedisArgs::write_redis_args` 由 trait 约束**无错误
-    /// 通道**,序列化失败只能 panic 或静默丢数据;两者都不可接受。处理**可能含 `NaN`/`Inf`/非字符串
-    /// Map key** 等不满足 JSON 模型的不可信数据时,调用方应先用本方法拿到 `Result`,再把 `Vec<u8>`
-    /// 喂命令(`client.set(k, Json::to_bytes(&v)?)`),从而把"序列化失败"变成可处理的 `Err` 而非 panic。
+    /// 业务作用：在 Redis 参数编码前显式序列化，使调用方能够处理序列化错误。
+    /// 参数说明：无。
+    /// 返回：JSON 字节；不支持的 map key 或自定义 Serialize 失败时返回错误。
+    /// 成功后可把字节交给 `client.set(k, Json(&value).to_bytes()?)`。
+    ///
+    /// serde_json 将浮点值 NaN 和无穷编码为 null，并不因此返回错误；要求有限数值的业务
+    /// 必须在调用前校验。整数 map key 可转成字符串键，数组等复合 key 会被拒绝。
     pub fn to_bytes(&self) -> std::result::Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&self.0)
     }
 }
 
 impl<T: Serialize> ToRedisArgs for Json<T> {
-    // Serializes the wrapped value into Redis command arguments.
-    ///
-    /// # 参数
-    /// 业务作用：- `out`: 输出缓冲区,用于收集解析结果。
+    /// 业务作用：把包装值编码为单个 Redis JSON 参数。
+    /// 参数说明：`out` 为 Redis 命令参数写入器。
+    /// 返回：成功时追加 JSON 字节；trait 没有错误通道，序列化失败时 panic。
     fn write_redis_args<W: ?Sized + RedisWrite>(&self, out: &mut W) {
-        // ⚠ 本路径**无错误通道**(trait 约束):序列化失败只能 panic 或静默丢数据。常规 DTO 永不失败;
-        // 仅 `NaN`/`Inf`/非字符串 Map key 等非 JSON 模型值会触发。**处理不可信/可能含此类值的数据时,
-        // 改用 `Json::to_bytes()`(返回 `Result`)+ 原始命令**,不要走本默认路径( 文档)。
-        let bytes = serde_json::to_vec(&self.0).expect("Json<T> 序列化失败:类型不满足 JSON 模型(NaN/Inf/非字符串 key?改用 Json::to_bytes() 处理)");
+        // 参数编码不能返回错误，也不能丢弃数据后继续提交命令；需处理失败的调用方应先用 to_bytes。
+        let bytes = serde_json::to_vec(&self.0)
+            .expect("Json<T> 序列化失败；需处理错误时先调用 Json::to_bytes()");
         out.write_arg(&bytes);
     }
 }
 
-// redis 1.2 起 FromRedisValue 改为【按值】接收 Value,解析失败返回 ParsingError
-// (与 RedisError 区分:解析错误只有 message,无服务器/网络语义,见 redis-rs 1.0 迁移说明)。
 impl<T: DeserializeOwned> FromRedisValue for Json<T> {
-    // Decodes a Redis value into the wrapper type.
-    ///
-    /// # 参数
-    /// 业务作用：- `v`: 待转换的值。
+    /// 业务作用：将 Redis 返回的字节按目标业务类型解码为 JSON 值。
+    /// 参数说明：`v` 为 Redis 命令返回值。
+    /// 返回：可按 T 解码时成功；无法取出字节、JSON 无效或类型不匹配时返回 ParsingError。
     fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
         // 第一步:把 Redis 返回值按原始 bytes 取出(GET/HGET 等返回 BulkString)
         let bytes: Vec<u8> = Vec::<u8>::from_redis_value(v)?;
@@ -73,6 +59,5 @@ impl<T: DeserializeOwned> FromRedisValue for Json<T> {
     }
 }
 
-// 标记:Json<T> 是"单参数"——SET value / HSET value 等单值槽位要求 ToSingleRedisArg
-// (redis 1.x 新增的类型级防误用:防把多 arg 类型塞进单值位置)。
+// JSON 只占一个 value 参数槽，不能展开成多个 Redis 参数。
 impl<T: Serialize> ToSingleRedisArg for Json<T> {}

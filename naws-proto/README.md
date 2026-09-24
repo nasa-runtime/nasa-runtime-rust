@@ -16,8 +16,8 @@ payload 字节 + Mode ──→ naws 外层 frame ──→ TCP / WebSocket
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["ws"] }
-naws-proto-derive = { version = "1" }
+nasa = { version = "1.0.3", features = ["ws"] }
+naws-proto-derive = { version = "1.0.1" }
 ```
 
 ## 派生消息体

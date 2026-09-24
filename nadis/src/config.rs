@@ -1,16 +1,7 @@
-// ============================================================================
-// src/config.rs —— 配置类(文档;默认值对齐 配置全景表,即 原实现 源码默认)。
-//
-// 命名约定:
-//   · legacy = 历史协议/历史运行模式。它影响 wire 名、锁语义、marker、路由等持久化边界。
-//   · compat = 单个兼容算法/格式化函数。它只复刻某个局部规则,不代表整套运行模式。
-//
-// 纪律
-//   · CompatibilityProfile 没有 Default,RedisConfig 反序列化缺 profile 即失败——
-//     这是持久化/跨语言协议,不允许新项目无意承担 原实现V1 约束,也不允许误连;
-//   · namespace 必填:协议标记 nasa:protocol:{namespace} 的作用域。
-// 装配模型:业务在 #[tokio::main] 里构造本配置 → RedisClient::connect(cfg)。
-// ============================================================================
+// Redis 配置显式选择 CompatibilityProfile 与 namespace。
+// profile 决定持久化键、心跳时钟、锁、ACK 与事件编码，缺省时拒绝反序列化，避免误连。
+// namespace 决定协议标记 nasa:protocol:{namespace} 的作用域。
+// legacy 表示整套兼容协议模式，compat 只表示局部算法或格式，不得混淆二者。
 
 use serde::{Deserialize, Serialize};
 
@@ -44,15 +35,15 @@ fn default_redis_qualifier() -> String {
 /// 业务只能整体选择,不能拼出半兼容组合。**无 Default,必须显式指定。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompatibilityProfile {
-    /// 原实现 互通/灰度:key 命名、锁 Lua、wire 与 原实现 逐字节一致。
+    /// 使用 LegacyV1 的键命名、锁协议与事件编码；共享数据的节点必须遵守相同字节协议。
     /// legacy 表示整套历史协议模式,不是单个 helper 的局部兼容逻辑。
     LegacyV1,
     /// 纯 Rust 集群：启用 V2 fencing 任期 stamp 与原子 fenced ACK 等增强能力。
     /// **心跳时钟**:
     ///   · **RustV2 = Redis TIME**(`nodes` ZSET 分数与过期驱逐 `now_ms` 同走服务端时钟,全集群单一
     ///     时钟源,节点墙钟漂移不再误判存活);
-    ///   · 原实现V1/原实现 = 本地墙钟(与 原实现 节点逐字节互通必须同时基)。
-    /// ⚠ **RustV2 节点不得与墙钟(原实现V1/原实现)节点共享同一 group 的 `nodes` ZSET**——两类用不同
+    ///   · LegacyV1 = 本地墙钟。
+    /// ⚠ **RustV2 节点不得与墙钟(LegacyV1)节点共享同一 group 的 `nodes` ZSET**——两类用不同
     /// 时基写分数 + 各用自己的 now_ms 驱逐,时钟差几秒即互相误判过期 ZREM → 虚假 owner 抖动/双 claim
     /// 窗口；部署时必须为两类时钟协议使用不同 group。
     RustV2,
@@ -437,7 +428,7 @@ impl RedisConfig {
                     );
                 }
                 let topics: Vec<&str> = if g.topics.is_empty() {
-                    vec![logical.as_str()] // 空 topics → 逻辑名即 topic(对照 原实现)
+                    vec![logical.as_str()] // 空 topics → 逻辑名即 topic
                 } else {
                     g.topics.iter().map(|s| s.as_str()).collect()
                 };
@@ -619,7 +610,7 @@ impl Default for CommandCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineCfg {
-    /// 单个 PipelineSession 的**滚动 auto-flush 阈值**(对齐 原实现 pipelineLength=1000):当前批到此条数即
+    /// 单个 PipelineSession 的**滚动 auto-flush 阈值**:当前批到此条数即
     /// seal 后台发出、会话续接,**不报错**(第 1001 条无缝接续)。
     pub session_max_commands: usize,
     /// 单批累计参数字节阈值:加上本命令会超此值即先 auto-flush 当前批(防单批超大 value 占满内存)。
@@ -647,15 +638,15 @@ impl Default for PipelineCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LockCfg {
-    /// 锁 key 前缀(原实现 默认 "DISTRIBUTED-LOCK:";三级回退在 原实现 侧,Rust 单层显式)。
+    /// 锁 key 前缀，默认 `DISTRIBUTED-LOCK:`，由本配置显式指定。
     pub prefix: String,
-    /// 锁过期 ms(原实现 默认 30000);看门狗每 lease/3 续期。
+    /// 锁租约毫秒数，默认 30000；看门狗每 lease/3 续期。
     pub lease_ms: u64,
 }
 impl Default for LockCfg {
     /// 业务作用：构造分布式锁默认配置。
     ///
-    /// 默认前缀兼容原实现,lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
+    /// 默认前缀为 DISTRIBUTED-LOCK:，lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
     fn default() -> Self {
         Self {
             prefix: "DISTRIBUTED-LOCK:".into(),
@@ -745,17 +736,17 @@ pub struct PartitionCfg {
     /// 毒消息策略(默认 Park——fail-closed:停拉隔离等运维处置,**不自动删数据**;
     ///文档 V2 默认即 Park,Drop 是显式选择的不可恢复丢弃)。
     pub poison_policy: PoisonPolicy,
-    /// **隔离组**(对照 原实现 `partition.groups.{逻辑名}`):把高频/重 topic 隔离到独立 stream 组,
+    /// **隔离组**:把高频/重 topic 隔离到独立 stream 组,
     /// 各组具有独立物理 Stream 和读取参数，执行与容量隔离由 `executor.scope` 决定；空配置仅启用默认组。
     /// key = 逻辑短名(不含 default_group 前缀;不得为空/含 `{`/`}`)。实际 stream 前缀 =
-    /// `{default_group}:{逻辑名}`(对照 原实现 streamPrefix)。
+    /// `{default_group}:{逻辑名}`。
     #[serde(default)]
     pub groups: std::collections::HashMap<String, PartitionGroupCfg>,
 }
 impl Default for PartitionCfg {
     /// 业务作用：构造 partition 模式默认配置。
     ///
-    /// 默认关闭 partition,但保留原实现的默认组名、64 分区、10s 再平衡和 Park 毒消息策略。
+    /// 默认关闭 partition，使用默认组名、64 分区、10s 再平衡与 Park 毒消息策略。
     fn default() -> Self {
         Self {
             limits: Default::default(),
@@ -776,18 +767,18 @@ impl Default for PartitionCfg {
     }
 }
 
-/// 单个隔离组配置(对照 原实现 `PartitionGroup` 的 yml `partition.groups.{逻辑名}`)。
-/// 路由(topics)+ 分区数(count)+ **per-group 运行时参数覆盖**(对照 原实现 per-group override):每个
+/// 单个隔离组配置。
+/// 路由(topics)+ 分区数(count)+ **per-group 运行时参数覆盖**:每个
 /// `Option` 字段 `None` = 继承父级 `PartitionCfg` / 全局 `StreamCfg`,`Some` = 覆盖。让高频组用更大 batch、
 /// 更短 poll/rebalance,慢任务组用更长 drain/min_idle 等。**覆盖值进 protocol marker**(异构运行参数 fail-closed)。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PartitionGroupCfg {
-    /// 路由到本隔离组的 topic 列表;空 = 逻辑组名本身即唯一 topic(对照 原实现 `isolate(topic, topic, count)`)。
+    /// 路由到本隔离组的 topic 列表;空 = 逻辑组名本身即唯一 topic。
     pub topics: Vec<String>,
     /// 本组分区数;0 = 继承 `partition.count`。
     pub count: u32,
-    // ── per-group 运行时覆盖(None = 继承父级 partition.*;对照 原实现 PartitionGroup)──
+    // 每个 group 的运行时覆盖项；None 继承父级 partition 配置。
     /// 再平衡周期 ms(继承 `partition.rebalance_ms`)。
     pub rebalance_ms: Option<u64>,
     /// XAUTOCLAIM min-idle ms(继承 `partition.min_idle_ms`)。

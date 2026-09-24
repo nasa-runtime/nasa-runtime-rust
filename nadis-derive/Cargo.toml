@@ -21,4 +21,4 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 # 运行时路径发现支持直接依赖 nadis、经 nasa::redis 门面使用以及 Cargo 依赖重命名。
-nasa-macro-support = { path = "../macro-support", package = "macro-support", version = "1.0.1" }
+nasa-macro-support = { package = "macro-support", version = "1.0.2" }

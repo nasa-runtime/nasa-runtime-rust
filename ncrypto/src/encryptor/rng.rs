@@ -1,7 +1,6 @@
-//! 随机盐 / 密钥生成(对照 原实现 `generateSalt`/`generateAESKey`/`generateAESKeyHex`/`StringUtils.random`)。
+//! 随机盐与密钥生成。
 //!
-//! ★ **一律用 OS 安全 RNG(`OsRng`)**,不复刻 原实现 的 `Math.random()`(非密码学)。这些值每次随机、
-//!   永不上线固定,不需与 原实现 逐字节一致,故安全升级零互通代价。
+//! 随机材料全部来自操作系统的 OsRng，每次生成独立字节，不依赖可预测的业务伪随机序列。
 
 use super::{b64_encode, hex_lower};
 use crate::{CryptoError, Result};
@@ -18,11 +17,8 @@ pub fn generate_salt(byte_len: usize) -> String {
     hex_lower(&salt)
 }
 
-/// 业务作用: 生成随机 AES 密钥(Base64 编码)。`bits` ∈ {128,192,256}。
-///
-/// **安全说明:非法 `bits` fail-fast**(对照 原实现 `KeyGenerator.init(bits)` 抛
-/// `InvalidParameterException`)——此前 `bits=0` 返回空串、`bits=129` 静默 `/8` 截断成 16 字节
-/// (像 AES-128 key,误导调用方),违反契约,故改返 `Result`。
+/// 业务作用：生成指定强度的随机 AES 密钥并编码为 Base64。
+/// 返回：128、192 或 256 位密钥；其它位数返回错误，不截断为另一种强度。
 ///
 /// # 参数
 /// - `bits`: AES 密钥位数,只接受 128、192 或 256。
@@ -45,7 +41,7 @@ pub fn generate_aes_key_hex() -> String {
     hex_lower(&key)
 }
 
-/// 业务作用: 生成 `len` 个 `[0-9a-zA-Z]` 随机字符(对照 原实现 `StringUtils.random(len)`,**但用安全 RNG**)。
+/// 业务作用: 生成 `len` 个 `[0-9a-zA-Z]` 随机字符。
 /// Web RSA_AES 策略的临时 AES key 用它(`random_ascii(16)` = 16 字节 ASCII = 合法 AES-128 key)。
 ///
 /// # 参数

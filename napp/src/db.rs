@@ -478,7 +478,7 @@ impl ApplicationComponent for DbComponent {
                     }],
                 )));
             }
-            let registrations = application.take_migrations();
+            let registrations = application.take_migrations()?;
             for (name, migrator) in &registrations {
                 let pool = self.pools.get(name).ok_or_else(|| {
                     db_error(

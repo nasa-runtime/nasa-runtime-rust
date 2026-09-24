@@ -58,6 +58,27 @@ pub struct SqlObservabilityRuntime {
 }
 
 impl SqlObservabilityRuntime {
+    /// 业务作用：按实际冻结目录组合有界 SQL 策略诊断，避免期望配置覆盖仍运行的来源。
+    /// 参数说明：`limit` 为调用方已校验的条数上限。
+    /// 返回：当前有效策略和是否截断，不触发数据库 I/O。
+    pub(crate) fn diagnostic_policies(
+        &self,
+        limit: usize,
+    ) -> (Vec<(String, EffectivePolicy)>, bool) {
+        let values = self
+            .catalog
+            .keys()
+            .take(limit)
+            .map(|name| {
+                (
+                    name.clone(),
+                    self.settings.observability.effective(name, None),
+                )
+            })
+            .collect();
+        (values, self.catalog.len() > limit)
+    }
+
     /// 业务作用：在 Application 校验过 UserHook 窗口后登记已声明的渠道实现。
     /// 参数说明：`provider_id` 为配置名称，`provider` 为只在后台 worker 中执行的实现。
     /// 返回：唯一登记成功；封口、未知类型或重名返回安全阶段错误。
@@ -1155,7 +1176,11 @@ async fn wait_application_ready(
             biased;
             _ = stop.cancelled() => return false,
             _ = force.cancelled() => return false,
-            changed = states.changed() => if changed.is_err() { return false; },
+            changed = states.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            },
         }
     }
 }

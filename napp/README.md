@@ -11,6 +11,53 @@ HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经
 慢 SQL 达到配置阈值后可经业务主动安装的 `Notify` 发送；关闭通知冷却即可逐条提交，框架不选择
 通知微服务协议或持有机器人连接。
 
+Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+secret/TLS 与本地文件监听，把连接来源、启动屏障、配置应用状态和退出责任绑定到同一资源 owner。
+文件监听与密钥解析使用同一活跃消费者集合：仅由禁用计划引用的密钥文件及其无消费者 provider
+引导文件不建立观察；共享 ID 仍有活跃引用时继续解析和监听。候选新增的文件依赖必须先可观察，
+再发布配置；失败时保留旧视图及旧监听。
+业务提交配置与 handler，框架负责启动门禁、健康和停机；各能力的 feature、入口、配置和失败边界见
+[受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
+## 命名资源运行架构
+
+```text
+配置与 feature 校验 → 来源启动与迁移 → Prepare 装配命名资源
+                                           ↓
+Service：UserHook 登记计划 → initializer → Ready 后取得句柄
+Batch：静态计划与初始化完成 → 工作负载取得句柄
+关闭：撤销准入 → 等待已接纳工作退出 → 释放 owner 与依赖
+```
+
+Service 的 UserHook 不能提前取得尚未装配的标准 adapter；Batch 的工作负载无需 Web 即可使用
+幂等、审计和出站客户端。`source`/`redis_ref` 固定资源来源，错误引用不会猜测默认库。
+数据库持久 adapter 在迁移门禁之后只读校验 schema，不在业务请求中隐式建表。
+
+配置更新先准备材料与安全资源，再发布同代视图和真实应用状态。`Applied` 表示该目标已经采用
+对应配置；`RestartRequired` 和 `ApplyFailed` 保留最后成功版本，不因无关更新而消失。
+配置读取应固定一次 `ConfigView`，不能把新 YAML 的可见性当成所有运行资源已切换的证明。
+每项资源只保留一个关闭 owner；关闭通知后仍须等待任务和在途调用的退出证明。
+
+## 命名对象存储与 Schema Registry
+
+这两类客户端在 Prepare 装配，无需新增组件字符串，也无需启动 Web 或 Kafka 消费组件：
+
+| 能力 | nasa 门面 feature | 直接 napp feature | 命名配置与获取入口 |
+| --- | --- | --- | --- |
+| 对象存储 | `application,object-store` | `object-store` | `object_stores.<name>` → `app.object_store(name).await` |
+| Schema Registry | `application,kafka-schema-registry` | `kafka-schema-registry` | `schema_registries.<name>` → `app.schema_registry(name).await` |
+
+命名计划须显式设置 `enabled: true`；未声明或禁用时不构造客户端、不读取其独占凭据。Prepare 使用
+同代配置和 `secret://` 材料绑定资源，并自动登记聚合指标。Service 在后续 initializer 或 Ready 后任务中
+使用句柄，Batch 在工作负载开始前完成装配。停机关闭新调用、等待在途调用，旧句柄永久返回 `Closed`；
+参数或凭据变化报告 `RestartRequired`。对象存储按显式健康策略监督远端状态；Registry 构造不探测远端、
+不注册 schema，其指标仅反映实际调用。
+
+独立 `S3ObjectStore` 和 `ConfluentSchemaRegistry` 仍可由业务显式构造并自行持有；与 Application
+组合时，独立指标源可在 UserHook 登记。标准受管计划已有指标 owner，不应重复手工登记。
+完整配置见 [对象存储](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naobject/README.md#配置投影)
+与 [Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#配置与使用)。
+
 ## SQL 观测与通知
 
 门面同时启用 `application` 与 `mapper`/`mapper-pgsql` 后，在 DB 建连前冻结方法目录与观测策略，
@@ -142,14 +189,15 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 数据库 Web 应用可写 `#[nasa::application("db", "web")]`。独立批处理仍可只开启 `kafka` feature 并显式
 管理 `KafkaProxy`；Service 一旦把 `"kafka"` 写入属性，连接、消费、Ready、监控和停机就全部归容器所有。
 `hystrix`、`grafana`、`mapper` 不是属性组件字符串，仍通过各自 feature 使用。
-MySQL 或 PostgreSQL Mapper 缓存也不新增组件字符串：业务在启动 Hook 中显式安装共享 L2；通过 `nasa`
-门面时，MySQL 使用 `mapper-redis-cache`，PostgreSQL 使用 `mapper-redis-cache-pgsql`，Service 会在 Ready
-前检查声明缓存的查询是否已经完成安装。
+MySQL 或 PostgreSQL Mapper 缓存不新增组件字符串。配置 `mapper_cache.enabled: true` 与 `redis_ref` 后，
+框架复用受管 Redis 安装 L2 并验证字段过期能力；Service 在 Ready 前、Batch 在工作负载前完成门禁。
+通过 `nasa` 门面时，MySQL 使用 `mapper-redis-cache`，PostgreSQL 使用 `mapper-redis-cache-pgsql`。
 
 直接依赖 `napp` 时，`mapper-cache` 是 MySQL Mapper 的 Ready 门禁，并同步启用
 `namapper/redis-cache`；`mapper-cache-pgsql` 是 PostgreSQL Mapper 的 Ready 门禁，只依赖
-`namapper-core`，不会引入 MySQL runtime。两个 feature 都不会根据 Redis 配置构造或安装 Mapper L2，
-实际缓存实现、namespace、TTL 与失败策略仍由业务启动 Hook 显式选择。
+`namapper-core`，不会引入 MySQL runtime。标准配置同时需要 `redis` feature 和组件；自定义实现仍可
+在启动 Hook 安装，不能与标准计划重复占用默认槽。codec/metrics 使用 `configure_mapper_defaults`，
+与缓存 owner 一起受启动回滚和停机管理。
 
 不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
@@ -345,17 +393,17 @@ scheduling:
 
 ### Redis 分区消费生命周期
 
-`"redis"` 组件只拥有受管客户端。业务通过 `nasa::redis::PreparedPartition` 登记 handler 并启动
-`RunningPartition`，后者拥有独立 napart Runner 集合；不会复用 Application 的 `"partition"`
-组件或自动取得它的停机权威。无需仅为 Redis 分区消费而声明 `"partition"`。
+`"redis"` 组件管理客户端及通过 `configure_redis_partition(source, critical, configure)` 登记的消费计划。
+业务在 UserHook 提供 handler，框架 Prepare 冻结计划，统一 Ready 后开放消费；通过
+`redis_partition(source)` 取得发布与查询句柄。每个来源拥有独立 napart Runner 集合，无需声明 `"partition"`。
 
 每个 Redis 源的 `partition.executor.scope` 可选 `source`（默认）、`group`、`stream`，分别按
 源实例、逻辑组、物理 Stream 划分执行与固定容量份额。各源注册表与预算独立；跨域同计划同 key
 仍受消费器的 ACK、重试和 Park 顺序门禁约束。
 
-创建消费器的业务须保留运行期 owner，并在受管 Redis 客户端关闭前停止消费、检查排干报告。
-可以在 UserHook 登记业务优雅停机任务来等待 `shutdown_until(deadline)`；报告未收敛时不能宣称
-业务任务、I/O 和租约已经退出，也不能通过再次关闭共享客户端替代这些证明。
+框架聚合 owner 先关闭所有来源准入，再并发使用共享截止点排干，提供逐来源健康和未完成报告。
+未取得退出证明时保留依赖责任，不能把取消通知视为 I/O 与租约已经退出。
+独立组件使用方仍可持有 `RunningPartition` 自行管理生命周期。
 完整合同见
 [Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/docs/partition.md)。
 
@@ -1462,7 +1510,11 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
 - 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
-- 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化如实记 `RestartRequired`。`app.config_view()` 保证快照与状态表同版本。
+- 组件身份 `id` 和静态 `dependencies` 在任何组件阶段之前统一受保护地读取一次；排序、配置投影和各阶段上下文只使用冻结值。元数据方法必须无副作用且有限时间返回。读取展开成为 Bootstrap 错误，不启动任何组件阶段；阶段执行后不再读取动态元数据，已登记补偿仍由统一异步回滚负责。
+- 组件 Bootstrap、Start、Prepare、Ready 的方法调用和 future 轮询发生单次展开式 panic 时，按组件与当前阶段报告固定错误，并沿 active stack 执行异步回滚。组件与 initializer 的启动 future、initializer 实例、暂存终端任务和任务工厂均在接管时建立释放保护；完成、超时、取消、信号或部分移交失败时，析构展开不越过回滚边界。实例从运行时登记或静态工厂产出起保持保护，拓扑排序只借用元数据；三轮结束及失败出口逐项释放实例后才清理其依赖。已有失败或停止原因保持不变，次要释放异常单独报告；成功结果后的释放异常阻止启动。异常 payload 的析构在独立边界处理，不输出正文。同步阻塞、`panic=abort` 与同一次展开中的再次 panic 无法安全抢占。
+- `ApplicationComponent` 对象从登记起受析构隔离保护，在清理栈和资源收口后逐项释放；尚未退出的受管任务保留组件所有权直到实际退出。批任务完成时的组件释放异常返回稳定的 Stopping 错误；已有主失败、信号或主动停止原因保持不变，释放异常进入次要清理报告。直接取消及延迟释放路径仅同步告警，不追改已交付结果。
+
+- 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化或依赖材料变化如实记 `RestartRequired`，保留最后实际生效版本。材料依赖识别完整合法的 `secret://id` 与既有裸 ID 引用，file/env/provider 内容改变即使配置树不变也参与判断；材料恢复到实际使用值后可重新记 `Applied`。命名 HTTP 客户端材料随视图发布，初始及后续成功版本记在 `Managed("http_clients")`；准备失败保留旧视图，名称集合变化拒绝整帧。`app.config_view()` 保证快照与状态表同版本。
 - 错误报告有界展开错误链并统一脱敏（URI userinfo、常见敏感键）；敏感键比较忽略不可见格式控制并识别 ASCII 字母数字兼容字形，替换坐标保持原文。兼容标点不产生新的值结束边界；这不是任意视觉混淆字符检测。进程级 panic hook 只写受控 location marker，不读 payload。
 
 ## 业务扩展点
@@ -1537,7 +1589,7 @@ Web Ready 固定执行 `手动 mapping plan 封口 -> global=true 自动 binding
 但不能用来冒充参与 auth-before-decrypt 排序的安全 interceptor；Ready 后再次调用两个 configure
 入口都会明确失败。
 
-全部能力入口先检查组件声明，再区分“底层对象尚未发布”和“已经清理”。共享对象只开放底层类型本身
+全部能力入口先检查组件声明，再区分“底层对象尚未装配就绪”和“已经清理”。共享对象只开放底层类型本身
 具有稳定共享和显式关闭语义的部分；具有装配权或关闭权的对象只给受控句柄。`WebHandle` 不持有路由
 服务图、监听器、服务任务或业务资源；路由修改仍只允许在启动 Hook 调用 `configure_router`。
 `routes()` 只包含自动收集端点和运行时探针，不伪造无法从不透明定制闭包枚举的手写端点。
@@ -1557,7 +1609,7 @@ struct VendorConfig {
     timeout_ms: u64,
 }
 
-/// 从最终配置装配尚未组件化的业务依赖。
+/// 业务作用：从最终配置装配业务依赖，交由应用资源容器持有。
 ///
 /// # 参数
 ///

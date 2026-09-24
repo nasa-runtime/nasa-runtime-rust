@@ -34,14 +34,16 @@ pub enum LogConfigError {
     SizeOverflow(String),
     /// `max_file_size == 0`(会导致几乎每条日志都滚动)。
     ZeroMaxFileSize,
-    /// `total_size_cap == 0`(按 logback 拒绝;如需关闭总量清理应另设显式字段)。
+    /// `total_size_cap == 0` 不构成有效归档容量。
     ZeroTotalSizeCap,
-    /// `max_history_days < 0`(按 logback 拒绝)。
+    /// `max_history_days < 0` 不构成有效保留天数。
     NegativeMaxHistoryDays(i64),
-    /// `原实现Default` 路径策略但未提供 `app_name`。
+    /// `MissingPathPolicy::LegacyDefault` 路径策略但未提供 `app_name`。
     MissingAppNameForLegacyDefaultPath,
-    /// `pattern` 解析失败(对照 logback LOG_PATTERN;不静默退回默认)。
+    /// `pattern` 解析失败，不静默退回默认格式。
     InvalidPattern(LogPatternError),
+    /// 日志过滤器不符合语法或当前 subscriber 不允许安装。
+    InvalidLevel(String),
 }
 
 impl fmt::Display for LogConfigError {
@@ -60,6 +62,7 @@ impl fmt::Display for LogConfigError {
                 write!(f, "LegacyDefault path policy requires app_name")
             }
             Self::InvalidPattern(e) => write!(f, "invalid log pattern: {e}"),
+            Self::InvalidLevel(reason) => write!(f, "invalid log filter: {reason}"),
         }
     }
 }
@@ -88,7 +91,7 @@ impl From<ByteSizeError> for LogConfigError {
 }
 
 /// `LogManager::apply` / `apply_config` 的错误:**配置解析错误**与**运行期文件打开错误**分开,
-/// 后者(目录不可建/被占用/权限)此前被吞成 `Ok`,现显式暴露。
+/// 目录创建失败、文件被占用或权限不足均返回文件错误，不作为成功应用处理。
 #[derive(Debug)]
 pub enum LogApplyError {
     /// 配置解析/转换错误。
@@ -140,26 +143,26 @@ impl From<LogOpenError> for LogApplyError {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// LogConfig:应用侧可反序列化配置(对照 原实现 logging.* + 原工具包 logback property)
+// 应用侧日志配置声明。
 // ────────────────────────────────────────────────────────────────────────────
 
 /// 应用侧日志配置。直接把 YAML/Nacos 的 `log:` 段反序列化进来;`None` 字段在 [`resolve`](LogConfig::resolve)
-/// 时取 logback 默认值。`Option` 区分"未配(走默认)"与"明确配值"。
+/// 时取组件默认值。`Option` 区分“省略并使用默认值”与“明确配值”。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
-    /// EnvFilter 表达式(等价 原实现 root level + per-package override)。默认 `"info"`,例 `"info,my_app=debug"`。
+    /// EnvFilter 表达式(根级别与各模块覆盖)。默认 `"info"`,例 `"info,my_app=debug"`。
     pub level: String,
     /// 日志目录。`Some`/非空 → 接 `info.log`/`error.log`;`None`/空 → 按 [`MissingPathPolicy`] 处理。
     pub path: Option<String>,
     /// 兼容旧 YAML:单文件上限,单位 MB。
     pub max_file_size_mb: Option<u64>,
-    /// logback 风格单文件上限 `"500MB"`/`"1GB"`/字节整数。**与 `max_file_size_mb` 并存时本字段优先**。
+    /// 单文件上限支持 `"500MB"`、`"1GB"` 或字节整数；与 `max_file_size_mb` 并存时本字段优先。
     #[serde(alias = "maxFileSize")]
     pub max_file_size: Option<ByteSize>,
     /// 兼容旧 YAML:归档总量上限,单位 MB。
     pub total_size_cap_mb: Option<u64>,
-    /// logback 风格归档总量上限 `"30GB"`。**与 `total_size_cap_mb` 并存时本字段优先**。
+    /// 归档总量上限支持 `"30GB"` 等容量值；与 `total_size_cap_mb` 并存时本字段优先。
     #[serde(alias = "totalSizeCap")]
     pub total_size_cap: Option<ByteSize>,
     /// 归档保留天数。`None` → 30。
@@ -172,7 +175,7 @@ pub struct LogConfig {
     pub split_error_file: Option<bool>,
     /// 文件是否带 ANSI 颜色。`None` → false。
     pub color: Option<bool>,
-    /// logback 风格输出 pattern(对照 `LOG_PATTERN`)。`None` → [`DEFAULT_LOG_PATTERN`]。
+    /// 日志输出格式；`None` 使用 [`DEFAULT_LOG_PATTERN`]。
     /// 非法 pattern 在 `resolve` 时返 `Err(InvalidPattern)`,**不静默退回默认**。
     #[serde(alias = "log_pattern", alias = "logPattern", alias = "LOG_PATTERN")]
     pub pattern: Option<String>,
@@ -216,7 +219,7 @@ pub enum MissingPathPolicy {
 pub struct LogContext {
     /// 应用名；`LegacyDefault` 缺少 path 时用于拼接默认目录。
     pub app_name: Option<String>,
-    /// 默认日志根(对照 原实现 `/usr/local/logs`)。
+    /// 默认日志根为 `/usr/local/logs`。
     pub default_log_root: String,
     /// 缺失 path 的处理策略。
     pub missing_path_policy: MissingPathPolicy,
@@ -239,7 +242,7 @@ impl LogContext {
         Self::default()
     }
 
-    /// 业务作用：对齐 原实现:缺 path 落 `{default_log_root}/{app_name}`。
+    /// 业务作用：显式选择缺省文件日志目录；缺 path 时使用 `{default_log_root}/{app_name}`。
     ///
     /// # 参数
     /// - `app_name`: 应用名,用于在未显式配置日志目录时拼出默认文件日志目录。
@@ -251,7 +254,7 @@ impl LogContext {
         }
     }
 
-    /// 业务作用：带 app_name 但保持 Rust 现状(缺 path = 只控制台)。
+    /// 业务作用：记录 app_name 并保持控制台输出(缺 path = 只控制台)。
     ///
     /// # 参数
     /// - `app_name`: 应用名,仅记录到上下文中,不会自动启用文件日志目录。
@@ -286,7 +289,7 @@ impl LogContext {
 pub enum LogPathSource {
     /// 来自 `cfg.path`。
     Explicit,
-    /// 来自 `原实现Default` 拼接的默认目录。
+    /// 来自 `MissingPathPolicy::LegacyDefault` 拼接的默认目录。
     LegacyDefault,
     /// 无文件日志(只控制台)。
     Disabled,
@@ -334,7 +337,7 @@ impl LogConfig {
         }
         match ctx.missing_path_policy {
             MissingPathPolicy::ConsoleOnly => Ok((None, LogPathSource::Disabled)),
-            // 原实现Default 缺 path 时拼 {root}/{app};app_name 缺失**或空白**都视为缺失(空服务名不应悄悄落到根目录)。
+            // MissingPathPolicy::LegacyDefault 缺 path 时拼 {root}/{app};app_name 缺失**或空白**都视为缺失(空服务名不应悄悄落到根目录)。
             MissingPathPolicy::LegacyDefault => {
                 match ctx
                     .app_name
@@ -451,6 +454,151 @@ impl LogConfig {
 #[must_use = "LogManager 必须持有到进程结束,否则文件日志后台刷盘线程会停止"]
 pub struct LogManager {
     guard: Option<LogGuard>,
+    reclaim: LogReclaimer,
+}
+
+/// 锁外完成 I/O 和过滤器解析的日志候选；旧 guard 在安装后保留到候选被锁外释放。
+pub struct PreparedLogConfig {
+    resolved: ResolvedLogConfig,
+    filter: Option<tracing_subscriber::EnvFilter>,
+    file: Option<crate::PreparedFileLogging>,
+    retired: Option<LogGuard>,
+    reclaim: Option<ReclaimPermit>,
+}
+
+/// 每个日志 owner 只保留固定数量的候选和回收工作，避免坏目录或慢刷盘累积后台线程。
+struct LogReclaimer {
+    sender: Option<std::sync::mpsc::Sender<ReclaimWork>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+enum ReclaimWork {
+    Guards(Vec<LogGuard>, Arc<std::sync::atomic::AtomicUsize>),
+    Barrier(std::sync::mpsc::SyncSender<()>),
+}
+
+struct ReclaimPermit {
+    sender: std::sync::mpsc::Sender<ReclaimWork>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl LogReclaimer {
+    /// 业务作用：建立一个有界日志资源回收 owner，刷盘等待不占配置发布线程。
+    /// 参数说明：无。
+    /// 返回：拥有独立回收线程的队列；线程无法建立时不允许启动日志 owner。
+    fn new() -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("log-reclaim".into())
+            .spawn(move || {
+                while let Ok(work) = receiver.recv() {
+                    match work {
+                        ReclaimWork::Guards(guards, pending) => {
+                            drop(guards);
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        ReclaimWork::Barrier(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("log resource reclaimer thread is required");
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// 业务作用：在打开候选文件前预留回收容量，慢回收时拒绝继续积累候选。
+    /// 参数说明：无。
+    /// 返回：最多两个在途候选/回收项中的一个许可；容量不足时返回配置应用错误。
+    fn reserve(&self) -> Result<ReclaimPermit, LogApplyError> {
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or_else(|| LogConfigError::InvalidLevel("log owner is closed".into()))?;
+        self.pending
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |pending| (pending < 2).then_some(pending + 1),
+            )
+            .map_err(|_| {
+                LogConfigError::InvalidLevel("log resource retirement capacity exhausted".into())
+            })?;
+        Ok(ReclaimPermit {
+            sender: sender.clone(),
+            pending: self.pending.clone(),
+        })
+    }
+
+    /// 业务作用：在停机的阻塞清理线程中确认已提交回收的旧 writer 全部完成。
+    /// 参数说明：无。
+    /// 返回：此前已交给回收 owner 的资源完成刷盘后返回。
+    fn drain(&self) {
+        let (done, wait) = std::sync::mpsc::sync_channel(0);
+        if self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(ReclaimWork::Barrier(done)).is_ok())
+        {
+            let _ = wait.recv();
+        }
+    }
+
+    /// 业务作用：关闭候选准入并等待有界回收线程退出。
+    /// 参数说明：无。
+    /// 返回：所有持有候选归还后完成，调用方须在受停机预算监督的阻塞线程中执行。
+    fn shutdown(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for ReclaimPermit {
+    /// 业务作用：准备失败而尚未形成候选时归还容量。
+    /// 参数说明：无。
+    /// 返回：减少在途准备计数，不等待日志资源。
+    fn drop(&mut self) {
+        self.pending
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl Drop for PreparedLogConfig {
+    /// 业务作用：将未安装或已退役的 writer 移交给有界回收 owner。
+    /// 参数说明：无。
+    /// 返回：本方法不等待刷盘；回收完成后容量归还。
+    fn drop(&mut self) {
+        let Some(permit) = self.reclaim.take() else {
+            return;
+        };
+        let mut guards = Vec::with_capacity(2);
+        if let Some(file) = self.file.take() {
+            guards.push(file.guards);
+        }
+        if let Some(retired) = self.retired.take() {
+            guards.push(retired);
+        }
+        if guards.is_empty() {
+            return;
+        }
+        // 候选在 I/O 之前已取得许可，队列长度由许可总量约束；不在发布临界区执行 flush/join。
+        let pending = permit.pending.clone();
+        pending.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Err(error) = permit
+            .sender
+            .send(ReclaimWork::Guards(guards, pending.clone()))
+        {
+            drop(error);
+            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
 }
 
 impl LogManager {
@@ -464,7 +612,10 @@ impl LogManager {
             set_log_pattern(c.resolve_pattern()?); // 早期控制台即用配置 pattern
         }
         init_with_default(cfg.map(LogConfig::bootstrap_level).unwrap_or("info"));
-        Ok(Self { guard: None })
+        Ok(Self {
+            guard: None,
+            reclaim: LogReclaimer::new(),
+        })
     }
 
     /// 业务作用：早期启动:仅初始化控制台(文件 writer 槽仍空)。便捷 fail-fast 版,boot pattern 非法直接 panic。
@@ -476,43 +627,82 @@ impl LogManager {
         Self::try_bootstrap(cfg).expect("invalid bootstrap log config (pattern)")
     }
 
-    /// 业务作用：最终配置生效:接入/关闭文件日志 + `set_level`。重复调用即热更新。
-    ///
-    /// # 参数
-    /// - `cfg`: 最终日志配置,包含级别、文件滚动参数和输出 pattern。
-    /// - `ctx`: 运行期日志上下文,用于解析缺失 path 和 legacy 默认目录。
-    ///
-    /// **失败语义**:文件打开失败返回 `Err(LogApplyError::Io)`,**不 drop 旧 guard、不改级别**——
-    /// 即一次热更新到坏目录(权限/挂载/被文件占用)时,旧文件日志保持生效、调用方能看到失败。成功时才
-    /// 装新 writer(`try_enable_file_logging_with` 内部先全部就绪再原子替换)+ drop 旧 guard + 切级别。
+    /// 业务作用：在发布前准备日志文件、writer 和过滤器，当前输出保持可用。
+    /// 参数说明：`cfg` 为完整日志配置；`ctx` 为稳定的应用日志上下文。
+    /// 返回：尚未安装的候选；任何解析或文件准备失败都不修改日志运行态。
+    pub fn prepare(
+        &self,
+        cfg: &LogConfig,
+        ctx: &LogContext,
+    ) -> Result<PreparedLogConfig, LogApplyError> {
+        let reclaim = self.reclaim.reserve()?;
+        let resolved = cfg.resolve(ctx)?;
+        let filter = tracing_subscriber::EnvFilter::try_new(&resolved.level)
+            .map_err(|error| LogConfigError::InvalidLevel(error.to_string()))?;
+        let file = resolved
+            .file
+            .as_ref()
+            .map(crate::prepare_file_logging)
+            .transpose()?;
+        Ok(PreparedLogConfig {
+            resolved,
+            filter: Some(filter),
+            file,
+            retired: None,
+            reclaim: Some(reclaim),
+        })
+    }
+
+    /// 业务作用：在宿主发布临界区安装已经准备的候选，不执行文件 I/O 或旧 writer 等待。
+    /// 参数说明：`prepared` 为尚未安装的候选，调用方必须在发布锁外释放它。
+    /// 返回：过滤器安装成功后切换输出；失败保留旧输出，候选仍负责未安装资源的清理。
+    pub fn install(&mut self, prepared: &mut PreparedLogConfig) -> Result<(), LogApplyError> {
+        let filter = prepared.filter.take().ok_or_else(|| {
+            LogConfigError::InvalidLevel("candidate was already installed".into())
+        })?;
+        // 先完成唯一可拒绝的过滤器安装，再无失败地移交文件输出与 guard。
+        crate::install_level(filter).map_err(LogConfigError::InvalidLevel)?;
+        set_log_pattern(prepared.resolved.pattern.clone());
+        let next_guard = match prepared.file.take() {
+            Some(file) => Some(file.install()),
+            None => {
+                disable_file_logging();
+                None
+            }
+        };
+        prepared.retired = std::mem::replace(&mut self.guard, next_guard);
+        Ok(())
+    }
+
+    /// 业务作用：独立使用时完成准备、安装和旧输出回收。
+    /// 参数说明：`cfg` 为完整配置；`ctx` 为应用日志上下文。
+    /// 返回：成功返回生效配置；失败保留原输出；此同步入口可能等待文件 I/O，不能在宿主发布锁内调用。
     pub fn apply(
         &mut self,
         cfg: &LogConfig,
         ctx: &LogContext,
     ) -> Result<ResolvedLogConfig, LogApplyError> {
-        let resolved = cfg.resolve(ctx)?; // 含 pattern 编译失败 → Err(Config),不改任何状态
-        match &resolved.file {
-            Some(file_cfg) => {
-                let new_guard = try_enable_file_logging_with(file_cfg)?; // 失败:旧 guard/级别/pattern 不变
-                set_log_pattern(resolved.pattern.clone()); // 文件就绪后再提交 pattern
-                set_level(&resolved.level);
-                self.guard = Some(new_guard);
-                emit_file_logging_enabled(file_cfg); // pattern 提交后再写状态行(首行也遵循新 pattern)
-            }
-            None => {
-                set_log_pattern(resolved.pattern.clone());
-                set_level(&resolved.level);
-                disable_file_logging();
-                self.guard = None;
-            }
+        let mut prepared = self.prepare(cfg, ctx)?;
+        self.install(&mut prepared)?;
+        if let Some(file) = &prepared.resolved.file {
+            emit_file_logging_enabled(file);
         }
-        Ok(resolved)
+        Ok(prepared.resolved.clone())
+    }
+
+    /// 业务作用：关闭文件日志并终止候选资源回收 owner，供宿主最终停机使用。
+    /// 参数说明：无。
+    /// 返回：当前及退役 writer 刷盘、回收线程退出后返回；关闭后不再接受新候选。
+    pub fn shutdown(&mut self) {
+        self.disable_file();
+        self.reclaim.shutdown();
     }
 
     /// 业务作用：手动关闭文件日志,回到只控制台。
     pub fn disable_file(&mut self) {
         disable_file_logging();
         self.guard = None;
+        self.reclaim.drain();
     }
 }
 

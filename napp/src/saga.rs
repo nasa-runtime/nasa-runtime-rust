@@ -16,12 +16,10 @@ use discovery::managed_grpc_discovery_target;
 use discovery::managed_http_discovery_target;
 #[cfg(feature = "nacos-discovery")]
 pub(crate) use discovery::registration_metadata as discovery_registration_metadata;
-mod latency_metrics;
-pub(crate) mod security;
-#[cfg(feature = "nacos-config")]
-pub(crate) use security::prepare_security_view;
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 mod grpc_target;
+mod latency_metrics;
+pub(crate) mod security;
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 mod start_payload;
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
@@ -15842,6 +15840,16 @@ fn validate_managed_transport_settings(
                 return Err(saga_error(
                     phase,
                     "managed Saga HTTP requires shared replay claim and command/result credentials",
+                ));
+            }
+            // 编排端必须先拥有可验签的结果主体，再开放受管 HTTP 数据面；空 Catalog 不能掩盖
+            // 缺失的信任边，否则后续定义可以产生命令，却没有任何结果能被认证并推进状态。
+            if matches!(role, SagaRole::Orchestrator | SagaRole::Combined)
+                && http.producer_credentials.is_empty()
+            {
+                return Err(saga_error(
+                    phase,
+                    "managed Saga HTTP Orchestrator requires non-empty producer_credentials",
                 ));
             }
             validate_routing_settings(&http.routing, role, phase)?;

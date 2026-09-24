@@ -24,7 +24,7 @@ leader-only 和 claim 都不替代业务幂等或外部写 fencing：租约可�
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["scheduling"] }
+nasa = { version = "1.0.3", features = ["scheduling"] }
 ```
 
 ## 什么时候用
@@ -285,7 +285,7 @@ Skipped，不创建执行 span。新根 sampled 位只由遥测组件冻结的 `
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["scheduling-cluster"] }
+nasa = { version = "1.0.3", features = ["scheduling-cluster"] }
 ```
 
 ```rust

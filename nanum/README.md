@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-nanum = "1"
+nanum = "1.0.2"
 ```
 
 核心表示：
@@ -34,7 +34,7 @@ let half = divide(price, to_fixed_str("2", 8)?, 8)?;
 ## 精度对齐
 
 ```rust
-use nanum::{align_down, align_up};
+use nanum::{align_down, align_up, to_fixed_str};
 
 let value = to_fixed_str("0.20021365", 8)?;
 let tick_down = align_down(value, 8, 4)?;
@@ -70,7 +70,8 @@ f64 路径是便捷入口，内部仍走定点化以减少普通浮点误差；�
 - `to_fixed_str` 字符串先经 f64 parse 和 round：有效数字 **≥16 位**开始失真；超过 `scale` 位的小数被**静默舍入**(`to_fixed_str("0.000000001", 8) = Ok(0)`)。需要任意精度的精确字符串解析请用 `decimal` 模块。
 - `to_plain_string_display` / `to_plain_string_raw_display` 负值舍到 0 时输出 `"-0"`；两参 `to_plain_string` 则有 `-0` 守卫。展示层不接受 `-0` 时请自行归一。
 - `align*` 语义:对齐到 `to_scale` 精度但**仍保持 `from_scale` 体系表示**(如 `align(20021365, 8, 4) = 20020000`,即 0.20021365 → 0.2002 仍 ×10^8),配合 `is_aligned` 做撮合 tick 校验。
-- 定点四则无浮点误差(0.1+0.2 精确等于 0.3);除零、scale>8、i128 溢出、非有限 f64、`Unnecessary` 需舍入等均返回错误,不 panic。
+- 定点加减与精度对齐使用整数路径；乘除的余数经 f64 中转，可能产生量化误差。大数下，默认乘除与显式 `HalfUp` 的结果可能相差 1 个最小单位；要求精确十进制结果时使用 `decimal`。
+- 除零、scale>8、i128 溢出、非有限 f64、`Unnecessary` 需舍入等算术错误通过 `Result` 返回。
 
 ## YML 配置与使用
 

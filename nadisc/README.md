@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["discovery"] }
+nasa = { version = "1.0.3", features = ["discovery"] }
 ```
 
 ```rust

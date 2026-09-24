@@ -1,5 +1,5 @@
 // ============================================================================
-// src/proxy.rs：对齐既有 RedisProxy.loadStreamSubscribe 的 PROXY 消费路径。
+// 共享 Redis Stream 的 PROXY 竞争消费与待确认消息回收。
 //
 // **共享 group 多 consumer 并行消费**(高吞吐、无序),区别于 PARTITION(每分区串行 + owner 锁 +
 // fenced ACK):PROXY 是**单共享 stream + 一个 consumer group**,N 个 consumer 并行 `XREADGROUP >`,
@@ -112,13 +112,12 @@ pub enum ProxyPoison {
     Dlq,
 }
 
-/// 新建 consumer group 的起始位点(**仅首次建组生效**;BUSYGROUP 已存在则不变)。
-/// 传给 [`PreparedProxy::prepare_with_offset`];[`PreparedProxy::prepare`] 默认用 `New`。
-///对齐 原实现 `RedisProxy` 的 PROXY 语义——原实现 PROXY 路径用 `ReadOffset.latest()`(`$`)
-/// 只消费组建后的新消息(live-subscribe)；显式选择 `History` 才会读取已有 backlog。
+/// 新建 consumer group 的起始位点，仅首次建组生效；BUSYGROUP 不改变已有位点。
+/// [`PreparedProxy::prepare`] 默认只消费建组后的新消息，需要历史 backlog 时显式使用
+/// [`PreparedProxy::prepare_with_offset`] 并选择 History。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyStartOffset {
-    /// `$`:只消费组建后的新消息([`prepare`](PreparedProxy::prepare) 的默认;对齐 原实现 PROXY=live-subscribe)。
+    /// `$`：只消费建组后的新消息，是 [`prepare`](PreparedProxy::prepare) 的默认值。
     New,
     /// `0-0`:从头消费(含历史 backlog)。durable-replay 语义,需要重放历史时显式选用。
     History,
@@ -144,10 +143,9 @@ pub struct PreparedProxy {
 }
 
 impl PreparedProxy {
-    /// 业务作用：prepare:建共享 stream + consumer group(MKSTREAM;BUSYGROUP 幂等)。
-    /// **建组位点默认 `$`**(只消费组建后的新消息,对齐 原实现 `RedisProxy` PROXY=live-subscribe);
-    /// 需要从头重放历史 backlog 时改用 [`prepare_with_offset`](Self::prepare_with_offset) 传
-    /// [`ProxyStartOffset::History`]。
+    /// 业务作用：创建共享 Stream 与 consumer group，已存在的组保持原位点。
+    /// 默认使用 `$`，只消费建组后的新消息；需要历史 backlog 时调用
+    /// [`prepare_with_offset`](Self::prepare_with_offset) 并传入 [`ProxyStartOffset::History`]。
     ///
     /// # 参数
     /// - `client`: Redis 客户端共享句柄。
@@ -160,13 +158,11 @@ impl PreparedProxy {
         group: impl Into<String>,
         cfg: ProxyCfg,
     ) -> Result<Self> {
-        // 默认位点 `$`(对齐 原实现 PROXY);。
         Self::prepare_with_offset(client, stream, group, cfg, ProxyStartOffset::New).await
     }
 
-    /// 业务作用：同 [`prepare`](Self::prepare),但**显式指定建组起始位点**(原实现 `RedisProxy.xGroupCreate(stream,
-    /// group, ReadOffset)` 重载的对应物):`New`=`$`(只收新消息)/ `History`=`0-0`(从头重放历史)。
-    /// 位点**仅首次建组生效**(BUSYGROUP 已存在则不变)。不需要重放历史就用 [`prepare`](Self::prepare) 走默认 `$`。
+    /// 业务作用：显式指定首次建组的起始位点，New 使用 `$`，History 使用 `0-0`。
+    /// 已有 consumer group 保持原位点，本入口不重置其消费进度。
     ///
     /// # 参数
     /// - `client`: Redis 客户端共享句柄。
@@ -253,8 +249,7 @@ impl PreparedProxy {
                 "PROXY stream / group 必须无首尾空白、非空且不超过 {MAX_REDIS_NAME_BYTES} 字节"
             )));
         }
-        //位点按 start_offset 参数(默认 `$`,对齐 原实现 PROXY live-subscribe);
-        // 仅首次建组生效(BUSYGROUP 已存在则位点不变)。partition 才用 `0-0`(durable 工作队列)。
+        // 位点只决定首次建组的消费起点；已有组不能因进程重启而重置进度。
         let r: std::result::Result<String, redis::RedisError> = redis::cmd("XGROUP")
             .arg("CREATE")
             .arg(&stream)
@@ -401,13 +396,11 @@ pub struct RunningProxy {
 }
 
 impl RunningProxy {
-    /// 业务作用：发布到共享 stream(无路由;consumers 竞争消费)。返回 entry ID。
+    /// 业务作用：向共享 Stream 写入单个 data 字段，内容为标准 JSON 编码的
+    /// `Envelope{topic,event,data,passthrough}`，由消费者竞争消费。
     ///
-    /// **wire 说明**:写 `XADD * data {Envelope JSON}`——**单 `data` 字段裹标准
-    /// `Envelope{topic,event,data,passthrough}`**,**不等于** 原实现 `RedisProxy.publish` 的 `XADD * {event}
-    /// {message}`(event 名作 entry field、可多 event/entry)。即 **Rust Proxy 与 原实现 原生 PROXY wire 不互通**:
-    /// 原实现 侧要与本 Proxy 共享 stream,必须改写成 `data`-field Envelope(适配器);否则无 `data` 字段的 原实现-shape
-    /// entry 会被本 Proxy 判为不可解析 → 转 DLQ(不再静默卡 PEL)。当前不支持双 wire 自动识别。
+    /// 生产者必须使用相同信封结构；以事件名作为 entry field 的编码不兼容，缺少 data 的
+    /// entry 会进入 DLQ。本入口不自动识别其它编码。返回 entry ID，不代表消费者已处理。
     ///
     /// # 参数
     /// - `topic`: stream/partition 使用的业务主题。
@@ -625,7 +618,7 @@ fn parse_entries(entries: &redis::Value) -> ParsedEntries {
             }
         }
         let Some(bytes) = data_bytes else {
-            // 无 `data` 字段(如 原实现 event-field wire,或缺字段的 producer)→ 坏 entry,不丢。
+            // 无 `data` 字段(如以事件名作为字段的编码，或缺字段的 producer)→ 坏 entry,不丢。
             bad.push(BadEntry {
                 id,
                 reason: "缺 data 字段(非标准 Envelope wire)".to_string(),

@@ -9,9 +9,12 @@
 
 #![forbid(unsafe_code)]
 
+mod managed_cache;
+pub use managed_cache::{MapperCacheOwner, MapperDefaultsOwner};
+
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 pub use async_trait::async_trait;
 
@@ -836,9 +839,12 @@ pub trait MapperTypedCacheCodec<T>: Send + Sync + 'static {
     fn decode_typed(&self, bytes: &[u8]) -> anyhow::Result<T>;
 }
 
-static DEFAULT_L2_CACHE: OnceLock<Arc<dyn MapperL2Cache>> = OnceLock::new();
-static DEFAULT_MAPPER_METRICS: OnceLock<Arc<dyn MapperMetrics>> = OnceLock::new();
-static DEFAULT_MAPPER_CACHE_CODEC: OnceLock<Arc<dyn MapperCacheCodec>> = OnceLock::new();
+pub(crate) static DEFAULT_L2_CACHE: std::sync::RwLock<Option<Arc<dyn MapperL2Cache>>> =
+    std::sync::RwLock::new(None);
+pub(crate) static DEFAULT_MAPPER_METRICS: std::sync::RwLock<Option<Arc<dyn MapperMetrics>>> =
+    std::sync::RwLock::new(None);
+pub(crate) static DEFAULT_MAPPER_CACHE_CODEC: std::sync::RwLock<Option<Arc<dyn MapperCacheCodec>>> =
+    std::sync::RwLock::new(None);
 
 /// 业务作用: 安装当前进程唯一的默认 Mapper 二级缓存。
 ///
@@ -847,9 +853,15 @@ static DEFAULT_MAPPER_CACHE_CODEC: OnceLock<Arc<dyn MapperCacheCodec>> = OnceLoc
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
 pub fn set_default_l2_cache(cache: Arc<dyn MapperL2Cache>) -> anyhow::Result<()> {
-    DEFAULT_L2_CACHE
-        .set(cache)
-        .map_err(|_| anyhow::anyhow!("mapper default L2 cache is already installed"))
+    let mut slot = DEFAULT_L2_CACHE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    anyhow::ensure!(
+        slot.is_none(),
+        "mapper default L2 cache is already installed"
+    );
+    *slot = Some(cache);
+    Ok(())
 }
 
 /// 业务作用: 获取进程默认 Mapper 二级缓存的共享引用。
@@ -858,7 +870,10 @@ pub fn set_default_l2_cache(cache: Arc<dyn MapperL2Cache>) -> anyhow::Result<()>
 ///
 /// 返回: 已安装 cache 的 `Arc` clone；未安装返回 `None`。
 pub fn default_l2_cache() -> Option<Arc<dyn MapperL2Cache>> {
-    DEFAULT_L2_CACHE.get().cloned()
+    DEFAULT_L2_CACHE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// 业务作用: 安装当前进程唯一的 Mapper 指标出口。
@@ -868,9 +883,15 @@ pub fn default_l2_cache() -> Option<Arc<dyn MapperL2Cache>> {
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
 pub fn set_default_mapper_metrics(metrics: Arc<dyn MapperMetrics>) -> anyhow::Result<()> {
-    DEFAULT_MAPPER_METRICS
-        .set(metrics)
-        .map_err(|_| anyhow::anyhow!("mapper default metrics is already installed"))
+    let mut slot = DEFAULT_MAPPER_METRICS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    anyhow::ensure!(
+        slot.is_none(),
+        "mapper default metrics is already installed"
+    );
+    *slot = Some(metrics);
+    Ok(())
 }
 
 /// 业务作用: 获取进程默认 Mapper 指标出口的共享引用。
@@ -879,7 +900,10 @@ pub fn set_default_mapper_metrics(metrics: Arc<dyn MapperMetrics>) -> anyhow::Re
 ///
 /// 返回: 已安装指标出口的 `Arc` clone；未安装返回 `None`。
 pub fn default_mapper_metrics() -> Option<Arc<dyn MapperMetrics>> {
-    DEFAULT_MAPPER_METRICS.get().cloned()
+    DEFAULT_MAPPER_METRICS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// 业务作用: 安装当前进程唯一的默认 Mapper cache codec。
@@ -889,9 +913,15 @@ pub fn default_mapper_metrics() -> Option<Arc<dyn MapperMetrics>> {
 ///
 /// 返回: 首次安装成功；重复安装返回错误。
 pub fn set_default_mapper_cache_codec(codec: Arc<dyn MapperCacheCodec>) -> anyhow::Result<()> {
-    DEFAULT_MAPPER_CACHE_CODEC
-        .set(codec)
-        .map_err(|_| anyhow::anyhow!("mapper default cache codec is already installed"))
+    let mut slot = DEFAULT_MAPPER_CACHE_CODEC
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    anyhow::ensure!(
+        slot.is_none(),
+        "mapper default cache codec is already installed"
+    );
+    *slot = Some(codec);
+    Ok(())
 }
 
 /// 业务作用: 获取默认 Mapper cache codec 的共享引用。
@@ -900,7 +930,10 @@ pub fn set_default_mapper_cache_codec(codec: Arc<dyn MapperCacheCodec>) -> anyho
 ///
 /// 返回: 已安装 codec 的 `Arc` clone；未安装返回 `None`。
 pub fn default_mapper_cache_codec() -> Option<Arc<dyn MapperCacheCodec>> {
-    DEFAULT_MAPPER_CACHE_CODEC.get().cloned()
+    DEFAULT_MAPPER_CACHE_CODEC
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// 业务作用: 使用进程默认或 JSON codec 编码 Mapper 查询结果。
@@ -926,7 +959,8 @@ pub fn encode_cache_value_with_codec<T: serde::Serialize + ?Sized>(
     codec: Option<&dyn MapperCacheCodec>,
 ) -> anyhow::Result<Vec<u8>> {
     let value = serde_json::to_value(value)?;
-    match codec.or_else(|| DEFAULT_MAPPER_CACHE_CODEC.get().map(Arc::as_ref)) {
+    let default = default_mapper_cache_codec();
+    match codec.or(default.as_deref()) {
         Some(codec) => codec.encode_value(&value),
         None => JsonMapperCacheCodec.encode_value(&value),
     }
@@ -943,7 +977,8 @@ pub fn decode_cache_value_with_codec<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
     codec: Option<&dyn MapperCacheCodec>,
 ) -> anyhow::Result<T> {
-    let value = match codec.or_else(|| DEFAULT_MAPPER_CACHE_CODEC.get().map(Arc::as_ref)) {
+    let default = default_mapper_cache_codec();
+    let value = match codec.or(default.as_deref()) {
         Some(codec) => codec.decode_value(bytes)?,
         None => JsonMapperCacheCodec.decode_value(bytes)?,
     };
@@ -997,8 +1032,9 @@ where
 ///
 /// 返回: 方法级或全局 codec 建议回写时为 `true`。
 pub fn cache_value_needs_rewrite(bytes: &[u8], codec: Option<&dyn MapperCacheCodec>) -> bool {
+    let default = default_mapper_cache_codec();
     codec
-        .or_else(|| DEFAULT_MAPPER_CACHE_CODEC.get().map(Arc::as_ref))
+        .or(default.as_deref())
         .is_some_and(|codec| codec.should_rewrite_value(bytes))
 }
 
@@ -1009,7 +1045,7 @@ pub fn cache_value_needs_rewrite(bytes: &[u8], codec: Option<&dyn MapperCacheCod
 ///
 /// 返回: 无；观测缺失不影响数据库业务结果。
 pub fn record_mapper_metric(metric: MapperMetric<'_>) {
-    if let Some(metrics) = DEFAULT_MAPPER_METRICS.get() {
+    if let Some(metrics) = default_mapper_metrics() {
         metrics.record(metric);
     }
 }
@@ -1020,9 +1056,7 @@ pub fn record_mapper_metric(metric: MapperMetric<'_>) {
 ///
 /// 返回: 无缓存查询或已安装 cache 时成功；否则阻断启动。
 pub fn assert_l2_cache_installed_for_cached_queries() -> anyhow::Result<()> {
-    if MAPPER_CACHE_META.iter().any(|meta| meta.has_cached_query)
-        && DEFAULT_L2_CACHE.get().is_none()
-    {
+    if MAPPER_CACHE_META.iter().any(|meta| meta.has_cached_query) && default_l2_cache().is_none() {
         anyhow::bail!("mapper has cache-enabled queries but default L2 cache is not installed");
     }
     Ok(())

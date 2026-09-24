@@ -10,14 +10,14 @@
 
 ```toml
 [dependencies]
-naml = "1"
+naml = "1.0.3"
 ```
 
 需要文件变化观察时显式开启 `watch` feature：
 
 ```toml
 [dependencies]
-naml = { version = "1", features = ["watch"] }
+naml = { version = "1.0.3", features = ["watch"] }
 ```
 
 ## 运行架构与顺序不变量
@@ -227,3 +227,21 @@ let cfg: AppConfig = naml::YmlLoader::standard().load()?;
 ```
 
 `naml` 只负责读本地、合并 overlay、解析占位符和反序列化。涉及 Nacos 的拉取、watch 和 overlay 重组时，应用应组合 `config-boot` 与 `nanacos`。
+
+## Application 接入
+
+门面开启 `application,yml-watch`，配置 `config_watch.enabled: true`；直接依赖 `napp` 时对应
+`config-watch` feature。Application 持有本地观察 owner，最多跟踪 128 个配置与材料依赖，事件
+合并和固定周期补读进入统一候选流程。Batch 拒绝启用持续监听。
+
+```text
+本地文件事件或周期补读 → 重建本地配置并保留有效远端 overlay → 准备候选材料与观察集
+                                                                       ↓
+                                                     发布视图 → 撤销旧观察
+```
+
+没有 Nacos 时仍可独立运行。材料解析与监听使用同一活跃消费者集合：禁用计划的独占密钥及无
+消费者的 provider 引导文件不读取、不监听；共享 ID 仍有活跃引用时继续保留。新增观察先准备，
+视图发布后再撤旧观察；坏候选保持有效监听，由有预算的周期补读发现尚未就绪的新材料。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

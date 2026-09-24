@@ -85,6 +85,6 @@ pub enum ResolutionAdmission {
         /// 已提交的解决终态。
         status: StepResolutionStatus,
     },
-    /// 本地不存在任何未知效果。
+    /// 本地没有可查询的未知效果，也没有目标明确、可安全重放的既有事实。
     MissingUnknownEffect,
 }

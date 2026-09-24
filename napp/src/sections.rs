@@ -385,7 +385,11 @@ fn configured_redis_names(tree: &Value) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     if let Some(properties) = redis.get("properties").and_then(Value::as_object) {
         for name in properties.keys() {
-            let canonical = if name == "default" { "primary" } else { name };
+            let canonical = if name == "default" {
+                "primary"
+            } else {
+                name
+            };
             names.insert(canonical.to_owned());
             if canonical == "primary" {
                 names.insert("default".to_owned());
@@ -455,7 +459,7 @@ fn string_setting<'a>(tree: &'a Value, section: &str, field: &str) -> Option<&'a
 /// - `component`：需要判断的组件身份。
 /// - `current`：当前已发布快照的配置树。
 /// - `candidate`：尚未发布的候选配置树。
-#[cfg(feature = "nacos-config")]
+#[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 pub(crate) fn sections_changed(component: ComponentId, current: &Value, candidate: &Value) -> bool {
     RESERVED_SECTIONS
         .iter()
@@ -471,4 +475,59 @@ pub(crate) fn sections_changed(component: ComponentId, current: &Value, candidat
 fn section_at<'a>(tree: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.')
         .try_fold(tree, |value, segment| value.get(segment))
+}
+
+/// 业务作用：把已变化的 secret 材料映射到实际引用它的配置目标。
+/// 参数说明：`component` 为目标；`tree` 为已校验配置；`changed` 为材料新增、移除或内容变化的 ID。
+/// 返回：目标配置引用变化 ID，或其字段参与变化 secret 的配置分片时为真。
+#[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+pub(crate) fn secrets_affect_component(
+    component: ComponentId,
+    tree: &Value,
+    changed: &std::collections::BTreeSet<std::sync::Arc<str>>,
+) -> bool {
+    let specs = crate::secret::parse_specs(tree).unwrap_or_default();
+    RESERVED_SECTIONS
+        .iter()
+        .filter(|(_, owner)| *owner == component)
+        .any(|(path, _)| {
+            section_at(tree, path)
+                .is_some_and(|section| contains_secret_reference(section, changed))
+                || specs
+                    .iter()
+                    .filter(|spec| changed.contains(&spec.id))
+                    .any(|spec| {
+                        spec.fragments.iter().any(|fragment| match fragment {
+                            nasecret::SecretFragmentRef::ConfigPath(fragment_path) => {
+                                fragment_path.as_ref() == *path
+                                    || fragment_path.starts_with(&format!("{path}."))
+                            }
+                            _ => false,
+                        })
+                    })
+        })
+}
+
+/// 业务作用：按公开 locator 与既有裸 ID 合同识别材料依赖，不解析或输出材料内容。
+/// 参数说明：`value` 为组件子树；`changed` 为变动的 secret ID 集合。
+/// 返回：合法的完整 ID 精确命中时为真；不做子串、URL 解码或大小写折叠。
+#[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+fn contains_secret_reference(
+    value: &Value,
+    changed: &std::collections::BTreeSet<std::sync::Arc<str>>,
+) -> bool {
+    match value {
+        Value::String(value) => {
+            let id = value.strip_prefix("secret://").unwrap_or(value);
+            // 材料代次改变但配置树不变时仍需阻止假 Applied；同一 ID 语法同时约束声明与引用。
+            crate::secret::valid_secret_id(id) && changed.contains(id)
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_secret_reference(value, changed)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| contains_secret_reference(value, changed)),
+        _ => false,
+    }
 }

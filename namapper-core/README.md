@@ -212,4 +212,17 @@ PostgreSQL-only 应用使用它不会引入 MySQL runtime。
 
 该 crate 不创建数据库连接、不执行 SQL，也不根据数据库 URL 选择后端。普通应用应使用 `namapper` 或
 `namapper-pgsql`；adapter 与宏实现可直接依赖本 crate 的稳定合同。Redis 连接仍由业务或受管应用创建，
-随后显式安装为默认 Mapper L2。
+独立模式由调用方显式安装默认 Mapper L2，Application 模式由命名配置完成安装与关闭。
+
+## Application 接入
+
+门面开启 `application,mapper-redis-cache` 或 `application,mapper-redis-cache-pgsql`，并声明
+`"redis"`。`mapper_cache.enabled` 与 `redis_ref` 选择受管 Redis，准备阶段验证 Hash 字段过期能力；
+Service 与 Batch 均在查询前完成门禁。
+
+默认 L2 由 `MapperCacheOwner` 管理，旧句柄关闭后拒绝读写，旧 owner 不能撤销后续安装。
+codec/metrics 通过 `configure_mapper_defaults` 纳入启动回滚与停机，无需另建关闭流程。
+`GroupedCache` 和独立 `RedisMapperL2Cache` 保留各自 TTL 合同；后端不支持字段过期时不能宣称
+字段级过期已经生效。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

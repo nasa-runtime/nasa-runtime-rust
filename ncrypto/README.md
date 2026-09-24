@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-ncrypto = "1"
+ncrypto = "1.0.1"
 ```
 
 ## 安全边界
@@ -18,7 +18,7 @@ Ed25519、现代 AEAD、哈希和 KDF 不受影响。确有迁移合同的调用
 
 ```toml
 [dependencies]
-ncrypto = { version = "1", features = ["legacy-rsa-private"] }
+ncrypto = { version = "1.0.1", features = ["legacy-rsa-private"] }
 ```
 
 该 feature 只开放低层兼容运算，不会替调用方建立协议级风险门。Web 端点等上层集成仍应增加独立的配置准入、启动审计和运行时授权。

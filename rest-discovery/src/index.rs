@@ -37,15 +37,17 @@ pub(crate) struct ServiceNameIndex {
     names: ArcSwap<HashMap<String, ServiceNameEntry>>,
     match_mode: ServiceMatchMode,
     grace: Duration,
+    max_services: usize,
 }
 
 impl ServiceNameIndex {
     /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
-    pub(crate) fn new(match_mode: ServiceMatchMode, grace: Duration) -> Self {
+    pub(crate) fn new(match_mode: ServiceMatchMode, grace: Duration, max_services: usize) -> Self {
         Self {
             names: ArcSwap::from_pointee(HashMap::new()),
             match_mode,
             grace,
+            max_services,
         }
     }
 
@@ -72,7 +74,17 @@ impl ServiceNameIndex {
     /// 业务作用：用一份新服务名列表刷新索引(仅 list_services 成功时调用)。`now` 由调用方传入(便于确定性验证)。
     /// 返回本轮【需回收 watch】的旧 canonical 名(超 grace 缺席 + canonical 单值替换;冲突不计,见 [`IndexRefreshOutcome`]),
     /// 供调用方 `mark_removed`。
-    pub(crate) fn refresh(&self, names: Vec<String>, now: Instant) -> IndexRefreshOutcome {
+    pub(crate) fn refresh(
+        &self,
+        names: Vec<String>,
+        now: Instant,
+    ) -> crate::error::Result<IndexRefreshOutcome> {
+        // 超量候选不能替换有效目录，也不能借 grace 保留把历次列表叠加成无界表。
+        if names.len() > self.max_services
+            || names.iter().any(|name| name.is_empty() || name.len() > 256)
+        {
+            return Err(crate::error::RestDiscoveryError::DiscoveryStateLimit);
+        }
         let old = self.names.load();
 
         // 1) 归一化分组:key -> 该 key 下出现过的(去重)raw 名,用于检测大小写冲突。
@@ -122,7 +134,7 @@ impl ServiceNameIndex {
                 continue; // key 仍在册(canonical 未变 → 无操作;变了 → 已记 removed,新 canonical 留在 next)
             }
             let missing_since = old_entry.missing_since.unwrap_or(now);
-            if now.duration_since(missing_since) <= self.grace {
+            if now.duration_since(missing_since) <= self.grace && next.len() < self.max_services {
                 next.insert(
                     key.clone(),
                     ServiceNameEntry {
@@ -137,6 +149,6 @@ impl ServiceNameIndex {
         }
 
         self.names.store(Arc::new(next));
-        IndexRefreshOutcome { removed }
+        Ok(IndexRefreshOutcome { removed })
     }
 }

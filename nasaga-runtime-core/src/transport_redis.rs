@@ -132,7 +132,11 @@ fn entry_mac(
         event_type.as_bytes(),
         payload,
         // 存在标志先行:区分"未携带 trace"与"携带空 trace",拼接不产生歧义。
-        if traceparent.is_some() { b"1" } else { b"0" },
+        if traceparent.is_some() {
+            b"1"
+        } else {
+            b"0"
+        },
         traceparent.unwrap_or_default(),
     ]));
     mac

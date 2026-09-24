@@ -10,9 +10,11 @@ use tokio::time::{timeout, Instant};
 
 use crate::{
     component::{action_panic_error, ActiveStack, ActiveStep, ShutdownActionCleanup},
+    future::StartupCleanup,
     initialization::{
-        freeze_plan, order_enabled, EnabledInitializer, FrozenInitializer, FrozenInitializerPlan,
-        InitializerFailure, InitializerFailureKind, InitializerStage, StagedInitializerTask,
+        freeze_plan, order_enabled, own_initializer_future, EnabledInitializer, FrozenInitializer,
+        FrozenInitializerPlan, InitializerFailure, InitializerFailureKind, InitializerStage,
+        StagedInitializerTask,
     },
     report::{report_shutdown, report_shutdown_summary, ShutdownSummary},
     resources::ResourceOwner,
@@ -115,7 +117,7 @@ struct ShutdownStepCounts {
 pub struct ApplicationRunner {
     application: Application,
     supervisor: TaskSupervisor,
-    components: Vec<Box<dyn ApplicationComponent>>,
+    components: Vec<ComponentEntry>,
     active: ActiveStack,
     // 出栈不代表任务已退出；跨 await 保留任务门，外层取消时仍约束资源释放。
     task_gate_in_progress: bool,
@@ -150,8 +152,16 @@ impl Drop for ApplicationRunner {
         let mut cleanup = CancelledRunnerCleanup {
             application: self.application.clone(),
             active: std::mem::replace(&mut self.active, ActiveStack::new()),
-            _components: std::mem::take(&mut self.components),
+            components: std::mem::take(&mut self.components),
         };
+        #[cfg(feature = "redis")]
+        {
+            self.application.redis_partitions().begin_shutdown();
+            if !self.application.redis_partitions().unfinished().is_empty() {
+                self.retain_partition_dependencies(cleanup);
+                return;
+            }
+        }
         // 正在等待的任务门已不在栈里，必须先恢复它的释放约束，不能越过它处理 initializer 或业务资源。
         if self.task_gate_in_progress {
             self.supervisor.cancel_for_drop();
@@ -179,7 +189,7 @@ impl Drop for ApplicationRunner {
 struct CancelledRunnerCleanup {
     application: Application,
     active: ActiveStack,
-    _components: Vec<Box<dyn ApplicationComponent>>,
+    components: Vec<ComponentEntry>,
 }
 
 impl Drop for CancelledRunnerCleanup {
@@ -199,6 +209,99 @@ impl Drop for CancelledRunnerCleanup {
         self.application.resources().close();
         // 延迟释放期间可能已有替代实例发布；只能清除属于本实例的全局入口。
         self.application.clear_global();
+        // 对象可能持有任务依赖；只有剩余栈与资源归还后才逐项释放，单项展开不截断后续对象。
+        for component in self.components.iter_mut().rev() {
+            if let Some(error) = component.owner.release() {
+                report_shutdown(&error);
+            }
+        }
+    }
+}
+
+/// 生命周期只使用一次准备的元数据，阶段执行不再读取扩展对象的动态身份与依赖。
+struct ComponentMetadata {
+    id: ComponentId,
+    dependencies: &'static [ComponentId],
+}
+
+/// 组件对象从登记起受保护，元数据成功冻结后才允许执行任何生命周期阶段。
+struct ComponentEntry {
+    owner: StartupCleanup<Box<dyn ApplicationComponent>>,
+    metadata: Option<ComponentMetadata>,
+}
+
+impl ComponentEntry {
+    /// 业务作用：接管组件对象但不调用扩展方法，登记失败或未运行时也保留析构隔离。
+    /// 参数说明：`component` 为调用方移交的生命周期实现。
+    /// 返回：尚未读取身份和依赖的组件项；元数据准备前的释放归因于 Application。
+    fn new(component: Box<dyn ApplicationComponent>) -> Self {
+        Self {
+            owner: StartupCleanup::new(
+                component,
+                ComponentId::Application,
+                ApplicationPhase::Stopping,
+                "releasing component instance",
+            ),
+            metadata: None,
+        }
+    }
+
+    /// 业务作用：为自动附加组件完成与显式声明相同的元数据门禁。
+    /// 参数说明：`component` 为框架构造但尚未执行生命周期的组件。
+    /// 返回：元数据已经冻结的受保护对象；扩展读取展开时返回 Bootstrap 错误。
+    #[cfg(any(
+        feature = "config-watch",
+        feature = "mapper-observability",
+        feature = "observability"
+    ))]
+    fn prepared(component: Box<dyn ApplicationComponent>) -> ApplicationResult<Self> {
+        let mut entry = Self::new(component);
+        entry.freeze_metadata()?;
+        Ok(entry)
+    }
+
+    /// 业务作用：在所有阶段开始前一次性读取稳定元数据，阻止阶段间身份漂移与异常越过回滚边界。
+    /// 参数说明：无。
+    /// 返回：身份与依赖均可读取时冻结；任一读取展开转为固定 Bootstrap 错误，不读取异常正文。
+    fn freeze_metadata(&mut self) -> ApplicationResult<()> {
+        if self.metadata.is_some() {
+            return Ok(());
+        }
+        let id = catch_unwind(AssertUnwindSafe(|| self.owner.value().id())).map_err(|payload| {
+            release_shutdown_panic_payload(payload);
+            ApplicationError::new(
+                ComponentId::Application,
+                ApplicationPhase::Bootstrap,
+                "component identity metadata panicked",
+            )
+        })?;
+        // 取得可信身份后立即更新释放归因；依赖读取失败也不能再次询问扩展对象的身份。
+        self.owner = StartupCleanup::new(
+            self.owner.take(),
+            id,
+            ApplicationPhase::Stopping,
+            "releasing component instance",
+        );
+        let dependencies = catch_unwind(AssertUnwindSafe(|| self.owner.value().dependencies()))
+            .map_err(|payload| {
+                release_shutdown_panic_payload(payload);
+                ApplicationError::new(
+                    id,
+                    ApplicationPhase::Bootstrap,
+                    "component dependency metadata panicked",
+                )
+            })?;
+        self.metadata = Some(ComponentMetadata { id, dependencies });
+        Ok(())
+    }
+
+    /// 业务作用：向排序、配置投影和阶段上下文提供同一冻结元数据，避免再进入扩展代码。
+    /// 参数说明：无。
+    /// 返回：已通过准备门禁的身份与静态依赖；准备前读取属于内部状态错误。
+    fn metadata(&self) -> &ComponentMetadata {
+        self.metadata
+            .as_ref()
+            .expect("component metadata is frozen")
     }
 }
 
@@ -236,6 +339,22 @@ fn release_cancelled_step(application: &Application, step: ActiveStep) {
 }
 
 impl ApplicationRunner {
+    /// 业务作用：将未排干消费器的整段依赖所有权延迟到实际退出后释放。
+    /// 参数说明：`cleanup` 为尚未执行清理的动作、资源和组件集合。
+    /// 返回：同步关闭外部借用；所有来源和受管任务都释放守卫后才析构依赖，不声明异步清理成功。
+    #[cfg(feature = "redis")]
+    fn retain_partition_dependencies(&mut self, cleanup: CancelledRunnerCleanup) {
+        self.application.resources().close_borrowing();
+        self.application.clear_global();
+        let retained = std::sync::Arc::new(std::sync::Mutex::new(Some(cleanup)));
+        for runtime in self.application.redis_partitions().unfinished() {
+            let _ = runtime.retain_shutdown_dependency(retained.clone());
+        }
+        // 消费器与普通受管任务可能同时持有依赖，任一侧尚未退出都不能触发另一侧的资源释放。
+        self.supervisor.cancel_for_drop();
+        self.supervisor.retain_until_tasks_release(retained);
+    }
+
     /// 业务作用：外层取消时立即撤销公共入口，并把任务门之后的资源释放责任交给任务存活边界。
     ///
     /// 参数说明：`cleanup` 持有尚未消费的 active stack、资源表和组件所有权。
@@ -321,38 +440,50 @@ impl ApplicationRunner {
 
     /// 业务作用：按声明顺序追加一个生命周期组件。
     ///
-    /// # 参数
-    ///
-    /// - `component`：由 Runner 独占所有权并依次执行 Bootstrap、Start、Prepare 和 Ready 的组件对象。
+    /// 参数说明：`component` 由 Runner 独占并依次执行 Bootstrap、Start、Prepare 和 Ready。
+    /// 返回：登记不读取动态元数据；run 在阶段执行前统一冻结。对象从登记起受析构隔离保护，依赖收口后才释放。
     #[doc(hidden)]
     pub fn with_component(mut self, component: Box<dyn ApplicationComponent>) -> Self {
-        // 这里是唯一完整观察组件表的位置；先发布声明位，全部能力入口才能用同一来源区分未声明与未就绪。
-        self.application.mark_component_declared(component.id());
-        self.components.push(component);
+        self.components.push(ComponentEntry::new(component));
         self
     }
 
     /// 业务作用：将已编入的观测能力纳入相同生命周期，不要求业务额外声明组件。
     /// 参数说明：无。
-    /// 返回：在数据库 I/O 与业务路由之前插入配置冻结节点，保留已有组件相对顺序。
-    fn attach_observability_components(&mut self) {
+    /// 返回：在数据库 I/O 与业务路由之前插入已冻结元数据的组件，保留已有相对顺序；元数据读取失败阻止启动。
+    fn attach_observability_components(&mut self) -> ApplicationResult<()> {
+        #[cfg(feature = "config-watch")]
+        if !self
+            .components
+            .iter()
+            .any(|component| component.metadata().id == ComponentId::Config)
+        {
+            let components = self.declared_components();
+            self.application
+                .mark_component_declared(ComponentId::Config);
+            self.components.push(ComponentEntry::prepared(Box::new(
+                crate::config_watch::LocalConfigComponent::new(components),
+            ))?);
+        }
         #[cfg(feature = "mapper-observability")]
         if !self
             .components
             .iter()
-            .any(|component| component.id() == ComponentId::SqlObservability)
+            .any(|component| component.metadata().id == ComponentId::SqlObservability)
         {
             if let Some(index) = self
                 .components
                 .iter()
-                .position(|component| component.id() == ComponentId::Db)
+                .position(|component| component.metadata().id == ComponentId::Db)
             {
                 // 策略与系列预算必须先于连接探测冻结，避免启动半途才发现观测配置无效。
                 self.application
                     .mark_component_declared(ComponentId::SqlObservability);
                 self.components.insert(
                     index,
-                    Box::new(crate::sql_observability::SqlObservabilityComponent::new()),
+                    ComponentEntry::prepared(Box::new(
+                        crate::sql_observability::SqlObservabilityComponent::new(),
+                    ))?,
                 );
             }
         }
@@ -360,14 +491,14 @@ impl ApplicationRunner {
         if !self
             .components
             .iter()
-            .any(|component| component.id() == ComponentId::Observability)
+            .any(|component| component.metadata().id == ComponentId::Observability)
         {
             let index = self
                 .components
                 .iter()
                 .position(|component| {
                     matches!(
-                        component.id(),
+                        component.metadata().id,
                         ComponentId::SqlObservability | ComponentId::Db | ComponentId::Web
                     )
                 })
@@ -376,9 +507,12 @@ impl ApplicationRunner {
                 .mark_component_declared(ComponentId::Observability);
             self.components.insert(
                 index,
-                Box::new(crate::observability::ObservabilityComponent::new()),
+                ComponentEntry::prepared(Box::new(
+                    crate::observability::ObservabilityComponent::new(),
+                ))?,
             );
         }
+        Ok(())
     }
 
     /// 业务作用：原子替换当前配置视图并通知订阅者。
@@ -397,7 +531,7 @@ impl ApplicationRunner {
     /// - `user_hook`：接收 Application 所有权副本并返回受监督 future 的业务启动入口。
     ///
     /// 返回：Service 正常停机或 Batch 工作完成时返回含退出原因、退出码和次要清理错误的结果；
-    /// 无法建立生命周期控制面或无法提交最终状态时返回主错误。
+    /// 启动或关键任务失败先执行统一回滚再返回主错误；无法建立控制面或提交最终状态也返回错误。
     #[doc(hidden)]
     pub async fn run<F, Fut, E>(mut self, user_hook: F) -> ApplicationResult<ApplicationExit>
     where
@@ -410,7 +544,6 @@ impl ApplicationRunner {
         // 之前安装——catch_unwind 在 hook 之后才生效,拦不住默认 hook 先把 payload
         // 写进 stderr。重复安装由 Once 收敛。
         crate::panic_hook::install_process_panic_hook();
-        self.attach_observability_components();
         // handler ready ACK 是所有异步组件的前置屏障，确保启动卡住时仍可被终止。
         let signal_mode = std::mem::replace(&mut self.signal_mode, SignalMode::Disabled);
         let mut broker = match SignalBroker::start(signal_mode, self.application.clone()).await {
@@ -418,6 +551,24 @@ impl ApplicationRunner {
             Err(error) => return Err(self.fail_without_broker(error).await),
         };
         let startup_deadline = Instant::now() + self.startup_timeout;
+
+        // 元数据属于启动信任边界；所有显式组件先通过门禁，任何一个失败都不执行其它组件的阶段。
+        for component in &mut self.components {
+            if let Err(error) = component.freeze_metadata() {
+                return self
+                    .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                    .await;
+            }
+        }
+        for component in &self.components {
+            self.application
+                .mark_component_declared(component.metadata().id);
+        }
+        if let Err(error) = self.attach_observability_components() {
+            return self
+                .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                .await;
+        }
 
         if let Err(error) = self.validate_component_order() {
             return self
@@ -457,6 +608,8 @@ impl ApplicationRunner {
                     }
                 };
                 if let Err(stop) = self.prepare_components(startup_deadline, &mut broker).await {
+                    // 未进入屏障的实例先释放捕获依赖，再由统一回滚关闭组件资源。
+                    drop(plan);
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
                 if let Err(stop) = self
@@ -464,6 +617,13 @@ impl ApplicationRunner {
                     .await
                 {
                     return self.handle_startup_stop(stop, &mut broker).await;
+                }
+
+                #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+                if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
+                    return self
+                        .handle_startup_stop(StartupStop::Failure(error), &mut broker)
+                        .await;
                 }
 
                 // 工作负载可登记现有业务资源/任务，但 initializer 登记门从未开放。
@@ -529,6 +689,8 @@ impl ApplicationRunner {
                     }
                 };
                 if let Err(stop) = self.prepare_components(startup_deadline, &mut broker).await {
+                    // 未进入屏障的实例先释放捕获依赖，再由统一回滚关闭组件资源。
+                    drop(plan);
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
                 let staged_tasks = match self
@@ -547,28 +709,33 @@ impl ApplicationRunner {
                 // 最后才撤销 initializer action 和资源。这也覆盖 Seal/Ready 失败时尚未激活 staged task 的路径。
                 self.active.push_initializer_tasks();
 
-                // Mapper L2 兜底断言（Service 专属）：存在 cache=true 的 Mapper 查询却没有在
-                // Hook 中显式安装 L2 时，在对外提供服务之前 fail-fast，避免生产流量静默绕过缓存。
-                // 断言放在 Hook 之后，业务装配已经完成；Batch 不做该断言，因为它的 Hook 本身就是
-                // 工作负载，事后断言会把已经完成的批任务错误改判为失败。
+                // 静态装配与 initializer 均已完成，接流前确认缓存查询具有可用默认 L2。
                 #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
                 if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
+                    // 尚未移交的捕获值必须先于依赖资源释放，守卫隔离各工厂的析构异常。
+                    drop(staged_tasks);
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
                 }
                 if let Err(error) = self.seal_initialization() {
+                    // 封存失败不再构造终端，先释放工厂捕获值，再撤销依赖。
+                    drop(staged_tasks);
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
                 }
                 // 全局 Weak 槽在 sealed 后、Ready 前安装，Ready action 可以构造需要 Application 的终端资源。
                 if let Err(error) = self.application.install_global() {
+                    // 未取得全局发布权时保持未接流，撤销暂存所有权后才回滚资源。
+                    drop(staged_tasks);
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
                 }
                 if let Err(stop) = self.ready_components(startup_deadline, &mut broker).await {
+                    // 组件拒绝 Ready 后不激活 initializer，捕获依赖的工厂先独立释放。
+                    drop(staged_tasks);
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
                 if let Err(stop) = self
@@ -666,7 +833,7 @@ impl ApplicationRunner {
     fn declared_components(&self) -> Vec<ComponentId> {
         self.components
             .iter()
-            .map(|component| component.id())
+            .map(|component| component.metadata().id)
             .collect()
     }
 
@@ -678,16 +845,26 @@ impl ApplicationRunner {
     fn validate_component_order(&self) -> ApplicationResult<()> {
         let component_ids = self.declared_components();
         crate::spec::validate_component_order(&component_ids)?;
+        #[cfg(any(feature = "db", feature = "db-pgsql"))]
+        if !crate::migrations::MIGRATION_PLANS.is_empty()
+            && !component_ids.contains(&ComponentId::Db)
+        {
+            // 静态计划承诺工作负载之前完成迁移；缺少 DB owner 时不能悄然跳过此门禁。
+            return Err(runner_error(
+                ApplicationPhase::Bootstrap,
+                "migration plans require the db component",
+            ));
+        }
         let mut declared = std::collections::HashSet::new();
         for component in &self.components {
-            let id = component.id();
+            let id = component.metadata().id;
             if !declared.insert(id) {
                 return Err(runner_error(
                     ApplicationPhase::Bootstrap,
                     format!("component `{id}` is declared more than once"),
                 ));
             }
-            for dependency in component.dependencies() {
+            for dependency in component.metadata().dependencies {
                 if !declared.contains(dependency) {
                     return Err(runner_error(
                         ApplicationPhase::Bootstrap,
@@ -701,17 +878,54 @@ impl ApplicationRunner {
 
     /// 业务作用：按声明顺序执行所有组件的 Bootstrap 阶段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `deadline`：整个异步启动共享的绝对截止时间。
     /// - `broker`：在组件 future 卡住时仍被并发轮询的信号控制面。
+    /// 返回：全部组件及阶段释放完成时成功；构造、轮询或析构展开、普通错误与启动中断交给统一回滚。
     async fn bootstrap_components(
         &mut self,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop> {
+        crate::managed_adapters::validate(
+            self.application.config().value(),
+            &self.declared_components(),
+        )
+        .map_err(StartupStop::Failure)?;
+        // 外部材料必须先于日志、配置中心认证和其余消费者准备；同步 preflight 不执行远端 I/O。
+        let view = self.application.config_view();
+        if let Some(raw) = view.bootstrap_candidate().map_err(StartupStop::Failure)? {
+            let prepare = async {
+                let candidate = crate::config::resolve_candidate_async(
+                    view.snapshot().version(),
+                    raw,
+                    Vec::new(),
+                )
+                .await
+                .map_err(|error| {
+                    ApplicationError::with_source(
+                        ComponentId::Config,
+                        ApplicationPhase::Bootstrap,
+                        "external bootstrap material preparation failed",
+                        error,
+                    )
+                })?;
+                self.application
+                    .publish_config(candidate.finish(view.reload_statuses().clone()));
+                Ok(())
+            };
+            await_startup_future(
+                prepare,
+                deadline,
+                ApplicationPhase::Bootstrap,
+                &self.application,
+                broker,
+            )
+            .await?;
+        }
         for component in &mut self.components {
-            let component_id = component.id();
+            let component_id = component.metadata().id;
             let mut context = BootstrapContext::new(
                 &self.application,
                 component_id,
@@ -719,9 +933,22 @@ impl ApplicationRunner {
                 deadline.into(),
             );
             await_startup_future(
-                component.bootstrap(&mut context),
+                // trait 调用延迟到隔离 future 内，已激活的副作用在构造或轮询展开后仍由回滚栈接管。
+                isolate_component_startup(
+                    async {
+                        retain_startup_future(
+                            component.owner.value_mut().bootstrap(&mut context),
+                            component_id,
+                            ApplicationPhase::Bootstrap,
+                        )
+                        .await
+                    },
+                    component_id,
+                    ApplicationPhase::Bootstrap,
+                ),
                 deadline,
                 ApplicationPhase::Bootstrap,
+                &self.application,
                 broker,
             )
             .await?;
@@ -731,17 +958,23 @@ impl ApplicationRunner {
 
     /// 业务作用：按声明顺序执行所有组件的 Start 阶段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
     /// - `deadline`：与前序阶段共享的绝对启动截止时间。
     /// - `broker`：持续观察启动中断信号的控制面。
+    /// 返回：全部组件及阶段释放完成时成功；构造、轮询或析构展开、普通错误与启动中断交给统一回滚。
     async fn start_components(
         &mut self,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop> {
+        crate::managed_adapters::validate(
+            self.application.config().value(),
+            &self.declared_components(),
+        )
+        .map_err(StartupStop::Failure)?;
         for component in &mut self.components {
-            let component_id = component.id();
+            let component_id = component.metadata().id;
             let mut context = StartContext::new(
                 &self.application,
                 component_id,
@@ -749,9 +982,22 @@ impl ApplicationRunner {
                 deadline.into(),
             );
             await_startup_future(
-                component.start(&mut context),
+                // 监听或注册已成功时必须保留异步撤销责任，不能让组件展开直接析构整个 Runner。
+                isolate_component_startup(
+                    async {
+                        retain_startup_future(
+                            component.owner.value_mut().start(&mut context),
+                            component_id,
+                            ApplicationPhase::Start,
+                        )
+                        .await
+                    },
+                    component_id,
+                    ApplicationPhase::Start,
+                ),
                 deadline,
                 ApplicationPhase::Start,
+                &self.application,
                 broker,
             )
             .await?;
@@ -779,7 +1025,7 @@ impl ApplicationRunner {
     /// - `deadline`：与 Bootstrap、Start 和后续初始化共享的绝对截止时刻。
     /// - `broker`：组件 future 阻塞时仍持续观察启动中断信号的控制面。
     ///
-    /// 返回：全部出站门禁通过时成功；组件失败、任务失败、超时或终止时返回唯一启动中断。
+    /// 返回：全部出站门禁通过时成功；组件错误或展开、任务失败、超时或终止时返回唯一启动中断。
     async fn prepare_components(
         &mut self,
         deadline: Instant,
@@ -787,33 +1033,86 @@ impl ApplicationRunner {
     ) -> Result<(), StartupStop> {
         let cancellation = self.application.cancellation_token();
         for component in &mut self.components {
-            let component_id = component.id();
+            let component_id = component.metadata().id;
             let mut context = PrepareContext::new(
                 &self.application,
                 component_id,
                 &mut self.active,
                 deadline.into(),
             );
-            let future = component.prepare(&mut context);
-            tokio::pin!(future);
-            loop {
-                let remaining = startup_remaining(deadline, ApplicationPhase::Prepare)?;
-                tokio::select! {
-                    result = &mut future => {
-                        result.map_err(StartupStop::Failure)?;
-                        break;
-                    }
-                    _ = cancellation.cancelled() => return Err(StartupStop::Requested),
-                    signal = broker.next() => return Err(signal_to_startup_stop(signal)),
-                    completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
-                        if let Some(completion) = completion {
-                            classify_startup_completion(completion)?;
+            // 迁移工厂和出站装配可在任一次 poll 中展开，阶段内收敛后才能按原栈逆序撤销。
+            let future = isolate_component_startup(
+                async {
+                    retain_startup_future(
+                        component.owner.value_mut().prepare(&mut context),
+                        component_id,
+                        ApplicationPhase::Prepare,
+                    )
+                    .await
+                },
+                component_id,
+                ApplicationPhase::Prepare,
+            );
+            let mut owned = StartupCleanup::new(
+                Box::pin(future),
+                component_id,
+                ApplicationPhase::Prepare,
+                "releasing component wait",
+            );
+            let result = async {
+                loop {
+                    let remaining = startup_remaining(deadline, ApplicationPhase::Prepare)?;
+                    tokio::select! {
+                        result = owned.value_mut() => {
+                            result.map_err(StartupStop::Failure)?;
+                            break;
+                        }
+                        _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                        signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                        completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                            if let Some(completion) = completion {
+                                classify_startup_completion(completion)?;
+                            }
+                        }
+                        _ = tokio::time::sleep(remaining) => {
+                            return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare)));
                         }
                     }
-                    _ = tokio::time::sleep(remaining) => {
-                        return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare)));
+                }
+                Ok(())
+            }
+            .await;
+            finish_startup_release(result, owned.release())?;
+        }
+        let mut context = PrepareContext::new(
+            &self.application,
+            ComponentId::Application,
+            &mut self.active,
+            deadline.into(),
+        );
+        let adapters = crate::managed_adapters::prepare(&mut context);
+        tokio::pin!(adapters);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                _ = tokio::time::sleep_until(deadline) => return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Prepare))),
+                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                    if let Some(completion) = completion {
+                        classify_startup_completion(completion)?;
                     }
                 }
+                result = &mut adapters => {
+                    if let Some(task) = result.map_err(StartupStop::Failure)? {
+                        // 资源清理责任已经压栈；探测任务交给同一监督器，在统一屏障后运行并在释放资源前收割。
+                        self.supervisor.spawn_component_critical(
+                            "object-store-health-monitor",
+                            Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
+                        ).map_err(StartupStop::Failure)?;
+                    }
+                    break;
+                },
             }
         }
         Ok(())
@@ -826,46 +1125,135 @@ impl ApplicationRunner {
     /// - `deadline`：全启动流程共享的绝对截止时刻。
     /// - `broker`：在工厂和每个阶段 future 期间保持活跃的信号控制面。
     ///
-    /// 返回：三轮全部成功时返回尚未构造/轮询的长期任务工厂；任一失败立即停止后续项。
+    /// 返回：三轮与实例释放全部成功时返回尚未构造的长期任务工厂；任一失败停止后续项并逐项释放实例。
     async fn run_initializers(
         &mut self,
         plan: FrozenInitializerPlan,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<Vec<StagedInitializerTask>, StartupStop> {
+        let mut staged_tasks = Vec::new();
         let mut enabled = Vec::with_capacity(plan.entries.len());
-        for entry in plan.entries {
-            match entry {
-                FrozenInitializer::Static { spec, factory } => {
-                    let name: Arc<str> = Arc::from(spec.name());
-                    let started = StdInstant::now();
-                    let future = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        factory(self.application.clone())
-                    }))
-                    .map_err(|_| {
-                        crate::initialization::record_duration(
-                            &self.application,
-                            &name,
-                            InitializerStage::Factory,
-                            started.elapsed(),
-                        );
-                        crate::initialization::record_failure(
-                            &self.application,
-                            &name,
-                            InitializerStage::Factory,
-                            InitializerFailureKind::Panicked,
-                        );
-                        StartupStop::Failure(initializer_failure_error(
+        let mut pending = std::collections::VecDeque::from(plan.entries);
+        let mut result = async {
+            while let Some(entry) = pending.pop_front() {
+                match entry {
+                    FrozenInitializer::Static { spec, factory } => {
+                        let name: Arc<str> = Arc::from(spec.name());
+                        let started = StdInstant::now();
+                        let future = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            factory(self.application.clone())
+                        }))
+                        .map_err(|payload| {
+                            release_shutdown_panic_payload(payload);
+                            crate::initialization::record_duration(
+                                &self.application,
+                                &name,
+                                InitializerStage::Factory,
+                                started.elapsed(),
+                            );
+                            crate::initialization::record_failure(
+                                &self.application,
+                                &name,
+                                InitializerStage::Factory,
+                                InitializerFailureKind::Panicked,
+                            );
+                            StartupStop::Failure(initializer_failure_error(
+                                name.clone(),
+                                InitializerStage::Factory,
+                                InitializerFailureKind::Panicked,
+                                None,
+                            ))
+                        })?;
+                        let initializer = await_initializer_future(
+                            // 工厂产出实例后先接管它，再释放工厂 future；两者的析构异常不能相互穿透。
+                            own_initializer_future(future),
                             name.clone(),
                             InitializerStage::Factory,
-                            InitializerFailureKind::Panicked,
-                            None,
-                        ))
-                    })?;
-                    let initializer = await_initializer_future(
+                            deadline,
+                            &self.application,
+                            &mut self.supervisor,
+                            broker,
+                        )
+                        .await?;
+                        tracing::info!(
+                            initializer = %name,
+                            stage = %InitializerStage::Factory,
+                            duration_seconds = started.elapsed().as_secs_f64(),
+                            enabled = initializer.is_some(),
+                            "initializer factory completed"
+                        );
+                        if let Some(initializer) = initializer {
+                            enabled.push(EnabledInitializer { spec, initializer });
+                        }
+                    }
+                    FrozenInitializer::Runtime { spec, initializer } => {
+                        enabled.push(EnabledInitializer { spec, initializer });
+                    }
+                }
+            }
+
+            // 排序只借用元数据；失败后实例仍留在本层，统一释放不会依赖局部容器的隐式析构。
+            let ordered = order_enabled(&enabled).map_err(StartupStop::Failure)?;
+            for stage in [
+                InitializerStage::Before,
+                InitializerStage::Initialize,
+                InitializerStage::After,
+            ] {
+                for index in &ordered {
+                    let entry = &mut enabled[*index];
+                    let name: Arc<str> = Arc::from(entry.spec.name());
+                    let started = StdInstant::now();
+                    let cancellation = self.application.cancellation_token();
+                    let mut context = InitializationContext {
+                        application: &self.application,
+                        initializer: name.clone(),
+                        kind: entry.spec.initializer_kind(),
+                        stage,
+                        active: &mut self.active,
+                        staged_tasks: &mut staged_tasks,
+                        deadline,
+                        cancellation,
+                    };
+                    // trait 方法调用也放进 async 边界，使“构造 future 时 panic”与
+                    // “poll 时 panic”都被同一 `catch_unwind` 收敛，不越过 Runner 回滚边界。
+                    let future = async {
+                        match stage {
+                            InitializerStage::Before => {
+                                retain_startup_future(
+                                    entry.initializer.value_mut().before(&mut context),
+                                    ComponentId::Application,
+                                    ApplicationPhase::Initialization,
+                                )
+                                .await
+                            }
+                            InitializerStage::Initialize => {
+                                retain_startup_future(
+                                    entry.initializer.value_mut().initialize(&mut context),
+                                    ComponentId::Application,
+                                    ApplicationPhase::Initialization,
+                                )
+                                .await
+                            }
+                            InitializerStage::After => {
+                                retain_startup_future(
+                                    entry.initializer.value_mut().after(&mut context),
+                                    ComponentId::Application,
+                                    ApplicationPhase::Initialization,
+                                )
+                                .await
+                            }
+                            InitializerStage::Factory | InitializerStage::Activation => {
+                                unreachable!(
+                                    "initializer barrier only executes before, initialize, and after"
+                                )
+                            }
+                        }
+                    };
+                    await_initializer_future(
                         future,
                         name.clone(),
-                        InitializerStage::Factory,
+                        stage,
                         deadline,
                         &self.application,
                         &mut self.supervisor,
@@ -874,75 +1262,32 @@ impl ApplicationRunner {
                     .await?;
                     tracing::info!(
                         initializer = %name,
-                        stage = %InitializerStage::Factory,
+                        stage = %stage,
                         duration_seconds = started.elapsed().as_secs_f64(),
-                        enabled = initializer.is_some(),
-                        "initializer factory completed"
+                        "initializer stage completed"
                     );
-                    if let Some(initializer) = initializer {
-                        enabled.push(EnabledInitializer { spec, initializer });
-                    }
                 }
-                FrozenInitializer::Runtime { spec, initializer } => {
-                    enabled.push(EnabledInitializer { spec, initializer });
+            }
+            Ok(())
+        }
+        .await;
+        // 无论屏障成功还是中断，先释放全部实例；首个释放错误只在尚无停止原因时阻止启动。
+        for entry in &mut enabled {
+            result = finish_startup_release(result, entry.initializer.release());
+        }
+        for entry in &mut pending {
+            if let FrozenInitializer::Runtime { initializer, .. } = entry {
+                result = finish_startup_release(result, initializer.release());
+            }
+        }
+        if result.is_err() {
+            for task in &mut staged_tasks {
+                if let Some(error) = task.factory.release() {
+                    report_shutdown(&error);
                 }
             }
         }
-
-        let mut ordered = order_enabled(enabled).map_err(StartupStop::Failure)?;
-        let mut staged_tasks = Vec::new();
-        for stage in [
-            InitializerStage::Before,
-            InitializerStage::Initialize,
-            InitializerStage::After,
-        ] {
-            for entry in &mut ordered {
-                let name: Arc<str> = Arc::from(entry.spec.name());
-                let started = StdInstant::now();
-                let cancellation = self.application.cancellation_token();
-                let mut context = InitializationContext {
-                    application: &self.application,
-                    initializer: name.clone(),
-                    kind: entry.spec.initializer_kind(),
-                    stage,
-                    active: &mut self.active,
-                    staged_tasks: &mut staged_tasks,
-                    deadline,
-                    cancellation,
-                };
-                // trait 方法调用也放进 async 边界，使“构造 future 时 panic”与
-                // “poll 时 panic”都被同一 `catch_unwind` 收敛，不越过 Runner 回滚边界。
-                let future = async {
-                    match stage {
-                        InitializerStage::Before => entry.initializer.before(&mut context).await,
-                        InitializerStage::Initialize => {
-                            entry.initializer.initialize(&mut context).await
-                        }
-                        InitializerStage::After => entry.initializer.after(&mut context).await,
-                        InitializerStage::Factory | InitializerStage::Activation => unreachable!(
-                            "initializer barrier only executes before, initialize, and after"
-                        ),
-                    }
-                };
-                await_initializer_future(
-                    future,
-                    name.clone(),
-                    stage,
-                    deadline,
-                    &self.application,
-                    &mut self.supervisor,
-                    broker,
-                )
-                .await?;
-                tracing::info!(
-                    initializer = %name,
-                    stage = %stage,
-                    duration_seconds = started.elapsed().as_secs_f64(),
-                    "initializer stage completed"
-                );
-            }
-        }
-        Ok(staged_tasks)
+        result.map(|()| staged_tasks)
     }
 
     /// 业务作用：封存 initializer 登记期允许扩展的资源 key 和 readiness 名称集合。
@@ -984,103 +1329,85 @@ impl ApplicationRunner {
     /// 返回：全部任务已加入 Supervisor 的关闭屏障时成功；超时、工厂 panic 或名称冲突时保持未接流并清理。
     async fn activate_initializer_tasks(
         &mut self,
-        tasks: Vec<StagedInitializerTask>,
+        mut tasks: Vec<StagedInitializerTask>,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop> {
         if tasks.is_empty() {
             return Ok(());
         }
-        for task in tasks {
-            startup_remaining(deadline, ApplicationPhase::Ready)?;
-            let started = StdInstant::now();
-            let cancellation = self.application.cancellation_token();
-            // 激活循环可能包含多个同步工厂；每项之间显式让出并优先处理停止事件，
-            // 避免启动已取消时仍继续构造后续业务 future。
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    crate::initialization::record_duration(
-                        &self.application,
-                        &task.initializer,
-                        InitializerStage::Activation,
-                        started.elapsed(),
-                    );
-                    crate::initialization::record_failure(
-                        &self.application,
-                        &task.initializer,
-                        InitializerStage::Activation,
-                        InitializerFailureKind::Cancelled,
-                    );
-                    return Err(StartupStop::Requested);
-                }
-                signal = broker.next() => {
-                    crate::initialization::record_duration(
-                        &self.application,
-                        &task.initializer,
-                        InitializerStage::Activation,
-                        started.elapsed(),
-                    );
-                    crate::initialization::record_failure(
-                        &self.application,
-                        &task.initializer,
-                        InitializerStage::Activation,
-                        InitializerFailureKind::Cancelled,
-                    );
-                    return Err(signal_to_startup_stop(signal));
-                }
-                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
-                    if let Some(completion) = completion {
-                        if let Err(stop) = classify_startup_completion(completion) {
-                            crate::initialization::record_duration(
-                                &self.application,
-                                &task.initializer,
-                                InitializerStage::Activation,
-                                started.elapsed(),
-                            );
-                            crate::initialization::record_failure(
-                                &self.application,
-                                &task.initializer,
-                                InitializerStage::Activation,
-                                InitializerFailureKind::Cancelled,
-                            );
-                            return Err(stop);
-                        }
-                    }
-                }
-                _ = tokio::task::yield_now() => {}
-            }
-            let token = self.supervisor.task_token();
-            let future =
-                std::panic::catch_unwind(AssertUnwindSafe(|| (task.factory)(token.clone())))
-                    .map_err(|_| {
-                        crate::initialization::record_failure(
-                            &self.application,
-                            &task.initializer,
-                            InitializerStage::Activation,
-                            InitializerFailureKind::Panicked,
-                        );
+        let result = async {
+            while !tasks.is_empty() {
+                let mut task = tasks.remove(0);
+                startup_remaining(deadline, ApplicationPhase::Ready)?;
+                let started = StdInstant::now();
+                let cancellation = self.application.cancellation_token();
+                // 激活循环可能包含多个同步工厂；每项之间显式让出并优先处理停止事件，
+                // 避免启动已取消时仍继续构造后续业务 future。
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
                         crate::initialization::record_duration(
                             &self.application,
                             &task.initializer,
                             InitializerStage::Activation,
                             started.elapsed(),
                         );
-                        StartupStop::Failure(initializer_failure_error(
-                            task.initializer.clone(),
+                        crate::initialization::record_failure(
+                            &self.application,
+                            &task.initializer,
                             InitializerStage::Activation,
-                            InitializerFailureKind::Panicked,
-                            None,
-                        ))
-                    })?;
-            self.supervisor
-                .spawn_initializer_task(task.name, task.kind, future)
-                .map_err(|error| {
+                            InitializerFailureKind::Cancelled,
+                        );
+                        return Err(StartupStop::Requested);
+                    }
+                    signal = broker.next() => {
+                        crate::initialization::record_duration(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            started.elapsed(),
+                        );
+                        crate::initialization::record_failure(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            InitializerFailureKind::Cancelled,
+                        );
+                        return Err(signal_to_startup_stop(signal));
+                    }
+                    completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                        if let Some(completion) = completion {
+                            if let Err(stop) = classify_startup_completion(completion) {
+                                crate::initialization::record_duration(
+                                    &self.application,
+                                    &task.initializer,
+                                    InitializerStage::Activation,
+                                    started.elapsed(),
+                                );
+                                crate::initialization::record_failure(
+                                    &self.application,
+                                    &task.initializer,
+                                    InitializerStage::Activation,
+                                    InitializerFailureKind::Cancelled,
+                                );
+                                return Err(stop);
+                            }
+                        }
+                    }
+                    _ = tokio::task::yield_now() => {}
+                }
+                let token = self.supervisor.task_token();
+                let future = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    (task.factory.take())(token.clone())
+                }))
+                .map_err(|payload| {
+                    release_shutdown_panic_payload(payload);
                     crate::initialization::record_failure(
                         &self.application,
                         &task.initializer,
                         InitializerStage::Activation,
-                        InitializerFailureKind::Error,
+                        InitializerFailureKind::Panicked,
                     );
                     crate::initialization::record_duration(
                         &self.application,
@@ -1091,18 +1418,48 @@ impl ApplicationRunner {
                     StartupStop::Failure(initializer_failure_error(
                         task.initializer.clone(),
                         InitializerStage::Activation,
-                        InitializerFailureKind::Error,
-                        Some(anyhow::Error::from(error)),
+                        InitializerFailureKind::Panicked,
+                        None,
                     ))
                 })?;
-            crate::initialization::record_duration(
-                &self.application,
-                &task.initializer,
-                InitializerStage::Activation,
-                started.elapsed(),
-            );
+                self.supervisor
+                    .spawn_initializer_task(task.name, task.kind, future)
+                    .map_err(|error| {
+                        crate::initialization::record_failure(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            InitializerFailureKind::Error,
+                        );
+                        crate::initialization::record_duration(
+                            &self.application,
+                            &task.initializer,
+                            InitializerStage::Activation,
+                            started.elapsed(),
+                        );
+                        StartupStop::Failure(initializer_failure_error(
+                            task.initializer.clone(),
+                            InitializerStage::Activation,
+                            InitializerFailureKind::Error,
+                            Some(anyhow::Error::from(error)),
+                        ))
+                    })?;
+                crate::initialization::record_duration(
+                    &self.application,
+                    &task.initializer,
+                    InitializerStage::Activation,
+                    started.elapsed(),
+                );
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        for task in &mut tasks {
+            if let Some(error) = task.factory.release() {
+                report_shutdown(&error);
+            }
+        }
+        result
     }
 
     /// 业务作用：按声明顺序装配组件并移交终端所有权；任务主体等待全应用屏障，Batch 不开放业务 listener。
@@ -1111,68 +1468,119 @@ impl ApplicationRunner {
     /// - `deadline`：与 Bootstrap、Start、UserHook、Prepare 和 Initialization 共享的启动截止时间。
     /// - `broker`：持续观察启动中断信号的控制面。
     ///
-    /// 返回：全部 Ready 装配成功且所有权登记完成时成功；失败由调用方收割未执行任务并反向清理资源。
+    /// 返回：全部 Ready 装配成功且所有权登记完成时成功；错误或展开由调用方收割未执行任务并反向清理资源。
     async fn ready_components(
         &mut self,
         deadline: Instant,
         broker: &mut SignalBroker,
     ) -> Result<(), StartupStop> {
+        let cancellation = self.application.cancellation_token();
         let batch = self.application.info().mode() == ApplicationMode::Batch;
         let mut staged_tasks = Vec::new();
-        for component in &mut self.components {
-            let component_id = component.id();
-            if batch
-                && !matches!(
+        let result = async {
+            for component in &mut self.components {
+                let component_id = component.metadata().id;
+                if batch
+                    && !matches!(
+                        component_id,
+                        ComponentId::Observability | ComponentId::SqlObservability
+                    )
+                {
+                    continue;
+                }
+                let mut context = ReadyContext::new(
+                    &self.application,
                     component_id,
-                    ComponentId::Observability | ComponentId::SqlObservability
-                )
-            {
-                continue;
-            }
-            let mut context = ReadyContext::new(
-                &self.application,
-                component_id,
-                &mut self.active,
-                deadline.into(),
-            );
-            {
-                // Ready future 的可变组件借用必须在取终端任务前结束，避免两个生命周期操作交叠。
-                let future = component.ready(&mut context);
-                tokio::pin!(future);
-                loop {
-                    let remaining = startup_remaining(deadline, ApplicationPhase::Ready)?;
-                    tokio::select! {
-                        result = &mut future => {
-                            result.map_err(StartupStop::Failure)?;
-                            break;
-                        }
-                        signal = broker.next() => return Err(signal_to_startup_stop(signal)),
-                        completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
-                            if let Some(completion) = completion {
-                                classify_startup_completion(completion)?;
+                    &mut self.active,
+                    deadline.into(),
+                );
+                {
+                    // Ready future 的可变组件借用必须在取终端任务前结束，避免两个生命周期操作交叠。
+                    let future = isolate_component_startup(
+                        async {
+                            retain_startup_future(
+                                component.owner.value_mut().ready(&mut context),
+                                component_id,
+                                ApplicationPhase::Ready,
+                            )
+                            .await
+                        },
+                        component_id,
+                        ApplicationPhase::Ready,
+                    );
+                    let mut owned = StartupCleanup::new(
+                        Box::pin(future),
+                        component_id,
+                        ApplicationPhase::Ready,
+                        "releasing component wait",
+                    );
+                    let result = async {
+                        loop {
+                            let remaining = startup_remaining(deadline, ApplicationPhase::Ready)?;
+                            tokio::select! {
+                                result = owned.value_mut() => {
+                                    result.map_err(StartupStop::Failure)?;
+                                    break;
+                                }
+                                _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                                signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                                    if let Some(completion) = completion {
+                                        classify_startup_completion(completion)?;
+                                    }
+                                }
+                                _ = tokio::time::sleep(remaining) => {
+                                    return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Ready)));
+                                }
                             }
                         }
-                        _ = tokio::time::sleep(remaining) => {
-                            return Err(StartupStop::Failure(startup_timeout_error(ApplicationPhase::Ready)));
-                        }
+                        Ok(())
                     }
+                    .await;
+                    finish_startup_release(result, owned.release())?;
+                }
+                // 任务移交仍属于 Ready 门禁，构造展开时不得放行已暂存的任务主体。
+                let task = catch_unwind(AssertUnwindSafe(|| component.owner.value_mut().take_critical_task())).map_err(
+                    |payload| {
+                        StartupStop::Failure(component_startup_panic(
+                            component_id,
+                            ApplicationPhase::Ready,
+                            payload,
+                        ))
+                    },
+                )?;
+                if let Some((name, task)) = task {
+                    // 后置组件仍可登记静态指标源；先持有但不 poll，防止出口或业务监听越过最终容量门禁。
+                    staged_tasks.push((
+                        name,
+                        StartupCleanup::new(
+                            task,
+                            component_id,
+                            ApplicationPhase::Ready,
+                            "releasing staged component task",
+                        ),
+                    ));
                 }
             }
-            if let Some((name, task)) = component.take_critical_task() {
-                // 后置组件仍可登记静态指标源；先持有但不 poll，防止出口或业务监听越过最终容量门禁。
-                staged_tasks.push((name, task));
+            // 这里只移交所有权；所有 initializer 工厂构造与最终复验之前，Supervisor 禁止主体 poll。
+            while !staged_tasks.is_empty() {
+                let (name, mut task) = staged_tasks.remove(0);
+                self.supervisor
+                    .spawn_component_critical(
+                        name,
+                        Box::pin(async move { task.value_mut().await.map_err(anyhow::Error::from) }),
+                    )
+                    .map_err(StartupStop::Failure)?;
+            }
+            Ok(())
+        }
+        .await;
+        for (_, task) in &mut staged_tasks {
+            if let Some(error) = task.release() {
+                report_shutdown(&error);
             }
         }
-        // 这里只移交所有权；所有 initializer 工厂构造与最终复验之前，Supervisor 禁止主体 poll。
-        for (name, task) in staged_tasks {
-            self.supervisor
-                .spawn_component_critical(
-                    name,
-                    Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
-                )
-                .map_err(StartupStop::Failure)?;
-        }
-        Ok(())
+        result
     }
 
     /// 业务作用：在全部任务工厂构造后复验最终静态条件、预算、取消及既有任务失败，保护唯一启动发布点。
@@ -1187,7 +1595,7 @@ impl ApplicationRunner {
         for component in &self.components {
             if batch
                 && !matches!(
-                    component.id(),
+                    component.metadata().id,
                     ComponentId::Observability | ComponentId::SqlObservability
                 )
             {
@@ -1195,12 +1603,14 @@ impl ApplicationRunner {
             }
             startup_remaining(deadline, ApplicationPhase::Ready)?;
             // 扩展实现的同步异常必须收敛到启动失败，不能绕过未执行任务收割和反向清理。
-            match catch_unwind(AssertUnwindSafe(|| component.validate_ready())) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                component.owner.value().validate_ready()
+            })) {
                 Ok(result) => result.map_err(StartupStop::Failure)?,
                 Err(payload) => {
                     release_shutdown_panic_payload(payload);
                     return Err(StartupStop::Failure(ApplicationError::new(
-                        component.id(),
+                        component.metadata().id,
                         ApplicationPhase::Ready,
                         "component final readiness check panicked",
                     )));
@@ -1217,7 +1627,9 @@ impl ApplicationRunner {
                 _ = cancellation.cancelled() => return Err(StartupStop::Requested),
                 signal = broker.next() => return Err(signal_to_startup_stop(signal)),
                 completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
-                    if let Some(completion) = completion { classify_startup_completion(completion)?; }
+                    if let Some(completion) = completion {
+                        classify_startup_completion(completion)?;
+                    }
                 }
                 _ = tokio::task::yield_now() => break,
             }
@@ -1338,10 +1750,8 @@ impl ApplicationRunner {
 
     /// 业务作用：处理启动阶段的主失败或信号中断，并保证两者共享同一反向回滚链。
     ///
-    /// # 参数
-    ///
-    /// - `stop`：决定终态和退出码的启动中断分类。
-    /// - `broker`：清理期间继续监听停机中强退信号的控制面。
+    /// 参数说明：`stop` 决定终态和退出码，`broker` 在清理期间继续监听强退信号。
+    /// 返回：先完成清理栈与组件释放，再返回首次主错误或带次要清理错误的信号、主动停止结果。
     async fn handle_startup_stop(
         &mut self,
         stop: StartupStop,
@@ -1360,8 +1770,9 @@ impl ApplicationRunner {
                     std::time::Instant::now() + self.shutdown_timeout,
                     ShutdownReason::StartupFailed,
                 );
-                let failures = self.shutdown_active_stack(&context).await;
+                let mut failures = self.shutdown_active_stack(&context).await;
                 self.application.resources().close();
+                failures.extend(self.release_components());
                 self.application.clear_global();
                 self.application.mark_failed()?;
                 broker.stop().await;
@@ -1383,8 +1794,9 @@ impl ApplicationRunner {
                     std::time::Instant::now() + self.shutdown_timeout,
                     ShutdownReason::Signal(signal),
                 );
-                let failures = self.shutdown_active_stack(&context).await;
+                let mut failures = self.shutdown_active_stack(&context).await;
                 self.application.resources().close();
+                failures.extend(self.release_components());
                 self.application.clear_global();
                 self.application.mark_stopped()?;
                 broker.stop().await;
@@ -1405,8 +1817,9 @@ impl ApplicationRunner {
                     std::time::Instant::now() + self.shutdown_timeout,
                     ShutdownReason::Requested,
                 );
-                let failures = self.shutdown_active_stack(&context).await;
+                let mut failures = self.shutdown_active_stack(&context).await;
                 self.application.resources().close();
+                failures.extend(self.release_components());
                 self.application.clear_global();
                 self.application.mark_stopped()?;
                 broker.stop().await;
@@ -1421,9 +1834,8 @@ impl ApplicationRunner {
 
     /// 业务作用：在信号控制面自身无法建立时执行最小启动失败收敛。
     ///
-    /// # 参数
-    ///
-    /// - `primary`：handler 注册或 ready ACK 失败形成的主错误。
+    /// 参数说明：`primary` 为 handler 注册或 ready ACK 失败形成的主错误。
+    /// 返回：原主错误；组件释放错误单独告警，不覆盖控制面建立失败的原因。
     async fn fail_without_broker(&mut self, mut primary: ApplicationError) -> ApplicationError {
         crate::report::report_runtime(&primary);
         primary.mark_reported();
@@ -1434,8 +1846,9 @@ impl ApplicationRunner {
                 std::time::Instant::now() + self.shutdown_timeout,
                 ShutdownReason::StartupFailed,
             );
-            let failures = self.shutdown_active_stack(&context).await;
+            let mut failures = self.shutdown_active_stack(&context).await;
             self.application.resources().close();
+            failures.extend(self.release_components());
             self.application.clear_global();
             let _ = self.application.mark_failed();
             for failure in &failures {
@@ -1468,11 +1881,11 @@ impl ApplicationRunner {
 
     /// 业务作用：完成正常或故障触发的 Running/Batch 反向清理并写入最终公开状态。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `reason`：传递给资源和 action 的首次停机原因。
     /// - `failed`：首次终态是否为框架或关键任务失败。
     /// - `broker`：清理完成前持续观察强退信号，最终状态写入后才停止。
+    /// 返回：正常停止返回次要清理错误；批任务完成时组件释放异常返回主错误并发布 Failed。
     async fn finish(
         &mut self,
         reason: ShutdownReason,
@@ -1482,16 +1895,54 @@ impl ApplicationRunner {
         self.begin_stopping()?;
         let context =
             ShutdownContext::new(std::time::Instant::now() + self.shutdown_timeout, reason);
-        let shutdown_failures = self.shutdown_active_stack(&context).await;
+        let mut shutdown_failures = self.shutdown_active_stack(&context).await;
         self.application.resources().close();
         self.application.clear_global();
-        if failed {
+        let mut component_failures = self.release_components();
+        // 已有失败、请求与信号保持首次原因；批任务完成尚需归还全部组件所有权才能交付成功结果。
+        let primary = if matches!(context.reason(), ShutdownReason::BatchCompleted)
+            && !component_failures.is_empty()
+        {
+            Some(component_failures.remove(0))
+        } else {
+            None
+        };
+        shutdown_failures.extend(component_failures);
+        if failed || primary.is_some() {
             self.application.mark_failed()?;
         } else {
             self.application.mark_stopped()?;
         }
         broker.stop().await;
-        Ok(shutdown_failures)
+        match primary {
+            Some(error) => Err(error),
+            None => Ok(shutdown_failures),
+        }
+    }
+
+    /// 业务作用：在资源收口后释放组件对象，尚未退出的任务保留最终释放责任。
+    /// 参数说明：无。
+    /// 返回：已同步释放对象的稳定错误；任务仍存活时移交延迟清理，仅在实际退出后释放并告警。
+    fn release_components(&mut self) -> Vec<ApplicationError> {
+        // 发出取消不等于任务已经退出，不能提前释放它仍可能依赖的组件对象。
+        if self.supervisor.has_live_futures() {
+            let cleanup = CancelledRunnerCleanup {
+                application: self.application.clone(),
+                active: std::mem::replace(&mut self.active, ActiveStack::new()),
+                components: std::mem::take(&mut self.components),
+            };
+            self.defer_cancelled_cleanup(cleanup);
+            return Vec::new();
+        }
+        let mut failures = Vec::new();
+        for component in self.components.iter_mut().rev() {
+            if let Some(error) = component.owner.release() {
+                report_shutdown(&error);
+                failures.push(error);
+            }
+        }
+        self.components.clear();
+        failures
     }
 
     /// 业务作用：严格逆序执行所有 active step，并让每一步只消费全局 deadline 的剩余预算。
@@ -1503,13 +1954,32 @@ impl ApplicationRunner {
     async fn shutdown_active_stack(&mut self, context: &ShutdownContext) -> Vec<ApplicationError> {
         let shutdown_started = StdInstant::now();
         let planned_steps = self.active.len();
-        let mut failures = Vec::new();
+        // UserHook 失败可能尚未生成冻结计划；先撤销其登记实例，随后才执行资源栈。
+        let mut failures = self.application.release_pending_initializers();
         let mut counts = ShutdownStepCounts::default();
         let mut business_shutdown_report = ShutdownTaskReport::default();
         let mut attempted_steps = 0_usize;
         let mut shutdown_sequence = 0_usize;
         let mut abandoned_steps = 0_usize;
         let mut task_abort_attempted = false;
+
+        #[cfg(feature = "redis")]
+        {
+            // 消费 handler 可以依赖 initializer、数据库及缓存；在逆序栈关闭这些依赖前先排干消费。
+            // 所有来源先同步关闭，再使用宿主预留预算并发等待，不因单源缓慢延迟其他来源停止。
+            let partitions = self.application.redis_partitions();
+            let partition_context = context.child_context(Duration::MAX);
+            if let Err(error) = partitions.shutdown(partition_context.deadline()).await {
+                failures.push(error);
+                let cleanup = CancelledRunnerCleanup {
+                    application: self.application.clone(),
+                    active: std::mem::replace(&mut self.active, ActiveStack::new()),
+                    components: std::mem::take(&mut self.components),
+                };
+                self.retain_partition_dependencies(cleanup);
+                return failures;
+            }
+        }
 
         // 启动失败可能发生在正常 Seal 之前；先关闭登记集合，才能保证已经成功 ACK 的任务进入
         // 本次回滚，同时阻止任何晚到的 UserHook 调用改变停机计划。
@@ -2099,7 +2569,11 @@ fn log_shutdown_step(
         action = action.unwrap_or("-"),
         duration_seconds = started.elapsed().as_secs_f64(),
         failures_added,
-        outcome = if failures_added == 0 { "completed" } else { "failed" },
+        outcome = if failures_added == 0 {
+            "completed"
+        } else {
+            "failed"
+        },
         "application shutdown step completed"
     );
 }
@@ -2195,116 +2669,127 @@ where
     F: Future<Output = ApplicationResult<T>> + Send,
 {
     let started = StdInstant::now();
-    let future = AssertUnwindSafe(future).catch_unwind();
-    tokio::pin!(future);
-    let cancellation = application.cancellation_token();
-    loop {
-        let remaining = startup_remaining(deadline, ApplicationPhase::Initialization)?;
-        tokio::select! {
-            result = &mut future => {
-                return match result {
-                    Ok(Ok(value)) => {
-                        crate::initialization::record_duration(
-                            application,
-                            &name,
-                            stage,
-                            started.elapsed(),
-                        );
-                        Ok(value)
-                    }
-                    Ok(Err(error)) => {
-                        crate::initialization::record_duration(
-                            application,
-                            &name,
-                            stage,
-                            started.elapsed(),
-                        );
-                        crate::initialization::record_failure(
-                            application,
-                            &name,
-                            stage,
-                            InitializerFailureKind::Error,
-                        );
-                        Err(StartupStop::Failure(initializer_failure_error(
-                            name,
-                            stage,
-                            InitializerFailureKind::Error,
-                            Some(anyhow::Error::new(error)),
-                        )))
-                    }
-                    Err(_) => {
-                        crate::initialization::record_duration(
-                            application,
-                            &name,
-                            stage,
-                            started.elapsed(),
-                        );
-                        crate::initialization::record_failure(
-                            application,
-                            &name,
-                            stage,
-                            InitializerFailureKind::Panicked,
-                        );
-                        Err(StartupStop::Failure(initializer_failure_error(
-                            name,
-                            stage,
-                            InitializerFailureKind::Panicked,
-                            None,
-                        )))
-                    }
-                };
-            }
-            _ = cancellation.cancelled() => {
-                crate::initialization::record_duration(application, &name, stage, started.elapsed());
-                crate::initialization::record_failure(
-                    application,
-                    &name,
-                    stage,
-                    InitializerFailureKind::Cancelled,
-                );
-                return Err(StartupStop::Requested);
-            }
-            signal = broker.next() => {
-                crate::initialization::record_duration(application, &name, stage, started.elapsed());
-                crate::initialization::record_failure(
-                    application,
-                    &name,
-                    stage,
-                    InitializerFailureKind::Cancelled,
-                );
-                return Err(signal_to_startup_stop(signal));
-            }
-            completion = supervisor.join_next(), if supervisor.has_tasks() => {
-                if let Some(completion) = completion {
-                    if let Err(stop) = classify_startup_completion(completion) {
-                        crate::initialization::record_duration(application, &name, stage, started.elapsed());
-                        crate::initialization::record_failure(
-                            application,
-                            &name,
-                            stage,
-                            InitializerFailureKind::Cancelled,
-                        );
-                        return Err(stop);
+    let mut owned = StartupCleanup::new(
+        Box::pin(future),
+        ComponentId::Application,
+        ApplicationPhase::Initialization,
+        "releasing initializer future",
+    );
+    let result = async {
+        let future = AssertUnwindSafe(owned.value_mut()).catch_unwind();
+        tokio::pin!(future);
+        let cancellation = application.cancellation_token();
+        loop {
+            let remaining = startup_remaining(deadline, ApplicationPhase::Initialization)?;
+            tokio::select! {
+                result = &mut future => {
+                    return match result {
+                        Ok(Ok(value)) => {
+                            crate::initialization::record_duration(
+                                application,
+                                &name,
+                                stage,
+                                started.elapsed(),
+                            );
+                            Ok(value)
+                        }
+                        Ok(Err(error)) => {
+                            crate::initialization::record_duration(
+                                application,
+                                &name,
+                                stage,
+                                started.elapsed(),
+                            );
+                            crate::initialization::record_failure(
+                                application,
+                                &name,
+                                stage,
+                                InitializerFailureKind::Error,
+                            );
+                            Err(StartupStop::Failure(initializer_failure_error(
+                                name,
+                                stage,
+                                InitializerFailureKind::Error,
+                                Some(anyhow::Error::new(error)),
+                            )))
+                        }
+                        Err(payload) => {
+                            release_shutdown_panic_payload(payload);
+                            crate::initialization::record_duration(
+                                application,
+                                &name,
+                                stage,
+                                started.elapsed(),
+                            );
+                            crate::initialization::record_failure(
+                                application,
+                                &name,
+                                stage,
+                                InitializerFailureKind::Panicked,
+                            );
+                            Err(StartupStop::Failure(initializer_failure_error(
+                                name,
+                                stage,
+                                InitializerFailureKind::Panicked,
+                                None,
+                            )))
+                        }
+                    };
+                }
+                _ = cancellation.cancelled() => {
+                    crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                    crate::initialization::record_failure(
+                        application,
+                        &name,
+                        stage,
+                        InitializerFailureKind::Cancelled,
+                    );
+                    return Err(StartupStop::Requested);
+                }
+                signal = broker.next() => {
+                    crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                    crate::initialization::record_failure(
+                        application,
+                        &name,
+                        stage,
+                        InitializerFailureKind::Cancelled,
+                    );
+                    return Err(signal_to_startup_stop(signal));
+                }
+                completion = supervisor.join_next(), if supervisor.has_tasks() => {
+                    if let Some(completion) = completion {
+                        if let Err(stop) = classify_startup_completion(completion) {
+                            crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                            crate::initialization::record_failure(
+                                application,
+                                &name,
+                                stage,
+                                InitializerFailureKind::Cancelled,
+                            );
+                            return Err(stop);
+                        }
                     }
                 }
-            }
-            _ = tokio::time::sleep(remaining) => {
-                crate::initialization::record_duration(application, &name, stage, started.elapsed());
-                crate::initialization::record_failure(
-                    application,
-                    &name,
-                    stage,
-                    InitializerFailureKind::TimedOut,
-                );
-                return Err(StartupStop::Failure(initializer_failure_error(
-                    name,
-                    stage,
-                    InitializerFailureKind::TimedOut,
-                    None,
-                )));
+                _ = tokio::time::sleep(remaining) => {
+                    crate::initialization::record_duration(application, &name, stage, started.elapsed());
+                    crate::initialization::record_failure(
+                        application,
+                        &name,
+                        stage,
+                        InitializerFailureKind::TimedOut,
+                    );
+                    return Err(StartupStop::Failure(initializer_failure_error(
+                        name,
+                        stage,
+                        InitializerFailureKind::TimedOut,
+                        None,
+                    )));
+                }
             }
         }
     }
+    .await;
+    finish_startup_release(result, owned.release())
 }
 
 /// 业务作用：构造带 initializer 身份、阶段和低基数分类的全局初始化错误。
@@ -2335,31 +2820,142 @@ fn initializer_failure_error(
     )
 }
 
-/// 业务作用：在启动组件 future、绝对 deadline 和信号控制面之间进行选择。
+/// 业务作用：持有真实扩展 future 到结果裁决之后，避免 await 的隐式析构覆盖已返回的业务错误。
+/// 参数说明：`future` 是扩展返回的任务；`component` 和 `phase` 提供释放失败归因。
+/// 返回：业务失败保持原样；成功后的析构异常阻止启动，外层取消时守卫仍隔离释放。
+fn retain_startup_future<T, F>(
+    future: F,
+    component: ComponentId,
+    phase: ApplicationPhase,
+) -> impl Future<Output = ApplicationResult<T>>
+where
+    F: Future<Output = ApplicationResult<T>>,
+{
+    let mut owned = StartupCleanup::new(
+        Box::pin(future),
+        component,
+        phase,
+        "releasing extension future",
+    );
+    async move {
+        let result = owned.value_mut().await;
+        match (result, owned.release()) {
+            (Ok(_), Some(error)) => Err(error),
+            (result, release) => {
+                if let Some(error) = release {
+                    report_shutdown(&error);
+                }
+                result
+            }
+        }
+    }
+}
+
+/// 业务作用：隔离组件阶段的展开，使已登记副作用继续由统一异步回滚负责。
+/// 参数说明：`future` 须包含 trait 方法调用及其返回 future 的轮询；`component` 与 `phase` 提供稳定归因。
+/// 返回：正常结果保持不变；单次展开转为当前组件阶段错误，不读取异常正文。
+fn isolate_component_startup<F>(
+    future: F,
+    component: ComponentId,
+    phase: ApplicationPhase,
+) -> impl Future<Output = ApplicationResult<()>>
+where
+    F: Future<Output = ApplicationResult<()>>,
+{
+    let mut owned = StartupCleanup::new(
+        Box::pin(future),
+        component,
+        phase,
+        "releasing component future",
+    );
+    async move {
+        let result = AssertUnwindSafe(owned.value_mut())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| Err(component_startup_panic(component, phase, payload)));
+        match (result, owned.release()) {
+            (Ok(()), Some(error)) => Err(error),
+            (result, release) => {
+                if let Some(error) = release {
+                    report_shutdown(&error);
+                }
+                result
+            }
+        }
+    }
+}
+
+/// 业务作用：在启动等待结束后合并释放结果，保持首次错误或停止原因的优先级。
+/// 参数说明：`result` 是已裁决的阶段结果；`release` 是停止轮询后独立析构产生的错误。
+/// 返回：成功阶段的释放异常阻止启动；已有中断保持原归因，次要释放异常单独报告。
+fn finish_startup_release<T>(
+    result: Result<T, StartupStop>,
+    release: Option<ApplicationError>,
+) -> Result<T, StartupStop> {
+    match (result, release) {
+        (Ok(_), Some(error)) => Err(StartupStop::Failure(error)),
+        (result, release) => {
+            if let Some(error) = release {
+                report_shutdown(&error);
+            }
+            result
+        }
+    }
+}
+
+/// 业务作用：将组件展开转换为可回滚的固定错误，并隔离异常对象自身的析构。
+/// 参数说明：`component` 与 `phase` 标识失败边界；`payload` 只用于释放所有权，不参与诊断内容。
+/// 返回：保留组件与生命周期归因的首次失败，随后清理错误由统一回滚另行记录。
+fn component_startup_panic(
+    component: ComponentId,
+    phase: ApplicationPhase,
+    payload: Box<dyn std::any::Any + Send>,
+) -> ApplicationError {
+    crate::shutdown::release_shutdown_panic_payload(payload);
+    ApplicationError::new(component, phase, "component panicked during startup")
+}
+
+/// 业务作用：裁决组件启动、绝对 deadline、显式取消与信号，并在回滚前隔离等待值的释放。
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `future`：当前组件阶段的受监督异步动作。
 /// - `deadline`：整个启动流程共享的绝对截止时间。
 /// - `phase`：超时时写入错误上下文的生命周期阶段。
+/// - `application`：提供显式停机请求的取消令牌。
 /// - `broker`：启动期间持续轮询的信号控制面。
+///
+/// 返回：阶段和释放均成功时继续启动；否则保留首次失败或中断，交由调用方统一回滚。
 async fn await_startup_future<F>(
     future: F,
     deadline: Instant,
     phase: ApplicationPhase,
+    application: &Application,
     broker: &mut SignalBroker,
 ) -> Result<(), StartupStop>
 where
     F: Future<Output = ApplicationResult<()>>,
 {
-    let remaining = startup_remaining(deadline, phase)?;
-    tokio::select! {
-        result = future => result.map_err(StartupStop::Failure),
-        signal = broker.next() => Err(signal_to_startup_stop(signal)),
-        _ = tokio::time::sleep(remaining) => {
-            Err(StartupStop::Failure(startup_timeout_error(phase)))
+    let mut owned = StartupCleanup::new(
+        Box::pin(future),
+        ComponentId::Application,
+        phase,
+        "releasing startup wait",
+    );
+    let cancellation = application.cancellation_token();
+    let result = async {
+        let remaining = startup_remaining(deadline, phase)?;
+        tokio::select! {
+            result = owned.value_mut() => result.map_err(StartupStop::Failure),
+            _ = cancellation.cancelled() => Err(StartupStop::Requested),
+            signal = broker.next() => Err(signal_to_startup_stop(signal)),
+            _ = tokio::time::sleep(remaining) => {
+                Err(StartupStop::Failure(startup_timeout_error(phase)))
+            }
         }
     }
+    .await;
+    finish_startup_release(result, owned.release())
 }
 
 /// 业务作用：计算当前启动阶段可消费的剩余预算。

@@ -8,7 +8,7 @@ transaction。复合主键 `(consumer_name, message_id)` 串行化并发重投�
 
 ```toml
 [dependencies]
-nainbox-pgsql = "1"
+nainbox-pgsql = "1.0.0"
 ```
 
 业务经门面使用时开启 `inbox-pgsql`，并从 `nasa::inbox::pgsql` 导入相同合同；与 `application` 组合时，

@@ -46,7 +46,7 @@ struct SagaArgs {
 
 /// 业务作用：`#[saga]` 入口——校验合同并生成 descriptor 与 adapter。
 ///
-/// 标注对象必须是 `impl SagaStep for ServiceType` 块；宏保留原实现不变，追加：
+/// 标注对象必须是 `impl SagaStep for ServiceType` 块；宏保留业务方法体不变，追加：
 /// 1. `COLLECTED_SAGA_STEPS` 中的静态 descriptor（启动预检与 definition 对齐）；
 /// 2. `ServiceType::saga_handle_command`——按 envelope phase 分发到 runtime 的
 ///    execute/cancel/compensate/resolve 完整事务 wrapper。

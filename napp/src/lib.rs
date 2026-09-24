@@ -1,5 +1,9 @@
 //! NASA 应用生命周期运行时核心。
 //!
+//! 命名 REST、幂等 store、事务审计、对象存储、Schema Registry、TLS HTTP、缓存与 Redis 派生任务
+//! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature
+//! 为空，未选择的能力不建连。可用入口随对应 feature 导出，持久提交与租约仍由各自后端裁决。
+//!
 //! 本 crate 统一拥有配置快照、组件启动与反向停机、受管任务以及 Ready 发布。业务 initializer
 //! 是 `Prepare` 与 `Seal` 之间的固定屏障：静态属性入口与 Service 启动 Hook 的运行时入口先合并
 //! 冻结为同一份依赖图；migration 和出站依赖准备完成后再严格执行全部 `before`、全部
@@ -52,7 +56,7 @@
 //!
 //! 数据库 YAML 中的 migration 段只定义执行策略。Service UserHook 通过
 //! `Application::configure_migrations` 登记业务嵌入的 migrator，DB Prepare 在 initializer 和入站
-//! listener 之前执行门禁；PostgreSQL 独立 session endpoint 还会在 advisory lock 前复验目标身份。
+//! listener 之前执行门禁；Batch 通过 `MIGRATION_PLANS` 静态工厂登记，工作负载前执行。PostgreSQL 独立 session endpoint 还会在 advisory lock 前复验目标身份。
 //!
 //! `rate-limit` 提供共享 Redis 原子计数的跨副本业务配额。业务显式从受管 Redis source 构造 provider；
 //! 本能力不增加组件字符串或配置根，默认后端错误采用 fail-open。与 `web` 组合时可安装 IP 中间件，
@@ -83,6 +87,31 @@
 
 #![forbid(unsafe_code)]
 
+mod diagnostics;
+mod managed_adapters;
+#[cfg(feature = "kafka-schema-registry")]
+mod schema_registry;
+pub use diagnostics::{ConfigStatusSummary, DiagnosticSnapshot, Sampled};
+pub use nabudget::{BudgetError, RequestBudget};
+#[cfg(any(feature = "db", feature = "db-pgsql"))]
+mod migrations;
+#[cfg(any(feature = "db", feature = "db-pgsql"))]
+pub use migrations::{MigrationPlanFactory, MIGRATION_PLANS};
+mod grouped_cache;
+mod object_store;
+#[cfg(feature = "rest")]
+mod rest;
+#[cfg(all(feature = "cache", feature = "redis"))]
+pub use grouped_cache::ManagedGroupedCache;
+#[cfg(feature = "secret-http")]
+mod tls_http;
+#[cfg(feature = "secret-http")]
+pub use tls_http::{ManagedHttpClient, ManagedHttpResponse};
+#[cfg(feature = "redis")]
+mod redis_partition;
+#[cfg(feature = "redis")]
+pub use redis_partition::{RedisPartitionObservation, RedisPartitionStopResult};
+
 mod application;
 /// 两级缓存组件:配置驱动装配 L2 + 失效广播,托管 CacheRuntimeGuard 生命周期。
 #[cfg(feature = "cache")]
@@ -90,6 +119,10 @@ mod cache;
 mod capabilities;
 mod component;
 mod config;
+#[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+mod config_reload;
+#[cfg(feature = "config-watch")]
+mod config_watch;
 #[cfg(all(feature = "db", not(feature = "db-pgsql")))]
 mod db;
 #[cfg(feature = "db-pgsql")]
@@ -138,9 +171,15 @@ pub use inbox::{InboxRetentionPlan, InboxRetentionSnapshot};
 mod log;
 #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
 mod mapper_cache;
+#[cfg(any(
+    feature = "mapper-cache",
+    feature = "mapper-cache-pgsql",
+    feature = "mapper-observability"
+))]
+mod mapper_defaults;
 #[cfg(feature = "web")]
 mod mapping_handle;
-#[cfg(any(feature = "kafka", feature = "web-security"))]
+#[cfg(any(feature = "kafka", feature = "web-auth", feature = "web-crypto"))]
 mod metrics;
 #[cfg(feature = "observability")]
 mod observability;
@@ -179,7 +218,7 @@ pub use problem::{ApiProblem, FieldViolation};
 #[cfg(feature = "web")]
 mod governance;
 #[cfg(feature = "web")]
-pub use governance::{ClientIp, RequestBudget, RequestId};
+pub use governance::{ClientIp, RequestId};
 
 /// 跨副本分布式业务配额:`RateLimitProvider` 抽象 + nadis Redis 固定窗口后端。
 #[cfg(feature = "rate-limit")]
@@ -274,8 +313,12 @@ mod redis;
 mod redis_job;
 #[cfg(feature = "redis-job")]
 pub use redis_job::{RedisJobDescriptor, COLLECTED_REDIS_JOBS};
-#[cfg(any(feature = "log", feature = "nacos-config"))]
+#[cfg(feature = "redis")]
+mod redis_tasks;
+#[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
 mod reload;
+#[cfg(feature = "redis")]
+pub use redis_tasks::ManagedRedisLeader;
 mod report;
 mod resources;
 mod runner;
@@ -295,6 +338,8 @@ mod web;
 mod web_handle;
 #[cfg(feature = "ws")]
 mod ws;
+#[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+mod ws_cluster;
 
 #[cfg(feature = "ws")]
 pub use application::WsCustomization;

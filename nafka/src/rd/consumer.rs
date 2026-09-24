@@ -652,7 +652,11 @@ impl ConsumerClient {
             .consumer
             .fetch_watermarks(&tp.topic, tp.partition, Timeout::After(remaining))
             .map_err(broker_error)?;
-        Ok(Offset::Offset(if high { high_value } else { low }))
+        Ok(Offset::Offset(if high {
+            high_value
+        } else {
+            low
+        }))
     }
 
     /// 业务作用：poll 一条消息或消费错误。

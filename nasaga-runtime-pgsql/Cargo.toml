@@ -20,7 +20,7 @@ nasaga-backend = { version = "1.0.0" }
 nasaga-core = { version = "1.0.1" }
 nasaga-pgsql = { version = "1.0.0" }
 nasaga-runtime-core = { version = "1.0.0" }
-natelemetry = { version = "1.0.1" }
+natelemetry = { version = "1.0.2" }
 natx-pgsql = { version = "1.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
 serde_json = "1"

@@ -133,7 +133,7 @@ pub struct KafkaPartitionLag {
     pub lag: Option<i64>,
 }
 
-/// assign 固定分区消费的起始位点策略,五种语义与参照实现一致。
+/// assign 固定分区消费的起始位点策略。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartOffset {
     /// 从分区最早可用记录开始(受 retention 影响,不是历史第一条)。

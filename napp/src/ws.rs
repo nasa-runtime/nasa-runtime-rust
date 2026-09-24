@@ -20,8 +20,8 @@ struct WsConfigRoot {
 
 /// 长连接服务的监听、握手与背压参数。
 ///
-/// 只覆盖"能从 YAML 声明"的部分；鉴权回调、endpoint 事件表、集群 notifier 是业务闭包，
-/// 由 `Application::configure_ws` 在启动 Hook 里注入。
+/// 鉴权回调和 endpoint 事件表由 `Application::configure_ws` 登记；集群来源可通过
+/// `configure_ws_redis` 或 `configure_ws_kafka` 的标准计划交给宿主装配。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct WsConfig {
@@ -189,6 +189,8 @@ impl WsConfig {
 /// 业务资源封存之后的 Ready——因此 UserHook 失败时进程从未对外接受过一条长连接。
 pub(crate) struct WsComponent {
     config: Option<WsConfig>,
+    task: Option<ApplicationFuture<'static>>,
+    health: Option<crate::ReadinessContributor>,
 }
 
 impl WsComponent {
@@ -198,7 +200,11 @@ impl WsComponent {
     ///
     /// 本方法无参数；监听器在 Ready 阶段才创建。
     pub(crate) fn new() -> Self {
-        Self { config: None }
+        Self {
+            config: None,
+            task: None,
+            health: None,
+        }
     }
 }
 
@@ -221,6 +227,16 @@ impl ApplicationComponent for WsComponent {
         Box::pin(async move {
             let config = read_ws_config(context.application())?;
             config.validate(ApplicationPhase::Start)?;
+            self.health = Some(context.application().register_readiness(
+                ComponentId::Ws,
+                Arc::<str>::from("ws:listener"),
+                crate::ReadinessPolicy {
+                    affects_ready: true,
+                    failure_threshold: 1,
+                    recovery_threshold: 1,
+                    stale_after: Some(Duration::from_secs(5)),
+                },
+            )?);
             self.config = Some(config);
             Ok(())
         })
@@ -230,7 +246,7 @@ impl ApplicationComponent for WsComponent {
     ///
     /// 装配顺序固定为"配置预填 → configure_ws 注册序 → build → bind"：业务定制在配置之后，
     /// 因此可以覆盖声明式取值，也能注入配置无法表达的鉴权回调与 endpoint 事件表；
-    /// `Sender` 在 bind 之前就发布到晚绑定运行态，业务 handler 一旦被触发即可广播，不存在丢消息窗口。
+    /// `Sender` 在 bind 之前发布到晚绑定运行态；监听器准入在全应用 Ready 后由受监督任务开放。
     ///
     /// # 参数
     ///
@@ -250,6 +266,8 @@ impl ApplicationComponent for WsComponent {
             for customize in application.take_ws_customizations() {
                 builder = customize(builder);
             }
+            #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+            let (builder, cluster) = crate::ws_cluster::prepare(context, builder).await?;
             let server = builder.build().map_err(|error| {
                 // BuildError 只含结构性原因（缺 authorize、帧上限非法等），不含业务负载。
                 ws_error(
@@ -257,12 +275,23 @@ impl ApplicationComponent for WsComponent {
                     format!("ws server build failed: {error}"),
                 )
             })?;
+            #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+            if let Some(cluster) = &cluster {
+                cluster.bind(&server)?;
+            }
+
+            let health = self.health.take().ok_or_else(|| {
+                ws_error(
+                    ApplicationPhase::Ready,
+                    "WS readiness was not registered during start",
+                )
+            })?;
 
             // Sender 是 Ready 才存在的晚绑定状态：资源容器此刻已封存，只能进 RuntimeState。
             // 发布必须早于 bind：bind 之后 handler 随时可能被触发，广播能力必须预先就绪。
             application.set_ws_sender(server.sender().clone())?;
 
-            let running = server.bind().await.map_err(|error| {
+            let running = server.bind_suspended().await.map_err(|error| {
                 ApplicationError::with_source(
                     ComponentId::Ws,
                     ApplicationPhase::Ready,
@@ -270,6 +299,14 @@ impl ApplicationComponent for WsComponent {
                     error,
                 )
             })?;
+            let running = Arc::new(running);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            // bind 成功即接管资源，后续地址发布失败同样走完整排干。
+            context.activate(Box::new(WsShutdown {
+                server: Some(running.clone()),
+                budget: Duration::from_millis(config.graceful_shutdown_timeout_ms),
+                cancel: cancel.clone(),
+            }));
             application.set_ws_addrs(running.local_addr, running.ws_local_addr)?;
             match running.ws_local_addr {
                 Some(ws_addr) => tracing::info!(
@@ -279,14 +316,54 @@ impl ApplicationComponent for WsComponent {
                 None => tracing::info!("ws listening on {}", running.local_addr),
             }
 
-            let running = Arc::new(running);
-            // 监听器已在接受连接后才压栈；此后任何退出路径都会先停 accept 再 drain。
-            context.activate(Box::new(WsShutdown {
-                server: Some(running),
-                budget: Duration::from_millis(config.graceful_shutdown_timeout_ms),
+            self.task = Some(Box::pin(async move {
+                // 此主体由 Runner 在全应用 Ready 之后释放，启动失败不可能绕过屏障接流。
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+                running.activate();
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            running.shutdown();
+                            return Ok(());
+                        },
+                        _ = interval.tick() => {
+                            #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+                            let healthy = match &cluster {
+                                Some(cluster) => cluster.healthy().await,
+                                None => true,
+                            };
+                            #[cfg(not(any(feature = "ws-redis", feature = "ws-kafka")))]
+                            let healthy = true;
+                            health.observe(
+                                if healthy {
+                                    crate::DependencyState::Ready
+                                } else {
+                                    crate::DependencyState::Degraded
+                                },
+                                if healthy {
+                                    crate::readiness::reason::HEALTHY
+                                } else {
+                                    crate::readiness::reason::DEGRADED
+                                },
+                                std::time::Instant::now(),
+                            );
+                        },
+                    }
+                }
             }));
             Ok(())
         })
+    }
+
+    /// 业务作用：将监听准入与运行期健康观测交给宿主监督器。
+    /// 参数说明：无。
+    /// 返回：仅首次调用返回等待 Ready 的关键任务；之后为空。
+    fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
+        self.task.take().map(|task| ("ws-listener", task))
     }
 }
 
@@ -294,6 +371,7 @@ impl ApplicationComponent for WsComponent {
 struct WsShutdown {
     server: Option<Arc<RunningServer>>,
     budget: Duration,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ShutdownAction for WsShutdown {
@@ -308,13 +386,15 @@ impl ShutdownAction for WsShutdown {
 
     /// 业务作用：在自身子预算与全局提前截止预算内排空长连接，为后续逆序清理保留时间。
     ///
-    /// 未排空不视为失败：底层已 cancel 全部任务，剩余连接会尽快退出；但必须如实记一条报告，
+    /// 未排空必须报告失败：底层已通知取消，但未取得全部退出证明，
     /// 不把"到点仍有连接在跑"静默说成优雅停机。
     ///
     /// # 参数
     ///
     /// - `context`：提供全局剩余停机预算的清理上下文。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+        // SIGTERM、启动回滚和主动关闭都经过同一 owner，健康循环不能依赖某一种停机来源。
+        self.cancel.cancel();
         Box::pin(async move {
             let Some(server) = self.server.take() else {
                 return Ok(());
@@ -329,6 +409,15 @@ impl ShutdownAction for WsShutdown {
                 "ws connections were still running when the drain budget expired",
             ))
         })
+    }
+}
+
+impl Drop for WsShutdown {
+    /// 业务作用：停机动作被取消或启动回滚时同步撤销监听健康任务。
+    /// 参数说明：无。
+    /// 返回：通知任务退出；监听与连接仍由 RunningServer 的 owner 收尾。
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 

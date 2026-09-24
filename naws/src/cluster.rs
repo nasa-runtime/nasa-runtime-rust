@@ -195,7 +195,7 @@ pub struct Cluster {
     data_publisher: std::sync::OnceLock<Arc<dyn ClusterDataPublisher>>,
     /// 数据事件 publish 被 transport 拒(Full/Closed)的累计数;warn 按 2 的幂限频。
     publish_dropped: std::sync::atomic::AtomicU64,
-    /// presence publish 被拒的累计数(原先完全静默;周期 FULL 自愈,但需可观测)。
+    /// presence publish 被拒的累计数；周期 FULL 可恢复目录，拒绝次数仍需用于观测背压。
     presence_dropped: std::sync::atomic::AtomicU64,
     /// data producer 容量拒绝计数。
     data_full: std::sync::atomic::AtomicU64,
@@ -206,9 +206,8 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// 业务作用：用**注入的、已校验的** `Incarnation` 构造。`Incarnation` 保证非空 + 纯 ASCII 十进制 + 正整数
-    /// (空串/非正会破坏 fencing,已在类型层挡住)。同 node_id 须用**同一定宽方案**
-    /// (`Incarnation::from_epoch` 恒 20 位)使字典序 == 数值序。
+    /// 业务作用：使用已校验的 Incarnation 构造集群运行时，按节点身份与数值代次拒绝旧实例事件。
+    /// 同 node_id 的代次必须持久单调递增；文本宽度和前导零不改变围栏比较结果。
     ///
     /// # 参数
     /// - `local_node`: 本节点稳定 ID,用于防回环、presence 目录和 fencing 分组。
@@ -464,7 +463,11 @@ impl Cluster {
     pub fn publish_presence_delta(&self, group: &str, present: bool, version: i64) {
         let groups = [group.to_string()];
         self.publish_presence_event(
-            if present { PRESENCE_ADD } else { PRESENCE_DEL },
+            if present {
+                PRESENCE_ADD
+            } else {
+                PRESENCE_DEL
+            },
             &groups,
             version,
         );
@@ -648,7 +651,7 @@ fn now_millis() -> i64 {
 pub enum IncarnationError {
     /// 空串或含非 ASCII 数字字符。
     NotDecimal,
-    /// 数值非正(0 或负)——会破坏定宽字典序的 fencing 语义。
+    /// epoch 非正，或十进制文本不满足接收范围；零值和超长纯数字文本均归入此类。
     NonPositive,
 }
 
@@ -668,9 +671,9 @@ impl std::fmt::Display for IncarnationError {
 }
 impl std::error::Error for IncarnationError {}
 
-/// **已校验的 incarnation fencing token**:保证非空、纯 ASCII 十进制、表示**正整数**。
-/// 接收端按字符串字典序比较同 node_id 的实例(更大=更新),故同 node_id 必须使用**同一定宽方案**
-/// ——`from_epoch` 恒 20 位零填充,使字典序 == 数值序。
+/// 已校验的 incarnation fencing token：1 至 20 位 ASCII 十进制正数。
+/// 接收端按数值比较同 node_id 的实例，更大表示更新；from_epoch 使用 20 位零填充，
+/// parse 也接受合法的变长文本，前导零不改变数值权威。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Incarnation(String);
 
@@ -686,7 +689,8 @@ impl Incarnation {
         Ok(Incarnation(format!("{epoch:020}")))
     }
 
-    /// 业务作用：从已有字符串解析(再水合):必须非空、全 ASCII 数字、表示正整数(去前导零后非空)、且 ≤ u128。
+    /// 业务作用：从持久化文本恢复 incarnation token，验证正数语义和接收宽度。
+    /// 返回：1 至 20 位 ASCII 十进制正数返回 token；其它输入返回 IncarnationError。
     ///
     /// # 参数
     /// - `s`: 持久化或配置中读取到的 incarnation token 字符串。
@@ -703,17 +707,12 @@ impl Incarnation {
     }
 
     /// 业务作用：解析 incarnation 字符串为**数值**(供 fence **按数值比较**,避免变长字典序错序)。
-    /// 要求:非空、全 ASCII 十进制、数值 > 0、且不溢出 u128。否则返回 None(接收端据此拒绝)。
+    /// 返回：1 至 20 位 ASCII 十进制正数返回其数值，其它输入返回 None，接收端据此拒绝。
     ///
     /// # 参数
     /// - `s`: 待验证和转换的 ASCII 十进制 incarnation 字符串。
     pub fn parse_value(s: &str) -> Option<u128> {
-        // 长度上限按既有的 `{epoch:020}` 契约（from_epoch 恒定产出 20 位）收紧。
-        //
-        // 不收紧的话，一条携带 39 位巨值 incarnation 的事件会把该 node id 的围栏永久顶到天花板：
-        // 此后真实节点的所有事件都因 incarnation 更小被静默拒绝，而 tombstone 按设计永不过期，
-        // 恢复要重启**所有对端**进程。文档里那条"固定 20 位"的约定此前只在构造侧成立，
-        // 接收侧从不校验——这里把它变成真正的不变量。
+        // 接收宽度与 from_epoch 的输出上限一致，防止异常大值永久抬高围栏、阻断正常节点事件。
         const MAX_INCARNATION_DIGITS: usize = 20;
         if s.is_empty()
             || s.len() > MAX_INCARNATION_DIGITS

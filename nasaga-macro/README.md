@@ -9,7 +9,7 @@ descriptor 与对应后端的事务 adapter。业务通过 `nasa` 门面的 `sag
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["saga-runtime"] }
+nasa = { version = "1.0.3", features = ["saga-runtime"] }
 ```
 
 PostgreSQL 把 feature 换为 `saga-runtime-pgsql`，并从 `nasa::saga::pgsql::saga` 导入属性宏；

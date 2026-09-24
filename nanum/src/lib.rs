@@ -89,7 +89,7 @@ pub enum NumericError {
     Parse(String),
     /// `RoundingMode::Unnecessary` 下却需要舍入。
     RoundingNecessary,
-    /// 非法范围(`next_int` 的 `min > max` / `next_int_max` 的 `max < 0`;对照 原实现 `IllegalArgumentException`)。
+    /// 非法范围(`next_int` 的 `min > max` / `next_int_max` 的 `max < 0`)。
     Range(String),
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn check_scale_pair(from_scale: u32, to_scale: u32) -> Result<()> {
 
 // ==================== 整数工具(纯整数,无保真歧义)====================
 
-/// 业务作用: 整数的十进制字符串长度,**负数比正数多 1 位**(算上负号)。对照 原实现 `Numeric.stringSize`。
+/// 业务作用: 整数的十进制字符串长度,**负数比正数多 1 位**(算上负号)。
 ///
 /// 例:`string_size(0)=1`、`string_size(999)=3`、`string_size(-12)=3`。
 ///
@@ -162,7 +162,7 @@ pub fn string_size(num: i128) -> usize {
     digits + usize::from(neg)
 }
 
-/// 业务作用: 是否偶数。对照 原实现 `Numeric.isEven`。
+/// 业务作用: 是否偶数。
 ///
 /// # 参数
 ///
@@ -171,7 +171,7 @@ pub fn is_even(num: i128) -> bool {
     num & 1 == 0
 }
 
-/// 业务作用: 是否奇数。对照 原实现 `Numeric.isOdd`。
+/// 业务作用: 是否奇数。
 ///
 /// # 参数
 ///
@@ -180,15 +180,10 @@ pub fn is_odd(num: i128) -> bool {
     num & 1 != 0
 }
 
-// 注:原实现 的 `isEven`/`isOdd` 各有 long/int/byte/short 四重载(仅因 原实现 基元 `&` 不自动加宽);
-// Rust 单一 `i128` 版即覆盖全部(调用方 `is_even(x as i128)`),无数值分歧,故不复刻四重载。
+// 奇偶入口统一接收 i128，其它整数类型可在不丢失数值的条件下转换后调用。
 
-/// 业务作用: 把整数 `number` 的十进制 ASCII 字节(负数含 `-`)写入 `chars[start..]`,返回写入长度。
-/// 对照既有系统的 `Numeric.copyToCharArray(long,char[],int)`（其中 JDK 位运算只是 `StringBuilder` 的性能优化，
-/// 输出与本实现逐字节一致;原实现 `char[]` 存 ASCII 数字,Rust 用字节缓冲是地道等价)。
-///
-/// # Panics
-/// `chars[start..]` 容量不足 [`string_size`] 时 panic(切片越界,与 原实现 `ArrayIndexOutOfBounds` 一致)。
+/// 业务作用：把整数的十进制 ASCII 字节写入指定缓冲区，负数包含负号。
+/// 返回：写入字节数；从 start 起容量不足时发生切片越界 panic，调用方应先按 `string_size` 预留。
 ///
 /// # 参数
 ///
@@ -199,15 +194,9 @@ pub fn copy_to_char_array(number: i64, chars: &mut [u8], start: usize) -> usize 
     copy_to_char_array_with_len(number, string_size(number as i128), chars, start)
 }
 
-/// 业务作用: 同 [`copy_to_char_array`],但**显式给定 `length`**(对照 原实现 `copyToCharArray(long,int,char[],int)`)。
-/// 原实现 用 `length` 预定位 `charPos = start + length` 再右往左填,故字节**右对齐**写入 `chars[start..start+length]`;
-/// `length` 应 = [`string_size`]`(number)`(传过大则左侧位保持原值,与 原实现 一致)。
-///
-/// **安全偏离**:`i64::MIN` 直接经 `to_string()` 输出正确的 `-9223372036854775808`,**不复刻 原实现
-/// `number = -number` 对 `Long.MIN_VALUE` 的取负溢出行为**。
-///
-/// # Panics
-/// `length < string_size(number)`(右对齐区放不下)或 `chars` 容量不足 `start+length` 时 panic。
+/// 业务作用：在指定宽度内右对齐写入整数的十进制 ASCII 字节。
+/// 宽度大于 `string_size(number)` 时左侧原字节保持不变；`i64::MIN` 使用完整十进制文本。
+/// 返回：写入字节数；宽度放不下文本或缓冲区不足 `start + length` 时 panic。
 ///
 /// # 参数
 ///
@@ -227,16 +216,10 @@ pub fn copy_to_char_array_with_len(
     length
 }
 
-// ==================== 比较(对照 原实现 `Numeric.eq/ne/gt/ge/lt/le` → `Compares`)====================
-//
-// 原实现 `Compares` 泛型 `T extends Comparable<T>`,用 `compareTo`;Rust 用 `PartialEq`/`PartialOrd`。
-// 下面泛型 `eq/ne/gt/ge/lt/le` 适配整数/`BigDecimal` 等正常可比类型,与 原实现 一致。
-// **但 f64 的 `NaN` 在泛型 `PartialOrd` 下与 原实现 `Double.compareTo` 总序不同**(Rust 下 NaN 比较全 false);
-// 完整迁移用专用族 [`eq_f64`]/[`ne_f64`]/[`gt_f64`]/[`ge_f64`]/[`lt_f64`]/[`le_f64`](复刻 `Double.compare`)。
-//
-// 原实现 `Compares.*` 还有 null→false 分支;Rust 无 null,自然不需要(对应 `Option` 由调用方处理)。
+// 泛型比较遵循 PartialEq/PartialOrd；浮点 NaN 不具备普通全序。
+// 需要 NaN 与带符号零的确定顺序时，使用专用 f64 比较族；可选值的处理由调用方决定。
 
-/// 业务作用: 相等。对照 原实现 `Numeric.eq`(`compareTo==0`;Rust 无 null,= `a == b`)。
+/// 业务作用: 按 PartialEq 判断两个值是否相等。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -245,7 +228,7 @@ pub fn eq<T: PartialEq>(a: T, b: T) -> bool {
     a == b
 }
 
-/// 业务作用: 不等。对照 原实现 `Numeric.ne`(= `!eq`)。
+/// 业务作用: 按 PartialEq 判断两个值是否不等。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -254,7 +237,7 @@ pub fn ne<T: PartialEq>(a: T, b: T) -> bool {
     a != b
 }
 
-/// 业务作用: 大于。对照 原实现 `Numeric.gt`。
+/// 业务作用: 大于。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -263,7 +246,7 @@ pub fn gt<T: PartialOrd>(a: T, b: T) -> bool {
     a > b
 }
 
-/// 业务作用: 大于等于。对照 原实现 `Numeric.ge`。
+/// 业务作用: 大于等于。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -272,7 +255,7 @@ pub fn ge<T: PartialOrd>(a: T, b: T) -> bool {
     a >= b
 }
 
-/// 业务作用: 小于。对照 原实现 `Numeric.lt`。
+/// 业务作用: 小于。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -281,7 +264,7 @@ pub fn lt<T: PartialOrd>(a: T, b: T) -> bool {
     a < b
 }
 
-/// 业务作用: 小于等于。对照 原实现 `Numeric.le`。
+/// 业务作用: 小于等于。
 ///
 /// # 参数
 /// - `a`: 左侧待比较值。
@@ -290,12 +273,12 @@ pub fn le<T: PartialOrd>(a: T, b: T) -> bool {
     a <= b
 }
 
-// ── f64 专用比较:复刻 原实现 `Double.compareTo` 总序(NaN 等于 NaN 且大于一切、`-0.0 < 0.0`)──
-// compat 前缀表示局部数值语义兼容,只约束本函数族的比较/舍入规则,不表达整套 legacy 协议模式。
-// 泛型 `PartialOrd` 版对 f64 NaN 与 原实现 不一致(全 false),完整迁移需此族(用户:必须全量迁移)。
+// f64 专用比较把全部 NaN 规范化为相同值，并置于所有非 NaN 之后；负零小于正零。
+// compat 前缀只表示该比较与舍入合同，不表示另一套运行时或协议模式。
 
-/// 业务作用: 完整复刻 `原实现.lang.Double.compare(a, b)`:先按 `<`/`>` 判,相等时落到**规范化位模式**比较
-/// (所有 NaN 归一为同一 NaN,故 `NaN==NaN`、`NaN>` 一切;`-0.0` 位模式为负 → `-0.0 < 0.0`)。
+/// 业务作用：按确定全序比较 f64，数值相同时使用规范化位模式区分带符号零。
+/// 所有 NaN 视为相等且大于非 NaN，负零小于正零。
+/// 返回：按该全序得到的 Ordering。
 ///
 /// # 参数
 /// - `a`: 左侧 f64 值。
@@ -308,7 +291,7 @@ fn compat_double_compare(a: f64, b: f64) -> core::cmp::Ordering {
         return core::cmp::Ordering::Greater;
     }
 
-    // 业务作用: 等价或含 NaN/±0:用 原实现 `doubleToLongBits` 语义(NaN 规范化,不区分 payload/符号)。
+    // 业务作用：数值比较无法区分带符号零与 NaN 时，规范化位模式提供确定顺序且忽略 NaN payload。
     /// 业务作用：转成兼容 IEEE-754 二进制浮点的规范化位模式。
     ///
     /// # 参数
@@ -324,7 +307,7 @@ fn compat_double_compare(a: f64, b: f64) -> core::cmp::Ordering {
     to_canonical_bits(a).cmp(&to_canonical_bits(b))
 }
 
-/// 业务作用: f64 相等,原实现 `Double.compareTo==0` 语义(`NaN==NaN` 为真)。对照 原实现 `Numeric.eq`。
+/// 业务作用: 按规范化浮点全序判断相等，任意两个 NaN 视为相等。
 ///
 /// # 参数
 ///
@@ -334,7 +317,7 @@ pub fn eq_f64(a: f64, b: f64) -> bool {
     compat_double_compare(a, b).is_eq()
 }
 
-/// 业务作用: f64 不等(`= !eq_f64`)。对照 原实现 `Numeric.ne`。
+/// 业务作用: f64 不等(`= !eq_f64`)。
 ///
 /// # 参数
 ///
@@ -344,7 +327,7 @@ pub fn ne_f64(a: f64, b: f64) -> bool {
     !eq_f64(a, b)
 }
 
-/// 业务作用: f64 大于,原实现 `Double.compareTo>0`(`NaN > 任意非NaN`)。对照 原实现 `Numeric.gt`。
+/// 业务作用: 按规范化浮点全序判断大于，NaN 大于任意非 NaN。
 ///
 /// # 参数
 ///
@@ -354,7 +337,7 @@ pub fn gt_f64(a: f64, b: f64) -> bool {
     compat_double_compare(a, b).is_gt()
 }
 
-/// 业务作用: f64 大于等于,原实现 `compareTo>=0`。对照 原实现 `Numeric.ge`。
+/// 业务作用: 按规范化浮点全序判断大于或等于。
 ///
 /// # 参数
 ///
@@ -364,7 +347,7 @@ pub fn ge_f64(a: f64, b: f64) -> bool {
     compat_double_compare(a, b).is_ge()
 }
 
-/// 业务作用: f64 小于(原实现 `lt = !ge`)。对照 原实现 `Numeric.lt`。
+/// 业务作用: 按规范化浮点全序判断小于。
 ///
 /// # 参数
 ///
@@ -374,7 +357,7 @@ pub fn lt_f64(a: f64, b: f64) -> bool {
     !ge_f64(a, b)
 }
 
-/// 业务作用: f64 小于等于(原实现 `le = !gt`)。对照 原实现 `Numeric.le`。
+/// 业务作用: 按规范化浮点全序判断小于或等于。
 ///
 /// # 参数
 ///

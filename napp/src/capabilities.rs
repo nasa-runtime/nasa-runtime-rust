@@ -152,6 +152,8 @@ pub(crate) struct KafkaClientCapability {
     readiness: std::sync::RwLock<KafkaReadinessSnapshot>,
     /// Start 注入 proxy、UserHook 安装真实 sink 的内部时序桥。
     metrics: Arc<crate::kafka::KafkaMetricsBridge>,
+    #[cfg(feature = "ws-kafka")]
+    ws_consumer_owner: bool,
 }
 
 #[cfg(feature = "kafka")]
@@ -164,6 +166,7 @@ impl KafkaClientCapability {
     /// - `proxy`：Start 已完成本地构造、尚未启动 consumer 的原始运行时。
     /// - `contributor`：Application readiness registry 为本 client 分配的独占贡献句柄。
     /// - `metrics`：Start 时注入 proxy 的内部可替换指标桥。
+    /// - `_ws_consumer_owner`：WS 子能力是否可独占本 client 的消费登记。
     ///
     /// # 返回
     ///
@@ -173,6 +176,7 @@ impl KafkaClientCapability {
         proxy: nafka::KafkaProxy,
         contributor: crate::readiness::ReadinessContributor,
         metrics: Arc<crate::kafka::KafkaMetricsBridge>,
+        _ws_consumer_owner: bool,
     ) -> Self {
         Self {
             readiness: std::sync::RwLock::new(KafkaReadinessSnapshot {
@@ -184,6 +188,8 @@ impl KafkaClientCapability {
             proxy,
             contributor,
             metrics,
+            #[cfg(feature = "ws-kafka")]
+            ws_consumer_owner: _ws_consumer_owner,
         }
     }
 
@@ -269,6 +275,21 @@ pub struct KafkaHandle {
 
 #[cfg(feature = "kafka")]
 impl KafkaHandle {
+    /// 业务作用：把关闭权移交给同宿主的 WS 协议 owner，拒绝争用普通消费注册表。
+    /// 参数说明：无。
+    /// 返回：client 显式关闭 collected consumers 时提供内部 proxy；其它配置拒绝。
+    #[cfg(feature = "ws-kafka")]
+    pub(crate) fn ws_runtime_proxy(&self) -> ApplicationResult<nafka::KafkaProxy> {
+        self.ensure_operation_open("ws cluster assembly", true)?;
+        if !self.capability.ws_consumer_owner {
+            return Err(ApplicationError::new(
+                ComponentId::Kafka,
+                ApplicationPhase::Ready,
+                "WS Kafka requires container.consumers=disabled on its named client",
+            ));
+        }
+        Ok(self.capability.proxy.clone())
+    }
     /// 业务作用：从组件私有能力根创建业务句柄。
     ///
     /// # 参数

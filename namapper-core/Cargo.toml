@@ -20,8 +20,8 @@ anyhow = "1"
 async-trait = "0.1"
 hex = "0.4"
 linkme = "0.3"
-nametrics-core = { path = "../nametrics-core", version = "1.0.2" }
-nanotify-core = { path = "../nanotify-core", version = "1.0.0" }
+nametrics-core = { version = "1.0.2" }
+nanotify-core = { version = "1.0.0" }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

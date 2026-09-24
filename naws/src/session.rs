@@ -645,9 +645,8 @@ impl Session {
         if self.is_closed() {
             return SendOutcome::Closed;
         }
-        // 控制帧也执行协议对应上限(原先完全绕过 → 小 max_frame 配置下服务端
-        // 发出客户端必拒的 AUTH_RESP/CLOSE)。配合 build 期 `MIN_MAX_FRAME` 校验 + 动态
-        // reason 截断,正常路径不会触发;触发即响亮丢弃,不发"客户端必拒"的帧。
+        // 控制帧同样受协议长度上限约束，避免服务端发送客户端必然拒收的 AUTH_RESP/CLOSE。
+        // build 期最小容量校验与 reason 截断约束正常输出，超限时记录丢弃而不进入发送队列。
         if self.frame_over_limit(frame.len()) {
             self.note_oversize(frame.len());
             return SendOutcome::Dropped;

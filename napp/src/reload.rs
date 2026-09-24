@@ -1,35 +1,37 @@
 //! 组件配置热重应用协议。
 //!
-//! 配置热刷新驱动（配置中心组件的 watch driver）对每一帧候选树先做整帧校验，再逐组件判定：
-//! 相关配置段未变化 → 直接推进 applied_version；变化且组件登记过本协议的句柄 → 调用句柄重应用，
-//! 成功记 `Applied`、失败保留 last-known-good 并记 `ApplyFailed`；变化但没有句柄 → 如实记
-//! `RestartRequired`。登记发生在组件启动阶段，驱动创建于 Ready，之后只读。
+//! 候选先完成材料准备，再进入既有配置发布门禁安装。准备不得改变当前运行态；
+//! 安装阶段不执行文件或网络 I/O，候选及旧资源由门禁外的 owner 回收。
 
 use serde_json::Value;
 
 use crate::{ApplicationResult, ComponentId};
 
-/// 可热刷组件提交给配置热刷新驱动的重应用句柄。
-///
-/// 实现者必须满足 last-known-good 契约：apply 失败时不得破坏当前运行态（由底层实现保证
-/// "先备好再原子换"，如 nalog）；驱动只把结果如实记入 ReloadStatus，不做补偿或重试。
-///
-/// apply 是同步调用：当前唯一实现（log）只做快速的过滤器与 appender 换装；出现慢速或必须
-/// 异步的重应用时再扩展协议，不预先制造异步表面。
-// 驱动侧（nacos-config）单独关闭时，本协议只有登记方在编译，消费入口空置属于预期形态。
-#[cfg_attr(not(feature = "nacos-config"), allow(dead_code))]
+/// 可热刷组件的候选准备入口，登记后由同一配置流水线调用。
+#[cfg_attr(
+    not(any(feature = "nacos-config", feature = "config-watch")),
+    allow(dead_code)
+)]
 pub(crate) trait ConfigApplier: Send + Sync {
-    /// 业务作用：返回该句柄负责的组件身份。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数；驱动用它把重应用结果记到正确的 `ReloadTarget::Component` 上。
+    /// 业务作用：声明本准备器负责的配置目标。
+    /// 参数说明：无。
+    /// 返回：用于匹配状态表的组件身份。
     fn component(&self) -> ComponentId;
 
-    /// 业务作用：对尚未发布的候选配置树执行一次重应用。
-    ///
-    /// # 参数
-    ///
-    /// - `candidate`：合并、插值并通过整帧校验的候选配置树；实现只读取自己的配置段。
-    fn apply(&self, candidate: &Value) -> ApplicationResult<()>;
+    /// 业务作用：在发布锁外完成所有可失败的材料准备。
+    /// 参数说明：`candidate` 为已经完成结构校验的原始候选。
+    /// 返回：拥有未安装资源的候选，或不改变当前运行态的准备错误。
+    fn prepare(&self, candidate: &Value) -> ApplicationResult<Box<dyn PreparedConfigApply>>;
+}
+
+/// 单个组件的已准备材料及被替换资源 owner。
+#[cfg_attr(
+    not(any(feature = "nacos-config", feature = "config-watch")),
+    allow(dead_code)
+)]
+pub(crate) trait PreparedConfigApply: Send {
+    /// 业务作用：在宿主发布门禁内安装候选，旧资源保留至门禁外回收。
+    /// 参数说明：无。
+    /// 返回：安装成功或保留当前运行态的拒绝原因；不得执行外部 I/O 或等待后台线程。
+    fn install(&mut self) -> ApplicationResult<()>;
 }

@@ -20,14 +20,14 @@ nasaga-core = { version = "1.0.1" }
 nasaga-backend = { version = "1.0.0" }
 nasaga-mysql = { version = "1.0.2" }
 nasaga-runtime-core = { version = "1.0.0" }
-nainbox-core = { version = "1.0.1" }
+nainbox-core = { version = "1.0.2" }
 nainbox-mysql = { version = "1.0.2" }
 naoutbox-core = { version = "1.0.2" }
 naoutbox-mysql = { version = "1.0.2" }
 # `TxDecision` 是提交结果不确定处理的必要合同。
 natx = { version = "1.0.3" }
 # 链路上下文共享类型:发起入口与 transport 收据显式传入 TraceContext,命令出站派生 child span。
-natelemetry = { version = "1.0.1" }
+natelemetry = { version = "1.0.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtime-tokio"] }

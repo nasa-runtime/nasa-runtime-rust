@@ -2,21 +2,8 @@
 //!
 //! 宏在编译期把 async handler 包装进 `hystrix` 运行时命令，保留原函数签名，
 //! 并把并发拒绝、超时降级和指标采集接入统一 Dashboard。
-// ============================================================================
-// hystrix-macro —— 自定义属性宏 #[hystrix(name=.., max_concurrent=.., timeout_ms=.., tps=.., reject_response=.., timeout_response=..)]
-//
-// 作用:贴在一个 axum async handler 上,【编译期】把它【改写】成
-//   「先抢信号量(满→429)、再限时执行原逻辑(超时→504)」的版本。
-//   = 注解驱动的 bulkhead + 超时,对照 src/hystrix.rs 的"显式中间件 Command::run"写法。
-//
-// ✅ 它【接入真正的 hystrix Command】:宏把"原函数体"包成闭包,交给 ::hystrix::Command::run_fn
-//    执行。Command 在首次调用时构造并自动注册进全局 REGISTRY,所以注解版的 bulkhead/超时/成功率/延迟
-//    会和 /heavy/slow、/spot/kline 一样【出现在 /hystrix.stream Dashboard 上】(一个名为注解里 name 的圈)。
-//    —— 之前做成自带 Semaphore 不上 Dashboard,等于"隔离了但监控看不到",注解价值大打折扣;现已修正。
-//    为此在 hystrix.rs【新增】了一个 run_fn 入口(run 重构成它的薄封装,原行为不变),没有破坏对照路由。
-//
-// 三类过程宏里这是【attribute 属性宏】(另两类:derive 派生宏、function-like 函数宏)。
-// ============================================================================
+// 属性宏把 async handler 的业务体交给 hystrix::Command::run_fn，统一处理并发隔离、
+// 超时和降级。Command 首次使用时登记到全局注册表，Dashboard 按配置名称展示其指标。
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};

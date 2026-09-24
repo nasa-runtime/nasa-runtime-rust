@@ -54,6 +54,11 @@ let level: Option<i64> = client.h_get("user:{1001}", "level").await?;
 client.expire("user:{1001}", std::time::Duration::from_secs(60)).await?;
 ```
 
+`nasa::redis::Json<T>` 使用标准 serde_json 编码。需要处理序列化失败时，先调用
+`Json(&value).to_bytes()?`，再把字节交给 Redis 命令；直接作为命令参数时，序列化失败会 panic。
+浮点 NaN 和无穷会编码为 JSON null，要求有限数值的业务必须先校验。整数 map key 可以编码为
+字符串键，数组等复合 key 会被拒绝；解码不会根据类名或类型元数据自动选择业务类型。
+
 Cluster 多 key 命令会做同 slot 守卫；需要跨 key 时请使用 `{tag}` 约束 slot。分区运行时以
 “分区组”为同槽单位：同组所有 stream、锁、marker 和控制 key 固定到一个 slot。`partition.count`
 增加的是组内并发，不会把单组分散到多个 master。`partition.groups` 可拆出不同 hash tag，
@@ -223,19 +228,28 @@ if let Some(msg) = sub.next_message().await {
 
 ## 分布式雪花 workerId
 
-`nabase` 的本地雪花器需要业务保证 workerId 唯一;跨节点自动分配用本 crate 的 Redis 版:
+Redis 分配使用显式初始化、编号永久不复用的账本。管理方须从账本外证明首次初始化权威，
+并保证已确认领取记录不会丢失或回退；不存在的 key 不能证明这是首次部署。
 
 ```rust
-use nasa::redis::{Snowflake, SnowflakeConfig};
+use nasa::redis::{SnowflakeConfig, WorkerIdNamespace};
 
-let cfg = SnowflakeConfig::default(); // key/bits 可调
-let (sf, lease) = cfg.build_with_redis(client.clone()).await?; // ZSET 租约分配 workerId
+let cfg = SnowflakeConfig::default();
+let namespace = WorkerIdNamespace {
+    incarnation: "orders-worker-space".into(),
+    first_worker_id: 0,
+    last_worker_id: 63,
+};
+// 管理方确认整个 ID 空间未使用后，独立执行一次 namespace.initialize(&client, &cfg)。
+let (sf, lease) = namespace.allocate(&client, &cfg).await?;
 let id = sf.generate();
-// 优雅停机时释放租约,workerId 可被其它节点复用:
 lease.release().await?;
 ```
 
-租约未释放时靠 TTL 到期回收;`lease.worker_id()` 可用于日志与监控。
+缺失账本、身份/位布局不符或容量耗尽均拒绝分配；`release` 不归还编号，没有 TTL 自动回收。
+`alloc_worker_id/build_with_redis` 始终返回错误。incarnation 不进入 ID 位编码，改名不保证新旧 ID 空间隔离。
+`build_local` 固定 workerId=1，同一 ID 空间只允许一个共享生成器；重启须越过上一实例的逻辑时间上界。
+Application 使用 `redis.snowflake.<name>` 与 `app.snowflake(name).await`，由框架领取和关闭生成器。
 
 ## Stream 消费
 
@@ -286,7 +300,8 @@ holder 复验不能提供相同强度的原子拒绝。
 
 注册示例、容量配置、恢复屏障、发布未知结果、停机报告及能力边界见
 [Redis 分区消费](docs/partition.md)。Redis 消费器自己拥有执行器生命周期，不使用 Application
-配置的命名 Runner。
+配置的命名 Runner。使用 Application 时通过 `configure_redis_partition` 登记计划，
+由 redis 子能力统一管理 Ready、逐源健康和聚合停机。
 
 ### 执行域与消费架构
 

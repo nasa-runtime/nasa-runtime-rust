@@ -1,14 +1,8 @@
-// ============================================================================
-// src/client.rs —— RedisClient:连接、协议标记、注册表、停机(文档)。
-//
-// 装配模型:`RedisClient::connect(cfg)` 只建连接 + 协议标记校验,
-// **不无条件启动任何高级设施后台任务**;锁/partition/search 各自显式构造。
-// 协议标记:nasa:protocol:{namespace},SET NX 创建或校验,
-// profile / naming_config_hash 不一致即拒绝启动(fail-closed)。
-// 注:标记仅 Rust 节点写入/校验——原实现 端不感知,防的是"Rust 误配 profile",
-// 防不了"原实现 节点误连",后者依赖部署侧保证环境隔离。
-// 多数据源 = 多个配置多次 connect;推荐显式传 Arc,RedisRegistry 仅迁移期便利通道。
-// ============================================================================
+// Redis 客户端负责连接、协议标记校验与组件装配。
+// connect 建立连接并校验 namespace 内的 profile 与命名配置，一致后才返回可用客户端。
+// 锁、partition 与 search 由调用方显式创建，不因连接成功就自动启动各自后台任务。
+// 协议标记由遵循该约定的客户端写入和校验，不能约束绕过标记的其它客户端。
+// 不同协议的 namespace 与 group 必须由部署配置隔离，避免误连破坏数据布局或时钟边界。
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -269,7 +263,7 @@ fn marker_semantically_equal(existing: &str, payload: &str) -> bool {
     }
 }
 
-/// Redis 客户端(对照 原实现 RedisProxy 的连接/注册表职责;命令 API 见 commands.rs)。
+/// Redis 客户端。
 pub struct RedisClient {
     cfg: RedisConfig,
     /// 连接管理器:clone 共享同一 socket,**断线后台自动重连**(direct command 角色,

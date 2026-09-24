@@ -1,4 +1,4 @@
-//! logback `LOG_PATTERN` 子集：解析(compile)+ 渲染(render)，支持
+//! `LOG_PATTERN` 的解析与渲染，支持
 //! `%d{...} %highlight([%-5level]) %magenta([%thread]) %cyan(%logger{30}[%line]) - %msg%n`。
 //!
 //! **仅实现当前 XML 用到的子集**(`%d{}`/`%d`/`%level`/`%-5level`/`%thread`/`%logger{N}`/`%line`/`%msg`/`%n`/`%%`/
@@ -13,10 +13,10 @@ use tracing_subscriber::registry::LookupSpan;
 pub const DEFAULT_LOG_PATTERN: &str =
     "%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight([%-5level]) %magenta([%thread]) %cyan(%logger{30}[%line]) - %msg%n";
 
-/// 默认日期格式(对照 XML;bare `%d` 用)。
+/// 未显式指定格式的 `%d` 使用的默认日期格式。
 const DEFAULT_DATE_PATTERN: &str = "yyyy-MM-dd HH:mm:ss.SSS";
 
-// ── 颜色(对照 logback %highlight/%magenta/%cyan)──
+// 颜色标记由输出层决定是否转换为 ANSI，文件默认保持纯文本。
 const C_RESET: &str = "\x1b[0m";
 const C_MAGENTA: &str = "\x1b[35m";
 const C_CYAN: &str = "\x1b[36m";
@@ -46,7 +46,7 @@ pub enum LogPatternError {
     UnclosedWrapper(&'static str),
     /// `%logger{...}` 内非数字或未闭合。
     InvalidLoggerLength(String),
-    /// 不支持的 原实现 日期 token(超出 yyyy/MM/dd/HH/mm/ss/SSS 子集)。
+    /// 不支持的日期 token(超出 yyyy/MM/dd/HH/mm/ss/SSS 子集)。
     UnsupportedDatePattern(String),
     /// 空 wrapper,如 `%highlight()`。
     EmptyWrapper(&'static str),
@@ -71,7 +71,7 @@ impl std::fmt::Display for LogPatternError {
 
 impl std::error::Error for LogPatternError {}
 
-/// 编译后的 pattern(token 序列),可热替换。对照 logback 编码后的 encoder。
+/// 编译后的格式 token 序列，可随配置原子替换。
 #[derive(Debug, Clone)]
 pub struct CompiledLogPattern {
     items: Vec<PatternItem>,
@@ -86,7 +86,7 @@ enum PatternItem {
     Literal(String),
     /// 日期时间片段,内容已映射为 chrono 格式串。
     Date(String),
-    /// 日志级别,支持 logback 风格的左对齐和宽度控制。
+    /// 日志级别，支持左对齐与宽度控制。
     Level {
         /// 是否使用左对齐填充级别文本。
         left_align: bool,
@@ -235,8 +235,8 @@ where
     }
 }
 
-/// 业务作用：原实现 风格包名缩写(对照 `%logger{N}`):除末段外只留首字符、`::`→`.`;若仍超 `max_len` 则**硬截断**到 `max_len`
-/// (保证 `%logger{N}` 的 `N` 生效;不强求 100% 复刻 logback,但保持原默认输出 + 长度上限)。
+/// 业务作用：缩短日志模块路径，除末段外只保留首字符，并把 `::` 转为 `.`。
+/// `%logger{N}` 的 `N` 限制缩写后的长度；省略上限时保留完整缩写，不额外截断。
 ///
 /// # 参数
 /// - `target`: tracing metadata target,通常是模块路径。
@@ -374,7 +374,11 @@ impl Parser {
         if word.is_empty() {
             let mods = format!(
                 "{}{}",
-                if left_align { "-" } else { "" },
+                if left_align {
+                    "-"
+                } else {
+                    ""
+                },
                 width.map(|w| w.to_string()).unwrap_or_default()
             );
             return Err(LogPatternError::UnknownConversion(mods));
@@ -444,7 +448,7 @@ impl Parser {
     }
 }
 
-/// 业务作用：原实现 日期 pattern → chrono 格式串(仅 yyyy/MM/dd/HH/mm/ss/SSS 子集;其余字母 token 报错)。
+/// 业务作用：将配置日期 pattern → chrono 格式串(仅 yyyy/MM/dd/HH/mm/ss/SSS 子集;其余字母 token 报错)。
 /// `SSS → %3f`(3 位毫秒不带前导点),使 `ss.SSS` → `%S.%3f` 渲染为 `07.298`,与旧硬编码 `%S%.3f` 一致。
 ///
 /// # 参数

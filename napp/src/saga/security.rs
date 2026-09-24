@@ -149,7 +149,7 @@ impl SagaSecurityState {
     /// 业务作用：在发布前校验全部已登记资源并构造新旧 HMAC 重叠窗口，任何失败保留原快照。
     /// 参数说明：`candidate` 是未发布的完整 secret 候选。
     /// 返回：所有资源都能构建时返回完整安全快照；任一引用删除、编码非法或历史窗口越界时拒绝整帧。
-    #[cfg(feature = "nacos-config")]
+    #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
     fn prepare(
         &self,
         candidate: Arc<nasecret::SecretSnapshot>,
@@ -453,21 +453,20 @@ pub(super) fn http_authenticator(
     SagaSecurityState::for_application(application)?.http_authenticator(reference)
 }
 
-/// 业务作用：把已全部校验的 Saga 安全资源附加到待发布配置，形成唯一原子切换点。
-/// 参数说明：`application` 提供已装配资源目录，`view` 是尚未公开的候选配置和 secret。
-/// 返回：含完整安全资源的候选；任一资源无法准备时拒绝发布，当前请求继续使用原配置。
-#[cfg(feature = "nacos-config")]
-pub(crate) fn prepare_security_view(
+/// 业务作用：只准备候选 secret 对应的 Saga 安全资源，不要求预先构造应用状态表。
+/// 参数说明：`application` 为现有资源目录；`secrets` 为同代候选 secret。
+/// 返回：已装配 Saga 时返回准备好的材料；未启用时为空；任一材料失败拒绝候选。
+#[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+pub(crate) fn prepare_security_materials(
     application: &Application,
-    view: Arc<crate::config::ConfigView>,
-) -> ApplicationResult<Arc<crate::config::ConfigView>> {
-    match application.saga_runtime().security.get() {
-        Some(state) => {
-            let prepared = state.prepare(view.secrets().clone())?;
-            Ok(view.with_saga_security(prepared))
-        }
-        None => Ok(view),
-    }
+    secrets: Arc<nasecret::SecretSnapshot>,
+) -> ApplicationResult<Option<Arc<SagaSecuritySnapshot>>> {
+    application
+        .saga_runtime()
+        .security
+        .get()
+        .map(|state| state.prepare(secrets))
+        .transpose()
 }
 
 /// 业务作用：把受管 gRPC listener 的握手器与 Saga 入站、出站凭据绑定到同一配置发布点。

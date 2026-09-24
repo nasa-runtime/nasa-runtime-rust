@@ -5,7 +5,7 @@
 # `image_crate`(package = "image")。公开 API 只暴露本组件声明支持的格式与压缩边界。
 [package]
 name = "naimg"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA 有界图片压缩与缩放：尺寸、质量、格式和输出像素门禁"

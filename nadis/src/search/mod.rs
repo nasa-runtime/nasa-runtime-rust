@@ -1,29 +1,12 @@
-// ============================================================================
-// src/search/mod.rs —— RediSearch 封装:元数据 trait / 文档编解码。
-// 对齐既有 RediSearch 与 annotation/meta/convert 配套语义。
+// RediSearch 文档元数据、键派生与类型化查询。
 //
-// ┌─ 核心能力 ───────────────────────────────────────────────────────┐
-// │ · RedisDocument trait(静态元数据 + HASH 编解码;对照 原实现 @RsDocument/    │
-// │   @RsId/@TagField/@TextField/@NumericField + MetaResolver/EntityMeta)     │
-// │ · DocMeta 构建期校验(字段重名/空 alias/ARRAY 约束——错误在 bind 时暴露,  │
-// │   不等到发命令)                                                           │
-// │ · 查询 = 类型化 AST + renderer(query.rs;字段/类型构建期校验,tag 值转义) │
-// │ · IndexPolicy{ValidateOnly|CreateIfMissing|RecreateExplicitly},FT.INFO    │
-// │   服务端结构归一化比较，**禁自动 DROP**(actuator.rs)                      │
-// │ · capability 探测(缺 FT/JSON 模块给明确错误,非协议错)                   │
-// │ · DataType::Hash / Json 两形态(id 直达 + FT.SEARCH 查询)                 │
-// ├─ 数组与聚合能力 ─────────────────────────────────────────────────┤
-// │ · prefix {field} 占位符(对照 原实现 KeyParts/KeySegment:prefix 编译成      │
-// │   literal/field 交替段;key_of_parts 按占位符顺序拼 key;动态段禁 :{}      │
-// │   防撞 key;literal_prefix 给 FT.CREATE PREFIX)                           │
-// │ · DataType::JsonArray / JsonArrayBucket + 5 个 JSON 数组 Lua(array.rs;   │
-// │   对照 原实现 JsonArraySupport/JsonArrayLuaScripts;bucket 选桶 =            │
-// │   floorMod(原实现_string_hash(渲染后 subId), bucketCount) **持久化协议**)   │
-// │ · #[derive(RedisDocument)] 过程宏(nadis-derive crate,纯语法糖——   │
-// │   生成的代码只调用本模块的公开 API)                                       │
-// │ · FT.AGGREGATE 封装（LOAD/GROUPBY/REDUCE/APPLY/FILTER/SORTBY/LIMIT）   │
-// └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
+// RedisDocument 提供静态元数据和 HASH 编解码；DocMeta 在绑定时校验配置。
+// 查询 AST 在 I/O 之前校验字段类型并转义 Tag。索引策略显式区分校验、缺失时创建和重建，
+// 不自动删除已有索引；缺少 FT 或 JSON 模块时返回明确错误。
+//
+// Hash、Json 使用直接键读取与 FT.SEARCH；JsonArray、JsonArrayBucket 使用 JSONPath 与 Lua。
+// prefix 占位符按出现顺序替换，动态段禁止 :{} 以防键碰撞。分桶按 UTF-16 String.hashCode
+// 与 floorMod 派生，属于持久化协议。过程宏生成的代码使用本模块公开 API。
 
 /// RediSearch 索引生命周期、文档读写、查询和聚合执行器。
 pub mod actuator;
@@ -37,11 +20,10 @@ use std::collections::HashMap;
 use crate::error::{NasaRedisError, Result};
 use crate::partition::compat_string_hash;
 
-/// 业务作用：序列化为 JSON 字符串并**省略 null 字段**，对齐既有系统的 `@JsonInclude(NON_NULL)`。
-/// Rust serde 默认写 `"f":null`,原实现 默认省略 → 同一子文档跨语言字节分叉,
-/// JSON_ARRAY 共享 key 时尤其致命(原实现 写的数组 Rust 读回会多/少字段)。
-/// 这里序列化到 `serde_json::Value` 后**递归剔除对象里值为 null 的成员**(数组元素、
-/// 嵌套对象一并处理),与字段上是否标 `skip_serializing_if` 无关,保证确定性对齐。
+/// 业务作用：把文档序列化为 JSON，并递归移除对象中值为 null 的成员。
+/// 数组中的对象同样处理，数组自身的 null 元素保持原位置；该策略不依赖字段上的
+/// skip_serializing_if 标记。共享 Redis key 的生产者必须采用相同字段省略规则。
+/// 返回：JSON 文本；序列化失败时返回 Codec 错误。
 ///
 /// # 参数
 /// - `doc`: 当前处理的配置文档。
@@ -72,7 +54,7 @@ fn strip_nulls(v: &mut serde_json::Value) {
     }
 }
 
-/// 存储形态(对照 原实现 DataType 四态全集)。
+/// 存储形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
     /// 扁平 HASH:field=列名;FT.CREATE ON HASH。
@@ -94,12 +76,12 @@ impl DataType {
     }
 }
 
-/// 字段索引类型(对照 原实现 @TagField/@TextField/@NumericField 的属性子集)。
+/// 字段索引类型。
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
     /// 精确匹配(离散值:ID/状态/枚举);FT 语法 `@f:{v}`。
     /// `separator` 是多值分隔符（默认 `,`，None 表示使用 RediSearch 默认值），`case_sensitive`
-    /// (CASESENSITIVE,默认大小写不敏感)——必须与 原实现 建索引时一致,否则分词/匹配不一致。
+    /// 控制 CASESENSITIVE（默认不区分大小写）；配置必须与实际索引一致，否则匹配语义不同。
     Tag {
         /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
@@ -127,9 +109,8 @@ pub enum FieldType {
         /// WITHSUFFIXTRIE 会建立后缀树，启用 `*foo`（后缀）和 `*foo*`（包含）查询。
         with_suffix_trie: bool,
     },
-    /// 数值范围;FT 语法 `@f:[min max]`。
-    ///`no_index`(NOINDEX 只存不建数值索引,仅 SORTABLE/投影用——对齐 原实现
-    /// `@NumericField(indexed=false)`,补齐 Tag/Text 已有的 NOINDEX 对称性)。
+    /// 数值范围字段，FT 语法为 `@f:[min max]`。
+    /// no_index 启用 NOINDEX，只保存值而不建立数值索引，适用于 SORTABLE 或投影。
     Numeric {
         /// 是否允许 RediSearch 对该字段排序。
         sortable: bool,
@@ -164,9 +145,8 @@ impl FieldMeta {
     }
 }
 
-/// prefix 编译段(对照 原实现 KeySegment):要么字面文本,要么占位符字段引用。
-/// 原实现 启动期编译缓存进 EntityMeta;Rust 侧 DocMeta 是手写/derive 的 plain struct,
-/// 在 key 构建时按需解析；该 IO 路径的解析成本可控，并保持实现无额外全局缓存。
+/// prefix 的字面段或占位符字段引用。
+/// DocMeta 可由手写或 derive 构造，在键派生时按需解析，不持有额外的全局解析缓存。
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeySeg {
     /// 字面段:原样拼接。
@@ -176,7 +156,7 @@ pub enum KeySeg {
     Field(String),
 }
 
-/// 文档元数据(对照 原实现 EntityMeta;trait 静态返回,bind 期校验)。
+/// 文档元数据。
 #[derive(Debug, Clone)]
 pub struct DocMeta {
     /// RediSearch 索引名(如 "idx:order")。ARRAY 系不建索引,仍要求非空(诊断用)。
@@ -194,13 +174,13 @@ pub struct DocMeta {
     pub id_name: String,
     /// id 在 JSON 文档中是否渲染为数字(serde 数值类型)。
     /// 决定 idFilter 字面量形态:数字不加引号、字符串加引号转义——
-    /// 形态错了 JSONPath `==` 永远不命中(原实现 靠 Object 运行时类型,Rust 靠此标记)。
+    /// 标记必须与实际存储类型一致，否则 JSONPath 等值条件无法命中。
     pub id_numeric: bool,
     /// ARRAY 系:@JsonArrayKey 字段名列表,**按 order 升序**(决定 key 拼接顺序,
     /// 是持久化协议——改顺序等于改 key,老数据查不到)。非 ARRAY 系为空。
     pub array_keys: Vec<String>,
-    /// 仅 JsonArrayBucket:桶数(>1;**不可热修改**——改桶数=改散列,等同 schema
-    /// 变更须停服迁移,对照 原实现 @RsDocument.bucketCount 原实现doc)。其他模式 0。
+    /// 仅 JsonArrayBucket 使用的桶数，必须大于 1；其它模式为 0。
+    /// 桶数决定持久化键布局，不能热修改；变更时必须迁移已存储数据。
     pub bucket_count: u32,
 }
 
@@ -229,7 +209,7 @@ impl DocMeta {
         }
         // 占位符语法校验(括号配对/非空/不嵌套)——解析即校验
         let segs = self.segments()?;
-        // ARRAY 系约束(对照 原实现 MetaResolver/RsDocument 注解约束)
+        // ARRAY 系约束
         match self.data_type {
             DataType::JsonArray | DataType::JsonArrayBucket => {
                 if self.array_keys.is_empty() {
@@ -239,7 +219,7 @@ impl DocMeta {
                 }
                 if segs.is_some() {
                     // ARRAY key = prefix + parts,动态性由 @JsonArrayKey 承担;
-                    // 占位符与之叠加会让 key 形态二义(原实现 同样不支持)
+                    // 占位符与数组键派生叠加会造成键形态歧义，因此在发送命令前拒绝
                     return Err(NasaRedisError::Config(
                         "DocMeta: ARRAY 模式 prefix 不支持 {field} 占位符".into(),
                     ));
@@ -275,7 +255,7 @@ impl DocMeta {
         self.fields.iter().find(|f| f.alias_or_name() == alias)
     }
 
-    // ───────────────── prefix {field} 占位符(对照 原实现 KeySegment)─────────────────
+    // ───────────────── prefix {field} 占位符─────────────────
 
     /// 业务作用：解析 prefix 为编译段。返回 None = 无占位符(fast path:prefix + id)。
     /// 语法:`{name}`,不嵌套;`{`/`}` 必须配对;name 非空。
@@ -341,9 +321,9 @@ impl DocMeta {
         self.prefix.matches('{').count()
     }
 
-    /// 业务作用：FT.CREATE PREFIX 参数用的 literal head:无占位符 = 整个 prefix;
-    /// 占位符模式 = 第一个 `{` 之前的字面头(FT PREFIX 按 startsWith 匹配,
-    /// literal head 覆盖该 entity 全部 key 变体——对照 原实现 literalPrefix)。
+    /// 业务作用：取得 FT.CREATE PREFIX 使用的字面前缀，覆盖该文档的全部键变体。
+    /// 参数说明：无。
+    /// 返回：首个占位符之前的字面部分；无占位符时返回完整 prefix。
     pub fn literal_prefix(&self) -> &str {
         match self.prefix.find('{') {
             Some(i) => &self.prefix[..i],
@@ -351,8 +331,8 @@ impl DocMeta {
         }
     }
 
-    /// 业务作用：完整 Redis key(仅无占位符模式;占位符模式报错引导走 key_of_parts——
-    /// 对照 原实现 EntityMeta.key(String) 同款 fail-fast)。
+    /// 业务作用：在无占位符模式下把 prefix 与 id 拼成完整 Redis key。
+    /// 返回：完整 key；存在占位符时返回错误，调用方须使用 key_of_parts。
     ///
     /// # 参数
     /// - `id`: 文档业务 ID,会直接拼到无占位符 prefix 之后形成 Redis key。
@@ -368,8 +348,8 @@ impl DocMeta {
 
     /// 业务作用：占位符模式拼 key:parts 按占位符出现顺序,id 拼末尾。
     /// 动态段(占位符值 + id)一律 check_part 禁 `:`/`{`/`}` ——
-    /// 不同输入拼出相同 key = 数据互相覆盖,必须写入前拒绝(对照 原实现 KeyParts)。
-    /// 无占位符模式 parts 必须为空(退化为 prefix + id,id 不校验,与 原实现 fast path 一致)。
+    /// 不同输入拼出相同 key = 数据互相覆盖,必须写入前拒绝。
+    /// 无占位符模式要求 parts 为空，直接拼接 prefix 与 id，不对 id 做动态段校验。
     ///
     /// # 参数
     /// - `parts`: prefix 中 `{field}` 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -406,13 +386,13 @@ impl DocMeta {
                 }
             }
         }
-        // 占位模式 id 同样校验分隔符防撞 key(对照 原实现 keyOf 末尾 checkPart)
+        // 占位模式 id 同样校验分隔符防撞 key
         check_part(id, "@RsId")?;
         out.push_str(id);
         Ok(out)
     }
 
-    // ───────────────── ARRAY key 派生(对照 原实现 EntityMeta.arrayKey 族)─────────────────
+    // ───────────────── ARRAY key 派生─────────────────
 
     /// 业务作用：ARRAY key 主体:parts 按 array_keys 顺序以 `:` 拼接(逐段 check_part)。
     ///
@@ -437,8 +417,8 @@ impl DocMeta {
         Ok(body)
     }
 
-    /// 业务作用：ARRAY 模式完整 key = prefix + body;BUCKET 模式 = 不含桶号的"前缀"
-    /// (调用方再经 bucket_key/all_bucket_keys 追加;对照 原实现 arrayKeyOf)。
+    /// 业务作用：按 array_keys 顺序构造数组键的主体。
+    /// 返回：ARRAY 的完整键；BUCKET 返回尚未追加桶号的主体，继续由 bucket_key 派生。
     ///
     /// # 参数
     /// - `parts`: `array_keys` 顺序对应的业务 key 段,每段都会做分隔符和 hash tag 字符校验。
@@ -452,10 +432,10 @@ impl DocMeta {
         Ok(format!("{}{}", self.prefix, self.array_body(parts)?))
     }
 
-    /// 业务作用：BUCKET 模式:subId 所在桶号 = floorMod(原实现_string_hash(渲染后 subId), bucketCount)。
-    /// **持久化协议**:原实现 在 String.hashCode 上取模(MetaResolver.renderValue 先归一化,
-    /// Rust 侧 id()/parts 已是渲染后字符串)——必须逐位一致,否则查不到 原实现 写的桶。
-    /// floorMod(而非 abs%)规避 hashCode==i32::MIN 时 abs 溢出(对照 原实现 bucketOf 注释)。
+    /// 业务作用：按 UTF-16 String.hashCode 与 floorMod 计算子文档的稳定桶号。
+    /// 该算法属于持久化协议，改变散列或 ID 文本会改变数据位置；floorMod 避免最小有符号
+    /// 整数在 abs 运算中溢出。调用前元数据必须已通过 validate。
+    /// 返回：小于 bucket_count 的桶号；非 JsonArrayBucket 模式返回错误。
     ///
     /// # 参数
     /// - `sub_id`: 数组子文档 ID 的最终字符串形态,用于稳定散列到 bucket。
@@ -503,7 +483,7 @@ impl DocMeta {
             .collect())
     }
 
-    /// 业务作用：`array_key_of` / `bucket_key` 的**逆向解析**(对照 原实现 EntityMeta.parseKey):
+    /// 业务作用：`array_key_of` / `bucket_key` 的**逆向解析**:
     /// 从一个完整 key 还原出 array_key parts(scan 后按业务键归组时用)。
     /// 段数必须等于 array_keys 数,否则视为非本 entity 的 key → Err。
     /// 因 `check_part` 禁止 parts 含 `:`/`{`/`}`,对 body 直接 `split(':')` 无损还原:
@@ -660,7 +640,7 @@ impl DocMeta {
     }
 }
 
-/// 业务作用：动态 key 段校验(对照 原实现 KeyParts.checkPart):禁 `:`(key 分隔符)与
+/// 业务作用：动态 key 段校验:禁 `:`(key 分隔符)与
 /// `{`/`}`(Cluster hash tag 字符)——含它们的不同输入会拼出相同 key(数据互相
 /// 覆盖)或破坏 slot 归属,写入前 fail-fast。
 ///
@@ -678,18 +658,18 @@ pub fn check_part(s: &str, desc: &str) -> Result<()> {
 
 /// 文档 trait(;手写 impl 与 #[derive(RedisDocument)] 共用同一形态——
 /// 宏只是生成下面这些方法,语义零差异)。
-/// HASH 编解码内聚于 trait(对照 原实现 RsConverter:字段值 ↔ 存储字符串);
+/// HASH 编解码内聚于 trait;
 /// JSON 模式经 serde(actuator 对 T: Serialize+DeserializeOwned 额外约束)。
 pub trait RedisDocument: Sized + Send + Sync {
     /// 业务作用：静态元数据(进程内单例;`OnceLock` 惯用)。
     fn meta() -> &'static DocMeta;
 
-    /// 业务作用：文档 ID(完整 key = meta().prefix + id;对照 原实现 @RsId)。
+    /// 业务作用：提供文档业务 ID，供元数据派生 Redis key 或 JSONPath 匹配条件。
     fn id(&self) -> String;
 
     /// 业务作用：HASH 编码:全部字段 →(field, value)字符串对(含 id 字段本身)。
     /// 占位符模式注意:占位符字段也必须在内——值只存在 key 里且 key 不可逆推,
-    /// 不写 HASH 则 find(query) 读回为 null（与 原实现 storedFields 合同一致）。
+    /// 不写 HASH 则 find(query) 读回为 null。
     fn to_fields(&self) -> Vec<(String, String)>;
 
     /// 业务作用：HASH 解码:从 field→value 表重建(缺字段按业务默认/报错,impl 决定)。
@@ -699,13 +679,13 @@ pub trait RedisDocument: Sized + Send + Sync {
     fn from_fields(fields: &HashMap<String, String>) -> Result<Self>;
 
     /// 业务作用：占位符模式:按 prefix 占位符出现顺序返回渲染后的字段值
-    /// (对照 原实现 KeySegment 从 entity 反查;无占位符保持默认空)。
+    /// 。
     fn placeholder_parts(&self) -> Vec<String> {
         Vec::new()
     }
 
     /// 业务作用：ARRAY 模式:按 meta().array_keys 顺序返回渲染后的 @JsonArrayKey 字段值
-    /// (对照 原实现 arrayKeyPartsOf;非 ARRAY 模式保持默认空)。
+    /// 。
     fn array_key_parts(&self) -> Vec<String> {
         Vec::new()
     }

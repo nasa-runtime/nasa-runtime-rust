@@ -14,8 +14,8 @@
 
 ```toml
 [dependencies]
-nasaga-mysql = "1"
-natx = "1"
+nasaga-mysql = "1.0.2"
+natx = "1.0.3"
 ```
 
 ## 初始化
@@ -109,6 +109,15 @@ Application 会复验当前角色作用域内的 `datasource_ref`、`outbox.data
   capability，并将所有权交给 `TimerClaimBatch`。
 - 租约过期、token 丢失或实例版本不匹配时，worker 必须立即停止当前动作。
 - 参与方在任何业务写之前锁定 gate，并让 gate、业务事实、Inbox 和结果 Outbox 共享一次提交。
+
+## 参与方 resolve 的事实边界
+
+外部效果仍为 `UNKNOWN` 时，gate 决定 execute/compensate 查询目标；`HALTED` 只冻结解决通道，
+不抹去原未知事实，重新查询必须携带受信恢复操作。已完成的 resolution 对新 attempt 重放原裁决。
+
+若正向效果已为 `SUCCEEDED/REJECTED`，尚未开始补偿且 resolution 为 `NONE`，result 回传未知不等于
+业务效果未知：首个 resolve 在同一事务中记录对应 resolution 终态和 resolve effect，runtime 为当前 command
+写入结果 Outbox，不调用业务 resolver。缺少原效果或目标方向不明确时仍冻结，不凭空查询或推测成功。
 
 ## 主要边界
 

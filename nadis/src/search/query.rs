@@ -1,20 +1,12 @@
-// ============================================================================
-// src/search/query.rs —— 类型化查询 AST + renderer(文档)。
-//
-// 红线
-//   · 查询构造成【类型化 AST】,由 renderer 生成 FT.SEARCH 查询串——字段名/类型在
-//     render(meta) 时校验(不存在的别名、Tag 字段配 between 等在发命令前报错);
-//   · Tag 值转义 RediSearch 特殊字符(防注入/语法破坏);
-//   · 基础查询仅组合 AND；OR 由 FT.AGGREGATE 表达式承担；
-//   · 只有显式 RawQuery 允许可信调用方传原始表达式(注入防护边界明示)。
-// move 语义:render 取 &self 可重复渲染;Query 本身是普通值(原实现 RsQuery 的
-// “池化一次性”在 Rust 中由所有权天然消解。
-// ============================================================================
+// 类型化查询 AST 与渲染器。
+// 字段与类型在 render(meta) 时校验，Tag 值统一转义，避免错误命令或查询注入。
+// 基础查询按 AND 组合，OR 可使用聚合表达式；RawQuery 只接收可信调用方提供的表达式。
+// render 通过共享引用读取 Query，同一查询值可以重复渲染。
 
 use super::{DocMeta, FieldType};
 use crate::error::{NasaRedisError, Result};
 
-/// 数值开区间与比较算子，对齐既有系统的 NumericField EQ/GT/GTE/LT/LTE 语义。
+/// 用于数值开区间、闭区间与无界范围的比较算子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumOp {
     /// `> v`:FT `[(v +inf]`、JSONPath `@.f>v`。
@@ -152,7 +144,7 @@ impl GeoUnit {
     }
 }
 
-/// 查询(AND 组合 + 单字段排序 + 分页;对照 原实现 RsQuery 的能力面)。
+/// 支持 AND 组合、单字段排序与分页的查询。
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     conds: Vec<Cond>,
@@ -160,7 +152,7 @@ pub struct Query {
     offset: usize,
     limit: usize,
     /// 调用方是否显式设置过 limit——ARRAY 模式(JSONPath filter)不支持分页,
-    /// 必须区分"默认 10"与"业务真要分页"(对照 原实现 limitExplicit 标记)。
+    /// 必须区分"默认 10"与"业务真要分页"。
     limit_explicit: bool,
 }
 
@@ -218,7 +210,7 @@ impl Query {
     }
 
     /// 业务作用：数值开区间比较：`gt/gte/lt/lte/eq`；FT 使用 `±inf` sentinel，
-    /// 不再用 `between(X, f64::MAX)` 与 原实现 `[(X +inf]` 跨语言分叉。
+    /// 无界一侧使用 `+inf` 或 `-inf`，有限浮点边界不能表达真正的无界范围。
     ///
     /// # 参数
     /// - `field`: Hash 字段名或业务字段名,用于定位 key 内的子项。
@@ -423,7 +415,7 @@ impl Query {
         self
     }
 
-    /// 业务作用：调用方是否显式设置过 limit(对照 原实现 limitExplicit;`find_keys` 据此决定默认 `LIMIT 0 1000000`)。
+    /// 业务作用：调用方是否显式设置过 limit。
     pub fn is_limit_explicit(&self) -> bool {
         self.limit_explicit
     }
@@ -491,7 +483,7 @@ impl Query {
                             "NumCmp 字段 \"{field}\" 的值必须有限(value={value})"
                         )));
                     }
-                    // FT NUMERIC:`(` 前缀 = 开区间;`±inf` sentinel(对齐 原实现 `[(X +inf]` 等)
+                    // FT NUMERIC 使用 `(` 表示开区间、`±inf` 表示无界，避免有限值截断范围。
                     let range = match op {
                         NumOp::Gt => format!("[({value} +inf]"),
                         NumOp::Gte => format!("[{value} +inf]"),
@@ -697,13 +689,13 @@ fn require_type(f: &super::FieldMeta, ok: bool, want: &str) -> Result<()> {
 }
 
 impl Query {
-    /// 业务作用：渲染为 RedisJSON JSONPath filter(ARRAY 模式查询通道;
-    /// 对照 原实现 RsQuery.toJsonPathFilter + Criteria.appendJsonPath)。
+    /// 业务作用：为 ARRAY 文档查询渲染 RedisJSON JSONPath 条件，并拒绝不支持的查询选项。
+    /// 返回：过滤表达式；排序、显式分页或无法转换的条件返回错误。
     ///
     /// # 参数
     /// - `meta`: 当前文档类型的元数据,用于校验字段类型并决定 JSON 字段别名。
     ///
-    /// 约束(对照 原实现 逐条):
+    /// 约束:
     ///   · 不支持 sort(子文档级排序 RedisJSON 不支持;要排序用 DataType::Json 单文档);
     ///   · 不支持显式分页(limit_explicit;默认 limit 视为未分页);
     ///   · TextMatch/Raw 无法翻译成 JSONPath(TEXT 是 FT 引擎语义;Raw 是 FT 语法)→ 拒绝;
@@ -804,7 +796,7 @@ impl Query {
 
 // ───────────────────────── FT.AGGREGATE(最小封装)─────────────────────────
 
-/// 聚合 reducer(对照 原实现 query/Reducer)。
+/// 聚合 reducer。
 #[derive(Debug, Clone)]
 pub enum Reducer {
     /// REDUCE COUNT 0。
@@ -997,7 +989,7 @@ impl Aggregate {
         // APPLY 位于 GROUPBY/REDUCE 后，可继续计算 reducer 输出；随后用 FILTER 过滤结果行。
         // 表达式由可信调用方提供(RediSearch 表达式语法),原样下发。
         for (expr, alias) in &self.applies {
-            //空表达式/别名会拼成 Redis 语法错(对照 原实现 isBlank 抛错)——提前 fail-fast。
+            //空表达式/别名会拼成 Redis 语法错——提前 fail-fast。
             if expr.trim().is_empty() || alias.trim().is_empty() {
                 return Err(NasaRedisError::Config(format!(
                     "Aggregate APPLY 表达式/别名不能为空(expr={expr:?}, alias={alias:?})"
@@ -1093,10 +1085,8 @@ pub(crate) fn json_path_literal(s: &str) -> Result<String> {
 fn escape_tag(v: &str) -> String {
     let mut out = String::with_capacity(v.len() + 4);
     for ch in v.chars() {
-        // 白名单(对齐 原实现 `escapeQueryChars`;A-5 改回白名单 +-P1g 收窄):只保留
-        // `[A-Za-z0-9_]` + **CJK 表意 `一-龥`(U+4E00..=U+9FA5)** 原样;其余**一切**(标点、空格、
-        // 反斜杠、控制字符 tab/换行、**以及假名/韩文/emoji 等其它非 ASCII**)一律 `\` 前缀。原实现 白名单
-        // 正是这个范围——Rust 若多保留假名/emoji 不转义,跨语言同库 tag 查询会因转义形态不同而分叉。
+        // 仅 ASCII 字母、数字、下划线和 U+4E00..=U+9FA5 汉字原样保留。
+        // 其它字符统一加反斜杠，包括控制字符与其它 Unicode 字符，避免业务值进入查询语法。
         let keep =
             ch.is_ascii_alphanumeric() || ch == '_' || ('\u{4e00}'..='\u{9fa5}').contains(&ch);
         if !keep {

@@ -1,5 +1,5 @@
 // ============================================================================
-// runtime/autotrim.rs：对齐既有 streamAutoTrim 语义的自动裁剪任务。
+// 根据分区保留策略运行 Stream 自动裁剪任务。
 //
 // 问题:partition stream 的 ACK **只移 PEL、不删 entry**,长跑节点 stream 单调增长 → OOM。
 // 解法:**leader** 每 `auto_trim_rate_ms`(默认 60s)对所有分区 stream 跑 `XTRIM MINID ~ {now-保留窗}`,

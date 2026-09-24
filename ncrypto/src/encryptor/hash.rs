@@ -46,7 +46,7 @@ pub fn md5(content: &str) -> String {
     hex_lower(&Md5::digest(content.as_bytes()))
 }
 
-/// 业务作用: SHA-256(**大写** hex,默认;对照 原实现 `sha256(content)`)。
+/// 业务作用: 计算 SHA-256 并输出大写十六进制摘要。
 ///
 /// # 参数
 /// - `content`: 要计算摘要的 UTF-8 文本。

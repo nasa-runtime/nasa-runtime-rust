@@ -1224,7 +1224,8 @@ kafka:
 
 `schema-registry` feature 提供 Confluent-compatible 的 registry client 与 wire envelope
 （`nasa` 门面对应 `kafka-schema-registry`）。它是 Kafka 的 codec 子能力：不启动 registry 服务端，
-不拥有 Application 生命周期，也不设 napp 组件；业务在 UserHook 从最终配置构造并自行持有。
+独立 client 由业务显式构造并持有；配合 `application` 时，Application 在 Prepare 按
+`schema_registries.<name>` 装配命名 client，无需声明 Kafka 消费组件或新增组件字符串。
 `kafka-schema-registry` 自带 `secret`，因此 `SchemaRegistryAuth` 的 token 与密码类型无需业务再补 feature。
 
 生产默认禁止自动注册。数据面只按已批准的 schema ID 拉取，命中结果进有界正缓存，确认不存在的 ID
@@ -1259,8 +1260,7 @@ endpoint 只接受 HTTPS 或 loopback HTTP，拒绝 userinfo、query、fragment�
 
 ### 配置与使用
 
-本能力没有固定 yml 根，也没有 Application 组件。业务从最终配置与 secret 快照构造 client，并自行
-持有其生命周期：
+独立模式通过 `ConfluentRegistryOptions` 显式构造 client，由业务持有生命周期：
 
 ```rust
 use std::sync::Arc;
@@ -1298,6 +1298,28 @@ let schema = registry.schema_by_id(envelope.schema_id).await?;
 | `negative_cache_ttl` | 5 秒 | Registry 明确 404 的短期负缓存；传输失败不会写入 |
 | `auto_register` | `false` | 只有显式授权的部署或管理路径才能注册新修订 |
 
+Application 受管模式开启 `application,kafka-schema-registry`，采用命名配置：
+
+```yaml
+schema_registries:
+  primary:
+    enabled: true
+    endpoint: https://registry.example.com
+    bearer: secret://registry_token
+    request_timeout_ms: 3000
+    max_response_bytes: 1048576
+    cache_capacity: 256
+    auto_register: false
+```
+
+`bearer` 引用 `secrets` 中的名字；Basic 认证使用 `username` 和 `password: secret://...`，不能与
+Bearer 同时配置。Prepare 从同代视图绑定材料并登记资源，Service 在后续 initializer 或 Ready 后任务中
+使用 `app.schema_registry("primary").await`；Batch 在工作负载前完成装配，无需启动 Web 或 Kafka 消费者。
+未声明或禁用的计划不解析其独占凭据、不访问远端。受管计划最多 64 个，请求超时上限 300 秒、缓存容量
+上限 65536；上述 options 的一年超时上限仅适用于独立构造。配置与凭据变化报告 `RestartRequired`。
+构造不查询 Registry、不注册 schema，也不将远端视为 Ready；停机关闭新调用、等待在途调用，旧句柄
+返回 `Closed`。
+
 ### 观测
 
 `metrics_snapshot()` 一次读取即得到全部当前事实，读取不清零。查询结局分六类分别记账，
@@ -1328,7 +1350,7 @@ schema ID、subject 与远端状态码**不进 label**。
 subject、容量或 `auto_register` 门禁在本地拒绝；`cancelled` 表示调用已经开始但没有返回业务结局。
 数据面查询与控制面请求分族，注册流量不会稀释缓存命中率。
 
-与 `nasa` 的 `application` 组合时一行接入统一指标目录，之后 Prometheus 文本端点与 OTLP 指标导出
+独立 client 与 `nasa` 的 `application` 组合时，在 UserHook 接入统一指标目录，之后 Prometheus 文本端点与 OTLP 指标导出
 共用同一份快照：
 
 ```rust
@@ -1346,10 +1368,12 @@ app.register_metrics_source(nasa::kafka::schema_metrics::metrics_source_many([
 ]))?;
 ```
 
+`schema_registries` 标准受管路径已自动登记一个聚合指标源，业务无需且不应为这些实例重复登记。
+
 ### 能力边界
 
-- `kafka-schema-registry` 保持显式 feature 并进入 `full`；它只开放 client/codec 合同，不创建
-  Application 组件或隐式启动后台任务。
+- `kafka-schema-registry` 保持显式 feature 并进入 `full`；独立模式开放 client/codec 合同，
+  配合 `application` 后由显式启用的 `schema_registries` 计划建立受管资源，无需额外组件字符串。
 - 稳定公开合同覆盖 Confluent 5 字节 envelope、Avro/Protobuf/JSON Schema 类型、按 ID 查询、
   兼容性检查、显式注册、有界正负缓存和低基数观测；不提供 codec 代码生成或 payload 语义校验。
 - client 不启动后台刷新，不主动扫描 subject/version，也不把 Registry 健康伪装成 Kafka broker Ready。
@@ -1388,3 +1412,11 @@ let exists = admin.topic_exists("orders").await?;
 生产部署通常预建 topic，并在启动阶段调用 `describe_topic()` 校验分区数、RF 和关键配置。在线增加分区会改变
 key→partition 映射，只能在业务明确接受顺序边界变化时调用 `increase_partitions()`；删除 topic 和修改配置也应由
 受控运维流程执行。
+
+## Application 接入
+
+Schema Registry 的独立构造与 `schema_registries` 标准装配见上文[配置与使用](#配置与使用)。
+受管入口使用 `app.schema_registry(name).await`，由 Application 负责材料、指标与关闭，无需 Kafka 消费组件。
+WS Kafka 通过 `configure_ws_kafka` 绑定受管来源，来源必须关闭 collected consumers，避免 consumer owner 重复。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

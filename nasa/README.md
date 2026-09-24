@@ -16,6 +16,11 @@
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
 
+Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+secret/TLS 与本地文件监听。业务提供配置与 handler，框架负责接流前装配、健康监督、配置应用状态
+和停机，无需另建资源关闭流程；各能力的 feature、入口、配置和失败边界见
+[受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
 ## 核心价值与门面架构
 
 业务 manifest 只选择 `nasa` feature，业务代码只使用 `nasa::<module>`；门面负责把实现 crate、过程宏、
@@ -226,10 +231,10 @@ Application 的 `"partition"` 组件。
 Runner。进程崩溃后的交付仍为至少一次，需要业务幂等；同步阻塞和共享 Redis 后端故障不在本地
 执行隔离的保证内。观测使用 `snapshot()`、`publisher_snapshot()` 与 `async_delete_pending()`。
 
-Application 的 `"redis"` 组件拥有客户端，`RunningPartition` 由创建它的业务负责消费生命周期；
-单独声明 `"redis"` 不会自动注册 handler 或启动分区消费。业务应在客户端关闭前等待
-`shutdown_until(deadline)` 并检查 `converged`；超时可继续等待同一操作，只有显式
-`force_shutdown_until` 才请求有损中止。
+Application 通过 `configure_redis_partition(source, critical, configure)` 接收 handler，负责 Prepare、
+Ready、逐来源健康与聚合停机；单独声明 `"redis"` 不会自动注册 handler。所有来源先关闭准入，再
+共用截止点并发排干，未完成时保留依赖责任。独立使用方持有 `RunningPartition` 并自行等待
+`shutdown_until(deadline)`；只有显式 `force_shutdown_until` 才请求有损中止。
 完整配置、逐条注册和容量算法见
 [nadis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#业务键有序分区消费)。
 
@@ -362,14 +367,21 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 | 能力 | feature 与入口 | 生命周期 owner | 核心安全合同 |
 | --- | --- | --- | --- |
-| Schema Registry | `kafka-schema-registry` → `nasa::kafka` | 业务持有 client；无组件字符串 | schema ID 白名单、有界正负缓存、默认禁止注册、凭据由 `SecretBytes` 承载 |
-| 对象存储 | `object-store` → `nasa::object` | 业务持有 adapter；无组件字符串 | 有界单对象、`CreateOnly` 条件写、默认 SHA-256 metadata 复核、SigV4 credential 脱敏 |
+| Schema Registry | `kafka-schema-registry` → `nasa::kafka`；配合 `application` 用 `app.schema_registry(name).await` | 独立 client 由业务持有；`schema_registries.<name>` 由 Application 托管，无需 Kafka 消费组件 | schema ID 白名单、有界正负缓存、默认禁止注册、凭据由 `SecretBytes` 承载 |
+| 对象存储 | `object-store` → `nasa::object`；配合 `application` 用 `app.object_store(name).await` | 独立 adapter 由业务持有；`object_stores.<name>` 由 Application 托管，无需新增组件字符串 | 有界单对象、`CreateOnly` 条件写、默认 SHA-256 metadata 复核、SigV4 credential 脱敏 |
 | gRPC listener | `grpc` → `nasa::grpc` | 独立 `GrpcServerHandle` 或 Application `"grpc"` 二选一 | 统一 codegen/service registry、permit 先于 accept、TLS/mTLS、固定方法指标与有预算排空 |
 | Web listener | `application,web` → `#[nasa::application("web")]` | Application 独占明文 listener；不提供脱离 Application 的 listener 模式 | HTTP/1/h2c 确定选择、连接与 stream 上界、固定协议指标与有预算排空；不终止 TLS |
 
-Schema Registry 与对象存储在 UserHook 从最终配置和 secret 快照构造，不会因为启用 `application`
-自动获得生命周期组件；需要统一 Prometheus/OTLP 出口时显式调用各自的 `metrics_source`，同一 family
-只能登记一个 owner，多实例使用 `metrics_source_many`。gRPC 只有在同时启用 `application` 并声明
+独立模式显式构造 `ConfluentSchemaRegistry` 或 `S3ObjectStore`，由业务管理实例。Application 模式
+在上述命名计划中显式设置 `enabled: true`，Prepare 按同代配置和 `secret://` 材料建立客户端、聚合指标
+及关闭门禁。Service 在后续 initializer 或 Ready 后任务中取得资源，Batch 在工作负载前完成装配；
+未声明或禁用的计划不建立客户端、不读取其独占凭据。对象存储按显式策略监督健康；Registry 构造不访问
+远端、不注册 schema，也不证明远端 readiness。参数或凭据变化报告 `RestartRequired`，停机关闭新调用、
+等待在途调用，旧句柄返回 `Closed`。
+
+独立实例接入 Application 的 Prometheus/OTLP 出口时，可以在 UserHook 登记各自的 `metrics_source`；
+同一 family 只能登记一个 owner，多实例使用 `metrics_source_many`。标准受管计划已自动登记聚合源，
+不要重复手工登记。gRPC 只有在同时启用 `application` 并声明
 `"grpc"` 时才由容器托管，独立模式仍由业务显式 shutdown。Web 只有在同时启用 `application,web`
 并声明 `"web"` 时才读取 `server` 配置和创建 listener；单独启用 `web` 只提供路由与安全门面。
 受管 Web/gRPC 可以在 Ready 装配阶段预绑定，但必须等全部任务工厂、最终检查和启动预算通过，
@@ -410,6 +422,22 @@ readiness、发现 metadata、指标和反向停机；`nasa::grpc` 是业务运�
 contract crate。完整配置、安全、发现、指标、兼容门禁和独立模式见
 [nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md)。
 
+## 受管配置与资源取得
+
+Service 的 UserHook 登记计划，Prepare 装配标准命名资源，initializer 与 Ready 后业务通过
+`app.idempotency_store_named(name)`、`app.audit_sink(name)`、`app.rest_client(name)`、
+`app.object_store(name)`、`app.schema_registry(name)`、`app.http_client(name)` 取得句柄。
+Batch 在工作负载前完成装配，不要求启动 Web。feature 名称以本 README 的总表为准；例如 MySQL
+审计使用 `audit`，普通 REST 使用 `rest-discovery`，不使用底层 `napp` 的 feature 名称。
+
+命名计划显式启用，来源必须精确匹配；仅由禁用计划引用的凭据不解析、不建立文件观察。
+本地文件与 Nacos 共用配置候选流程，材料准备失败保留旧视图。TLS HTTP 和受管日志可应用已支持
+参数；对象存储、Schema Registry 与连接来源变化保留现有资源并报告 `RestartRequired`。
+配置可见与资源实际生效分别记录，单次业务操作应固定一次 `app.config_view()`。
+
+停机由所属 owner 撤销准入并等待在途工作，旧受管句柄不能重新开放。诊断快照不发起后端探测；
+构造成功也不等于远端健康。各能力的健康策略、容量、事务与取消边界仍按组件合同执行。
+
 ## Feature 总表
 
 默认 feature 为空。只开启业务实际使用的能力：
@@ -442,7 +470,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `cache` | `nasa::cache` | 两级缓存、失效广播和缓存宏 |
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |
 | `kafka-tls` / `kafka-gssapi` / `kafka-zstd` | `nasa::kafka` | Kafka 传输安全与压缩子能力 |
-| `kafka-schema-registry` | `nasa::kafka`、`nasa::secret` | 有界 schema adapter；蕴含 `kafka` 与 `secret`，进入 `full` |
+| `kafka-schema-registry` | `nasa::kafka`、`nasa::secret` | 有界 schema adapter；蕴含 `kafka` 与 `secret`，配合 `application` 纳管 `schema_registries`，进入 `full` |
 | `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
 | `saga-runtime-pgsql` | `nasa::saga::pgsql`、`nasa::application` | PostgreSQL Store/Inbox/Outbox 组合与共享 Saga 状态机 |
@@ -463,7 +491,7 @@ contract crate。完整配置、安全、发现、指标、兼容门禁和独立
 | `oauth` | `nasa::oauth` | JWT、JWKS 与授权服务器 metadata |
 | `secret` | `nasa::secret` | secret 分片、快照和两阶段轮换 |
 | `secret-http` / `secret-vault` | `nasa::secret` | TLS client 和 KV v2 provider |
-| `object-store` | `nasa::object`、`nasa::secret` | 有界对象存储合同；蕴含 `secret`，进入 `full` |
+| `object-store` | `nasa::object`、`nasa::secret` | 有界对象存储合同；蕴含 `secret`，配合 `application` 纳管 `object_stores`，进入 `full` |
 | `grpc` | `nasa::grpc`、`nasa::application` | 统一 codegen、独立或 `"grpc"` Application 受管 listener、TLS/mTLS、方法策略与观测，进入 `full` |
 | `scheduling` | `nasa::scheduling` | 异步与定时任务 |
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
@@ -647,6 +675,8 @@ server:
 | `saga` | Application Saga 组件 |
 | `outbox` | Application Outbox 组件；也由 Saga 隐式纳入 |
 | `kafka` / `kafkas` | `nafka` 受管组件 |
+| `schema_registries.<name>` | Application Prepare 装配的命名 Registry client；需 `application,kafka-schema-registry`，无需 Kafka 消费组件 |
+| `object_stores.<name>` | Application Prepare 装配的命名对象存储；需 `application,object-store`，无需新增组件字符串 |
 | `grpc` | Application gRPC listener、TLS、方法策略与协议能力；独立模式不读取此根 |
 | `auth` | OAuth/JWKS 认证组件 |
 | `server` | Web 组件 |
@@ -654,7 +684,10 @@ server:
 | `rest_discovery` | 注册发现组件 |
 | `scheduling` | `nasched` |
 
-Schema Registry 和对象存储没有固定配置根；README 中的 yml 仅是业务投影示例，门面不会隐式读取。
+`schema_registries` 与 `object_stores` 是 Application 受管配置根，每个命名计划以 `enabled: true`
+启用；仅编入 feature 不会创建客户端。独立 `ConfluentRegistryOptions` 与 `S3Options` 仍由调用方显式
+传入，不读取 Application 配置。两种入口的完整配置和边界见
+[受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
 
 ## 主要边界
 

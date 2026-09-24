@@ -1,4 +1,4 @@
-//! HMAC 消息认证码(对照 原实现 `hmacMd5/Sha1/Sha256/Sha512` + `*Base64` 变体)。
+//! HMAC 消息认证码。
 //!
 //! hex 输出**小写**;`*_base64` 输出标准 Base64。HMAC key 任意长度(直接取 secret 的 UTF-8 字节)。
 //!

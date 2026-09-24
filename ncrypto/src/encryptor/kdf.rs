@@ -1,21 +1,12 @@
-//! PBKDF2 密码派生(对照 原实现 `pbkdf2`,`PBKDF2WithHmacSHA256`,小写 hex)。
+//! PBKDF2 密码派生。
 
 use super::hex_lower;
 use crate::{CryptoError, Result};
 use sha2::Sha256;
 
-/// 业务作用: PBKDF2-HMAC-SHA256 派生密钥(**小写** hex)。
-/// `iterations` 推荐 >= 100000;`key_bits` 如 128/256。salt 取其 UTF-8 字节(对照 原实现)。
-///
-/// **`iterations==0` / `key_bits==0` fail-fast**(对照 原实现 `PBEKeySpec` 抛
-/// `IllegalArgumentException`)——`iterations=0` 此前静默退化成 1 轮(严重削弱派生强度)、`key_bits=0`
-/// 此前返回空串(把配置错误伪装成合法输出),违反 crate"可失败 API 返 Result、不静默"纪律,故改返 `Result`。
-/// 注:`key_bits` 非 8 倍数沿用 `/8` floor(JDK `PBEKeySpec(...,129)` 实测也返回 16 字节,**不**拒绝)。
-///
-/// **跨语言 caveat(安全说明.2)**:口令取 `password.as_bytes()`(UTF-8 编码)。
-/// **ASCII 口令已 KAT 实证与公认向量逐字节一致**;但 原实现 SunJCE `PBKDF2WithHmacSHA256`
-/// 内部把 char[] 口令按其自身规则编码,**非 ASCII 口令(中文/重音符)的字节序列可能与 UTF-8 不同**,
-/// 此时 Rust 与 原实现 派生结果会发散。若需用非 ASCII 口令跨语言互通,务必先对 原实现 golden 验证。
+/// 业务作用：按 PBKDF2-HMAC-SHA256 从口令与盐派生密钥，输出小写十六进制。
+/// 口令和盐均按 UTF-8 输入；跨语言互通必须使用相同字节、轮数与长度，不能只比较显示文本。
+/// 返回：`key_bits / 8` 字节密钥的编码；轮数或位数为零时返回错误。非八倍数位数向下取整。
 ///
 /// # 参数
 /// - `password`: 派生密钥使用的口令文本,当前实现按 UTF-8 字节输入 PBKDF2。

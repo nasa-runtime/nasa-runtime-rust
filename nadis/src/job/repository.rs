@@ -1050,7 +1050,11 @@ impl JobRepository {
         let shard = self.keyspace.schedule_shard(definition.name());
         let schedule_type = definition.schedule_type().wire_name();
         // triggerType 决定 runId 派生：补偿触发与常规触发即使同一逻辑时刻也必须是不同 Run。
-        let trigger_type = if misfire { "MISFIRE" } else { schedule_type };
+        let trigger_type = if misfire {
+            "MISFIRE"
+        } else {
+            schedule_type
+        };
         let run_id = scheduled_run_id(
             self.keyspace.qualifier(),
             self.keyspace.namespace(),

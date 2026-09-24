@@ -602,6 +602,7 @@ impl ApplicationComponent for KafkaComponent {
                     proxy.clone(),
                     contributor,
                     bridge,
+                    client.container.consumers == ConsumerMode::Disabled,
                 ));
                 capabilities.insert(name.clone(), Arc::clone(&capability));
                 self.clients.insert(

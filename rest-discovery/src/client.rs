@@ -28,6 +28,7 @@ use crate::resilience::ResilienceRuntime;
 /// 带服务发现 + 负载均衡的 HTTP client。`discovery=None` 即 external-only(`rest_discovery.enabled=false`)。
 pub struct RestDiscoveryClient {
     http: reqwest::Client,
+    background: Arc<crate::background::BackgroundOwner>,
     /// `None` = external-only:`service_request`/`lb://` 返回 `DiscoveryDisabledForInternalCall`。
     /// `Arc`:索引刷新任务持 `Weak` 以在服务名超 grace 移除时回调 `mark_removed`(churn 回收)。
     source: Option<Arc<InstanceSource>>,
@@ -139,15 +140,18 @@ impl RestDiscoveryClient {
             );
         }
         let metrics = Arc::new(RestMetrics::default());
+        let background = Arc::new(crate::background::BackgroundOwner::new());
         let source = Arc::new(InstanceSource::new(
             discovery,
             options.watch.clone(),
             metrics.clone(),
             options.no_instance,
+            background.clone(),
         ));
         Ok(Self {
             http: build_http_client(&options.http),
             source: Some(source),
+            background,
             lb,
             options,
             index: None,
@@ -205,23 +209,26 @@ impl RestDiscoveryClient {
         let metrics = Arc::new(RestMetrics::default());
         // InstanceSource 是内部调用的事实入口:显式 service、lb://、启发式命中都会先经它取 watch 快照。
         // 它必须在索引刷新任务启动前创建,这样刷新任务移除服务时才能回调 mark_removed 回收对应 watch。
+        let background = Arc::new(crate::background::BackgroundOwner::new());
         let source = Arc::new(InstanceSource::new(
             discovery.clone(),
             options.watch.clone(),
             metrics.clone(),
             options.no_instance,
+            background.clone(),
         ));
 
         let (index, index_refresh_task) = if options.heuristic_http == HeuristicHttpMode::Enabled {
             let index = Arc::new(ServiceNameIndex::new(
                 options.service_match,
                 options.heuristic.removed_service_grace,
+                options.watch.max_services,
             ));
             // 首拉必须发生在 client 发布前:否则首批裸 http(s) 请求会看到空索引,把内部服务误判为外部。
             match discovery.list_services().await {
                 // 首拉时旧索引为空 → 不会有 removed,丢弃返回值。
                 Ok(names) => {
-                    index.refresh(names, Instant::now());
+                    index.refresh(names, Instant::now())?;
                 }
                 Err(e) => match options.startup {
                     StartupPolicy::RequireInitialServiceListWhenHeuristicEnabled => {
@@ -236,13 +243,13 @@ impl RestDiscoveryClient {
                 },
             }
             // 刷新任务只持 Weak,避免后台循环延长 client 生命周期;服务名超 grace 移出索引时回收对应 watch。
-            let task = tokio::spawn(index_refresh_loop(
+            let task = background.spawn(index_refresh_loop(
                 discovery.clone(),
                 index.clone(),
                 options.heuristic.refresh_interval,
                 Arc::downgrade(&source),
-            ));
-            (Some(index), Some(task.abort_handle()))
+            ))?;
+            (Some(index), Some(task))
         } else {
             (None, None)
         };
@@ -250,6 +257,7 @@ impl RestDiscoveryClient {
         Ok(Self {
             http: build_http_client(&options.http),
             source: Some(source),
+            background,
             lb,
             options,
             index,
@@ -284,6 +292,7 @@ impl RestDiscoveryClient {
         Ok(Self {
             http: build_http_client(&options.http),
             source: None,
+            background: Arc::new(crate::background::BackgroundOwner::new()),
             lb,
             options,
             index: None,
@@ -380,14 +389,26 @@ impl RestDiscoveryClient {
         )
     }
 
-    /// 业务作用：abort 所有后台任务(索引刷新 + watch pump)(`RemoteRuntime` drop / 运行时 reset 用)。
-    pub(crate) fn shutdown_background(&self) {
+    /// 业务作用：永久关闭当前实例准入并通知索引和订阅任务退出。
+    /// 参数说明：无。
+    /// 返回：关闭立即生效；实际任务退出由 shutdown 等待确认。
+    pub fn shutdown_background(&self) {
+        self.background.close();
         if let Some(h) = &self.index_refresh_task {
             h.abort();
         }
         if let Some(source) = &self.source {
             source.abort_all();
         }
+    }
+
+    /// 业务作用：关闭当前实例并在宿主截止点内等待其调用和后台任务退出。
+    /// 参数说明：`deadline` 为共享的绝对停机截止点。
+    /// 返回：任务和调用全部退出时成功；超时返回未排干，旧句柄持续拒绝新工作。
+    /// 原始 send 返回的 reqwest 响应体归调用方持有；便捷解码方法的响应体由本 owner 管理。
+    pub async fn shutdown(&self, deadline: tokio::time::Instant) -> Result<()> {
+        self.shutdown_background();
+        self.background.wait(deadline).await
     }
 
     // ── 解析与选址(send 时调用) ──
@@ -723,18 +744,27 @@ impl RestDiscoveryClient {
 
     /// 业务作用：为一个额外 attempt 消耗每服务 retry token，防止下游故障时所有请求同时倍增流量。
     fn consume_retry_budget(&self, service: &str) -> bool {
-        let now = Instant::now();
-        let capacity = self.options.retry.budget_capacity;
-        let refill = self.options.retry.budget_refill_per_second;
-        let entry = self
-            .retry_budgets
-            .entry(service.to_owned())
-            .or_insert_with(|| std::sync::Mutex::new(RetryBucket::new(capacity, now)));
-        let allowed = entry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .try_take(capacity, refill, now);
-        allowed
+        self.background
+            .with_open(|| {
+                if !self.retry_budgets.contains_key(service)
+                    && self.retry_budgets.len() >= self.options.watch.max_services
+                {
+                    return Ok(false);
+                }
+                let now = Instant::now();
+                let capacity = self.options.retry.budget_capacity;
+                let refill = self.options.retry.budget_refill_per_second;
+                let entry = self
+                    .retry_budgets
+                    .entry(service.to_owned())
+                    .or_insert_with(|| std::sync::Mutex::new(RetryBucket::new(capacity, now)));
+                let allowed = entry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .try_take(capacity, refill, now);
+                Ok(allowed)
+            })
+            .unwrap_or(false)
     }
 
     /// 业务作用：选一个未试过的实例下标:优先 LB 选址;若 LB 选到已试过的(或 `None`),线性取第一个未试的。
@@ -876,7 +906,13 @@ async fn index_refresh_loop(
         };
         match discovery.list_services().await {
             Ok(names) => {
-                let outcome = index.refresh(names, Instant::now());
+                let outcome = match index.refresh(names, Instant::now()) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        tracing::warn!("rest-discovery: service index capacity rejected; retaining current index");
+                        continue;
+                    }
+                };
                 let just_marked: std::collections::HashSet<&str> =
                     outcome.removed.iter().map(String::as_str).collect();
                 for name in &outcome.removed {
@@ -1257,12 +1293,10 @@ impl RestRequestBuilder {
     ///
     /// 返回：绝对预算内完成解析、选址与全部尝试时返回原始响应；取消、超时、选址或传输失败返回脱敏错误。
     pub async fn send(mut self) -> Result<reqwest::Response> {
-        if self
-            .budget
-            .as_ref()
-            .is_some_and(RequestBudget::is_exhausted)
-        {
-            return Err(RestDiscoveryError::BudgetExhausted);
+        let background = self.client.background.clone();
+        let _call = background.enter()?;
+        if let Some(budget) = &self.budget {
+            budget.check()?;
         }
         // 业务未显式绑定时回退环境上下文(HTTP 入站中间件、消费/任务入口建立的 task-local 作用域),
         // 使漏穿线的调用点不再静默断链;显式绑定始终优先,既有行为不变。
@@ -1290,17 +1324,17 @@ impl RestRequestBuilder {
         }
         let budget = self.budget.clone();
         let operation = self.send_with_context();
-        let result = match budget {
-            Some(budget) => {
-                tokio::select! {
-                    _ = budget.cancelled() => Err(RestDiscoveryError::Cancelled),
-                    result = tokio::time::timeout_at(budget.deadline(), operation) => {
-                        result.map_err(|_| RestDiscoveryError::BudgetExhausted)?
-                    }
+        let result = background
+            .run(async move {
+                match budget {
+                    Some(budget) => budget
+                        .run(operation)
+                        .await
+                        .map_err(RestDiscoveryError::from)?,
+                    None => operation.await,
                 }
-            }
-            None => operation.await,
-        };
+            })
+            .await;
         if let Some(span) = span.take() {
             let status = result
                 .as_ref()
@@ -1389,13 +1423,7 @@ impl RestRequestBuilder {
     ///
     /// 返回：2xx 且 JSON 契约匹配时返回 `T`；非 2xx、传输失败或反序列化失败返回对应稳定错误。
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
-        let resp = self.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(RestDiscoveryError::HttpStatus { status });
-        }
-        // 先读字节(传输失败 → Http),再本地反序列化(契约失败 → ResponseDecodeFailed)。
-        let bytes = resp.bytes().await?;
+        let bytes = self.send_bytes().await?;
         serde_json::from_slice(&bytes).map_err(|e| RestDiscoveryError::ResponseDecodeFailed {
             reason: format!("响应体 JSON 反序列化失败:{e}"),
         })
@@ -1409,13 +1437,7 @@ impl RestRequestBuilder {
     ///
     /// 返回：2xx 响应含指定顶层字段且其类型匹配时返回 `T`；状态、JSON 或字段合同不满足时返回脱敏错误。
     pub async fn send_json_unwrap<T: DeserializeOwned>(self, field: &str) -> Result<T> {
-        let resp = self.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(RestDiscoveryError::HttpStatus { status });
-        }
-        // 先读字节(传输失败 → Http),再本地解析 Value 取顶层字段;声明式客户端场景可接受一次中转分配。
-        let bytes = resp.bytes().await?;
+        let bytes = self.send_bytes().await?;
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             RestDiscoveryError::ResponseDecodeFailed {
                 reason: format!("响应不是合法 JSON:{e}"),
@@ -1439,13 +1461,8 @@ impl RestRequestBuilder {
     ///
     /// 返回：2xx 时返回完整文本；非 2xx 不读取敏感正文并返回状态错误。
     pub async fn send_text(self) -> Result<String> {
-        let resp = self.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            // 非成功正文可能包含凭据、用户数据或内部诊断；即使调用方请求文本，也不能让它进入公开错误链。
-            return Err(RestDiscoveryError::HttpStatus { status });
-        }
-        Ok(resp.text().await?)
+        self.consume_response(|response| async move { Ok(response.text().await?) })
+            .await
     }
 
     /// 业务作用：发送并只校验 2xx、丢弃 body(供宏 `-> anyhow::Result<()>` 生成)。
@@ -1468,12 +1485,42 @@ impl RestRequestBuilder {
     ///
     /// 返回：2xx 时返回响应字节；非 2xx 不读取正文并返回状态错误。
     pub async fn send_bytes(self) -> Result<bytes::Bytes> {
-        let resp = self.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(RestDiscoveryError::HttpStatus { status });
-        }
-        Ok(resp.bytes().await?)
+        self.consume_response(|response| async move { Ok(response.bytes().await?) })
+            .await
+    }
+
+    /// 业务作用：让响应头与完整响应体消费使用同一个预算和运行时 owner。
+    /// 参数说明：`consume` 为成功响应体的消费方法。
+    /// 返回：完整消费成功时返回业务值；关闭、取消、到期或传输失败时保留错误分类。
+    async fn consume_response<T, F, Fut>(mut self, consume: F) -> Result<T>
+    where
+        F: FnOnce(reqwest::Response) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let maximum = self.timeout.unwrap_or(self.client.options.http.timeout);
+        let budget = self
+            .budget
+            .as_ref()
+            .map(|parent| parent.child(maximum))
+            .unwrap_or_else(|| RequestBudget::from_now(maximum));
+        self.budget = Some(budget.clone());
+        let background = self.client.background.clone();
+        let _call = background.enter()?;
+        background
+            .run(async move {
+                budget
+                    .run(async move {
+                        let response = self.send().await?;
+                        let status = response.status();
+                        if !status.is_success() {
+                            return Err(RestDiscoveryError::HttpStatus { status });
+                        }
+                        consume(response).await
+                    })
+                    .await
+                    .map_err(RestDiscoveryError::from)?
+            })
+            .await
     }
 }
 
@@ -1525,7 +1572,11 @@ fn append_external_query(url: &str, query_parts: &[String]) -> Result<reqwest::U
         });
     }
     let joined = query_parts.join("&");
-    let sep = if url.contains('?') { '&' } else { '?' };
+    let sep = if url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     let full = format!("{url}{sep}{joined}");
     reqwest::Url::parse(&full).map_err(|e| RestDiscoveryError::InvalidUrl {
         url: full,

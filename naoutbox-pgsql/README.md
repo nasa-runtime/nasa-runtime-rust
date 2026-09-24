@@ -1,6 +1,6 @@
 # naoutbox-pgsql
 
-`naoutbox-pgsql` 把业务事实与待发布事件写入同一个命名 PostgreSQL datasource 和 ambient transaction，
+`naoutbox-pgsql` 把业务事实与等待投递的事件写入同一个命名 PostgreSQL datasource 和 ambient transaction，
 消除“业务已提交但消息没有持久化”的窗口。dispatcher 以数据库 owner 租约和递增 fencing token 取得
 global 或单 lane 权威，再通过 `FOR UPDATE SKIP LOCKED` 按稳定 `id` 升序领取候选；只有下游已确认的
 成功前缀会按精确 `id + event_id` 标记完成。
@@ -9,9 +9,9 @@ global 或单 lane 权威，再通过 `FOR UPDATE SKIP LOCKED` 按稳定 `id` �
 
 ```toml
 [dependencies]
-naoutbox-core = "1"
-naoutbox-pgsql = "1"
-natx-pgsql = "1"
+naoutbox-core = "1.0.2"
+naoutbox-pgsql = "1.0.0"
+natx-pgsql = "1.0.0"
 ```
 
 ```rust

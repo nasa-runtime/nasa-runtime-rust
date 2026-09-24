@@ -88,9 +88,12 @@ homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
-# 成员间依赖保留公开版本约束，可同时用 path 选择本地组件；workspace patch 统一其它传递引用的
-# crate 身份。归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
+# 成员间依赖使用公开版本约束；workspace patch 统一直接与传递引用的本地 crate 身份。
+# 归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
 [patch.crates-io]
+nadisc = { path = "nadisc" }
+nasecret-vault = { path = "nasecret-vault" }
+nasecret-http = { path = "nasecret-http" }
 nanotify-core = { path = "nanotify-core" }
 # 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
 macro-support = { path = "macro-support" }
@@ -134,6 +137,9 @@ ncrypto = { path = "ncrypto" }
 naaudit = { path = "naaudit" }
 naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
+nabudget = { path = "nabudget" }
+nalog = { path = "nalog" }
+nacache-macro = { path = "nacache-macro" }
 async-macro = { path = "async-macro" }
 nasaga-core = { path = "nasaga-core" }
 nasaga-backend = { path = "nasaga-backend" }
@@ -169,3 +175,13 @@ naauthz = { path = "naauthz" }
 nasched = { path = "nasched" }
 # 门面与声明式 REST 客户端宏必须共享同一依赖身份，确保生成代码使用一致的错误和参数类型。
 rest-client-macro = { path = "rest-client-macro" }
+# 工作区成员使用同一组本地版本；宏与可选门面能力也不能另行解析为 registry 副本。
+hystrix-macro = { path = "hystrix-macro" }
+nafana-macro = { path = "nafana-macro" }
+nafka-macro = { path = "nafka-macro" }
+naimg = { path = "naimg" }
+naopenapi = { path = "naopenapi" }
+nasa = { path = "nasa" }
+nauth-oauth = { path = "nauth-oauth" }
+naweb-macro = { path = "naweb-macro" }
+naws-proto-derive = { path = "naws-proto-derive" }

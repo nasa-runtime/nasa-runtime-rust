@@ -140,8 +140,10 @@ async fn run_redis_monitor(
     application: Application,
     clients: Vec<(Arc<RedisClient>, ReadinessContributor)>,
 ) -> ApplicationResult<()> {
+    let mut states = application.subscribe_state();
     loop {
-        match application.state() {
+        let state = *states.borrow_and_update();
+        match state {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
                 for (_, contributor) in &clients {
                     contributor.observe(
@@ -153,14 +155,21 @@ async fn run_redis_monitor(
                 return Ok(());
             }
             ApplicationState::Starting => {
-                tokio::time::sleep(REDIS_MONITOR_INTERVAL).await;
+                let _ = states.changed().await;
                 continue;
             }
-            ApplicationState::Ready => {}
+            ApplicationState::Ready => {
+                application.redis_partitions().observe()?;
+                application.redis_tasks().observe()?;
+            }
         }
 
-        let results =
-            futures_util::future::join_all(clients.iter().map(|(client, _)| client.ping())).await;
+        // 停机状态优先结束只读探测，不让周期等待占用派生任务的排干预算。
+        let results = tokio::select! {
+            biased;
+            _ = states.changed() => continue,
+            results = futures_util::future::join_all(clients.iter().map(|(client, _)| client.ping())) => results,
+        };
         for ((client, contributor), result) in clients.iter().zip(results) {
             let now = Instant::now();
             match result {
@@ -178,7 +187,11 @@ async fn run_redis_monitor(
                 Err(_) => contributor.observe(DependencyState::Degraded, reason::DEGRADED, now),
             }
         }
-        tokio::time::sleep(REDIS_MONITOR_INTERVAL).await;
+        tokio::select! {
+            biased;
+            _ = states.changed() => {},
+            _ = tokio::time::sleep(REDIS_MONITOR_INTERVAL) => {},
+        }
     }
 }
 
@@ -243,6 +256,9 @@ impl ApplicationComponent for RedisComponent {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = metric_clients;
             self.critical_task = Some(Box::pin(run_redis_monitor(application, monitored)));
+            install_snowflakes(context).await?;
+            #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+            crate::mapper_cache::install_managed(context).await?;
             Ok(())
         })
     }
@@ -319,6 +335,12 @@ impl ApplicationComponent for RedisComponent {
                     )
                 })?;
             }
+            context
+                .application()
+                .redis_partitions()
+                .prepare(context)
+                .await?;
+            context.application().redis_tasks().prepare(context).await?;
             Ok(())
         })
     }
@@ -435,7 +457,11 @@ impl nametrics_core::LegacyMetricsSource for IdempotentMetricsSource {
                 samples.push(idempotent_gauge_sample(
                     &IDEMPOTENT_RESOLVED_MODE,
                     vec![("qualifier", qualifier.clone()), ("mode", label.to_owned())],
-                    if selected { 1.0 } else { 0.0 },
+                    if selected {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ));
             }
             samples.push(idempotent_gauge_sample(
@@ -582,7 +608,10 @@ fn parse_redis_configs(
         .ok_or_else(|| redis_error(phase, "`redis` configuration section must be an object"))?;
     let mut configs = BTreeMap::new();
     if let Some(properties) = object.get("properties") {
-        if object.keys().any(|key| key != "properties" && key != "job") {
+        if object
+            .keys()
+            .any(|key| key != "properties" && key != "job" && key != "snowflake")
+        {
             return Err(redis_error(
                 phase,
                 "`redis.properties` multi-instance form cannot be mixed with flat Redis fields",
@@ -631,6 +660,7 @@ fn parse_redis_configs(
         let mut flat = section.clone();
         if let Some(object) = flat.as_object_mut() {
             object.remove("job");
+            object.remove("snowflake");
         }
         let mut config = decode_redis_config(flat, phase, "primary")?;
         if canonical_qualifier(&config.qualifier) != "primary" {
@@ -761,4 +791,130 @@ fn redis_error_src(
     source: impl Into<anyhow::Error>,
 ) -> ApplicationError {
     ApplicationError::with_source(ComponentId::Redis, phase, message, source)
+}
+
+/// Redis 子能力下的命名生成器装配计划；账本初始化不属于应用启动动作。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnowflakePlan {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_snowflake_redis")]
+    redis_ref: String,
+    #[serde(default)]
+    config: nadis::snowflake::SnowflakeConfig,
+    namespace: Option<nadis::snowflake::WorkerIdNamespace>,
+}
+
+/// 业务作用：为未指定来源的生成器绑定标准 Redis 默认资源。
+/// 参数说明：无。
+/// 返回：默认来源的 canonical qualifier。
+fn default_snowflake_redis() -> String {
+    "primary".to_owned()
+}
+
+/// 业务作用：所有 Redis 来源建立后装配显式启用的非复用生成器。
+/// 参数说明：`context` 提供资源登记和逆序清理责任。
+/// 返回：所有启用计划可领取编号时发布命名资源；失败终止启动，已登记 owner 随回滚关闭。
+async fn install_snowflakes(context: &mut StartContext<'_>) -> ApplicationResult<()> {
+    let application = context.application().clone();
+    let snapshot = application.config();
+    let Some(section) = snapshot
+        .value()
+        .get("redis")
+        .and_then(|redis| redis.get("snowflake"))
+    else {
+        return Ok(());
+    };
+    let plans: BTreeMap<String, SnowflakePlan> =
+        serde_json::from_value(section.clone()).map_err(|error| {
+            redis_error_src(
+                ApplicationPhase::Start,
+                "invalid managed snowflake plans",
+                error,
+            )
+        })?;
+    if plans.len() > MAX_MANAGED_REDIS_SOURCES {
+        return Err(redis_error(
+            ApplicationPhase::Start,
+            "managed snowflake plan count exceeds limit",
+        ));
+    }
+    for (name, plan) in plans {
+        if !plan.enabled {
+            continue;
+        }
+        if name.is_empty() || name.len() > MAX_MANAGED_REDIS_NAME_BYTES {
+            return Err(redis_error(
+                ApplicationPhase::Start,
+                "invalid managed snowflake resource name",
+            ));
+        }
+        let namespace = plan.namespace.ok_or_else(|| {
+            redis_error(
+                ApplicationPhase::Start,
+                "managed snowflake requires an initialized namespace identity",
+            )
+        })?;
+        let client = redis_handle(&application, &canonical_qualifier(&plan.redis_ref)).await?;
+        // 启动只允许领取已获管理授权的现有账本，缺失时禁止自动创建。
+        let generator = Arc::new(
+            nadis::snowflake::ManagedSnowflake::allocate(&client, &plan.config, &namespace)
+                .await
+                .map_err(|error| {
+                    redis_error_src(
+                        ApplicationPhase::Start,
+                        "managed snowflake allocation rejected",
+                        error,
+                    )
+                })?,
+        );
+        context.activate(Box::new(SnowflakeShutdown(generator.clone())));
+        context.register_resource(Some(&name), generator)?;
+    }
+    Ok(())
+}
+
+/// 发号权限由应用 owner 控制，即使调用方保留 Arc 也不能越过停机。
+struct SnowflakeShutdown(Arc<nadis::snowflake::ManagedSnowflake>);
+
+impl ShutdownAction for SnowflakeShutdown {
+    /// 业务作用：提供稳定的关闭责任名称。
+    /// 参数说明：无。
+    /// 返回：不包含动态来源或资源名的固定名称。
+    fn label(&self) -> &'static str {
+        "redis-snowflake"
+    }
+
+    /// 业务作用：在 Redis 客户端关闭前收回当前生成器的发号权限。
+    /// 参数说明：`context` 为宿主停机上下文；本动作不执行外部 I/O。
+    /// 返回：发号门禁关闭后成功，不回收已分配 workerId。
+    fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+        self.0.close();
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl Drop for SnowflakeShutdown {
+    /// 业务作用：启动取消或清理 owner 释放时收回发号权限。
+    /// 参数说明：无。
+    /// 返回：同步关闭，不生成新的后台任务。
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+impl Application {
+    /// 业务作用：取得由 redis 子能力装配的命名 Snowflake 生成器。
+    /// 参数说明：`name` 为 redis.snowflake 中显式启用的计划名。
+    /// 返回：成功取得共享句柄；未配置或尚未装配时返回资源错误，停机后句柄拒绝发号。
+    pub async fn snowflake(
+        &self,
+        name: &str,
+    ) -> ApplicationResult<Arc<nadis::snowflake::ManagedSnowflake>> {
+        Ok(self
+            .named_resource::<Arc<nadis::snowflake::ManagedSnowflake>>(name)
+            .await?
+            .clone())
+    }
 }

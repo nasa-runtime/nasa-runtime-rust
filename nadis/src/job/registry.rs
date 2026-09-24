@@ -358,7 +358,12 @@ impl ExecutorRegistry {
             self.config.executor_expire_ms.to_string().into_bytes(),
             capability_digest.clone().into_bytes(),
             capability_digest.into_bytes(),
-            if fanout_capable { b"1" } else { b"0" }.to_vec(),
+            if fanout_capable {
+                b"1"
+            } else {
+                b"0"
+            }
+            .to_vec(),
         ];
         let raw = eval(&self.client, &EXECUTOR_REGISTER, &keys, &argv).await?;
         let outcome = interpret_register_capability(&raw)?;

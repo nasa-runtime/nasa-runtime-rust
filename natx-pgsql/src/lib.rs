@@ -1767,3 +1767,25 @@ impl PgConn {
 
 // ── re-export 过程宏：业务项目 `use natx_pgsql::transactional;` 即可。──
 pub use natx_macro::transactional_pgsql as transactional;
+
+/// 业务作用：让连接池等待或当前事务连接的互斥等待服从调用链预算。
+/// 参数说明：`datasource` 为已注册来源；`budget` 为共享绝对预算。
+/// 返回：成功取得连接守卫；已取消或到期时停止等待，不提交、回滚或重试业务事务。
+pub async fn conn_for_budget(
+    datasource: impl AsRef<str>,
+    budget: &nabudget::RequestBudget,
+) -> anyhow::Result<PgConn> {
+    budget.run(conn_for(datasource)).await?
+}
+
+/// 业务作用：显式约束调用方确认无业务写入副作用的读取等待。
+/// 参数说明：`budget` 为共享预算；`read` 为已确认只读的查询 future。
+/// 返回：保留查询结果或预算错误；取消会丢弃当前 future，不承诺数据库从未执行。
+/// 本方法不解析 SQL、不根据 SELECT 前缀推断安全性；有副作用的函数、锁定读和事务写不得使用。
+/// COMMIT、事务提交结果和业务重试继续由事务入口裁决。
+pub async fn read_with_budget<T>(
+    budget: &nabudget::RequestBudget,
+    read: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    budget.run(read).await?
+}

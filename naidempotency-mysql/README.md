@@ -3,42 +3,52 @@
 `naidempotency-mysql` 实现持久化 `IdempotencyStore`。事务内调用时记录与业务写共享 `natx`
 ambient MySQL 事务；事务外调用时提供跨重启、跨副本的持久响应重放。
 
-该 adapter 当前不是独立门面 feature，应用按需直接引入，同时仍从 `nasa::application` 使用公共合同：
+通过门面 `idempotency-mysql` feature 使用 adapter，公共状态机类型位于 `nasa::idempotency`：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "tx", "web"] }
-naidempotency-mysql = { version = "1" }
+nasa = { version = "1.0.3", features = ["application", "idempotency-mysql"] }
 ```
 
 ```rust
-use std::sync::Arc;
-
-#[nasa::application("db", "web")]
+#[nasa::application("db")]
 async fn main(app: nasa::Application) -> anyhow::Result<()> {
-    app.set_idempotency_store(Arc::new(
-        naidempotency_mysql::MySqlIdempotencyStore::with_datasource("identity")?,
-    ))?;
+    let store = app.idempotency_store_named("orders").await?;
+    // store 可由无 Web 的 Service 或 Batch 工作负载使用。
     Ok(())
 }
 ```
 
+上述入口用于 Batch 工作负载；Service 在 initializer 或 `serve_when_ready` 内取得 store，
+UserHook 仅登记计划，此时标准 adapter 尚未装配。
+
 ## YML 配置
 
-本 crate 不新增配置根，复用 `database:` / `datasources:`。`new()` 绑定 `default`，
-`with_datasource(name)` 让事务内记录和事务外 response-cache 都固定使用同一个命名库。
+Application 用 `idempotency_stores` 选择命名 datasource，在迁移后验证 schema、登记关闭 owner。
+独立构造器 `new()` 绑定 `default`；`with_datasource(name)` 固定事务内外使用的命名库。
 
 ```yaml
+application:
+  mode: batch
 datasources:
   identity:
     url: ${APP_IDENTITY_MYSQL_URL}
     max_connections: 16
     migrations:
       mode: validate
+idempotency_stores:
+  orders:
+    enabled: true
+    driver: mysql
+    source: identity
 ```
 
 生产环境由 migration 创建 `idempotency_record_v2`；`ensure_schema` 只用于本地自举，不是发布期
 schema 管理接口。
+
+声明 Web 时可以设置 `web_default: true`，无需业务再安装 store；与手工安装冲突时拒绝启动。
+取消或响应失败不证明业务已回滚，Web 不因此自动释放执行占位。停机后旧受管句柄拒绝新调用。
+Batch 通过 `MIGRATION_PLANS` 在工作负载前执行迁移。
 
 ## 主要边界
 

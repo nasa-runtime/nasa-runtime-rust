@@ -897,8 +897,8 @@ impl MySqlSagaStore {
     /// - `resolve_effect`: resolve 阶段跨 attempt 稳定的效果身份。
     /// - `recovery_operation_id`: 已认证 Orchestrator 签发的人工恢复操作；普通命令为空。
     ///
-    /// 返回：存在未知正向/补偿效果时返回准入方向；已有终态返回稳定重放；没有未知效果时
-    /// 返回 `MissingUnknownEffect` 并持久化冻结证据。事务缺失、身份漂移或数据损坏返回错误。
+    /// 返回：存在未知正向/补偿效果时返回准入方向；已有解决终态或尚未补偿的确定正向事实
+    /// 返回稳定重放；其它无目标情形返回 `MissingUnknownEffect` 并冻结。事务或合同失败返回错误。
     pub async fn admit_resolution(
         &self,
         gate: &ParticipantGateKey<'_>,
@@ -977,6 +977,37 @@ impl MySqlSagaStore {
             return Ok(ResolutionAdmission::AlreadySettled {
                 target,
                 status: resolution,
+            });
+        }
+
+        // 本地效果已提交而 result 回传未知时，resolve 只需重放确定事实，不再查询业务。
+        // 仅首次 resolution 且补偿尚未开始时方向明确；已有冻结、查询或补偿状态不能被此路径覆盖。
+        if resolution == StepResolutionStatus::None
+            && compensation == StepCompensationStatus::None
+            && matches!(
+                forward,
+                StepForwardStatus::Succeeded | StepForwardStatus::Rejected
+            )
+        {
+            let status = if forward == StepForwardStatus::Succeeded {
+                StepResolutionStatus::Succeeded
+            } else {
+                StepResolutionStatus::Rejected
+            };
+            sqlx::query(
+                "UPDATE saga_participant_step SET resolution_status = ?, resolve_effect_id = ? \
+                 WHERE saga_id = ? AND step_name = ?",
+            )
+            .bind(status.as_str())
+            .bind(resolve_effect.to_string())
+            .bind(gate.saga_id.as_str())
+            .bind(gate.step.as_str())
+            .execute(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+            return Ok(ResolutionAdmission::AlreadySettled {
+                target: ResolutionTarget::Forward,
+                status,
             });
         }
 

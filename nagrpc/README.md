@@ -170,6 +170,7 @@ grpc:
 
 `authority` 是服务发现发布给 generated client 的 TLS DNS/IP identity，不含 scheme、端口或路径；省略时
 resolver 回退到注册 IP。`mode` 只能是 `disabled`、`server` 或 `mutual`。private key 进入清零容器且不会出现在 Debug 或错误文本；
+服务端 TLS 和 mTLS client verifier 显式使用 ring CryptoProvider，不依赖消费方统一后的 rustls feature 自动推断，也不安装或改写宿主的全局 provider。
 证书链、密钥匹配、serverAuth、有效期和 ALPN h2 在 bind 前校验。mTLS 验证通过后，请求 extension 中的
 `PeerIdentity` 来自 client leaf certificate 的 SHA-256 指纹，不信任客户端自报 metadata。
 
@@ -316,3 +317,9 @@ secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同
 - 兼容门禁保护 protobuf wire 与 RPC cardinality，不替业务判断字段语义、授权范围或数据保留政策。
 - drain 先关闭新准入，再发送两阶段 GOAWAY，并让已接纳调用使用整个 `drain_timeout_ms`；首请求、空闲
   和连接年龄驱逐才使用 `connection_eviction_grace_ms`。预算耗尽会终止 serve task，不遗留 detached listener。
+
+## Application 接入
+
+Deadline::request_budget 保留入站绝对截止点；propagate_request_budget 将剩余预算写入下游 grpc-timeout，call_with_budget 在等待当前 RPC future 时响应取消。Web 与 gRPC 之间转换不延长预算。入站 Deadline 不包含客户端断开令牌；drop 本地 future 不证明服务端未执行，自行创建的后台任务必须另行纳入领域 owner 并明确请求或作业预算。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

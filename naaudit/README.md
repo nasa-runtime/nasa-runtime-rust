@@ -7,7 +7,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["audit"] }
+nasa = { version = "1.0.3", features = ["audit"] }
 ```
 
 ## 初始化与使用

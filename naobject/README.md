@@ -12,8 +12,8 @@ nasa = { version = "1.0.3", features = ["object-store"] }
 
 ## 运行架构与安全合同
 
-`ObjectStore` 是 provider-neutral 业务边界，`S3ObjectStore` 是当前唯一 adapter。它不启动后台任务，
-也不接管应用生命周期；业务构造并持有实例，必要时将其登记为 Application managed resource。每次调用
+`ObjectStore` 是 provider-neutral 业务边界，`S3ObjectStore` 是当前唯一 adapter。独立调用方拥有实例；
+Application 用 `object_stores` 标准配置建立命名资源、凭据、健康与关闭 owner。每次调用
 都沿同一条有界路径执行：
 
 ```text
@@ -70,21 +70,34 @@ SHA-256 metadata，ETag 不作为内容摘要。
 
 ## 配置投影
 
-当前没有受管对象存储组件和固定 yml schema。下面只是业务配置投影示例；endpoint、bucket、region、
-请求超时、对象大小上限和 checksum 策略由业务映射到 `S3Options`，credential 必须来自 `nasecret`
-快照或等价信任根。
+开启 `application,object-store` 后，无需新增组件字符串。命名计划使用同代 SecretSnapshot 凭据，
+通过 `app.object_store(name).await` 取得受管 `ObjectStore`；Service 与无 Web 的 Batch 均可使用。
 
 ```yaml
-object_store:
-  endpoint: https://objects.example.com
-  bucket: exports
-  region: ap-southeast-1
-  request_timeout_ms: 10000
-  max_object_bytes: 16777216
-  require_checksum: true
+object_stores:
+  exports:
+    enabled: true
+    provider: s3
+    endpoint: https://objects.example.com
+    bucket: exports
+    region: ap-southeast-1
+    access_key: secret://object_access_key
+    secret_key: secret://object_secret_key
+    request_timeout_ms: 10000
+    max_object_bytes: 16777216
+    require_checksum: true
+    health_probe: head_bucket
+    critical: true
 ```
 
-不要把 access key 或 session token 写入该配置。
+access_key/secret_key/session_token 必须使用 `secret://` 引用 `secrets` 中的名字，不能填写凭据正文。
+标准计划最多 64 个，业务请求超时上限 300 秒。`head_bucket` 在启动时进行只读探测，随后由宿主监督的任务
+每 15 秒并发探测各命名来源，单次最多 5 秒；60 秒无新证据时健康过期。HEAD 证明 bucket 可达与凭据可用，
+不能保证每个对象操作都具备权限。传输、远端拒绝和响应完整性失败使关键资源 `NotReady`，非关键资源
+`Degraded`；成功调用或确定性的 `NotFound`/`AlreadyExists` 恢复健康。
+非关键资源也可选择 `on_request`：不创建探测任务，仅记录最后一次实际调用结果，不将空闲视为故障，
+也不承诺持续可达。参数或凭据变化报告 `RestartRequired`；停机取消并等待探测任务退出，关闭新调用、
+等待在途业务调用，旧句柄返回 `Closed`。下面的默认值与一年超时上限只描述独立 `S3Options`。
 
 | `S3Options` 字段 | 默认值 | 约束与失败语义 |
 | --- | --- | --- |
@@ -162,14 +175,12 @@ app.register_metrics_source(nasa::object::metrics::metrics_source_many([
 ]))?;
 ```
 
-聚合源逐操作、逐结局、逐时延桶求和，成功传输字节同样求和；各 adapter 的生命周期仍由业务持有。
-
-对象存储没有独立后台所有权，因此不设 Application 组件；adapter 的生命周期由业务自行持有，
-需要显式关闭的资源可登记为 managed resource。
+聚合源逐操作、逐结局、逐时延桶求和，成功传输字节同样求和。以上手工指标入口适用于独立 adapter；
+`object_stores` 标准路径自动登记一个聚合源，由 Application 负责准入、健康与关闭，避免重复登记。
 
 ## 能力边界
 
-- 本能力进入 `full`，但没有 Application 组件；业务仍须显式构造 adapter、持有生命周期并决定数据政策。
+- 本能力进入 `full`，通过命名 `object_stores` 接入 Application，无需新增组件名；业务决定对象生命周期与数据政策。
 - 稳定使用范围是有界 `put/get/head/delete`、`Overwrite/CreateOnly`、path-style SigV4 与
   SHA-256 metadata 完整性；provider-neutral trait 不表示所有对象存储的高级语义已经统一。
 - key 拒绝绝对路径、空段、`.`、`..`、控制字符和超长输入。

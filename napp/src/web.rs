@@ -806,7 +806,7 @@ impl ApplicationComponent for WebComponent {
             }
             // configure_router 已封口并执行完成，此时安全 route 集合才完整。统一指标目录在同一
             // 线性化点冻结 route 注册并预留最坏序列，后续不能再扩张实际渲染面。
-            #[cfg(feature = "web-security")]
+            #[cfg(any(feature = "web-auth", feature = "web-crypto"))]
             if let Some(runtime) = application.mapping_runtime() {
                 let source =
                     std::sync::Arc::new(crate::metrics::NawebMetricsSource::new(runtime.metrics()));

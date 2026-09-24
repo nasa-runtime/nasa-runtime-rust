@@ -12,11 +12,11 @@ on:
           - 2
           - 3
           - 4
+          - naml
+          - napart
           - 5
           - 6
-          - naml
           - 7
-          - napart
           - 8
           - 9
           - 10

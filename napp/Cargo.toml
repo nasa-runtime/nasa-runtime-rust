@@ -3,7 +3,7 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "Managed lifecycle with gated activation, ordered shutdown, cancellation-safe resources, datasource-bound Saga, SQL observability and business notifications"
+description = "Managed named resources and configuration snapshots with gated activation, ordered shutdown, datasource-bound Saga, SQL observability and business notifications"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -16,6 +16,10 @@ default = []
 # 每个内置组件按需拉取其重实现依赖，避免 web-only 应用编译 log/db/redis/nacos 等重依赖
 # 并由 nasa 门面经 `application_impl?/<组件>` 弱依赖桥打开。
 log = ["dep:nalog"]
+config-watch = ["naml/watch"]
+secret-vault = ["dep:nasecret-vault"]
+secret-http = ["dep:nasecret-http", "dep:reqwest"]
+object-store = ["dep:naobject", "naobject/metrics", "dep:async-trait"]
 # Mapper 的固定指标、连接策略和有界通知由运行时自动装配。
 mapper-observability = ["dep:namapper-core", "dep:natx-core", "dep:nanotify-core"]
 observability = ["dep:nafana", "tokio/net"]
@@ -43,6 +47,7 @@ grpc = ["dep:nagrpc"]
 cache = ["dep:cacheable", "dep:async-trait"]
 # Kafka：受管 producer/consumer、broker Ready、动态健康和两段停机由 napp 编排。
 kafka = ["dep:futures", "dep:nafka"]
+kafka-schema-registry = ["kafka", "nafka/schema-registry-metrics", "dep:async-trait"]
 # Outbox：在 UserHook 接收发布端，Ready 后按 datasource driver 监督 dispatcher；可脱离 Saga 独立使用。
 outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql", "dep:async-trait"]
 outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql", "dep:async-trait"]
@@ -64,24 +69,39 @@ saga-redis-stream-pgsql = ["saga-pgsql", "redis", "dep:hex", "nasaga-runtime-pgs
 saga-grpc = ["saga", "grpc", "dep:prost", "dep:http-body", "nasaga-runtime/grpc-transport", "nasaga-runtime-pgsql?/grpc-transport"]
 saga-grpc-pgsql = ["saga-pgsql", "grpc", "dep:prost", "dep:http-body", "nasaga-runtime-pgsql/grpc-transport", "nasaga-runtime?/grpc-transport"]
 # Web：自动端点收集、确定的 HTTP/1/h2c 监听与排空；无 Web 的批处理不编译路由和网络依赖。
-web = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:naweb", "dep:matchit", "dep:tower", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
+web = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:http-body", "dep:naweb", "dep:matchit", "dep:tower", "dep:tower-http", "dep:nauth-oauth", "dep:naopenapi", "dep:ipnet", "dep:reqwest", "tokio/net"]
 # Web 安全端点：把 naweb 的 auth/crypto 组合显式编入 Application 容器路径。
-web-security = ["web", "naweb/security"]
+web-auth = ["web", "naweb/auth"]
+web-crypto = ["web", "naweb/crypto"]
+web-security = ["web-auth", "web-crypto"]
 # scheduling：启动/关闭 `#[scheduled]` 任务；cluster 模式另需 nasched 的 nadis 适配层与 redis 组件。
-# Mapper 缓存查询的启动断言；真实 L2 仍由业务在启动 Hook 中显式装配。
+# Mapper 缓存标准装配与 Service/Batch 启动门禁；复用指定受管 Redis。
 # MySQL 路径同步开放 namapper 的 Redis 实现；PostgreSQL 路径只依赖后端中立缓存运行时。
-mapper-cache = ["dep:namapper-core", "dep:namapper", "namapper/redis-cache"]
-mapper-cache-pgsql = ["dep:namapper-core"]
+mapper-cache = ["redis", "dep:namapper-core", "namapper-core/redis-cache", "dep:namapper", "namapper/redis-cache"]
+mapper-cache-pgsql = ["redis", "dep:namapper-core", "namapper-core/redis-cache"]
 # ws：长连接服务（TCP/WebSocket）；鉴权与 endpoint 事件表由业务经 configure_ws 注入。
 ws = ["dep:naws"]
+ws-redis = ["ws", "redis", "naws/redis"]
+ws-kafka = ["ws", "kafka", "naws/kafka"]
 # nacos-discovery：分段生命周期（出站 runtime / 本实例注册 / 关闭后台任务）由 rest-discovery-nacos 提供。
 nacos-discovery = ["dep:rest-discovery-nacos"]
+rest = ["dep:rest-discovery", "dep:nadisc"]
 # 真实注册中心后端；门面依赖会统一底层包的能力开关，直连 napp 时也可显式启用。
 nacos-discovery-sdk = ["nacos-discovery", "rest-discovery-nacos/nacos-sdk"]
 scheduling = ["dep:nasched"]
 scheduling-cluster = ["scheduling", "nasched/cluster", "redis"]
 
+# 持久 adapter 在既有数据源准备之后装配；启用 feature 不等于启用任何实例。
+idempotency-mysql = ["db", "dep:naidempotency-mysql", "dep:async-trait"]
+idempotency-pgsql = ["db-pgsql", "dep:naidempotency-pgsql", "dep:async-trait"]
+idempotency-redis = ["redis", "dep:naidempotency-redis", "dep:async-trait"]
+audit-mysql = ["db", "dep:naaudit", "dep:naaudit-mysql", "dep:naoutbox-mysql", "dep:async-trait"]
+audit-pgsql = ["db-pgsql", "dep:naaudit", "dep:naaudit-pgsql", "dep:naoutbox-pgsql", "dep:async-trait"]
+
 [dependencies]
+nasecret-vault = { version = "1.0.1", optional = true }
+nasecret-http = { version = "1.0.1", optional = true }
+naobject = { version = "1.0.1", optional = true }
 anyhow = "1"
 unicode-normalization = "0.1"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
@@ -99,20 +119,20 @@ naweb = { version = "1.0.2", optional = true }
 matchit = { version = "0.8", optional = true }
 naml = { version = "1.0.3" }
 nametrics-core = { version = "1.0.2" }
-nanotify-core = { path = "../nanotify-core", version = "1.0.0", optional = true }
-nafana = { path = "../nafana", version = "1.0.2", optional = true }
-nabudget = { version = "1.0.1" }
+nanotify-core = { version = "1.0.0", optional = true }
+nafana = { version = "1.0.2", optional = true }
+nabudget = { version = "1.0.2" }
 nasecret = { version = "1.0.1" }
 naidempotency = { version = "1.0.2" }
 naauthz = { version = "1.0.2" }
 natelemetry = { version = "1.0.2" }
 napart = { version = "1.1.2", optional = true }
-nagrpc = { path = "../nagrpc", version = "1.1.0", optional = true }
+nagrpc = { version = "1.0.2", optional = true }
 ncrypto = { version = "1.0.1", optional = true }
 hex = { version = "0.4", optional = true }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
-nauth-oauth = { version = "1.0.0", optional = true }
-naopenapi = { version = "1.0.1", optional = true }
+nauth-oauth = { version = "1.0.1", optional = true }
+naopenapi = { version = "1.0.2", optional = true }
 # 仅 web 特性使用：auth 组件远程拉取 `jwks_uri`；rustls-tls 对齐 rest-discovery 的 TLS 栈。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 namapper-core = { version = "1.0.0", optional = true, default-features = false }
@@ -120,7 +140,7 @@ namapper = { version = "1.0.2", optional = true, default-features = false }
 natx = { version = "1.0.3", optional = true }
 natx-core = { version = "1.0.0", optional = true }
 natx-pgsql = { version = "1.0.0", optional = true }
-namigrate = { version = "1.0.0", optional = true }
+namigrate = { version = "1.0.1", optional = true }
 namigrate-core = { version = "1.0.0", optional = true }
 namigrate-pgsql = { version = "1.0.0", optional = true }
 cacheable = { version = "1.0.2", optional = true }
@@ -128,8 +148,8 @@ cacheable = { version = "1.0.2", optional = true }
 async-trait = { version = "0.1", optional = true }
 nadis = { version = "1.0.2", optional = true }
 prost = { version = "0.14", optional = true }
-nalog = { version = "1.0.0", optional = true }
-nafka = { version = "1.0.2", optional = true, default-features = false }
+nalog = { version = "1.0.1", optional = true }
+nafka = { version = "1.0.3", optional = true, default-features = false }
 naoutbox-core = { version = "1.0.2", optional = true }
 naoutbox-mysql = { version = "1.0.2", optional = true }
 naoutbox-pgsql = { version = "1.0.0", optional = true }
@@ -139,9 +159,11 @@ nainbox-pgsql = { version = "1.0.0", optional = true }
 nasaga-runtime = { version = "1.0.2", optional = true }
 nasaga-runtime-pgsql = { version = "1.0.0", optional = true }
 nanacos = { version = "1.0.2", optional = true, default-features = false }
-nasched = { version = "1.0.1", optional = true }
-naws = { version = "1.0.1", optional = true, default-features = false }
-rest-discovery-nacos = { path = "../rest-discovery-nacos", version = "1.0.2", optional = true, default-features = false }
+nasched = { version = "1.0.2", optional = true }
+naws = { version = "1.0.2", optional = true, default-features = false }
+rest-discovery-nacos = { version = "1.0.2", optional = true, default-features = false }
+rest-discovery = { version = "1.0.2", optional = true }
+nadisc = { version = "1.0.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -156,3 +178,10 @@ sha2 = "0.10"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
 uuid = { version = "1", features = ["v5"] }
+
+naidempotency-mysql = { version = "1.0.2", optional = true }
+naidempotency-pgsql = { version = "1.0.0", optional = true }
+naidempotency-redis = { version = "1.0.2", optional = true }
+naaudit = { version = "1.0.1", optional = true }
+naaudit-mysql = { version = "1.0.2", optional = true }
+naaudit-pgsql = { version = "1.0.0", optional = true }

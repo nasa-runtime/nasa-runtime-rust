@@ -116,6 +116,18 @@ impl PgIdempotencyStore {
         &self.datasource
     }
 
+    /// 业务作用：在宿主迁移门禁之后只读核对本 store 所需表和字段，不隐式执行 DDL。
+    /// 参数说明：无。
+    /// 返回：连接和必要字段可读取时成功；表缺失、权限不足或结构不符时返回脱敏错误。
+    pub async fn validate_schema(&self) -> Result<(), IdempotencyError> {
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
+        sqlx::query("SELECT tenant, subject, route_id, client_key, fingerprint, lease, generation, state, status, body, headers, lease_expires_at_ms, created_at_ms, updated_at_ms FROM idempotency_record_v2 WHERE 1 = 0")
+            .fetch_optional(connection.as_mut()).await.map_err(map_err)?;
+        Ok(())
+    }
+
     /// 业务作用: 为显式自举创建默认 datasource 的幂等表。
     ///
     /// 参数说明: 无。

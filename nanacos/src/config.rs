@@ -611,7 +611,7 @@ impl<F: Fn(String) + Send + Sync + 'static> nacos_sdk::api::config::ConfigChange
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 多配置门面(对照):一次拉取/监听一组配置,顺序即覆盖顺序。
+// 多配置门面:一次拉取/监听一组配置,顺序即覆盖顺序。
 //   · fetch_many          按序拉取(optional 缺失跳过、required 缺失报错、保序)。
 //   · watch_many_channel  任一变更 → 全量重拉 → 整体发新 bundle(避免混合新旧快照)。
 // 仍恪守边界:**只吐裸文本 bundle,绝不认识业务 AppConfig**;merge/apply 由 app(经 nasa::yml)做。

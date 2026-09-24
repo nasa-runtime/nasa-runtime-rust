@@ -16,7 +16,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
+use crate::{
+    future::StartupCleanup, ApplicationError, ApplicationPhase, ApplicationResult, ComponentId,
+};
 
 /// 受管任务注册通道容量。
 ///
@@ -316,7 +318,7 @@ impl TaskSupervisor {
         self.spawn_task(name, TaskKind::UserHook, future)
     }
 
-    /// 业务作用：在组件 Ready action 已压栈后直接登记一个框架关键任务。
+    /// 业务作用：在资源清理责任已压栈后登记框架关键任务，主体等待统一启动放行。
     ///
     /// 该入口由 Runner 单线程调用，不经过已经关闭的业务注册通道；任务一旦加入就会参与同一退出分类和强制收割。
     ///
@@ -330,6 +332,14 @@ impl TaskSupervisor {
         name: &'static str,
         future: ManagedTaskFuture,
     ) -> ApplicationResult<TaskId> {
+        // 验证也可能拒绝接管；先保护释放责任，重名或部分移交失败仍允许 Runner 执行回滚。
+        let future = StartupCleanup::new(
+            future,
+            ComponentId::Supervisor,
+            ApplicationPhase::Ready,
+            "releasing unaccepted startup task",
+        );
+
         let name: Arc<str> = Arc::from(name);
         if name.trim().is_empty() {
             return Err(supervisor_error("component task name cannot be empty"));
@@ -358,6 +368,14 @@ impl TaskSupervisor {
         kind: TaskKind,
         future: ManagedTaskFuture,
     ) -> ApplicationResult<TaskId> {
+        // 验证也可能拒绝接管；先保护释放责任，重名或部分移交失败仍允许 Runner 执行回滚。
+        let future = StartupCleanup::new(
+            future,
+            ComponentId::Supervisor,
+            ApplicationPhase::Ready,
+            "releasing unaccepted startup task",
+        );
+
         if kind == TaskKind::UserHook {
             return Err(supervisor_error(
                 "initializer task cannot use the reserved user-hook kind",
@@ -376,27 +394,41 @@ impl TaskSupervisor {
     /// 业务作用：把终端主体隔离在组件与 initializer 共用的启动屏障后，避免逐项登记造成部分执行。
     /// 参数说明：`future` 为已经构造但尚未 poll 的终端主体。
     /// 返回：等待统一放行的受管任务；组级取消或 owner 消失时释放主体而不执行它。
-    fn guard_activation(&self, future: ManagedTaskFuture) -> ManagedTaskFuture {
+    fn guard_activation(&self, mut future: StartupCleanup<ManagedTaskFuture>) -> ManagedTaskFuture {
         let mut activation = self.activation.subscribe();
         let stop = self.task_group_token.clone();
         Box::pin(async move {
-            loop {
-                // 停机优先于放行；失败清理也会唤醒尚未开始工作的任务，归还其资源所有权。
-                if stop.is_cancelled() {
-                    return Ok(());
-                }
-                if *activation.borrow() {
-                    break;
-                }
-                tokio::select! {
-                    biased;
-                    _ = stop.cancelled() => return Ok(()),
-                    changed = activation.changed() => {
-                        if changed.is_err() { return Ok(()); }
+            let result = async {
+                loop {
+                    // 停机优先于放行；失败清理也会唤醒尚未开始工作的任务，归还其资源所有权。
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    if *activation.borrow() {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => return Ok(()),
+                        changed = activation.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
+                future.value_mut().await
             }
-            future.await
+            .await;
+            match (result, future.release()) {
+                (Ok(()), Some(error)) => Err(anyhow::Error::from(error)),
+                (result, release) => {
+                    if let Some(error) = release {
+                        crate::report::report_shutdown(&error);
+                    }
+                    result
+                }
+            }
         })
     }
 

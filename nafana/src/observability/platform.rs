@@ -407,7 +407,11 @@ impl PlatformController {
             } else {
                 Method::POST
             },
-            if old.is_some() { &path } else { &collection },
+            if old.is_some() {
+                &path
+            } else {
+                &collection
+            },
             Some(body),
         )
         .await?;
@@ -537,7 +541,11 @@ impl PlatformController {
                     } else {
                         Method::POST
                     },
-                    if old.is_some() { &path } else { &collection },
+                    if old.is_some() {
+                        &path
+                    } else {
+                        &collection
+                    },
                     Some(desired),
                 )
                 .await?;

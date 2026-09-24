@@ -103,7 +103,7 @@ pub trait OutboxWriter {
 
 /// 借用透传:`&W` 也是 writer,方便把同一个 outbox 借给审计等多个 sink 而无需 Arc。
 impl<W: OutboxWriter + ?Sized> OutboxWriter for &W {
-    /// 业务作用：将借用 writer 的调用透明转发到原实现。
+    /// 业务作用：将借用 writer 的调用透明转发到底层 writer。
     fn append(&self, event: OutboxEvent) {
         (**self).append(event);
     }

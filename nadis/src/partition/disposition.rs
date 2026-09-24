@@ -96,7 +96,7 @@ return {'OK', tostring(v)}
 
 /// owner 凭据:**不可缺省**——disposition mutator 必须传它证明调用者是
 /// 当前 partition owner,且携带本次管理操作的稳定 `operation_id`(状态机身份)。
-/// `fence_key` 为空串 = **原实现V1**(无 V2 fence,仅校验 holder 持锁);非空 = RustV2 带 fence
+/// `fence_key` 为空串 = **LegacyV1**(无 V2 fence,仅校验 holder 持锁);非空 = RustV2 带 fence
 /// 三元组 + 任期 counter。**由 runtime 私有构造**,外部不可伪造,杜绝 None 绕过。
 pub struct OwnerLease<'a> {
     pub partition: u32,
@@ -124,7 +124,7 @@ impl OwnerLease<'_> {
 
     /// 业务作用：返回本次管理转换是否携带 V2 fence 的序列化标记。
     ///
-    /// Lua 脚本用 `"1"`/`"0"` 区分严格 fence 校验和原实现 V1 holder-only 校验。
+    /// Lua 脚本用 `"1"`/`"0"` 区分严格 fence 校验和LegacyV1 holder-only 校验。
     fn has_fence(&self) -> &'static str {
         if self.fence_key.is_empty() {
             "0"

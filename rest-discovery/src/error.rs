@@ -13,6 +13,17 @@ pub type Result<T> = std::result::Result<T, RestDiscoveryError>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RestDiscoveryError {
+    /// 当前实例已经永久关闭，旧句柄不能登记新的工作。
+    #[error("REST runtime is closed")]
+    RuntimeClosed,
+
+    /// 关闭已生效，但仍有任务或调用尚未在截止点前退出。
+    #[error("REST runtime shutdown is incomplete")]
+    ShutdownIncomplete,
+
+    /// 动态服务订阅超过配置上限。
+    #[error("REST discovery service state limit reached")]
+    DiscoveryStateLimit,
     /// `RestDiscovery::get()/try_get()` 在 init 之前被调用。
     #[error("RestDiscovery 未初始化:请先在 main 调用 RestDiscovery::init_with_discovery 或 init_external_only")]
     NotInitialized,
@@ -129,4 +140,16 @@ pub enum RestDiscoveryError {
         /// 响应体不符合调用方约定的原因。
         reason: String,
     },
+}
+
+impl From<nabudget::BudgetError> for RestDiscoveryError {
+    /// 业务作用：保留显式取消和绝对截止点耗尽的区别。
+    /// 参数说明：`error` 为本地等待终止原因。
+    /// 返回：对应 REST 稳定错误，不推断远端副作用。
+    fn from(error: nabudget::BudgetError) -> Self {
+        match error {
+            nabudget::BudgetError::Cancelled => Self::Cancelled,
+            nabudget::BudgetError::DeadlineExceeded => Self::BudgetExhausted,
+        }
+    }
 }

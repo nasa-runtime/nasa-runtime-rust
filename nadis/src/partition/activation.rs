@@ -99,15 +99,17 @@ impl PlanActivation {
         self.groups.push(group);
     }
 
-    /// 业务作用：在路由与远端合同均就绪后只做本地内存发布，一次性允许全部组开始消费。
+    /// 业务作用：在路由与远端合同就绪后转移全部组的生命周期责任，按宿主屏障决定是否立即放行。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`activate` 为 true 时立即开放消费，为 false 时继续等待宿主调用 activate。
     ///
-    /// 返回：消费准入开放；后续生命周期由 RunningPartition 接管。
-    pub(super) fn commit(mut self) {
+    /// 返回：RunningPartition 接管后续责任；延迟激活时所有消费任务仍受关闭的屏障约束。
+    pub(super) fn commit(mut self, activate: bool) {
         self.committed = true;
         // 可失败的远端就绪必须先于此信号，任何一个组都不能提前观察半套注册集合。
-        self.gate.cancel();
+        if activate {
+            self.gate.cancel();
+        }
     }
 
     /// 业务作用：关闭未激活组并等待其监督任务结束，原始启动错误由调用方保留。

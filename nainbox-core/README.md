@@ -8,7 +8,7 @@ claim，不暴露 MySQL/PostgreSQL 连接类型；`InboxProcess` 和 `InboxTrans
 
 ```toml
 [dependencies]
-nainbox-core = "1"
+nainbox-core = "1.0.2"
 ```
 
 ```rust

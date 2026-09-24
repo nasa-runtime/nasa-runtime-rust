@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-naimg = "1"
+naimg = "1.0.1"
 ```
 
 质量加等比缩放：

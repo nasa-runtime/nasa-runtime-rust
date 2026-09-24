@@ -391,6 +391,15 @@ pub struct ServerBuilder {
 }
 
 impl ServerBuilder {
+    /// 业务作用：识别已经安装的集群策略，供宿主拒绝重复接管同一服务。
+    /// 参数说明：无。
+    /// 返回：存在通知器、节点身份或数据发布器时返回真，不改变 builder。
+    pub fn has_cluster(&self) -> bool {
+        self.cluster_node.is_some()
+            || self.notifier.is_some()
+            || self.cluster_data_publisher.is_some()
+            || self.cluster_incarnation.is_some()
+    }
     /// 业务作用：设置 TCP 监听地址。
     ///
     /// # 参数
@@ -800,6 +809,7 @@ pub struct RunningServer {
     /// 实际绑定的 WebSocket 地址;未启用 WS 时为 None。
     pub ws_local_addr: Option<SocketAddr>,
     pub(crate) shared: Arc<Shared>,
+    admission: CancellationToken,
 }
 
 /// 直接 drop handle(不显式 shutdown)也必须停 accept/连接/集群任务、释放 listener 端口
@@ -815,6 +825,14 @@ impl Drop for RunningServer {
 }
 
 impl RunningServer {
+    /// 业务作用：在宿主完整就绪后放行 TCP 与 WebSocket 监听器。
+    /// 参数说明：无。
+    /// 返回：首次调用开放准入；关闭后调用不会恢复服务。
+    pub fn activate(&self) {
+        if !self.shared.cancel.is_cancelled() {
+            self.admission.cancel();
+        }
+    }
     /// 业务作用：集群规模只读快照;单机(未启用集群)返回 `None`。`tombstone_count` 的无界增长说明
     /// `node_id` 不稳定,部署应据此告警(标准 ServerBuilder 集成路径现可监控该指标)。
     pub fn cluster_stats(&self) -> Option<crate::cluster::ClusterStats> {
@@ -919,6 +937,15 @@ impl Server {
 
     /// 业务作用：绑定监听地址并启动服务；用于接受 TCP 或 WebSocket 连接。
     pub async fn bind(self) -> std::io::Result<RunningServer> {
+        let running = self.bind_suspended().await?;
+        running.activate();
+        Ok(running)
+    }
+
+    /// 业务作用：绑定监听地址并准备集群设施，保留业务连接准入屏障。
+    /// 参数说明：无。
+    /// 返回：资源准备成功时返回未接流的 owner；失败或取消准备时关闭本次设施。
+    pub async fn bind_suspended(self) -> std::io::Result<RunningServer> {
         // **先**把所有 listener bind 成功(可失败步骤前置),再启动 cluster / spawn accept——
         // 否则 bind 失败时已 start 的 cluster 不回滚、已 spawn 的 accept 泄漏。
         let tcp = listen_reuseaddr(&self.shared.config.addr)?;
@@ -930,6 +957,14 @@ impl Server {
         let ws_local_addr = match &ws_listener {
             Some(l) => Some(l.local_addr()?),
             None => None,
+        };
+
+        // 在集群任务可能启动前建立同步关闭责任，取消 bind future 也不会留下无 owner 的循环。
+        let running = RunningServer {
+            local_addr,
+            ws_local_addr,
+            shared: self.shared.clone(),
+            admission: CancellationToken::new(),
         };
 
         // listener 都就位后才启动 cluster(reader 定好游标)+ 周期 presence。
@@ -952,22 +987,24 @@ impl Server {
         }
 
         let shared = self.shared.clone();
-        self.shared
-            .tasks
-            .spawn(accept_loop(tcp, shared.clone(), false));
+        self.shared.tasks.spawn(accept_loop(
+            tcp,
+            shared.clone(),
+            false,
+            running.admission.clone(),
+        ));
         tracing::info!("rust-ws TCP server bound on {local_addr}");
         if let Some(ws_listener) = ws_listener {
-            self.shared
-                .tasks
-                .spawn(accept_loop(ws_listener, shared.clone(), true));
+            self.shared.tasks.spawn(accept_loop(
+                ws_listener,
+                shared.clone(),
+                true,
+                running.admission.clone(),
+            ));
             tracing::info!("rust-ws WS server bound on {}", ws_local_addr.unwrap());
         }
 
-        Ok(RunningServer {
-            local_addr,
-            ws_local_addr,
-            shared: self.shared,
-        })
+        Ok(running)
     }
 }
 
@@ -1027,9 +1064,22 @@ fn listen_reuseaddr(addr: &str) -> std::io::Result<TcpListener> {
 /// - `listener`: TCP 或 WS listener。
 /// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
 /// - `is_ws`: 当前 accept loop 是否处理 WebSocket 连接。
-async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, is_ws: bool) {
+async fn accept_loop(
+    listener: TcpListener,
+    shared: Arc<Shared>,
+    is_ws: bool,
+    admission: CancellationToken,
+) {
+    // 优先观察停机，避免 Ready 与取消同时到达时接受新业务连接。
+    tokio::select! {
+        biased;
+        _ = shared.cancel.cancelled() => return,
+        _ = admission.cancelled() => {},
+    }
     loop {
         tokio::select! {
+            biased;
+            _ = shared.cancel.cancelled() => break,
             res = listener.accept() => match res {
                 Ok((stream, _peer)) => {
                     // 连接总数上限(过载/DoS 背压):超过则立即关闭新连接,不 spawn 连接任务、不升级 WS。
@@ -1068,7 +1118,6 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, is_ws: bool) {
                 }
                 Err(e) => tracing::warn!("accept error: {e}"),
             },
-            _ = shared.cancel.cancelled() => break, // 取消 → 停 accept、释放 listener
         }
     }
 }

@@ -637,7 +637,7 @@ impl ApplicationComponent for DbComponent {
     ) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if self.inactive_direct_client {
-                if !context.application().take_migrations().is_empty() {
+                if !context.application().take_migrations()?.is_empty() {
                     return Err(db_error(
                         ApplicationPhase::Prepare,
                         "managed direct Saga client cannot register database migrations without a datasource",
@@ -650,7 +650,7 @@ impl ApplicationComponent for DbComponent {
                 self.adopt_deferred(context).await?;
             }
             let application = context.application().clone();
-            for (name, migrator) in application.take_migrations() {
+            for (name, migrator) in application.take_migrations()? {
                 let driver = self.drivers.get(&name).copied().ok_or_else(|| {
                     db_error(
                         ApplicationPhase::Prepare,

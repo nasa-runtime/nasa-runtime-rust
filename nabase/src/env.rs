@@ -12,7 +12,13 @@ use crate::strings;
 /// 返回: 将分隔符统一为下划线并转换为大写后的环境变量名。
 pub fn relaxed_env_key(key: &str) -> String {
     key.chars()
-        .map(|c| if c == '.' || c == '-' { '_' } else { c })
+        .map(|c| {
+            if c == '.' || c == '-' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .to_ascii_uppercase()
 }

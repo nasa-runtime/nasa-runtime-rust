@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["ws"] }
+nasa = { version = "1.0.3", features = ["ws"] }
 ```
 
 ## 服务端
@@ -117,10 +117,9 @@ let server = nasa::ws::Server::builder()
 - **空目标列表 = 不发给任何节点,不是广播。** `publish_to(&[])`(以及元素全为空串的列表)在 wire 上
   编成"存在但为空"的 target 列表,接收端一律不投递。只有 `target_nodes` **缺省**才表示广播。
   否则"发给零个节点"会退化成"发给所有节点",路由原语失败开放。
-- **incarnation 接收侧限长 20 位十进制。** `Incarnation::from_epoch` 的 `{epoch:020}` 契约此前只在
-  构造侧成立,接收侧不校验。一条携带 39 位巨值 incarnation 的事件会把该 node id 的围栏顶到天花板,
-  此后真实节点的全部事件都因 incarnation 更小被静默拒绝,而 tombstone 按设计永不过期——
-  恢复要重启**所有对端**进程。现在超长值在解析期即判非法。
+- **incarnation 接收侧只接受 1 至 20 位 ASCII 十进制正数。** `Incarnation::from_epoch` 使用
+  `{epoch:020}` 生成固定宽度文本。接收端在更新 fence 前拒绝超长值，防止异常大值永久抬高
+  节点围栏并持续拒绝正常事件；tombstone 不依靠过期回收。
 
 ## 背压与安全
 
@@ -213,7 +212,7 @@ Redis 集群广播是 at-most-once 语义，适合 presence 对账、订阅状�
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["ws-kafka"] }
+nasa = { version = "1.0.3", features = ["ws-kafka"] }
 # 生产使用 SASL_SSL 时再加 "kafka-tls"；使用 Zstd 时再加 "kafka-zstd"。
 ```
 
@@ -435,5 +434,16 @@ handler 即使已经调用 `ack()`，之后返回 `Err`/panic/timeout 时，本�
 
 实现落点：`sender.rs` 负责一次 frame 物化和共享 outbox backing allocation；`wire.rs` 负责
 borrowed/owned 编码一致性；`nafka/src/consumer/passthrough.rs` 的公开生命周期合同限制 borrowed record
-不能逃逸 poll 回调。真实 broker 的 raw/empty/tombstone、commit、assignment 和故障场景由仓库外验证
-工作区覆盖，不进入产品发布包。
+不能逃逸 poll 回调。
+
+## Application 接入
+
+Application 用 `configure_ws_redis` 或 `configure_ws_kafka` 绑定来源组件、节点与显式 `Incarnation`，
+框架装配集群依赖并管理退出。`Incarnation` 的持久单调性由部署方保证；Kafka 来源不能同时启用
+collected consumers，避免两个消费 owner 竞争同一来源。
+
+`bind_suspended` 可先绑定端口，统一 Ready 后 `activate` 才处理连接，启动失败不会提前接流。
+健康任务与 listener 共用停机 owner；SIGTERM 和主动关闭都先撤销准入，等待 listener 与集群任务
+退出后才释放来源。端口已绑定不能作为业务就绪的依据。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

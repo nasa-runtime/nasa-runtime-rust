@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["tx"] }
+nasa = { version = "1.0.3", features = ["tx"] }
 ```
 
 ```rust
@@ -224,3 +224,9 @@ Application 模式不调用这些注册函数；业务通过 `app.default_dataso
 
 约束：所有需要参加事务的 DB 访问必须通过 `nasa::tx::conn()` / `conn_for()`、
 `nasa::tx::mandatory_conn()` / `mandatory_conn_for()` 或 Mapper 生成代码获取连接。
+
+## Application 接入
+
+conn_for_budget 对 pool acquire 应用剩余绝对预算，read_with_budget 只供调用方已确认无副作用的读取使用；不按 SQL 前缀猜测只读，不自动包装事务写、COMMIT 或重放未知结果。Application 的 Batch 通过 MIGRATION_PLANS 静态工厂在工作负载前执行迁移，Service 也可在 UserHook 登记；持久 adapter 在迁移与 schema 校验之后才能使用。after_commit 只在确认提交后执行进程内尽力回调，不提供持久补偿。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

@@ -3,7 +3,8 @@
 `natx-pgsql` 提供 PostgreSQL 的命名连接池、ambient transaction、强制事务连接、提交结果分类，
 以及分离的连接池获取、事务连接槽等待和执行前拒绝观测。
 它与 `natx` 共享 `natx-core` 的 datasource catalog，为同 owner 的 MySQL/PostgreSQL 受管编排提供
-typed registry 基础；本 crate 自身不接入 Application。单个本地事务不能跨 driver 或跨 datasource。
+typed registry 基础。通过门面同时开启 `application,tx-pgsql` 后，由 `napp` 的 `"db"` 组件纳管
+连接、迁移门禁与关闭；本 crate 自身不依赖 Application。单个本地事务不能跨 driver 或跨 datasource。
 
 本 crate 只提供事务与连接基础能力，不包含 Application YAML 受管接线、migration、Mapper、Inbox、
 Outbox 或 Saga。依赖本 crate 不会自动启用这些能力。
@@ -14,14 +15,14 @@ Outbox 或 Saga。依赖本 crate 不会自动启用这些能力。
 
 ```toml
 [dependencies]
-natx-pgsql = "1"
+natx-pgsql = "1.0.0"
 ```
 
 也可以通过门面只启用 PostgreSQL 事务能力：
 
 ```toml
 [dependencies]
-nasa = { version = "1", default-features = false, features = ["tx-pgsql"] }
+nasa = { version = "1.0.3", default-features = false, features = ["tx-pgsql"] }
 ```
 
 ```rust
@@ -105,3 +106,15 @@ SQLx 独立慢语句升级，保留 Mapper 的业务慢阈值。SQLx statement �
   commit" 显式失败，而不是在槽锁上永久卡死。
 - `classify_sqlstate` 提供 `23505`、`40001`、`40P01`、`55P03` 和 SQLSTATE class `08` 的稳定分类，
   不解析数据库错误正文。
+
+## Application 接入
+
+`"db"` 组件从 `datasources.<name>` 的 `driver: postgresql` 与连接配置建立来源；业务通过
+`app.pg_datasource(name).await` 取得池，通过同名 ambient 事务复用连接。Application 的 Batch 使用
+`MIGRATION_PLANS` 静态工厂在工作负载前执行迁移，持久 adapter 随后校验 schema。
+
+`conn_for_budget` 对 pool acquire 应用剩余绝对预算，`read_with_budget` 仅供调用方已确认无副作用
+的读取使用；不按 SQL 前缀猜测只读，不自动包装事务写、COMMIT 或重放未知结果。
+`after_commit` 只在确认提交后执行进程内尽力回调，不提供持久补偿。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

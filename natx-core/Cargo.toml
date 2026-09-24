@@ -14,7 +14,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 nametrics-core = { version = "1.0.2" }
-nanotify-core = { version = "1.0.0", path = "../nanotify-core" }
+nanotify-core = { version = "1.0.0" }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

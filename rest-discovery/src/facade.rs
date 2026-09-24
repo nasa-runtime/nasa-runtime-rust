@@ -23,6 +23,12 @@ static RUNTIME: RwLock<Option<Arc<RemoteRuntime>>> = RwLock::new(None);
 pub struct RestDiscovery;
 
 impl RestDiscovery {
+    /// 业务作用：把已经由宿主持有的运行态发布给声明式客户端。
+    /// 参数说明：`runtime` 为唯一受管运行态。
+    /// 返回：空槽安装成功；存在其它 owner 时拒绝，不覆盖现有客户端。
+    pub fn install_runtime(runtime: Arc<RemoteRuntime>) -> Result<()> {
+        install(runtime)
+    }
     /// 业务作用：discovery 启用:用已连接好的 provider(`Arc<dyn DiscoveryClient>`)装配内部模式。
     /// `service_request`/`lb://` 走服务发现 + LB。
     ///

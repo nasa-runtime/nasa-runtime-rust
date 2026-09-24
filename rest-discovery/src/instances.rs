@@ -87,6 +87,7 @@ struct CachedInstances {
 /// 实例事实源:watch 快照为主,discover+TTL 为降级。
 pub(crate) struct InstanceSource {
     discovery: Arc<dyn DiscoveryClient>,
+    background: Arc<crate::background::BackgroundOwner>,
     /// canonical service name → watch 入口(`OnceCell` 去重首次启动 + `removed` 标志支持 churn 回收)。
     watch_states: DashMap<String, Arc<WatchEntry>>,
     /// 降级 TTL cache(key 同样是 canonical service name)。
@@ -104,9 +105,11 @@ impl InstanceSource {
         watch: RestWatchOptions,
         metrics: Arc<RestMetrics>,
         no_instance: NoInstancePolicy,
+        background: Arc<crate::background::BackgroundOwner>,
     ) -> Self {
         Self {
             discovery,
+            background,
             watch_states: DashMap::new(),
             ttl_cache: DashMap::new(),
             watch,
@@ -120,12 +123,19 @@ impl InstanceSource {
     /// 循环是为支持「churn 回收后复活」:若取到的 entry 已被 [`mark_removed`](Self::mark_removed) 标记,
     /// 就换一个全新 entry 重来。init 完成后复查 `removed`,杜绝 init-in-flight 的 orphan task。
     pub(crate) async fn instances(&self, service: &str) -> Result<Arc<Vec<Instance>>> {
+        let _call = self.background.enter()?;
         loop {
-            let entry = self
-                .watch_states
-                .entry(service.to_string())
-                .or_insert_with(WatchEntry::new)
-                .clone();
+            let entry = self.background.with_open(|| {
+                if let Some(entry) = self.watch_states.get(service) {
+                    return Ok(entry.clone());
+                }
+                if self.watch_states.len() >= self.watch.max_services {
+                    return Err(RestDiscoveryError::DiscoveryStateLimit);
+                }
+                let entry = WatchEntry::new();
+                self.watch_states.insert(service.to_owned(), entry.clone());
+                Ok(entry)
+            })?;
 
             // entry 已被标记移除(上一轮 churn 清理过)→ 复活:换全新 entry 再来。
             if entry.removed.load(Ordering::Acquire) {
@@ -164,6 +174,7 @@ impl InstanceSource {
                     return Ok(state.snapshot.load_full());
                 }
                 Err(e) => {
+                    self.background.with_open(|| Ok(()))?;
                     tracing::warn!(service, error = %e, "rest-discovery: watch 启动失败,降级 discover+TTL");
                     return self.discover_ttl(service).await;
                 }
@@ -194,15 +205,23 @@ impl InstanceSource {
     async fn try_start_watch(&self, service: &str) -> anyhow::Result<WatchState> {
         let opts = WatchOptions::new().with_poll_interval(self.watch.poll_interval);
         let ServiceWatch { guard, receiver } = self
-            .discovery
-            .watch_with_options(service, opts.clone())
+            .background
+            .run(async {
+                self.discovery
+                    .watch_with_options(service, opts.clone())
+                    .await
+                    .map_err(|source| RestDiscoveryError::DiscoveryFailed {
+                        service: service.to_owned(),
+                        source,
+                    })
+            })
             .await?;
 
         // 返回前 receiver 已被后端播种为当前健康快照。
         let snapshot = Arc::new(ArcSwap::from_pointee(receiver.borrow().clone()));
         let degraded = Arc::new(AtomicBool::new(false));
 
-        let task = tokio::spawn(pump_loop(
+        let task = self.background.spawn(pump_loop(
             self.discovery.clone(),
             service.to_string(),
             opts,
@@ -213,14 +232,14 @@ impl InstanceSource {
             self.metrics.clone(),
             guard,
             receiver,
-        ));
+        ))?;
 
         tracing::debug!(service, "rest-discovery: watch 已启动");
         Ok(WatchState {
             snapshot,
             degraded,
             transport_degraded_until: Mutex::new(None),
-            task: task.abort_handle(),
+            task,
         })
     }
 
@@ -229,6 +248,7 @@ impl InstanceSource {
     /// # 参数
     /// - `service`: 服务名,用于服务发现或注册中心查询。
     async fn discover_ttl(&self, service: &str) -> Result<Arc<Vec<Instance>>> {
+        self.background.with_open(|| Ok(()))?;
         // 进入降级即记一次 watch_fallback(watch 不可用 / 中断)。
         self.metrics.watch_fallback();
         let now = Instant::now();
@@ -240,7 +260,18 @@ impl InstanceSource {
             }
         }
 
-        match self.discovery.discover(service).await {
+        match self
+            .background
+            .run(async {
+                self.discovery.discover(service).await.map_err(|source| {
+                    RestDiscoveryError::DiscoveryFailed {
+                        service: service.to_owned(),
+                        source,
+                    }
+                })
+            })
+            .await
+        {
             // discover 已是「可承载流量」实例(nacos discover_core 用 is_traffic_instance 过滤)。
             Ok(list) => {
                 let arc = Arc::new(list);
@@ -255,6 +286,7 @@ impl InstanceSource {
                 Ok(arc)
             }
             Err(e) => {
+                self.background.with_open(|| Ok(()))?;
                 self.metrics.discovery_failure();
                 // 仅 NoInstancePolicy::StaleIfDiscoveryError 才允许 discover 出错时短暂沿用 stale;
                 // 默认 Error 直接返回 DiscoveryFailed(成功空列表在上游已恒返回 NoAvailableInstance,绝不 stale)。
@@ -266,10 +298,7 @@ impl InstanceSource {
                         }
                     }
                 }
-                Err(RestDiscoveryError::DiscoveryFailed {
-                    service: service.to_string(),
-                    source: e,
-                })
+                Err(e)
             }
         }
     }
@@ -314,6 +343,7 @@ impl InstanceSource {
     /// 业务作用：abort 所有 watch pump(`RemoteRuntime` drop / 运行时 reset 调用),避免后台任务泄漏。
     /// 同时把每个 entry 标记 `removed`:让此刻正在 init(cell 尚空)的 get 完成后自 abort,收掉 init-in-flight 的 task。
     pub(crate) fn abort_all(&self) {
+        self.background.close();
         for entry in self.watch_states.iter() {
             entry.value().removed.store(true, Ordering::Release);
             if let Some(state) = entry.value().cell.get() {

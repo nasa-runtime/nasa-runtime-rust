@@ -1,6 +1,6 @@
 [package]
 name = "naaudit"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Provider-neutral business audit events and transactional Outbox sink contracts"
@@ -13,5 +13,5 @@ categories = ["asynchronous", "web-programming"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-naoutbox-core = { version = "1.0.0" }
+naoutbox-core = { version = "1.0.2" }
 async-trait = "0.1"

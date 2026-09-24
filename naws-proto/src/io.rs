@@ -1,7 +1,7 @@
 // ============================================================================
 // proto/src/io.rs —— wire 编解码原语:varint / zigzag / Writer / Reader
 //
-// 逐字节对齐 原实现 com.nasa.common.base.ProtocolBytes(见 rust-ws/架构说明 附录 A)。
+// 整型、长度前缀与字符串编码遵守协议字节合同，读写双方必须使用相同规则。
 // 解码端按"攻击者输入"设防(附录 A.9):varint≤10 字节、长度/count 不超剩余、trailing 检查。
 // ============================================================================
 
@@ -94,7 +94,7 @@ pub type Result<T> = std::result::Result<T, CodecError>;
 
 /* ============================== zigzag(附录 A.2)============================== */
 
-/// 业务作用：有符号整型 → 无符号 varint 友好编码。`<<` 在 Rust 是位移不做溢出检查,与 原实现 一致。
+/// 业务作用：有符号整型 → 无符号 varint 友好编码。`<<` 在 Rust 是位移不做溢出检查。
 ///
 /// # 参数
 /// - `v`: schema 中的有符号整数值,会映射成适合 varint 的无符号值。
@@ -185,7 +185,14 @@ impl Writer {
     /// # 参数
     /// - `b`: schema 中的布尔值,写成裸 varint 0 或 1。
     pub fn val_bool(&mut self, b: bool) {
-        write_varint(&mut self.buf, if b { 1 } else { 0 });
+        write_varint(
+            &mut self.buf,
+            if b {
+                1
+            } else {
+                0
+            },
+        );
     }
 
     /// 业务作用：写入字符串值；用于把文本字段编码进协议缓冲区。
@@ -331,7 +338,7 @@ impl<'a> Reader<'a> {
         Ok(self.take(n)?.to_vec())
     }
 
-    /// 业务作用：String[]:外层 LD,内层 `[count][每元素 len+bytes]`;元素 len=0 → None(与 原实现 一致)。
+    /// 业务作用：String[]:外层 LD,内层 `[count][每元素 len+bytes]`;元素 len=0 → None。
     pub fn read_str_array(&mut self) -> Result<Vec<Option<String>>> {
         let n = self.read_len()?;
         let inner = self.take(n)?;

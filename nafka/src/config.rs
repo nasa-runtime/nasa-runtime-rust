@@ -1,8 +1,5 @@
-//! 组件配置:强类型字段 + 三端透传 + 启动期 fail-fast 校验。
-//!
-//! 命名约定:字段按 librdkafka 原生语义设计(与参照实现字段名的差异);
-//! 不做 serde rename,YAML 键 = 字段名 snake_case(与 nadis 一致)。
-//! 默认值全部继承参照实现,运维平迁零认知成本。
+//! Kafka 强类型配置、三端参数透传与启动期校验。
+//! YAML 使用与字段名一致的 snake_case，producer、consumer 和 admin 的参数由各自合同约束。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -79,7 +76,7 @@ fn default_client_name() -> String {
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct ProducerConfig {
-    /// ack 策略("0"/"1"/"all");默认 "1" 与参照实现一致。需要副本级持久性的场景显式配 "all"。
+    /// ack 策略("0"/"1"/"all");默认 "1"。需要副本级持久性的场景显式配 "all"。
     pub acks: String,
     /// 发送失败重试次数；默认值必须显式设为 3，避免继承底层库的 i32::MAX 而静默偏离。
     pub retries: u32,
@@ -99,7 +96,7 @@ pub struct ProducerConfig {
     pub stalled_rebuild_min_failures: u32,
     /// 两次非 fatal generation 切换之间的最短冷却毫秒数。
     pub stalled_rebuild_cooldown_ms: u64,
-    /// 分区器;默认 murmur2_random 与参照实现的默认分区器逐 key 一致,
+    /// 分区器默认使用 murmur2_random；共享 topic 的生产者必须使用一致的 key 编码与分区算法，
     /// 改动会导致同 key 跨语言落不同分区,覆盖时 validate 打高可见告警。
     pub partitioner: String,
     /// 压缩算法(none/gzip/snappy/lz4/zstd;zstd 需开同名 feature)。
@@ -547,7 +544,7 @@ pub struct SecurityConfig {
     pub sasl_username: Option<String>,
     /// SASL 密码;Debug 打码。
     pub sasl_password: Option<String>,
-    /// CA 证书路径(PEM;与参照实现的 JKS 不同)。
+    /// PEM 格式的 CA 证书路径。
     pub ssl_ca_location: Option<String>,
     /// 客户端证书路径(PEM/PKCS12)。
     pub ssl_certificate_location: Option<String>,

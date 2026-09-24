@@ -6,7 +6,7 @@ VARINT_TLV、BITPACK_TLV 和 JSON_BYTES 分派代码。它是 `naws-proto` 的�
 
 ```toml
 [dependencies]
-naws-proto-derive = { version = "1" }
+naws-proto-derive = { version = "1.0.1" }
 ```
 
 业务项目通常只依赖 `naws-proto`；只有维护协议 schema 的 crate 才直接依赖本包。

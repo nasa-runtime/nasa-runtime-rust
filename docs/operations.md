@@ -39,6 +39,30 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
 - 配置刷新没有 `ApplyFailed` 或 `RestartRequired` 长时间未处理。
 - 日志中没有连接串、访问令牌、业务 payload 或控制 token。
 
+## 命名资源与配置应用状态
+
+配置刷新应同时检查 `ConfigView` 的期望配置与目标应用状态。候选材料或新观察集准备失败时保留
+旧视图；已经发布的新 YAML 也不代表所有运行资源都采用了新参数。
+
+| 事实 | 含义与处理 |
+| --- | --- |
+| `Applied` | 目标采用对应配置，按记录的实际版本观察 |
+| `RestartRequired` | 现有资源保持运行，按部署流程重启后才采用变化 |
+| `ApplyFailed` | 热应用失败，保留最后成功版本，先定位固定错误分类 |
+| 旧受管句柄返回 `Closed` / `RuntimeClosed` | 所属实例已收回准入，不能用重试重新打开 |
+| 对象存储 `NotReady` / `Degraded` | 结合 `critical`、探测策略与证据时效判断，不把 HEAD 成功当作全部对象权限 |
+
+日志和命名 TLS HTTP 支持各自已声明的热应用；连接来源、对象存储、Schema Registry 与普通 REST
+参数变化要求重启。无关更新不会清除失败或重启要求；相同 fingerprint 且材料未变不会隐式重试。
+仅由禁用计划引用的材料不解析、不监听，共享材料存在活跃消费者时仍会观察。
+
+`diagnostic_snapshot(limit)` 只读取已有状态，limit 为 1..=256；它不执行网络探测，也不是跨组件原子
+快照。Schema Registry 构造不证明远端 readiness，对象存储仅按所选健康策略收集证据。
+
+组件 `id` 与静态依赖在阶段执行前读取并冻结；元数据读取展开会报告 Bootstrap 错误，不执行组件
+启动阶段。阶段或清理失败保留首次终止原因，后续异常进入次要报告；同步阻塞与 `panic=abort`
+不受异步期限和展开隔离保护。
+
 ## SQL、通知与指标出口
 
 SQL 日志、阈值与通知策略在启动时冻结，按 `method > datasource > global` 逐叶覆盖；可以通过

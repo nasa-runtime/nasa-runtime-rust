@@ -148,7 +148,7 @@ impl ShutdownAction for LogShutdown {
                 manager
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .disable_file();
+                    .shutdown();
             })
             .await
             .map_err(|error| {
@@ -186,12 +186,16 @@ impl ConfigApplier for LogReloadApplier {
         ComponentId::Log
     }
 
-    /// 业务作用：对候选配置树中的 `log` 段执行一次重应用。
+    /// 业务作用：在发布锁外准备候选日志文件和过滤器，不修改当前输出。
     ///
     /// # 参数
     ///
     /// - `candidate`：已通过整帧校验、尚未发布的候选配置树。
-    fn apply(&self, candidate: &Value) -> ApplicationResult<()> {
+    /// 返回：持有已准备文件与过滤器的候选；失败保持原输出。
+    fn prepare(
+        &self,
+        candidate: &Value,
+    ) -> ApplicationResult<Box<dyn crate::reload::PreparedConfigApply>> {
         let cfg = log_config_or_default(candidate, ApplicationPhase::Running)?;
         #[cfg(feature = "mapper-observability")]
         let cfg = {
@@ -199,12 +203,49 @@ impl ConfigApplier for LogReloadApplier {
             merge_sql_directive(&mut cfg.level, &self.sql_directive);
             cfg
         };
-        apply_log_config(
-            &self.manager,
-            &cfg,
-            &self.app_name,
-            ApplicationPhase::Running,
-        )
+        let prepared = self
+            .manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare(&cfg, &LogContext::with_app_name(&self.app_name))
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::Log,
+                    ApplicationPhase::Running,
+                    "log candidate preparation failed",
+                    error,
+                )
+            })?;
+        Ok(Box::new(PreparedLogApply {
+            manager: self.manager.clone(),
+            prepared,
+        }))
+    }
+}
+
+/// 候选保留旧日志守卫，直到配置发布锁释放后再回收。
+struct PreparedLogApply {
+    manager: Arc<StdMutex<LogManager>>,
+    prepared: nalog::PreparedLogConfig,
+}
+
+impl crate::reload::PreparedConfigApply for PreparedLogApply {
+    /// 业务作用：安装已完成 I/O 准备的日志候选，保留旧输出的回收责任。
+    /// 参数说明：无。
+    /// 返回：成功切换过滤器与 writer；安装被拒绝时保留旧输出。
+    fn install(&mut self) -> ApplicationResult<()> {
+        self.manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .install(&mut self.prepared)
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::Log,
+                    ApplicationPhase::Running,
+                    "log candidate installation failed",
+                    error,
+                )
+            })
     }
 }
 

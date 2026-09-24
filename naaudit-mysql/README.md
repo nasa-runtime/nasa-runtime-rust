@@ -2,6 +2,8 @@
 
 `naaudit-mysql` 是 `TransactionalAuditSink` 的 MySQL Outbox adapter。它本身无连接池和全局状态，
 每次写入都从 `natx` ambient 事务取得同一条连接。
+门面同时开启 `application,audit` 时可声明命名 `audit_sinks`，由 Application 绑定数据源、验证 schema
+并管理句柄关闭，业务仍显式决定审计事件的记录时机。
 
 ## 写入架构
 
@@ -18,7 +20,7 @@ adapter 只在当前事务中追加审计事件，不自行提交或发布。事
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["audit"] }
+nasa = { version = "1.0.3", features = ["audit"] }
 ```
 
 ```rust
@@ -47,15 +49,21 @@ async fn record_cancel(occurred_at_millis: u64) -> anyhow::Result<()> {
 
 ## YML 配置
 
-本 adapter 不新增配置根，复用 `database:` / `datasources:`；审计事件与该句柄绑定库中的业务写、
-Outbox 行共享同一个本地事务。
+独立 adapter 显式绑定已注册的数据源。Application 声明 `"db"` 后按 `audit_sinks` 装配命名 sink；
+审计事件与该句柄绑定库中的业务写、Outbox 行共享同一个本地事务。
 
 ```yaml
 datasources:
   orders:
+    driver: mysql
     url: ${APP_ORDERS_MYSQL_URL}
     migrations:
       mode: validate
+audit_sinks:
+  changes:
+    enabled: true
+    driver: mysql
+    source: orders
 ```
 
 ## 主要边界
@@ -64,3 +72,14 @@ datasources:
 - 生产 schema 必须由 migration 拥有。
 - 底层 SQL、连接信息和事件 payload 不会进入公开错误。
 - 若业务写和审计写使用不同 datasource，就不再具备同事务原子性。
+
+## Application 接入
+
+门面 feature 为 `application,audit`；直接依赖 `napp` 时对应 `audit-mysql`。迁移门禁之后只读验证
+Outbox schema，再通过 `app.audit_sink("changes").await` 提供句柄。Service 在 initializer 或 Ready
+后取得 sink，Batch 在工作负载前完成装配；关闭后旧句柄拒绝新记录。
+
+sink 只追加同来源 ambient 事务，缺事务或错源会拒绝，不自行提交或启动 dispatcher。
+需要投递时显式配置同来源 Outbox 生命周期；构造 sink 不代表审计事件已经送达。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

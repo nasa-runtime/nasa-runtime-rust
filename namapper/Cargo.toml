@@ -21,7 +21,7 @@ redis-cache = ["namapper-core/redis-cache"]
 
 [dependencies]
 namapper-core = { version = "1.0.0" }
-namapper-macro = { package = "namapper-macro", version = "1.0.1" }
+namapper-macro = { package = "namapper-macro", version = "1.0.2" }
 natx = { package = "natx", version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"
@@ -33,4 +33,4 @@ linkme = "0.3"
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-cacheable = { version = "1.0.1", optional = true }
+cacheable = { version = "1.0.2", optional = true }

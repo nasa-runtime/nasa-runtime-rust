@@ -1,6 +1,7 @@
 //! 有界 Confluent-compatible Schema Registry client 与 wire envelope。
 //!
-//! 该模块是 Kafka codec 子能力，不拥有 Application 生命周期，也不启动 registry 服务端。生产默认禁止
+//! 该模块提供可独立使用的 Kafka codec 子能力，不启动 registry 服务端；命名受管实例的生命周期
+//! 由 Application 适配层承担。生产默认禁止
 //! 自动注册；业务数据面只按已批准 schema ID 拉取并使用有界正/负缓存。
 //!
 //! 数据面先校验 Confluent magic byte、payload 上限与 `ApprovedSchemaIds`，再按 ID 读取缓存或
@@ -580,6 +581,8 @@ impl Drop for SchemaControlAccounting<'_> {
 /// 脱敏、有限分类的 registry 错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaRegistryError {
+    /// 宿主已经关闭该代次客户端的新调用准入。
+    Closed,
     /// endpoint/options 不合法。
     InvalidConfiguration,
     /// schema ID 必须为正数。
@@ -1193,7 +1196,8 @@ fn schema_control_outcome<T>(result: &Result<T, SchemaRegistryError>) -> SchemaC
             | SchemaRegistryError::InvalidSchemaId(_),
         ) => SchemaControlOutcome::InvalidResponse,
         Err(
-            SchemaRegistryError::InvalidConfiguration
+            SchemaRegistryError::Closed
+            | SchemaRegistryError::InvalidConfiguration
             | SchemaRegistryError::InvalidEnvelope
             | SchemaRegistryError::UnsupportedMagic(_)
             | SchemaRegistryError::UnapprovedSchemaId(_)

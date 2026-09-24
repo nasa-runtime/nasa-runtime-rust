@@ -13,6 +13,6 @@ readme = "README.md"
 
 [dependencies]
 async-trait = "0.1"
-naaudit = { version = "1.0.0" }
+naaudit = { version = "1.0.1" }
 naoutbox-pgsql = { version = "1.0.0" }
 natx-pgsql = { version = "1.0.0" }

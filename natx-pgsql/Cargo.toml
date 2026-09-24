@@ -12,6 +12,7 @@ categories = ["asynchronous", "database"]
 readme = "README.md"
 
 [dependencies]
+nabudget = { version = "1.0.2" }
 natx-core = { version = "1.0.0" }
 natx-macro = { package = "natx-macro", version = "1.0.1" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }

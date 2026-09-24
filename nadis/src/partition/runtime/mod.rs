@@ -137,7 +137,7 @@ pub struct GroupRuntime {
     pub(super) core: Arc<engine::RedisPartitionRuntime>,
     pub(super) publisher: Arc<super::publisher::PublisherCoordinator>,
     /// V2 fencing 运行参数(profile==RustV2 时 start 内 bootstrap 后注入;
-    /// 原实现V1 = None,ACK 走 holds 双检查 + 裸 XACK 的 V1 协议)。
+    /// LegacyV1 = None,ACK 走 holds 双检查 + 裸 XACK 的 V1 协议)。
     fence_meta: Option<super::fencing::FenceMeta>,
     /// 再平衡 single-flight 守卫(周期 rebalance 与 wake rebalance 都直接调
     /// rebalance_once,无保护时会并发心跳/扫描/抢锁;try_lock
@@ -291,7 +291,7 @@ impl GroupRuntime {
             (Some(tx), Some(rx))
         };
 
-        // V2 fencing bootstrap(profile 驱动,:原实现V1 无 fence 概念)
+        // V2 fencing bootstrap(profile 驱动,:LegacyV1 无 fence 概念)
         let fence_meta = if matches!(
             client.profile(),
             crate::config::CompatibilityProfile::RustV2
@@ -595,7 +595,7 @@ impl GroupRuntime {
 
 impl GroupRuntime {
     /// 业务作用：构造分区 owner-fenced 转换凭据:本节点非该分区 owner(owner_ctx 无记录)→
-    /// None,调用方据此拒绝管理操作。RustV2 带 fence 三元组 + 任期 counter;原实现V1 fence_key 空,
+    /// None,调用方据此拒绝管理操作。RustV2 带 fence 三元组 + 任期 counter;LegacyV1 fence_key 空,
     /// 只校验 holder 持锁。
     pub(super) fn owner_fence(&self, p: u32, operation_id: String) -> Option<OwnerFence> {
         let oc = self.owner_ctx.lock().expect("owner_ctx");
@@ -726,7 +726,7 @@ impl GroupRuntime {
 // ─────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────
-// 再平衡:心跳 + fair 配额 + 抢占/让出(对照 原实现 rebalance;V1 墙钟语义)
+// 再平衡:心跳 + fair 配额 + 抢占/让出
 // ─────────────────────────────────────────────────────────────────────────
 
 // ── 子模块（各文件精确 import，无 use super::* 之外的

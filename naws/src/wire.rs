@@ -50,7 +50,7 @@ pub struct Frame {
 }
 
 /// 业务作用：出站统一入口:把一帧编码成完整 `Bytes`(头+payload 一次成形)。
-/// fan-out 时编一次、`Bytes::clone()` 给 N 个 outbox(零拷贝,= 原实现 retainedDuplicate)。
+/// fan-out 时编一次、`Bytes::clone()` 给 N 个 outbox（共享同一底层字节缓冲）。
 ///
 /// # 参数
 /// - `typ`: frame 类型字节,例如 EVENT/PING/PONG/CLOSE。

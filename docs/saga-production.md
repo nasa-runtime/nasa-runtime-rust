@@ -257,6 +257,9 @@ Hook 之前校验，运行期候选配置也必须满足同一约束。
 - effect_id 跨 attempt 稳定，参与方和真实副作用目标用它做业务幂等；command_id 只标识一次投递。
 - Rejected 提交拒绝事实并进入冻结的逆序补偿计划。
 - Unknown 进入有界 resolve，不能直接按失败补偿。
+- 本地正向效果已成功或拒绝、但 result 回传未知时，首次 resolve 在没有补偿状态的前提下重放受锁事实，
+  同事务记录 resolution 终态与当前结果 Outbox，不再次调用业务 resolver。缺少原效果仍须冻结。
+- resolution 的 Halted 不覆盖原 Unknown；普通 attempt 重放冻结结论，受信恢复操作才允许重新查询原效果。
 - timeout 先遵守 cancel_mode 与 TimeoutPolicy，再决定重试、resolve、补偿或人工介入。
 - 不可补偿 pivot 之后不能再增加需要逆向撤销的步骤。
 - 补偿失败保持补偿中或进入人工介入，不能越过事实宣称完成。

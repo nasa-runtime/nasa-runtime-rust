@@ -451,7 +451,11 @@ impl Exporter {
                         break;
                     }
                 }
-                batch.outcome = if success { 5 } else { 6 };
+                batch.outcome = if success {
+                    5
+                } else {
+                    6
+                };
                 if !success {
                     tracing::warn!(target:"napp::observability", event="remote_write_failed", "远程指标批次未确认");
                 }

@@ -89,7 +89,11 @@ pub(crate) fn classify(raw: &str) -> Result<Classified> {
 /// - `u`: 需要分类的请求 URL。
 fn path_and_query(u: &Url) -> String {
     let path = u.path();
-    let path = if path.is_empty() { "/" } else { path };
+    let path = if path.is_empty() {
+        "/"
+    } else {
+        path
+    };
     match u.query() {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),

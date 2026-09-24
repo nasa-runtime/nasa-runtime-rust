@@ -34,6 +34,7 @@ pub(super) struct ShutdownOperation {
     done: AtomicBool,
     forced: AtomicBool,
     changed: Notify,
+    dependency: Mutex<(bool, Option<Box<dyn Send>>)>,
 }
 
 impl ShutdownOperation {
@@ -54,6 +55,7 @@ impl ShutdownOperation {
             done: AtomicBool::new(false),
             forced: AtomicBool::new(false),
             changed: Notify::new(),
+            dependency: Mutex::new((false, None)),
         })
     }
 
@@ -73,9 +75,40 @@ impl ShutdownOperation {
             futures::future::join_all(owner.groups.iter().map(|group| group.shutdown())).await;
             owner.core.stop().await;
             owner.done.store(true, Ordering::Release);
+            // 只有完整排干之后才释放宿主依赖；超时等待者退出不会让数据库或 Redis 提前关闭。
+            if owner.report().converged {
+                let dependency = owner
+                    .dependency
+                    .lock()
+                    .expect("shutdown dependency")
+                    .1
+                    .take();
+                drop(dependency);
+            }
             owner.changed.notify_waiters();
         });
         *self.handle.lock().expect("shutdown operation") = Some(handle);
+    }
+
+    /// 业务作用：原子登记一次宿主依赖保留权，避免完成与登记竞争造成永久保留。
+    /// 参数说明：`guard` 为宿主提供的具体所有权守卫。
+    /// 返回：成功接管或在完成后释放；重复登记返回原值。
+    pub(super) fn retain_dependency<T: Send + 'static>(
+        &self,
+        guard: T,
+    ) -> std::result::Result<(), T> {
+        let mut dependency = self.dependency.lock().expect("shutdown dependency");
+        if dependency.0 {
+            return Err(guard);
+        }
+        dependency.0 = true;
+        if self.report().converged {
+            drop(dependency);
+            drop(guard);
+        } else {
+            dependency.1 = Some(Box::new(guard));
+        }
+        Ok(())
     }
 
     /// 业务作用：等待同一排干操作，超时不终止续租或提前解锁。
@@ -124,7 +157,7 @@ impl ShutdownOperation {
     /// 业务作用：读取退出证明和未完成责任，避免把取消请求误报为完整排干。
     /// 参数说明: 无。
     /// 返回：分别采样消费、发布、删除与后台状态；只有停机操作完成且全部剩余责任为零才报告收敛。
-    fn report(&self) -> PartitionShutdownReport {
+    pub(super) fn report(&self) -> PartitionShutdownReport {
         let finished = self.done.load(Ordering::Acquire);
         let remaining = self.core.snapshot();
         let publishes = self.publisher.snapshot();

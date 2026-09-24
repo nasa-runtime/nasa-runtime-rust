@@ -23,6 +23,7 @@
 // ============================================================================
 #![forbid(unsafe_code)]
 
+mod background;
 mod classify;
 mod client;
 mod error;

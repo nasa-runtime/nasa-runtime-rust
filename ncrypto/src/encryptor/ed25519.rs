@@ -1,4 +1,4 @@
-//! Ed25519 现代椭圆曲线签名(对照 原实现 `generateEd25519KeyPair`/`signEd25519`/`verifyEd25519`)。
+//! Ed25519 现代椭圆曲线签名。
 //! 密钥 = Base64(PKCS8 私钥 / SPKI 公钥);签名 = Base64(64 字节)。
 
 use super::b64_encode;
@@ -26,7 +26,7 @@ pub fn generate_ed25519_key_pair() -> Result<(String, String)> {
     ))
 }
 
-/// 业务作用: Ed25519 私钥签名(Base64 输出,64 字节)。对照 原实现 `signEd25519`。
+/// 业务作用: Ed25519 私钥签名(Base64 输出,64 字节)。
 ///
 /// # 参数
 /// - `content`: 要签名的 UTF-8 内容。
@@ -41,7 +41,7 @@ pub fn sign_ed25519(content: &str, private_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&sig.to_bytes()))
 }
 
-/// 业务作用: Ed25519 公钥验签。出错即 false。对照 原实现 `verifyEd25519`。
+/// 业务作用: Ed25519 公钥验签。出错即 false。
 ///
 /// # 参数
 /// - `content`: 原始 UTF-8 内容,必须与签名时输入一致。

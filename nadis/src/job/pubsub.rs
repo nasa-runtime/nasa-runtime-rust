@@ -226,7 +226,11 @@ async fn subscribe(
             // 启动门禁期出现的业务通知不承担权威；持久 receipt/ready 索引会在 Ready 后重新定位。
         }
     };
-    let timeout = if timeout_ms == 0 { 30_000 } else { timeout_ms };
+    let timeout = if timeout_ms == 0 {
+        30_000
+    } else {
+        timeout_ms
+    };
     tokio::time::timeout(std::time::Duration::from_millis(timeout), wait_ack)
         .await
         .map_err(|_| {

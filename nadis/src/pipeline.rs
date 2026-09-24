@@ -1,22 +1,9 @@
-// ============================================================================
-// src/pipeline.rs —— 显式 PipelineSession(文档,typed ticket 正式 API)。
+// 显式 PipelineSession 与多生产者自动微批。
 //
-// 模型:
-//   · session = **本地 buffer**,无共享生产者——到 max_commands 条数 / max_bytes 单批字节阈值即
-//     **滚动 auto-flush**:seal 当前批后台串行发出、会话续接,**永不报错**(对齐 原实现 pipelineAutoFlush,
-//     第 1001 条无缝接续;各段经 flush_chain 链式串行保证跨段保序);
-//   · move 语义:`execute(self)` 收尾会话(等齐已 flush 各段 + 发最后一段)——原实现 的 execTag 配对/
-//     openNested 在 Rust 是编译期事实;Drop 未 execute = 最后一段未发(NotSent)+ warn,已 auto-flush 段已提交;
-//   · typed ticket:入队返回 Ticket<T>,execute 后 `ticket.await_result()` 取各自类型化结果;
-//   · **保序 + 一批一写 + 逐命令隔离**：
-//     经 `MultiplexedConnection::send_packed_commands(&Pipeline, 0, n)` 单条消息进
-//     driver、单次 flush、严格按入队顺序;返回裸 `Vec<Value>`,server error 以
-//     `Value::ServerError` **逐槽位内联**；聚合成整批 Err 只发生在
-//     `Pipeline::query_async` 包装层,绕开包装层即得逐命令隔离)。
-//   · 失败语义:传输层错误(写出后断线等)= 整 session 未确认结果统一
-//     ExecutionUnknown;`Value::ServerError` = 单命令确定性失败,不污染同批其它命令。
-//   · 顺序:单 session 内严格有序(同一连接单批);direct 与 session 混用不保证顺序。
-// ============================================================================
+// 默认会话在条数或字节阈值达到后封批，后台串行提交各段；execute 等待全部段并发送尾批。
+// 同一 slot 内按入队顺序执行，跨 slot 或与 direct 命令混用时不提供全局顺序。
+// 每条服务器错误只影响对应 ticket；传输失败表示结果不确定，不能据此安全重发写命令。
+// 丢弃会话只将尚未封批的命令标为 NotExecuted，已提交后台的段继续执行。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +17,8 @@ use crate::client::RedisClient;
 use crate::config::PipelineCfg;
 use crate::error::{NasaRedisError, Result};
 
-/// `h_decr_by_and_del` 的 Lua —— **逐字复刻 原实现 `/lua/hash_hdecriby_del.lua`**:HINCRBY 负 delta,自减后
-/// 余值 `<= 0` 则 HDEL 该 field,返回自减后余值。KEYS=[key] ARGV=[field, delta](Lua 用单引号,合法)。
+/// hash field 原子自减脚本：HINCRBY 使用负 delta，余值不大于零时删除该 field。
+/// KEYS 为 key，ARGV 为 field、delta；返回删除前的自减结果。
 const H_DECR_BY_AND_DEL_LUA: &str = "local k = KEYS[1];\n\
 local hk = ARGV[1];\n\
 local delta = tonumber(ARGV[2]) or 1;\n\
@@ -60,9 +47,8 @@ pub struct Ticket<T> {
 }
 
 impl<T: FromRedisValue> Ticket<T> {
-    /// 业务作用：**预置已完成 ticket**(空集合短路)。空输入(`h_del([])`/`mget([])`…)
-    /// 不构造非法命令、不发 Redis——直接给定结果,对照 原实现 Actuator 空集合 early-return。`await_result`
-    /// 立即返回该值;不占 session 配额、不入 dispatch。
+    /// 业务作用：为空集合操作创建已完成的 ticket，不向 Redis 发送非法空命令。
+    /// 返回：可立即读取的预置结果，不占用会话条数或字节额度。
     ///
     /// # 参数
     /// - `v`: 待转换的值。
@@ -75,7 +61,10 @@ impl<T: FromRedisValue> Ticket<T> {
         }
     }
 
-    /// 业务作用：取本命令的结果(必须在 `execute()` 之后调用,否则 Err)。
+    /// 业务作用：消费本命令的 ticket 并读取已经送达的结果，本方法不会异步等待。
+    /// 参数说明：无。
+    /// 返回：就绪时返回命令结果或对应错误；尚未就绪时返回 SessionLimit 且 ticket 被消费。
+    /// 通常应先等待 execute 完成；空输入的预置结果或已完成的后台封批可以更早就绪。
     pub fn await_result(mut self) -> Result<T> {
         match self.rx.try_recv() {
             // 命令成功:Value 按值移交 FromRedisValue(redis 1.2 形态),类型化失败 = Parsing
@@ -100,23 +89,14 @@ impl<T: FromRedisValue> Ticket<T> {
     }
 }
 
-/// 显式批会话。`client.pipeline()` 创建,入队若干命令后 `execute(self)` 收尾。
+/// 显式批会话，由 `client.pipeline()` 创建并以 `execute(self)` 等待完成。
 ///
-/// **滚动自动 flush(对齐 原实现 `LettucePipeline.pipelineAutoFlush`)**:**第 N 条入队
-/// 后**当前批达 `session_max_commands`(默认 1000)条或 `session_max_bytes`(默认 4MB)字节即 seal 后台发出、
-/// 会话继续接收——**永不返 `SessionLimit`**。**正好 1000 条也立即提交**(入队后判断,对齐 原实现 line 1540;
-/// 第 1001 条进新批),不必等 `execute()`。各段经 `flush_chain` **链式串行**(段 N 落库后才发段 N+1),保证跨段
-/// 严格按 seal 顺序(同 slot 跨段保序;cluster 跨 slot 同单批限制)。每段命令各自的 `Ticket` 在该段后台 dispatch
-/// 完成时回填——auto-flush 段的 ticket 可能在 `execute()` 前就绪。`execute()` 等齐各段 + 发最后一段未满批,并
-/// **聚合各段批级传输错误上抛**。**已 auto-flush 段=已提交**(同 原实现),会话未 `execute` 即 drop 也会后台
-/// 完成(仅最后一段未满批按 `NotExecuted`)。
+/// 默认在入队后达到 1000 条或 4MB 时封批，后台按封批顺序逐段发送；同 slot 跨段保序。
+/// 封批后仍可继续入队，每段 ticket 在该段完成时就绪，可能早于 execute。
+/// execute 等待已封批的段并发送尾批，汇总批级传输错误；单命令错误由对应 ticket 返回。
 ///
-/// ⚠ **时间可见性**(对照 原实现 的契约差异):原实现 `pipelineAutoFlush` 在入队线程内同步 `pipelineForce()`;Rust
-/// 为保持 helper 同步,seal 后**后台 spawn 发出**——第 1000 个 helper 返回时,命令可能尚未写到 Redis。保证的是
-/// "达阈值即 seal 并调度提交 + `execute()` 等齐所有已 seal 段",**不**保证"helper 返回即 Redis 可见"。需 原实现
-/// 级同步可见性只能改 helper 为 async(不为此做大改)。
-///
-/// 需要多生产者并发微批仍用 [`AutoPipeline`];`PipelineSession` 是单调用方顺序攒批 + 滚动 flush。
+/// helper 返回只表示本地入队或已调度封批，不表示 Redis 已执行。丢弃会话不撤销后台段，
+/// 仅最后尚未发送的批次返回 NotExecuted。多生产者共享合批使用 [`AutoPipeline`]。
 pub struct PipelineSession {
     client: Arc<RedisClient>,
     cfg: PipelineCfg,
@@ -196,7 +176,7 @@ impl PipelineSession {
         let (tx, rx) = oneshot::channel();
         self.bytes += sz;
         self.cmds.push((cmd, tx));
-        // 滚动自动 flush(对齐 原实现 pipelineAutoFlush;**不报错**):**push 后**判断——第 1000 条入队后
+        // 滚动自动 flush:**push 后**判断——第 1000 条入队后
         // `len==session_max_commands` 立即 seal 后台发出。字节阈值同样 push 后判断
         // (`bytes >= max_bytes`),单条命令本身超限时它自己一段发出,不死循环。
         if self.auto_flush
@@ -346,9 +326,8 @@ impl PipelineSession {
     //    底座仍是 enqueue;cluster 多 key 命令的跨 slot 由 Redis loud CROSSSLOT 兜底)──
 
     // key / string
-    /// 业务作用：相对过期 → `PEXPIRE`(毫秒)。对照 原实现 `LettucePipeline.expire(key, millis)`(= `OP_EXPIRE`→pexpire)
-    /// **与 direct `commands.rs::expire(Duration)` 同源**。入参取 `Duration` 消除单位歧义；
-    /// 非零下界 1ms，避免亚毫秒时长变成 `PEXPIRE 0` 而删除 key。
+    /// 业务作用：使用 PEXPIRE 设置相对过期时间，按毫秒提交。
+    /// 正的亚毫秒时长向上保留为 1ms，避免因截断为零而立即删除 key。
     ///
     /// # 参数
     ///
@@ -369,7 +348,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("EXPIREAT").arg(key).arg(unix_secs).to_owned())
     }
 
-    /// 业务作用：绝对过期(epoch **毫秒**)→ `PEXPIREAT`。对照 原实现 `LettucePipeline.expireAt(key, millis)`
+    /// 业务作用：绝对过期(epoch **毫秒**)→ `PEXPIREAT`。
     /// (= `OP_EXPIRE_AT`→pexpireat)与 direct `commands.rs::expire_at_millis`。
     ///
     /// # 参数
@@ -407,7 +386,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("PTTL").arg(key).to_owned())
     }
 
-    /// 业务作用：SETNX(不存在才设)→ 是否设置成功。对照 原实现 `setIfAbsent`。
+    /// 业务作用：SETNX(不存在才设)→ 是否设置成功。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -912,8 +891,8 @@ impl PipelineSession {
         self.enqueue(redis::cmd("XLEN").arg(stream).to_owned())
     }
 
-    /// 业务作用：XTRIM MAXLEN(**精确**)→ 删除数。对照 原实现 `xTrimMaxlen`(= `c.xtrim(s, l)`,无 `~`)与 direct
-    /// `commands.rs::x_trim_maxlen_exact`，按指定长度精确裁剪。
+    /// 业务作用：按精确 MAXLEN 裁剪 Stream，不使用近似裁剪标记 `~`。
+    /// 返回：携带删除 entry 数量的 ticket。
     ///
     /// # 参数
     ///
@@ -992,7 +971,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    // ── 全量对齐 原实现 Actuator(框架须一次铺完整,X/XAsync 折叠为单方法)──
+    // Redis 命令的类型化入队入口。
 
     // key(其余)
     /// 业务作用：TTL(秒;-1 无 TTL,-2 不存在)。
@@ -1103,7 +1082,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：DECRBY → 减后值(对照 原实现 `decrement`)。
+    /// 业务作用：DECRBY → 减后值。
     ///
     /// # 参数
     ///
@@ -1123,10 +1102,9 @@ impl PipelineSession {
         self.enqueue(redis::cmd("INCRBYFLOAT").arg(key).arg(delta).to_owned())
     }
 
-    /// 业务作用：**Redis 原生 `MSET`**(单命令原子多写)。⚠ cluster 下所有 key **须同 slot**,否则 Redis loud
-    /// CROSSSLOT。空 pairs 短路 no-op。**注意:这不等价 原实现 `multiSet`** ——原实现 的 `multiSet(Map)`
-    /// 把每对**拆成独立 `SET`**(`kvMap.forEach((k,v)->set(k,v))`),cluster 下各自按 slot 路由;要那个语义用
-    /// [`Self::multi_set_split`]。
+    /// 业务作用：将键值对作为一条原子 MSET 入队，空输入直接完成。
+    /// Cluster 下全部 key 必须位于同一 slot，否则返回 CROSSSLOT；跨 slot 写入可使用
+    /// `multi_set_split`，但后者不提供跨 key 原子性。
     ///
     /// # 参数
     ///
@@ -1142,8 +1120,8 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：**对齐 原实现 `multiSet(Map)`**:逐对入队独立 `SET`,返回每对各自的 `Ticket<()>`。cluster 下由
-    /// `execute` 的按-slot 分桶把它们路由到各自节点(**不会 CROSSSLOT**)。空 pairs → 空 Vec。
+    /// 业务作用：为每个键值对分别入队 SET，返回独立 ticket。
+    /// Cluster 按 key 路由到各 slot；各命令独立成功或失败，不提供整组写入的原子性。
     ///
     /// # 参数
     ///
@@ -1157,7 +1135,7 @@ impl PipelineSession {
     }
 
     // hash(其余)
-    /// 业务作用：HSET(多 field,= HMSET)。对照 原实现 `hMSet`。空 pairs 短路 no-op。
+    /// 业务作用：HSET(多 field,= HMSET)。空 pairs 短路 no-op。
     ///
     /// # 参数
     ///
@@ -1219,7 +1197,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：HINCRBY 负增(对照 原实现 `hDecrBy`)→ 减后值。
+    /// 业务作用：HINCRBY 负增→ 减后值。
     ///
     /// # 参数
     ///
@@ -1273,7 +1251,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：LPUSHX(仅 key 存在;对照 原实现 `lPushIfAbsent`)→ push 后长度。
+    /// 业务作用：仅在 key 已存在时执行 LPUSHX，ticket 返回操作后的列表长度。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1286,7 +1264,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("LPUSHX").arg(key).arg(val).to_owned())
     }
 
-    /// 业务作用：RPUSHX(对照 原实现 `rPushIfAbsent`)。
+    /// 业务作用：RPUSHX。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
@@ -1508,7 +1486,7 @@ impl PipelineSession {
     }
 
     // zset(其余)
-    /// 业务作用：ZREMRANGEBYRANK → 删除数(对照 原实现 `zRemRange`)。
+    /// 业务作用：ZREMRANGEBYRANK → 删除数。
     ///
     /// # 参数
     ///
@@ -1807,7 +1785,7 @@ impl PipelineSession {
     }
 
     // stream / script / pubsub(其余)
-    /// 业务作用：XTRIM MINID(**精确**)→ 删除数。对照 原实现 `xTrimMinId`(= `XTrimArgs.minId(minId)`,无 `~`)。
+    /// 业务作用：按精确 MINID 裁剪 Stream，不使用 `~`；ticket 返回删除数量。
     ///
     /// # 参数
     ///
@@ -1850,7 +1828,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SCRIPT").arg("KILL").to_owned())
     }
 
-    /// 业务作用：SCRIPT LOAD → sha1。对照 原实现 `scriptLoad`。
+    /// 业务作用：SCRIPT LOAD → sha1。
     ///
     /// # 参数
     ///
@@ -1859,7 +1837,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("SCRIPT").arg("LOAD").arg(script).to_owned())
     }
 
-    /// 业务作用：SCRIPT EXISTS(多 sha)→ 各是否已缓存。对照 原实现 `scriptExists`。空 sha 短路返回空数组。
+    /// 业务作用：SCRIPT EXISTS(多 sha)→ 各是否已缓存。空 sha 短路返回空数组。
     ///
     /// # 参数
     ///
@@ -1876,7 +1854,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    // ── count 重载(;对照 原实现 `lPop(key,count)`/`sPop(key,count)` 等)──
+    // 支持 count 参数的批量弹出入口。
     /// 业务作用：LPOP key count → 弹出的多个元素。
     ///
     /// # 参数
@@ -2205,8 +2183,8 @@ impl PipelineSession {
         self.publish_default(stream, data)
     }
 
-    /// 业务作用：hash field 自减 `delta`,**余值 ≤0 则删该 field**,返回自减后余值(对照 原实现 `hDecrByAndDel`,EVAL
-    /// Lua 逐字复刻 `/lua/hash_hdecriby_del.lua`)。`KEYS=[key] ARGV=[field, delta]`,cluster 安全(key 经 KEYS 路由)。
+    /// 业务作用：用单 key Lua 原子地将 hash field 自减 delta，余值不大于零时删除 field。
+    /// 返回：携带自减后余值的 ticket；删除 field 不改变该返回值。
     ///
     /// # 参数
     ///
@@ -2225,7 +2203,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：`h_decr_by_and_del` delta=1(对照 原实现 `hDecrByAndDel(key, hashKey)`)。
+    /// 业务作用：`h_decr_by_and_del` delta=1。
     ///
     /// # 参数
     ///
@@ -2235,9 +2213,9 @@ impl PipelineSession {
         self.h_decr_by_and_del(key, field, 1)
     }
 
-    /// 业务作用：HEXPIRE key `<秒>` FIELDS 1 `<field>`(对照 原实现 `expire(key, Duration, hashKey)` = lettuce `hexpire`,
-    /// **秒**精度;亚秒 Duration 截断成 0=立即过期,与 原实现 一致)。返回单 field 状态码数组(1=设/2=已过期删/
-    /// 0=条件未满足/-2=无此 field)。⚠ 需 Redis 7.4+(跟随 原实现 行为,不论服务端版本)。
+    /// 业务作用：使用 HEXPIRE 为单个 hash field 设置秒级有效期，需要 Redis 7.4 或更高版本。
+    /// Duration 按整秒截断，亚秒时长变为零并立即过期。返回单 field 状态码数组：
+    /// 1 表示设置成功，2 表示已删除，0 表示条件未满足，-2 表示 field 不存在。
     ///
     /// # 参数
     ///
@@ -2257,7 +2235,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：HEXPIRE 多 field(对照 原实现 `OP_HEXPIRE_MULTI` = `c.hexpire(key, Duration, byte[][])`)。空 fields 短路空数组。
+    /// 业务作用：HEXPIRE 多 field。空 fields 短路空数组。
     ///
     /// # 参数
     ///
@@ -2282,8 +2260,8 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    // ── RedisJSON / RediSearch(feature "search";对照 原实现 jsonSet/ftSearch 等)──
-    /// 业务作用：JSON.SET(RedisJSON)。对照 原实现 `jsonSet`。
+    // search feature 提供 RedisJSON 与 RediSearch 命令。
+    /// 业务作用：JSON.SET(RedisJSON)。
     ///
     /// # 参数
     ///
@@ -2301,7 +2279,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：JSON.GET。对照 原实现 `jsonGet`。
+    /// 业务作用：JSON.GET。
     ///
     /// # 参数
     ///
@@ -2312,7 +2290,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("JSON.GET").arg(key).arg(path).to_owned())
     }
 
-    /// 业务作用：JSON.DEL → 删除的路径数。对照 原实现 `jsonDel`。
+    /// 业务作用：JSON.DEL → 删除的路径数。
     ///
     /// # 参数
     ///
@@ -2372,7 +2350,7 @@ impl PipelineSession {
         )
     }
 
-    /// 业务作用：FT.SEARCH(原样 query;typed 解析见 search 模块)。对照 原实现 `ftSearch`。
+    /// 业务作用：FT.SEARCH(原样 query;typed 解析见 search 模块)。
     ///
     /// # 参数
     ///
@@ -2383,7 +2361,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.SEARCH").arg(index).arg(query).to_owned())
     }
 
-    /// 业务作用：FT.AGGREGATE。对照 原实现 `ftAggregate`。
+    /// 业务作用：FT.AGGREGATE。
     ///
     /// # 参数
     ///
@@ -2394,7 +2372,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.AGGREGATE").arg(index).arg(query).to_owned())
     }
 
-    /// 业务作用：FT.DROPINDEX。对照 原实现 `ftDropIndex`。
+    /// 业务作用：FT.DROPINDEX。
     ///
     /// # 参数
     ///
@@ -2404,8 +2382,7 @@ impl PipelineSession {
         self.enqueue(redis::cmd("FT.DROPINDEX").arg(index).to_owned())
     }
 
-    /// 业务作用：`FT.DROPINDEX [DD]`（`dd=true` 时连同删除文档）。对照 原实现
-    /// `ftDropIndex(index, dropDocs)`。
+    /// 业务作用：删除 RediSearch 索引，dd 为 true 时同时删除索引中的文档。
     ///
     /// # 参数
     ///
@@ -2421,7 +2398,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.INFO。对照 原实现 `ftInfo`。
+    /// 业务作用：FT.INFO。
     ///
     /// # 参数
     ///
@@ -2432,8 +2409,8 @@ impl PipelineSession {
     }
 
     // ── FT 原样 args 透传──
-    /// 业务作用：FT.SEARCH index 后接**原样 args**(SORTBY/LIMIT/DIALECT/RETURN/FILTER… 由调用方逐段给)。对照 原实现
-    /// `ftSearch(index, String[] args)`。typed 结果解析建议走 search 模块的 query builder,本入口只透传。
+    /// 业务作用：在 FT.SEARCH 的 index 之后原样追加参数，由调用方负责 SORTBY、LIMIT、
+    /// DIALECT、RETURN 和 FILTER 等参数的顺序与安全性；非可信输入应使用类型化查询构建器。
     ///
     /// # 参数
     ///
@@ -2449,7 +2426,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.AGGREGATE index 后接原样 args。对照 原实现 `ftAggregate(index, String[] args)`。
+    /// 业务作用：FT.AGGREGATE index 后接原样 args。
     ///
     /// # 参数
     ///
@@ -2469,7 +2446,7 @@ impl PipelineSession {
         self.enqueue(c)
     }
 
-    /// 业务作用：FT.CREATE index 后接原样 args(schema/ON HASH|JSON/PREFIX… 由调用方给)。对照 原实现 `ftCreate`。
+    /// 业务作用：FT.CREATE index 后接原样 args(schema/ON HASH|JSON/PREFIX… 由调用方给)。
     ///
     /// # 参数
     ///
@@ -2518,7 +2495,7 @@ impl Drop for PipelineSession {
     ///
     /// 已 auto-flush 的段保持后台提交；仅最后一段尚未发出的命令被标记为 `NotSent`,让调用方可安全重试。
     fn drop(&mut self) {
-        // 已 auto-flush 的各段 = **已提交**(同 原实现 autoFlush 已写出):`flush_chain` 句柄被 drop 后任务
+        // 已 auto-flush 的各段 = **已提交**:`flush_chain` 句柄被 drop 后任务
         // 自动 detach,在后台继续完成、回填各自 ticket——不撤销。仅**最后一段未满批**(从未发出)按 NotSent
         // → 调用方 await_result 得 `NotExecuted`(确定未发,可安全重发),区别于"可能已发"的 ExecutionUnknown。
         if !self.executed && !self.cmds.is_empty() {
@@ -2531,21 +2508,18 @@ impl Drop for PipelineSession {
     }
 }
 
-// ═══════════════════ 自动微批（时间轮合批 + caller-runs 背压）═══════════════════
-//
-// 对照 原实现 LettucePipeline 自动微批:多生产者把命令丢进有界队列,后台任务按**时间窗 + 批量上限**
-// 合并成一条 pipeline 一次发出;队列满时 `execute().await` 阻塞 = caller-runs 背压(天然限流)。
-// 失败语义同显式 session:Value::ServerError = 单命令确定性失败;传输错误/响应数不符 = 整批
-// ExecutionUnknown。停机 drain 已入队命令不丢。
+// 自动微批使用有界 mpsc 队列接收多生产者命令，按时间窗与批量上限合并发送。
+// 队列满时生产者异步等待容量，不在生产者内执行 Redis 命令。服务器错误按命令分发，
+// 传输失败或响应数量不符返回 ExecutionUnknown；停机等待已入队命令排干。
 
 /// 自动微批配置。
 #[derive(Debug, Clone)]
 pub struct MicroBatchCfg {
-    /// 合批时间窗:收到首命令后等这么久收集更多(对照 原实现 1ms 时间轮)。
+    /// 合批时间窗:收到首命令后等这么久收集更多。
     pub window: Duration,
     /// 单批最大命令数(到此立即 flush,不等满窗)。
     pub max_batch: usize,
-    /// 入队队列容量(满 → caller-runs 背压)。
+    /// 入队队列容量；满时生产者异步等待可用容量。
     pub queue_capacity: usize,
     /// **单命令参数字节上限**(0=不限)。超限的命令入队即拒绝(字节级背压)。
     /// 与 `queue_capacity` 联合给出队列字节上界 ≈ `queue_capacity × max_command_bytes`,防大 value 撑爆内存。
@@ -2634,7 +2608,7 @@ type BatchJob = (
 );
 
 /// 业务作用：后台 auto-flush task 的 `JoinError`(panic/cancel)→ `ExecutionUnknown`(批级不确定,**不吞成 Ok**;
-///pipeline)。仅用于 `flush_chain` 段任务的 `JoinHandle::await` 失败映射。
+///仅用于 `flush_chain` 段任务的 `JoinHandle::await` 失败映射。
 ///
 /// # 参数
 /// - `e`: 错误对象或外部错误值。
@@ -2681,10 +2655,8 @@ impl AutoPipeline {
         })
     }
 
-    /// 业务作用：提交一条命令,await 自己的类型化结果。**队列满 → 阻塞(真 caller-runs 背压)**。
-    /// 注:这是对 原实现 的**有意改良**——原实现 LettucePipeline 用无界 ConcurrentLinkedQueue
-    /// (满了不阻塞、内存可能无界增长),Rust 用有界 `mpsc`(`queue_capacity`),满则 `send().await` 阻塞生产者
-    /// = 天然限流,绝不无界堆积 OOM。
+    /// 业务作用：提交单条命令并异步等待对应的类型化结果，队列满时等待可用容量。
+    /// 返回：该命令的结果、确定的服务器错误或执行结果不确定错误；不自动重试写入。
     ///
     /// # 参数
     /// - `cmd`: 底层 Redis 命令对象。

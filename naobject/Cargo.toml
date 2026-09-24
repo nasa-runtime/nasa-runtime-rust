@@ -10,12 +10,17 @@ homepage.workspace = true
 keywords = ["object-storage", "s3", "sigv4", "storage", "async"]
 categories = ["asynchronous", "web-programming::http-client"]
 
+[features]
+default = []
+metrics = ["dep:nametrics-core"]
+
 [dependencies]
+nametrics-core = { version = "1.0.2", optional = true }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hex = "0.4"
 hmac = "0.12"
-nasecret = { version = "1.0.0" }
+nasecret = { version = "1.0.1" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10"
 zeroize = "1"

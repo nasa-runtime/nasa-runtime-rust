@@ -17,6 +17,11 @@ Mapper 同时提供默认采集的 SQL 指标，区分逻辑方法、真实数�
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
 
+Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接流前完成资源装配，统一管理健康、
+配置应用状态和停机；无需为这些能力另建连接池、监听循环或关闭任务。各能力的入口和边界见
+[受管能力合同](docs/managed-capabilities.md)。
+
 ## 核心价值与运行架构
 
 `nasa` 把配置收敛、依赖校验、组件启动、Ready 发布和反向停机统一为一个受管生命周期，让业务只选择
@@ -45,7 +50,32 @@ Application 不提供跨数据库原子事务，也不会替业务推断租户�
 `spawn_background` / `spawn_critical`。业务自管 listener 使用 `serve_when_ready`；initializer 的任务
 工厂应只构造 future，不自行启动监听或派生任务。
 
+## 受管资源装配与配置生效
+
+feature 决定编译期能力，组件声明决定连接与任务的生命周期，命名计划以 `enabled: true` 显式启用。
+Service 在 UserHook 登记计划，标准命名资源在 Prepare 装配，供 initializer 和 Ready 后的业务使用；
+Batch 在工作负载前完成装配。名称、来源和容量在启动时校验，显式错源不会回退到默认实例。
+
+```text
+最终配置 → 来源连接与迁移门禁 → 命名资源装配 → initializer → Ready 后业务
+配置变化 → 材料与资源候选准备 → 复验当前视图 → 发布配置与实际应用状态
+停机     → 撤销新调用与任务准入 → 等待在途工作退出 → 释放所属资源
+```
+
+本地文件与 Nacos 更新共用候选流程。secret、TLS 和日志先在发布锁外准备；候选失败保留旧视图。
+已支持的日志与命名 TLS HTTP 参数可热应用；连接来源、对象存储和 Schema Registry 的参数或凭据
+变更要求重启，状态报告 `RestartRequired`。读到新配置不代表所有组件已经采用新参数，业务应固定
+一次 `config_view()` 并查看实际应用状态。文件观察只覆盖活跃消费者所需材料。
+
+资源句柄不授予第二份关闭权：停机后旧受管句柄拒绝新调用，已接纳的工作仍须归还责任。
+对象存储按显式策略监督健康；Schema Registry 构造不证明远端可用。诊断快照只组合已有证据，
+不主动探测后端，也不是跨组件的原子快照。事务原子性、租约 fencing 和写入结果未知仍由各组件
+合同约束，取消等待不能证明远端未执行。
+
 ## Redis 分区消费与执行隔离
+
+Application 通过 `configure_redis_partition` 接收逐来源消费计划，统一负责 Ready、健康和聚合停机。
+业务从 `redis_partition(source)` 获取受管句柄，无需另写消费循环或停机 callback。
 
 `nasa::redis::PreparedPartition` 先准备物理 Stream 并冻结消费计划，`start` 返回拥有消费生命周期的
 `RunningPartition`。Redis 租约、PEL 和 fencing 决定跨进程接管权；实例专属的 napart Runner 集合
@@ -375,14 +405,22 @@ Kafka Schema Registry、对象存储、gRPC listener 和受管 Web listener 已�
 
 | 能力 | 解决的问题 | 运行架构 | 明确不负责 |
 | --- | --- | --- | --- |
-| [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | Kafka codec 子能力；业务持有 client，无 Application 组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
-| [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；业务持有实例 | multipart、流式/range/list、STS 刷新、对象版本治理 |
+| [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | 独立 client，或 Application 按 `schema_registries.<name>` 装配的命名资源；无需声明 Kafka 消费组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
+| [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；可独立构造，或由 Application 按 `object_stores.<name>` 托管 | multipart、流式/range/list、STS 刷新、对象版本治理 |
 | [gRPC listener](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、观测与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto 业务语义、service mesh、客户端负载均衡 |
 | [Web listener](napp/README.md#web-http-listener-受管模式) | 确定的 HTTP/1/h2c 选择、连接与 stream 上界、协议观测和有预算排空 | Application `"web"` 组件独占明文 TCP listener 与路由服务图 | TLS 终止、h2c Upgrade 协商、服务间协议选择 |
 
-Schema Registry 和对象存储没有固定配置根，也不会因启用 Application 自动启动；业务从最终配置与
-secret 快照构造，并可把低基数累计事实登记到统一 Prometheus/OTLP 目录。gRPC 受管模式则由容器独占
-shutdown，在 initializer 全部完成前不会绑定端口。Web listener 只有在同时启用 `application,web`
+独立模式由业务显式构造 `ConfluentSchemaRegistry` 或 `S3ObjectStore` 并持有实例。受管模式分别开启
+`application,kafka-schema-registry` 或 `application,object-store`，在对应命名配置中设置 `enabled: true`，
+无需新增组件字符串。Application 在 Prepare 使用同代配置与 `secret://` 材料装配资源，业务通过
+`app.schema_registry(name).await` 或 `app.object_store(name).await` 取得句柄；Service 在装配后的
+initializer 或 Ready 后任务中使用，Batch 在工作负载开始前完成装配，无需启动 Web 或 Kafka 消费者。
+未声明或禁用的计划不建立客户端、不读取其独占凭据。受管路径自动登记聚合指标、关闭新调用并等待在途调用，
+停机后旧句柄返回 `Closed`；不要为同一受管资源再次手工登记指标。配置或凭据变化报告 `RestartRequired`。
+对象存储按显式健康策略探测并影响 readiness；Registry 构造不探测远端、不注册 schema，也不证明远端健康。
+配置与生命周期边界见 [受管能力合同](docs/managed-capabilities.md#出站客户端健康与诊断)。
+
+gRPC 受管模式由容器独占 shutdown，在 initializer 全部完成前不会绑定端口。Web listener 只有在同时启用 `application,web`
 feature 并声明 `#[nasa::application("web")]` 时才由容器创建；满足这些前提后，最终 YAML 的
 `server.http2.enabled` 决定是否接受 h2c。各组件 README 是默认值、观测判读和成熟度边界的完整合同。
 
@@ -637,8 +675,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | OpenAPI 3.1 | `openapi`（配合 `application` + `web`） | `Application::openapi_document`、`ApiSchema`、mapping 合同及 `register_route_contract` 显式动态合同；文档 path 包含实际 `context_path` |
 | Secret/TLS 引用与两阶段轮换 | `secret` / `secret-http` / `secret-vault` | `RotatingSecretStore`、`RotatingTlsHttpClient`、`VaultKvV2Provider` |
 | OAuth/JWKS/Metadata | `oauth` | `nasa::oauth::{MetadataClient, JwksRegistry}` |
-| Schema Registry | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}` |
-| 对象存储 | `object-store`（蕴含 `secret`） | `nasa::object::{ObjectStore, S3ObjectStore}` |
+| Schema Registry | `kafka-schema-registry`（蕴含 `kafka`、`secret`） | 独立 `nasa::kafka::{ConfluentSchemaRegistry, ConfluentEnvelope}`；配合 `application` 用 `app.schema_registry(name).await` |
+| 对象存储 | `object-store`（蕴含 `secret`） | 独立 `nasa::object::{ObjectStore, S3ObjectStore}`；配合 `application` 用 `app.object_store(name).await` |
 | gRPC listener | `grpc` | `nasa::grpc::{ServerPlan, GrpcServerConfig, GrpcServerHandle}`、`Application::register_grpc_service`、`#[application("grpc")]` |
 | Redis 命令、Stream、锁 | `redis` | `nasa::redis::RedisClient` |
 | 方法级 L1/L2 缓存 | `cache` | `nasa::cache::{cached, cache_invalidate}` |
@@ -664,26 +702,25 @@ nasa = { git = "https://github.com/nasa-runtime/nasa-runtime-rust.git", features
 ```
 
 ```rust
-use nasa::hystrix::hystrix;          // 熔断/隔离/超时/指标
+use nasa::hystrix::hystrix;          // 有界隔离/超时/指标
 use nasa::ws::Server;                // WebSocket 服务端
 #[nasa::web::get_mapping("/x")]   // Axum MVC 风格路由
 ```
 
-同仓实现 crate 之间只使用 registry 版本约束，工作区构建与公开归档保持相同依赖来源。下游 crate
-只有在前置版本已经能从 registry 解析后才能发布，不得用 `[patch]` 掩盖缺失的前置发布。
+同仓实现 crate 保留 registry 版本约束，工作区通过根级 patch 统一本地 package 身份。
+公开归档使用 registry 依赖，前置版本必须可解析；本地 patch 不会随 crate 归档传递给使用方。
 
 ### crates.io 依赖
 
-发布到 crates.io 后，业务项目仍只依赖门面 `nasa`：
+业务项目通过 crates.io 依赖门面 `nasa`：
 
 ```toml
 [dependencies]
 nasa = { version = "1.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
-内部实现包按工作区 `Cargo.toml` 中的 package name 发布，例如 `nabase`、`naimg`、`naws`。
-包名可用性是发布时事实，正式发布前仍须按 [交付就绪清单](docs/release-checklist.md) 实时复查 crates.io，不能依赖
-本地缓存结论。Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
+内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。
+Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
 `nasa::image` 等。
 
 ## YML 配置总览
@@ -860,7 +897,7 @@ HTTP/1/h2c listener。
 | [naaudit](naaudit/README.md) | `audit` | 脱敏业务审计事件与事务型 sink 合同 | 无独立配置根 |
 | [naaudit-mysql](naaudit-mysql/README.md) | `audit` | 审计事件写入同事务 MySQL Outbox | 复用 `database.*` |
 | [naaudit-pgsql](naaudit-pgsql/README.md) | `audit-pgsql` | 审计事件写入同事务 PostgreSQL Outbox | 复用显式或受管 `natx-pgsql` pool |
-| [hystrix](hystrix/README.md) | `hystrix` | 熔断、隔离、超时、指标流 | `hystrix.*` |
+| [hystrix](hystrix/README.md) | `hystrix` | 有界隔离、超时、指标流 | `hystrix.*` |
 | [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 宏 | 由 `hystrix` 运行时读取 |
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
 | [nafana-macro](nafana-macro/README.md) | `grafana` | `#[grafana]` 编译期参数校验与包装 | 无运行期 yml |
@@ -872,7 +909,7 @@ HTTP/1/h2c listener。
 | [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
-| [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；Registry 由业务配置投影 |
+| [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；受管 Registry 用 `schema_registries.<name>`，独立 client 显式传入 options |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
 | [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和受控兼容加解密 | `crypto.*`、环境变量承载密钥 |
 | [nanum](nanum/README.md) | `numeric` | 定点金额、价格、最小变动单位对齐、舍入 | `numeric.*` |
@@ -889,7 +926,7 @@ HTTP/1/h2c listener。
 | [nasecret](nasecret/README.md) | `secret` | 分片解析、脱敏快照与两阶段轮换 | `secrets.*` |
 | [nasecret-http](nasecret-http/README.md) | `secret-http` | 随 secret 代际轮换的 TLS/mTLS HTTP client | 引用 `secrets.*` ID |
 | [nasecret-vault](nasecret-vault/README.md) | `secret-vault` | 有界 KV v2 secret provider | provider 配置由业务投影 |
-| [naobject](naobject/README.md) | `object-store` | 有界对象合同与 S3-compatible adapter | 无受管组件配置；业务显式构造 |
+| [naobject](naobject/README.md) | `object-store` | 有界对象合同与 S3-compatible adapter | 受管模式用 `object_stores.<name>`；独立 adapter 显式传入 options |
 | [nagrpc](nagrpc/README.md) | `grpc` | 统一 codegen/service registry、HTTP/2/TLS、健康、反射、方法策略、观测与排空 | `grpc.*`；可独立构造或交给 Application 托管 |
 | [nagrpc-build](nagrpc-build/README.md) | `grpc` 的 build dependency | vendored protoc、descriptor/摘要、受管 server adapter 与兼容门禁 | 只写 Cargo `OUT_DIR` |
 | [macro-support](macro-support/README.md) | 宏内部依赖 | 过程宏路径解析 | 无运行时 yml |

@@ -12,6 +12,6 @@ categories.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-naaudit = { version = "1.0.0" }
+naaudit = { version = "1.0.1" }
 naoutbox-mysql = { version = "1.0.2" }
 natx = { version = "1.0.3" }

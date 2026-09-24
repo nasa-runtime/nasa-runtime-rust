@@ -1426,24 +1426,8 @@ where
 // ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：获取默认 datasource 的当前连接；事务内复用事务连接，事务外从池中获取。
 ///
-/// repo 里每条 query 都先 `let mut c = natx::conn().await?;` 再 `query.execute(c.as_mut())`。
-/// 这就是"task_local 取得到用事务、取不到用 pool"的落点。
-///
-/// # ★ 关键:想参与 `#[transactional]` 事务的 repo,连接【必须】走这里,不能用 self.pool
-/// 同一个 repo 方法,取连接的方式决定它【能不能加入 ambient 事务】:
-///
-/// | repo 取连接方式 | 在 `#[transactional]` 里调用时 | 单独(无事务)调用时 | 备注 |
-/// |---|---|---|---|
-/// | `natx::conn().await`(本函数) | ✅ 用【事务连接】,写入随事务提交/回滚 | ✅ 用池连接,正常 | 想参与事务就用它 |
-/// | `&self.pool`(struct 字段,如原版 KLineRepository) | ❌ **另取一条池连接,绕过事务** —— 写入【不在事务内、不会回滚】 | ✅ 用池连接,正常 | 需在 main 显式 `new` struct 并注入 |
-///
-/// 所以这是个**静默陷阱**:把一个 `self.pool` 风格的 repo 方法塞进 `#[transactional]` 流程里,
-/// 它看起来"在事务里",实际却用了另一条连接 —— 事务回滚时它的写入**不会被撤销**(脏写)。
-/// 对照:
-///   · 原版 `repository/kline.rs`(struct + `self.pool`):只读查询,不需要事务,故用 self.pool;
-///     代价是它【无法】加入 `#[transactional]`(真要它进事务,得改成收 executor 参数或走 natx::conn)。
-///   · 自由函数 + `natx::conn()`:为参与事务而生,无 struct、连接从当前事务上下文取得。
-/// 一句话:**要不要进事务,在"怎么取连接"时就决定了——进事务用 `natx::conn()`,不进事务才用 `self.pool`。**
+/// 参与 ambient 事务的查询必须从此入口取得连接。直接使用另一 Pool 会绕过当前事务，
+/// 其写入不受当前事务的回滚约束；数据访问层可显式接收事务 executor，或复用本入口。
 ///
 /// 参数说明: 无。
 ///
@@ -1763,3 +1747,25 @@ impl Conn {
 
 // ── re-export 过程宏：业务项目 `use natx::transactional;` 即可。──
 pub use natx_macro::transactional;
+
+/// 业务作用：让连接池等待或当前事务连接的互斥等待服从调用链预算。
+/// 参数说明：`datasource` 为已注册来源；`budget` 为共享绝对预算。
+/// 返回：成功取得连接守卫；已取消或到期时停止等待，不提交、回滚或重试业务事务。
+pub async fn conn_for_budget(
+    datasource: impl AsRef<str>,
+    budget: &nabudget::RequestBudget,
+) -> anyhow::Result<Conn> {
+    budget.run(conn_for(datasource)).await?
+}
+
+/// 业务作用：显式约束调用方确认无业务写入副作用的读取等待。
+/// 参数说明：`budget` 为共享预算；`read` 为已确认只读的查询 future。
+/// 返回：保留查询结果或预算错误；取消会丢弃当前 future，不承诺数据库从未执行。
+/// 本方法不解析 SQL、不根据 SELECT 前缀推断安全性；有副作用的函数、锁定读和事务写不得使用。
+/// COMMIT、事务提交结果和业务重试继续由事务入口裁决。
+pub async fn read_with_budget<T>(
+    budget: &nabudget::RequestBudget,
+    read: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    budget.run(read).await?
+}

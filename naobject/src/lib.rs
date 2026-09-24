@@ -1,7 +1,7 @@
 //! 有界对象存储合同与 S3-compatible SigV4 adapter。
 //!
-//! 当前只接受有硬上限的单对象缓冲，不伪装成 multipart 或无限流式上传。adapter 不拥有应用生命周期；
-//! 业务可把实例注册为 managed resource。稳定公共合同仍需两个真实上传/导出/归档项目收敛。
+//! 当前只接受有硬上限的单对象缓冲，不提供 multipart 或无限流式上传。独立 adapter 的生命周期
+//! 由调用方负责；Application 通过 object_stores 命名计划装配凭据、健康、关闭门禁与在途等待。
 //!
 //! `ObjectStore` 封闭业务读写语义，`S3ObjectStore` 依次执行本地 key/容量门禁、path-style SigV4、
 //! 禁止重定向的有界 HTTP 请求和 SHA-256 metadata 复核。`CreateOnly` 由远端条件写裁决，取消只表示
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use hmac::{Hmac, Mac as _};
 use nasecret::SecretBytes;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
@@ -182,6 +184,8 @@ impl S3Options {
 /// 对象存储错误；不读取或转发远端错误正文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectStoreError {
+    /// 宿主已关闭当前 client 的新工作准入。
+    Closed,
     /// key 不合法。
     InvalidKey,
     /// adapter 配置不合法。
@@ -307,7 +311,9 @@ impl ObjectOutcome {
             ObjectStoreError::NotFound => Self::NotFound,
             ObjectStoreError::ObjectTooLarge { .. } => Self::TooLarge,
             ObjectStoreError::AlreadyExists => Self::AlreadyExists,
-            ObjectStoreError::InvalidKey | ObjectStoreError::InvalidConfiguration => Self::Rejected,
+            ObjectStoreError::Closed
+            | ObjectStoreError::InvalidKey
+            | ObjectStoreError::InvalidConfiguration => Self::Rejected,
             ObjectStoreError::Transport => Self::Transport,
             ObjectStoreError::RemoteStatus(_) => Self::RemoteStatus,
             ObjectStoreError::InvalidResponse => Self::InvalidResponse,
@@ -561,6 +567,32 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
+    /// 业务作用：以签名的 HEAD bucket 证明当前凭据可访问配置目标，不创建或删除对象。
+    /// 参数说明：无。
+    /// 返回：远端确认成功时就绪；权限不足、目标不存在或网络失败原样归类，不返回远端正文。
+    pub async fn health_check(&self) -> Result<(), ObjectStoreError> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|_| ObjectStoreError::InvalidConfiguration)?
+            .pop_if_empty()
+            .push(&self.options.bucket);
+        let response = self
+            .signed(
+                reqwest::Method::HEAD,
+                url,
+                &hex::encode(Sha256::digest([])),
+                None,
+            )?
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ObjectStoreError::RemoteStatus(response.status().as_u16()))
+        }
+    }
+
     /// 业务作用：校验配置并构造 adapter。
     pub fn new(options: S3Options) -> Result<Self, ObjectStoreError> {
         if !valid_bucket(&options.bucket)

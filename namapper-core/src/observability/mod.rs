@@ -452,7 +452,13 @@ pub fn clean_text(value: &str, limit: usize) -> String {
     value
         .chars()
         .take(limit)
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 

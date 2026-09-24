@@ -6,14 +6,14 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["tx"] }
+nasa = { version = "1.0.3", features = ["tx"] }
 ```
 
 PostgreSQL 入口使用独立 feature 和模块：
 
 ```toml
 [dependencies]
-nasa = { version = "1", default-features = false, features = ["tx-pgsql"] }
+nasa = { version = "1.0.3", default-features = false, features = ["tx-pgsql"] }
 ```
 
 ```rust

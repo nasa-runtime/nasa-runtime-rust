@@ -96,7 +96,7 @@ fn unit_rank(unit: &str) -> Option<u8> {
     }
 }
 
-/// 业务作用：字面量 duration string → 毫秒(对照原 `*String` 语义)。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
+/// 业务作用：字面量 duration string → 毫秒。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
 /// 支持**编译期字面量**:可选 `+` 正号;纯整数(走 fallback);SIMPLE/COMPOSITE 段式 `1s500ms`/`1h12m27s`/`1d 2h 3m`(单位
 /// `d/h/m/s/ms/us/ns`,从大到小);ISO-8601 `P1DT2H`/`PT1M30S`/`PT0.5S`。负号与占位符/表达式拒绝。
 ///
@@ -124,7 +124,7 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
     if t.is_empty() {
         return Err(format!("duration \"{t0}\" 缺数值"));
     }
-    // ISO-8601:大小写不限的 P 前缀(`P...`/`P...T...`)。**不接受外层括号**(对照原 parser:括号仅属 COMPOSITE)。
+    // ISO-8601:大小写不限的 P 前缀(`P...`/`P...T...`)。**不接受外层括号**（括号仅允许用于 COMPOSITE）。
     if t.starts_with('P') || t.starts_with('p') {
         return parse_iso8601_duration(t);
     }
@@ -135,7 +135,7 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
             .map_err(|_| format!("duration \"{t0}\" 数值非法"))?;
         return unit_part_to_ms(n, fallback_unit, &format!("duration \"{t0}\""));
     }
-    // SIMPLE(单段)/ COMPOSITE(多段从大到小,可含空格)。**仅此分支允许可选外层括号** `(1s500ms)`(对照原 COMPOSITE):
+    // SIMPLE(单段)/ COMPOSITE(多段从大到小,可含空格)。**仅此分支允许可选外层括号** `(1s500ms)`:
     // 成对则剥掉,只有一侧则报错;剥后内容仍须是带单位段(`(100)`/`(PT1S)` 因无单位段/被前面分支拦截而落到这里报错)。
     let seg = if let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
         inner.trim()
@@ -745,7 +745,7 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：# `#[scheduled]` —— 定时任务
 ///
-/// 贴在【零参 async fn】上,被自动注册并由调度器跑(没人调它)。**返回类型不限**——值被忽略(对照"返回值被调度器忽略")。
+/// 贴在【零参 async fn】上,被自动注册并由调度器跑(没人调它)。**返回类型不限**——值被忽略。
 /// 若返回**带显式路径的标准 Result**(`std::result::Result<_,_>` / `core::result::Result<_,_>` / `anyhow::Result<_>`),
 /// `Err` 会记 **error 日志**(任务名 + "返回 Err";**不格式化错误值,故不要求 `E: Debug`**)。
 /// **裸名 `Result<_,_>`、类型别名、`custom::Result` 一律按普通返回值忽略**(过程宏无法解析裸名真实来源,为不破坏自定义同名类型而保守处理)。
@@ -824,12 +824,12 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut initial_delay_ms: Option<u64> = None;
     let mut name_attr: Option<String> = None;
     let mut zone: Option<String> = None; // cron 时区(仅与 cron 同用)
-                                         // 数字版 + time_unit(对照原 timeUnit):值×单位因子折成 ms。time_unit 默认毫秒。
+                                         // 数字版 + time_unit:值×单位因子折成 ms。time_unit 默认毫秒。
     let mut fixed_rate: Option<u64> = None;
     let mut fixed_delay: Option<u64> = None;
     let mut initial_delay: Option<u64> = None;
     let mut time_unit: Option<String> = None;
-    // 字面量 duration string(对照原 *String,但只收编译期字面量):"500ms"/"5s"/"2m"/"1h"。
+    // 字面量 duration string（只接收编译期字面量）:"500ms"/"5s"/"2m"/"1h"。
     let mut fixed_rate_string: Option<String> = None;
     let mut fixed_delay_string: Option<String> = None;
     let mut initial_delay_string: Option<String> = None;
@@ -1089,7 +1089,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
         bail!("#[scheduled] 必须给调度:cron / fixed_rate_ms(every_ms) / fixed_delay_ms / initial_delay_ms(delay_ms)");
     };
 
-    // 返回值包装(对照"返回值被调度器忽略"语义,**不限制返回类型、不附加任何约束**):
+    // 返回值包装（不限制返回类型，也不附加约束）:
     //   - 标准 Result(见 is_result_return,仅 std/core/anyhow 形态)→ `Err` 打 error 日志(带任务名)、`Ok(_)` 忽略;
     //   - 其它任意返回类型(含 `()`/`u32`/自定义 `xxx::Result`/类型别名)→ `let _ =` 忽略。
     // 注:Err 分支**不格式化错误值**(不打 `{:?}`),以免给 `E` 强加 `Debug` 约束而破坏"返回值忽略";要错误详情请在任务体内自行记录。

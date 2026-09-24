@@ -534,7 +534,52 @@ pub(crate) fn has_hosted_static_initializer() -> bool {
 /// UserHook 期间动态登记、尚未进入冻结计划的 initializer。
 pub(crate) struct InitializerRegistration {
     spec: InitializerSpec,
-    initializer: Box<dyn Initialization>,
+    initializer: InitializerOwner,
+}
+
+/// 贯穿登记、冻结、排序和三轮调用的唯一实例释放权。
+pub(crate) type InitializerOwner = crate::future::StartupCleanup<Box<dyn Initialization>>;
+
+/// 业务作用：在任何登记门禁或后续工厂释放之前接管公开 initializer 实例的析构责任。
+/// 参数说明：`initializer` 为已经构造完成、尚未移交的业务实例。
+/// 返回：实例不会因普通释放展开越过回滚边界；成功路径仍须显式检查释放结果。
+pub(crate) fn own_initializer(initializer: Box<dyn Initialization>) -> InitializerOwner {
+    crate::future::StartupCleanup::new(
+        initializer,
+        ComponentId::Application,
+        ApplicationPhase::Initialization,
+        "releasing initializer instance",
+    )
+}
+
+/// 业务作用：工厂产出实例后先接管实例，再独立释放工厂 future，避免返回值与工厂同时展开。
+/// 参数说明：`future` 为静态工厂返回、尚未被轮询的唯一任务。
+/// 返回：成功实例带释放保护；工厂或释放失败保留首次错误，未产出实例时不创建替代对象。
+pub(crate) fn own_initializer_future(
+    future: ApplicationFuture<'static, Option<Box<dyn Initialization>>>,
+) -> impl std::future::Future<Output = ApplicationResult<Option<InitializerOwner>>> {
+    let mut future = crate::future::StartupCleanup::new(
+        future,
+        ComponentId::Application,
+        ApplicationPhase::Initialization,
+        "releasing initializer factory future",
+    );
+    async move {
+        // 只借用真实 future；不能让映射适配器在返回实例被保护前隐式析构原 future。
+        let result = future
+            .value_mut()
+            .await
+            .map(|value| value.map(own_initializer));
+        match (result, future.release()) {
+            (Ok(_), Some(error)) => Err(error),
+            (result, release) => {
+                if let Some(error) = release {
+                    crate::report::report_shutdown(&error);
+                }
+                result
+            }
+        }
+    }
 }
 
 /// 独立于资源和 UserHook 状态的 initializer 登记门。
@@ -583,6 +628,23 @@ impl InitializerRegistry {
             .ok_or_else(|| initialization_error("initializer registry was already frozen"))
     }
 
+    /// 业务作用：在 UserHook 提前终止时撤销尚未冻结的实例，避免其捕获依赖延迟到资源关闭后释放。
+    /// 参数说明：无。
+    /// 返回：逐项释放产生的次要错误；已冻结时为空，析构用户代码在登记锁外执行。
+    pub(crate) fn release_pending(&self) -> Vec<crate::ApplicationError> {
+        self.open.store(false, Ordering::Release);
+        let registrations = self
+            .registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        registrations
+            .into_iter()
+            .flatten()
+            .filter_map(|mut entry| entry.initializer.release())
+            .collect()
+    }
+
     /// 业务作用：在开放窗口内登记一个已经构造完成的运行时 initializer。
     ///
     /// 参数说明：
@@ -593,7 +655,7 @@ impl InitializerRegistry {
     pub(crate) fn register(
         &self,
         spec: InitializerSpec,
-        initializer: Box<dyn Initialization>,
+        initializer: InitializerOwner,
     ) -> ApplicationResult<()> {
         if !self.open.load(Ordering::Acquire) {
             return Err(initialization_error(
@@ -626,7 +688,7 @@ pub(crate) enum FrozenInitializer {
     },
     Runtime {
         spec: InitializerSpec,
-        initializer: Box<dyn Initialization>,
+        initializer: InitializerOwner,
     },
 }
 
@@ -651,7 +713,7 @@ pub(crate) struct FrozenInitializerPlan {
 /// 条件工厂完成后实际启用的一项 initializer。
 pub(crate) struct EnabledInitializer {
     pub(crate) spec: InitializerSpec,
-    pub(crate) initializer: Box<dyn Initialization>,
+    pub(crate) initializer: InitializerOwner,
 }
 
 /// 业务作用：冻结静态描述与运行时登记，确保任何工厂调用前完成身份和模式校验。
@@ -732,14 +794,12 @@ pub(crate) fn freeze_plan(
 /// 参数说明：
 /// - `enabled`：静态条件工厂和运行时登记合并后的实际实例集合。
 ///
-/// 返回：三轮屏障共用的唯一顺序；缺失依赖、自依赖或环按 fail-closed 拒绝。
-pub(crate) fn order_enabled(
-    enabled: Vec<EnabledInitializer>,
-) -> ApplicationResult<Vec<EnabledInitializer>> {
-    let mut by_name = BTreeMap::<Arc<str>, EnabledInitializer>::new();
-    for initializer in enabled {
+/// 返回：三轮屏障共用的稳定下标顺序；仅借用元数据，排序拒绝时实例仍由调用方逐项释放。
+pub(crate) fn order_enabled(enabled: &[EnabledInitializer]) -> ApplicationResult<Vec<usize>> {
+    let mut by_name = BTreeMap::<Arc<str>, usize>::new();
+    for (index, initializer) in enabled.iter().enumerate() {
         let name = initializer.spec.name.clone();
-        if by_name.insert(name.clone(), initializer).is_some() {
+        if by_name.insert(name.clone(), index).is_some() {
             return Err(initialization_error(format!(
                 "enabled initializer `{name}` appeared more than once"
             )));
@@ -748,7 +808,8 @@ pub(crate) fn order_enabled(
 
     let mut indegree = HashMap::<Arc<str>, usize>::new();
     let mut dependents = HashMap::<Arc<str>, Vec<Arc<str>>>::new();
-    for (name, initializer) in &by_name {
+    for (name, index) in &by_name {
+        let initializer = &enabled[*index];
         indegree.insert(name.clone(), initializer.spec.requires.len());
         for required in &initializer.spec.requires {
             if required == name {
@@ -772,7 +833,8 @@ pub(crate) fn order_enabled(
     }
 
     let mut ready = BTreeSet::<(i32, Arc<str>)>::new();
-    for (name, initializer) in &by_name {
+    for (name, index) in &by_name {
+        let initializer = &enabled[*index];
         if indegree.get(name).copied().unwrap_or_default() == 0 {
             ready.insert((initializer.spec.order, name.clone()));
         }
@@ -789,9 +851,10 @@ pub(crate) fn order_enabled(
                     .expect("dependent initializer must have an indegree entry");
                 *degree -= 1;
                 if *degree == 0 {
-                    let next_initializer = by_name
+                    let next_index = by_name
                         .get(next)
                         .expect("dependent initializer must exist in enabled map");
+                    let next_initializer = &enabled[*next_index];
                     ready.insert((next_initializer.spec.order, next.clone()));
                 }
             }
@@ -829,7 +892,9 @@ pub(crate) struct StagedInitializerTask {
     pub(crate) initializer: Arc<str>,
     pub(crate) name: Arc<str>,
     pub(crate) kind: TaskKind,
-    pub(crate) factory: Box<dyn FnOnce(CancellationToken) -> ManagedTaskFuture + Send + 'static>,
+    pub(crate) factory: crate::future::StartupCleanup<
+        Box<dyn FnOnce(CancellationToken) -> ManagedTaskFuture + Send + 'static>,
+    >,
 }
 
 /// 当前三阶段调用共享的受控上下文。
@@ -1056,7 +1121,7 @@ impl<'a> InitializationContext<'a> {
     /// - `kind`：后台或关键任务分类。
     /// - `task`：只允许 Ready 激活路径消费的一次性工厂。
     ///
-    /// 返回：名称唯一且模式合法时成功；失败时工厂不会被 poll。
+    /// 返回：名称唯一且模式合法时成功；拒绝时不调用工厂，捕获值的析构异常不覆盖原拒绝原因。
     fn stage_task<F, Fut>(
         &mut self,
         name: Arc<str>,
@@ -1067,6 +1132,15 @@ impl<'a> InitializationContext<'a> {
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
+        // 在模式和名称门禁之前接管捕获值，拒绝登记也不能让工厂析构越过 initializer 回滚边界。
+        let factory: Box<dyn FnOnce(CancellationToken) -> ManagedTaskFuture + Send> =
+            Box::new(move |token| Box::pin(task(token)));
+        let factory = crate::future::StartupCleanup::new(
+            factory,
+            ComponentId::Application,
+            ApplicationPhase::Initialization,
+            "releasing staged initializer factory",
+        );
         if self.kind != InitializerKind::Hosted
             || self.application.info().mode() != ApplicationMode::Service
         {
@@ -1090,7 +1164,7 @@ impl<'a> InitializationContext<'a> {
             initializer: self.initializer.clone(),
             name: full_name,
             kind,
-            factory: Box::new(move |token| Box::pin(task(token))),
+            factory,
         });
         Ok(())
     }

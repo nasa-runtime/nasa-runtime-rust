@@ -356,6 +356,21 @@ owner：已经使用 `register_managed` 的对象，或 Application 拥有的数
 需要完整优雅停机时应使用 Service 的 `app.shutdown()` 或进程 SIGTERM。完整限制见
 [业务优雅停机任务](../napp/README.md#业务优雅停机任务)。
 
+## 命名资源与配置变化
+
+Service 的 UserHook 用于登记 handler 与计划，标准命名资源在之后的 Prepare 阶段装配；业务应在
+initializer 或 `serve_when_ready` 内取得幂等 store、审计 sink、REST、对象存储、Schema Registry
+和 TLS HTTP client。Batch 在工作负载前完成装配，无需 Web listener。
+
+feature 使用门面名称，例如 MySQL 审计为 `application,audit`，普通 REST 为
+`application,rest-discovery`。命名计划以 `enabled: true` 启用；`source` 与 `redis_ref` 必须精确
+匹配声明来源，平铺 `redis` 的来源名为 `default`。完整示例见
+[受管能力与资源边界](managed-capabilities.md)。
+
+需要监听本地配置时开启 `application,yml-watch` 并设置 `config_watch.enabled: true`，限 Service
+模式。候选失败保留旧视图；读取新 YAML 不表示所有组件已热应用，应同时检查配置应用状态。
+不要给已经受管的资源再登记重复关闭任务。
+
 ## 后续阅读
 
 | 需求 | 文档 |

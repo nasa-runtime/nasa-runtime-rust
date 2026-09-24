@@ -6,8 +6,21 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "cache", "redis"] }
+nasa = { version = "1.0.3", features = ["application", "cache", "redis"] }
 ```
+
+## 缓存与失效架构
+
+```text
+读请求 → L1 → L2 Redis → 回源 loader → 回填
+业务事务 → record_invalidation 持久意图 → 明确提交 → dispatcher → apply_invalidation
+                                                                   ↓
+                                                     删除 L2/L1 与尽力广播
+```
+
+运行时 owner 约束后台刷新、失效广播和关闭顺序。持久意图只记录事务责任，实际失效只操作缓存；
+两条入口不能相互递归。cache-aside 与 Pub/Sub 不提供强一致，晚到 loader 仍可能回填旧值，断线
+节点也可能漏收广播，TTL 不能证明一个固定时间窗口后必然新鲜。
 
 ## 受管初始化
 
@@ -120,13 +133,14 @@ cache:
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `cache.mode` | `disabled` | `disabled` 或 `two_level`。 |
+| `cache.mode` | `disabled` | `disabled`、`local` 或 `two_level`；local 管理纯 L1 刷新，不建立 L2。 |
 | `cache.redis_ref` | 无 | 复用 `"redis"` 组件中的命名实例；与 `redis_url` 互斥。 |
 | `cache.redis_url` | 空 | 自建 L2 Cluster 连接；与 `redis_ref` 互斥。 |
 | `cache.cache_ttl_secs` | `300` | 普通值基础 TTL。 |
 | `cache.null_ttl_secs` | `30` | 空结果哨兵 TTL。 |
 | `cache.invalidation.enabled` | `false` | 是否启动跨实例 L1 失效广播。 |
-| `cache.invalidation.redis_url` | 空 | 广播连接；启用广播时必填。 |
+| `cache.invalidation.redis_url` | 空 | 自建广播连接；与广播 `redis_ref` 互斥。 |
+| `cache.invalidation.redis_ref` | 无 | 复用受管 Redis 来源建立广播连接。 |
 
 方法级 `refresh_ms` 和 `expire_ms` 仍写在宏属性上，不由组件 yml 猜测。
 
@@ -144,3 +158,24 @@ Application 中业务停机任务先于 `"cache"` 与 `"redis"` 组件的最终�
 - `BoundedInvalidatePublisher::channel` 的非 fallible 容量参数收敛到 Tokio 有界队列可表达范围，
   不因零值或极端值在构造时 panic。
 - 缓存不是业务事实源；资金、库存和权限判断不能把缓存命中当作最终一致性证明。
+
+## 事务失效与任务所有权
+
+`record_invalidation(scene, key)` 只追加持久意图，失败必须传回业务事务，不访问 Redis。
+通过 `Application::configure_cache_invalidation_sink` 安装同源事务策略；dispatcher 在提交后调用
+`apply_invalidation` 删除 L2/L1 并尝试广播，不会再次记录意图。
+
+`#[transactional]` 与 `#[cache_invalidate]` 的属性顺序决定包装层级，内层函数返回也不代表外层事务已提交。
+失效宏在业务返回 Err 时仍尝试即时失效，并保留原业务结果；它不能替代必须成功的持久意图写入。
+`after_commit` 只提供进程内尽力回调，失败不改变已提交结果，也不提供崩溃恢复。
+
+失效之后，已经读到旧数据的 loader 仍可能晚到回填并重新起算 TTL；广播离线缺口也没有持久补偿。
+因此不能承诺一个 TTL 内必定恢复新鲜。single-flight 只约束同 key 回源并发，失败和取消时仍保留等待者共享的锁项。
+
+受管 L1 最多接纳 128 个后台工作，停止时撤下本代场景并等待 future 退出。独立 L1 使用方持有
+`LocalCacheRuntimeGuard`；两级模式使用 `CacheRuntimeGuard`，两者不能同时安装。
+`#[cached]` 使用两级入口；纯 L1 使用 `local_cache` API。
+
+`grouped_caches.<name>` 通过 `redis_ref` 标准装配并使用 `app.grouped_cache(name).await` 获取。
+GroupedCache 正 TTL 写值与字段过期由同一 Lua 执行；设置过期失败会删除本次字段并记录写入失败，读取仍返回回源结果。
+TTL=0 表示不设置过期，业务 TTL 最大 365 天，不能把不支持字段过期的后端视为已启用该能力。

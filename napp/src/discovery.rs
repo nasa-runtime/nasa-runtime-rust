@@ -330,18 +330,16 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
         "nacos-discovery-runtime"
     }
 
-    /// 业务作用：从进程级槽取下并关闭出站客户端后台任务。
-    ///
-    /// # 参数
-    ///
-    /// - `_context`：共享停机预算；该动作只做取下与 abort，不做网络等待。
-    fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+    /// 业务作用：撤下本实例出站入口并等待它的任务和调用退出。
+    /// 参数说明：`context` 为宿主共享停机预算。
+    /// 返回：排干后释放会话；未排干报告失败并保留当前 owner。
+    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
-            if let Some(session) = self.session.take() {
+            if let Some(session) = &self.session {
                 session
                     .lock()
                     .await
-                    .shutdown_runtime()
+                    .shutdown_runtime_until(tokio::time::Instant::from_std(context.deadline()))
                     .await
                     .map_err(|error| {
                         discovery_error_src(
@@ -351,6 +349,7 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
                         )
                     })?;
             }
+            self.session = None;
             Ok(())
         })
     }

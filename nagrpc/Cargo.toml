@@ -1,6 +1,6 @@
 [package]
 name = "nagrpc"
-version = "1.1.0"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Managed gRPC registry with gated listener activation, HTTP/2 and TLS boundaries, observability, and bounded shutdown"
@@ -12,6 +12,7 @@ keywords = ["grpc", "tonic", "server", "lifecycle", "async"]
 categories = ["asynchronous", "network-programming"]
 
 [dependencies]
+nabudget = { version = "1.0.2" }
 bytes = "1"
 http-body = "1"
 hyper = { version = "1", features = ["http2", "server"] }

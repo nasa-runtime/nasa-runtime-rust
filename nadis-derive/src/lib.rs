@@ -4,14 +4,14 @@
 // ============================================================================
 // nadis-derive：实现 #[derive(RedisDocument)]。
 //
-// 对照 原实现 注解全集(annotation/ 包)与 MetaResolver 启动期解析:
-//   @RsDocument(index, prefix, type, bucketCount) → 结构体级 #[rs(...)]
-//   @RsId            → #[rs(id)](恰好一个;数值类型自动判定 id_numeric)
-//   @TagField        → #[rs(tag)]      可叠 sortable / alias / json_path
-//   @TextField       → #[rs(text)]     可叠 sortable / weight / alias / json_path
-//   @NumericField    → #[rs(numeric)]  可叠 sortable / alias / json_path
-//   @JsonArrayKey    → #[rs(array_key)] 可叠 order = N(多字段升序拼接,
-//                       同 order 重复 = 编译错,对照 原实现 duplicate-order 启动错)
+// 派生属性在编译期决定文档结构与持久化布局:
+//   结构体级 #[rs(index, prefix, data_type, bucket_count)]
+//   #[rs(id)](恰好一个;数值类型自动判定 id_numeric)
+//   #[rs(tag)]      可叠 sortable / alias / json_path
+//   #[rs(text)]     可叠 sortable / weight / alias / json_path
+//   #[rs(numeric)]  可叠 sortable / alias / json_path
+//   #[rs(array_key)] 可叠 order = N(多字段升序拼接,
+//                       重复 order 在编译期拒绝，避免键拼接顺序不确定)
 //
 // 用法:
 //   #[derive(RedisDocument, Serialize, Deserialize)]
@@ -29,14 +29,14 @@
 //
 // 生成物(全部只调 nadis 公开 API,语义与手写 impl 零差异):
 //   meta()          —— OnceLock<DocMeta> 单例(索引字段 = 标注 tag/text/numeric 的);
-//   id()            —— @RsId 字段 to_string;
+//   id()            —— #[rs(id)] 字段 to_string;
 //   to_fields()     —— **全部字段**(含未标注/占位符字段)→ (name, value) 字符串对
 //                      ——占位符字段值只存在 key 里且不可逆推,必须随 HASH 落盘
-//                      (对照 原实现 storedFields 合同);
+//                      ;
 //   from_fields()   —— 逐字段 FromStr 解析,缺字段取 Default(字段类型须
 //                      Display + FromStr + Default,String/数值天然满足);
 //   placeholder_parts() —— prefix 的 {name} 在**展开期**与结构体字段名匹配
-//                      (原实现 是运行时反查;Rust 提前到编译错),按出现顺序取值;
+//                      并在编译期拒绝未知字段，按出现顺序取值;
 //   array_key_parts()   —— #[rs(array_key)] 字段按 order 升序取值。
 // ============================================================================
 
@@ -263,7 +263,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         fields.push(info);
     }
 
-    // ── 校验:恰好一个 id;array_key 同 order 重复报错(对照 原实现 MetaResolver)──
+    // ── 校验:恰好一个 id;array_key 同 order 重复报错──
     let ids: Vec<&FieldInfo> = fields.iter().filter(|f| f.is_id).collect();
     if ids.len() != 1 {
         return Err(syn::Error::new_spanned(
@@ -353,7 +353,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
 
     // ── placeholder_parts():展开期解析 prefix 的 {name} 并匹配结构体字段——
-    //    名字不存在 = 编译错(原实现 运行时反查,Rust 提前到编译期)──
+    //    字段名不存在时在编译期拒绝，避免运行时构造错误的持久化键──
     let placeholder_names =
         parse_placeholders(&prefix).map_err(|msg| syn::Error::new_spanned(input, msg))?;
     let mut placeholder_idents = Vec::new();

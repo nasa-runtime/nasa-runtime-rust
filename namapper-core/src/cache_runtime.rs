@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(feature = "redis-cache")]
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "redis-cache")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ pub struct SingleFlightMapperL2Cache {
 struct SingleFlightLockCleanup<'a> {
     locks: &'a StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     lock_key: String,
-    lock: Arc<tokio::sync::Mutex<()>>,
+    lock: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl Drop for SingleFlightLockCleanup<'_> {
@@ -43,8 +43,18 @@ impl Drop for SingleFlightLockCleanup<'_> {
             );
             return;
         };
-        if Arc::strong_count(&self.lock) == 2 {
-            locks.remove(&self.lock_key);
+        if let Some(lock) = self.lock.take() {
+            let same = locks
+                .get(&self.lock_key)
+                .is_some_and(|current| Arc::ptr_eq(current, &lock));
+            drop(lock);
+            if same
+                && locks
+                    .get(&self.lock_key)
+                    .is_some_and(|current| Arc::strong_count(current) == 1)
+            {
+                locks.remove(&self.lock_key);
+            }
         }
     }
 }
@@ -161,9 +171,14 @@ impl MapperL2Cache for SingleFlightMapperL2Cache {
         let cleanup = SingleFlightLockCleanup {
             locks: &self.locks,
             lock_key,
-            lock,
+            lock: Some(lock),
         };
-        let guard = cleanup.lock.lock().await;
+        let guard = cleanup
+            .lock
+            .as_ref()
+            .expect("registered flight")
+            .lock()
+            .await;
         // 等待期间可能已有先到请求完成写入，取得控制权后必须再次读取。
         let result = match self.inner.get(key, hash_key).await {
             Ok(Some(bytes)) => Ok(MapperCacheLoad::hit_after_wait(bytes)),
@@ -462,24 +477,23 @@ fn validate_mapper_ttl(ttl_ms: u64) -> anyhow::Result<()> {
 /// Redis key 对应 Mapper namespace，Hash field 对应 SQL 与 bind 派生的查询字段。TTL 优先使用
 /// Hash field 级过期；服务端不支持 `HPEXPIRE` 时退到整个 Hash key 的 `PEXPIRE`。
 #[cfg(feature = "redis-cache")]
-pub struct RedisMapperL2Cache {
-    redis: redis::cluster_async::ClusterConnection,
-    ttl_mode: AtomicU8,
+pub struct RedisMapperL2Cache<C = redis::cluster_async::ClusterConnection> {
+    redis: C,
 }
 
 #[cfg(feature = "redis-cache")]
-impl RedisMapperL2Cache {
+impl<C> RedisMapperL2Cache<C>
+where
+    C: redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
+{
     /// 业务作用: 创建 Redis Hash 版 Mapper 二级缓存。
     ///
     /// # 参数
-    /// - `redis`: Redis Cluster 异步连接。
+    /// - `redis`: 已由独立调用方或宿主管理的 Redis 异步连接，不创建第二套连接池。
     ///
     /// 返回: 可共享使用的 Redis L2 cache。
-    pub fn new(redis: redis::cluster_async::ClusterConnection) -> Self {
-        Self {
-            redis,
-            ttl_mode: AtomicU8::new(REDIS_TTL_MODE_UNKNOWN),
-        }
+    pub fn new(redis: C) -> Self {
+        Self { redis }
     }
 
     /// 业务作用: 启动期确认 Redis 支持 Hash field 级 TTL。
@@ -490,53 +504,14 @@ impl RedisMapperL2Cache {
     pub async fn assert_hash_field_ttl_supported(&self) -> anyhow::Result<()> {
         assert_redis_hash_field_ttl_supported(self.redis.clone()).await
     }
-
-    /// 业务作用: 给刚写入的 Hash field 设置 TTL，并在旧服务端退到 key 级 TTL。
-    ///
-    /// # 参数
-    /// - `conn`: 当前操作使用的 Redis Cluster 连接。
-    /// - `key`: Mapper cache namespace。
-    /// - `hash_key`: 刚写入的 Hash field。
-    /// - `ttl_ms`: 已校验的毫秒级 TTL。
-    ///
-    /// 返回: field 或 key 级过期确认生效时成功，否则返回 Redis 错误。
-    async fn apply_ttl(
-        &self,
-        conn: &mut redis::cluster_async::ClusterConnection,
-        key: &str,
-        hash_key: &str,
-        ttl_ms: u64,
-    ) -> anyhow::Result<()> {
-        let ttl_mode = self.ttl_mode.load(Ordering::Relaxed);
-        if ttl_mode != REDIS_TTL_MODE_KEY {
-            // field 级过期不会连带删除同一 Mapper namespace 下的其它查询结果。
-            match redis_hpexpire_field(conn, key, hash_key, ttl_ms).await {
-                Ok(()) => {
-                    self.ttl_mode.store(REDIS_TTL_MODE_FIELD, Ordering::Relaxed);
-                    return Ok(());
-                }
-                Err(error)
-                    if ttl_mode == REDIS_TTL_MODE_UNKNOWN
-                        && redis_error_is_hpexpire_unsupported(&error) =>
-                {
-                    self.ttl_mode.store(REDIS_TTL_MODE_KEY, Ordering::Relaxed);
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        // 兼容旧 Redis 时维持可用性，但整个 namespace 会共享同一过期时间。
-        redis::cmd("PEXPIRE")
-            .arg(key)
-            .arg(ttl_ms)
-            .query_async::<()>(&mut *conn)
-            .await?;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "redis-cache")]
 #[crate::async_trait]
-impl MapperL2Cache for RedisMapperL2Cache {
+impl<C> MapperL2Cache for RedisMapperL2Cache<C>
+where
+    C: redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
+{
     /// 业务作用: 从 Redis Hash 读取单条 Mapper 查询缓存。
     ///
     /// # 参数
@@ -571,10 +546,17 @@ impl MapperL2Cache for RedisMapperL2Cache {
             validate_mapper_ttl(ttl_ms)?;
         }
         let mut conn = self.redis.clone();
-        conn.hset::<_, _, _, ()>(key, hash_key, value).await?;
         if let Some(ttl_ms) = ttl_ms {
-            // 只有成功落盘的 field 才进入过期策略，避免 TTL 参数错误产生部分状态。
-            self.apply_ttl(&mut conn, key, hash_key, ttl_ms).await?;
+            // 值与过期在一个脚本内完成；TTL 失败时删除字段，避免取消或拒绝留下永久缓存。
+            redis::Script::new(WRITE_WITH_TTL)
+                .key(key)
+                .arg(hash_key)
+                .arg(value)
+                .arg(ttl_ms)
+                .invoke_async::<i64>(&mut conn)
+                .await?;
+        } else {
+            conn.hset::<_, _, _, ()>(key, hash_key, value).await?;
         }
         Ok(())
     }
@@ -615,118 +597,56 @@ impl MapperL2Cache for RedisMapperL2Cache {
 /// 返回: field TTL 生效且没有设置 key TTL 时成功；能力不完整或清理失败时返回错误。
 #[cfg(feature = "redis-cache")]
 pub async fn assert_redis_hash_field_ttl_supported(
-    redis: redis::cluster_async::ClusterConnection,
+    redis: impl redis::aio::ConnectionLike + Send,
 ) -> anyhow::Result<()> {
     let mut conn = redis;
     let probe_key = redis_hash_field_ttl_probe_key();
-    let probe_field = "probe";
-    let ttl_ms = 60_000_u64;
-    // 隔离探测必须先清除同名残留，避免历史状态影响能力判断。
-    redis::cmd("DEL")
-        .arg(&probe_key)
-        .query_async::<()>(&mut conn)
+    // 探测和清理同属一个执行单元，调用方取消等待不影响服务端删除探测 key。
+    redis::Script::new(FIELD_TTL_PROBE)
+        .key(probe_key)
+        .invoke_async::<i64>(&mut conn)
         .await?;
-    redis::cmd("HSET")
-        .arg(&probe_key)
-        .arg(probe_field)
-        .arg("1")
-        .query_async::<()>(&mut conn)
-        .await?;
-
-    let probe_result = async {
-        redis_hpexpire_field(&mut conn, &probe_key, probe_field, ttl_ms).await?;
-        let field_ttl = redis::cmd("HPTTL")
-            .arg(&probe_key)
-            .arg("FIELDS")
-            .arg(1)
-            .arg(probe_field)
-            .query_async::<Vec<i64>>(&mut conn)
-            .await?;
-        if field_ttl.len() != 1 || field_ttl[0] <= 0 {
-            anyhow::bail!("Redis HPTTL did not report positive hash field TTL: {field_ttl:?}");
-        }
-        let key_ttl = redis::cmd("TTL")
-            .arg(&probe_key)
-            .query_async::<i64>(&mut conn)
-            .await?;
-        if key_ttl != -1 {
-            anyhow::bail!("Redis Hash field TTL probe unexpectedly set key TTL: {key_ttl}");
-        }
-        Ok(())
-    }
-    .await;
-
-    // 无论探测结果如何都清除临时 key，避免能力检查污染业务 Redis。
-    let cleanup_result = redis::cmd("DEL")
-        .arg(&probe_key)
-        .query_async::<()>(&mut conn)
-        .await;
-    match (probe_result, cleanup_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(anyhow::anyhow!(
-            "Redis Hash field TTL is required but not available: {error}; use a Redis 7.4+ compatible cluster or disable the strict startup check"
-        )),
-        (Ok(()), Err(error)) => Err(error.into()),
-    }
+    Ok(())
 }
 
 #[cfg(feature = "redis-cache")]
-const REDIS_TTL_MODE_UNKNOWN: u8 = 0;
-#[cfg(feature = "redis-cache")]
-const REDIS_TTL_MODE_FIELD: u8 = 1;
-#[cfg(feature = "redis-cache")]
-const REDIS_TTL_MODE_KEY: u8 = 2;
+const WRITE_WITH_TTL: &str = r#"
+if not redis.acl_check_cmd('HSET', KEYS[1], ARGV[1], ARGV[2]) or
+   not redis.acl_check_cmd('HDEL', KEYS[1], ARGV[1]) then
+    return redis.error_reply('cache write and cleanup permissions required')
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+local result = redis.pcall('HPEXPIRE', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+if result.err then
+    local message = string.lower(result.err)
+    if string.find(message, 'unknown command') or string.find(message, 'unsupported command') then
+        local fallback = redis.pcall('PEXPIRE', KEYS[1], ARGV[3])
+        if type(fallback) == 'number' and fallback == 1 then return 1 end
+    end
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    return redis.error_reply('cache expiration unavailable')
+end
+if result[1] ~= 1 then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    return redis.error_reply('cache expiration rejected')
+end
+return 1
+"#;
 
-/// 业务作用: 对单个 Redis Hash field 设置毫秒级过期并校验返回值。
-///
-/// # 参数
-/// - `conn`: 当前操作使用的 Redis Cluster 连接。
-/// - `key`: Redis Hash key。
-/// - `hash_key`: 目标 Hash field。
-/// - `ttl_ms`: 毫秒级 TTL。
-///
-/// 返回: 目标 field 确认设置过期时成功；其它响应返回 Redis 类型错误。
 #[cfg(feature = "redis-cache")]
-async fn redis_hpexpire_field(
-    conn: &mut redis::cluster_async::ClusterConnection,
-    key: &str,
-    hash_key: &str,
-    ttl_ms: u64,
-) -> redis::RedisResult<()> {
-    let result = redis::cmd("HPEXPIRE")
-        .arg(key)
-        .arg(ttl_ms)
-        .arg("FIELDS")
-        .arg(1)
-        .arg(hash_key)
-        .query_async::<Vec<i64>>(conn)
-        .await?;
-    match result.as_slice() {
-        [1] => Ok(()),
-        [_] => Err(redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "HPEXPIRE did not set hash field TTL",
-        ))),
-        _ => Err(redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "invalid HPEXPIRE response",
-        ))),
-    }
-}
-
-/// 业务作用: 判断 Redis 错误是否表示服务端不支持 `HPEXPIRE`。
-///
-/// # 参数
-/// - `error`: Redis 命令返回的错误。
-///
-/// 返回: 错误消息明确表达未知或不支持命令时为 `true`。
-#[cfg(feature = "redis-cache")]
-fn redis_error_is_hpexpire_unsupported(error: &redis::RedisError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("unknown command")
-        || message.contains("unsupported command")
-        || message.contains("unknown redis command")
-}
+const FIELD_TTL_PROBE: &str = r#"
+if not redis.acl_check_cmd('HSET', KEYS[1], 'probe', '1') or not redis.acl_check_cmd('DEL', KEYS[1]) then
+    return redis.error_reply('cache probe and cleanup permissions required')
+end
+redis.call('HSET', KEYS[1], 'probe', '1')
+local result = redis.pcall('HPEXPIRE', KEYS[1], 5000, 'FIELDS', 1, 'probe')
+local ttl = redis.pcall('HPTTL', KEYS[1], 'FIELDS', 1, 'probe')
+redis.call('DEL', KEYS[1])
+if result.err or ttl.err or result[1] ~= 1 or ttl[1] <= 0 or ttl[1] > 5000 then
+    return redis.error_reply('hash field TTL required')
+end
+return 1
+"#;
 
 #[cfg(feature = "redis-cache")]
 static REDIS_FIELD_TTL_PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);

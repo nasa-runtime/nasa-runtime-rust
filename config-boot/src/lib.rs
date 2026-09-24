@@ -304,7 +304,13 @@ impl std::fmt::Debug for NacosBootstrap {
     /// # 参数
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mark = |s: &str| if s.is_empty() { "<empty>" } else { "<set>" };
+        let mark = |s: &str| {
+            if s.is_empty() {
+                "<empty>"
+            } else {
+                "<set>"
+            }
+        };
         f.debug_struct("NacosBootstrap")
             .field("enabled", &self.enabled)
             .field("server_addr", &self.server_addr)

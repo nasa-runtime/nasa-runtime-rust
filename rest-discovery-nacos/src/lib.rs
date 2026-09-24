@@ -222,6 +222,8 @@ pub struct HeuristicConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WatchConfig {
+    /// 允许保留的服务订阅身份上限，缺省为 1024。
+    pub max_services: Option<usize>,
     /// watch 不可用时的轮询间隔毫秒。
     pub poll_interval_ms: Option<u64>,
     /// 发现结果的兜底 TTL 毫秒数。
@@ -498,9 +500,22 @@ impl DiscoverySession {
     ///
     /// 本方法无参数;运行时已被取下时返回 Ok。
     pub async fn shutdown_runtime(&mut self) -> anyhow::Result<()> {
-        if let Some(runtime) = self.runtime.take() {
-            RestDiscovery::shutdown_if_current(&runtime);
+        self.shutdown_runtime_until(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+    }
+
+    /// 业务作用：撤下本会话出站入口，并等待当前代 REST 任务和调用退出。
+    /// 参数说明：`deadline` 为宿主统一停机截止点。
+    /// 返回：排干后释放会话依赖；未排干保留 owner 以便再次等待，不影响后续实例。
+    pub async fn shutdown_runtime_until(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> anyhow::Result<()> {
+        if let Some(runtime) = &self.runtime {
+            RestDiscovery::shutdown_if_current(runtime);
+            runtime.rest().shutdown(deadline).await?;
         }
+        self.runtime = None;
         self.client = None;
         Ok(())
     }
@@ -758,7 +773,11 @@ fn resolve_registration(
     nacos_discovery_ip: Option<&str>,
 ) -> anyhow::Result<(String, String, u16)> {
     let service = first_nonempty(&cfg.service_name, &app.service_name);
-    let port = if cfg.port != 0 { cfg.port } else { app.port };
+    let port = if cfg.port != 0 {
+        cfg.port
+    } else {
+        app.port
+    };
 
     anyhow::ensure!(
         !service.trim().is_empty(),
@@ -957,6 +976,13 @@ fn parse_no_instance(s: &str) -> anyhow::Result<NoInstancePolicy> {
 /// - `watch`: yml 中 `rest_discovery.rest.watch` 的轮询和退避配置。
 fn map_watch(watch: &WatchConfig) -> anyhow::Result<RestWatchOptions> {
     let mut o = RestWatchOptions::new();
+    if let Some(max_services) = watch.max_services {
+        anyhow::ensure!(
+            (1..=65536).contains(&max_services),
+            "rest_discovery.rest.watch.max_services must be between 1 and 65536"
+        );
+        o.max_services = max_services;
+    }
     if let Some(ms) = watch.poll_interval_ms {
         anyhow::ensure!(
             ms > 0,

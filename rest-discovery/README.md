@@ -1,12 +1,14 @@
 # rest-discovery
 
 `rest-discovery` 是带服务发现和客户端负载均衡的 HTTP 客户端。它只依赖 provider-neutral 的 `nadisc::DiscoveryClient` 抽象，不依赖 Nacos；Nacos 装配在 `rest-discovery-nacos`。
+与 `application` 组合时，`rest_clients` 可装配 external、static、dns 或 custom 来源，统一拥有
+服务 watch、请求准入与退出等待；普通出站调用无需启动注册中心或入站 Web。
 
 业务项目通过门面开启 `rest-discovery`：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["rest-discovery"] }
+nasa = { version = "1.0.3", features = ["rest-discovery"] }
 ```
 
 ## 全局初始化
@@ -152,7 +154,7 @@ trait OrderApi {
 
 `rest-discovery` 本体是 provider-neutral 运行时，不直接读取 yml。若需要从 yml 一键装配 Nacos 注册发现，请使用 `rest-discovery-nacos` 的 `rest_discovery:` 配置。只用本 crate 时，推荐应用定义 `rest:` 段再映射到 `RestDiscoveryOptions`。
 
-完整示例：
+以下是业务自行定义并映射的独立配置示例，不是 Application 的 `rest_clients` 配置结构：
 
 ```yaml
 rest:
@@ -221,3 +223,38 @@ nasa::discovery::RestDiscovery::init_with_discovery(discovery, opts).await?;
 - 实例异常摘除只影响当前进程的候选快照，窗口到期自动恢复；服务状态表和实例状态表均有硬上限。
 - 进程级 runtime 需要显式 `shutdown` / `shutdown_if_current`，只丢弃局部 `Arc` 不会停止后台 watch。
 - 外部 URL 与内部服务名的识别失败不能静默改写请求目标。
+
+## Application 接入
+
+门面开启 `application,rest-discovery`，直接依赖 `napp` 时对应 `rest` feature。以下命名计划由
+Application 标准装配，无需新增组件字符串：
+
+```yaml
+rest_clients:
+  inventory:
+    enabled: true
+    provider: static
+    timeout_ms: 3000
+    connect_timeout_ms: 1000
+    max_services: 1024
+    services:
+      inventory:
+        - host: inventory.internal
+          port: 8080
+```
+
+Service 在 initializer 或 Ready 后通过 `app.rest_client("inventory").await` 取得实例，Batch 在
+工作负载前完成装配。`external` 只调用显式 URL；`dns` 每服务配置一个域名与端口；`custom` 使用
+`provider_ref` 借用已登记的发现 provider，其独立资源仍由原 owner 管理。
+
+```text
+命名来源 → 有界服务 watch 与候选快照 → 实例选择 → 同一预算内调用及重试
+停机     → 关闭请求与任务登记准入 → 等待退出 → 释放 runtime
+```
+
+每个实例默认最多 1024 个服务 watch，上限 65536。关闭准入与任务登记使用同一门禁，晚到 watch
+不能重建已关闭任务；shutdown 等待任务与登记调用真实退出，旧句柄永久返回 `RuntimeClosed`。
+带预算的 `send_text/send_bytes/send_json` 覆盖完整正文；直接 `send` 返回的原始 response 仍由
+调用方负责正文期限。参数变更需要重启，不因读取新配置就替换运行实例。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

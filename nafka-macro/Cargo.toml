@@ -1,6 +1,6 @@
 [package]
 name = "nafka-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ proc-macro = true
 name = "nafka_macro"
 
 [dependencies]
-nasa-macro-support = { path = "../macro-support", package = "macro-support", version = "1.0.1" }
+nasa-macro-support = { package = "macro-support", version = "1.0.2" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

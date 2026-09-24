@@ -44,7 +44,7 @@ pub mod pubsub;
 /// partition 的服务不编译它(门面侧经 "redis-search" 透传)。
 #[cfg(feature = "search")]
 pub mod search;
-/// 雪花 ID 生成器(对照 原实现 `JdkSnowflake`):纯算法 [`Snowflake`] + Redis ZSET 分配 workerId。
+/// 雪花 ID 生成器：纯算法 [`Snowflake`] 与显式初始化、永久不复用 workerId 的 Redis 账本。
 pub mod snowflake;
 /// 普通 stream(event-field wire)的 publish/subscribe。
 pub mod stream;

@@ -189,7 +189,11 @@ fn build_tls_acceptor(
             .map_err(|_| GrpcServerError::TlsConfiguration)?
             .ok_or(GrpcServerError::TlsConfiguration)?;
 
-    let builder = rustls::ServerConfig::builder();
+    // 同版本依赖的 feature 会合并；显式选择本组件的算法实现，不推断或改写宿主全局 provider。
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|_| GrpcServerError::TlsConfiguration)?;
     let mut server = if let Some(client_ca_pem) = &identity.client_ca_pem {
         let mut roots = rustls::RootCertStore::empty();
         let client_roots = rustls_pemfile::certs(&mut BufReader::new(client_ca_pem.as_slice()))
@@ -203,9 +207,10 @@ fn build_tls_acceptor(
         if accepted == 0 || rejected != 0 {
             return Err(GrpcServerError::TlsConfiguration);
         }
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|_| GrpcServerError::TlsConfiguration)?;
+        let verifier =
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .map_err(|_| GrpcServerError::TlsConfiguration)?;
         builder
             .with_client_cert_verifier(verifier)
             .with_single_cert(certificates, private_key)
@@ -653,6 +658,13 @@ pub struct Deadline {
 }
 
 impl Deadline {
+    /// 业务作用：将入站 RPC 截止点交给其它 adapter，保持同一绝对时刻。
+    /// 参数说明：无。
+    /// 返回：共享截止点的请求预算；RPC Deadline 本身不携带客户端断开的取消信号。
+    pub fn request_budget(&self) -> nabudget::RequestBudget {
+        nabudget::RequestBudget::until(self.effective)
+    }
+
     /// 业务作用：读取当前 RPC 距有效截止点的剩余单调时长，避免 handler 重复解析 metadata。
     ///
     /// 参数说明: 无。
@@ -696,6 +708,45 @@ pub fn propagate_deadline_from<T>(
     }
     request.set_timeout(remaining);
     Ok(())
+}
+
+/// 业务作用：把调用链预算传播到下游 RPC 的超时 metadata。
+/// 参数说明：`request` 为尚未发出的请求；`budget` 为当前调用链预算。
+/// 返回：取消或到期时本地拒绝；成功时写入不超过剩余预算的 grpc-timeout。
+pub fn propagate_request_budget<T>(
+    request: &mut tonic::Request<T>,
+    budget: &nabudget::RequestBudget,
+) -> Result<(), tonic::Status> {
+    budget.check().map_err(budget_status)?;
+    let remaining = budget
+        .remaining()
+        .checked_sub(Duration::from_millis(1))
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| tonic::Status::deadline_exceeded("gRPC deadline budget is exhausted"))?;
+    request.set_timeout(remaining);
+    Ok(())
+}
+
+/// 业务作用：使一个已传播超时的下游 RPC 等待同时响应本地取消和截止点。
+/// 参数说明：`budget` 为当前预算；`operation` 为下游调用 future。
+/// 返回：保留 RPC 结果；停止等待不能证明服务端未收到或未执行请求。
+pub async fn call_with_budget<T>(
+    budget: &nabudget::RequestBudget,
+    operation: impl std::future::Future<Output = Result<T, tonic::Status>>,
+) -> Result<T, tonic::Status> {
+    budget.run(operation).await.map_err(budget_status)?
+}
+
+/// 业务作用：将本地预算终止原因映射为协议状态，保持取消与超时的区别。
+/// 参数说明：`error` 为预算终止原因。
+/// 返回：不包含业务数据的固定 gRPC 状态。
+fn budget_status(error: nabudget::BudgetError) -> tonic::Status {
+    match error {
+        nabudget::BudgetError::Cancelled => tonic::Status::cancelled("gRPC call cancelled"),
+        nabudget::BudgetError::DeadlineExceeded => {
+            tonic::Status::deadline_exceeded("gRPC deadline exceeded")
+        }
+    }
 }
 
 /// generated code 提交给 registry 的静态方法身份。

@@ -26,8 +26,8 @@
 - [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。
-- [ ] `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致；目标版本高于
-      crates.io 当前最高稳定版本，或该名称尚未发布且从 `1.0.0` 起步。
+- [ ] `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致；已有组件采用
+      crates.io 当前最高稳定版本的下一个补丁号，首次公开的组件使用 `1.0.0`。
 - [ ] 每个批次发布并回读后，在干净工作树运行 `prepare-next-release-batch.sh <completed-batch>`；只删除
       已上线 crate 的根级 `[patch.crates-io]` 本地覆盖，审阅并提交 `Cargo.toml` 与 `Cargo.lock` 后才启动
       下一批。
@@ -36,7 +36,7 @@
 - [ ] 默认流程严格按“完成提交 → 推送目标分支 → 远端 CI 全绿 → 核对远端提交 SHA → 获得明确上传授权
       → 上传 registry → 回读 registry 元数据与 README”推进；本地 dry-run 或归档通过不构成上传授权。
 - [ ] 公开版本不可原地替换；归档遗漏或文档合同不完整时停止当前批次，以新的补丁版本承载后续内容，
-      不把尚未上线的本地改动描述成 registry 已完成处置。
+      registry 的实际归档内容必须与对外说明一致。
 
 ## 组件边界
 

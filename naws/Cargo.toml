@@ -21,7 +21,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # 协议层:发布包名 naws-proto,别名 `proto` 保持全部源码/公开 API 不变。
-naws-proto = { package = "naws-proto", version = "1.0.0" }
+naws-proto = { package = "naws-proto", version = "1.0.1" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 bytes = "1"
@@ -38,7 +38,7 @@ serde_json = { version = "1", optional = true }
 # 二进制 payload ↔ socket.io 文本的 base64 桥接(可选,随 socketio 启用)
 base64 = { version = "0.22", optional = true }
 # 消息队列数据面适配器；只在 socket 集群场景按需启用。
-nafka = { version = "1.0.2", optional = true, default-features = false }
+nafka = { version = "1.0.3", optional = true, default-features = false }
 smallvec = { version = "1", optional = true }
 
 [features]

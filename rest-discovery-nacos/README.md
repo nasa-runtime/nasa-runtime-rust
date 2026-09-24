@@ -9,7 +9,7 @@
 ```toml
 [dependencies]
 nasa = { version = "1.0.3", features = ["nacos-sdk", "rest-discovery-nacos"] }
-rest-discovery-nacos = { version = "1", features = ["nacos-sdk"] }
+rest-discovery-nacos = { version = "1.0.2", features = ["nacos-sdk"] }
 ```
 
 ## 配置形状
@@ -223,3 +223,12 @@ let handle = nasa::discovery::init_from_config(&cfg.rest_discovery, app).await?;
 - 分段生命周期必须保持“装出站 -> listener Ready -> 注册 -> 摘流 -> drain -> 关 runtime”的顺序。
 - 多协议端点必须使用受控 metadata，注册主端口与协议端口不能互相替代。
 - provider 异常时 watch 保留 last-good 的时长由 `rest.watch.stale_if_error_ms` 限定。
+
+## Application 接入
+
+Application 的 `"nacos-discovery"` 组件拥有 `DiscoverySession`。摘流与出站关闭分别执行，
+`shutdown_runtime_until` 使用宿主同一个绝对截止点等待 REST 任务退出，未完成时保留 owner；
+旧会话不会撤销后续实例的全局入口。独立 `DiscoverySession` 使用方也须等待退出证明，关闭通知
+不等同于已完成。普通 external/static/dns/custom 出站可使用 `rest_clients`，无需注册到 Nacos。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

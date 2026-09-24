@@ -1,16 +1,7 @@
-// ============================================================================
-// src/search/actuator.rs —— SearchActuator:capability / 索引策略 / 读写查询。
-// (文档;对照 原实现 RediSearch.Actuator<T> + RsCommandExecutor)
-//
-// 红线:
-//   · capability 探测:缺 FT(或 JSON 模式缺 ReJSON)→ 明确的 NotSupported 错误,
-//     不是一串协议错(缺模块给明确错误)
-//   · 索引校验以 **FT.INFO 返回的实际结构**为准，归一化后比较，
-//     IndexPolicy{ValidateOnly|CreateIfMissing|RecreateExplicitly},**禁自动 DROP**:
-//     发现漂移 ValidateOnly 报错带 diff,Recreate 必须显式选择;
-//   · 双通道(对照 原实现):本 actuator = 查询/管理通道;批量写并入 PipelineSession
-//     单条 save 由本模块负责。
-// ============================================================================
+// SearchActuator 提供能力检查、索引管理、文档读写与查询。
+// 缺少 FT 或 JSON 模块时返回 NotSupported。索引以 FT.INFO 实际结构归一化比较，
+// ValidateOnly 发现漂移时返回差异；仅显式选择 RecreateExplicitly 才删除并重建。
+// 单条写入可直接执行，批量写入可通过 PipelineSession 合批。
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -70,7 +61,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         let meta = T::meta();
         meta.validate()?;
         // ARRAY 系不经 FT 索引(JSONPath filter 通道),走 JsonArrayOps——绑错执行器
-        // 在 bind 时就拦下,不等到发命令(对照 原实现 JsonArraySupport.checkMeta 反向约束)
+        // 在 bind 时就拦下,不等到发命令
         if meta.data_type.is_array() {
             return Err(NasaRedisError::Config(format!(
                 "{} 是 ARRAY 模式({:?}),请用 JsonArrayOps 而非 SearchActuator",
@@ -144,7 +135,9 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 业务作用：索引是否存在(FT.INFO;对照 原实现 `indexExists`)。只识别明确的"未知索引"判不存在,其余错误上抛。
+    /// 业务作用：通过 FT.INFO 判断索引是否存在。
+    /// 参数说明：无。
+    /// 返回：明确的未知索引响应返回 false，成功返回 true；权限、模块或传输等错误继续返回。
     pub async fn index_exists(&self) -> Result<bool> {
         let r: std::result::Result<redis::Value, redis::RedisError> = redis::cmd("FT.INFO")
             .arg(&self.meta.index)
@@ -152,10 +145,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .await;
         match r {
             Ok(_) => Ok(true),
-            //**只**识别 Redis 明确的"未知索引"才判不存在(对齐 原实现 的
-            // `Unknown Index name`/`no such index`)。旧逻辑"错误串含 index 即不存在"过宽——
-            // 权限/模块/参数/代理错误文本都可能含 index,会被误判后错误执行 FT.CREATE。
-            // 其余一切错误(含语义含混的)必须上抛,绝不静默触发重建。
+            // 只把明确的未知索引响应视为不存在，避免将权限、模块或代理错误误判为可创建索引。
             Err(e) => {
                 if is_unknown_index_error(&e) {
                     Ok(false)
@@ -181,7 +171,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .arg("PREFIX")
             .arg(1)
             // 占位符模式给 literal head(第一个 { 之前):FT PREFIX 按 startsWith
-            // 匹配,literal head 覆盖该 entity 全部 key 变体(对照 原实现 literalPrefix)
+            // 匹配,literal head 覆盖该 entity 全部 key 变体
             .arg(self.meta.literal_prefix())
             .arg("SCHEMA");
         for a in self.meta.schema_args() {
@@ -332,10 +322,10 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(())
     }
 
-    // ─────────────────────── 写入 / id 直达(对照 原实现 save/findById)───────────────────────
+    // ─────────────────────── 写入 / id 直达───────────────────────
 
     /// 业务作用：实体路径算 key:无占位符 fast path = prefix + id;占位符模式从
-    /// placeholder_parts 取动态段(对照 原实现 keyOf(entity))。
+    /// placeholder_parts 取动态段。
     ///
     /// # 参数
     /// - `doc`: 当前处理的配置文档。
@@ -436,7 +426,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(docs.len())
     }
 
-    /// 业务作用：id 直达读取(不经 FT.SEARCH;对照 原实现 findById)。
+    /// 业务作用：根据业务 ID 派生 key 并直接读取文档，不经过 FT.SEARCH。
     /// 占位符模式 key 不能只由 id 派生 → key_of 内部报错引导走 find_by_parts。
     ///
     /// # 参数
@@ -449,8 +439,8 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.find_at(&key).await
     }
 
-    /// 业务作用：parts 直达读取(占位符模式;对照 原实现 findByParts:placeholder 值按
-    /// prefix 占位符顺序 + id,不经 FT.SEARCH 按 key 拼接直读)。
+    /// 业务作用：按 prefix 占位符顺序与业务 ID 拼接 key，直接读取文档。
+    /// 返回：存在且可解码的文档，缺失时返回 None，键派生或读取失败时返回错误。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -519,9 +509,9 @@ impl<T: RedisDocument> SearchActuator<T> {
             > 0)
     }
 
-    // ───────────── 原实现 RediSearchOperations 对齐补全─────────────
+    // 索引管理与直接文档操作。
 
-    /// 业务作用：删除索引(对照 原实现 `dropIndex(deleteDocuments)`)。`delete_documents=true` → `FT.DROPINDEX DD`
+    /// 业务作用：删除索引。`delete_documents=true` → `FT.DROPINDEX DD`
     /// (连同删除被索引的文档),否则只删索引定义、保留文档。
     ///
     /// # 参数
@@ -532,8 +522,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         if delete_documents {
             cmd.arg("DD");
         }
-        //**幂等**——索引本不存在视为清理成功(对偶 ensure_index,对齐 原实现 dropIndex 把
-        // `Unknown Index name`/`no such index` 当成功)。其余错误(权限/模块/代理)仍上抛,不误判。
+        // 索引已经不存在时视为删除完成；权限、模块和代理错误必须返回，不能伪报清理成功。
         match cmd.query_async::<()>(&mut self.client.conn()).await {
             Ok(()) => Ok(()),
             Err(e) if is_unknown_index_error(&e) => Ok(()),
@@ -541,7 +530,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         }
     }
 
-    /// 业务作用：id 是否存在(对照 原实现 `existsById`)——直接 `EXISTS key`,不反序列化整文档。占位符模式报错引导 parts 版。
+    /// 业务作用：id 是否存在——直接 `EXISTS key`,不反序列化整文档。占位符模式报错引导 parts 版。
     ///
     /// # 参数
     /// - `id`: 文档业务 ID,仅适用于无占位符 prefix 的文档类型。
@@ -550,7 +539,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.client.exists(&key).await
     }
 
-    /// 业务作用：parts 是否存在(占位符模式;对照 原实现 `existsById` 的 parts 重载)。
+    /// 业务作用：按占位符 parts 与业务 ID 派生 key，通过 EXISTS 判断文档是否存在。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -560,9 +549,8 @@ impl<T: RedisDocument> SearchActuator<T> {
         self.client.exists(&key).await
     }
 
-    /// 业务作用：JSON.NUMINCRBY(**整数** delta;direct executor,对照 原实现 `jsonNumIncrBy(type,id,path,long)`)——
-    /// 撮合部分成交/持仓加减热路径,不必为单次自增手工开 pipeline。返回 RedisJSON 回的结果串(如 `[6]`)。
-    /// ⚠ 仅 JSON 模式；整数 delta 保持 JSON 整数 shape，与 pipeline `json_num_incr_by` 一致。
+    /// 业务作用：直接对 JSON 文档路径执行 JSON.NUMINCRBY，整数 delta 保持整数参数形态。
+    /// 返回：RedisJSON 的结果文本，例如 `[6]`；仅支持 JSON 模式，无需创建 pipeline。
     ///
     /// # 参数
     /// - `id`: JSON 文档业务 ID,仅适用于无占位符 prefix 的 JSON 文档。
@@ -573,7 +561,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .await
     }
 
-    /// 业务作用：JSON.NUMINCRBY 整数 delta(占位符模式;对照 原实现 parts 重载)。
+    /// 业务作用：按占位符派生文档 key，并以整数 delta 执行 JSON.NUMINCRBY。
     ///
     /// # 参数
     /// - `parts`: prefix 占位符对应的业务分片值,顺序必须与占位符出现顺序一致。
@@ -612,7 +600,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(s)
     }
 
-    /// 业务作用：查首个匹配(对照 原实现 `findOne`)——内部 `LIMIT 0 1`,不受调用方 `q` 的分页影响。
+    /// 业务作用：查首个匹配——内部 `LIMIT 0 1`,不受调用方 `q` 的分页影响。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,只使用其过滤和排序语义,分页会被覆盖为首条。
@@ -624,7 +612,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(self.find(&one).await?.into_iter().next())
     }
 
-    /// 业务作用：是否有匹配(对照 原实现 `exists(query)`)——`LIMIT 0 0` 只取 total 判 >0。
+    /// 业务作用：是否有匹配——`LIMIT 0 0` 只取 total 判 >0。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,用于渲染 FT.SEARCH 过滤表达式。
@@ -632,8 +620,9 @@ impl<T: RedisDocument> SearchActuator<T> {
         Ok(self.count(q).await? > 0)
     }
 
-    /// 业务作用：查匹配文档的 **id**(NOCONTENT;对照 原实现 `findKeys`)。占位符 prefix 模式拒绝(key→id 无法反推)。
-    /// **未显式 limit 时用 `LIMIT 0 1000000`**(避免默认 10 静默少取,对齐 原实现)。key 经 `literal_prefix` 反推 id。
+    /// 业务作用：通过 NOCONTENT 查询匹配文档的 ID，从 key 中去掉 literal_prefix。
+    /// 无法反推 ID 的占位符 prefix 会被拒绝。未显式分页时使用 LIMIT 0 1000000，
+    /// 显式分页则保留调用方的范围；结果仍受该上限约束。
     ///
     /// # 参数
     /// - `q`: 类型化查询条件,可包含排序和分页;未显式分页时会使用大上限对齐批量取 key 语义。
@@ -662,16 +651,15 @@ impl<T: RedisDocument> SearchActuator<T> {
         if expr.is_empty() {
             return Ok(Vec::new()); // MATCH_NONE 哨兵
         }
-        //**复用 `render_args`**(而非手写 LIMIT)——保留 `SORTBY` + 排序字段存在性/SORTABLE
-        // 校验(NOCONTENT 只跳 RETURN,不是跳 SORTBY 的理由,对齐 原实现 findKeys/remove 用 renderArgs)。
-        // offset/limit 由调用方覆盖(find_keys 显式分页或默认大上限;remove 大上限)。
+        // 复用 render_args 保留排序与字段可排序性校验；NOCONTENT 只省略正文，不取消排序。
+        // 分页范围由 find_keys 或 remove 的调用策略决定。
         let q_for_keys = q.clone().limit(offset, limit);
         let mut cmd = redis::cmd("FT.SEARCH");
         cmd.arg(&self.meta.index).arg(&expr).arg("NOCONTENT");
         for a in q_for_keys.render_args(self.meta)? {
             cmd.arg(a);
         }
-        cmd.arg("DIALECT").arg(2); // 对齐 原实现:NOCONTENT + SORTBY + LIMIT + DIALECT
+        cmd.arg("DIALECT").arg(2);
         let v: redis::Value = cmd.query_async(&mut self.client.conn()).await?;
         let prefix = self.meta.literal_prefix();
         Ok(parse_search_keys(v)
@@ -680,7 +668,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             .collect())
     }
 
-    /// 业务作用：按查询批量删除(对照 原实现 `remove(query)`):循环 `LIMIT 0 1000000` 拉 key、每 1000 个 `DEL` 一批;
+    /// 业务作用：按查询批量删除:循环 `LIMIT 0 1000000` 拉 key、每 1000 个 `DEL` 一批;
     /// **本轮有命中但实际删 0 → 提前退出**(防索引滞后/并发写无限循环)。返回删除总数。
     ///
     /// # 参数
@@ -701,7 +689,7 @@ impl<T: RedisDocument> SearchActuator<T> {
             }
             total += deleted;
             if deleted == 0 {
-                break; // 命中但删 0:索引滞后/并发,防死循环(对照 原实现)
+                break; // 命中但删 0:索引滞后/并发,防死循环
             }
         }
         Ok(total)
@@ -726,7 +714,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         for a in q.render_args(self.meta)? {
             cmd.arg(a);
         }
-        cmd.arg("DIALECT").arg(2); //恒发 DIALECT 2(对齐 原实现,高级查询语义一致)
+        cmd.arg("DIALECT").arg(2); //恒发 DIALECT 2
         let v: redis::Value = cmd.query_async(&mut self.client.conn()).await?;
         self.parse_search(v)
     }
@@ -834,7 +822,7 @@ impl<T: RedisDocument> SearchActuator<T> {
         match self.meta.data_type {
             DataType::Hash => T::from_fields(&map),
             // bind 已拒 ARRAY 系,这里只剩 Json:文档在 "$" 字段(整文档 JSON 串)。
-            //**缺 `$` 回退取首个字段值**(对齐 原实现 parseJsonRow)——某些
+            //**缺 `$` 回退取首个字段值**——某些
             // RETURN/投影形态不带 `$` 根字段而是单值返回;回退避免误报 Config 缺字段。
             _ => {
                 let raw = map
@@ -895,7 +883,7 @@ impl<T: RedisDocument> SearchActuator<T> {
     }
 }
 
-/// 业务作用：Redis 错误是否为"未知索引"(对齐 原实现 `Unknown Index name`/`no such index`)。`index_exists`(判不存在)
+/// 业务作用：Redis 错误是否为"未知索引"。`index_exists`(判不存在)
 /// 与 `drop_index`(幂等)共用——只认明确的未知索引,权限/模块/代理错误不误判。
 ///
 /// # 参数
@@ -991,10 +979,8 @@ fn resp3_map_get<'a>(
         .find_map(|(k, v)| (val_str(k).as_deref() == Some(key)).then_some(v))
 }
 
-/// 业务作用：从 RESP3 单行结果(Map,含 `extra_attributes` 子 Map)提取 field→value 表。
-/// FT.SEARCH/FT.AGGREGATE RESP3 行形态:`{id, extra_attributes:{f1:v1,...}, values:[...]}`。
-///**带 `attributes` 回退键**——个别 RediSearch 版本/形态把字段放 `attributes`
-/// 而非 `extra_attributes`(原实现 侧亦兼容两者),漏回退会让某些版本 find 返空。
+/// 业务作用：从 RESP3 搜索结果行提取字段值，支持 extra_attributes 与 attributes 两种键。
+/// 返回：提取的字段表；缺少可识别字段映射时返回空表。
 ///
 /// # 参数
 /// - `row`: Redis 搜索返回的单行结果。

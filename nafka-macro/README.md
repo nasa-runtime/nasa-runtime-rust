@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["kafka"] }
+nasa = { version = "1.0.3", features = ["kafka"] }
 ```
 
 ## 生成与运行架构

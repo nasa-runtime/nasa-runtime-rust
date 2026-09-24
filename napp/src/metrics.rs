@@ -12,14 +12,14 @@
 //!
 //! nafana 迁移属 nasa 门面层增量(napp 不依赖 nafana,强接会倒置分层),此处不做。
 
-#[cfg(any(feature = "kafka", feature = "web-security"))]
+#[cfg(any(feature = "kafka", feature = "web-auth", feature = "web-crypto"))]
 use std::sync::Arc;
 
 #[cfg(feature = "kafka")]
 use nametrics_core::MetricConflict;
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 use nametrics_core::MetricSourceRegistrationError;
-#[cfg(any(feature = "kafka", feature = "web-security"))]
+#[cfg(any(feature = "kafka", feature = "web-auth", feature = "web-crypto"))]
 use nametrics_core::{MetricDescriptor, MetricHub, MetricKind};
 
 // ───────────────────────────── nafka 域(原生) ─────────────────────────────
@@ -190,14 +190,14 @@ impl nafka::MetricsSink for NafkaMetricSinkAdapter {
 
 // ───────────────────────────── naweb 域(兼容源) ─────────────────────────────
 
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 use nametrics_core::LegacyMetricsSource;
 
 /// naweb 安全端点指标的 descriptor manifest，供统一 catalog 冲突审计、结构化样本校验与文本渲染。
 ///
 /// help/label 与 `naweb::SecurityMetrics::render_prometheus` 一致;histogram 桶边界与
 /// `naweb` 的 `DURATION_BUCKET_LABELS` 对齐(秒)。
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_SECURITY_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_security_requests_total",
     help: "安全端点最终请求结果计数。",
@@ -206,7 +206,7 @@ static MAPPING_SECURITY_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["route_id", "outcome"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_AUTH_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_auth_requests_total",
     help: "身份阶段结果计数,不包含身份值。",
@@ -215,7 +215,7 @@ static MAPPING_AUTH_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["route_id", "requirement", "outcome"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_requests_total",
     help: "密码方向执行结果计数。",
@@ -224,7 +224,7 @@ static MAPPING_CRYPTO_REQUESTS_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["route_id", "protocol", "direction", "outcome"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_REPLAY_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_replay_total",
     help: "required replay 占位结果计数。",
@@ -233,7 +233,7 @@ static MAPPING_CRYPTO_REPLAY_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["route_id", "outcome"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_BYPASS_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_bypass_total",
     help: "静态 condition 实际关闭密码方向的次数。",
@@ -242,7 +242,7 @@ static MAPPING_CRYPTO_BYPASS_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["route_id", "condition"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_DURATION_SECONDS: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_duration_seconds",
     help: "安全流水线固定阶段延迟秒数。",
@@ -253,7 +253,7 @@ static MAPPING_CRYPTO_DURATION_SECONDS: MetricDescriptor = MetricDescriptor {
         0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
     ],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_KEY_RELOAD_TOTAL: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_key_reload_total",
     help: "安全快照热更新结果计数。",
@@ -262,7 +262,7 @@ static MAPPING_CRYPTO_KEY_RELOAD_TOTAL: MetricDescriptor = MetricDescriptor {
     label_names: &["outcome"],
     histogram_bounds: &[],
 };
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static MAPPING_CRYPTO_SNAPSHOT_GENERATION: MetricDescriptor = MetricDescriptor {
     name: "mapping_crypto_snapshot_generation",
     help: "当前安全快照代次。",
@@ -273,7 +273,7 @@ static MAPPING_CRYPTO_SNAPSHOT_GENERATION: MetricDescriptor = MetricDescriptor {
 };
 
 /// naweb 安全端点全部指标的静态 descriptor manifest。
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 static NAWEB_DESCRIPTORS: [&MetricDescriptor; 8] = [
     &MAPPING_SECURITY_REQUESTS_TOTAL,
     &MAPPING_AUTH_REQUESTS_TOTAL,
@@ -289,12 +289,12 @@ static NAWEB_DESCRIPTORS: [&MetricDescriptor; 8] = [
 ///
 /// descriptor 并入统一 catalog，值由 naweb registry 生成结构化快照后交给 hub 统一渲染；
 /// 本源始终返回 `Some`，当前无样本也不会回落到另一份文本数据路径。
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 pub struct NawebMetricsSource {
     metrics: Arc<naweb::SecurityMetrics>,
 }
 
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 impl NawebMetricsSource {
     /// 业务作用：用 Web Ready 后发布的 `SecurityMetrics` 句柄创建兼容源。
     ///
@@ -307,7 +307,7 @@ impl NawebMetricsSource {
     }
 }
 
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 impl LegacyMetricsSource for NawebMetricsSource {
     /// 业务作用：返回 naweb 兼容源拥有的静态指标族目录。
     ///
@@ -372,7 +372,7 @@ impl LegacyMetricsSource for NawebMetricsSource {
 /// - source：Web Ready 发布的安全指标源。
 ///
 /// 返回：descriptor 无冲突且完整序列容量可预留时发布；失败时目录、源和容量账目均保持不变。
-#[cfg(feature = "web-security")]
+#[cfg(any(feature = "web-auth", feature = "web-crypto"))]
 pub fn register_naweb_source(
     hub: &MetricHub,
     source: Arc<NawebMetricsSource>,

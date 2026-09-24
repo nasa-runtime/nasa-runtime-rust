@@ -45,6 +45,8 @@ pub mod reason {
             feature = "nacos-discovery",
             feature = "partition",
             feature = "nacos-config",
+            feature = "config-watch",
+            feature = "object-store",
             feature = "cache",
             feature = "telemetry"
         )),
@@ -63,6 +65,7 @@ pub mod reason {
     pub const ROUTE_AUDIT_FAILED: &str = "route_audit_failed";
     /// 依赖被判为不可服务。
     #[cfg(any(
+        feature = "object-store",
         feature = "kafka",
         feature = "db",
         feature = "db-pgsql",
@@ -95,7 +98,10 @@ pub mod reason {
         feature = "redis",
         feature = "cache",
         feature = "nacos-config",
+        feature = "config-watch",
+        feature = "object-store",
         feature = "web",
+        feature = "ws",
         feature = "telemetry"
     ))]
     pub const DEGRADED: &str = "degraded";

@@ -1,15 +1,11 @@
-//! 随机:整数 + 定点步长。用 `rand`(非 原实现 的 `Math.random()` 弱 RNG)。
+//! 使用 rand 生成有界随机整数；定点步长由 decimal 模块提供。
 
 use crate::{NumericError, Result};
 use rand::Rng;
 
-/// 业务作用: `[min, max]` 闭区间随机整数(两端含)。对照 原实现 `Numeric.nextInt(min,max)`。
-///
-/// `min == max` 返 `min`;`min > max` → `Err(Range)`(对照 原实现 抛 `IllegalArgumentException`)。
-///
-/// **`min > max` 不再静默返 `min`**——静默会吞掉上游范围或配置错误，且违反 crate
-/// "可失败 API 返 Result"纪律。**`max == i32::MAX` 正常工作**(`gen_range(0..=i32::MAX)` 无溢出),
-/// 明确避开 原实现 `max+1` 的溢出行为。
+/// 业务作用：生成包含上下界的随机整数，区间退化时返回唯一值。
+/// 返回：区间内整数；下界大于上界时返回 Range 错误。上界为 i32::MAX 仍使用闭区间计算，
+/// 不通过加 1 构造可能溢出的半开区间。
 ///
 /// # 参数
 ///
@@ -27,7 +23,7 @@ pub fn next_int(min: i32, max: i32) -> Result<i32> {
     Ok(rand::thread_rng().gen_range(min..=max))
 }
 
-/// 业务作用: `[0, max]` 闭区间随机整数。对照 原实现 `Numeric.nextInt(max)`。
+/// 业务作用: `[0, max]` 闭区间随机整数。
 ///
 /// `max < 0` → `Err(Range)`(经 `next_int(0, max)` 的 `min>max` 判定);`max == i32::MAX` 正常(见 [`next_int`])。
 ///
@@ -37,4 +33,4 @@ pub fn next_int(min: i32, max: i32) -> Result<i32> {
 pub fn next_int_max(max: i32) -> Result<i32> {
     next_int(0, max)
 }
-// 注:`random_step` 已移到 `decimal` 模块(走 BigDecimal,无 scale≤8 上限,对照 原实现 返 BigDecimal)。
+// `decimal::random_step` 返回 BigDecimal，不受定点八位小数上限限制。

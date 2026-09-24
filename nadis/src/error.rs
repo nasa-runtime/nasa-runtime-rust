@@ -15,6 +15,9 @@ use thiserror::Error;
 /// 前者表示可能已写到 Redis,后者表示本地确认尚未发出。
 #[derive(Debug, Error)]
 pub enum NasaRedisError {
+    /// 显式只读调用的本地预算终止；不表示远端没有收到命令。
+    #[error(transparent)]
+    ReadBudget(#[from] nabudget::BudgetError),
     /// 启动未提交，清理操作仍在后台持有尚未排干的资源。
     #[error("partition start rollback not converged: {cause}; remaining: {remaining:?}")]
     StartRollbackNotConverged {

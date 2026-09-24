@@ -5,6 +5,10 @@
 pub mod cache;
 /// 进程内 L1 缓存和刷新/过期策略。
 pub mod local_cache;
+mod local_work;
+pub use local_work::LocalCacheRuntimeGuard;
+mod durable_owner;
+pub use durable_owner::DurableInvalidationOwner;
 
 // ============================================================================
 // rust-cache/cacheable.rs —— Cacheable-lite 的【运行期支持】
@@ -27,25 +31,21 @@ use serde::Serialize;
 use crate::cache::CacheLayer; // L2:Redis 三防 cache-aside
 
 // ── 进程级缓存运行时──
-// 把原先两个独立全局(L2 后端句柄 + 失效广播发布器)收拢进**单一** `CacheRuntime` 对象,
-// 由一个全局 `OnceLock` 持有。`#[cached]`/`#[cache_invalidate]` 展开仍调 `get_or_load_2level`/
-// `invalidate` 两个自由入口(宏契约不变),它们改从 runtime 读后端与发布器。
-// 后端与发布器仍各用内部 `OnceLock` 两段设置,保持"init 后端 / 稍后起广播"的既有时序独立性;
-// napp `CacheComponent` 负责构造并**拥有** runtime，同时接入 readiness 与停机。
+// `CacheRuntime` 的可撤销槽保存当前后端与发布器，宏入口读取当前代次。
+// napp CacheComponent 持有安装与撤销责任，并管理 readiness 和停机。
 
 /// 进程级两级缓存运行时:统一持有 L2 后端、失效广播发布器与可选 durable 失效 sink。
 ///
-/// **带 generation 的可撤销槽**:三个槽都可换代(install 覆盖)与撤销(revoke 清空),每次变更
-/// 令 `generation` 单调 +1。宏入口每次调用读**当前代**;长借的 `Arc` 持旧代直至释放——旧请求继续用旧
-/// 后端,新请求立刻用新后端,无一致性窗口。`CacheRuntimeGuard::shutdown` 撤销全部槽,同进程随后可再
-/// 装配(重装/组件重启),不再受一次性 `OnceLock` 限制。
+/// 后端和发布器按 owner 撤销，generation 记录变化；长借 Arc 保留旧资源直至释放。
+/// 分别读取多个槽不构成跨组件原子快照。持久意图策略具有独立关闭门禁，后续应用可重新装配。
 pub struct CacheRuntime {
     /// L2(Redis 三防)后端句柄;`init`(首装)/`install_generation`(换代)注入,`revoke_runtime` 清空。
     backend: RwLock<Option<Arc<CacheLayer>>>,
     /// 失效广播有界发布器;`start_invalidate_broadcast` 注入(换代覆盖——二次启动广播不再被旧值挡住)。
     publisher: RwLock<Option<Arc<BoundedInvalidatePublisher>>>,
-    /// 可选 durable 失效 sink:失效动作先经它持久记录,再走尽力 pub/sub。
+    /// 显式 record_invalidation 使用的持久意图入口；执行失效不会调用它。
     durable_sink: RwLock<Option<Arc<dyn DurableInvalidationSink>>>,
+    durable_owned: std::sync::atomic::AtomicBool,
     /// 槽代次:任何 install/revoke 单调 +1,供诊断观察换代。
     generation: AtomicU64,
     /// 当前拥有 backend/publisher 槽的 guard owner；旧 guard 只能停止自己的任务，不能撤销新 owner。
@@ -64,6 +64,7 @@ impl CacheRuntime {
             backend: RwLock::new(None),
             publisher: RwLock::new(None),
             durable_sink: RwLock::new(None),
+            durable_owned: std::sync::atomic::AtomicBool::new(false),
             generation: AtomicU64::new(0),
             owner: AtomicU64::new(0),
             next_owner: AtomicU64::new(0),
@@ -198,14 +199,11 @@ impl CacheRuntime {
     }
 }
 
-/// durable 失效 sink:把每次缓存失效**持久记录**到可重放通道。
+/// 将失效意图记录到可重放通道的事务适配器。
 ///
-/// pub/sub 广播是尽力而为(at-most-once):节点掉线/队列满时远端 L1 可能漏失效,只能靠 TTL 兜底。
-/// 注册本 sink 后,[`invalidate`] 在广播**之前**先 `record`——典型实现把 `(scene, key)` 写进事务型 outbox
-/// (业务事务内则与业务写同提交),由带重试/重放的 dispatcher 兜底投递失效,弥补广播丢失。
-///
-/// 本 trait 刻意窄(不依赖任何 outbox 类型):适配层把 `OutboxWriter`/`MySqlOutbox` 包成本 trait 即可。
-/// `record` 返回错误时 [`invalidate`] 整体返错且**不发广播**(L1/L2 已删,重试 `invalidate` 幂等)。
+/// `record_invalidation` 只记录意图，不删除缓存或发布 Pub/Sub。事务适配器必须参与调用方的
+/// 同源业务事务，记录失败应使业务事务失败。提交后由 dispatcher 调用 `apply_invalidation`。
+/// Pub/Sub 是尽力通知，离线节点仍可能漏收；该接口不提供持久广播或 cache-aside 强一致保证。
 #[async_trait::async_trait]
 pub trait DurableInvalidationSink: Send + Sync {
     /// 业务作用：持久记录一次失效。
@@ -216,25 +214,29 @@ pub trait DurableInvalidationSink: Send + Sync {
     ///
     /// # 错误
     ///
-    /// 持久化失败时返回错误;调用方(`invalidate`)会把错误上抛且不发广播。
+    /// 持久化失败时返回错误；调用方必须传播到业务事务，不得视为已经记录。
     async fn record(&self, scene: &str, key: &str) -> anyhow::Result<()>;
 }
 
-/// 业务作用：注册 durable 失效 sink(换代覆盖;`revoke_runtime` 一并清空)。
-///
-/// # 参数
-/// - `sink`: 持久记录失效的 sink 实现(典型为 outbox 适配层)。
-pub fn set_durable_invalidation_sink(sink: Arc<dyn DurableInvalidationSink>) {
+/// 业务作用：为独立使用方安装持久意图策略，避免覆盖受管 owner。
+/// 参数说明：`sink` 为参与同源事务的意图记录器。
+/// 返回：非受管槽安装成功；受管 owner 存在时拒绝且保留现有策略。
+pub fn set_durable_invalidation_sink(sink: Arc<dyn DurableInvalidationSink>) -> anyhow::Result<()> {
     let runtime = CacheRuntime::global();
     let _transition = runtime
         .transition
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    anyhow::ensure!(
+        !runtime.durable_owned.load(Ordering::Acquire),
+        "durable invalidation has a managed owner"
+    );
     *runtime
         .durable_sink
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
     runtime.generation.fetch_add(1, Ordering::AcqRel);
+    Ok(())
 }
 
 /// 业务作用：换代安装 L2 后端:无条件覆盖当前槽并 generation+1。
@@ -428,8 +430,8 @@ where
 /// 参数:
 ///   scene  L1 池名(要和对应 #[cached] 一致)
 ///   key    完整缓存 key(宏已拼好)
-/// 泛型 V:该 scene 缓存的值类型——L1 是按 <K,V> 强类型分池的,删除要用相同 V 才能 downcast 到那个池
-///        （所以 #[cache_invalidate] 必须传 value=）。Pub/Sub 使用非泛型失效入口绕开该限制。
+/// 泛型 `V` 保留宏调用签名；实际按 scene/key 清理。即时失效不代表外层事务已提交，
+/// 也不自动记录持久意图。需要事务语义时显式调用 `record_invalidation` 并传播错误。
 ///
 /// # 参数
 /// - `scene`: L1 本地缓存池名,必须与对应读取入口使用的 scene 一致。
@@ -438,22 +440,32 @@ pub async fn invalidate<V>(scene: &'static str, key: String) -> anyhow::Result<(
 where
     V: Send + Sync + 'static,
 {
-    // 失效顺序【先 L2 后 L1】:先删共享 L2(下游真源),再删本节点 L1。
-    // 若反过来(先 L1 后 L2),两步之间本节点的并发读会 L1 miss → 从【尚未删除的】L2 载入旧值 →
-    // 把旧值重新灌回 L1,失效完成后 L1 反而残留脏值。先删 L2 则此刻 L1 仍持旧值(读命中旧值、不回源),
-    // 待 ② 删除收尾;且 L2 删除失败时直接返错、L1 不动,两级保持一致的旧值可重试(不会 L1 空/L2 脏)。
-    // ① 失效 L2:redis DEL 这个 key(共享 Redis,所有节点的 L2 都没了)。失败即返错,不再动 L1。
-    try_l2()?.delete(&key).await?;
-    // ② 失效 L1:从该 scene 的 moka 池里 invalidate 这个 key(本节点)。
-    local_cache::remove::<String, V>(scene, key.clone()).await;
-    // ③【durable,可选】持久记录失效:先可靠层后尽力层——sink 失败即返错且不发广播
-    //    (L1/L2 已删,重试本函数幂等),由 outbox 等带重放的通道兜底广播丢失。
-    if let Some(sink) = CacheRuntime::durable_sink() {
-        sink.record(scene, &key).await?;
+    apply_invalidation(scene, &key).await
+}
+
+/// 业务作用：仅持久记录失效意图，使调用方可在业务事务中原子提交意图与数据。
+/// 参数说明：`scene` 为缓存场景；`key` 为完整缓存身份。
+/// 返回：sink 成功记录时成功；未安装或记录失败直接返回错误，不访问 L1、L2 或广播队列。
+pub async fn record_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
+    let sink = CacheRuntime::durable_sink()
+        .ok_or_else(|| anyhow::anyhow!("durable invalidation sink is not installed"))?;
+    sink.record(scene, key).await
+}
+
+/// 业务作用：执行已提交的失效意图，供 dispatcher 和显式即时失效共用。
+/// 参数说明：`scene` 为缓存场景；`key` 为完整缓存身份。
+/// 返回：L2 删除成功后清理本节点 L1 并尝试广播；纯 L1 直接清理本节点。
+/// 未安装运行态或 L2 失败返回错误以供重试，不再记录意图。
+/// 并发旧 loader 可能在删除后回填，Pub/Sub 也可能丢失；该入口不提供强一致读取。
+pub async fn apply_invalidation(scene: &str, key: &str) -> anyhow::Result<()> {
+    // 先删除共享缓存，再清本节点，缩小清理过程中从共享旧值重新回填的窗口。
+    if let Some(layer) = CacheRuntime::backend() {
+        layer.delete(key).await?;
+    } else {
+        anyhow::ensure!(local_work::is_open(), "cache runtime is not installed");
     }
-    // ④ 广播失效：通过 Redis PUBLISH 让其它节点清理各自 L1（本节点 L1 已在 ② 清理）。
-    //    解决多节点 L1 不一致:不再只靠短 TTL 兜底。订阅端见 spawn_invalidate_subscriber。
-    publish_invalidate(scene, &key);
+    local_cache::remove_any(scene, key);
+    publish_invalidate(scene, key);
     Ok(())
 }
 
@@ -615,6 +627,7 @@ impl Drop for InvalidateBroadcast {
 /// 取代业务分散调 `init` + `start_invalidate_broadcast` + 自建 shutdown 资源;把"装配 + 拥有 + 停机"
 /// 收进单一对象，便于由 napp `CacheComponent` 统一构造并持有该 guard。
 pub struct CacheRuntimeGuard {
+    local_work: Arc<local_work::LocalWork>,
     broadcast: Option<InvalidateBroadcast>,
     owner: u64,
 }
@@ -640,8 +653,13 @@ impl CacheRuntimeGuard {
             None => None,
         };
         let publisher = broadcast.as_ref().map(|value| value.publisher.clone());
+        let local_work = local_work::LocalWork::install()?;
         let owner = CacheRuntime::install_owned(layer, publisher);
-        Ok(Self { broadcast, owner })
+        Ok(Self {
+            broadcast,
+            owner,
+            local_work,
+        })
     }
 
     /// 业务作用：以宿主受管的 `RedisClient` 装配 L2 后端和跨实例失效广播。
@@ -661,10 +679,12 @@ impl CacheRuntimeGuard {
         // 广播资源完整就绪后再替换运行时，避免订阅建立失败时覆盖仍可工作的上一代。
         let broadcast = start_invalidate_broadcast_with_managed_redis(client).await?;
         let publisher = Some(broadcast.publisher.clone());
+        let local_work = local_work::LocalWork::install()?;
         let owner = CacheRuntime::install_owned(layer, publisher);
         Ok(Self {
             broadcast: Some(broadcast),
             owner,
+            local_work,
         })
     }
 
@@ -674,11 +694,14 @@ impl CacheRuntimeGuard {
     ///
     /// 本方法无参数;等待上限由调用方在外层用 timeout 施加。
     pub async fn shutdown(mut self) {
+        self.local_work.close();
+        self.local_work.wait().await;
         if let Some(broadcast) = self.broadcast.take() {
             broadcast.shutdown().await;
         }
         // 旧 guard 与新 guard 可能短暂重叠；只允许当前 owner 撤销全局槽。
-        let _ = CacheRuntime::revoke_if_owner(self.owner);
+        self.local_work.close();
+        CacheRuntime::revoke_if_owner(self.owner);
     }
 }
 
@@ -687,7 +710,8 @@ impl Drop for CacheRuntimeGuard {
     fn drop(&mut self) {
         // 正常 shutdown 和被取消/直接 drop 共用同一 owner fencing；重复撤销只会返回 false。
         // broadcast 的 Drop 会停止并 abort 尚未 join 的后台任务。
-        let _ = CacheRuntime::revoke_if_owner(self.owner);
+        self.local_work.close();
+        CacheRuntime::revoke_if_owner(self.owner);
     }
 }
 

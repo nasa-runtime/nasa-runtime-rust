@@ -263,7 +263,7 @@ marker 权威。只有 index、非终态缺少 park_id、未知状态或读取�
 等待删除交接的 Commit 能收口；普通运行期间的短暂失败仍按周期重试，不重新调用 handler。
 
 发布在有界序列化前登记票据；调用方取消等待后，监督任务仍持有 XADD。发送后断线返回
-`PublishOutcomeUnknown`，不会自动重发，也不能解释为消息未发布。需要可重放发布时，应另行使用
+`PublishOutcomeUnknown`，不会自动重发，也不能据此断定消息没有写入。需要可重放发布时，应另行使用
 业务事件 ID 与持久去重协议。
 
 ## 启停与观测
@@ -307,6 +307,12 @@ gate、deferred、unroutable、来源阻断、超大正文、协议异常、债�
 快照中的 `group` 在 source 模式为 `None`，其它模式使用逻辑组 ID，默认组为 `Some("")`；
 `partition` 只在 stream 模式给出物理编号。record、payload、batch、task 投影在账本锁内读取；
 异步删除和 Runner 状态来自独立原子状态，不能把不同调用时刻的 gauge 拼成事务证明。
-`snapshot().ready` 是消费器的本地状态，不会自动成为 Application 的 readiness 门禁，业务需显式
-接入健康策略。`PreparedPartition::start` 也不等待 Application Ready；需要统一接流时由业务协调
-启动时点，并在共享 Redis 客户端关闭前完成消费器停机。
+独立使用时，`snapshot().ready` 是消费器的本地状态，`PreparedPartition::start` 立即开放消费，
+宿主需协调健康和停机。需要外部屏障时使用 `start_suspended`，完成宿主准备后再 `activate`。
+
+Application 标准路径通过 `configure_redis_partition(source, critical, register)` 登记计划，
+由 redis 子能力调用延迟激活入口，在 Application Ready 后统一放行。`critical` 决定运行健康
+是否阻断整体 readiness；无需再登记通用 `"partition"` 组件。
+停机聚合 owner 先关闭所有来源的新发布和消费准入，再按同一截止点并发等待；未退出时保留
+任务及其 Redis 依赖，报告未收口，不默认执行 force。逐来源观察与停机报告分别通过
+`redis_partition_observations` 和 `redis_partition_stop_results` 取得。

@@ -86,6 +86,58 @@ const CACHE_MONITOR_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// 超过三个 monitor 周期没有新观测时，把缓存标记为 stale。
 const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
 
+impl Application {
+    /// 业务作用：为显式持久失效记录提供标准受管策略入口，保持调用方事务上下文。
+    /// 参数说明：`sink` 只负责记录领域意图，不应自行启动消费循环；其依赖使用受管资源。
+    /// 返回：缓存已声明且启用、策略唯一时登记 owner；冲突或登记失败立即撤销本次安装。
+    pub fn configure_cache_invalidation_sink(
+        &self,
+        sink: Arc<dyn cacheable::DurableInvalidationSink>,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("cache invalidation strategy")?;
+        self.ensure_component_declared(
+            ComponentId::Cache,
+            ApplicationPhase::UserHook,
+            "cache invalidation strategy",
+        )?;
+        if read_cache_config(self)?.mode == CacheMode::Disabled {
+            return Err(cache_error(
+                ApplicationPhase::UserHook,
+                "cache invalidation strategy requires an enabled cache",
+            ));
+        }
+        let owner = cacheable::DurableInvalidationOwner::install(sink).map_err(|error| {
+            cache_error_src(
+                ApplicationPhase::UserHook,
+                "durable invalidation strategy conflicts with an existing owner",
+                error,
+            )
+        })?;
+        self.register_managed(DurableSinkResource(owner))
+    }
+}
+
+struct DurableSinkResource(cacheable::DurableInvalidationOwner);
+
+impl crate::ManagedResource for DurableSinkResource {
+    /// 业务作用：撤销持久意图准入并等待在途记录释放事务依赖。
+    /// 参数说明：`context` 为宿主统一停机期限。
+    /// 返回：记录全部结束时成功；超时报告未完成，入口保持关闭。
+    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+        Box::pin(async move {
+            tokio::time::timeout_at(context.deadline().into(), self.0.shutdown())
+                .await
+                .map_err(|_| {
+                    cache_error(
+                        ApplicationPhase::Stopping,
+                        "durable invalidation calls did not drain",
+                    )
+                })?;
+            Ok(())
+        })
+    }
+}
+
 /// 缓存组件负责读取的顶层配置根投影。
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -100,6 +152,8 @@ enum CacheMode {
     /// 显式关闭:组件成为无副作用空操作(不建连、不装 backend、不起广播)。
     #[default]
     Disabled,
+    /// 仅在本进程缓存并托管有界刷新，不建立 L2 或广播连接。
+    Local,
     /// 两级缓存:L1 moka + L2 Redis 三防(+ 可选跨实例失效广播)。
     TwoLevel,
 }
@@ -275,8 +329,10 @@ async fn run_cache_monitor(
     handle: cacheable::CacheHandle,
     contributor: ReadinessContributor,
 ) -> ApplicationResult<()> {
+    let mut states = application.subscribe_state();
     loop {
-        match application.state() {
+        let state = *states.borrow_and_update();
+        match state {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
                 contributor.observe(
                     DependencyState::NotReady,
@@ -286,7 +342,7 @@ async fn run_cache_monitor(
                 return Ok(());
             }
             ApplicationState::Starting => {
-                tokio::time::sleep(CACHE_MONITOR_INTERVAL).await;
+                let _ = states.changed().await;
                 continue;
             }
             ApplicationState::Ready => {}
@@ -294,13 +350,23 @@ async fn run_cache_monitor(
         let now = std::time::Instant::now();
         // 后端客户端本身通常带命令超时，这里仍施加 monitor 级上限，避免错误配置或驱动缺陷让
         // 单次探针永久占住监督任务，导致 readiness 只能依赖 stale 被动翻转且停机无法及时收束。
-        match tokio::time::timeout(CACHE_MONITOR_INTERVAL, handle.health_check()).await {
+        // 探针只读且可取消；停机状态到达后应将预算留给在途缓存工作。
+        let result = tokio::select! {
+            biased;
+            _ = states.changed() => continue,
+            result = tokio::time::timeout(CACHE_MONITOR_INTERVAL, handle.health_check()) => result,
+        };
+        match result {
             Ok(Ok(())) => contributor.observe(DependencyState::Ready, reason::HEALTHY, now),
             Ok(Err(_)) | Err(_) => {
                 contributor.observe(DependencyState::Degraded, reason::DEGRADED, now)
             }
         }
-        tokio::time::sleep(CACHE_MONITOR_INTERVAL).await;
+        tokio::select! {
+            biased;
+            _ = states.changed() => {},
+            _ = tokio::time::sleep(CACHE_MONITOR_INTERVAL) => {},
+        }
     }
 }
 
@@ -337,6 +403,18 @@ impl ApplicationComponent for CacheComponent {
             })?;
             if config.mode == CacheMode::Disabled {
                 tracing::info!("cache component is disabled by configuration; no cache pipeline");
+                self.config = Some(config);
+                return Ok(());
+            }
+            if config.mode == CacheMode::Local {
+                let guard = cacheable::LocalCacheRuntimeGuard::install().map_err(|error| {
+                    cache_error_src(
+                        ApplicationPhase::Start,
+                        "local cache owner is already installed",
+                        error,
+                    )
+                })?;
+                context.activate(Box::new(LocalCacheShutdown(guard)));
                 self.config = Some(config);
                 return Ok(());
             }
@@ -441,6 +519,34 @@ async fn build_cache_runtime(
 /// 停机 action:排空并停止失效广播(发布 drainer + 订阅循环),join 后退出。
 ///
 /// 等待上限由 Runner 对每个 action 施加的全局剩余停机预算 timeout 约束。
+struct LocalCacheShutdown(cacheable::LocalCacheRuntimeGuard);
+
+impl ShutdownAction for LocalCacheShutdown {
+    /// 业务作用：标识纯本地缓存任务清理。
+    /// 参数说明：无。
+    /// 返回：固定动作名称。
+    fn label(&self) -> &'static str {
+        "local-cache"
+    }
+
+    /// 业务作用：撤销刷新准入并等待全部本地任务退出。
+    /// 参数说明：`context` 为宿主共享期限。
+    /// 返回：实际退出时成功；超时保留关闭态。
+    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+        Box::pin(async move {
+            tokio::time::timeout_at(context.deadline().into(), self.0.shutdown())
+                .await
+                .map_err(|_| {
+                    cache_error(
+                        ApplicationPhase::Stopping,
+                        "local cache refresh tasks did not stop",
+                    )
+                })?;
+            Ok(())
+        })
+    }
+}
+
 struct CacheShutdown {
     guard: Option<cacheable::CacheRuntimeGuard>,
 }

@@ -586,7 +586,7 @@ pub enum Schedule {
         /// 同一任务允许并发在飞的上限;达到上限时跳过本拍。
         max_in_flight: Option<u64>,
     },
-    /// 固定延迟(对照 `fixedDelay`):上次**完成**后再等 `delay_ms` 跑下次。
+    /// 固定延迟:上次**完成**后再等 `delay_ms` 跑下次。
     /// `initial_delay_ms=None` → 立即首跑;`Some(d)` → 首跑在 d 后。
     FixedDelay {
         /// 上次完成到下次开始之间的延迟毫秒数。
@@ -594,7 +594,7 @@ pub enum Schedule {
         /// 首次执行前的延迟毫秒数;`None` 表示立即首跑。
         initial_delay_ms: Option<u64>,
     },
-    /// 一次性(对照仅 `initialDelay`):启动后 `delay_ms` 跑【一次】(= 旧 `delay_ms` 单独)。
+    /// 一次性任务：启动后等待 delay_ms，再执行唯一一次。
     OneShot {
         /// 启动后等待多久触发唯一一次执行。
         delay_ms: u64,
@@ -1144,7 +1144,7 @@ pub const fn scheduler_handle() -> SchedulerHandle {
     SchedulerHandle
 }
 
-// #[scheduled] 任务返回值处理:由宏按返回类型生成包装(对照原"返回值被调度器忽略"语义):
+// #[scheduled] 任务返回值处理:由宏按返回类型生成包装，调度器不消费业务返回值:
 //   - **带显式路径的标准 Result**(仅 std::result::Result / core::result::Result / anyhow::Result)→ `Err` 记 error 日志
 //     (带任务名,**不格式化错误值**故不要求 `E: Debug`),`Ok(_)` 忽略;
 //   - 其它任意返回类型 + 裸名 `Result` + 类型别名 + 自定义 `xxx::Result` → 直接忽略(裸名无法解析来源,保守忽略防误判)。

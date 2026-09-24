@@ -5,7 +5,7 @@ name = "cacheable"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "两级缓存门面(L1 moka + L2 Redis 三防 + #[cached]/#[cache_invalidate])"
+description = "L1/L2 缓存、Redis 分组缓存、有界刷新与失效广播，分离事务持久失效意图和提交后缓存操作"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -21,7 +21,8 @@ default = []
 managed-redis = ["dep:nadis"]
 
 [dependencies]
-nacache-macro = { package = "nacache-macro", version = "1.0.1" }
+tokio-util = { version = "0.7", features = ["rt"] }
+nacache-macro = { package = "nacache-macro", version = "1.0.2" }
 nadis = { version = "1.0.2", optional = true }
 redis = { version = "1", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 moka = { version = "0.12", features = ["future"] }

@@ -14,5 +14,5 @@ categories = ["asynchronous"]
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-nametrics-core = { version = "1.0.2", path = "../nametrics-core" }
+nametrics-core = { version = "1.0.2" }
 tokio = { version = "1", features = ["sync"] }
