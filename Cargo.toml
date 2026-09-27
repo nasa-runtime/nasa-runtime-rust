@@ -102,8 +102,6 @@ namigrate-pgsql = { path = "namigrate-pgsql" }
 naws = { path = "naws" }
 # 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
 hystrix = { path = "hystrix" }
-# 配置加载器与组合组件必须共享同一 naml 类型身份。
-naml = { path = "naml" }
 # 进程一致性依赖必须单来源:task-local 事务上下文与 Inbox 访问若在同一图里出现
 # 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
 natx = { path = "natx" }

@@ -637,7 +637,7 @@ name = "config-boot"
 version = "2.0.0"
 dependencies = [
  "anyhow",
- "naml",
+ "naml 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
@@ -2393,7 +2393,7 @@ dependencies = [
  "matchit",
  "nafana-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nametrics-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naml",
+ "naml 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost",
@@ -2840,6 +2840,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "naml"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83b7e49e606b4867da47efc1928e8d0592675f470f4770ee025697faac8917f5"
+dependencies = [
+ "anyhow",
+ "config",
+ "nabase 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "notify",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "nanacos"
 version = "2.0.0"
 dependencies = [
@@ -3053,7 +3068,7 @@ dependencies = [
  "namigrate",
  "namigrate-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-pgsql",
- "naml",
+ "naml 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanotify-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3152,7 +3167,7 @@ dependencies = [
  "namapper-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-pgsql",
  "namigrate-pgsql",
- "naml",
+ "naml 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanum 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
