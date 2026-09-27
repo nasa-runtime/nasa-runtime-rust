@@ -91,6 +91,4 @@ categories = ["asynchronous", "web-programming"]
 # 成员间依赖使用公开版本约束；保留的 workspace patch 统一相应 crate 的本地依赖身份。
 # 归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
 [patch.crates-io]
-# 门面与 Application 生命周期必须共享同一 napp 类型身份，避免受管句柄和组件快照分裂。
-napp = { path = "napp" }
 nasa = { path = "nasa" }
