@@ -93,7 +93,7 @@ sql:
 平台资源由独立 controller 管理，remote write 失联只引用平台提供的期望实例指标。
 完整配置见 [SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)、
 [通知接口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md) 和
-[观测出口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafana/OBSERVABILITY.md)。
+[观测出口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/OBSERVABILITY.md)。
 
 ## 请求安全与链路传播
 

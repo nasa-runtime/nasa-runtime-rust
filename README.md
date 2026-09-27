@@ -887,7 +887,7 @@ HTTP/1/h2c listener。
 | [namapper-macro](namapper-macro/README.md) | `mapper` | Mapper 派生和 SQL 注解宏 | 由 `namapper` 运行时读取 |
 | [namapper-core](namapper-core/README.md) | runtime 内部合同 | 后端中立分页、排序、缓存合同、共享缓存运行时与结构化 SQL 节点 | 不读取业务配置 |
 | [namapper-pgsql](namapper-pgsql/README.md) | `mapper-pgsql` / `mapper-redis-cache-pgsql` | PostgreSQL Mapper、`$n` bind、动态 SQL、流式结果与 Redis L2 | standalone 显式注册 pool；Application 模式复用受管 datasource |
-| [natx](natx/README.md) | `tx` | ambient MySQL 事务、after-commit 回调、多数据源 | `mysql.*`、`datasources.*` |
+| [natx](natx/README.md) | `tx` | ambient MySQL 事务、after-commit 回调、多数据源 | `database.*`、`datasources.*` |
 | [natx-core](natx-core/README.md) | runtime 内部合同 | datasource/driver catalog、owner、事务结果分类 | 不读取业务配置 |
 | [natx-pgsql](natx-pgsql/README.md) | `tx-pgsql` | PostgreSQL ambient 事务、命名 pool、SQLSTATE 分类 | 可显式建池，也可由 `napp` 从 YAML 受管 |
 | [natx-macro](natx-macro/README.md) | `tx` | `#[transactional]` 事务宏 | 由 `natx` 运行时读取 |

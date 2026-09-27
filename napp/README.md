@@ -95,7 +95,7 @@ Batch 不支持活跃命名路由；显式命名引用不存在或禁用仍拒�
 凭据。外部注入 Pool 的已有 SQLx 日志选项不由 Application 追溯修改，调用方须在建池时设置。
 通知 provider 配置与通信边界见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md)，
 独立或 Web 指标出口、remote write 与 controller 边界见
-[nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafana/README.md)。
+[nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/README.md)。
 
 ## 核心价值与生命周期架构
 

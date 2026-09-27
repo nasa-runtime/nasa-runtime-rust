@@ -24,7 +24,7 @@ categories.workspace = true
 name = "rest_discovery_nacos"
 [features]
 default = []
-# 透传真实 nacos-sdk 后端(nasa 的 rest-discovery-nacos feature 打开它);不开时 nacos 为 stub、connect 运行期 bail。
+# 透传真实 nacos-sdk 后端；门面通过同名 nacos-sdk feature 开启，不开时 connect 运行期拒绝连接。
 nacos-sdk = ["nanacos/nacos"]
 # 可选真实后端开关,供下游显式连真实注册中心时启用。
 live-nacos = ["nacos-sdk"]
