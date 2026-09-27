@@ -353,14 +353,22 @@ datasource；需要耐久跨库收敛时使用源库 Outbox 与目标库 Inbox�
 
 ### 业务 migration 登记
 
-YAML 的 `migrations.mode`、锁等待和 topology 字段只定义执行策略，不包含业务 SQL。Service 必须在
-UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`；业务因此需要直接依赖启用相应 driver
+YAML 的 `migrations.mode`、锁等待和 topology 字段只定义执行策略，不包含业务 SQL。Service 可以在
+UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`；业务需要直接依赖启用相应 driver
 与 `migrate` 能力的 `sqlx`，供 `sqlx::migrate!` 在构建期读取语义化 migration 文件：
 
 ```toml
 [dependencies]
 nasa = { version = "2.0.0", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
+```
+
+下面的动态登记示例要求 Service 模式。只声明 `"db"` 时，`auto` 会选择 Batch，因此需在
+`application.yml` 显式指定：
+
+```yaml
+application:
+  mode: service
 ```
 
 ```rust
@@ -373,9 +381,17 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 数据源必须已经出现在 `database` 或 `datasources`，同一名称只能登记一次。Application 在 Prepare 阶段、
 initializer 和入站监听之前依该数据源的 driver 执行门禁；`disabled` 跳过、`validate` 只接受完全一致的
-已应用集合、`apply` 才应用未执行项。Service Hook 返回后登记入口封口。Batch 的 DB Prepare 早于业务
-Hook，必须在 Hook 内显式取得 pool；MySQL 调用 `nasa::application::run_gate`，PostgreSQL 调用
-`nasa::migration::pgsql::run_gate`，不能使用 `configure_migrations`。
+已应用集合、`apply` 才应用未执行项。Service Hook 返回后登记入口封口。
+
+Service 与 Batch 都可使用静态迁移计划。业务直接依赖 `linkme`，通过 `linkme::distributed_slice`
+将 `MigrationPlanFactory` 登记到 `nasa::application::MIGRATION_PLANS`；工厂只返回
+`Vec<(String, nasa::application::Migrator)>`，不执行 I/O。静态与动态计划在 DB Prepare 合并后，
+重复来源或超过 128 项的计划会在执行迁移 SQL 前拒绝。来源必须精确匹配已配置的数据源；
+遇到未知来源会阻止启动，此前其它来源已经完成的迁移不会自动撤销。
+
+Batch 的 DB Prepare 早于静态 initializer 和工作负载 UserHook，因此必须用静态计划参与自动迁移门禁；
+在工作负载中调用 `configure_migrations` 会被拒绝。声明静态计划时必须同时声明 `"db"` 组件，
+迁移失败会阻止 initializer 与工作负载执行。
 
 ### Redis 单源
 

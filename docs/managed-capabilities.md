@@ -173,7 +173,8 @@ audit_sinks:
 store 的 driver 可选 `mysql/pgsql/redis`；datasource 自身的 PostgreSQL driver 仍是 `postgresql`。
 store 和审计 sink 固定绑定来源，装配前只读验证必要 schema，不在请求或 Ready 中隐式建表。
 Service 可以在 UserHook 登记迁移；Batch 必须用 `MIGRATION_PLANS` 静态工厂，在工作负载之前执行。
-工厂仅返回来源与嵌入的 `Migrator`，不执行 I/O；重复、未知或超过 128 个来源在执行迁移前拒绝。
+工厂仅返回来源与嵌入的 `Migrator`，不执行 I/O；重复来源或超过 128 项的计划在执行迁移前拒绝。
+来源必须精确匹配已配置的数据源；遇到未知来源会阻止启动，此前其它来源已经完成的迁移不会自动撤销。
 
 `web_default` 只在声明 Web 时可用，与手工 `set_idempotency_store` 冲突时拒绝重复安装。
 HTTP 取消、不可缓存状态或响应传输失败不证明业务已回滚，不自动 `abort` 执行占位。
