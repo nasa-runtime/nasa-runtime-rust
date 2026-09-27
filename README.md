@@ -702,7 +702,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 接口保护与 Prometheus/Grafana 面板 | `grafana` | `nasa::grafana::{grafana, Command, metrics}` |
 | 日志 | `log` | `nasa::log::LogManager` |
 | yml 配置加载与文件观察 | `yml` / `yml-watch` / `config-boot` | `nasa::yml`、`nasa::yml::watch`、`nasa::yml::nacos` |
-| 注册中心 | `nacos` / `nacos-sdk` | `nasa::nacos` |
+| 注册中心 | `nacos` / `nacos-sdk` | `nasa::discovery::nacos` |
 | 静态/DNS 服务发现 | `discovery` | `nasa::discovery::{StaticDiscovery, DnsDiscovery}` |
 | REST 负载均衡 | `rest-discovery` / `rest-discovery-nacos` | `nasa::discovery::rest` |
 | 长连接 | `ws`、`ws-redis`、`ws-socketio` | `nasa::ws::Server` |
