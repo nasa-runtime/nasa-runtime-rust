@@ -2,11 +2,11 @@
 
 [advisories]
 version = 2
-# RUSTSEC-2023-0071:`rsa` 0.9 的 Marvin 计时侧信道,目前【上游无修复版本】(no patched release)。
+# RUSTSEC-2023-0071:`rsa` 0.9 的 Marvin 计时侧信道,目前上游没有不受影响的可升级版本。
 # 引入方 = `ncrypto`。默认构建只用该依赖做 RS256 公钥验签等不执行易受攻击私钥解密的操作；
 # PKCS#1 v1.5 私钥解密与历史私钥运算受 `legacy-rsa-private` 编译 feature 和 Web 运行时风险门
 # 双重隔离，不进入 `nasa/full`。因上游尚无可升级版本，仍需按包级 advisory 显式登记；
-# 上游修复后删除本项并升级。
+# 上游提供不受影响的版本后删除本项并升级。
 ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]

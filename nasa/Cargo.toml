@@ -4,14 +4,15 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust shared runtime facade"
+description = "NASA Rust facade for managed resources, shared startup activation, ordered shutdown, durable Saga, SQL observability, messaging, gRPC and HTTP"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["runtime", "saga", "grpc", "lifecycle", "observability"]
 categories.workspace = true
 
 [features]
@@ -21,40 +22,54 @@ default = []
 # 应用运行时核心：生命周期、配置快照、资源容器与受管任务监督。
 application = ["dep:application_impl", "dep:application_macro"]
 
-hystrix = ["dep:hystrix_impl", "dep:hystrix_macro"]
+hystrix = ["dep:hystrix_impl", "dep:hystrix_macro", "application_impl?/hystrix"]
 # 接口级隔离监控(nafana):bulkhead、超时、降级与 Prometheus/Grafana 观测。
 # 出口 = Prometheus `/metrics` + Grafana 面板。
-grafana = ["dep:grafana_impl", "dep:grafana_macro"]
+grafana = ["dep:grafana_impl", "dep:grafana_macro", "application_impl?/observability"]
 cache = ["dep:cache_impl", "dep:nacache_macro", "application_impl?/cache"]
 # 弱依赖桥：同时启用 application 时把 napp 的 db 组件编入，使 #[application("db", ...)] 生效。
 tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
+# PostgreSQL 事务入口保持独立 typed API；与 application 组合时向下启用受管 PostgreSQL 数据源组件。
+tx-pgsql = ["dep:tx_pgsql_impl", "dep:natx_macro", "dep:migration_pgsql_impl", "application_impl?/db-pgsql"]
 # Inbox 去重标记与业务副作用共享 tx ambient MySQL 事务。
-inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl"]
+inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl", "application_impl?/inbox"]
+inbox-pgsql = ["tx-pgsql", "dep:inbox_core_impl", "dep:inbox_pgsql_impl", "application_impl?/inbox-pgsql"]
 # Outbox 事件与业务写共享 tx ambient MySQL 事务；同时启用 application 时编入受管 dispatcher。
 outbox = ["tx", "dep:outbox_core_impl", "dep:outbox_mysql_impl", "application_impl?/outbox"]
+outbox-pgsql = ["tx-pgsql", "dep:outbox_core_impl", "dep:outbox_pgsql_impl", "application_impl?/outbox-pgsql"]
 # Provider-neutral 幂等状态机；持久化后端按业务一致性要求单独选择。
 idempotency = ["dep:idempotency_impl"]
-idempotency-mysql = ["idempotency", "tx", "dep:idempotency_mysql_impl"]
-idempotency-redis = ["idempotency", "redis", "dep:idempotency_redis_impl"]
+idempotency-mysql = ["idempotency", "tx", "dep:idempotency_mysql_impl", "application_impl?/idempotency-mysql"]
+idempotency-pgsql = ["idempotency", "tx-pgsql", "dep:idempotency_pgsql_impl", "application_impl?/idempotency-pgsql"]
+idempotency-redis = ["idempotency", "redis", "dep:idempotency_redis_impl", "application_impl?/idempotency-redis"]
 # 确定性 OpenAPI 3.1 合同生成器。
 openapi = ["dep:openapi_impl"]
 # 业务审计通过 MySQL Outbox 与业务写同事务持久化。
-audit = ["tx", "dep:audit_impl", "dep:audit_mysql_impl"]
+audit = ["tx", "dep:audit_impl", "dep:audit_mysql_impl", "application_impl?/audit-mysql"]
+audit-pgsql = ["tx-pgsql", "dep:audit_impl", "dep:audit_pgsql_impl", "application_impl?/audit-pgsql"]
 # Provider-neutral secret/TLS references；Vault/OpenBao KV v2 adapter 单独按需启用。
 secret = ["dep:secret_impl"]
-secret-http = ["secret", "dep:secret_http_impl"]
-secret-vault = ["secret", "dep:secret_vault_impl"]
-# 实验性对象存储；不进入 full，待两个真实业务合同收敛后稳定。
-object-store-experimental = ["dep:object_impl"]
+secret-http = ["secret", "dep:secret_http_impl", "application_impl?/secret-http"]
+secret-vault = ["secret", "dep:secret_vault_impl", "application_impl?/secret-vault"]
+# 有界对象存储合同；凭据公共类型随本 feature 一并开放，并纳入完整能力组合。
+object-store = ["secret", "dep:object_impl", "application_impl?/object-store"]
 # Saga 纯逻辑层（nasaga-core：身份派生/状态机/补偿计划，无 I/O）。
 saga = ["dep:saga_core_impl"]
 # Saga 运行时（Orchestrator/参与方 adapter/#[saga] 宏；MySQL store + Outbox/Inbox 通道）。
 # 单独一层开关：只用纯逻辑合同的调用方不必编入 SQLx 依赖面。
 saga-runtime = ["saga", "inbox", "outbox", "dep:saga_runtime_impl", "dep:nasaga_macro", "application_impl?/saga"]
+saga-runtime-pgsql = ["saga", "inbox-pgsql", "outbox-pgsql", "dep:saga_runtime_pgsql_impl", "dep:nasaga_macro", "application_impl?/saga-pgsql"]
 # Saga 真实 Kafka hosted transport；要求同时启用 nasa Kafka 门面并向下打开 runtime adapter。
-saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka"]
-# 实验性 gRPC listener 生命周期；不进入 full，稳定组件合同待真实项目收敛。
-grpc-experimental = ["dep:grpc_impl"]
+saga-kafka = ["saga-runtime", "kafka", "saga_runtime_impl/kafka", "application_impl?/saga-kafka"]
+saga-kafka-pgsql = ["saga-runtime-pgsql", "kafka", "saga_runtime_pgsql_impl/kafka", "application_impl?/saga-kafka-pgsql"]
+# Saga Redis Streams hosted transport：显式 ACK 裁决、pending reclaim、原子 DLT 与消息签名。
+saga-redis-stream = ["saga-runtime", "redis", "saga_runtime_impl/redis-stream", "application_impl?/saga-redis-stream"]
+saga-redis-stream-pgsql = ["saga-runtime-pgsql", "redis", "saga_runtime_pgsql_impl/redis-stream", "application_impl?/saga-redis-stream-pgsql"]
+# Saga gRPC request/response transport：入站 generated service 自动复用 grpc 组件的 listener 与 drain。
+saga-grpc = ["saga-runtime", "grpc", "saga_runtime_impl/grpc-transport", "application_impl?/saga-grpc"]
+saga-grpc-pgsql = ["saga-runtime-pgsql", "grpc", "saga_runtime_pgsql_impl/grpc-transport", "application_impl?/saga-grpc-pgsql"]
+# 统一 codegen 合同、独立 listener 与 Application 受管生命周期。
+grpc = ["dep:grpc_impl", "application_impl?/grpc"]
 # 标准 OAuth Resource Server/JWKS/RFC 8414 metadata 公共 adapter。
 oauth = ["dep:oauth_impl"]
 # 弱依赖桥：同时启用 application 时把 napp 的 scheduling 组件编入。
@@ -62,42 +77,53 @@ scheduling = ["dep:scheduling_impl", "dep:async_macro", "application_impl?/sched
 # 集群定时:打开 scheduling 的 nadis adapter(NadisLeaderGate / start_scheduled_clustered*)并拉起 redis,
 # 业务可从 nasa::redis 构造 Leader；cluster="leader" 配合自定义 LeaderGate 时只需开启 scheduling。
 scheduling-cluster = ["scheduling", "scheduling_impl/cluster", "redis", "application_impl?/scheduling-cluster"]
+# Web 路由门面；与 application 同时启用时纳入确定的 HTTP/1/h2c 受管 listener。
 web = ["dep:web_impl", "dep:web_macro", "application_impl?/web"]
 # Web 身份运行时；普通 Web 用户不会因此引入异步身份组件。
-web-auth = ["web", "web_impl/auth"]
+web-auth = ["web", "web_impl/auth", "application_impl?/web-auth"]
 # Web 双协议、密钥、重放与资源治理；与纯密码工具 feature 相互独立。
-web-crypto = ["web", "web_impl/crypto"]
+web-crypto = ["web", "web_impl/crypto", "application_impl?/web-crypto"]
 # 受控迁移专用：编译期开放 legacy RSA 私钥路径；运行时仍必须显式允许。
 # 不进入 `full`，普通完整构建不会隐式承担已知侧信道风险。
 web-crypto-legacy-rsa = ["web-crypto", "web_impl/legacy-rsa-private"]
 # 端点固定流水线的完整能力，同时启用身份与密码处理。
 web-security = ["web-auth", "web-crypto", "application_impl?/web-security"]
-mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro"]
+mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
+# PostgreSQL Mapper 使用独立 typed API；与 application 组合时复用受管 PostgreSQL datasource。
+mapper-pgsql = ["tx-pgsql", "dep:mapper_pgsql_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
+mapper-cache-grouped-pgsql = ["mapper-pgsql", "cache", "mapper_pgsql_impl/grouped-cache"]
 # 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
-# 本地同 key 严格 FIFO 执行器，提供有界背压、任务隔离与显式停机。
-partition = ["dep:partition_impl"]
+mapper-redis-cache-pgsql = ["mapper-pgsql", "mapper_pgsql_impl/redis-cache", "application_impl?/mapper-cache-pgsql"]
+# 命名分区 Runner；同时启用 application 时纳入逐域 readiness 与反序停机。
+# scheduling 同时在位时连带打开 `#[Async]` 的分区执行域形态(scheduling_impl 的 __private 桥)。
+partition = ["dep:partition_impl", "application_impl?/partition", "scheduling_impl?/partition"]
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
 ws = ["dep:ws_impl", "application_impl?/ws"]
+# 纯出站客户端的标准宿主接线。
+ws-client = ["dep:ws_impl", "application_impl?/ws-client"]
 # WebSocket 子能力向下透传到实现 crate。
-ws-redis = ["ws", "ws_impl/redis"]
+ws-redis = ["ws", "ws_impl/redis", "application_impl?/ws-redis"]
 ws-socketio = ["ws", "ws_impl/socketio"]
 # 长连接消息队列数据面；同时启用两端实现并暴露 nasa::ws::kafka。
-ws-kafka = ["ws", "kafka", "ws_impl/kafka"]
+ws-kafka = ["ws", "kafka", "ws_impl/kafka", "application_impl?/ws-kafka"]
 
 # Kafka 运行时按需启用；安全和压缩能力继续向实现 crate 透传。
 kafka = ["dep:kafka_impl", "kafka_impl/macros", "application_impl?/kafka"]
-kafka-schema-registry = ["kafka", "kafka_impl/schema-registry"]
+# Schema Registry 的认证类型依赖 secret；门面 feature 必须让完整构造合同可直接命名。
+kafka-schema-registry = ["kafka", "secret", "kafka_impl/schema-registry", "application_impl?/kafka-schema-registry"]
 kafka-tls = ["kafka", "kafka_impl/tls"]
 kafka-gssapi = ["kafka", "kafka_impl/gssapi"]
 kafka-zstd = ["kafka", "kafka_impl/zstd"]
 
 # 弱依赖桥：同时启用 application 时，把 napp 的 redis 组件编入。
 redis = ["dep:redis_impl", "application_impl?/redis"]
+# RedisJob 同时需要受管应用、Redis 多实例资源、核心状态机与属性声明入口。
+redis-job = ["application", "redis", "redis_impl/job", "application_impl?/redis-job"]
 # rate-limit：跨副本分布式业务配额，由 RateLimitProvider 与 nadis Redis 后端实现并经 nasa::application 暴露。
-rate-limit = ["redis", "application_impl?/rate-limit"]
+rate-limit = ["application", "redis", "application_impl/rate-limit"]
 # telemetry：OpenTelemetry traces 组件。启用后可声明 #[application("telemetry")]；
 # 传播由 Web trace 中间件自动完成,v1 无业务直调 API(配置驱动 + 日志 sink)。
 telemetry = ["application_impl?/telemetry"]
@@ -111,26 +137,23 @@ crypto = ["dep:crypto_impl"]
 # 纯工具层的受控迁移开关；不进入 `full`。
 crypto-legacy-rsa = ["crypto", "crypto_impl/legacy-rsa-private"]
 
-# 定点精确算术由 nanum 提供，对齐既有数值语义并使用 i128 扩展安全范围。
+# nanum 提供 i128 定点算术与 BigDecimal；定点乘除的余数经 f64 中转，受浮点精度限制。
 numeric = ["dep:numeric_impl"]
-
-# 日期时间工具(crate = nadate，基于 chrono，使用 i64 epoch ms 与 GMT+8 默认时区)。
-date = ["dep:date_impl"]
 
 # 日志(crate = nalog，提供 formatter、按天/按大小滚动、保留策略、独立 error.log 与级别热切)。
 # 弱依赖桥：同时启用 application 时把 napp 的 log 组件编入，使 #[application("log", ...)] 生效。
 log = ["dep:log_impl", "application_impl?/log"]
 
-# 通用响应壳 BaseResponse(crate = nabase)。
-# base 只暴露轻量公共 API 和纯工具;date/numeric/crypto/image 继续走 nasa 顶层 feature。
+# 公共响应、日期时间、容量、ID、字符串、环境变量和翻译能力(crate = nabase)。
+# 启用 base 即引入 nabase 的完整依赖和公开模块，不再拆分日期子 feature。
 base = ["dep:base_impl"]
 
 # 通用分层 YAML 配置加载器由 naml 提供。
 # 本地主配置 + profile + overlay(含 Nacos 多配置)+ env + ${} 占位符 → 强类型 T;不认识业务 AppConfig。
 # 「按 import 调 Nacos 拉取拼 overlay」的胶水在门面层(yml 本身零 Nacos 依赖)。
 yml = ["dep:yml_impl"]
-# 文件变化观察按需启用；同时开放基础加载能力并透传 naml 的 watcher。
-yml-watch = ["yml", "yml_impl/watch"]
+# 文件变化观察按需启用；同时开放基础加载能力并向 naml 透传 watcher。
+yml-watch = ["yml", "yml_impl/watch", "application_impl?/config-watch"]
 
 # 配置引导胶水(yml × nacos;crate = config-boot):按 import 拉远端配置、拼有序 overlay(nasa::yml::nacos)。
 # 同时拉起 yml 与 nacos 的纯类型/方法；SDK 由 nacos-sdk 单独开启。
@@ -146,7 +169,7 @@ discovery = ["dep:discovery_impl"]
 # Nacos 后端(crate = nacos):配置中心(nasa::config::nacos)+ 注册中心(nasa::discovery::nacos)。
 # 两层(同 ws/ws-redis 透传纪律):
 #   nacos      = 引入 crate + discovery 中性类型:API 可编译,但 connect/fetch/... 运行时 bail(不编 nacos-sdk)。
-#                给"单 binary 运行期条件启用"的 app 保留(对照各 app 现有"未带 --features nacos 则 bail")。
+#                给"单 binary 运行期条件启用"的 app 保留；未编入传输能力时连接入口返回明确错误。
 #   nacos-sdk  = 透传 nacos_impl/nacos,编入真实 nacos-sdk 后端(真正能连)。
 nacos = ["discovery", "dep:nacos_impl"]
 # nacos-sdk:真实 nacos 后端。弱依赖特性 `rest_discovery_nacos_impl?/nacos-sdk`:仅当 convenience 已被
@@ -159,7 +182,7 @@ nacos-sdk = ["nacos", "nacos_impl/nacos", "rest_discovery_nacos_impl?/nacos-sdk"
 #   rest-discovery       = 引入 REST LB:显式内部调用(service_request / lb://)+ 普通外部 http(s)。
 #   rest-discovery-nacos = 便利:一键装配门面 nasa::discovery::init_from_config(读 DiscoveryConfig → 连 Nacos +
 #                          注册 + 装配 RestDiscovery,返回 DiscoveryHandle 交 main);业务【不再】手工注入 NacosDiscoveryClient。
-rest-discovery = ["discovery", "dep:rest_discovery_impl"]
+rest-discovery = ["discovery", "dep:rest_discovery_impl", "application_impl?/rest"]
 # rest-discovery-nacos:REST LB + 一键装配便利层(nasa::discovery::init_from_config)。**stub 层**:
 #   convenience 编进来、API 可用,但 connect 在未开 nacos-sdk 时运行期 bail(同 nacos/nacos-sdk 两层纪律)。
 #   → 业务可【无条件】调 init_from_config(enabled=false 走 external-only;enabled=true 但没开 nacos-sdk 则 bail)。
@@ -181,6 +204,8 @@ image = ["dep:image_impl"]
 # 仅用于完整能力构建、示例或确实需要所有能力的服务；不要设为默认。
 full = [
     "application",
+    "redis-job",
+    "rate-limit",
     "hystrix",
     "grafana",
     "cache",
@@ -189,6 +214,9 @@ full = [
     "outbox",
     "saga-runtime",
     "saga-kafka",
+    "saga-grpc",
+    "grpc",
+    "object-store",
     "idempotency-mysql",
     "idempotency-redis",
     "openapi",
@@ -201,13 +229,14 @@ full = [
     "mapper-cache-grouped",
     "mapper-redis-cache",
     "partition",
+    "ws-client",
     "ws-redis",
     "ws-socketio",
     "kafka",
+    "kafka-schema-registry",
     "redis-derive",
     "crypto",
     "numeric",
-    "date",
     "log",
     "base",
     "yml-watch",
@@ -218,57 +247,81 @@ full = [
     "rest-client-nacos",
 ]
 
+# PostgreSQL-only 持久能力集合；不借用 `full`，避免把 MySQL typed runtime 隐式拉回依赖图。
+full-pgsql = [
+    "application",
+    "tx-pgsql",
+    "mapper-pgsql",
+    "mapper-cache-grouped-pgsql",
+    "mapper-redis-cache-pgsql",
+    "inbox-pgsql",
+    "outbox-pgsql",
+    "idempotency-pgsql",
+    "audit-pgsql",
+    "saga-runtime-pgsql",
+    "saga-kafka-pgsql",
+    "saga-redis-stream-pgsql",
+    "saga-grpc-pgsql",
+]
+
 [dependencies]
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "1.0.2", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.1", optional = true }
-hystrix_impl = { package = "hystrix", version = "1.0.1", optional = true }
-hystrix_macro = { package = "hystrix-macro", version = "1.0.1", optional = true }
-grafana_impl = { package = "nafana", version = "1.0.1", optional = true }
-grafana_macro = { package = "nafana-macro", version = "1.0.1", optional = true }
-cache_impl = { package = "cacheable", version = "1.0.1", optional = true }
-nacache_macro = { package = "nacache-macro", version = "1.0.1", optional = true }
-tx_impl = { package = "natx", version = "1.0.2", optional = true }
-natx_macro = { package = "natx-macro", version = "1.0.0", optional = true }
-inbox_core_impl = { package = "nainbox-core", version = "1.0.1", optional = true }
-inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.1", optional = true }
-outbox_core_impl = { package = "naoutbox-core", version = "1.0.1", optional = true }
-outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.1", optional = true }
-idempotency_impl = { package = "naidempotency", version = "1.0.1", optional = true }
-idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.1", optional = true }
-idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.1", optional = true }
-openapi_impl = { package = "naopenapi", version = "1.0.1", optional = true }
-audit_impl = { package = "naaudit", version = "1.0.0", optional = true }
-audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.1", optional = true }
-secret_impl = { package = "nasecret", version = "1.0.0", optional = true }
-secret_http_impl = { package = "nasecret-http", version = "1.0.0", optional = true }
-secret_vault_impl = { package = "nasecret-vault", version = "1.0.0", optional = true }
-object_impl = { package = "naobject", version = "1.0.0", optional = true }
-saga_core_impl = { package = "nasaga-core", version = "1.0.0", optional = true }
-saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.1", optional = true }
-nasaga_macro = { package = "nasaga-macro", version = "1.0.1", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.0.1", optional = true }
-oauth_impl = { package = "nauth-oauth", version = "1.0.0", optional = true }
-scheduling_impl = { package = "nasched", version = "1.0.1", optional = true }
-async_macro = { package = "async-macro", version = "1.0.1", optional = true }
-web_impl = { package = "naweb", version = "1.0.1", optional = true }
-web_macro = { package = "naweb-macro", version = "1.0.0", optional = true }
-mapper_impl = { package = "namapper", version = "1.0.1", optional = true }
-namapper_macro = { package = "namapper-macro", version = "1.0.1", optional = true }
-partition_impl = { package = "napart", version = "1.1.1", optional = true }
-ws_impl = { package = "naws", version = "1.0.1", optional = true, default-features = false }
-kafka_impl = { package = "nafka", version = "1.0.2", optional = true, default-features = false }
-redis_impl = { package = "nadis", version = "1.0.1", optional = true, default-features = false }
-crypto_impl = { package = "ncrypto", version = "1.0.0", optional = true }
-numeric_impl = { package = "nanum", version = "1.0.1", optional = true }
-date_impl = { package = "nadate", version = "1.0.0", optional = true }
-log_impl = { package = "nalog", version = "1.0.0", optional = true }
-base_impl = { package = "nabase", version = "1.0.1", optional = true }
-yml_impl = { package = "naml", version = "1.0.2", optional = true }
-config_boot_impl = { package = "config-boot", version = "1.0.1", optional = true }
-image_impl = { package = "naimg", version = "1.0.0", optional = true }
-discovery_impl = { package = "nadisc", version = "1.0.1", optional = true }
-nacos_impl = { package = "nanacos", version = "1.0.1", optional = true, default-features = false }
-rest_discovery_impl = { package = "rest-discovery", version = "1.0.1", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "1.0.1", optional = true }
-rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.1", optional = true, default-features = false }
+application_impl = { package = "napp", version = "1.0.3", optional = true }
+application_macro = { package = "napp-macro", version = "1.0.2", optional = true }
+hystrix_impl = { package = "hystrix", version = "1.0.2", optional = true }
+hystrix_macro = { package = "hystrix-macro", version = "1.0.2", optional = true }
+grafana_impl = { package = "nafana", version = "1.0.2", optional = true }
+grafana_macro = { package = "nafana-macro", version = "1.0.2", optional = true }
+cache_impl = { package = "cacheable", version = "1.0.2", optional = true }
+nacache_macro = { package = "nacache-macro", version = "1.0.2", optional = true }
+tx_impl = { package = "natx", version = "1.0.3", optional = true }
+tx_pgsql_impl = { package = "natx-pgsql", version = "1.0.0", optional = true }
+migration_pgsql_impl = { package = "namigrate-pgsql", version = "1.0.0", optional = true }
+natx_macro = { package = "natx-macro", version = "1.0.1", optional = true }
+inbox_core_impl = { package = "nainbox-core", version = "1.0.2", optional = true }
+inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.2", optional = true }
+inbox_pgsql_impl = { package = "nainbox-pgsql", version = "1.0.0", optional = true }
+outbox_core_impl = { package = "naoutbox-core", version = "1.0.2", optional = true }
+outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.2", optional = true }
+outbox_pgsql_impl = { package = "naoutbox-pgsql", version = "1.0.0", optional = true }
+idempotency_impl = { package = "naidempotency", version = "1.0.2", optional = true }
+idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.2", optional = true }
+idempotency_pgsql_impl = { package = "naidempotency-pgsql", version = "1.0.0", optional = true }
+idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.2", optional = true }
+openapi_impl = { package = "naopenapi", version = "1.0.2", optional = true }
+audit_impl = { package = "naaudit", version = "1.0.1", optional = true }
+audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.2", optional = true }
+audit_pgsql_impl = { package = "naaudit-pgsql", version = "1.0.0", optional = true }
+secret_impl = { package = "nasecret", version = "1.0.1", optional = true }
+secret_http_impl = { package = "nasecret-http", version = "1.0.1", optional = true }
+secret_vault_impl = { package = "nasecret-vault", version = "1.0.1", optional = true }
+object_impl = { package = "naobject", version = "1.0.1", optional = true }
+saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
+saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "1.0.0", optional = true }
+nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
+grpc_impl = { package = "nagrpc", version = "1.0.2", optional = true }
+oauth_impl = { package = "nauth-oauth", version = "1.0.1", optional = true }
+scheduling_impl = { package = "nasched", version = "1.0.2", optional = true }
+async_macro = { package = "async-macro", version = "1.0.2", optional = true }
+web_impl = { package = "naweb", version = "1.0.2", optional = true }
+web_macro = { package = "naweb-macro", version = "1.0.1", optional = true }
+mapper_impl = { package = "namapper", version = "1.0.2", optional = true }
+mapper_pgsql_impl = { package = "namapper-pgsql", version = "1.0.0", optional = true }
+namapper_macro = { package = "namapper-macro", version = "1.0.2", optional = true }
+partition_impl = { package = "napart", version = "1.1.2", optional = true }
+ws_impl = { package = "naws", version = "1.0.2", optional = true, default-features = false }
+kafka_impl = { package = "nafka", version = "1.0.3", optional = true, default-features = false }
+redis_impl = { package = "nadis", version = "1.0.2", optional = true, default-features = false }
+crypto_impl = { package = "ncrypto", version = "1.0.1", optional = true }
+numeric_impl = { package = "nanum", version = "1.0.2", optional = true }
+log_impl = { package = "nalog", version = "1.0.1", optional = true }
+base_impl = { package = "nabase", version = "1.0.2", optional = true }
+yml_impl = { package = "naml", version = "1.0.3", optional = true }
+config_boot_impl = { package = "config-boot", version = "1.0.2", optional = true }
+image_impl = { package = "naimg", version = "1.0.1", optional = true }
+discovery_impl = { package = "nadisc", version = "1.0.2", optional = true }
+nacos_impl = { package = "nanacos", version = "1.0.2", optional = true, default-features = false }
+rest_discovery_impl = { package = "rest-discovery", version = "1.0.2", optional = true }
+rest_client_macro = { package = "rest-client-macro", version = "1.0.2", optional = true }
+rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.2", optional = true, default-features = false }

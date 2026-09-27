@@ -11,6 +11,35 @@ use crate::command::CommandExport;
 use crate::counters::LATENCY_LE_LABELS;
 use crate::registry;
 
+/// nafana registry 的 provider-neutral 当前值。
+#[derive(Debug, Clone)]
+pub enum PrometheusMetricValue {
+    /// 单调累计值。
+    Counter(u64),
+    /// 当前状态值。
+    Gauge(f64),
+    /// 按固定边界分组的累计分布。
+    Histogram {
+        /// 每个有限边界及 `+Inf` 的非累积桶计数。
+        buckets: Vec<u64>,
+        /// 观测秒数总和。
+        sum: f64,
+        /// 观测总数。
+        count: u64,
+    },
+}
+
+/// 一个 nafana 指标 family 与 label 组合的结构化快照。
+#[derive(Debug, Clone)]
+pub struct PrometheusMetricSample {
+    /// 稳定的公开 family 名称。
+    pub name: &'static str,
+    /// 与 family descriptor 顺序一致的 label。
+    pub labels: Vec<(&'static str, String)>,
+    /// 当前值。
+    pub value: PrometheusMetricValue,
+}
+
 /// 业务作用：`/metrics` handler:业务把它挂到路由即可被 Prometheus 抓取。
 /// 是否鉴权由业务路由层自定(合同 安全边界);本组件不新增独立端口。
 pub async fn metrics() -> impl IntoResponse {
@@ -182,6 +211,117 @@ pub fn render_metrics() -> String {
     }
 
     out
+}
+
+/// 业务作用：直接从 nafana 全局 registry 读取与 Prometheus 出口同源的结构化当前值。
+///
+/// 参数说明: 无。
+///
+/// 返回：每个 command 的计数器、gauge 和直方图快照；读取不清零生命周期计数。
+pub fn structured_metrics_snapshot() -> Vec<PrometheusMetricSample> {
+    let exports: Vec<CommandExport> = registry::all()
+        .iter()
+        .map(|command| command.export())
+        .collect();
+    let mut samples = Vec::with_capacity(exports.len() * 19);
+    for export in exports {
+        let common = || {
+            vec![
+                ("command", export.command.clone()),
+                ("group", export.group.clone()),
+            ]
+        };
+        for (outcome, value) in [
+            ("success", export.success),
+            ("failure", export.failure),
+            ("timeout", export.timeout),
+            ("rejected", export.rejected),
+            ("canceled", export.canceled),
+        ] {
+            let mut labels = common();
+            labels.push(("outcome", outcome.to_owned()));
+            samples.push(PrometheusMetricSample {
+                name: "nafana_requests_total",
+                labels,
+                value: PrometheusMetricValue::Counter(value),
+            });
+        }
+        for (name, value) in [
+            ("nafana_fallback_total", export.fallback),
+            ("nafana_tps_total", export.tps),
+        ] {
+            samples.push(PrometheusMetricSample {
+                name,
+                labels: common(),
+                value: PrometheusMetricValue::Counter(value),
+            });
+        }
+        for (outcome, value) in [
+            ("handled", export.global_fallback_handled),
+            ("builtin", export.global_fallback_builtin),
+            ("failed", export.global_fallback_failed),
+        ] {
+            let mut labels = common();
+            labels.push(("outcome", outcome.to_owned()));
+            samples.push(PrometheusMetricSample {
+                name: "nafana_global_fallback_total",
+                labels,
+                value: PrometheusMetricValue::Counter(value),
+            });
+        }
+        for (name, value) in [
+            ("nafana_inflight", export.inflight),
+            ("nafana_inflight_rolling_max", export.rolling_max_inflight),
+            ("nafana_inflight_lifetime_max", export.lifetime_max_inflight),
+            ("nafana_max_concurrent", export.max_concurrent),
+            ("nafana_timeout_ms", export.timeout_ms),
+            ("nafana_tps_weight", export.tps_weight),
+        ] {
+            samples.push(PrometheusMetricSample {
+                name,
+                labels: common(),
+                value: PrometheusMetricValue::Gauge(value as f64),
+            });
+        }
+        samples.push(PrometheusMetricSample {
+            name: "nafana_latency_seconds",
+            labels: common(),
+            value: PrometheusMetricValue::Histogram {
+                buckets: non_cumulative_buckets(
+                    &export.histogram.cumulative,
+                    export.histogram.count,
+                ),
+                sum: export.histogram.sum_seconds,
+                count: export.histogram.count,
+            },
+        });
+        let mut info_labels = common();
+        info_labels.push(("path", export.path));
+        samples.push(PrometheusMetricSample {
+            name: "nafana_command_info",
+            labels: info_labels,
+            value: PrometheusMetricValue::Gauge(1.0),
+        });
+    }
+    samples
+}
+
+/// 业务作用：将 Prometheus 有限累积桶转为 provider-neutral 非累积桶并补齐 `+Inf`。
+///
+/// 参数说明：
+/// - `cumulative`: 按边界递增的有限桶。
+/// - `count`: 包含全部观测的总数。
+///
+/// 返回：长度比有限边界多一的非累积桶；短暂不一致读取使用饱和减法保持可导出。
+fn non_cumulative_buckets(cumulative: &[u64], count: u64) -> Vec<u64> {
+    let mut previous = 0;
+    let mut buckets = Vec::with_capacity(cumulative.len() + 1);
+    for current in cumulative {
+        buckets.push(current.saturating_sub(previous));
+        previous = previous.max(*current);
+    }
+    buckets.push(count.saturating_sub(previous));
+    buckets
 }
 
 /// 业务作用：输出一族只按 (command, group) 打标签的 counter。

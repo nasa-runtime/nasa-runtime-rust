@@ -263,7 +263,7 @@ impl SecretSpec {
 
     /// 业务作用: 从最终 material 上限反推可接受的拼接输入上限，避免先聚合/解码任意大数据再做结果校验。
     fn input_limit(&self) -> Result<usize, SecretError> {
-        if !valid_id(&self.id) {
+        if !valid_secret_id(&self.id) {
             return Err(self.error(SecretErrorReason::InvalidId));
         }
         if self.fragments.len() > MAX_SECRET_FRAGMENTS {
@@ -537,13 +537,37 @@ impl SecretProviderRegistry {
     }
 }
 
-/// 业务作用: 将 provider、secret 与 participant ID 限制为短 ASCII 标识。
+/// 业务作用: 将 provider 与 participant ID 限制为短 ASCII 标识。
+///
+/// 参数说明:
+/// - `value`: 需要校验的 provider 或 participant ID。
+///
+/// 返回: ID 非空、长度不超过 64 字节且仅含封闭 ASCII 字符集时返回 `true`。
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// 业务作用: 将 secret ID 限制为有界 ASCII 层级标识，避免空分段和路径穿越。
+///
+/// 参数说明:
+/// - `value`: 需要校验的层级 secret ID。
+///
+/// 返回: ID 非空、长度不超过 128 字节，且每个分段均非空、不是路径特殊段并仅含封闭 ASCII 字符集时返回 `true`。
+fn valid_secret_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 /// 业务作用: 校验引用元数据的非空、长度与控制字符边界。
@@ -615,7 +639,7 @@ impl SecretSnapshot {
         let mut builder = SecretSnapshot::builder(generation);
         let mut ids = BTreeSet::new();
         for spec in specs {
-            if !valid_id(&spec.id) {
+            if !valid_secret_id(&spec.id) {
                 return Err(spec.error(SecretErrorReason::InvalidId));
             }
             if !ids.insert(Arc::clone(&spec.id)) {
@@ -641,7 +665,7 @@ impl SecretSnapshot {
         let mut builder = SecretSnapshot::builder(generation);
         let mut ids = BTreeSet::new();
         for spec in specs {
-            if !valid_id(&spec.id) {
+            if !valid_secret_id(&spec.id) {
                 return Err(spec.error(SecretErrorReason::InvalidId));
             }
             if !ids.insert(Arc::clone(&spec.id)) {
@@ -856,7 +880,7 @@ where
         if watched_ids.is_empty()
             || watched_ids
                 .iter()
-                .any(|id| !valid_id(id) || !initial.contains(id))
+                .any(|id| !valid_secret_id(id) || !initial.contains(id))
         {
             return Err(SecretResourceError::InvalidSecretReference);
         }
@@ -1244,7 +1268,7 @@ impl SecretSnapshotBuilder {
         id: Arc<str>,
         material: SecretBytes,
     ) -> Result<&mut Self, SecretError> {
-        if !valid_id(&id) {
+        if !valid_secret_id(&id) {
             return Err(secret_error(&id, SecretErrorReason::InvalidId));
         }
         if self.entries.contains_key(&id) {

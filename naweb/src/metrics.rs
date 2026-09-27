@@ -1,7 +1,7 @@
 //! 端点安全流水线的低基数进程内指标与 Prometheus 文本渲染。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -252,32 +252,35 @@ impl DurationHistogram {
         }
     }
 
-    /// 业务作用：记录一次有界阶段耗时。
+    /// 业务作用：记录一次有界阶段耗时，并按 count 先于累计 bucket 的发布顺序维持并发快照不变量。
     ///
-    /// # 参数
-    ///
+    /// 参数说明：
     /// - `duration`: 调用方用单调时钟测得的阶段时长。
+    ///
+    /// 返回：无；累计总数、所有命中 bucket 与耗时总和，读取方一旦看到 bucket 增量就一定能看到对应总数。
     fn observe(&self, duration: Duration) {
         let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        // 总数必须先于累计 bucket 登记；每个 bucket 的 Release 与快照的 Acquire 配对，
+        // 使并发读取即使跨越一次写入，也只会把暂不可见的 bucket 归入 +Inf，不会让 bucket 领先 count。
+        self.count.fetch_add(1, Ordering::Relaxed);
         for (index, bound) in DURATION_BUCKETS_NANOS.iter().enumerate() {
             if nanos <= *bound {
-                self.buckets[index].fetch_add(1, Ordering::Relaxed);
+                self.buckets[index].fetch_add(1, Ordering::Release);
             }
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 
-    /// 业务作用：读取一次一致性要求较弱但单调的抓取视图。
+    /// 业务作用：读取可供文本与结构化出口共用的单调直方图当前视图。
     ///
-    /// # 返回
+    /// 参数说明: 无。
     ///
-    /// 返回各 bucket、总数和总纳秒；并发写入期间允许相邻字段有极短时间差，符合 Prometheus
-    /// 累计指标抓取语义。
+    /// 返回：各累计 bucket、总数和总纳秒；并发写入期间允许把暂不可见的有限 bucket 归入
+    /// `+Inf`，但不会返回 bucket 领先 count 的不完整快照，下一次读取会自然收敛。
     fn export(&self) -> HistogramExport {
         HistogramExport {
-            buckets: std::array::from_fn(|index| self.buckets[index].load(Ordering::Relaxed)),
-            count: self.count.load(Ordering::Relaxed),
+            buckets: std::array::from_fn(|index| self.buckets[index].load(Ordering::Acquire)),
+            count: self.count.load(Ordering::Acquire),
             sum_nanos: self.sum_nanos.load(Ordering::Relaxed),
         }
     }
@@ -291,6 +294,35 @@ struct HistogramExport {
     count: u64,
     /// 总观测纳秒。
     sum_nanos: u64,
+}
+
+/// 安全指标注册表的 provider-neutral 当前值。
+#[derive(Debug, Clone)]
+pub enum SecurityMetricValue {
+    /// 单调累计值。
+    Counter(u64),
+    /// 当前状态值。
+    Gauge(f64),
+    /// 按固定边界分组的累计分布。
+    Histogram {
+        /// 每个有限边界及 `+Inf` 的非累积桶计数。
+        buckets: Vec<u64>,
+        /// 观测秒数总和。
+        sum: f64,
+        /// 观测总数。
+        count: u64,
+    },
+}
+
+/// 一个安全指标 family 与 label 组合的结构化快照。
+#[derive(Debug, Clone)]
+pub struct SecurityMetricSample {
+    /// 稳定的公开 family 名称。
+    pub name: &'static str,
+    /// 与 family descriptor 顺序一致的 label。
+    pub labels: Vec<(&'static str, String)>,
+    /// 当前值。
+    pub value: SecurityMetricValue,
 }
 
 /// 一条编译期路由的全部安全指标槽位。
@@ -434,6 +466,8 @@ impl RouteSecurityMetrics {
 pub struct SecurityMetrics {
     /// 按静态 route ID 排序的有限路由指标集合。
     routes: RwLock<BTreeMap<&'static str, Arc<RouteSecurityMetrics>>>,
+    /// 统一指标目录完成容量预留后关闭新 route ID 注册，保证渲染面不越过冻结上界。
+    frozen: AtomicBool,
     /// 成功发布与失败保留 last-good 的热更新计数。
     reloads: [AtomicU64; 2],
     /// 当前已发布安全快照代次。
@@ -453,6 +487,7 @@ impl SecurityMetrics {
     pub fn new(generation: u64) -> Self {
         Self {
             routes: RwLock::new(BTreeMap::new()),
+            frozen: AtomicBool::new(false),
             reloads: std::array::from_fn(|_| AtomicU64::new(0)),
             generation: AtomicU64::new(generation),
         }
@@ -467,15 +502,51 @@ impl SecurityMetrics {
     /// # 返回
     ///
     /// 同一 route ID 始终返回同一原子集合；注册数量受二进制静态路由数限制，不读取 raw path。
+    ///
+    /// # Panics
+    ///
+    /// [`SecurityMetrics::freeze_worst_case_series`] 返回后传入此前未登记的 route ID 时中止调用；
+    /// 冻结后的集合不能继续增长，否则进程级指标目录已经预留的最坏序列上界会失真。既有 route ID
+    /// 在请求期仍可重复取得，不会触发该门禁。
     pub fn route(&self, policy: RoutePolicy) -> Arc<RouteSecurityMetrics> {
         if let Some(existing) = read_routes(&self.routes).get(policy.route_id).cloned() {
             return existing;
         }
         let mut routes = write_routes(&self.routes);
+        if let Some(existing) = routes.get(policy.route_id).cloned() {
+            return existing;
+        }
+        // 容量预留与新 route 注册共享写锁作为线性化点；冻结后继续增长会让统一目录的
+        // 最坏序列上界失真，因此必须在路由开放前明确中止装配。
+        assert!(
+            !self.frozen.load(Ordering::Acquire),
+            "security metric route registration is closed after series budget freeze"
+        );
         routes
             .entry(policy.route_id)
             .or_insert_with(|| Arc::new(RouteSecurityMetrics::new(policy)))
             .clone()
+    }
+
+    /// 业务作用：计算当前静态路由集合在全部指标槽位被观测后可能导出的最大 Prometheus 序列数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：包含 counter、gauge，以及每个 histogram 的有限 bucket、正无穷 bucket、sum、count；
+    /// 结果供进程级指标目录在发布兼容源前一次性预留容量。
+    pub fn worst_case_series(&self) -> usize {
+        worst_case_series_for(&read_routes(&self.routes))
+    }
+
+    /// 业务作用：在统一指标目录预留容量的线性化点冻结 route 集合并返回精确最坏序列数。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：写锁内观测到的完整 route 集合上界；返回后既有 route 可继续记录，新 route ID 会拒绝注册。
+    pub fn freeze_worst_case_series(&self) -> usize {
+        let routes = write_routes(&self.routes);
+        self.frozen.store(true, Ordering::Release);
+        worst_case_series_for(&routes)
     }
 
     /// 业务作用：记录一次安全快照热更新结果。
@@ -531,6 +602,189 @@ impl SecurityMetrics {
         ));
         output
     }
+
+    /// 业务作用：直接从安全 registry 读取与 Prometheus 出口同源的结构化当前值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：指标名、label 和累计语义与文本出口一致；读取不会清零计数器或直方图。
+    pub fn structured_snapshot(&self) -> Vec<SecurityMetricSample> {
+        let routes = read_routes(&self.routes)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut samples = Vec::new();
+        for route in &routes {
+            for outcome in metric_outcomes() {
+                samples.push(SecurityMetricSample {
+                    name: "mapping_security_requests_total",
+                    labels: vec![
+                        ("route_id", route.route_id.to_owned()),
+                        ("outcome", outcome.label().to_owned()),
+                    ],
+                    value: SecurityMetricValue::Counter(
+                        route.requests[outcome.index()].load(Ordering::Relaxed),
+                    ),
+                });
+            }
+            if route.auth_requirement != "public" && route.auth_requirement != "unspecified" {
+                for outcome in auth_outcomes() {
+                    samples.push(SecurityMetricSample {
+                        name: "mapping_auth_requests_total",
+                        labels: vec![
+                            ("route_id", route.route_id.to_owned()),
+                            ("requirement", route.auth_requirement.to_owned()),
+                            ("outcome", outcome.label().to_owned()),
+                        ],
+                        value: SecurityMetricValue::Counter(
+                            route.auth[outcome.index()].load(Ordering::Relaxed),
+                        ),
+                    });
+                }
+            }
+            for (enabled, direction, counters) in [
+                (
+                    route.crypto_directions.request,
+                    "request",
+                    &route.crypto_request,
+                ),
+                (
+                    route.crypto_directions.response,
+                    "response",
+                    &route.crypto_response,
+                ),
+            ] {
+                if !enabled {
+                    continue;
+                }
+                for outcome in metric_outcomes() {
+                    samples.push(SecurityMetricSample {
+                        name: "mapping_crypto_requests_total",
+                        labels: vec![
+                            ("route_id", route.route_id.to_owned()),
+                            ("protocol", route.protocol.to_owned()),
+                            ("direction", direction.to_owned()),
+                            ("outcome", outcome.label().to_owned()),
+                        ],
+                        value: SecurityMetricValue::Counter(
+                            counters[outcome.index()].load(Ordering::Relaxed),
+                        ),
+                    });
+                }
+            }
+            if route.replay_required {
+                for outcome in replay_outcomes() {
+                    samples.push(SecurityMetricSample {
+                        name: "mapping_crypto_replay_total",
+                        labels: vec![
+                            ("route_id", route.route_id.to_owned()),
+                            ("outcome", outcome.label().to_owned()),
+                        ],
+                        value: SecurityMetricValue::Counter(
+                            route.replay[outcome.index()].load(Ordering::Relaxed),
+                        ),
+                    });
+                }
+            }
+            if let Some(condition) = route.condition {
+                samples.push(SecurityMetricSample {
+                    name: "mapping_crypto_bypass_total",
+                    labels: vec![
+                        ("route_id", route.route_id.to_owned()),
+                        ("condition", condition.to_owned()),
+                    ],
+                    value: SecurityMetricValue::Counter(route.bypass.load(Ordering::Relaxed)),
+                });
+            }
+            for operation in metric_operations() {
+                let export = route.durations[operation.index()].export();
+                if export.count == 0 {
+                    continue;
+                }
+                samples.push(SecurityMetricSample {
+                    name: "mapping_crypto_duration_seconds",
+                    labels: vec![
+                        ("route_id", route.route_id.to_owned()),
+                        ("protocol", route.protocol.to_owned()),
+                        ("operation", operation.label().to_owned()),
+                    ],
+                    value: SecurityMetricValue::Histogram {
+                        buckets: non_cumulative_buckets(&export.buckets, export.count),
+                        sum: export.sum_nanos as f64 / 1_000_000_000_f64,
+                        count: export.count,
+                    },
+                });
+            }
+        }
+        for (outcome, value) in [
+            ("success", self.reloads[0].load(Ordering::Relaxed)),
+            ("failure", self.reloads[1].load(Ordering::Relaxed)),
+        ] {
+            samples.push(SecurityMetricSample {
+                name: "mapping_crypto_key_reload_total",
+                labels: vec![("outcome", outcome.to_owned())],
+                value: SecurityMetricValue::Counter(value),
+            });
+        }
+        samples.push(SecurityMetricSample {
+            name: "mapping_crypto_snapshot_generation",
+            labels: Vec::new(),
+            value: SecurityMetricValue::Gauge(self.generation.load(Ordering::Acquire) as f64),
+        });
+        samples
+    }
+}
+
+/// 业务作用：将 Prometheus 有限累积桶转为 provider-neutral 非累积桶并补齐 `+Inf`。
+///
+/// 参数说明：
+/// - `cumulative`: 按边界递增的有限桶。
+/// - `count`: 包含全部观测的总数。
+///
+/// 返回：长度比有限边界多一的非累积桶；不一致读取会用饱和减法保持可导出。
+fn non_cumulative_buckets(
+    cumulative: &[u64; DURATION_BUCKETS_NANOS.len()],
+    count: u64,
+) -> Vec<u64> {
+    let mut previous = 0;
+    let mut buckets = Vec::with_capacity(cumulative.len() + 1);
+    for current in cumulative {
+        buckets.push(current.saturating_sub(previous));
+        previous = previous.max(*current);
+    }
+    buckets.push(count.saturating_sub(previous));
+    buckets
+}
+
+/// 业务作用：按冻结或只读的安全 route 集合计算全部 counter、gauge 与 histogram 的序列上界。
+///
+/// 参数说明：
+/// - `routes`：以稳定 route ID 去重后的指标集合。
+///
+/// 返回：包含三条全局序列和每条 route 全部可能槽位的饱和和。
+fn worst_case_series_for(routes: &BTreeMap<&'static str, Arc<RouteSecurityMetrics>>) -> usize {
+    const GLOBAL_SERIES: usize = 3;
+    const HISTOGRAM_SERIES: usize = DURATION_BUCKETS_NANOS.len() + 3;
+    routes.values().fold(GLOBAL_SERIES, |total, route| {
+        let auth = usize::from(
+            route.auth_requirement != "public" && route.auth_requirement != "unspecified",
+        ) * auth_outcomes().len();
+        let crypto_directions = usize::from(route.crypto_directions.request)
+            + usize::from(route.crypto_directions.response);
+        let crypto = crypto_directions * metric_outcomes().len();
+        let replay = usize::from(route.replay_required) * replay_outcomes().len();
+        let bypass = usize::from(route.condition.is_some());
+        let durations = metric_operations().len() * HISTOGRAM_SERIES;
+        total.saturating_add(
+            metric_outcomes()
+                .len()
+                .saturating_add(auth)
+                .saturating_add(crypto)
+                .saturating_add(replay)
+                .saturating_add(bypass)
+                .saturating_add(durations),
+        )
+    })
 }
 
 impl Default for SecurityMetrics {

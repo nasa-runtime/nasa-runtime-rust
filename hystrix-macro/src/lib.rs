@@ -2,21 +2,13 @@
 //!
 //! 宏在编译期把 async handler 包装进 `hystrix` 运行时命令，保留原函数签名，
 //! 并把并发拒绝、超时降级和指标采集接入统一 Dashboard。
-// ============================================================================
-// hystrix-macro —— 自定义属性宏 #[hystrix(name=.., max_concurrent=.., timeout_ms=.., tps=.., reject_response=.., timeout_response=..)]
-//
-// 作用:贴在一个 axum async handler 上,【编译期】把它【改写】成
-//   「先抢信号量(满→429)、再限时执行原逻辑(超时→504)」的版本。
-//   = 注解驱动的 bulkhead + 超时,对照 src/hystrix.rs 的"显式中间件 Command::run"写法。
-//
-// ✅ 它【接入真正的 hystrix Command】:宏把"原函数体"包成闭包,交给 ::hystrix::Command::run_fn
-//    执行。Command 在首次调用时构造并自动注册进全局 REGISTRY,所以注解版的 bulkhead/超时/成功率/延迟
-//    会和 /heavy/slow、/spot/kline 一样【出现在 /hystrix.stream Dashboard 上】(一个名为注解里 name 的圈)。
-//    —— 之前做成自带 Semaphore 不上 Dashboard,等于"隔离了但监控看不到",注解价值大打折扣;现已修正。
-//    为此在 hystrix.rs【新增】了一个 run_fn 入口(run 重构成它的薄封装,原行为不变),没有破坏对照路由。
-//
-// 三类过程宏里这是【attribute 属性宏】(另两类:derive 派生宏、function-like 函数宏)。
-// ============================================================================
+//!
+//! # 命令归属与应用实例
+//!
+//! 独立模式在首次调用时取得命令；Application 受管模式在 Ready 前收集静态描述并装配本代目录。
+//! 宏缓存只持有带代次的弱引用，下一实例重新解析当前 owner；不会用静态强引用延长旧实例寿命。
+//! 业务体交给 `hystrix::Command::run_fn`，关闭后的旧命令返回 503。`global_fallback` 只登记静态
+//! 函数描述，不拥有运行任务，也不替代命令 owner 的在途等待与关闭责任。
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
@@ -456,22 +448,26 @@ pub fn hystrix(attr: TokenStream, item: TokenStream) -> TokenStream {
         //   由 axum 照常提取参数填进来，下面 #block 直接用这些参数(见 ② 的 `async move #block` 会捕获它们)。
         #(#attrs)*
         #vis #sig {
-            // ① 每个被注解的 handler 各自持有一个【进程内静态、只构造一次】的 Command。
-            //    用 OnceLock 懒初始化：第一次请求进来时构造 Command 并自动注册进 hystrix 全局 REGISTRY
-            //    → 之后 /hystrix.stream 就会上报这个圈、Dashboard 看得到。
-            //    类型写全 ::std::sync::OnceLock / ::std::sync::Arc(绝对路径，宏卫生)；
-            //    ::hystrix::Command 指主 crate 的命令类型(展开后 crate=主 crate)。
-            static __HYSTRIX_CMD: ::std::sync::OnceLock<::std::sync::Arc<#root::Command>> =
-                ::std::sync::OnceLock::new();
-            // get_or_init：已初始化则返回现有 Arc，否则跑一次闭包构造。.clone() 拿一份 Arc(run_fn 要 self: Arc<Self>)。
-            let __cmd = __HYSTRIX_CMD.get_or_init(|| {
-                // #ctor = 上面按 tps 选好的构造调用(tps>0→with_tps / tps=0→new)，group 统一为 "macro"。
-                let __c = #ctor;
-                __c.set_path(#name); // CostTime 定时日志显示用(没有真实路由就用 name)
-                #set_reject  // 自定义限流返回(写了 reject_response 才生成)
-                #set_timeout // 自定义超时返回(写了 timeout_response 才生成)
-                __c
-            }).clone();
+            // 静态描述持有代码，受管运行实例按 owner 代次缓存弱引用并在准备阶段校验。
+            static __HYSTRIX_CMD: #root::__private::CommandSlot = #root::__private::CommandSlot::new();
+            #[#root::__private::linkme::distributed_slice(#root::__private::COLLECTED_COMMANDS)]
+            #[linkme(crate = #root::__private::linkme)]
+            static __HYSTRIX_DESCRIPTOR: #root::__private::CollectedCommand = #root::__private::CollectedCommand {
+                slot: &__HYSTRIX_CMD,
+                factory: || {
+                    let __c = #ctor;
+                    __c.set_path(#name);
+                    #set_reject
+                    #set_timeout
+                    __c
+                },
+            };
+            let __cmd = match __HYSTRIX_CMD.get(__HYSTRIX_DESCRIPTOR.factory) {
+                Ok(command) => command,
+                Err(_) => return #root::__private::axum::response::IntoResponse::into_response(
+                    #root::__private::axum::http::StatusCode::SERVICE_UNAVAILABLE
+                ),
+            };
 
             // ② 把【原函数体 #block】包成"无参闭包 → 产出 Response 的 future"，交给 Command::run_fn 执行。
             //    run_fn 内部:先 try_acquire(满→429)、再 timeout 限时跑这个 future(超时→504)、并把

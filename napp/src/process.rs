@@ -123,7 +123,10 @@ fn build_component(
         ComponentId::NacosConfig => build_nacos_config_component(spec, pinned_application),
         ComponentId::Db => build_db_component(),
         ComponentId::Redis => build_redis_component(),
+        ComponentId::RedisJob => build_redis_job_component(),
         ComponentId::Telemetry => build_telemetry_component(),
+        ComponentId::Partition => build_partition_component(),
+        ComponentId::Grpc => build_grpc_component(),
         ComponentId::Cache => build_cache_component(),
         ComponentId::Saga => build_saga_component(),
         ComponentId::Kafka => build_kafka_component(),
@@ -133,10 +136,44 @@ fn build_component(
         ComponentId::Scheduling => build_scheduling_component(),
         ComponentId::NacosDiscovery => build_nacos_discovery_component(),
         ComponentId::Application
+        | ComponentId::SqlObservability
+        | ComponentId::Observability
         | ComponentId::Config
         | ComponentId::Resources
         | ComponentId::Supervisor
         | ComponentId::UserHook => Err(non_declarable_component_error(id)),
+    }
+}
+
+/// 业务作用：构造稳定受管 gRPC listener；能力未编入时拒绝退化为业务自管端口。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `grpc` 时返回受管组件，否则返回指向门面 feature 的启动错误。
+fn build_grpc_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "grpc")]
+    {
+        Ok(Box::new(crate::grpc::GrpcComponent::new()))
+    }
+    #[cfg(not(feature = "grpc"))]
+    {
+        Err(feature_missing_error(ComponentId::Grpc, "grpc"))
+    }
+}
+
+/// 业务作用：构造保序执行器组件；能力未编入时拒绝把生命周期声明降级为业务自管 worker。
+///
+/// 参数说明: 无。
+///
+/// 返回：启用 `partition` 时返回受管组件，否则返回指向门面 feature 的启动错误。
+fn build_partition_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "partition")]
+    {
+        Ok(Box::new(crate::partition::PartitionComponent::new()))
+    }
+    #[cfg(not(feature = "partition"))]
+    {
+        Err(feature_missing_error(ComponentId::Partition, "partition"))
     }
 }
 
@@ -257,11 +294,11 @@ fn build_nacos_config_component(
 ///
 /// 本函数无参数；是否编入数据源组件由编译期 feature 决定。
 fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     {
         Ok(Box::new(crate::db::DbComponent::new()))
     }
-    #[cfg(not(feature = "db"))]
+    #[cfg(not(any(feature = "db", feature = "db-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Db, "tx"))
     }
@@ -273,11 +310,11 @@ fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationErro
 ///
 /// 返回：启用 `saga-runtime` 时返回受管组件，否则返回启动配置错误。
 fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     {
         Ok(Box::new(crate::saga::SagaComponent::new()))
     }
-    #[cfg(not(feature = "saga"))]
+    #[cfg(not(any(feature = "saga", feature = "saga-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Saga, "saga-runtime"))
     }
@@ -289,11 +326,11 @@ fn build_saga_component() -> Result<Box<dyn ApplicationComponent>, ApplicationEr
 ///
 /// 返回：启用 `outbox` 时返回生命周期组件，否则返回指向门面 feature 的启动错误。
 fn build_outbox_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     {
         Ok(Box::new(crate::outbox::OutboxComponent::new()))
     }
-    #[cfg(not(feature = "outbox"))]
+    #[cfg(not(any(feature = "outbox", feature = "outbox-pgsql")))]
     {
         Err(feature_missing_error(ComponentId::Outbox, "outbox"))
     }
@@ -312,6 +349,22 @@ fn build_redis_component() -> Result<Box<dyn ApplicationComponent>, ApplicationE
     #[cfg(not(feature = "redis"))]
     {
         Err(feature_missing_error(ComponentId::Redis, "redis"))
+    }
+}
+
+/// 业务作用：构造独立 RedisJob 组件；能力未编入时定向提示 `redis-job` feature。
+///
+/// 参数说明: 无。
+///
+/// 返回：已编入时返回组件；否则在任何 Job 副作用前返回 feature 错误。
+fn build_redis_job_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "redis-job")]
+    {
+        Ok(Box::new(crate::redis_job::RedisJobComponent::new()))
+    }
+    #[cfg(not(feature = "redis-job"))]
+    {
+        Err(feature_missing_error(ComponentId::RedisJob, "redis-job"))
     }
 }
 
@@ -430,7 +483,63 @@ fn install_fallback_subscriber() {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    #[cfg(feature = "mapper-observability")]
+    {
+        let base = filter.to_string();
+        let builder = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_filter_reloading();
+        let handle = builder.reload_handle();
+        if builder.try_init().is_ok() {
+            let _ = FALLBACK_FILTER.set((base, handle));
+        }
+    }
+    #[cfg(not(feature = "mapper-observability"))]
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(feature = "mapper-observability")]
+type FallbackFilter = tracing_subscriber::reload::Handle<
+    tracing_subscriber::EnvFilter,
+    tracing_subscriber::fmt::Formatter,
+>;
+#[cfg(feature = "mapper-observability")]
+static FALLBACK_FILTER: std::sync::OnceLock<(String, FallbackFilter)> = std::sync::OnceLock::new();
+
+/// 业务作用：没有文件日志组件时也让 YAML 的 SQL console 开关作用于框架控制台。
+/// 参数说明：`root` 为已经合并的最终配置，过滤器只归框架 fallback subscriber 所有。
+/// 返回：固定 SQL target 合并成功；外部自定义 subscriber 不被替换，非法指令拒绝启动。
+#[cfg(feature = "mapper-observability")]
+pub(crate) fn configure_fallback_sql_logging(
+    root: &serde_json::Value,
+) -> crate::ApplicationResult<()> {
+    let Some((base, handle)) = FALLBACK_FILTER.get() else {
+        return Ok(());
+    };
+    let directive =
+        namapper_core::observability::config::console_directive(root).map_err(|message| {
+            ApplicationError::new(
+                ComponentId::SqlObservability,
+                ApplicationPhase::Start,
+                message,
+            )
+        })?;
+    let parameters = directive.replace("sqlx::query=", "namapper::parameters=");
+    let filter = tracing_subscriber::EnvFilter::try_new(format!("{base},{directive},{parameters}"))
+        .map_err(|_| {
+            ApplicationError::new(
+                ComponentId::SqlObservability,
+                ApplicationPhase::Start,
+                "invalid effective SQL console filter",
+            )
+        })?;
+    handle.reload(filter).map_err(|_| {
+        ApplicationError::new(
+            ComponentId::SqlObservability,
+            ApplicationPhase::Start,
+            "SQL console filter is unavailable",
+        )
+    })
 }
 
 /// 业务作用：创建由同步入口独占的多线程 runtime。

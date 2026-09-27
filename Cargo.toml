@@ -1,22 +1,6 @@
-# ============================================================================
-# nasa-runtime-rust —— NASA Rust 共享组件工作区
-#
-# ★ 业务唯一入口 = `nasa` 门面 crate(单一公共入口 + 模块分区 + feature 按需):
-#     nasa = { ..., features = ["hystrix", "cache", "tx", "scheduling", "web", "ws-redis"] }
-#     use nasa::hystrix::hystrix;  use nasa::ws::Server;  #[nasa::web::get_mapping("/x")]
-#   其余成员都是【实现细节】,业务项目不得直接依赖;
-#   旧式直接依赖(hystrix/cacheable/...)仍兼容(宏按"旧直接依赖优先"解析),仅供渐进迁移。
-#
-# 成员:
-#   *-macro   过程宏(proc-macro crate)
-#   hystrix   熔断/监控门面(Command/stream + #[hystrix])
-#   nafana    接口级隔离监控(Prometheus/Grafana 出口 + #[grafana])
-#   cacheable 两级缓存门面(L1 moka + L2 redis 三防 + #[cached]/#[cache_invalidate])
-#   tx        事务门面(task_local ambient 事务 + #[transactional])
-#   scheduling 异步/定时门面(tokio-cron-scheduler + #[Async]/#[Scheduled]/#[EnableAsync])
-#   naweb      Web 路由、interceptor 与端点安全运行时
-#   naweb-macro 路由注解(#[get_mapping]/#[post_mapping]/#[put_mapping]/#[delete_mapping]/#[patch_mapping] + mvc_router!,收集点在用户 crate 生成)
-# ============================================================================
+# nasa-runtime-rust —— NASA Rust 共享组件工作区。
+# 业务应用以 `nasa` 为门面并按 feature 选择能力；组件 crate 负责具体运行时、adapter 与宏展开。
+# 直接依赖组件 crate 时，调用方必须自行承担其 README 声明的初始化、生命周期和安全边界。
 [workspace]
 resolver = "2"
 members = [
@@ -26,11 +10,13 @@ members = [
     "macro-support",
     "naweb",
     "namapper-macro",
+    "namapper-core",
     "namapper",
+    "namapper-pgsql",
     "hystrix-macro", "hystrix",
     "nafana-macro", "nafana",
     "nacache-macro", "cacheable",
-    "natx-macro", "natx",
+    "natx-macro", "natx-core", "natx", "natx-pgsql",
     "async-macro", "nasched",
     "naweb-macro",
     "napart",
@@ -43,9 +29,10 @@ members = [
     "nadis-derive",
     "ncrypto",
     "nanum",
-    "nadate",
     "nametrics-core",
+    "nanotify-core",
     "nagrpc",
+    "nagrpc-build",
     "naobject",
     "nasecret",
     "nasecret-http",
@@ -55,20 +42,30 @@ members = [
     "nauth-oauth",
     "naidempotency",
     "naidempotency-mysql",
+    "naidempotency-pgsql",
     "naidempotency-redis",
     "naoutbox-core",
     "naoutbox-mysql",
+    "naoutbox-pgsql",
     "nainbox-core",
     "nainbox-mysql",
+    "nainbox-pgsql",
     "nasaga-core",
+    "nasaga-backend",
     "nasaga-mysql",
+    "nasaga-pgsql",
+    "nasaga-runtime-core",
     "nasaga-runtime",
+    "nasaga-runtime-pgsql",
     "nasaga-macro",
     "naopenapi",
+    "namigrate-core",
     "namigrate",
+    "namigrate-pgsql",
     "naauthz",
     "naaudit",
     "naaudit-mysql",
+    "naaudit-pgsql",
     "naimg",
     "nalog",
     "nabase",
@@ -90,3 +87,101 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
+
+# 成员间依赖使用公开版本约束；workspace patch 统一直接与传递引用的本地 crate 身份。
+# 归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
+[patch.crates-io]
+nadisc = { path = "nadisc" }
+nasecret-vault = { path = "nasecret-vault" }
+nasecret-http = { path = "nasecret-http" }
+nanotify-core = { path = "nanotify-core" }
+# 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
+macro-support = { path = "macro-support" }
+cacheable = { path = "cacheable" }
+nadis-derive = { path = "nadis-derive" }
+nafka = { path = "nafka" }
+namapper = { path = "namapper" }
+namapper-core = { path = "namapper-core" }
+namapper-macro = { path = "namapper-macro" }
+namapper-pgsql = { path = "namapper-pgsql" }
+namigrate = { path = "namigrate" }
+namigrate-core = { path = "namigrate-core" }
+namigrate-pgsql = { path = "namigrate-pgsql" }
+nanum = { path = "nanum" }
+nabase = { path = "nabase" }
+naws = { path = "naws" }
+# 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
+hystrix = { path = "hystrix" }
+# 配置加载器与组合组件必须共享同一 naml 类型身份。
+naml = { path = "naml" }
+# 进程一致性依赖必须单来源:task-local 事务上下文与 Inbox 访问若在同一图里出现
+# 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
+natx = { path = "natx" }
+natx-core = { path = "natx-core" }
+natx-macro = { path = "natx-macro" }
+natx-pgsql = { path = "natx-pgsql" }
+nainbox-core = { path = "nainbox-core" }
+nainbox-mysql = { path = "nainbox-mysql" }
+nainbox-pgsql = { path = "nainbox-pgsql" }
+naidempotency = { path = "naidempotency" }
+naidempotency-mysql = { path = "naidempotency-mysql" }
+naidempotency-pgsql = { path = "naidempotency-pgsql" }
+naidempotency-redis = { path = "naidempotency-redis" }
+naoutbox-core = { path = "naoutbox-core" }
+naoutbox-pgsql = { path = "naoutbox-pgsql" }
+naaudit-mysql = { path = "naaudit-mysql" }
+naaudit-pgsql = { path = "naaudit-pgsql" }
+# 同版本双身份消除:成员既按 path 直依赖、又经其它成员的公开坐标传递引用的 crate,
+# 必须统一来源,否则类型跨身份流动即编译失败或行为分裂。
+ncrypto = { path = "ncrypto" }
+naaudit = { path = "naaudit" }
+naws-proto = { path = "naws-proto" }
+rest-discovery = { path = "rest-discovery" }
+nabudget = { path = "nabudget" }
+nalog = { path = "nalog" }
+nacache-macro = { path = "nacache-macro" }
+async-macro = { path = "async-macro" }
+nasaga-core = { path = "nasaga-core" }
+nasaga-backend = { path = "nasaga-backend" }
+nasaga-mysql = { path = "nasaga-mysql" }
+nasaga-pgsql = { path = "nasaga-pgsql" }
+nasaga-runtime-core = { path = "nasaga-runtime-core" }
+nasaga-runtime = { path = "nasaga-runtime" }
+nasaga-runtime-pgsql = { path = "nasaga-runtime-pgsql" }
+nasaga-macro = { path = "nasaga-macro" }
+naoutbox-mysql = { path = "naoutbox-mysql" }
+# 对象存储指标源在门面构造，adapter 与门面必须共享同一 naobject 类型身份。
+naobject = { path = "naobject" }
+# 门面与 Application 生命周期必须共享同一 napart 身份，否则受管句柄无法流经公开门面类型。
+napart = { path = "napart" }
+# 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
+nagrpc = { path = "nagrpc" }
+nagrpc-build = { path = "nagrpc-build" }
+# 指标统一目录与领域结构化快照必须共享同一类型身份，才能由 Application 完成文本与 OTLP 双出口。
+nametrics-core = { path = "nametrics-core" }
+natelemetry = { path = "natelemetry" }
+nanacos = { path = "nanacos" }
+rest-discovery-nacos = { path = "rest-discovery-nacos" }
+nasecret = { path = "nasecret" }
+config-boot = { path = "config-boot" }
+naweb = { path = "naweb" }
+nafana = { path = "nafana" }
+# 门面与 Application 生命周期必须共享同一 napp 类型身份，避免受管句柄和组件快照分裂。
+napp = { path = "napp" }
+napp-macro = { path = "napp-macro" }
+nadis = { path = "nadis" }
+# 授权快照、调度运行时与门面宏桥必须分别共享同一依赖身份。
+naauthz = { path = "naauthz" }
+nasched = { path = "nasched" }
+# 门面与声明式 REST 客户端宏必须共享同一依赖身份，确保生成代码使用一致的错误和参数类型。
+rest-client-macro = { path = "rest-client-macro" }
+# 工作区成员使用同一组本地版本；宏与可选门面能力也不能另行解析为 registry 副本。
+hystrix-macro = { path = "hystrix-macro" }
+nafana-macro = { path = "nafana-macro" }
+nafka-macro = { path = "nafka-macro" }
+naimg = { path = "naimg" }
+naopenapi = { path = "naopenapi" }
+nasa = { path = "nasa" }
+nauth-oauth = { path = "nauth-oauth" }
+naweb-macro = { path = "naweb-macro" }
+naws-proto-derive = { path = "naws-proto-derive" }

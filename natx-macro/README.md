@@ -1,10 +1,28 @@
 # natx-macro
 
-`natx-macro` 提供 `#[transactional]` 属性宏。业务通常从 `nasa::tx::transactional` 或 `natx::transactional` 使用，不直接依赖本宏 crate。
+`natx-macro` 提供 MySQL 与 PostgreSQL 两条编译期固定后端的事务属性宏。业务通常从
+`nasa::tx::transactional`、`natx::transactional`、`nasa::tx::pgsql::transactional` 或
+`natx_pgsql::transactional` 使用，不直接依赖本宏 crate。
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["tx"] }
+nasa = { version = "1.0.3", features = ["tx"] }
+```
+
+PostgreSQL 入口使用独立 feature 和模块：
+
+```toml
+[dependencies]
+nasa = { version = "1.0.3", default-features = false, features = ["tx-pgsql"] }
+```
+
+```rust
+use nasa::tx::pgsql::transactional;
+
+#[transactional(datasource = "reporting")]
+async fn create_report() -> anyhow::Result<()> {
+    Ok(())
+}
 ```
 
 ```rust
@@ -33,6 +51,9 @@ nasa::tx::run(async move { ... }).await
 nasa::tx::run_for("reporting", async move { ... }).await
 ```
 
+PostgreSQL 宏固定展开到 `nasa::tx::pgsql::run[_for]` 或直接运行时 `natx_pgsql::run[_for]`，不会根据
+URL 在运行期猜测数据库后端。
+
 约束：
 
 - 只能用于 `async fn`。
@@ -41,7 +62,9 @@ nasa::tx::run_for("reporting", async move { ... }).await
 
 ## YML 配置与使用
 
-`natx-macro` 没有运行期 yml。事务 datasource 名称写在属性上，MySQL URL 和连接池大小写在应用 yml，并由 `natx` 启动时注册。
+`natx-macro` 没有运行期 yml。事务 datasource 名称写在属性上；连接 URL、pool 参数与注册由对应 typed
+runtime 处理。Application 组合通过 `napp` 受管 MySQL/PostgreSQL pool；standalone 使用时由业务显式
+建立并注册对应 pool。
 
 推荐配置：
 
@@ -51,7 +74,8 @@ datasources:
     url: ${APP_MYSQL_URL}
     max_connections: 16
   reporting:
-    url: ${APP_REPORTING_MYSQL_URL}
+    driver: postgresql
+    url: ${APP_REPORTING_POSTGRES_URL}
     max_connections: 8
 ```
 
@@ -61,8 +85,9 @@ datasources:
 | --- | --- |
 | 是否开启事务 | `#[transactional]` 属性 |
 | datasource 名称 | `#[transactional(datasource = "...")]` |
-| MySQL URL、连接池参数 | 应用 yml |
+| MySQL/PostgreSQL URL、连接池参数 | 应用 yml |
 | pool 注册 | `natx::try_init` / `natx::try_init_datasource` |
+| PostgreSQL standalone pool 注册 | `natx_pgsql::try_init` / `natx_pgsql::try_init_datasource` |
 
 示例：
 

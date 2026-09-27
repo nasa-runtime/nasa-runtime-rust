@@ -1,10 +1,19 @@
-//! 实验性 Confluent-compatible Schema Registry client 与 wire envelope。
+//! 有界 Confluent-compatible Schema Registry client 与 wire envelope。
 //!
-//! 该模块是 Kafka codec 子能力，不拥有 Application 生命周期，也不启动 registry 服务端。生产默认禁止
+//! 该模块提供可独立使用的 Kafka codec 子能力，不启动 registry 服务端；命名受管实例的生命周期
+//! 由 Application 适配层承担。生产默认禁止
 //! 自动注册；业务数据面只按已批准 schema ID 拉取并使用有界正/负缓存。
+//!
+//! 数据面先校验 Confluent magic byte、payload 上限与 `ApprovedSchemaIds`，再按 ID 读取缓存或
+//! Registry；控制面的兼容性检查与注册独立记账，不会稀释数据面命中率。endpoint、响应体、缓存、
+//! timeout 与 credential 均有边界，错误不携带 endpoint、subject、schema 正文或认证信息。
+//!
+//! 本模块不生成 Avro/Protobuf/JSON codec，不决定 subject 命名、兼容级别、发布审批、ACL 或灾备。
+//! 调用取消后远端结果未知，写入方必须依靠 Registry 去重语义和自己的发布流程安全重试。
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -248,9 +257,332 @@ pub trait SchemaRegistryClient: Send + Sync {
     ) -> Result<SchemaId, SchemaRegistryError>;
 }
 
+/// schema 查询的封闭结局；label 取值域固定，不随 schema ID 或 subject 扩张。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SchemaLookupOutcome {
+    /// 正缓存命中，未访问 registry。
+    CacheHit,
+    /// 负缓存命中，未访问 registry，直接判定不存在。
+    NegativeCacheHit,
+    /// 缓存未命中，向 registry 拉取并成功写回正缓存。
+    Fetched,
+    /// 缓存未命中，registry 明确返回不存在并写回负缓存。
+    FetchedMissing,
+    /// 缓存未命中，拉取因传输、状态码或应答格式失败，未污染缓存。
+    FetchFailed,
+    /// 查询 future 在返回结局前被丢弃；远端是否收到或完成请求未知。
+    Cancelled,
+}
+
+impl SchemaLookupOutcome {
+    /// 业务作用：返回结局的稳定低基数 label 值，供导出面使用。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：与枚举一一对应的固定字符串。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CacheHit => "cache_hit",
+            Self::NegativeCacheHit => "negative_cache_hit",
+            Self::Fetched => "fetched",
+            Self::FetchedMissing => "fetched_missing",
+            Self::FetchFailed => "fetch_failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// 全部结局的固定顺序；导出面据此生成稳定序列。
+const SCHEMA_LOOKUP_OUTCOMES: [SchemaLookupOutcome; 6] = [
+    SchemaLookupOutcome::CacheHit,
+    SchemaLookupOutcome::NegativeCacheHit,
+    SchemaLookupOutcome::Fetched,
+    SchemaLookupOutcome::FetchedMissing,
+    SchemaLookupOutcome::FetchFailed,
+    SchemaLookupOutcome::Cancelled,
+];
+
+/// 一个查询结局的累计次数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaLookupCount {
+    /// 结局分类。
+    pub outcome: SchemaLookupOutcome,
+    /// 累计次数。
+    pub lookups: u64,
+}
+
+/// Registry 控制面操作；label 取值域固定，不随 subject 或 schema 类型扩张。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SchemaControlOperation {
+    /// 检查候选 schema 的兼容性。
+    Compatibility,
+    /// 注册新的 schema 修订。
+    Register,
+}
+
+impl SchemaControlOperation {
+    /// 业务作用：返回控制面操作的稳定低基数 label 值。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：与枚举一一对应的固定字符串。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Compatibility => "compatibility",
+            Self::Register => "register",
+        }
+    }
+}
+
+/// Registry 控制面请求的封闭结局；远端状态码和 subject 不进入 label。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SchemaControlOutcome {
+    /// 远端成功应答且响应符合合同；兼容性结论为 false 也属于成功应答。
+    Success,
+    /// 本地输入、容量或写入授权门禁拒绝，请求未发出。
+    Rejected,
+    /// HTTP 传输或超时失败，远端是否完成处理未知。
+    Transport,
+    /// Registry 返回非成功状态码。
+    RemoteStatus,
+    /// Registry 成功应答的 body 或字段不符合合同。
+    InvalidResponse,
+    /// 控制面 future 在返回结局前被丢弃；远端是否收到或完成请求未知。
+    Cancelled,
+}
+
+impl SchemaControlOutcome {
+    /// 业务作用：返回控制面结局的稳定低基数 label 值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与枚举一一对应的固定字符串。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Rejected => "rejected",
+            Self::Transport => "transport",
+            Self::RemoteStatus => "remote_status",
+            Self::InvalidResponse => "invalid_response",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+const SCHEMA_CONTROL_OPERATIONS: [SchemaControlOperation; 2] = [
+    SchemaControlOperation::Compatibility,
+    SchemaControlOperation::Register,
+];
+const SCHEMA_CONTROL_OUTCOMES: [SchemaControlOutcome; 6] = [
+    SchemaControlOutcome::Success,
+    SchemaControlOutcome::Rejected,
+    SchemaControlOutcome::Transport,
+    SchemaControlOutcome::RemoteStatus,
+    SchemaControlOutcome::InvalidResponse,
+    SchemaControlOutcome::Cancelled,
+];
+
+/// 一个 Registry 控制面操作与结局组合的累计请求数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaControlCount {
+    /// 控制面操作。
+    pub operation: SchemaControlOperation,
+    /// 请求结局。
+    pub outcome: SchemaControlOutcome,
+    /// 累计请求数。
+    pub requests: u64,
+}
+
+/// client 自构造以来的累计观测事实。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaRegistrySnapshot {
+    /// 按结局分类的累计查询次数，只包含非零组合。
+    pub lookups: Vec<SchemaLookupCount>,
+    /// 当前正负缓存合计占用的条目数。
+    pub cached_entries: u64,
+    /// 缓存条目上限，用于判断是否已被容量而非 TTL 驱逐。
+    pub cache_capacity: u64,
+    /// 按操作与结局分类的兼容性检查和注册请求，只包含非零组合。
+    pub control_requests: Vec<SchemaControlCount>,
+}
+
+/// client 内部的原子计数；读取不清零。
+#[derive(Debug)]
+struct SchemaRegistryMetrics {
+    lookups: [AtomicU64; SCHEMA_LOOKUP_OUTCOMES.len()],
+    control_requests: [[AtomicU64; SCHEMA_CONTROL_OUTCOMES.len()]; SCHEMA_CONTROL_OPERATIONS.len()],
+}
+
+impl SchemaRegistryMetrics {
+    /// 业务作用：创建全部计数为零的 client 观测状态。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可由并发查询写入、导出面并发读取的原子状态。
+    fn new() -> Self {
+        Self {
+            lookups: std::array::from_fn(|_| AtomicU64::new(0)),
+            control_requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+        }
+    }
+
+    /// 业务作用：记录一次查询结局，作为唯一记账点覆盖缓存命中与拉取的全部返回路径。
+    ///
+    /// 参数说明：
+    /// - `outcome`: 本次查询的封闭结局。
+    ///
+    /// 返回：无；只累加，不清零已有计数。
+    fn record(&self, outcome: SchemaLookupOutcome) {
+        self.lookups[outcome as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：记录一次兼容性检查或注册请求的封闭结局。
+    ///
+    /// 参数说明：
+    /// - `operation`: 本次控制面操作。
+    /// - `outcome`: 本次请求的封闭结局。
+    ///
+    /// 返回：无；只累加，不清零已有计数。
+    fn record_control(&self, operation: SchemaControlOperation, outcome: SchemaControlOutcome) {
+        self.control_requests[operation as usize][outcome as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：导出当前累计查询结局。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只含非零结局的累计次数；读取不清零。
+    fn snapshot(&self) -> Vec<SchemaLookupCount> {
+        SCHEMA_LOOKUP_OUTCOMES
+            .into_iter()
+            .filter_map(|outcome| {
+                let lookups = self.lookups[outcome as usize].load(Ordering::Relaxed);
+                (lookups > 0).then_some(SchemaLookupCount { outcome, lookups })
+            })
+            .collect()
+    }
+
+    /// 业务作用：导出当前累计控制面请求结局。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只含非零操作与结局组合的累计次数；读取不清零。
+    fn control_snapshot(&self) -> Vec<SchemaControlCount> {
+        SCHEMA_CONTROL_OPERATIONS
+            .into_iter()
+            .flat_map(|operation| {
+                SCHEMA_CONTROL_OUTCOMES
+                    .into_iter()
+                    .filter_map(move |outcome| {
+                        let requests = self.control_requests[operation as usize][outcome as usize]
+                            .load(Ordering::Relaxed);
+                        (requests > 0).then_some(SchemaControlCount {
+                            operation,
+                            outcome,
+                            requests,
+                        })
+                    })
+            })
+            .collect()
+    }
+}
+
+/// 一次数据面查询的完成守卫；future 在返回前被丢弃时由析构路径补记取消结局。
+struct SchemaLookupAccounting<'a> {
+    metrics: Option<&'a SchemaRegistryMetrics>,
+}
+
+impl<'a> SchemaLookupAccounting<'a> {
+    /// 业务作用：在查询第一次被 poll 时取得唯一记账责任，使完成与取消路径共同守恒。
+    ///
+    /// 参数说明：
+    /// - `metrics`: 本次查询所属 client 的累计观测状态。
+    ///
+    /// 返回：持有唯一记账责任的守卫；未显式完成时析构为 `Cancelled`。
+    fn new(metrics: &'a SchemaRegistryMetrics) -> Self {
+        Self {
+            metrics: Some(metrics),
+        }
+    }
+
+    /// 业务作用：发布正常返回路径的数据面结局，并解除析构路径的取消记账责任。
+    ///
+    /// 参数说明：
+    /// - `outcome`: 缓存或远端查询已经得出的封闭结局。
+    ///
+    /// 返回：无；本次查询只发布一次结局。
+    fn finish(mut self, outcome: SchemaLookupOutcome) {
+        if let Some(metrics) = self.metrics.take() {
+            metrics.record(outcome);
+        }
+    }
+}
+
+impl Drop for SchemaLookupAccounting<'_> {
+    /// 业务作用：在查询 future 完成前被丢弃时发布取消结局，避免已开始的远端工作从观测面消失。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无；仅在正常完成尚未解除责任时记录一次数据面取消结局。
+    fn drop(&mut self) {
+        if let Some(metrics) = self.metrics.take() {
+            metrics.record(SchemaLookupOutcome::Cancelled);
+        }
+    }
+}
+
+/// 一次控制面调用的完成守卫；按操作维度为提前丢弃的 future 补记取消结局。
+struct SchemaControlAccounting<'a> {
+    metrics: Option<&'a SchemaRegistryMetrics>,
+    operation: SchemaControlOperation,
+}
+
+impl<'a> SchemaControlAccounting<'a> {
+    /// 业务作用：在控制面调用第一次被 poll 时取得指定操作的唯一记账责任。
+    ///
+    /// 参数说明：
+    /// - `metrics`: 本次调用所属 client 的累计观测状态。
+    /// - `operation`: 兼容性检查或注册操作。
+    ///
+    /// 返回：持有唯一记账责任的守卫；未显式完成时析构为 `Cancelled`。
+    fn new(metrics: &'a SchemaRegistryMetrics, operation: SchemaControlOperation) -> Self {
+        Self {
+            metrics: Some(metrics),
+            operation,
+        }
+    }
+
+    /// 业务作用：发布正常返回路径的控制面结局，并解除析构路径的取消记账责任。
+    ///
+    /// 参数说明：
+    /// - `outcome`: 本地门禁或远端调用已经得出的封闭结局。
+    ///
+    /// 返回：无；本次控制面调用只发布一次结局。
+    fn finish(mut self, outcome: SchemaControlOutcome) {
+        if let Some(metrics) = self.metrics.take() {
+            metrics.record_control(self.operation, outcome);
+        }
+    }
+}
+
+impl Drop for SchemaControlAccounting<'_> {
+    /// 业务作用：在控制面 future 完成前被丢弃时按原操作发布取消结局。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无；仅在正常完成尚未解除责任时记录一次对应操作的取消结局。
+    fn drop(&mut self) {
+        if let Some(metrics) = self.metrics.take() {
+            metrics.record_control(self.operation, SchemaControlOutcome::Cancelled);
+        }
+    }
+}
+
 /// 脱敏、有限分类的 registry 错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaRegistryError {
+    /// 宿主已经关闭该代次客户端的新调用准入。
+    Closed,
     /// endpoint/options 不合法。
     InvalidConfiguration,
     /// schema ID 必须为正数。
@@ -382,10 +714,67 @@ pub struct ConfluentSchemaRegistry {
     client: reqwest::Client,
     options: ConfluentRegistryOptions,
     cache: Mutex<SchemaCache>,
+    /// 冷缓存 singleflight:同一 schema ID 的并发未命中只放行一个 leader 去访问 Registry,
+    /// 其余调用等待该轮结束后重查缓存。防止冷启动或 Registry 故障时,解码并发被原样放大成
+    /// 对 Registry 的请求风暴;leader 失败时等待者逐个接替(串行重试),不回到并行放大。
+    inflight: Mutex<HashMap<SchemaId, tokio::sync::watch::Receiver<()>>>,
+    metrics: SchemaRegistryMetrics,
+}
+
+/// 单个 schema ID 的一轮 singleflight 领导权;Drop 时先摘除在飞登记再释放 watch sender,
+/// 使正常返回、错误返回与调用方取消都必然唤醒等待者且不会让新请求加入已死的轮次。
+struct InflightRound<'a> {
+    registry: &'a ConfluentSchemaRegistry,
+    id: SchemaId,
+    _sender: tokio::sync::watch::Sender<()>,
+}
+
+impl Drop for InflightRound<'_> {
+    /// 业务作用：结束本轮 singleflight——无论 leader 以何种方式离开(成功/失败/被取消),
+    /// 都摘除登记并经 sender drop 唤醒全部等待者,杜绝等待者被遗忘的悬挂。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无；移除登记后 sender 随守卫释放，等待者可重查缓存或竞争下一轮。
+    fn drop(&mut self) {
+        self.registry
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 
 impl ConfluentSchemaRegistry {
+    /// 业务作用：读取 client 自构造以来的数据面查询、控制面请求与缓存事实，供业务接入自己的指标目录。
+    ///
+    /// 分母非零时，完成查询的正命中率按 `cache_hit / (cache_hit + fetched)` 计算；`cancelled`
+    /// 没有查询结论，不进入该分母。命中率偏低且缓存占用接近容量时，表示数据面受容量驱逐影响。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：只含非零结局的数据面与控制面累计次数、当前缓存条目数与容量上限；读取不清零。
+    pub fn metrics_snapshot(&self) -> SchemaRegistrySnapshot {
+        let cached_entries = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len() as u64;
+        SchemaRegistrySnapshot {
+            lookups: self.metrics.snapshot(),
+            cached_entries,
+            cache_capacity: self.options.cache_capacity as u64,
+            control_requests: self.metrics.control_snapshot(),
+        }
+    }
+
     /// 业务作用：校验配置并构造 adapter。
+    ///
+    /// 参数说明：
+    /// - `options`：Registry endpoint、超时、响应上限与正负缓存策略。
+    ///
+    /// 返回：配置全部有界且 endpoint 可作 HTTP(S) 基址时返回 adapter；否则返回稳定配置错误。
     pub fn new(options: ConfluentRegistryOptions) -> Result<Self, SchemaRegistryError> {
         if options.cache_capacity == 0
             || options.max_response_bytes == 0
@@ -433,6 +822,8 @@ impl ConfluentSchemaRegistry {
             endpoint,
             client,
             cache: Mutex::new(SchemaCache::new(options.cache_capacity)),
+            inflight: Mutex::new(HashMap::new()),
+            metrics: SchemaRegistryMetrics::new(),
             options,
         })
     }
@@ -535,70 +926,173 @@ struct SchemaRequest<'a> {
 
 #[async_trait::async_trait]
 impl SchemaRegistryClient for ConfluentSchemaRegistry {
-    /// 业务作用：优先读取正/负缓存，未命中时按全局 ID 拉取并缓存 Registry schema。
+    /// 业务作用：优先读取正/负缓存，未命中时经 singleflight 按全局 ID 拉取并缓存 Registry schema。
+    ///
+    /// 同一 ID 的并发未命中只放行一个 leader 访问 Registry;其余调用等待该轮结束后重查缓存,
+    /// leader 成功即全体命中,失败则等待者逐个接替(串行而非并行重试)。冷启动与 Registry 故障
+    /// 期间对 Registry 的请求量因此以"每 ID 同时至多一个"为上界,不随解码并发放大。
+    ///
+    /// 参数说明：
+    /// - `id`: Registry 分配且已经过正数校验的全局 schema ID。
+    ///
+    /// 返回：正缓存命中或远端返回合法 schema 时返回共享 schema；负缓存命中、远端缺失、
+    /// 传输失败或应答不符合合同时返回封闭错误，并为每次调用记录且只记录一个查询结局。
     async fn schema_by_id(
         &self,
         id: SchemaId,
     ) -> Result<Arc<RegisteredSchema>, SchemaRegistryError> {
-        let cached = self
-            .cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id, Instant::now());
-        if let Some(value) = cached {
-            return value.ok_or(SchemaRegistryError::SchemaNotFound(id));
-        }
+        let accounting = SchemaLookupAccounting::new(&self.metrics);
+        let attempt: Result<
+            (Arc<RegisteredSchema>, SchemaLookupOutcome),
+            (SchemaRegistryError, SchemaLookupOutcome),
+        > = async {
+            // singleflight 领导权轮次:守卫存在期间同 ID 的其它调用都在等待本轮;必须在取得
+            // 领导权后立刻持有,使任何离开路径(含取消)都能结束轮次。
+            let _round: InflightRound<'_>;
+            loop {
+                let cached = self
+                    .cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(id, Instant::now());
+                if let Some(value) = cached {
+                    // 正负缓存都未访问 Registry，但负命中表示上游持续按不存在的 ID 解码，
+                    // 必须与正命中分开观测，才能区分健康复用和无效流量。
+                    // singleflight 等待后到达这里的调用同样按缓存结局记账——它没有访问 Registry。
+                    return match value {
+                        Some(schema) => Ok((schema, SchemaLookupOutcome::CacheHit)),
+                        None => Err((
+                            SchemaRegistryError::SchemaNotFound(id),
+                            SchemaLookupOutcome::NegativeCacheHit,
+                        )),
+                    };
+                }
+                // 领导权裁决在锁内完成,守卫构造与等待都在锁外——map 锁绝不跨 await,
+                // 守卫的 Drop(会再取同一把锁)也绝不在持锁路径上构造或析构。
+                let joined = {
+                    let mut inflight = self
+                        .inflight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match inflight.get(&id) {
+                        Some(receiver) => Err(receiver.clone()),
+                        None => {
+                            // 无在飞轮次:本调用成为 leader。先登记再发请求,窗口内到达的并发
+                            // 调用都会订阅本轮;watch sender 随守卫在任何离开路径释放。
+                            let (sender, receiver) = tokio::sync::watch::channel(());
+                            inflight.insert(id, receiver);
+                            Ok(sender)
+                        }
+                    }
+                };
+                match joined {
+                    Ok(sender) => {
+                        _round = InflightRound {
+                            registry: self,
+                            id,
+                            _sender: sender,
+                        };
+                        break;
+                    }
+                    Err(mut receiver) => {
+                        // 等待当前轮次结束(changed 在 sender drop 时以 Err 返回,即轮次结束
+                        // 信号),然后回到循环开头重查缓存:leader 成功→命中;失败→接替为新 leader。
+                        let _ = receiver.changed().await;
+                    }
+                }
+            }
 
-        let id_text = id.get().to_string();
-        let url = self.url(&["schemas", "ids", &id_text])?;
-        let response = self
-            .authenticate(self.client.get(url))
-            .send()
-            .await
-            .map_err(|_| SchemaRegistryError::Transport)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let id_text = id.get().to_string();
+            let url = self
+                .url(&["schemas", "ids", &id_text])
+                .map_err(|error| (error, SchemaLookupOutcome::FetchFailed))?;
+            let response = self
+                .authenticate(self.client.get(url))
+                .send()
+                .await
+                .map_err(|_| {
+                    (
+                        SchemaRegistryError::Transport,
+                        SchemaLookupOutcome::FetchFailed,
+                    )
+                })?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                self.cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        id,
+                        CachedSchema::Miss,
+                        Instant::now() + self.options.negative_cache_ttl,
+                    );
+                return Err((
+                    SchemaRegistryError::SchemaNotFound(id),
+                    SchemaLookupOutcome::FetchedMissing,
+                ));
+            }
+            if !response.status().is_success() {
+                return Err((
+                    SchemaRegistryError::RemoteStatus(response.status().as_u16()),
+                    SchemaLookupOutcome::FetchFailed,
+                ));
+            }
+            let body: SchemaByIdResponse = self
+                .bounded_json(response)
+                .await
+                .map_err(|error| (error, SchemaLookupOutcome::FetchFailed))?;
+            let schema_type = match body.schema_type.as_deref().unwrap_or("AVRO") {
+                "AVRO" => RegistrySchemaType::Avro,
+                "PROTOBUF" => RegistrySchemaType::Protobuf,
+                "JSON" => RegistrySchemaType::Json,
+                _ => {
+                    return Err((
+                        SchemaRegistryError::InvalidResponse,
+                        SchemaLookupOutcome::FetchFailed,
+                    ));
+                }
+            };
+            if body.schema.is_empty() {
+                return Err((
+                    SchemaRegistryError::InvalidResponse,
+                    SchemaLookupOutcome::FetchFailed,
+                ));
+            }
+            let schema = Arc::new(RegisteredSchema {
+                id,
+                schema_type,
+                schema: Arc::from(body.schema),
+            });
             self.cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(
                     id,
-                    CachedSchema::Miss,
-                    Instant::now() + self.options.negative_cache_ttl,
+                    CachedSchema::Hit(Arc::clone(&schema)),
+                    Instant::now() + self.options.cache_ttl,
                 );
-            return Err(SchemaRegistryError::SchemaNotFound(id));
+            Ok((schema, SchemaLookupOutcome::Fetched))
         }
-        if !response.status().is_success() {
-            return Err(SchemaRegistryError::RemoteStatus(
-                response.status().as_u16(),
-            ));
-        }
-        let body: SchemaByIdResponse = self.bounded_json(response).await?;
-        let schema_type = match body.schema_type.as_deref().unwrap_or("AVRO") {
-            "AVRO" => RegistrySchemaType::Avro,
-            "PROTOBUF" => RegistrySchemaType::Protobuf,
-            "JSON" => RegistrySchemaType::Json,
-            _ => return Err(SchemaRegistryError::InvalidResponse),
+        .await;
+
+        let (result, outcome) = match attempt {
+            Ok((schema, outcome)) => (Ok(schema), outcome),
+            Err((error, outcome)) => (Err(error), outcome),
         };
-        if body.schema.is_empty() {
-            return Err(SchemaRegistryError::InvalidResponse);
-        }
-        let schema = Arc::new(RegisteredSchema {
-            id,
-            schema_type,
-            schema: Arc::from(body.schema),
-        });
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                id,
-                CachedSchema::Hit(Arc::clone(&schema)),
-                Instant::now() + self.options.cache_ttl,
-            );
-        Ok(schema)
+        // 正常返回与析构取消共享唯一记账责任，既不让提前返回漏记，也不让完成路径重复计数。
+        accounting.finish(outcome);
+        result
     }
 
     /// 业务作用：向 Registry 查询候选 schema 对指定 subject/version 的兼容性。
+    ///
+    /// 参数说明：
+    /// - `subject`: 已由业务选择的 Registry subject。
+    /// - `version`: 正整数文本或 `latest`。
+    /// - `schema_type`: 候选 schema 的协议类型。
+    /// - `schema`: 待检查且受响应体同一容量上限约束的 schema 文本。
+    ///
+    /// 返回：远端成功应答时返回兼容性结论；本地门禁、传输、状态码或应答合同失败时返回封闭错误，
+    /// 并把结局计入控制面观测。
     async fn is_compatible(
         &self,
         subject: &str,
@@ -606,56 +1100,112 @@ impl SchemaRegistryClient for ConfluentSchemaRegistry {
         schema_type: RegistrySchemaType,
         schema: &str,
     ) -> Result<bool, SchemaRegistryError> {
-        validate_subject(subject, version, schema)?;
-        self.validate_schema_size(schema)?;
-        let url = self.url(&["compatibility", "subjects", subject, "versions", version])?;
-        let response = self
-            .authenticate(self.client.post(url))
-            .json(&SchemaRequest {
-                schema,
-                schema_type: schema_type.confluent_name(),
-            })
-            .send()
-            .await
-            .map_err(|_| SchemaRegistryError::Transport)?;
-        if !response.status().is_success() {
-            return Err(SchemaRegistryError::RemoteStatus(
-                response.status().as_u16(),
-            ));
+        let accounting =
+            SchemaControlAccounting::new(&self.metrics, SchemaControlOperation::Compatibility);
+        // 记账包住整个控制面调用，使本地门禁、URL 派生、传输与应答解析共享唯一出口；
+        // 后续新增提前返回也不会让使用期请求从观测面消失。
+        let result: Result<bool, SchemaRegistryError> = async {
+            validate_subject(subject, version, schema)?;
+            self.validate_schema_size(schema)?;
+            let url = self.url(&["compatibility", "subjects", subject, "versions", version])?;
+            let response = self
+                .authenticate(self.client.post(url))
+                .json(&SchemaRequest {
+                    schema,
+                    schema_type: schema_type.confluent_name(),
+                })
+                .send()
+                .await
+                .map_err(|_| SchemaRegistryError::Transport)?;
+            if !response.status().is_success() {
+                return Err(SchemaRegistryError::RemoteStatus(
+                    response.status().as_u16(),
+                ));
+            }
+            let body: CompatibilityResponse = self.bounded_json(response).await?;
+            Ok(body.is_compatible)
         }
-        let body: CompatibilityResponse = self.bounded_json(response).await?;
-        Ok(body.is_compatible)
+        .await;
+        accounting.finish(schema_control_outcome(&result));
+        result
     }
 
     /// 业务作用：在显式开启自动注册后提交候选 schema，并校验返回的正 ID。
+    ///
+    /// 参数说明：
+    /// - `subject`: 新修订所属的 Registry subject。
+    /// - `schema_type`: 待注册 schema 的协议类型。
+    /// - `schema`: 待注册且受响应体同一容量上限约束的 schema 文本。
+    ///
+    /// 返回：写入授权开启且远端返回正 ID 时成功；本地门禁、传输、状态码或应答合同失败时返回
+    /// 封闭错误，并把结局计入控制面观测。
     async fn register(
         &self,
         subject: &str,
         schema_type: RegistrySchemaType,
         schema: &str,
     ) -> Result<SchemaId, SchemaRegistryError> {
-        if !self.options.auto_register {
-            return Err(SchemaRegistryError::AutoRegisterDisabled);
+        let accounting =
+            SchemaControlAccounting::new(&self.metrics, SchemaControlOperation::Register);
+        let result: Result<SchemaId, SchemaRegistryError> = async {
+            if !self.options.auto_register {
+                return Err(SchemaRegistryError::AutoRegisterDisabled);
+            }
+            validate_subject(subject, "latest", schema)?;
+            self.validate_schema_size(schema)?;
+            let url = self.url(&["subjects", subject, "versions"])?;
+            let response = self
+                .authenticate(self.client.post(url))
+                .json(&SchemaRequest {
+                    schema,
+                    schema_type: schema_type.confluent_name(),
+                })
+                .send()
+                .await
+                .map_err(|_| SchemaRegistryError::Transport)?;
+            if !response.status().is_success() {
+                return Err(SchemaRegistryError::RemoteStatus(
+                    response.status().as_u16(),
+                ));
+            }
+            let body: RegisterResponse = self.bounded_json(response).await?;
+            SchemaId::new(body.id)
         }
-        validate_subject(subject, "latest", schema)?;
-        self.validate_schema_size(schema)?;
-        let url = self.url(&["subjects", subject, "versions"])?;
-        let response = self
-            .authenticate(self.client.post(url))
-            .json(&SchemaRequest {
-                schema,
-                schema_type: schema_type.confluent_name(),
-            })
-            .send()
-            .await
-            .map_err(|_| SchemaRegistryError::Transport)?;
-        if !response.status().is_success() {
-            return Err(SchemaRegistryError::RemoteStatus(
-                response.status().as_u16(),
-            ));
+        .await;
+        accounting.finish(schema_control_outcome(&result));
+        result
+    }
+}
+
+/// 业务作用：把控制面调用结果折叠成稳定低基数结局，避免 subject、状态码或正文进入指标。
+///
+/// 参数说明：
+/// - `result`: 兼容性检查或注册的完整调用结果。
+///
+/// 返回：成功、门禁拒绝、传输、远端状态或应答合同五类之一。
+fn schema_control_outcome<T>(result: &Result<T, SchemaRegistryError>) -> SchemaControlOutcome {
+    match result {
+        Ok(_) => SchemaControlOutcome::Success,
+        Err(SchemaRegistryError::Transport) => SchemaControlOutcome::Transport,
+        Err(SchemaRegistryError::SchemaNotFound(_) | SchemaRegistryError::RemoteStatus(_)) => {
+            SchemaControlOutcome::RemoteStatus
         }
-        let body: RegisterResponse = self.bounded_json(response).await?;
-        SchemaId::new(body.id)
+        Err(
+            SchemaRegistryError::ResponseTooLarge
+            | SchemaRegistryError::InvalidResponse
+            | SchemaRegistryError::InvalidSchemaId(_),
+        ) => SchemaControlOutcome::InvalidResponse,
+        Err(
+            SchemaRegistryError::Closed
+            | SchemaRegistryError::InvalidConfiguration
+            | SchemaRegistryError::InvalidEnvelope
+            | SchemaRegistryError::UnsupportedMagic(_)
+            | SchemaRegistryError::UnapprovedSchemaId(_)
+            | SchemaRegistryError::PayloadTooLarge { .. }
+            | SchemaRegistryError::SchemaTooLarge { .. }
+            | SchemaRegistryError::InvalidSubject
+            | SchemaRegistryError::AutoRegisterDisabled,
+        ) => SchemaControlOutcome::Rejected,
     }
 }
 

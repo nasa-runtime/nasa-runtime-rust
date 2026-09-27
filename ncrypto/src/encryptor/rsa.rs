@@ -1,10 +1,10 @@
-//! RSA 非对称(对照 原实现 `encryptRSA*`/`decryptRSA*`/`signRSA`/`verifyRSA`/OAEP/`generateRSAKeyPair`)。
+//! RSA 非对称。
 //!
 //! 字节保真
 //! - `"RSA"` = **PKCS1 v1.5**(非 OAEP);自动分段(encrypt 块=keyLen-11、decrypt 块=keyLen,顺序拼接)。
 //! - 公钥 = Base64(X509 SPKI)、私钥 = Base64(PKCS8 DER)。
 //! - **私钥加密 = PKCS1 type-1**:`rsa` crate 高层无此 API,用低层 raw 模幂 + 手工 `00 01 FF.. 00` padding;
-//!   **公钥解密 = type-1 unpad**(同样低层)。两者是 原实现 `encryptRSAPrivate`/`decryptRSAPublic` 的对等物。
+//!   **公钥解密 = type-1 unpad**(同样低层)。这两种 type-1 运算仅用于明确选择的协议兼容。
 //!
 //! PKCS1v1.5 **私钥解密**受 RUSTSEC-2023-0071(Marvin)时序侧信道影响。默认构建不执行
 //! 该路径；`decrypt_rsa_private` 与历史私钥 type-1 运算需要 `legacy-rsa-private` feature。
@@ -69,8 +69,8 @@ pub fn validate_rsa_private_key(private_key_b64: &str) -> Result<usize> {
     Ok(bits)
 }
 
-/// 业务作用: 按块大小切分;**空输入也产 1 个(空)块**——对齐 原实现 `rsaDoFinal` 对空输入仍 `doFinal(empty)` 产 1 块
-/// (安全说明.1:否则空 payload 跨语言不一致,Rust 输出空串、原实现 输出 1 块)。
+/// 业务作用：按 RSA 单块容量切分输入，空输入仍保留一个空块参与 padding。
+/// 返回：顺序不变的字节切片集合；非空输入按 block 容量分段。
 ///
 /// # 参数
 /// - `data`: 待加密或待解密的原始字节。
@@ -100,7 +100,7 @@ fn left_pad(mut bytes: Vec<u8>, len: usize) -> Vec<u8> {
 
 // ==================== 标准方向:公钥加密 / 私钥解密(PKCS1 v1.5 type-2,rsa 高层) ====================
 
-/// 业务作用: RSA 公钥加密(字符串输入,Base64 输出,自动分段)。对照 原实现 `encryptRSAPublic`。
+/// 业务作用: RSA 公钥加密(字符串输入,Base64 输出,自动分段)。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文;长文本会按 RSA 明文块大小自动分段。
@@ -122,7 +122,7 @@ pub fn encrypt_rsa_public(content: &str, public_key_b64: &str) -> Result<String>
     Ok(b64_encode(&out))
 }
 
-/// 业务作用: RSA 私钥解密(Base64 密文输入,UTF-8 输出,自动分段)。对照 原实现 `decryptRSAPrivate`。
+/// 业务作用: RSA 私钥解密(Base64 密文输入,UTF-8 输出,自动分段)。
 /// ⚠ PKCS1v1.5 解密受 RUSTSEC-2023-0071(Marvin)影响,见模块文档。
 ///
 /// # 参数
@@ -210,7 +210,7 @@ fn public_decrypt_block(key: &RsaPublicKey, block: &[u8], k: usize) -> Result<Ve
     Ok(em[i + 1..].to_vec())
 }
 
-/// 业务作用: RSA **私钥加密**(字符串输入,Base64 输出,自动分段;PKCS1 type-1)。对照 原实现 `encryptRSAPrivate`。
+/// 业务作用: RSA **私钥加密**(字符串输入,Base64 输出,自动分段;PKCS1 type-1)。
 /// ⚠ 私钥加密是**签名语义、非机密**(公钥人人可解),仅为互通保真。
 ///
 /// # 参数
@@ -242,7 +242,7 @@ pub fn encrypt_rsa_private(_content: &str, _private_key_b64: &str) -> Result<Str
     ))
 }
 
-/// 业务作用: RSA **公钥解密**(Base64 密文输入,UTF-8 输出,自动分段;type-1 unpad)。对照 原实现 `decryptRSAPublic`。
+/// 业务作用: RSA **公钥解密**(Base64 密文输入,UTF-8 输出,自动分段;type-1 unpad)。
 ///
 /// # 参数
 /// - `cipher_b64`: Base64 编码的 type-1 RSA 密文;解码后长度必须是 RSA 模数字节数的整数倍。
@@ -261,7 +261,7 @@ pub fn decrypt_rsa_public(cipher_b64: &str, public_key_b64: &str) -> Result<Stri
     String::from_utf8(out).map_err(|e| CryptoError::decrypt(format!("明文非 UTF-8: {e}")))
 }
 
-/// 业务作用: RSA 密文合法性守卫——空密文 / 非完整 block 是非法密文(原实现 `cipher.doFinal` 会抛),
+/// 业务作用: RSA 密文合法性守卫——空密文 / 非完整 block 是非法密文,
 /// 不应解成空明文/截断。两个解密方向共用。
 ///
 /// # 参数
@@ -283,7 +283,7 @@ fn rsa_ciphertext_guard(ct: &[u8], block_size: usize) -> Result<()> {
 
 // ==================== 签名 / 验签(SHA256withRSA = PKCS1 v1.5) ====================
 
-/// 业务作用: RSA 私钥签名(SHA256withRSA,Base64 输出)。对照 原实现 `signRSA`。
+/// 业务作用: RSA 私钥签名(SHA256withRSA,Base64 输出)。
 ///
 /// # 参数
 /// - `content`: 要签名的 UTF-8 内容。
@@ -295,7 +295,7 @@ pub fn sign_rsa(content: &str, private_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&sig.to_bytes()))
 }
 
-/// 业务作用: RSA 公钥验签(SHA256withRSA)。出错即 false。对照 原实现 `verifyRSA`。
+/// 业务作用: RSA 公钥验签(SHA256withRSA)。出错即 false。
 ///
 /// # 参数
 /// - `content`: 原始 UTF-8 内容,必须与签名时输入一致。
@@ -372,7 +372,7 @@ pub fn validate_rs256_public_components(modulus_be: &[u8], exponent_be: &[u8]) -
 
 // ==================== RSA-OAEP(SHA-256 / MGF1) ====================
 
-/// 业务作用: RSA-OAEP 公钥加密(`RSA/ECB/OAEPWithSHA-256AndMGF1Padding`)。对照 原实现 `encryptRSAOAEP`。
+/// 业务作用: RSA-OAEP 公钥加密(`RSA/ECB/OAEPWithSHA-256AndMGF1Padding`)。
 ///
 /// # 参数
 /// - `content`: 要加密的 UTF-8 明文;OAEP 入口不做自动分段。
@@ -386,7 +386,7 @@ pub fn encrypt_rsa_oaep(content: &str, public_key_b64: &str) -> Result<String> {
     Ok(b64_encode(&ct))
 }
 
-/// 业务作用: RSA-OAEP 私钥解密。对照 原实现 `decryptRSAOAEP`。
+/// 业务作用: RSA-OAEP 私钥解密。
 ///
 /// # 参数
 /// - `cipher_b64`: Base64 编码的 RSA-OAEP 密文。
@@ -404,7 +404,7 @@ pub fn decrypt_rsa_oaep(cipher_b64: &str, private_key_b64: &str) -> Result<Strin
 
 // ==================== 密钥对生成 ====================
 
-/// 业务作用: 生成 RSA 公私钥对,返回 `(私钥 Base64(PKCS8), 公钥 Base64(SPKI))`。`bits` >= 2048(对照 原实现 校验)。
+/// 业务作用: 生成 RSA 公私钥对,返回 `(私钥 Base64(PKCS8), 公钥 Base64(SPKI))`。`bits` >= 2048。
 ///
 /// # 参数
 /// - `bits`: RSA 模数位数;必须不小于 2048。

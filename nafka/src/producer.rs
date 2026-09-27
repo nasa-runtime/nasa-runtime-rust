@@ -406,6 +406,12 @@ impl BuilderFields {
     }
 
     /// 业务作用：生成 headers，并在存在父 context 时让 wire context 与 producer span 共用同一子 span-id。
+    ///
+    /// 参数说明：
+    /// - `codec`：可选载荷编码，用于写入框架协议 header。
+    /// - `recorder`：可选只写 span 记录器，不存在时仍派生传播上下文。
+    ///
+    /// 返回：元数据合法时返回唯一框架 header 集与可选 producer span；保留名冲突或编码失败时返回配置错误。
     fn finish_headers_with_span(
         &self,
         codec: Option<PayloadCodec>,
@@ -415,10 +421,13 @@ impl BuilderFields {
             return Err(NafkaError::Config(message.clone()));
         }
         let mut headers = self.headers.clone();
-        let span = self.trace_parent.as_ref().and_then(|parent| {
+        // 业务未显式绑定父 context 时回退入口层 task-local 环境值，避免出站发送静默断链；
+        // 显式绑定始终优先于环境值。
+        let trace_parent = self.trace_parent.or_else(natelemetry::ambient);
+        let span = trace_parent.as_ref().and_then(|parent| {
             recorder.map(|recorder| recorder.start("Kafka publish", parent, SpanKind::Producer))
         });
-        if let Some(parent) = self.trace_parent {
+        if let Some(parent) = trace_parent {
             let context = span
                 .as_ref()
                 .map(SpanGuard::context)

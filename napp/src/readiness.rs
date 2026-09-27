@@ -17,16 +17,6 @@
 //! `ReadinessRegistry::all_ready`)保留,kafka 侧无需改动;各组件逐步迁移到
 //! `observe`/policy 富合同。
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 use std::{
     collections::BTreeMap,
     sync::{Mutex, RwLock},
@@ -41,23 +31,34 @@ use std::{
 };
 
 /// 稳定就绪原因码。只允许编译期常量,禁止把动态错误文本(地址、SQL、key、凭据)当 reason。
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub mod reason {
     /// 依赖最近一次观测就绪且未过 stale 窗。
+    #[cfg_attr(
+        not(any(
+            feature = "redis",
+            feature = "kafka",
+            feature = "outbox",
+            feature = "db",
+            feature = "web",
+            feature = "grpc",
+            feature = "saga",
+            feature = "nacos-discovery",
+            feature = "partition",
+            feature = "nacos-config",
+            feature = "config-watch",
+            feature = "object-store",
+            feature = "cache",
+            feature = "telemetry",
+            feature = "ws-client",
+            feature = "hystrix"
+        )),
+        allow(dead_code)
+    )]
     pub const HEALTHY: &str = "healthy";
     /// 贡献项已注册但尚无任何观测(初始 `Unknown`)。
     pub const UNOBSERVED: &str = "unobserved";
     /// 探针超时。
-    #[cfg(any(feature = "db", feature = "nacos-discovery"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "nacos-discovery"))]
     pub const PROBE_TIMEOUT: &str = "probe_timeout";
     /// 观测长时间未更新,已超过 `stale_after`。
     pub const WATCH_STALE: &str = "watch_stale";
@@ -66,22 +67,46 @@ pub mod reason {
     pub const ROUTE_AUDIT_FAILED: &str = "route_audit_failed";
     /// 依赖被判为不可服务。
     #[cfg(any(
+        feature = "object-store",
         feature = "kafka",
         feature = "db",
+        feature = "db-pgsql",
         feature = "redis",
         feature = "cache",
+        feature = "partition",
+        feature = "grpc",
         feature = "nacos-config",
         feature = "nacos-discovery",
         feature = "web"
     ))]
     pub const NOT_READY: &str = "not_ready";
+    /// 保序执行器失去 worker 或 lane 的安全执行权。
+    #[cfg(feature = "partition")]
+    pub const PARTITION_UNHEALTHY: &str = "partition_unhealthy";
+    /// gRPC listener 在运行期失去 serve 所有权。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_LISTENER_UNAVAILABLE: &str = "grpc_listener_unavailable";
+    /// gRPC listener 仍持有 socket，但连续 accept 失败已超过受管摘流阈值。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_ACCEPT_STALLED: &str = "grpc_accept_stalled";
+    /// gRPC TLS server identity 已进入配置的到期告警窗口。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_TLS_CERTIFICATE_EXPIRING: &str = "grpc_tls_certificate_expiring";
+    /// gRPC TLS server identity 已到期，listener 不得继续接收新流量。
+    #[cfg(feature = "grpc")]
+    pub const GRPC_TLS_CERTIFICATE_EXPIRED: &str = "grpc_tls_certificate_expired";
     /// 依赖可服务但发生可恢复降级。
     #[cfg(any(
         feature = "redis",
         feature = "cache",
         feature = "nacos-config",
+        feature = "config-watch",
+        feature = "object-store",
         feature = "web",
-        feature = "telemetry"
+        feature = "ws",
+        feature = "telemetry",
+        feature = "ws-client",
+        feature = "hystrix"
     ))]
     pub const DEGRADED: &str = "degraded";
 }
@@ -105,16 +130,6 @@ pub enum DependencyState {
 /// 应大于 monitor 间隔(否则依赖会被误判 stale),`None` 表示不做 stale 检查(适用于一次性
 /// 发布、不由 monitor 周期刷新的兼容贡献项)。
 #[derive(Debug, Clone, Copy)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub struct ReadinessPolicy {
     /// 该依赖是否参与"是否摘流"的关键裁决。`true`=关键(失败则 503),`false`=非关键(失败仅 Degraded)。
     pub affects_ready: bool,
@@ -126,16 +141,6 @@ pub struct ReadinessPolicy {
     pub stale_after: Option<Duration>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl ReadinessPolicy {
     /// 业务作用：关键、立即生效、不检查 stale 的策略。
     ///
@@ -145,7 +150,6 @@ impl ReadinessPolicy {
     /// # 返回
     ///
     /// `affects_ready=true`、两个阈值均为 1、`stale_after=None` 的策略。
-    #[cfg(any(feature = "kafka", feature = "nacos-discovery"))]
     pub const fn critical_immediate() -> Self {
         Self {
             affects_ready: true,
@@ -158,16 +162,6 @@ impl ReadinessPolicy {
 
 /// 注册失败的结构化原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub enum RegisterError {
     /// 名称去除首尾空白后为空。
     EmptyName,
@@ -207,16 +201,6 @@ pub struct ReadinessSnapshot {
 
 /// 单个贡献项的可变状态,置于 per-entry 短临界区之后。
 #[derive(Debug)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 struct EntryState {
     component: Arc<str>,
     policy: ReadinessPolicy,
@@ -225,20 +209,15 @@ struct EntryState {
     success_streak: u32,
     fail_streak: u32,
     last_observed: Option<Instant>,
+    valid_until: Option<Instant>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl EntryState {
     /// 业务作用：创建尚无观测的贡献项状态，并冻结组件身份与阈值策略。
+    ///
+    /// 参数说明：`component` 是组件身份，`policy` 决定依赖失败如何影响整体就绪。
+    ///
+    /// 返回：尚未取得观测或租约证据的 Unknown 状态。
     fn new(component: Arc<str>, policy: ReadinessPolicy) -> Self {
         Self {
             component,
@@ -248,12 +227,18 @@ impl EntryState {
             success_streak: 0,
             fail_streak: 0,
             last_observed: None,
+            valid_until: None,
         }
     }
 
-    /// 业务作用：按阈值推进已发布状态。`raw` 为本次原始观测,`observed_reason` 为其静态原因码。
+    /// 业务作用：按连续观测阈值推进依赖状态，并替换上轮观测证据。
+    ///
+    /// 参数说明：`raw` 是原始状态，`observed_reason` 是静态原因码，`now` 是本次观测的单调时刻。
+    ///
+    /// 返回：更新连续观测计数与发布状态；清除上轮期限，租约发布者在同一临界区设置本轮期限。
     fn advance(&mut self, raw: DependencyState, observed_reason: &'static str, now: Instant) {
         self.last_observed = Some(now);
+        self.valid_until = None;
         match raw {
             DependencyState::Ready => {
                 self.success_streak = self.success_streak.saturating_add(1);
@@ -290,13 +275,18 @@ impl EntryState {
         }
     }
 
-    /// 业务作用：计入 stale 后的有效状态与原因。
+    /// 业务作用：在读取依赖状态时复验观测新鲜度与租约，防止阻塞的发布任务延长就绪权威。
+    ///
+    /// 参数说明：`now` 是本次读取的单调时刻。
+    ///
+    /// 返回：证据有效时返回已发布状态；证据过期时按策略返回 NotReady 或 Degraded 及失效原因。
     fn effective(&self, now: Instant) -> (DependencyState, &'static str) {
         let stale = matches!(
             (self.policy.stale_after, self.last_observed),
             (Some(after), Some(at)) if now.saturating_duration_since(at) >= after
         );
-        if stale {
+        // 租约型依赖按绝对单调期限失效；即使续租任务阻塞，读取就绪状态也不能延长权威。
+        if stale || self.valid_until.is_some_and(|deadline| now >= deadline) {
             let state = if self.policy.affects_ready {
                 DependencyState::NotReady
             } else {
@@ -314,37 +304,45 @@ impl EntryState {
 /// 组件只持有自己的句柄并 `observe` 自身观测,不能枚举或修改其他组件的贡献项;动态健康
 /// 因此不需要把具体组件类型反向写进 Application 核心。
 #[derive(Clone, Debug)]
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 pub struct ReadinessContributor {
     entry: Arc<Mutex<EntryState>>,
 }
 
-#[cfg(any(
-    feature = "kafka",
-    feature = "db",
-    feature = "redis",
-    feature = "nacos-config",
-    feature = "nacos-discovery",
-    feature = "telemetry",
-    feature = "cache",
-    feature = "web"
-))]
 impl ReadinessContributor {
+    /// 业务作用：在统一接流点复验已登记证据的新鲜度。
+    /// 参数说明：无。
+    /// 返回：当前证据仍为 Ready 时为 true，过期证据不会延长接流权威。
+    #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+    pub(crate) fn ready_now(&self) -> bool {
+        self.entry.lock().unwrap().effective(Instant::now()).0 == DependencyState::Ready
+    }
+    /// 业务作用：发布有租约期限的就绪证据，期限到达后由读取端独立摘流。
+    ///
+    /// 参数说明：`deadline` 是整批依赖最早失效的单调时刻。
+    ///
+    /// 返回：原子发布 Ready 与期限；已到期的证据立即按 NotReady 处理。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn observe_ready_until(&self, deadline: Instant) {
+        let mut entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        // 已过期的证据不能触发恢复阈值或短暂开放路由。
+        if deadline <= now {
+            entry.advance(DependencyState::NotReady, reason::NOT_READY, now);
+        } else {
+            entry.advance(DependencyState::Ready, reason::HEALTHY, now);
+            entry.valid_until = Some(deadline);
+        }
+    }
+
     /// 业务作用：发布一次原始观测,由策略阈值决定是否改变已发布状态。
     ///
     /// # 参数
     ///
     /// - `state`:本次观测的原始状态(通常 `Ready`/`Degraded`/`NotReady`)。
-    /// - `reason`:静态原因码(见 [`reason`]),禁止动态错误文本。
+    /// - `reason`:静态原因码（见内部 `reason` 目录），禁止动态错误文本。
     /// - `now`:当前单调时刻,用于 stale 判定;由调用方传入以便确定性推进。
     pub fn observe(&self, state: DependencyState, reason: &'static str, now: Instant) {
         self.entry
@@ -395,20 +393,11 @@ impl ReadinessContributor {
 
 /// 汇总全部运行依赖动态就绪状态的通用注册表。
 ///
-/// 没有贡献项时聚合结果 `ready=true`,保证未声明动态依赖的既有应用语义不变。注册只在
-/// Start/UserHook 开放期发生;`seal` 之后注册返回 [`RegisterError::Sealed`]。运行期只读
+/// 没有贡献项时聚合结果 `ready=true`,保证未声明动态依赖的既有应用语义不变。组件在
+/// Start/UserHook 登记，hosted initializer 可在 Initialization 登记；`seal` 之后返回
+/// [`RegisterError::Sealed`]。运行期只读
 /// 各 entry 的已发布状态并聚合,不做网络 I/O。
 pub struct ReadinessRegistry {
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
     entries: RwLock<BTreeMap<Arc<str>, Arc<Mutex<EntryState>>>>,
     sealed: AtomicBool,
 }
@@ -421,32 +410,12 @@ impl ReadinessRegistry {
     /// 聚合 `ready=true` 的空注册表,直到组件注册关键贡献项。
     pub fn new() -> Self {
         Self {
-            #[cfg(any(
-                feature = "kafka",
-                feature = "db",
-                feature = "redis",
-                feature = "nacos-config",
-                feature = "nacos-discovery",
-                feature = "telemetry",
-                feature = "cache",
-                feature = "web"
-            ))]
             entries: RwLock::new(BTreeMap::new()),
             sealed: AtomicBool::new(false),
         }
     }
 
     /// 业务作用：注册一个带稳定组件归属的贡献项。
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
     pub fn register_component(
         &self,
         component: impl Into<Arc<str>>,
@@ -485,7 +454,7 @@ impl ReadinessRegistry {
 
     /// 业务作用：封口注册表:此后 `register` 返回 [`RegisterError::Sealed`]。
     ///
-    /// 由 Application 在资源封口(UserHook 结束)时调用,防止运行期无界新增贡献项名称。
+    /// 由 Application 在 Initialization 结束的 Seal 边界调用，防止运行期无界新增贡献项名称。
     pub fn seal(&self) {
         self.sealed.store(true, Ordering::Release);
     }
@@ -501,80 +470,49 @@ impl ReadinessRegistry {
     /// [`ReadinessSnapshot`]:`ready` 表示无关键依赖处于未就绪;`degraded` 表示存在可恢复降级;
     /// `entries` 为按名称有序的各依赖有效状态。O(贡献项数量),无网络 I/O。
     pub fn snapshot(&self, now: Instant) -> ReadinessSnapshot {
-        #[cfg(not(any(
-            feature = "kafka",
-            feature = "db",
-            feature = "redis",
-            feature = "nacos-config",
-            feature = "nacos-discovery",
-            feature = "telemetry",
-            feature = "cache",
-            feature = "web"
-        )))]
-        {
-            let _ = now;
-            ReadinessSnapshot {
-                ready: true,
-                degraded: false,
-                entries: Arc::from([]),
-            }
-        }
-
-        #[cfg(any(
-            feature = "kafka",
-            feature = "db",
-            feature = "redis",
-            feature = "nacos-config",
-            feature = "nacos-discovery",
-            feature = "telemetry",
-            feature = "cache",
-            feature = "web"
-        ))]
-        {
-            let entries = self
-                .entries
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut snapshots: Vec<DependencySnapshot> = Vec::with_capacity(entries.len());
-            let mut ready = true;
-            let mut degraded = false;
-            for (name, entry) in entries.iter() {
-                let (component, affects_ready, state, reason) = {
-                    let guard = entry
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let (state, reason) = guard.effective(now);
-                    (
-                        Arc::clone(&guard.component),
-                        guard.policy.affects_ready,
-                        state,
-                        reason,
-                    )
-                };
-                match state {
-                    DependencyState::Ready => {}
-                    DependencyState::Degraded => degraded = true,
-                    DependencyState::NotReady | DependencyState::Unknown => {
-                        if affects_ready {
-                            ready = false;
-                        } else {
-                            degraded = true;
-                        }
-                    }
-                }
-                snapshots.push(DependencySnapshot {
-                    component,
-                    name: Arc::clone(name),
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshots: Vec<DependencySnapshot> = Vec::with_capacity(entries.len());
+        let mut ready = true;
+        let mut degraded = false;
+        for (name, entry) in entries.iter() {
+            let (component, affects_ready, state, reason) = {
+                let guard = entry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (state, reason) = guard.effective(now);
+                (
+                    Arc::clone(&guard.component),
+                    guard.policy.affects_ready,
                     state,
                     reason,
-                    affects_ready,
-                });
+                )
+            };
+            match state {
+                DependencyState::Ready => {}
+                DependencyState::Degraded => degraded = true,
+                DependencyState::NotReady | DependencyState::Unknown => {
+                    if affects_ready {
+                        ready = false;
+                    } else {
+                        degraded = true;
+                    }
+                }
             }
-            ReadinessSnapshot {
-                ready,
-                degraded,
-                entries: Arc::from(snapshots),
-            }
+            snapshots.push(DependencySnapshot {
+                component,
+                name: Arc::clone(name),
+                state,
+                reason,
+                affects_ready,
+            });
+        }
+        ReadinessSnapshot {
+            ready,
+            degraded,
+            entries: Arc::from(snapshots),
         }
     }
 

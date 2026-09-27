@@ -1,0 +1,30 @@
+[package]
+name = "namapper-core"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral mapper SQL rendering, shared cache, atomic metrics, and bounded threshold notifications"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["database", "mapper", "sql", "runtime", "observability"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[features]
+default = []
+redis-cache = ["dep:redis"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+hex = "0.4"
+linkme = "0.3"
+nametrics-core = { version = "1.0.2" }
+nanotify-core = { version = "1.0.0" }
+redis = { version = "1", features = ["tokio-comp", "cluster-async"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"

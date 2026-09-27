@@ -3,11 +3,21 @@
 `nauth-oauth` 提供 OAuth Resource Server 的 JWT access token 校验、JWKS last-good registry 和
 RFC 8414 授权服务器 metadata 客户端。当前签名能力明确限定为 RSA/RS256。
 
+## 验证与刷新架构
+
+```text
+metadata / jwks_uri ──→ 有界 HTTPS 拉取 ──→ 候选 JWKS 校验 ──→ 原子发布 last-good
+token ──→ 按 kid 选 key ──→ RS256 验签 ──→ issuer / audience / 时间声明校验 ──→ Principal
+```
+
+启动首拉失败会阻止 Ready；运行期候选失败不会覆盖 last-good。连续失败超过 `jwks_stale_secs` 后
+readiness 转为不可用，刷新成功、失败和陈旧状态由运行时观测，错误输出保持敏感材料脱敏。
+
 业务通过门面开启 `oauth`；使用配置驱动认证组件时同时开启 `application` 和 `web`：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["application", "oauth", "web-security"] }
+nasa = { version = "1.0.3", features = ["application", "oauth", "web-security"] }
 ```
 
 ```rust

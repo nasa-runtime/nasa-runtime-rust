@@ -1,7 +1,8 @@
 //! Outbox 的 MySQL 后端。
 //!
-//! **写侧**:`append` 经 [`natx::conn`]——在 `natx::run`/`#[transactional]` 事务内调用则
-//! 事件 INSERT 与业务写**同一事务原子提交/回滚**,消除“业务已提交但事件丢失”窗口;事务外则走连接池。
+//! **写侧**：`append` 经 [`natx::conn_for`] 选择句柄绑定的数据源——在同源
+//! `natx::run_for`/带 datasource 的 `#[transactional]` 事务内调用时，事件 INSERT 与业务写
+//! **同一事务原子提交/回滚**，消除“业务已提交但事件丢失”窗口；事务外则走所选连接池。
 //!
 //! **投递侧(dispatcher)**:`dispatch_batch` 轮询未投递行(按 `id` 升序保序)→ 复用
 //! [`naoutbox_core::dispatch_in_order`] 保序至少一次投递 → 把成功前缀 `mark_dispatched`。投递失败的行
@@ -21,14 +22,316 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::OnceLock;
+mod retention;
+pub use retention::{RETENTION_COMMIT_UNCERTAIN_REASON, RETENTION_LOCK_CONTENTION_REASON};
 
-use naoutbox_core::{dispatch_in_order, DispatchReport, OutboxEvent, OutboxPublisher};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use naoutbox_core::{
+    dispatch_in_order, DispatchReport, DurableOutboxAppend, DurableOutboxDispatch,
+    DurableOutboxQuota, DurableOutboxRetention, DurableOutboxWakeup, OutboxArchive, OutboxEvent,
+    OutboxPublisher, OutboxRetentionPolicy, OutboxWriteContext, TENANT_QUOTA_EXCEEDED_REASON,
+};
+pub use naoutbox_core::{OutboxStoreError, RetentionRoundReport};
 use sqlx::{pool::PoolConnection, MySql, MySqlConnection, Row as _};
 use tokio::sync::watch;
 
 /// 进程内提交代际只承担低延迟唤醒；数据库轮询仍是跨进程和崩溃恢复的最终事实来源。
-static COMMIT_SIGNAL: OnceLock<watch::Sender<u64>> = OnceLock::new();
+// 提交信号以 datasource 与 lane 共同定界，避免一个业务链的提交唤醒无关 dispatcher。
+type CommitSignalRegistry = BTreeMap<(String, String), watch::Sender<u64>>;
+static COMMIT_SIGNALS: OnceLock<Mutex<CommitSignalRegistry>> = OnceLock::new();
+
+/// 未路由 aggregate_type 的默认 lane；未安装任何路由时全部事件归入本 lane,
+/// 行为与未分片的单 dispatcher 完全一致(分片是显式 opt-in)。
+pub const DEFAULT_CHANNEL: &str = "global";
+
+/// 进程级冻结的 aggregate_type → channel 路由。写侧按它为新行落 channel 列;
+/// 一经安装不可变更——运行期换路由会把同一聚合根的先后事件拆进两个 lane。
+static CHANNEL_ROUTES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+
+/// 业务作用：校验 lane/通道名落在封闭字符集,可安全进入列值、advisory lock 名与指标标签。
+///
+/// 参数说明：
+/// - `channel`: 待校验通道名。
+///
+/// 返回：小写字母数字与 `_-.`、长度 1..=64 时返回真。
+pub fn valid_channel_name(channel: &str) -> bool {
+    !channel.is_empty()
+        && channel.len() <= 64
+        && channel.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+}
+
+/// 业务作用：安装进程级冻结通道路由——分片的显式 opt-in 开关,决定新事件的 lane 归属。
+///
+/// 路由必须在任何业务 append 之前安装(应用装配阶段),且进程生命周期内只允许一份:
+/// 重复安装同一内容按幂等成功,内容不同立即拒绝——变更路由必须走新部署,保证同一
+/// 聚合根二元组自始至终落在同一 lane。
+///
+/// 参数说明：
+/// - `routes`: aggregate_type 到通道名的冻结映射;未列出的类型归入 [`DEFAULT_CHANNEL`]。
+///
+/// 返回：安装成功或幂等重放返回 `Ok`;通道名非法或与已安装内容不一致返回错误。
+pub fn install_channel_routes(routes: BTreeMap<String, String>) -> Result<(), OutboxStoreError> {
+    for (aggregate_type, channel) in &routes {
+        if aggregate_type.is_empty() || aggregate_type.len() > 128 || !valid_channel_name(channel) {
+            return Err(OutboxStoreError::new(
+                "channel routes require bounded aggregate types and canonical channel names",
+            ));
+        }
+    }
+    let installed = CHANNEL_ROUTES.get_or_init(|| routes.clone());
+    if *installed != routes {
+        return Err(OutboxStoreError::new(
+            "channel routes are frozen for the process lifetime",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：按冻结路由解析事件的 lane 归属;路由缺失或类型未列出时归入默认 lane。
+///
+/// 参数说明：
+/// - `aggregate_type`: 事件聚合根类型。
+///
+/// 返回：稳定通道名;派生只依赖聚合类型,同一聚合根二元组必然同 lane。
+pub fn channel_of(aggregate_type: &str) -> &'static str {
+    match CHANNEL_ROUTES.get() {
+        // 静态 OnceLock 的内容借用天然 'static。
+        Some(routes) => routes
+            .get(aggregate_type)
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_CHANNEL),
+        None => DEFAULT_CHANNEL,
+    }
+}
+
+/// 进程级冻结的租户在飞事件配额表。列出的租户在 append 事务内原子预留、投递/死信
+/// 裁决时同事务释放;未列出的租户不记账不设限——账本行锁会把同租户并发 append 串行化,
+/// 这是配额的固有代价,只应由显式选择配额的租户承担。
+static TENANT_QUOTAS: OnceLock<BTreeMap<String, u64>> = OnceLock::new();
+
+/// 当前进程按租户在飞配额拒绝的 append 数(低基数计数,不携带租户标签)。
+static QUOTA_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// 业务作用：安装进程级冻结的租户在飞事件配额——配额的显式 opt-in 开关。
+///
+/// 配额必须在任何业务 append 之前安装(应用装配阶段),进程生命周期内只允许一份:
+/// 重复安装同一内容按幂等成功,内容不同立即拒绝。把某租户纳入配额前,该租户的全部
+/// 写入必须已改走受信上下文入口,否则旧路径写入的行会在释放时造成账本漂移
+/// (由有界对账收敛)。
+///
+/// 参数说明：
+/// - `quotas`: 租户到在飞事件上限的冻结映射;`0` 表示禁止该租户任何新 append。
+///
+/// 返回：安装成功或幂等重放返回 `Ok`;租户名越界或与已安装内容不一致返回错误。
+pub fn install_outbox_tenant_quotas(quotas: BTreeMap<String, u64>) -> Result<(), OutboxStoreError> {
+    for tenant in quotas.keys() {
+        if tenant.is_empty() || tenant.len() > 256 || tenant.chars().any(char::is_control) {
+            return Err(OutboxStoreError::new(
+                "outbox tenant quotas require bounded tenant names",
+            ));
+        }
+    }
+    let installed = TENANT_QUOTAS.get_or_init(|| quotas.clone());
+    if *installed != quotas {
+        return Err(OutboxStoreError::new(
+            "outbox tenant quotas are frozen for the process lifetime",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：查询租户的在飞事件上限;未安装配额或未列出的租户返回 `None`(不设限)。
+///
+/// 参数说明：
+/// - `tenant`: 租户身份。
+///
+/// 返回：列出的租户返回上限,其余返回 `None`。
+pub fn outbox_tenant_quota_of(tenant: &str) -> Option<u64> {
+    TENANT_QUOTAS
+        .get()
+        .and_then(|quotas| quotas.get(tenant).copied())
+}
+
+/// 业务作用：判定本进程是否真正启用了 Outbox 租户配额。
+///
+/// 配额是显式 opt-in,**未启用时投递与死信裁决绝不触碰配额账本**:非采用者既不承担
+/// 多表 UPDATE 与显式事务的开销,也不因缺少 `outbox_tenant_quota` 表而中断投递。
+/// 空映射视为未启用——它表达"提交了计划但没有任何受限租户",语义上等同不启用。
+///
+/// 参数说明: 无。
+///
+/// 返回：安装了非空配额表返回真。
+fn tenant_quotas_enabled() -> bool {
+    TENANT_QUOTAS.get().is_some_and(|quotas| !quotas.is_empty())
+}
+
+/// 业务作用：校验所有 Outbox 部署都依赖的通用持久结构——受信租户归因列存在且宽度
+/// 满足公开身份合同(256 字节)。
+///
+/// 与租户配额无关:`OutboxWriteContext` 的租户上界是公开合同,`outbox_event.tenant`
+/// 是每一笔受信写入都会落的列。未启用配额的存量部署若仍是窄列,191..=256 字节的
+/// 合法租户可以通过全部身份校验,却在第一笔业务写入处被数据库拒绝。因此本校验在
+/// 任何启用 Outbox 的应用 Ready 前无条件执行。
+///
+/// 参数说明: 无。
+///
+/// 返回：列存在且宽度达标返回 `Ok`;缺列或宽度不足返回指向纠正迁移的脱敏错误。
+pub async fn verify_outbox_event_schema() -> Result<(), OutboxStoreError> {
+    verify_outbox_event_schema_for(natx::DEFAULT_DATASOURCE).await
+}
+
+/// 业务作用：在指定 datasource 上校验 Outbox 通用事件表合同。
+///
+/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+///
+/// 返回：租户列存在且宽度达标时成功；名称、连接或结构不满足时返回脱敏错误。
+pub async fn verify_outbox_event_schema_for(
+    datasource: impl AsRef<str>,
+) -> Result<(), OutboxStoreError> {
+    let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+    let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
+    verify_outbox_event_schema_on(conn.as_mut()).await
+}
+
+/// 业务作用：在调用方已经持有的 MySQL 会话上复验 Outbox 通用事件表合同，避免组合验表
+/// 为同一启动门禁额外占用连接池槽位。
+///
+/// 参数说明：
+/// - `connection`：Ready 阶段独占持有的数据库会话。
+///
+/// 返回：tenant 列存在且宽度达标返回 `Ok`；否则返回稳定、脱敏的迁移指引。
+async fn verify_outbox_event_schema_on(
+    connection: &mut MySqlConnection,
+) -> Result<(), OutboxStoreError> {
+    let tenant_width: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'outbox_event' \
+         AND COLUMN_NAME = 'tenant'",
+    )
+    .fetch_optional(connection)
+    .await
+    .map_err(map_err)?;
+    match tenant_width {
+        None => Err(OutboxStoreError::new(
+            "outbox requires the outbox_event.tenant column (run outbox_event_tenant migration)",
+        )),
+        Some(width) if width.is_none_or(|width| width < TENANT_COLUMN_MIN_WIDTH) => {
+            Err(OutboxStoreError::new(
+                "outbox_event.tenant must be at least VARCHAR(256) (run outbox_tenant_width migration)",
+            ))
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+/// 租户列的最小合同宽度,与 `OutboxWriteContext`/Saga `TenantId` 的公开上界一致。
+const TENANT_COLUMN_MIN_WIDTH: i64 = 256;
+
+/// 业务作用：校验启用配额所需的持久结构已就位——把"迁移漏跑"从运行期投递中断
+/// 提前成暴露在启动门禁上的失败。
+///
+/// 只在真正启用配额时有意义:未启用的部署不依赖这些结构,调用本函数直接放行。
+///
+/// 参数说明: 无。
+///
+/// 返回：未启用或结构齐备返回 `Ok`;缺列/缺表返回指明缺失项的脱敏错误。
+pub async fn verify_outbox_tenant_quota_schema() -> Result<(), OutboxStoreError> {
+    verify_outbox_tenant_quota_schema_for(natx::DEFAULT_DATASOURCE).await
+}
+
+/// 业务作用：在指定 datasource 上复验 Outbox 租户配额账本与通用事件表。
+///
+/// 参数说明：`datasource` 是受管 Outbox 计划绑定的数据源。
+///
+/// 返回：未启用配额或结构齐备时成功；名称、连接或账本合同缺失时失败。
+pub async fn verify_outbox_tenant_quota_schema_for(
+    datasource: impl AsRef<str>,
+) -> Result<(), OutboxStoreError> {
+    if !tenant_quotas_enabled() {
+        return Ok(());
+    }
+    let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+    let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
+    // 配额校验复用当前会话执行通用合同，合法的单连接池不会因验表内部再次取连接而
+    // 自我等待；独立调用本入口时仍完整覆盖 tenant 列存在性与宽度。
+    verify_outbox_event_schema_on(conn.as_mut()).await?;
+    let has_ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() \
+         AND TABLE_NAME = 'outbox_tenant_quota'",
+    )
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(map_err)?;
+    if has_ledger == 0 {
+        return Err(OutboxStoreError::new(
+            "outbox tenant quotas require the outbox_tenant_quota table (run outbox_tenant_quota migration)",
+        ));
+    }
+    let ledger_width: Option<i64> = sqlx::query_scalar(
+        "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'outbox_tenant_quota' \
+         AND COLUMN_NAME = 'tenant_id'",
+    )
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(map_err)?;
+    if ledger_width.is_none_or(|width| width < TENANT_COLUMN_MIN_WIDTH) {
+        return Err(OutboxStoreError::new(
+            "outbox_tenant_quota.tenant_id must be at least VARCHAR(256) (run outbox_tenant_width migration)",
+        ));
+    }
+    // 每个设限租户的账本必须已由对账初始化:存量待投递行未入账时,其投递/死信释放
+    // 会扣掉新行名额。Ready 期 fail-fast,不把部署错误拖到首次业务 append。
+    if let Some(quotas) = TENANT_QUOTAS.get() {
+        for tenant in quotas.keys() {
+            let initialized: Option<i8> = sqlx::query_scalar(
+                "SELECT initialized FROM outbox_tenant_quota WHERE tenant_id = ?",
+            )
+            .bind(tenant)
+            .fetch_optional(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+            if initialized != Some(1) {
+                return Err(OutboxStoreError::new(
+                    "outbox tenant quota ledger for a capped tenant is not initialized; run reconcile_outbox_tenant_quota after every writer runs the accounting binary",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 业务作用：读取当前进程按租户配额拒绝的 append 总数,供低基数观测面导出。
+///
+/// 参数说明: 无。
+///
+/// 返回：进程内累计拒绝数。
+pub fn outbox_quota_rejections_total() -> u64 {
+    QUOTA_REJECTIONS.load(Ordering::Relaxed)
+}
+
+/// 配额账本建表语句(部署应由迁移拥有 schema;此处便于演示环境自举)。
+const CREATE_QUOTA_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS outbox_tenant_quota ( \
+     tenant_id VARCHAR(256) NOT NULL, \
+     in_flight BIGINT UNSIGNED NOT NULL DEFAULT 0, \
+     initialized TINYINT NOT NULL DEFAULT 0, \
+     updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), \
+     PRIMARY KEY (tenant_id) \
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
+
+/// 死信处置事实表建表语句:每条被保留清理删除的死信都持久化批准标识与收据身份。
+const CREATE_DEAD_DISPOSAL_SQL: &str = "CREATE TABLE IF NOT EXISTS outbox_dead_disposal ( \
+     event_id CHAR(36) NOT NULL, \
+     approval VARCHAR(128) NOT NULL, \
+     receipt_event_id CHAR(36) NOT NULL, \
+     disposed_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
+     PRIMARY KEY (event_id) \
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
 
 /// outbox 表建表语句(部署应由迁移拥有 schema;此处便于演示环境自举)。
 const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS outbox_event ( \
@@ -39,51 +342,23 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS outbox_event ( \
      event_type VARCHAR(128) NOT NULL, \
      payload LONGBLOB NOT NULL, \
      traceparent VARCHAR(64) NULL, \
+     tenant VARCHAR(256) NOT NULL DEFAULT 'system', \
+     channel VARCHAR(64) NOT NULL DEFAULT 'global', \
      dispatched TINYINT NOT NULL DEFAULT 0, \
      attempts INT NOT NULL DEFAULT 0, \
      dead TINYINT NOT NULL DEFAULT 0, \
+     dead_at TIMESTAMP(6) NULL, \
      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
      dispatched_at TIMESTAMP NULL, \
      PRIMARY KEY (id), \
      UNIQUE KEY uk_event_id (event_id), \
      KEY idx_dispatchable (dispatched, dead, id), \
+     KEY idx_channel_dispatchable (channel, dispatched, dead, id), \
+     KEY idx_tenant_dispatchable (tenant, dispatched, dead, id), \
+     KEY idx_retention_dispatched (dispatched, dead, dispatched_at), \
+     KEY idx_retention_dead (dead, dead_at), \
      KEY idx_dead (dead, id) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-
-/// outbox store I/O 失败(脱敏;不含 SQL/凭据/payload)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboxStoreError {
-    /// 稳定脱敏原因。
-    pub reason: String,
-}
-
-impl OutboxStoreError {
-    /// 业务作用：用稳定脱敏原因构造 Outbox 持久层错误。
-    ///
-    /// 参数说明：
-    /// - `reason`：允许向上游暴露的稳定失败分类。
-    ///
-    /// 返回：不携带 SQL、凭据或事件正文的存储错误。
-    pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for OutboxStoreError {
-    /// 业务作用：输出不含 SQL、连接信息或 payload 的稳定存储错误。
-    ///
-    /// 参数说明：
-    /// - `formatter`：标准格式化输出目标。
-    ///
-    /// 返回：稳定摘要写入成功时返回 `Ok`。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "outbox store error: {}", self.reason)
-    }
-}
-
-impl std::error::Error for OutboxStoreError {}
 
 /// 一条待投递行(带 DB 主键 id,供投递成功后 `mark_dispatched`)。
 #[derive(Debug, Clone)]
@@ -100,6 +375,8 @@ struct PendingRow {
 /// session 留在池中。
 struct DispatchClaim {
     connection: Option<PoolConnection<MySql>>,
+    /// lane 名;`None` 表示未分片的全表 dispatcher claim(锁名不带通道后缀)。
+    channel: Option<String>,
 }
 
 impl DispatchClaim {
@@ -112,12 +389,28 @@ impl DispatchClaim {
     fn new(connection: PoolConnection<MySql>) -> Self {
         Self {
             connection: Some(connection),
+            channel: None,
+        }
+    }
+
+    /// 业务作用：创建 lane 独占 claim guard——每个 lane 的锁名互不相同,停摆半径收窄到
+    /// 单 lane,其余 lane 的投递权威不受影响。
+    ///
+    /// 参数说明：
+    /// - `connection`：即将竞争该 lane named lock 的独占池连接。
+    /// - `channel`：lane 名。
+    ///
+    /// 返回：持有连接关闭责任的 lane claim guard。
+    fn for_channel(connection: PoolConnection<MySql>, channel: &str) -> Self {
+        Self {
+            connection: Some(connection),
+            channel: Some(channel.to_string()),
         }
     }
 
     /// 业务作用：借用绑定 named lock 的底层 MySQL session，确保领取、发布标记与释放使用同一会话。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：claim guard 独占持有的可变 MySQL 连接。
     fn connection(&mut self) -> &mut MySqlConnection {
@@ -128,7 +421,7 @@ impl DispatchClaim {
 
     /// 业务作用：在当前 session 明确没有取得 claim 时解除兜底关闭，让健康连接正常回池。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；本方法消费 guard 并归还连接所有权。
     fn disarm(mut self) {
@@ -137,15 +430,26 @@ impl DispatchClaim {
 
     /// 业务作用：显式释放 named lock；只有服务端确认释放成功才允许连接回池。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；释放结果不确定时保留关闭责任，由 `Drop` 关闭物理会话。
     async fn release(mut self) {
-        let released: Result<Option<i64>, _> = sqlx::query_scalar(
-            "SELECT RELEASE_LOCK(SHA2(CONCAT('nasa-outbox:', DATABASE()), 256))",
-        )
-        .fetch_one(self.connection())
-        .await;
+        let released: Result<Option<i64>, _> =
+            match self.channel.take() {
+                Some(channel) => sqlx::query_scalar(
+                    "SELECT RELEASE_LOCK(SHA2(CONCAT('nasa-outbox:', DATABASE(), ':', ?), 256))",
+                )
+                .bind(channel)
+                .fetch_one(self.connection())
+                .await,
+                None => {
+                    sqlx::query_scalar(
+                        "SELECT RELEASE_LOCK(SHA2(CONCAT('nasa-outbox:', DATABASE()), 256))",
+                    )
+                    .fetch_one(self.connection())
+                    .await
+                }
+            };
         if matches!(released, Ok(Some(1))) {
             let _ = self.connection.take();
         }
@@ -156,7 +460,7 @@ impl DispatchClaim {
 impl Drop for DispatchClaim {
     /// 业务作用：未确认 `RELEASE_LOCK` 时关闭物理连接，阻止 named lock 随池连接泄漏。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：无。
     ///
     /// 返回：无；只标记连接在析构时关闭，不执行阻塞 I/O。
     fn drop(&mut self) {
@@ -166,18 +470,69 @@ impl Drop for DispatchClaim {
     }
 }
 
-/// MySQL outbox。无自身状态:每次操作经 `natx::conn()` 取连接,自动感知 ambient 事务。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MySqlOutbox;
+/// MySQL outbox；句柄固定 datasource，避免多库部署隐式落到默认池。
+#[derive(Debug, Clone)]
+pub struct MySqlOutbox {
+    datasource: natx::DatasourceRef,
+}
+
+impl Default for MySqlOutbox {
+    /// 业务作用：以兼容语义构造绑定默认 datasource 的 Outbox。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 [`MySqlOutbox::new`] 相同的轻量句柄。
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MySqlOutbox {
-    /// 业务作用：创建无状态 Outbox 入口，不提前建连或取得 dispatcher claim。
+    /// 业务作用：创建绑定默认 datasource 的轻量 Outbox 入口，不提前建连或取得 dispatcher claim。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：可在事务写侧或独立投递侧复用的轻量句柄。
     pub fn new() -> Self {
-        Self
+        Self {
+            datasource: natx::DatasourceRef::default(),
+        }
+    }
+
+    /// 业务作用：创建绑定命名 datasource 的 Outbox 入口。
+    ///
+    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    ///
+    /// 返回：写入、查询与投递操作固定使用该 datasource；名称非法时在 I/O 前失败。
+    pub fn with_datasource(datasource: impl AsRef<str>) -> Result<Self, OutboxStoreError> {
+        Ok(Self {
+            datasource: natx::DatasourceRef::new(datasource)
+                .map_err(|_| OutboxStoreError::new("invalid outbox datasource name"))?,
+        })
+    }
+
+    /// 业务作用：读取该 Outbox 全部持久、claim 与治理操作绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不可变、不含连接信息的 qualifier 引用。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        &self.datasource
+    }
+
+    /// 业务作用：在任何事务写 SQL 前复验 ambient transaction 与 Outbox 绑定到同一 datasource。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：事务存在且身份一致时成功；缺少事务或跨 datasource 时返回稳定脱敏分类。
+    fn require_ambient_datasource(&self) -> Result<(), OutboxStoreError> {
+        match natx::current_datasource() {
+            Some(current) if current == self.datasource => Ok(()),
+            Some(_) => Err(OutboxStoreError::new(
+                "ambient transaction datasource mismatch",
+            )),
+            None => Err(OutboxStoreError::new("ambient transaction is required")),
+        }
     }
 
     /// 业务作用：为受控自举环境创建 Outbox 表，并把历史演示表补齐稳定身份、死信字段和投递索引。
@@ -186,7 +541,29 @@ impl MySqlOutbox {
     ///
     /// 返回：表结构达到当前运行合同后成功；建表、历史回填或强制约束失败时返回脱敏存储错误。
     pub async fn ensure_schema() -> Result<(), OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        Self::ensure_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上建立受控自举所需的 Outbox 结构。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：结构完整时成功；名称、连接或 DDL 失败时返回脱敏错误。
+    pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), OutboxStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+        let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
+        Self::ensure_schema_on_connection(&mut conn).await
+    }
+
+    /// 业务作用：复用调用方已持有的 MySQL 连接建立当前 Outbox 结构，使外层 schema
+    /// 互斥权覆盖历史收敛与索引建立。
+    ///
+    /// 参数说明：`conn` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：表、列和索引达到运行合同时成功；DDL 或历史收敛失败时返回脱敏错误。
+    pub async fn ensure_schema_on_connection(
+        conn: &mut natx::Conn,
+    ) -> Result<(), OutboxStoreError> {
         sqlx::query(CREATE_TABLE_SQL)
             .execute(conn.as_mut())
             .await
@@ -219,6 +596,53 @@ impl MySqlOutbox {
         ] {
             let _ = sqlx::query(statement).execute(conn.as_mut()).await;
         }
+        // 通道列与按通道领取索引:历史行由列默认值一次性归入 'global' 默认 lane;
+        // 该归属规则一经发布不可更改,否则同一聚合根的历史事件会被拆进两个 lane。
+        for statement in [
+            "ALTER TABLE outbox_event ADD COLUMN channel VARCHAR(64) NOT NULL DEFAULT 'global'",
+            "ALTER TABLE outbox_event ADD INDEX idx_channel_dispatchable (channel, dispatched, dead, id)",
+        ] {
+            let _ = sqlx::query(statement).execute(conn.as_mut()).await;
+        }
+        // 死信时刻列:死信保留期必须从"进入死信"起算,而不是从创建起算——长期待投递
+        // 后刚标死的行不允许立即成为清理候选。
+        let _ = sqlx::query("ALTER TABLE outbox_event ADD COLUMN dead_at TIMESTAMP(6) NULL")
+            .execute(conn.as_mut())
+            .await;
+        // 保留清理的时间过滤与最老候选聚合按生命周期时刻走索引:缺它们时聚合退化为
+        // 全表扫描,预算在第一次检查前就被大表吃光。
+        for statement in [
+            "ALTER TABLE outbox_event ADD INDEX idx_retention_dispatched (dispatched, dead, dispatched_at)",
+            "ALTER TABLE outbox_event ADD INDEX idx_retention_dead (dead, dead_at)",
+        ] {
+            let _ = sqlx::query(statement).execute(conn.as_mut()).await;
+        }
+        // 租户列:历史行与未携带上下文的 append 固定归入 system 租户;租户身份只能由
+        // 受信写入上下文填充,不得从 payload 解析。配额账本表随建。
+        for statement in [
+            "ALTER TABLE outbox_event ADD COLUMN tenant VARCHAR(256) NOT NULL DEFAULT 'system'",
+            "ALTER TABLE outbox_event ADD INDEX idx_tenant_dispatchable (tenant, dispatched, dead, id)",
+            // 早期演示库列宽 190:对齐 TenantId 合同上限,191..=256 字节的合法租户不得
+            // 在双写处被窄化拒绝。
+            "ALTER TABLE outbox_event MODIFY COLUMN tenant VARCHAR(256) NOT NULL DEFAULT 'system'",
+            "ALTER TABLE outbox_tenant_quota MODIFY COLUMN tenant_id VARCHAR(256) NOT NULL",
+        ] {
+            let _ = sqlx::query(statement).execute(conn.as_mut()).await;
+        }
+        sqlx::query(CREATE_QUOTA_TABLE_SQL)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+        sqlx::query(CREATE_DEAD_DISPOSAL_SQL)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+        // 旧演示库的配额账本补初始化标记列;生产环境由正式 migration 拥有该变更。
+        let _ = sqlx::query(
+            "ALTER TABLE outbox_tenant_quota ADD COLUMN initialized TINYINT NOT NULL DEFAULT 0",
+        )
+        .execute(conn.as_mut())
+        .await;
         Ok(())
     }
 
@@ -231,13 +655,20 @@ impl MySqlOutbox {
     /// 脱敏存储错误。事务回滚时不会发送唤醒。
     pub async fn append(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
         let transactional = natx::in_transaction();
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        if transactional {
+            // 跨 datasource 必须在取连接和执行 INSERT 前拒绝，避免脱敏映射把路由错误混成普通数据库失败。
+            self.require_ambient_datasource()?;
+        }
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
         if transactional {
-            register_commit_notification()?;
+            register_commit_notification(
+                self.datasource.as_str(),
+                channel_of(&event.aggregate_type),
+            )?;
         } else {
-            notify_committed_append();
+            notify_committed_append(self.datasource.as_str(), channel_of(&event.aggregate_type));
         }
         Ok(())
     }
@@ -252,20 +683,168 @@ impl MySqlOutbox {
     /// 返回：INSERT 与提交后唤醒均成功登记时完成；缺少事务或写入失败返回脱敏存储错误。回滚、
     /// rollback-only 与提交失败都不会唤醒 dispatcher。
     pub async fn append_transactional(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
-        let mut conn = natx::mandatory_conn().await.map_err(map_err)?;
+        // 先复验事务身份再获取连接，保证跨库调用没有任何 SQL 或提交后唤醒副作用。
+        self.require_ambient_datasource()?;
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
         Self::append_on(conn.as_mut(), event).await?;
         drop(conn);
-        register_commit_notification()?;
+        register_commit_notification(self.datasource.as_str(), channel_of(&event.aggregate_type))?;
         Ok(())
+    }
+
+    /// 业务作用：以受信写入上下文在当前 ambient 事务内追加事件——配额与归因的租户
+    /// 身份由已认证业务上下文填充,绝不从 payload 解析。
+    ///
+    /// 若该租户被冻结配额表列出,先在同事务内对 `outbox_tenant_quota` 做
+    /// `in_flight < cap` 的条件自增预留:预留失败按稳定原因码拒绝且**不写事件行**,
+    /// 业务事务回滚时预留一并回滚。未列出的租户不记账不设限。事件行携带租户列,
+    /// 投递/死信裁决时由同一语句/事务释放。
+    ///
+    /// 参数说明：
+    /// - `context`: 已认证租户的受信写入上下文。
+    /// - `event`: 必须与当前业务事实原子提交的待发布事件。
+    ///
+    /// 返回：预留(如需)与 INSERT 都成功时完成;配额耗尽返回携带
+    /// [`TENANT_QUOTA_EXCEEDED_REASON`] 的错误,缺少事务或数据库失败返回脱敏错误。
+    pub async fn append_transactional_with_context(
+        &self,
+        context: &OutboxWriteContext,
+        event: &OutboxEvent,
+    ) -> Result<(), OutboxStoreError> {
+        // 配额预留同样属于关键事务写，必须在任何账本 SQL 前拒绝跨 datasource。
+        self.require_ambient_datasource()?;
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
+        if let Some(cap) = outbox_tenant_quota_of(context.tenant()) {
+            // 预留先于写行:两步都持有该租户账本行锁,并发 append 在行锁上串行化,
+            // 上限不可能被无锁计数穿透;拒绝时事件行从未写入,无需补偿。
+            sqlx::query(
+                "INSERT IGNORE INTO outbox_tenant_quota (tenant_id, in_flight) VALUES (?, 0)",
+            )
+            .bind(context.tenant())
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+            // 设限租户的预留要求账本已初始化(存量待投递行经受锁对账入账),否则旧行
+            // 的投递/死信释放会扣掉新行名额、上限被穿透;未初始化按部署错误上报,
+            // 不与"配额耗尽"共用稳定拒绝。
+            let reserved = sqlx::query(
+                "UPDATE outbox_tenant_quota SET in_flight = in_flight + 1 \
+                 WHERE tenant_id = ? AND in_flight < ? AND initialized = 1",
+            )
+            .bind(context.tenant())
+            .bind(cap)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+            if reserved.rows_affected() == 0 {
+                let initialized: i8 = sqlx::query_scalar(
+                    "SELECT initialized FROM outbox_tenant_quota WHERE tenant_id = ?",
+                )
+                .bind(context.tenant())
+                .fetch_one(conn.as_mut())
+                .await
+                .map_err(map_err)?;
+                if initialized == 0 {
+                    return Err(OutboxStoreError::new(
+                        "outbox tenant quota ledger is not initialized; run reconcile_outbox_tenant_quota after every writer runs the accounting binary",
+                    ));
+                }
+                QUOTA_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+                // 稳定原因码使配额拒绝与系统故障可区分;文本不携带其它租户信息。
+                return Err(OutboxStoreError::new(TENANT_QUOTA_EXCEEDED_REASON));
+            }
+        }
+        Self::append_on_with_tenant(conn.as_mut(), event, context.tenant()).await?;
+        drop(conn);
+        register_commit_notification(self.datasource.as_str(), channel_of(&event.aggregate_type))?;
+        Ok(())
+    }
+
+    /// 业务作用：读取单个租户的精确在飞事件数——只服务受鉴权管理查询,不进指标标签。
+    ///
+    /// 参数说明：
+    /// - `tenant`: 租户身份。
+    ///
+    /// 返回：账本记录的在飞事件数;无记录返回 0。
+    pub async fn outbox_tenant_quota_usage(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        let row = sqlx::query("SELECT in_flight FROM outbox_tenant_quota WHERE tenant_id = ?")
+            .bind(tenant)
+            .fetch_optional(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+        match row {
+            Some(row) => Ok(row.try_get::<u64, _>("in_flight").map_err(map_err)?),
+            None => Ok(0),
+        }
+    }
+
+    /// 业务作用：按已提交事实有界对账单个租户的在飞账本——把旧路径混写或崩溃窗口
+    /// 造成的漂移收敛回真实在飞数。
+    ///
+    /// 必须在 ambient 事务内调用,且**先锁账本行再计数**:受信 append 的预留与投递/
+    /// 死信裁决的释放都持有同一把行锁,未提交的在线事务被挡在行锁外;先计数后覆盖
+    /// 会让"计数与覆盖之间提交的在线变更"被旧值覆盖,对账本身制造漂移。在飞事实 =
+    /// `dispatched = 0 AND dead = 0` 的该租户行数,扫描范围由
+    /// `(tenant, dispatched, dead, id)` 索引约束;不在请求路径调用,由运维显式触发。
+    ///
+    /// 参数说明：
+    /// - `tenant`: 租户身份。
+    ///
+    /// 返回：对账后的在飞事件数;事务缺失或底层失败返回错误。
+    pub async fn reconcile_outbox_tenant_quota(
+        &self,
+        tenant: &str,
+    ) -> Result<u64, OutboxStoreError> {
+        let mut conn = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_err)?;
+        sqlx::query("INSERT IGNORE INTO outbox_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
+            .bind(tenant)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_err)?;
+        // 行锁先行:此后该租户的受信 append(预留)与投递/死信裁决(释放)都在本事务
+        // 提交前被阻塞,计数窗口内不可能再有账本参与方提交新事实。
+        let _locked: u64 = sqlx::query_scalar(
+            "SELECT in_flight FROM outbox_tenant_quota WHERE tenant_id = ? FOR UPDATE",
+        )
+        .bind(tenant)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_err)?;
+        let actual: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox_event \
+             WHERE tenant = ? AND dispatched = 0 AND dead = 0",
+        )
+        .bind(tenant)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_err)?;
+        let actual = actual.max(0) as u64;
+        // 对账是初始化标记的唯一置位入口:设限租户的预留与 Ready 校验都以它为放行条件。
+        sqlx::query(
+            "UPDATE outbox_tenant_quota SET in_flight = ?, initialized = 1 WHERE tenant_id = ?",
+        )
+        .bind(actual)
+        .bind(tenant)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_err)?;
+        Ok(actual)
     }
 
     /// 业务作用：订阅当前进程 Outbox 提交代际，使受管 dispatcher 在新事实提交后立即尝试投递。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`channel` 指定 lane 时只订阅该 lane；未指定时订阅当前 datasource 的全局代际。
     ///
     /// 返回：初值为当前代际的接收端；通知只优化本进程延迟，调用方仍须保留数据库轮询兜底。
-    pub fn subscribe_committed_appends() -> watch::Receiver<u64> {
-        commit_signal().subscribe()
+    pub fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        commit_signal(self.datasource.as_str(), channel.unwrap_or("*")).subscribe()
     }
 
     /// 业务作用：在调用方提供的连接内写入完整 Outbox 事件，不改变连接的提交所有权。
@@ -279,10 +858,30 @@ impl MySqlOutbox {
         connection: &mut MySqlConnection,
         event: &OutboxEvent,
     ) -> Result<(), OutboxStoreError> {
+        // 未携带受信上下文的历史路径固定映射 system 租户:租户身份只能由已认证
+        // 上下文填充,这里不读取 payload 或 header 里的任何自报身份。
+        Self::append_on_with_tenant(connection, event, naoutbox_core::SYSTEM_TENANT).await
+    }
+
+    /// 业务作用：在调用方提供的连接内写入带租户归因的完整 Outbox 事件行。
+    ///
+    /// 参数说明：
+    /// - `connection`：业务事务或独立提交路径持有的 MySQL 连接。
+    /// - `event`：已具备稳定事件身份的待发布事件。
+    /// - `tenant`：受信写入上下文解析出的租户;历史路径固定传 system。
+    ///
+    /// 返回：事件行写入成功时完成；数据库失败返回脱敏错误，由外层决定提交或回滚。
+    async fn append_on_with_tenant(
+        connection: &mut MySqlConnection,
+        event: &OutboxEvent,
+        tenant: &str,
+    ) -> Result<(), OutboxStoreError> {
+        // lane 归属在写入时由冻结路由稳定派生:只依赖 aggregate_type,同一聚合根
+        // 二元组自始至终同 lane;未安装路由时全部落默认 lane,分片保持显式 opt-in。
         sqlx::query(
             "INSERT INTO outbox_event \
-             (event_id, aggregate_type, aggregate_id, event_type, payload, traceparent, dispatched) \
-             VALUES (?, ?, ?, ?, ?, ?, 0)",
+             (event_id, aggregate_type, aggregate_id, event_type, payload, traceparent, tenant, channel, dispatched) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
         )
         .bind(&event.event_id)
         .bind(&event.aggregate_type)
@@ -290,6 +889,8 @@ impl MySqlOutbox {
         .bind(&event.event_type)
         .bind(&event.payload)
         .bind(&event.traceparent)
+        .bind(tenant)
+        .bind(channel_of(&event.aggregate_type))
         .execute(connection)
         .await
         .map_err(map_err)?;
@@ -302,7 +903,7 @@ impl MySqlOutbox {
     ///
     /// 返回：基于 `(dispatched, dead, id)` 覆盖索引返回非死信积压；数据库失败返回脱敏错误。
     pub async fn pending_count(&self) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row =
             sqlx::query("SELECT COUNT(*) AS n FROM outbox_event WHERE dispatched = 0 AND dead = 0")
                 .fetch_one(conn.as_mut())
@@ -389,7 +990,14 @@ impl MySqlOutbox {
                 .await?;
         }
         // 首个失败行记一次尝试;达到上限即标死信(单行静态 SQL,原子)。
-        if report.first_error.is_some() && report.published < pending.len() {
+        // 瞬态/结果不确定失败豁免死信预算:消息保留待投递,不计 attempts 不标死——
+        // 远端可能已提交,离开投递流等于放弃后续收敛。只有确定性失败进入预算裁决。
+        if report
+            .first_error
+            .as_ref()
+            .is_some_and(|error| !error.is_transient())
+            && report.published < pending.len()
+        {
             let failed_id = pending[report.published].id;
             Self::record_failed_attempt(dispatch_claim.connection(), failed_id, max_attempts)
                 .await?;
@@ -404,7 +1012,7 @@ impl MySqlOutbox {
     ///
     /// 返回：基于 `(dead, id)` 覆盖索引返回死信总数；数据库失败返回脱敏错误。
     pub async fn dead_count(&self) -> Result<u64, OutboxStoreError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let row = sqlx::query("SELECT COUNT(*) AS n FROM outbox_event WHERE dead = 1")
             .fetch_one(conn.as_mut())
             .await
@@ -426,17 +1034,84 @@ impl MySqlOutbox {
         id: i64,
         max_attempts: u32,
     ) -> Result<(), OutboxStoreError> {
-        sqlx::query(
-            "UPDATE outbox_event SET \
-             dead = IF(attempts + 1 >= ?, 1, dead), \
-             attempts = attempts + 1 \
-             WHERE id = ? AND dispatched = 0 AND dead = 0",
+        if !tenant_quotas_enabled() {
+            // 未启用配额:保持升级前的单条原子 UPDATE。没有账本要释放,就不该为此
+            // 引入显式事务与额外往返,也不引用配额账本。
+            // 死信时刻与翻转同语句写入:保留清理只认 dead_at,缺它的死信永远无法进入
+            // 清理候选——零足迹分支省的是配额账本,不能省生命周期证据。
+            sqlx::query(
+                "UPDATE outbox_event SET \
+                 dead = IF(attempts + 1 >= ?, 1, dead), \
+                 dead_at = IF(attempts + 1 >= ?, CURRENT_TIMESTAMP(6), dead_at), \
+                 attempts = attempts + 1 \
+                 WHERE id = ? AND dispatched = 0 AND dead = 0",
+            )
+            .bind(max_attempts)
+            .bind(max_attempts)
+            .bind(id)
+            .execute(connection)
+            .await
+            .map_err(map_err)?;
+            return Ok(());
+        }
+        // 启用配额:死信裁决与名额释放必须同事务——行离开可投递集合与账本回落要么
+        // 一起提交、要么一起消失。claim 连接不在 ambient 事务里,这里用显式事务;
+        // 中途失败时 claim 的 close-on-drop 关闭会话,MySQL 隐式回滚。
+        sqlx::raw_sql("BEGIN")
+            .execute(&mut *connection)
+            .await
+            .map_err(map_err)?;
+        // FOR UPDATE 锁行读取旧 attempts:是否翻转死信由旧值决定,不依赖多表 UPDATE
+        // 的赋值顺序语义;claim 已按 lane 串行化,这里的行锁是对非本 lane 写者的防御。
+        let row = sqlx::query(
+            "SELECT attempts, tenant FROM outbox_event \
+             WHERE id = ? AND dispatched = 0 AND dead = 0 FOR UPDATE",
         )
-        .bind(max_attempts)
         .bind(id)
-        .execute(connection)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(map_err)?;
+        let Some(row) = row else {
+            // 行已离开可投递集合(并发投递或早前死信):无事可记,提交空事务。
+            sqlx::raw_sql("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(map_err)?;
+            return Ok(());
+        };
+        let attempts: i32 = row.try_get("attempts").map_err(map_err)?;
+        let tenant: String = row.try_get("tenant").map_err(map_err)?;
+        let becomes_dead = attempts.saturating_add(1) >= max_attempts as i32;
+        // 行锁已在本事务内持有,dispatched/dead 不可能被并发改写;仍保留守卫条件,
+        // 使语句单独看也不会越过已离开可投递集合的行。
+        // 翻转死信时同步记录 dead_at:死信保留期以它为唯一时间依据。
+        sqlx::query(
+            "UPDATE outbox_event SET attempts = attempts + 1, dead = ?, \
+             dead_at = IF(?, CURRENT_TIMESTAMP(6), dead_at) \
+             WHERE id = ? AND dispatched = 0 AND dead = 0",
+        )
+        .bind(becomes_dead)
+        .bind(becomes_dead)
+        .bind(id)
+        .execute(&mut *connection)
+        .await
+        .map_err(map_err)?;
+        if becomes_dead {
+            // 死信行离开可投递集合:同事务释放在飞名额;无账本行的租户自然无操作,
+            // `in_flight > 0` 防御旧路径混写造成的欠账回绕。
+            sqlx::query(
+                "UPDATE outbox_tenant_quota SET in_flight = in_flight - 1 \
+                 WHERE tenant_id = ? AND in_flight > 0",
+            )
+            .bind(&tenant)
+            .execute(&mut *connection)
+            .await
+            .map_err(map_err)?;
+        }
+        sqlx::raw_sql("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -452,13 +1127,53 @@ impl MySqlOutbox {
         limit: u32,
     ) -> Result<Vec<PendingRow>, OutboxStoreError> {
         let rows = sqlx::query(
-            "SELECT id, event_id, aggregate_type, aggregate_id, event_type, payload, traceparent \
+            "SELECT id, event_id, aggregate_type, aggregate_id, event_type, payload, traceparent, \
+             tenant \
              FROM outbox_event WHERE dispatched = 0 AND dead = 0 ORDER BY id ASC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(connection)
         .await
         .map_err(map_err)?;
+        Self::parse_pending(rows)
+    }
+
+    /// 业务作用：按 lane 轮询待投递行——每个 lane 独享自己的 `id` 升序前缀,互不阻塞。
+    ///
+    /// 参数说明：
+    /// - `connection`：持有该 lane claim 的 MySQL 会话。
+    /// - `channel`：lane 名。
+    /// - `limit`：单轮最多领取的行数。
+    ///
+    /// 返回：该 lane 内按 `id` 升序的待投递批次；数据库失败返回脱敏错误。
+    async fn poll_pending_channel(
+        connection: &mut MySqlConnection,
+        channel: &str,
+        limit: u32,
+    ) -> Result<Vec<PendingRow>, OutboxStoreError> {
+        let rows = sqlx::query(
+            "SELECT id, event_id, aggregate_type, aggregate_id, event_type, payload, traceparent, \
+             tenant \
+             FROM outbox_event WHERE channel = ? AND dispatched = 0 AND dead = 0 \
+             ORDER BY id ASC LIMIT ?",
+        )
+        .bind(channel)
+        .bind(limit)
+        .fetch_all(connection)
+        .await
+        .map_err(map_err)?;
+        Self::parse_pending(rows)
+    }
+
+    /// 业务作用：把待投递查询结果解析为带主键的事件批次。
+    ///
+    /// 参数说明：
+    /// - `rows`：待投递查询结果集。
+    ///
+    /// 返回：按查询顺序的批次；列缺失或类型漂移返回脱敏错误。
+    fn parse_pending(
+        rows: Vec<sqlx::mysql::MySqlRow>,
+    ) -> Result<Vec<PendingRow>, OutboxStoreError> {
         let mut pending = Vec::with_capacity(rows.len());
         for row in rows {
             let id: i64 = row.try_get("id").map_err(map_err)?;
@@ -469,6 +1184,9 @@ impl MySqlOutbox {
                 event_type: row.try_get("event_type").map_err(map_err)?,
                 payload: row.try_get("payload").map_err(map_err)?,
                 traceparent: row.try_get("traceparent").map_err(map_err)?,
+                // 受信租户归因唯一来源是持久列;发布端据此做租户级授权与分类,
+                // 不得从 payload 或自报 header 推导。
+                tenant: row.try_get("tenant").map_err(map_err)?,
             };
             pending.push(PendingRow { id, event });
         }
@@ -476,6 +1194,11 @@ impl MySqlOutbox {
     }
 
     /// 业务作用：只标记本轮已经得到下游确认的精确行，防止并发或死信空洞被范围更新越过。
+    ///
+    /// 标记与在飞配额释放在**同一条多表 UPDATE**内完成:行离开可投递集合的瞬间账本
+    /// 同步回落,崩溃窗口里不会出现"已投递但仍占额"的幽灵占用。无账本行的租户
+    /// (未纳入配额)由 LEFT JOIN 自然跳过;`WHERE dispatched = 0` 保证重复调用不会
+    /// 二次释放。
     ///
     /// 参数说明：
     /// - `connection`：持有 dispatcher claim 的 MySQL 会话。
@@ -486,16 +1209,25 @@ impl MySqlOutbox {
         connection: &mut MySqlConnection,
         rows: &[PendingRow],
     ) -> Result<(), OutboxStoreError> {
+        // 未启用配额时保持单表 UPDATE:不引用配额账本,非采用者的投递路径与升级前
+        // 逐字节等价,也不因缺少该表而中断。
+        let statement = if tenant_quotas_enabled() {
+            "UPDATE outbox_event event \
+             LEFT JOIN outbox_tenant_quota quota ON quota.tenant_id = event.tenant \
+             SET event.dispatched = 1, event.dispatched_at = CURRENT_TIMESTAMP, \
+             quota.in_flight = quota.in_flight - IF(quota.in_flight > 0, 1, 0) \
+             WHERE event.dispatched = 0 AND event.dead = 0 AND event.id = ? AND event.event_id = ?"
+        } else {
+            "UPDATE outbox_event SET dispatched = 1, dispatched_at = CURRENT_TIMESTAMP \
+             WHERE dispatched = 0 AND dead = 0 AND id = ? AND event_id = ?"
+        };
         for row in rows {
-            sqlx::query(
-                "UPDATE outbox_event SET dispatched = 1, dispatched_at = CURRENT_TIMESTAMP \
-                 WHERE dispatched = 0 AND dead = 0 AND id = ? AND event_id = ?",
-            )
-            .bind(row.id)
-            .bind(&row.event.event_id)
-            .execute(&mut *connection)
-            .await
-            .map_err(map_err)?;
+            sqlx::query(statement)
+                .bind(row.id)
+                .bind(&row.event.event_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(map_err)?;
         }
         Ok(())
     }
@@ -511,7 +1243,7 @@ impl MySqlOutbox {
     /// 返回：取得锁时返回 armed guard，锁已被其它进程持有时返回 `None`；事务上下文或数据库失败
     /// 返回脱敏错误。
     async fn try_claim_dispatcher(&self) -> Result<Option<DispatchClaim>, OutboxStoreError> {
-        let conn = natx::conn().await.map_err(map_err)?;
+        let conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         let natx::Conn::Pool(conn) = conn else {
             return Err(OutboxStoreError::new(
                 "dispatcher cannot run inside an ambient transaction",
@@ -531,36 +1263,416 @@ impl MySqlOutbox {
             Ok(None)
         }
     }
+
+    /// 业务作用：竞争单个 lane 的独占投递权威——锁名带通道后缀,与其它 lane 及未分片
+    /// dispatcher 的锁互不冲突,某 lane 停摆不影响其余 lane 的领取。
+    ///
+    /// 参数说明：
+    /// - `channel`：lane 名（须先通过 [`valid_channel_name`]）。
+    ///
+    /// 返回：取得锁时返回 armed guard；锁已被其它进程持有时返回 `None`；事务上下文或
+    /// 数据库失败返回脱敏错误。
+    async fn try_claim_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<DispatchClaim>, OutboxStoreError> {
+        let conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        let natx::Conn::Pool(conn) = conn else {
+            return Err(OutboxStoreError::new(
+                "dispatcher cannot run inside an ambient transaction",
+            ));
+        };
+        let mut claim = DispatchClaim::for_channel(conn, channel);
+        let claimed: Option<i64> = sqlx::query_scalar(
+            "SELECT GET_LOCK(SHA2(CONCAT('nasa-outbox:', DATABASE(), ':', ?), 256), 0)",
+        )
+        .bind(channel)
+        .fetch_one(claim.connection())
+        .await
+        .map_err(map_err)?;
+        if claimed == Some(1) {
+            Ok(Some(claim))
+        } else {
+            claim.disarm();
+            Ok(None)
+        }
+    }
+
+    /// 业务作用：在单 lane 独占 claim 下保序发布该 lane 的一个有界批次。
+    ///
+    /// lane 内不变量与未分片入口完全一致:成功前缀才标记、`Block` 语义不变——改变的只是
+    /// 停摆半径(单 lane)而不是投递不变量。**启用分片后同库不得再运行未分片 dispatcher**,
+    /// 两种 claim 锁名不同,并行运行会对同一批行双重发布。
+    ///
+    /// 参数说明：
+    /// - `publisher`：下游发布端。
+    /// - `channel`：lane 名。
+    /// - `limit`：单轮最多领取的行数。
+    ///
+    /// 返回：claim 未取得时返回空报告；否则返回该 lane 的发布报告；通道名非法或存储
+    /// 失败返回脱敏错误。
+    pub async fn dispatch_batch_channel<P>(
+        &self,
+        publisher: &P,
+        channel: &str,
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>
+    where
+        P: OutboxPublisher + ?Sized,
+    {
+        if !valid_channel_name(channel) {
+            return Err(OutboxStoreError::new("invalid outbox channel name"));
+        }
+        let Some(mut claim) = self.try_claim_channel(channel).await? else {
+            return Ok(DispatchReport {
+                published: 0,
+                total: 0,
+                first_error: None,
+            });
+        };
+        let pending = Self::poll_pending_channel(claim.connection(), channel, limit).await?;
+        let events: Vec<OutboxEvent> = pending.iter().map(|row| row.event.clone()).collect();
+        let report = dispatch_in_order(&events, publisher).await;
+        if report.published > 0 {
+            Self::mark_dispatched_exact(claim.connection(), &pending[..report.published]).await?;
+        }
+        claim.release().await;
+        Ok(report)
+    }
+
+    /// 业务作用：单 lane 的毒丸死信投递变体——首失败行计预算,达到上限移入死信,
+    /// 死信策略的作用域同样收窄到本 lane。
+    ///
+    /// 参数说明：
+    /// - `publisher`：下游发布端。
+    /// - `channel`：lane 名。
+    /// - `limit`：单轮最多领取的行数。
+    /// - `max_attempts`：同一事件累计失败轮次上限。
+    ///
+    /// 返回：该 lane 的发布报告；阈值为零、通道名非法或存储失败返回脱敏错误。
+    pub async fn dispatch_batch_channel_with_dlt<P>(
+        &self,
+        publisher: &P,
+        channel: &str,
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError>
+    where
+        P: OutboxPublisher + ?Sized,
+    {
+        if max_attempts == 0 {
+            return Err(OutboxStoreError::new(
+                "max_attempts must be greater than zero",
+            ));
+        }
+        if !valid_channel_name(channel) {
+            return Err(OutboxStoreError::new("invalid outbox channel name"));
+        }
+        let Some(mut claim) = self.try_claim_channel(channel).await? else {
+            return Ok(DispatchReport {
+                published: 0,
+                total: 0,
+                first_error: None,
+            });
+        };
+        let pending = Self::poll_pending_channel(claim.connection(), channel, limit).await?;
+        let events: Vec<OutboxEvent> = pending.iter().map(|row| row.event.clone()).collect();
+        let report = dispatch_in_order(&events, publisher).await;
+        if report.published > 0 {
+            Self::mark_dispatched_exact(claim.connection(), &pending[..report.published]).await?;
+        }
+        // 瞬态/结果不确定失败豁免死信预算:消息保留待投递,不计 attempts 不标死——
+        // 远端可能已提交,离开投递流等于放弃后续收敛。只有确定性失败进入预算裁决。
+        if report
+            .first_error
+            .as_ref()
+            .is_some_and(|error| !error.is_transient())
+            && report.published < pending.len()
+        {
+            let failed_id = pending[report.published].id;
+            Self::record_failed_attempt(claim.connection(), failed_id, max_attempts).await?;
+        }
+        claim.release().await;
+        Ok(report)
+    }
+
+    /// 业务作用：读取单个 lane 仍可投递的事件数量，供按 lane 的积压观测。
+    ///
+    /// 参数说明：
+    /// - `channel`：lane 名。
+    ///
+    /// 返回：基于 `(channel, dispatched, dead, id)` 索引的该 lane 非死信积压；
+    /// 通道名非法或数据库失败返回脱敏错误。
+    pub async fn pending_count_channel(&self, channel: &str) -> Result<u64, OutboxStoreError> {
+        if !valid_channel_name(channel) {
+            return Err(OutboxStoreError::new("invalid outbox channel name"));
+        }
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n FROM outbox_event \
+             WHERE channel = ? AND dispatched = 0 AND dead = 0",
+        )
+        .bind(channel)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_err)?;
+        let count: i64 = row.try_get("n").map_err(map_err)?;
+        Ok(count.max(0) as u64)
+    }
 }
 
-/// 业务作用：取得进程唯一的提交代际发布端，供写侧和受管 dispatcher 共享唤醒事实。
+#[async_trait::async_trait]
+impl DurableOutboxAppend for MySqlOutbox {
+    /// 业务作用：通过后端中立写侧合同追加事件，并沿用 MySQL 的事务内外提交语义。
+    ///
+    /// 参数说明：
+    /// - `event`：携带稳定身份的待发布事件。
+    ///
+    /// 返回：持久写入与提交后唤醒登记完成时成功；路由或数据库失败返回错误。
+    async fn append(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append(self, event).await
+    }
+
+    /// 业务作用：通过后端中立合同在同源 MySQL ambient transaction 内追加关键事件。
+    ///
+    /// 参数说明：
+    /// - `event`：必须与业务事实同提交的待发布事件。
+    ///
+    /// 返回：写入与提交后唤醒登记完成时成功；事务缺失、跨 datasource 或数据库失败时返回错误。
+    async fn append_transactional(&self, event: &OutboxEvent) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append_transactional(self, event).await
+    }
+
+    /// 业务作用：通过后端中立合同执行受信租户配额预留与事务内事件追加。
+    ///
+    /// 参数说明：
+    /// - `context`：受信租户写入上下文。
+    /// - `event`：必须与业务事实同提交的待发布事件。
+    ///
+    /// 返回：配额预留、事件写入与唤醒登记完成时成功；拒绝或数据库失败返回错误。
+    async fn append_transactional_with_context(
+        &self,
+        context: &OutboxWriteContext,
+        event: &OutboxEvent,
+    ) -> Result<(), OutboxStoreError> {
+        MySqlOutbox::append_transactional_with_context(self, context, event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxDispatch for MySqlOutbox {
+    /// 业务作用：从本数据源已提交事件计算指定合同的最老排队时间。
+    ///
+    /// 参数说明：`event_type` 是待观测的固定事件合同名。
+    ///
+    /// 返回：非负毫秒数；无待确认事件时为零，数据库失败时返回错误。
+    async fn oldest_pending_age_ms(&self, event_type: &str) -> Result<u64, OutboxStoreError> {
+        let mut connection = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        let age: i64 = sqlx::query_scalar("SELECT CAST(COALESCE(GREATEST(TIMESTAMPDIFF(MICROSECOND, MIN(created_at), CURRENT_TIMESTAMP(6)) DIV 1000, 0), 0) AS SIGNED) FROM outbox_event WHERE dispatched = 0 AND dead = 0 AND event_type = ?")
+            .bind(event_type).fetch_one(connection.as_mut()).await.map_err(map_err)?;
+        Ok(age.max(0) as u64)
+    }
+
+    /// 业务作用：通过后端中立投递合同读取 MySQL 可投递积压。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负积压数；数据库失败返回错误。
+    async fn pending_count(&self) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::pending_count(self).await
+    }
+
+    /// 业务作用：通过后端中立投递合同读取 MySQL 死信数量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非负死信数；数据库失败返回错误。
+    async fn dead_count(&self) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::dead_count(self).await
+    }
+
+    /// 业务作用：通过后端中立合同竞争 MySQL dispatcher claim 并确认成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：本轮发布报告；存储失败返回错误。
+    async fn dispatch_batch(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch(self, publisher, limit).await
+    }
+
+    /// 业务作用：通过后端中立合同执行带确定性死信预算的 MySQL 投递轮次。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信前的轮次上限。
+    ///
+    /// 返回：本轮发布报告；输入非法或存储失败返回错误。
+    async fn dispatch_batch_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_with_dlt(self, publisher, limit, max_attempts).await
+    }
+
+    /// 业务作用：通过后端中立合同投递一个 MySQL lane 并确认其成功前缀。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    ///
+    /// 返回：本轮 lane 报告；名称非法或存储失败返回错误。
+    async fn dispatch_batch_channel(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_channel(self, publisher, channel, limit).await
+    }
+
+    /// 业务作用：通过后端中立合同投递一个 MySQL lane，并对确定性首失败累计死信预算。
+    ///
+    /// 参数说明：
+    /// - `publisher`：至少一次发布端。
+    /// - `channel`：冻结路由生成的 lane 名称。
+    /// - `limit`：本轮最多领取的事件数。
+    /// - `max_attempts`：确定性失败进入死信前的轮次上限。
+    ///
+    /// 返回：本轮 lane 报告；输入非法或存储失败返回错误。
+    async fn dispatch_batch_channel_with_dlt(
+        &self,
+        publisher: &(dyn OutboxPublisher + Sync),
+        channel: &str,
+        limit: u32,
+        max_attempts: u32,
+    ) -> Result<DispatchReport, OutboxStoreError> {
+        MySqlOutbox::dispatch_batch_channel_with_dlt(self, publisher, channel, limit, max_attempts)
+            .await
+    }
+
+    /// 业务作用：通过后端中立投递合同读取 MySQL 单 lane 积压。
+    ///
+    /// 参数说明：
+    /// - `channel`：待观测的 lane 名称。
+    ///
+    /// 返回：该 lane 的非负积压数；名称非法或数据库失败返回错误。
+    async fn pending_count_channel(&self, channel: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::pending_count_channel(self, channel).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxQuota for MySqlOutbox {
+    /// 业务作用：通过后端中立配额合同读取 MySQL 租户在飞账本。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：账本不存在时为零；数据库失败返回错误。
+    async fn tenant_quota_usage(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::outbox_tenant_quota_usage(self, tenant).await
+    }
+
+    /// 业务作用：通过后端中立配额合同在同源 MySQL 事务内对账租户在飞数。
+    ///
+    /// 参数说明：
+    /// - `tenant`：受信租户身份。
+    ///
+    /// 返回：对账后的在飞数；事务或数据库失败返回错误。
+    async fn reconcile_tenant_quota(&self, tenant: &str) -> Result<u64, OutboxStoreError> {
+        MySqlOutbox::reconcile_outbox_tenant_quota(self, tenant).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableOutboxRetention for MySqlOutbox {
+    /// 业务作用：通过后端中立保留合同执行 MySQL 有界归档与清理轮次。
+    ///
+    /// 参数说明：
+    /// - `policy`：冻结保留策略。
+    /// - `archive`：需要归档收据时提供的幂等归档端。
+    /// - `now_ms`：统一 epoch 毫秒时钟。
+    ///
+    /// 返回：只包含已确认提交事实的轮次报告；策略或存储失败返回错误。
+    async fn retention_round(
+        &self,
+        policy: &OutboxRetentionPolicy,
+        archive: Option<&(dyn OutboxArchive + Sync)>,
+        now_ms: i64,
+    ) -> Result<RetentionRoundReport, OutboxStoreError> {
+        MySqlOutbox::retention_round(self, policy, archive, now_ms).await
+    }
+}
+
+impl DurableOutboxWakeup for MySqlOutbox {
+    /// 业务作用：通过后端中立唤醒合同订阅 MySQL 已确认提交代际。
+    ///
+    /// 参数说明：`channel` 指定 lane 时隔离唤醒；未指定时订阅当前 datasource 的全局代际。
+    ///
+    /// 返回：当前进程共享的 watch 接收端；数据库轮询仍承担最终收敛。
+    fn subscribe_committed_appends(&self, channel: Option<&str>) -> watch::Receiver<u64> {
+        MySqlOutbox::subscribe_committed_appends(self, channel)
+    }
+}
+
+/// 业务作用：取得指定 datasource 与 lane 的提交代际发布端，供写侧和受管 dispatcher 共享唤醒事实。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：写侧和 dispatcher 共同使用的 datasource 身份。
+/// - `channel`：事件所属 lane，`*` 表示该 datasource 的全局订阅。
 ///
 /// 返回：惰性创建且进程内稳定的 watch 发布端。
-fn commit_signal() -> &'static watch::Sender<u64> {
-    COMMIT_SIGNAL.get_or_init(|| watch::channel(0).0)
+fn commit_signal(datasource: &str, channel: &str) -> watch::Sender<u64> {
+    let signals = COMMIT_SIGNALS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut signals = signals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    signals
+        .entry((datasource.to_owned(), channel.to_owned()))
+        .or_insert_with(|| watch::channel(0).0)
+        .clone()
 }
 
 /// 业务作用：在数据库提交已经确定后推进代际，缩短持久化事件进入 dispatcher 的等待时间。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际落库的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：无；接收端可合并连续代际，真实待投递集合始终以数据库为准。
-fn notify_committed_append() {
-    commit_signal().send_modify(|generation| {
+fn notify_committed_append(datasource: &str, channel: &str) {
+    commit_signal(datasource, channel).send_modify(|generation| {
         *generation = generation.wrapping_add(1);
     });
+    if channel != "*" {
+        commit_signal(datasource, "*").send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+    }
 }
 
 /// 业务作用：把 Outbox 唤醒挂到 ambient transaction 的提交确认之后，防止未提交事件提前触发投递。
 ///
-/// 参数说明: 无。
+/// 参数说明：
+/// - `datasource`：事件实际写入的 datasource 身份。
+/// - `channel`：事件持久化时解析出的 lane。
 ///
 /// 返回：成功登记时返回 `Ok`；事务上下文意外丢失时返回脱敏错误并让调用方回滚本次写入。
-fn register_commit_notification() -> Result<(), OutboxStoreError> {
-    natx::after_commit(|| async {
-        notify_committed_append();
+fn register_commit_notification(datasource: &str, channel: &str) -> Result<(), OutboxStoreError> {
+    let datasource = datasource.to_owned();
+    let channel = channel.to_owned();
+    natx::after_commit(move || async move {
+        notify_committed_append(&datasource, &channel);
     })
     .map_err(map_err)
 }
@@ -571,6 +1683,6 @@ fn register_commit_notification() -> Result<(), OutboxStoreError> {
 /// - `_error`：只用于丢弃敏感细节的底层错误。
 ///
 /// 返回：固定数据库失败分类。
-fn map_err<E>(_error: E) -> OutboxStoreError {
+pub(crate) fn map_err<E>(_error: E) -> OutboxStoreError {
     OutboxStoreError::new("database error")
 }

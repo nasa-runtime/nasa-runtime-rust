@@ -134,7 +134,11 @@ impl TraceContext {
         Self {
             trace_id: random_trace_id(),
             parent_id: random_span_id(),
-            flags: if sampled { SAMPLED_FLAG } else { 0 },
+            flags: if sampled {
+                SAMPLED_FLAG
+            } else {
+                0
+            },
         }
     }
 

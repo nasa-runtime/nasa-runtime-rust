@@ -9,7 +9,7 @@
 //   socket.io 包(载于 engine.io MESSAGE 内):<type><[/ns,]><[ackId]><json>
 //     type: 0 CONNECT/1 DISCONNECT/2 EVENT/3 ACK/4 CONNECT_ERROR/5 BINARY_EVENT/6 BINARY_ACK
 //
-// NASA 映射(对照 原实现 socketio):
+// NASA 映射:
 //   engine.io 2(PING)→ NASA PING;1(CLOSE)→ CLOSE
 //   sio 0(CONNECT,带 auth)→ NASA AUTH(token 取自 connect data 的 "token");1(DISCONNECT)→ CLOSE
 //   sio 2(EVENT)→ NASA EVENT(event=args[0],payload=args[1] 的 JSON 字节);3(ACK)→ 丢弃(NASA 无 awaitAck)

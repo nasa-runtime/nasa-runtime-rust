@@ -21,9 +21,10 @@ pub struct BaseResponse<T> {
 impl<T> BaseResponse<T> {
     /// 业务作用：构造成功响应。
     ///
-    /// # 参数
-    ///
+    /// 参数说明:
     /// - `data`: 成功时返回给调用方的业务数据，会写入响应体的 `data` 字段。
+    ///
+    /// 返回: 状态码为 `200`、包含业务数据且不携带失败信息的响应外壳。
     pub fn ok(data: T) -> Self {
         Self {
             code: 200,
@@ -35,10 +36,11 @@ impl<T> BaseResponse<T> {
 
     /// 业务作用：构造失败响应。
     ///
-    /// # 参数
-    ///
+    /// 参数说明:
     /// - `code`: 业务失败码；非 `200` 表示失败，调用方可据此分支处理。
     /// - `msg`: 失败提示文案，会写入响应体的 `msg` 字段。
+    ///
+    /// 返回: 包含失败码和提示、不携带业务数据的响应外壳。
     pub fn err(code: i32, msg: impl Into<String>) -> Self {
         Self {
             code,
@@ -50,9 +52,10 @@ impl<T> BaseResponse<T> {
 
     /// 业务作用：设置响应加密密钥。
     ///
-    /// # 参数
-    ///
+    /// 参数说明:
     /// - `aes`: 本次响应关联的 AES 密钥或密钥标识，会写入响应体的 `aes` 字段。
+    ///
+    /// 返回: 写入 `aes` 字段后的同一响应外壳，其余字段保持不变。
     pub fn with_aes(mut self, aes: impl Into<String>) -> Self {
         self.aes = Some(aes.into());
         self

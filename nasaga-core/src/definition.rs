@@ -223,6 +223,7 @@ pub struct StepDefinition {
     resolution: ResolutionSpec,
     timeout: Duration,
     timeout_policy: TimeoutPolicy,
+    payload_contract: crate::SagaPayloadContract,
 }
 
 impl StepDefinition {
@@ -257,7 +258,31 @@ impl StepDefinition {
             resolution,
             timeout,
             timeout_policy,
+            payload_contract: crate::SagaPayloadContract::default(),
         }
+    }
+
+    /// 业务作用：将正文媒体类型和 schema 固定为步骤语义的一部分。
+    ///
+    /// 参数说明：contract 是所有部署副本共同支持的正文解释合同。
+    ///
+    /// 返回：合同合法时返回新步骤；改变合同会改变整个 definition 摘要。
+    pub fn with_payload_contract(
+        mut self,
+        contract: crate::SagaPayloadContract,
+    ) -> Result<Self, crate::SagaPayloadError> {
+        contract.validate()?;
+        self.payload_contract = contract;
+        Ok(self)
+    }
+
+    /// 业务作用：读取步骤冻结的正文解释合同，供 start、capability 和参与方共同复验。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：步骤合同的只读引用。
+    pub fn payload_contract(&self) -> &crate::SagaPayloadContract {
+        &self.payload_contract
     }
 
     /// 业务作用：读取步骤名称，用于 journal 关联、身份派生与计划构造。
@@ -577,6 +602,13 @@ impl WorkflowDefinition {
         for step in &self.steps {
             // 每个步骤的全部语义字段都进入摘要：任何一项变化都必须表现为新的 definition 版本，
             // 否则跟随者可能用新内容解释旧实例的历史事实。
+            if step.payload_contract != crate::SagaPayloadContract::default() {
+                hasher.update(canonical_bytes(&[
+                    b"payload-contract",
+                    step.payload_contract.content_type.as_bytes(),
+                    step.payload_contract.schema_id.as_bytes(),
+                ]));
+            }
             hasher.update(canonical_bytes(&[
                 step.name.as_str().as_bytes(),
                 step.owner.as_str().as_bytes(),

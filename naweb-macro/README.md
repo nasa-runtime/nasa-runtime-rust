@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["web"] }
+nasa = { version = "1.0.3", features = ["web"] }
 ```
 
 ## 生成收集器

@@ -1,8 +1,8 @@
-//! RSA+AES 混合加密(对照 原实现 `CryptoTactics.RSA_AES`)。
+//! RSA+AES 混合加密。
 //!
 //! 把 demo 里手写的"随机 AES key + RSA 加密 key + AES 加密数据"机制收敛成纯函数,供复用。
-//! **方向 = 服务端加密响应**(对照 原实现 `CryptoTactics.RSA_AES` 的 `ENCRYPT` 分支):
-//!   1. AES key:调用方给 `Some(key)` 用之,`None` → 随机 16B ASCII(对照 原实现 `StringUtils.random(16)`);
+//! **方向 = 服务端加密响应**:
+//!   1. AES key:调用方给 `Some(key)` 用之,`None` → 随机 16B ASCII;
 //!   2. `aes = encryptRSAPrivate(key)`(服务端**私钥**加密 AES key);
 //!   3. `data = encryptAES(plaintext, key)`(AES-ECB 加密明文)。
 //!
@@ -17,7 +17,7 @@ use super::rng::random_ascii;
 use super::rsa::{decrypt_rsa_public, encrypt_rsa_private};
 use crate::Result;
 
-/// 业务作用: RSA+AES 混合**封装**(服务端加密响应方向;对照 原实现 `CryptoTactics.RSA_AES` ENCRYPT)。
+/// 业务作用: RSA+AES 混合**封装**(服务端加密响应方向)。
 ///
 /// # 参数
 /// - `plaintext`: 待加密的 UTF-8 响应明文。

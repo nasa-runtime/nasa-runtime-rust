@@ -27,6 +27,7 @@ pub struct SagaContext {
     target_phase: StepPhase,
     target_effect_id: EffectId,
     command_id: CommandId,
+    payload: Option<crate::SagaPayload>,
 }
 
 impl SagaContext {
@@ -73,7 +74,27 @@ impl SagaContext {
             target_phase: phase,
             target_effect_id: effect_id,
             command_id,
+            payload: None,
         }
+    }
+
+    /// 业务作用：将已经过合同复验的原始正文交给业务 handler，供自定义 schema 解码。
+    ///
+    /// 参数说明：payload 是当前命令的精确字节与媒体合同。
+    ///
+    /// 返回：包含正文只读视图的上下文，不改变任何幂等身份。
+    pub fn with_payload(mut self, payload: Option<crate::SagaPayload>) -> Self {
+        self.payload = payload;
+        self
+    }
+
+    /// 业务作用：读取当前命令的原始字节与 schema，避免业务从传输 header 猜测格式。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：有正文时返回只读引用；后续依赖本地事实的命令可为空。
+    pub fn payload(&self) -> Option<&crate::SagaPayload> {
+        self.payload.as_ref()
     }
 
     /// 业务作用：为取消/解决 adapter 绑定“当前操作正在裁决的原始业务阶段”。

@@ -138,6 +138,81 @@ groups:
           summary: "Saga HTTP command 确定性拒绝已进入 DLT"
           description: "核对 workflow/version/digest/producer 投影与发布顺序；禁止把 DLT 行改回普通无限重试。"
 
+      - alert: NasaSagaTenantQuotaRejected
+        expr: increase(nasaga_quota_rejections_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga 租户在飞实例配额发生拒绝"
+          description: "区分正常容量保护与账本未初始化；精确用量只经受权管理查询读取，不增加 tenant 指标标签。"
+
+      - alert: NasaSagaManagementRateRejected
+        expr: increase(nasaga_action_rate_rejections_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga 租户管理动作速率发生拒绝"
+          description: "核对该租户恢复动作流量、数据库窗口和审批；禁止绕过管理入口直接改写状态。"
+
+      - alert: NasaOutboxTenantQuotaRejected
+        expr: increase(napp_outbox_tenant_quota_rejections_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox 租户在飞事件配额发生拒绝"
+          description: "核对受信写入上下文、存量账本初始化和实际容量；不要从 payload 推断租户或手工改账本。"
+
+      - alert: NasaOutboxRetentionCommitUncertain
+        expr: increase(napp_outbox_retention_commit_uncertain_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 保留清理提交应答不确定"
+          description: "先核对数据库候选与归档/处置收据，允许下一轮按持久事实收敛；不得补记删除或立即重写归档。"
+
+      - alert: NasaOutboxRetentionBudgetExhausted
+        expr: increase(napp_outbox_retention_budget_exhausted_total[15m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox 保留清理持续耗尽单轮预算"
+          description: "检查候选年龄、批大小、归档延迟与数据库锁等待；预算耗尽轮次不会刷新最近成功时刻。"
+
+      - alert: NasaOutboxLaneUnhealthy
+        expr: napp_outbox_lane_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 分片通道持续不健康"
+          description: "按 channel 核对首个未确认事件和 publisher 路由；禁止启动未分片 dispatcher 争抢同一数据库。"
+
+      - alert: NasaSagaRedisPendingDeleted
+        expr: increase(napp_saga_stream_deleted_pending_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga Redis Stream entry 在确认前被删除"
+          description: "停止外部清剪，核对全部 group 的 PEL/frontier 与原子清剪入口；空 PEL 不能证明业务已处理。"
+
+      - alert: NasaSagaRedisConsumerUnhealthy
+        expr: napp_saga_stream_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga Redis Stream 受管消费持续不健康"
+          description: "检查 Redis 连接、group、ACL、handler 预算和 DLT 同槽条件；未确认消息应留在 PEL。"
+
+      - alert: NasaSagaRedisPelAging
+        expr: napp_saga_stream_oldest_pel_age_ms > 300000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga Redis Stream PEL 最老消息持续老化"
+          description: "检查 consumer 存活、XAUTOCLAIM、handler 延迟与 DLT 可达性；阈值应按获批恢复目标调整。"
+
       - alert: NasaKafkaDltDeliveryFailed
         expr: increase(dlt_failed_total[5m]) > 0
         labels:

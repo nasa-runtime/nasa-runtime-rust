@@ -5,11 +5,11 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["web"] }
+nasa = { version = "1.0.3", features = ["web"] }
 ```
 
 ```rust
-use nasa::web::{get_mapping, mvc_router};
+use nasa::web::{get_mapping, mvc_router, Router};
 
 #[get_mapping("/health")]
 async fn health() -> &'static str {
@@ -19,7 +19,7 @@ async fn health() -> &'static str {
 // crate 根声明一次,生成 crate::__mvc 收集模块
 mvc_router!(());
 
-let app = crate::__mvc::register_all(axum::Router::new());
+let app = crate::__mvc::register_all(Router::new());
 ```
 
 本 crate 的稳定职责是：
@@ -29,17 +29,31 @@ let app = crate::__mvc::register_all(axum::Router::new());
 - 按 feature 提供 auth gate、请求/响应加解密、replay、密钥运行时和低基数安全指标；
 - 提升常用 Axum Web 类型，并通过 `__private` 为宏展开桥接依赖。
 
-端口监听、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，不属于 `naweb`。
+启用安全能力后，`SecurityMetrics::render_prometheus()` 提供文本出口；需要接入统一 OTLP 或其它
+provider-neutral 出口时，`SecurityMetrics::structured_snapshot()` 返回同源的
+`SecurityMetricSample`。Counter、Gauge 与 Histogram 保留原 family、label 和累计语义，读取不会
+清零 registry；并发观测按 count 先于 bucket 的顺序发布，跨写入抓取会把尚未可见的有限 bucket
+暂归入 `+Inf`，bucket 总和始终与 count 一致并在下一次抓取自然收敛。调用方仍须对 descriptor
+冲突和 label 基数负责。
+
+端口监听、HTTP/1/h2c 协议选择、context path、探针、请求排空和优雅停机属于 `napp` 的 Web 组件，
+不属于 `naweb`。
+
+Application 的 `register_graceful_shutdown` 在受管 listener 摘流和在途请求收口之后、业务资源关闭
+之前执行业务一次性收尾；它不延长 listener 的接流窗口，也不提供第二个 listener 关闭 owner。
+独立装配 Router 的项目仍须自行管理信号、HTTP 服务退出和资源顺序。
 
 业务代码不要依赖 `naweb::__private`，它只服务于宏展开。
 
-`#[application("web")]` 的项目**不要**再手写 `mvc_router!`：属性入口会在 crate 根自动生成收集端（再手写会因 `crate::__mvc` 重复定义而编译失败），路由装配、监听与优雅停机由应用运行时接管，业务定制经 `app.configure_router(...)` 注入。
+`#[nasa::application("web")]` 的项目**不要**再手写 `mvc_router!`：属性入口会在 crate 根自动生成收集端（再手写会因 `crate::__mvc` 重复定义而编译失败），路由装配、监听与优雅停机由应用运行时接管，业务定制经 `app.configure_router(...)` 注入。
 
 `nasa::web` 直接提供稳定 Web 类型：`Json` / `Form` / `Path` / `Query` / `State` / `HeaderMap` / `StatusCode` / `Router` / `get`…`delete` / `from_fn` / `from_fn_with_state` / `Request` / `Next` 等，业务写 handler 与中间件不必直连 Axum 内部路径。
 
 ## YML 配置与使用
 
-`naweb` 不读取 yml。路由路径、HTTP 方法、`produces`、`consumes` 都写在属性宏上；服务监听地址、context path 和中间件开关由业务应用配置。
+`naweb` 不读取 yml。路由路径、HTTP 方法、`produces`、`consumes` 都写在属性宏上；服务监听地址、
+context path 和中间件开关由业务应用配置。下面的 `server` 配置只有在同时启用 `application,web` 并
+声明 `#[nasa::application("web")]` 时才由 `napp` 读取；单独启用 `web` 不会创建 listener。
 
 推荐应用配置：
 
@@ -49,22 +63,25 @@ server:
   port: 8080
   context_path: /order
   request_body_limit_bytes: 10485760
+  http2:
+    enabled: false
 ```
 
 字段说明：
 
 | 键 | 说明 |
 | --- | --- |
-| `server.host` | axum 监听 host。 |
-| `server.port` | axum 监听端口。 |
-| `server.context_path` | 应用统一前缀；可在业务装配 Router 时 nest。 |
-| `request_body_limit_bytes` | 请求体大小上限；由业务中间件配置。 |
+| `server.host` | 受管 Web listener 的监听 host。 |
+| `server.port` | 受管 Web listener 的监听端口。 |
+| `server.context_path` | 应用统一前缀；受管模式自动 nest，手工装配时由业务处理。 |
+| `server.request_body_limit_bytes` | 请求体大小上限；由受管 Web 中间件配置。 |
+| `server.http2.enabled` | 由 `napp` 解释；默认只接受 HTTP/1，开启后同一明文端口接受 h2c prior knowledge。 |
 
-使用代码：
+不使用 Application 受管模式时，业务自行装配 Router：
 
 ```rust
-let router = crate::__mvc::register_all(axum::Router::new());
-let app = axum::Router::new().nest(&cfg.server.context_path, router);
+let router = crate::__mvc::register_all(nasa::web::Router::new());
+let app = nasa::web::Router::new().nest(&cfg.server.context_path, router);
 ```
 
 路由本身继续写在函数属性上，例如 `#[get_mapping("/health")]`。
@@ -93,10 +110,10 @@ let app = axum::Router::new().nest(&cfg.server.context_path, router);
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["web-security"] }
+nasa = { version = "1.0.3", features = ["web-security"] }
 ```
 
-`web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需历史 RSA
+`web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需遗留 RSA
 线协议的迁移服务才同时启用 `web-crypto-legacy-rsa`；`LocalCryptoProvider` 的运行时允许开关
 仍须显式为真，路由审计会拒绝能力与 key ring 不匹配的配置。
 
@@ -105,9 +122,9 @@ nasa = { version = "1", features = ["web-security"] }
 ```rust
 let runtime = std::sync::Arc::new(mapping_runtime);
 let router = crate::__mvc::try_register_all(
-    axum::Router::new(),
+    nasa::web::Router::new(),
     runtime,
-    naweb::MappingPlan::new(),
+    nasa::web::MappingPlan::new(),
     state.clone(),
 )?;
 ```
@@ -182,7 +199,7 @@ async fn manual_audit(request: Request, next: Next) -> Response {
     audit(request, next).await
 }
 
-let plan = naweb::MappingPlan::new().global(manual_audit::binding());
+let plan = nasa::web::MappingPlan::new().global(manual_audit::binding());
 ```
 
 ```rust
@@ -201,11 +218,11 @@ async fn automatic_audit(request: Request, next: Next) -> Response {
 静态路径 scope 的手动写法如下：
 
 ```rust
-let plan = naweb::MappingPlan::new()
+let plan = nasa::web::MappingPlan::new()
     .scope("/account", account_scope::binding())?;
 
 let router = crate::__mvc::try_register_all(
-    axum::Router::new(),
+    nasa::web::Router::new(),
     plan.runtime_or_default(),
     plan,
     state.clone(),
@@ -775,13 +792,14 @@ let health = runtime.health();
 4. 调用 `try_register_all` 审计全部静态 route policy；
 5. 审计成功后再 bind/listen。
 
-完整逐字段 YML、环境变量映射和真实 Fore/Redis adapter 见 `rust-simple-mvc/README.md` 与 `rust-simple-mvc/zcf/application.yml`。
+YML 字段、环境变量映射和外部认证／重放 adapter 由宿主应用定义；`naweb` 接收已构造的运行时，
+不把特定业务项目的配置结构作为通用协议。
 
 ### 安全限制
 
 - TLS 必须始终启用，应用层加密不替代 TLS、授权、限流和审计。
 - modern-v2 使用请求/响应方向隔离 key、12 字节随机 nonce、规范化 AAD 和共享重放存储。
-- legacy-v1 只用于迁移；RSA 私钥路径受未修复依赖风险影响，默认能力门关闭。
+- legacy-v1 只用于迁移；RSA 私钥路径的已知依赖风险尚未消除，默认能力门关闭。
 - CPU 密集工作经有界 blocking 执行器；超时或取消不会提前释放仍在运行闭包的 permit。
 - 请求和响应同时受单请求上限与全进程加权内存预算限制。
 - 错误、日志、指标和调试输出不得包含密钥、token、明文或完整密文。
@@ -791,3 +809,9 @@ let health = runtime.health();
 启用 `web-security` 后，每条静态路由在注册时获得固定指标槽位。`MappingRuntime::metrics().render_prometheus()` 返回可与应用现有 `/metrics` 文本直接拼接的 Prometheus 片段，覆盖端点结果、身份、双向密码、required replay、受控旁路、阶段延迟、热更新结果和快照代次。
 
 指标只使用编译期 `route_id`、静态 protocol/condition、固定 direction/operation/outcome 标签。运行时 path 参数、query、subject、tenant、rid、token、kid、密钥来源、明文和完整密文都不会进入标签或 HELP 文本。热更新复用同一个注册表，计数不会因 ArcSwap 替换快照而清零。
+
+`SecurityMetrics::worst_case_series()` 按当前已注册 route 的真实协议形状计算公开容量；每个
+histogram 组合完整计入有限 bucket、正无穷 bucket、sum 与 count。`napp` 在全部业务 Router
+transform 完成后调用 `freeze_worst_case_series()`，以同一线性化点关闭新 route ID 注册并事务式
+预留统一指标目录；既有 route 继续记录，迟到的新 route 会拒绝装配，容量不足时也不会发布半份
+descriptor 或指标源。

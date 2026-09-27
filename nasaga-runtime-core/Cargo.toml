@@ -1,0 +1,56 @@
+[package]
+name = "nasaga-runtime-core"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral NASA Saga state machine and shared runtime state"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["saga", "workflow", "runtime", "observability", "microservices"]
+categories = ["asynchronous"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "NOTICE",
+    "build.rs",
+    "src/**",
+    "proto/saga_transport.proto",
+    "proto/saga_orchestrator.proto",
+]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+linkme = "0.3"
+nasaga-backend = { version = "1.0.0" }
+nasaga-core = { version = "1.0.1" }
+nainbox-core = { version = "1.0.2" }
+naoutbox-core = { version = "1.0.2" }
+natelemetry = { version = "1.0.2" }
+natx-core = { version = "1.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "v5"] }
+tracing = "0.1"
+hmac = "0.12"
+url = "2"
+nafka = { version = "1.0.3", optional = true, default-features = false }
+nadis = { version = "1.0.2", optional = true }
+redis = { version = "1", optional = true, features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
+tokio = { version = "1", optional = true, features = ["time"] }
+nagrpc = { version = "1.0.2", optional = true }
+
+[build-dependencies]
+nagrpc-build = { version = "1.0.0" }
+
+[features]
+default = []
+kafka = ["dep:nafka"]
+redis-stream = ["dep:nadis", "dep:redis", "dep:tokio"]
+grpc-transport = ["dep:nagrpc"]

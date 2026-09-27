@@ -5,7 +5,7 @@ prepare/commit/abort 两阶段轮换。它不依赖应用运行时，也不把�
 
 ```toml
 [dependencies]
-nasecret = "1"
+nasecret = "1.0.1"
 ```
 
 `nasecret` 不读取 yml，也不依赖应用运行时；调用方负责把自己的配置模型映射成 `SecretSpec`。
@@ -76,7 +76,11 @@ DB、Redis、Kafka、OTLP 等强类型资源可复用 `RotatingSecretResource<R>
 
 ## 主要边界
 
-- secret ID、fragment 数、引用元数据和最终字节数都有硬上限。
+- secret ID 是最多 128 字节的 `/` 分段 ASCII 标识；每段只能包含字母、数字、`-`、`_`、`.`，空段、
+  `.` 和 `..` 会被拒绝。`grpc/server-certificate` 这类层级 ID 合法，不能把 ID 当作文件系统路径解析。
+- provider 与 rotation participant ID 最多 64 字节，只接受同一封闭字符集且不接受 `/`；它们标识运行
+  参与方，不承担 secret 命名层级。
+- fragment 数、引用元数据和最终字节数都有硬上限。
 - 单个 secret 最多 32 个分片，最终 material 上限 16 MiB；业务应使用更小的 `max_bytes` 收紧边界。
 - 分片严格按声明顺序拼接，不 trim、不补换行，再只解码一次。
 - `Debug` 和公开错误只展示 ID、长度、generation 与稳定分类。

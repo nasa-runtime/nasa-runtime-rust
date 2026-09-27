@@ -8,8 +8,8 @@
 
 ```toml
 [dependencies]
-rest-client-macro = "1"
-rest-discovery = "1"
+rest-client-macro = "1.0.2"
+rest-discovery = "1.0.2"
 ```
 
 若由上层门面重导出，宏也能识别被 Cargo 重命名后的门面路径。`rest-client-macro` 自身不发请求、不持有连接池。

@@ -2,6 +2,32 @@
 //!
 //! 本 crate 提供可显式调用的 `Command` 运行时与 axum 中间件辅助，适合保护慢下游、
 //! 热点接口和需要被 Dashboard 观测的业务入口。
+//!
+//! # 与受管治理面的分工
+//!
+//! 本 crate 支持独立 `Command`，也支持由 `ManagedRuntime` 持有目录、规则与集中周期观测。
+//! Application 可通过显式配置接管该 owner；业务仍负责选择需要隔离的执行体：
+//!
+//! - Web 限流（单进程令牌桶 + 分布式配额）管**入站配额**；
+//! - REST 发现客户端内建的 bulkhead/circuit 只对**传输级失败**（建连、超时、可分类 5xx）熔断；
+//! - hystrix `Command` 包裹**业务判定的失败**(语义错误、慢成功)与非 REST 出站依赖
+//!   (慢查询隔离、第三方 SDK)。
+//!
+//! # 受管命令的运行架构
+//!
+//! Prepare 将固定隔离规则、显式命令与静态属性描述安装到唯一 `ManagedRuntime`，统一周期观测。
+//! 属性宏只缓存带代次的弱引用；命令可用于后续初始化、业务调用与收尾。关闭先拒绝新调用，
+//! 等待在途业务、降级与观察任务退出，再撤销目录和全局引用。旧 Command 永久返回 503，下一实例
+//! 使用自己的 owner；取消关闭等待不转移退出责任。命名计划、规则与目录容量冻结到启动，变化要求重启。
+//! owner 存活不表示下游健康；本能力不提供错误率 Open/HalfOpen/Closed 状态机。
+//!
+//! # 反模式
+//!
+//! - **REST 调用外层再包 hystrix 时，`Command` timeout 必须大于该客户端的重试总预算**：否则内层
+//!   还在跨实例重试、外层已判超时并计入结局，被放弃的重试还会继续占用连接。
+//! - **包执行体而不是包提交**：`Command` 不感知任务队列语义，包裹 napart/`#[Async]` 的提交动作
+//!   只测到入队耗时，超时与隔离对真实执行不生效。
+//! - **命令名必须是代码常量级低基数**：拼接租户、订单等业务值会让指标序列失控。
 #![recursion_limit = "512"] // hystrix snapshot_json 的 json!{} 字段多,提高宏递归上限
                             // ============================================================================
 
@@ -11,41 +37,12 @@ pub use fallback::{
     global_fallback_installed, initialize_global_fallback, install_global_fallback, FallbackCause,
     FallbackContext, FallbackDecision, GlobalFallbackHandler, GlobalFallbackInstallError,
 };
-// 路由级 bulkhead 隔离 + 超时 + Dashboard 指标流
+// 路由命令由信号量限制并发、由 deadline 限制执行时间，并向 Dashboard 输出滚动结局与延迟。
+// 本组件不维护错误率触发的 Closed/Open/HalfOpen 状态机；下游持续失败时只由并发和超时边界
+// 限制当前进程的资源消耗，`isCircuitBreakerOpen` 恒为 false，短路计数恒为零。
 //
-// ★ 能力范围(明确,避免误读):本模块只做【信号量隔离(bulkhead)+ 超时 + 滚动窗口指标】,
-//   **不提供错误率触发的短路熔断**(无 Closed/Open/HalfOpen 状态机、无 error-threshold 短路;
-//   Dashboard 的 isCircuitBreakerOpen 恒 false、rollingCountShortCircuited 恒 0)。
-//   下游持续失败时靠并发上限 + 超时保护自身,不会自动短路。完整熔断器可作为独立状态机扩展。
-//
-// 对照参考实现的隔离 filter：
-//   - 它按 URL 给每类接口套【线程池/信号量隔离 + 超时 + 队列拒绝】并上报 /hystrix.stream
-//   - 本模块在 async Rust 里用【per-route 信号量(bulkhead)+ 超时 + 滚动窗口指标】等价实现
-//     （async 不需要线程池隔离：慢调用 .await 挂起不占 worker 线程，详见文档）
-//
-// 四部分：
-//   ① Command —— 一个被隔离+监控的“命令”(= 一条路由)：
-//        · tokio::Semaphore 限并发(bulkhead)，try_acquire 满了立刻拒(429)，不排队
-//        · tokio::time::timeout 限时(对应 executionTimeoutInMilliseconds)
-//        · 滚动窗口(10s)统计 success/failure/timeout/rejected + 延迟百分位
-//        · 当前并发数 gauge(currentConcurrentExecutionCount)
-//      用法：作为 axum middleware 包在某条路由上(见 main.rs)。
-//
-//   ② hystrix_stream —— GET /hystrix.stream 的 SSE 端点：
-//        每秒把所有已注册 Command 的快照序列化成 Hystrix Dashboard 认得的 JSON 推出去。
-//        字段名严格对齐 SerialHystrixDashboardData(type=HystrixCommand / rollingCountXxx / latencyExecute...)。
-//
-//   ③ CostTime 风格的定时延迟日志(融合自 原工具包 CostTime)：
-//        【每个 Command 在 build() 里各自 spawn 一个独立的 10s 周期任务】(相位锚定创建时刻、
-//        互相错开，对齐 原实现「每 url 各起一个 TimingWheel 任务」)，每拍打一行
-//        `path N次/10s min/avg/max (ms)`，复用 ① 的 Rolling 滚动窗口、不另存计数器。
-//        是"每请求延迟日志"的低开销聚合替代。可选 extra 钩子(set_extra)对齐 CostTime 的 Function<Long,String>。
-//
-//   ④ 配置驱动隔离(init_isolation + dispatch) —— 对标 原实现 HystrixDashboardFilter：
-//        yml 配 hystrix.isolation 的路由前缀模式(/download/*) → 建 matchit Trie；
-//        一个全局中间件 dispatch 每请求拿 path 匹配 Trie，命中就按模式懒加载 Command 套上 ①。
-//        与"硬编码 per-route Command"(main.rs 的 SpotKline/HeavySlow)并存，对照两种范式。
-// ============================================================================
+// 显式 `Command` 与配置驱动的路由匹配共享同一执行合同：并发满载立即拒绝，不在组件内排队；
+// 每个命令独立维护滚动窗口和当前并发；受管模式集中周期观测，独立模式按命令启动观测。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -62,6 +59,9 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use fallback::{execute_global_fallback, GlobalFallbackExecution};
+
+mod managed;
+pub use managed::{ManagedError, ManagedRuntime};
 
 /// 公开构造器保持非 fallible，因此把无实际意义的极端时长收敛到安全 deadline 上限。
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -103,18 +103,9 @@ fn lock_registry() -> std::sync::MutexGuard<'static, Vec<Arc<Command>>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// ── 全局 TPS（吞吐：每秒事务数）──
-// 对照 原实现 com.nasa.common.interceptor.TPSInterceptor extends OPS：dashboard 顶栏 `TPS: X/s` 显示它
-//   （SerialHystrixDashboardData 把同一个 TPS 值写进每条 command JSON 的 "TPS" 字段，
-//    JS hystrixCommand.js 里 `$('#TPS').html(data.TPS + "/s")` 取用）。
-//
-// ★ 这里【不再自立一套独立窗口】（早先用过一个全局 TpsWindow，结果它和圈/QPS 用的是两套
-//   独立时钟的滑动窗口，采样相位错开 → TPS 和「圈数字/10」对不上）。现在 TPS 直接从
-//   【各命令 Rolling 的 requestCount】派生：
-//       TPS = Σ(所有 tps_weight=Some 的命令的 requestCount × weight) / WINDOW_SECS
-//   而 requestCount 正是 Dashboard 画圈/算 QPS 用的同一份数据、同一套窗口 → TPS 必然 =
-//   「这些圈的 QPS 之和」，只差取整级别，不会再各自漂。
-//   附带好处：run() 热路径上不再有「每请求抢一个全局互斥锁」的 tps_hit。
+// 全局 TPS 从计入吞吐的各命令滚动窗口派生：
+// TPS = Σ(requestCount × weight) / WINDOW_SECS。
+// 与 Dashboard QPS 共用采样窗口，避免独立时钟造成统计口径不一致。
 
 /// 业务作用：读取当前 TPS（每秒事务数）= 所有计 TPS 的命令的 requestCount(×weight) 求和 / 窗口秒数。
 /// 先 clone 出命令列表立刻释放 REGISTRY 锁，再逐个 snapshot（避免攥着 registry 锁去锁 stats）。
@@ -398,6 +389,8 @@ impl Percentiles {
 /// `Command` 通常对应一个接口路由或一个配置匹配模式。它会自动注册到全局表,供 `/hystrix.stream`
 /// 输出 Dashboard 指标,同时也负责 CostTime 风格的周期延迟日志。
 pub struct Command {
+    owner: Option<std::sync::Weak<managed::ManagedState>>,
+    admitted: std::sync::atomic::AtomicBool,
     name: String,  // Dashboard 里那个圈的标题（HystrixCommand name）
     group: String, // 归类名（command group / threadPool 名，圈会按 group 分组）
     // 并发上限。None = 不限并发（不建信号量、永不 429），用于"只看监控"。Some(n) = bulkhead 容量 n。
@@ -412,20 +405,13 @@ pub struct Command {
     // 当前窗口按总样本聚合，不维护 per-bucket max；调用方不能据此推断单桶峰值。
     rolling_max_concurrent: AtomicI64,
     stats: Mutex<Rolling>, // 滚动窗口统计（成功/失败/超时/拒绝 + 延迟），加锁访问
-    // 是否计入全局 TPS + 计数权重。对标 原实现 的 @TPS 注解：
-    //   None       = 没标 @TPS → 不计入 TPS（默认）
-    //   Some(w)    = @TPS(value=w) → 每个请求给全局 TPS +w
+    // None 不计入全局 TPS；Some(weight) 按权重计入同一窗口的请求吞吐。
     tps_weight: Option<u64>,
-    // 【融合自 原工具包 CostTime 的 extra 钩子】可选的附加信息生成器。
-    // 对标 原实现 `CostTime.extra(url, Function<Long,String>)`：每 10s 打那行延迟日志时，
-    //   把这个闭包的输出拼到行尾（入参是统计周期毫秒数 = WINDOW_SECS*1000，对应 原实现 的 PERIOD）。
-    //   典型用途：拼一段自定义指标（如吞吐、外部计数）到日志里。
-    // 用 OnceLock 包：Command 一出生就在 Arc 里、之后不可变，OnceLock 提供"只设一次"的内部可变性，
-    //   让构造后还能用 set_extra(&self, ...) 补设；Box<dyn Fn..+Send+Sync> 保证可跨线程被定时任务调用。
+    // 延迟日志的可选附加字段生成器，接收统计周期毫秒数。
+    // OnceLock 保证构造后只安装一次，Send + Sync 允许周期任务跨线程调用。
     extra: OnceLock<Box<dyn Fn(u64) -> String + Send + Sync>>,
-    // 【CostTime 日志用】真实接口路由(如 "/spot/kline")。对标 原实现 CostTime 打的是 url。
-    //   name 是 Dashboard 圈标题(如 "SpotKline")，path 是日志里更直观的路由；二者用途不同。
-    //   OnceLock：构造后由 set_path 补设；未设则 log_cost 回退用 name。
+    // 日志使用路由模板，Dashboard 使用命令名；两者的展示含义不同。
+    // 路径只允许设置一次，未设置时日志回退到命令名。
     path: OnceLock<String>,
     // 【自定义限流返回】#[hystrix(reject_response = "{...}")] 设的 JSON body：bulkhead 满时返回它(HTTP 200)。
     //   None(未设) → 回退默认 429 壳 rejected_response。OnceLock：构造后由 set_reject_response_str 补设。
@@ -504,20 +490,9 @@ impl Command {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    // 内部构造：是否计 TPS 由 tps_weight 决定
-    // 参数：
-    //   name           = Dashboard 圈标题
-    //   group          = 归类名
-    //   max_concurrent = 并发上限（信号量许可数）
-    //   timeout        = 单请求超时
-    //   tps_weight     = None 不计 TPS / Some(w) 每请求给全局 TPS +w
-    ///
-    /// # 参数
-    /// 业务作用：- `name`: 业务名称、字段名或配置名,用于定位目标对象。
-    /// - `group`: 消费组、服务分组或任务分组名称。
-    /// - `max_concurrent`: 熔断隔离允许的最大并发数。
-    /// - `timeout`: 等待或执行超时时间,用于控制阻塞边界。
-    /// - `tps_weight`: REST 事务权重,用于计算该命令对全局 TPS 的贡献。
+    /// 业务作用：统一构造隔离命令，将运行实例登记到当前受管代次或独立进程目录。
+    /// 参数说明：`name`、`group` 为固定身份；`max_concurrent`、`timeout` 为执行边界；`tps_weight` 为统计权重。
+    /// 返回：独立模式按原有方式归一化参数；受管模式身份、容量或边界不合法时返回只拒绝执行的命令。
     fn build(
         name: &str,
         group: &str,
@@ -535,7 +510,11 @@ impl Command {
         let timeout = timeout
             .filter(|duration| !duration.is_zero())
             .map(|duration| duration.min(MAX_COMMAND_TIMEOUT));
+        // 构造与 owner 安装/撤销串行，避免运行命令被登记到错误代次。
+        let owner = managed::lock_owner();
         let cmd = Arc::new(Self {
+            owner: owner.as_ref().map(Arc::downgrade),
+            admitted: std::sync::atomic::AtomicBool::new(true),
             name: name.to_string(),
             group: group.to_string(),
             max_concurrent,
@@ -553,31 +532,41 @@ impl Command {
             reject_fb: OnceLock::new(),    // 限流降级 fn 默认空，需要时由 set_reject_fn 补设
             timeout_fb: OnceLock::new(),   // 超时降级 fn 默认空，需要时由 set_timeout_fn 补设
         });
-        // 自动注册到全局表：clone 出一份 Arc 放进 REGISTRY，SSE 端点据此遍历上报
         {
             let mut table = lock_registry();
-            // 同 (group, name) 已存在:Dashboard 会画出两个同名圈、CostTime 也会有两行同名日志。
-            // 保持"各自独立统计"的既有行为(不合并),但必须让重名可见,否则排查时无从下手。
-            if table
+            if let Some(owner) = owner.as_ref() {
+                // 受管目录有界且同名唯一，旧代构造不能绕过关闭门禁创建新周期工作。
+                if !owner.is_open()
+                    || name.is_empty()
+                    || name.trim() != name
+                    || name.len() > 128
+                    || group.is_empty()
+                    || group.trim() != group
+                    || group.len() > 128
+                    || max_concurrent.is_some_and(|limit| limit > 65536)
+                    || timeout.is_some_and(|duration| duration > Duration::from_secs(3600))
+                    || table.len() >= owner.limit
+                    || table
+                        .iter()
+                        .any(|command| command.name == name && command.group == group)
+                {
+                    cmd.admitted.store(false, Ordering::Release);
+                    return cmd;
+                }
+            } else if table
                 .iter()
-                .any(|c| c.name == cmd.name && c.group == cmd.group)
+                .any(|command| command.name == name && command.group == group)
             {
-                tracing::warn!(
-                    group = %cmd.group,
-                    command = %cmd.name,
-                    "duplicate hystrix command name; dashboard will show separate circles with the same title"
-                );
+                tracing::warn!("duplicate standalone hystrix command identity");
             }
             table.push(cmd.clone());
         }
+        let standalone = owner.is_none();
+        drop(owner);
 
-        // 【CostTime 风格定时日志】给【本命令】单独起一个 10s 周期任务（对齐 原实现 CostTime：
-        //   每个 url 在自己构造时各 TimingWheel.exec 一个独立周期任务）。
-        //   相位锚定【创建时刻】→ 不同命令的日志在时间轴上【自然错开】，不会像「一个全局 ticker
-        //   遍历所有命令」那样 N 个命令同一瞬间齐刷刷喷 N 行（100 个路由就是一秒 100 行）。
-        //   用 Weak 持有：命令若被回收，任务自行退出（当前命令常驻 REGISTRY，主要图稳妥）。
-        //   仅在 tokio runtime 内才起（build 总在 runtime 内被调用；try_current 仅作防御，避免无运行时时 panic）。
-        if tokio::runtime::Handle::try_current().is_ok() {
+        // 每个命令的日志周期锚定创建时刻，避免全部路由同时集中输出。
+        // 任务只持有 Weak，命令释放后自行退出；没有 Tokio runtime 时不启动任务。
+        if standalone && tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cmd);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(WINDOW_SECS));
@@ -596,7 +585,7 @@ impl Command {
 
     /// 业务作用：创建命令并【自动注册】到全局表（SSE 端点据此上报）。
     /// name 会成为 Dashboard 里那个圈的标题；group 用于归类。
-    /// 【不计入全局 TPS】——等价于 原实现 端【没标 @TPS】的接口。
+    /// 本入口创建的命令不计入全局 TPS。
     ///
     /// # 参数
     /// - `name`: Dashboard 圈标题和默认日志标签。
@@ -628,7 +617,7 @@ impl Command {
         Self::build(name, group, max_concurrent, timeout, tps_weight)
     }
 
-    /// 业务作用：同 new，但【计入全局 TPS】，weight 对应 原实现 `@TPS(value=weight)`（默认 1）。
+    /// 业务作用：创建计入全局 TPS 的命令，按 weight 加权统计每个请求。
     /// 只有用本构造器创建的命令，其请求才会累加到顶栏 TPS；其余命令对 TPS 贡献为 0。
     ///
     /// # 参数
@@ -825,15 +814,15 @@ impl Command {
         }
     }
 
-    /// 业务作用：【融合自 CostTime】打印本命令最近一个窗口的延迟聚合日志，由 build() 里给本命令起的那个独立 10s 周期任务每拍调一次。
-    /// 复用现成的滚动窗口 snapshot（不像 原实现 CostTime 那样 restore 清零——因为这份 Rolling
-    /// 同时喂着 SSE 流，清零会破坏 SSE；滑动窗口每 10s 读一次即"最近 10s"，语义等价）。
+    /// 业务作用：按命令周期输出最近窗口的延迟聚合日志。
+    /// 参数说明：无。
+    /// 返回：有样本时输出统计；不清空滚动窗口，以免破坏共用窗口的 SSE 观测。
     fn log_cost(&self) {
         // 取最近窗口汇总（含各结局计数 + 延迟百分位）
         let w = self.stats().snapshot();
         // count = 真正执行过的样本数（成功+失败+超时；被拒的没执行、无延迟，不计）——对齐 min/avg/max 的样本集
         let count = w.success + w.failure + w.timeout;
-        // 对齐 原实现 CostTime：窗口内没有样本就不打（避免刷空日志）
+        // 窗口内没有样本时不输出，避免把空窗口当作新的延迟证据。
         if count == 0 {
             return;
         }
@@ -858,7 +847,7 @@ impl Command {
         };
         // 标识符：优先用真实路由(set_path 设的，如 "/spot/kline")，没设则回退 name(Dashboard 标题)
         let label = self.path.get().map(|s| s.as_str()).unwrap_or(&self.name);
-        // 日志格式对齐 原实现 CostTime.cost：`<url> <count>次/<10>s min <min> avg <avg> max <max> (ms) <extra>`
+        // 延迟日志格式：`<url> <count>次/<10>s min <min> avg <avg> max <max> (ms) <extra>`
         //   min = p0（窗口最小延迟）、avg = mean（均值）、max = p100（窗口最大延迟）
         tracing::info!(
             "{} {}次/{}s min {} avg {} max {} (ms){}{}{}",
@@ -920,6 +909,17 @@ impl Command {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Response>,
     {
+        // 关闭后的旧命令不能因下一代全局安装而复活；守卫覆盖业务和降级的完整执行。
+        if !self.admitted.load(Ordering::Acquire) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        let _owner_call = match &self.owner {
+            Some(owner) => match owner.upgrade().and_then(|owner| owner.enter().ok()) {
+                Some(guard) => Some(guard),
+                None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            },
+            None => None,
+        };
         // 注：不再在此 tps_hit。TPS 改为从下面记的 requestCount 派生（见 tps_rate），
         //   既和圈/QPS 同源、对得上，又免去热路径上抢全局 TPS 锁。tps_weight 仅作"是否计入 TPS"的标记。
 
@@ -1179,24 +1179,8 @@ pub async fn hystrix_stream() -> impl IntoResponse {
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(5)))
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// CostTime 风格的定时延迟日志（融合自 原工具包 com.nasa.common.interceptor.CostTime）
-// ════════════════════════════════════════════════════════════════════════════
-// 原实现 那边 CostTime 是【每 url 一个聚合器 + 每个 url 在自己构造时各起一个 TimingWheel 10s 周期任务】。
-// 本项目把它的「料」直接复用到既有结构上，不另起文件、不另存计数器：
-//   · 「每 url 一个聚合器」      → 已有的【每路由一个 Command + 它的 Rolling 滚动窗口】
-//   · 「counter/min/max/total」 → Rolling 已经在算 count / p0(min) / mean(avg) / p100(max)
-//   · 「PERIOD = 10000ms」       → 已有常量 WINDOW_SECS = 10
-//   · 「每 url 各自一个 TimingWheel 周期任务」→ 【每个 Command 在 build() 里各 spawn 一个独立的
-//        10s 周期任务】，相位锚定创建时刻 → 不同命令日志在时间轴上【自然错开】，
-//        不像「一个全局 ticker 遍历所有命令」那样 N 个命令同一瞬间齐刷刷打 N 行。
-//   · 「extra: Function<Long,String>」→ Command.extra 钩子 + set_extra（见上）
-// 与 原实现 的唯一行为差异：不做 restore() 清零（Rolling 是滑动窗口、且同时喂着 SSE，清零会坏 SSE），
-//   每 10s 读一次滑动 snapshot 即「最近 10s」，语义等价。
-//
-// 实际 spawn 逻辑在 Command::build —— 命令一创建就自带它的定时日志任务，无需 main 额外调用任何启动函数。
-// log_cost() 是「每请求 `⏱ latency` debug 日志」的生产级替代：1 行/10s/路由、相位错开、开销可忽略，
-//   可放心在 info 级别常开，不像每请求日志那样压垮吞吐。
+// 命令的周期日志复用 Rolling 的 count、最小值、均值和最大值。
+// 每个 Command 独立持有周期任务，无需业务额外启动；日志读取不会清空 SSE 共用的窗口。
 
 /// 业务作用：读取当前全局 TPS（每秒事务数）的公开入口。
 /// 给 set_extra 的闭包用——例如让某条命令的 CostTime 日志行尾带上实时吞吐：
@@ -1206,16 +1190,8 @@ pub fn current_tps() -> f64 {
     tps_rate()
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// ④ 配置驱动的路由级 bulkhead 隔离（对标 原实现 HystrixDashboardFilter 的 Trie 匹配）
-// ════════════════════════════════════════════════════════════════════════════
-// 与硬编码 demo（main.rs 给 /spot/kline、/heavy/slow 各挂一个 Command）并存、对照：
-//   · 硬编码：     编译期把 Command 钉在某条 .route() 上，加/调接口要改代码重编译。
-//   · 配置驱动：   一个全局中间件 dispatch，请求时拿 path 在 Trie 上匹配出隔离参数，
-//                  按"匹配到的模式"懒加载并复用 Command。加/调隔离只改 yml。
-// 数据流：yml(hystrix.isolation) → init_isolation 建 matchit Trie → dispatch 每请求匹配。
-// async 下无需线程池隔离（慢调用不占线程），所以只实现 原实现 filter 的信号量快路径，
-//   它的 doFilterWithCommand（线程池+fallback）整段不需要。
+// 路由隔离从 YAML 建立 matchit 索引，并按匹配到的路由模板复用并发信号量。
+// 异步请求通过许可与期限控制并发，不创建额外线程池；阻塞业务须由调用方隔离。
 
 /// 运行期的一条隔离规则（由 zconf::IsolationRule 转来，多带一个 pattern 串做 key/名字）。
 struct IsolationCfg {
@@ -1227,33 +1203,43 @@ struct IsolationCfg {
 
 /// 全局隔离表：Trie + context-path 前缀 + 「模式 → 已建 Command」缓存。
 struct IsolationTable {
+    owner: Option<std::sync::Weak<managed::ManagedState>>,
     // 前缀树：path → 隔离规则。matchit 是 axum 内部用的那个基数树匹配器
     trie: matchit::Router<IsolationCfg>,
     // context-path（如 "/rust-simple-mvc"），dispatch 匹配前从 path 剥掉，让 yml 模式写相对路径
     ctx_prefix: String,
-    // 模式 → 懒加载的 Command（对标 原实现 metricsCache.computeIfAbsent；同模式所有请求共用一个桶）
+    // 模式 → 懒加载的 Command
     commands: dashmap::DashMap<String, Arc<Command>>,
 }
 
 // 全局隔离表，启动时 init 一次；没配 hystrix.isolation 则保持空（dispatch 全放行）
-static ISOLATION: OnceLock<IsolationTable> = OnceLock::new();
+static ISOLATION: OnceLock<Mutex<Option<Arc<IsolationTable>>>> = OnceLock::new();
 
-/// 业务作用：启动时调用一次：把 yml 的 hystrix.isolation 建成 Trie。
-/// 规则为空则不初始化 → dispatch 全部放行（= 配置驱动隔离未启用）。
-///
-/// # 参数
-/// - `rules`: 「模式 → 规则」表,通常来自配置里的 hystrix.isolation。
-/// - `context_path`: 服务 context-path;匹配前会从请求 path 剥掉。
+/// 业务作用：提供可按 owner 撤销的隔离表槽，独立安装仍保持一次性合同。
+/// 参数说明：无。
+/// 返回：进程级槽，读取方取得 Arc 后立即释放锁。
+fn isolation() -> &'static Mutex<Option<Arc<IsolationTable>>> {
+    ISOLATION.get_or_init(|| Mutex::new(None))
+}
+
+/// 业务作用：独立模式安装进程隔离规则，已有受管 owner 时保留其配置权。
+/// 参数说明：`rules` 为路由规则；`context_path` 为匹配时剥离的上下文前缀。
+/// 返回：首次合法配置安装生效；重复安装、受管冲突或非法模式保留原有警告行为。
 pub fn init_isolation(
     rules: &std::collections::HashMap<String, IsolationRule>,
     context_path: &str,
 ) {
+    let owner = managed::lock_owner();
+    if owner.is_some() {
+        tracing::warn!("managed hystrix owner rejects standalone isolation installation");
+        return;
+    }
     if rules.is_empty() {
         return;
     }
     let mut trie = matchit::Router::new();
     for (pattern, rule) in rules {
-        // 把 原实现 风格 "/download/*" 归一成 matchit 0.8 的命名 catch-all "/download/{*rest}"
+        // 把 配置中的 "/download/*" 归一成 matchit 0.8 的命名 catch-all "/download/{*rest}"
         let route = normalize_pattern(pattern);
         let cfg = IsolationCfg {
             pattern: pattern.clone(),
@@ -1273,18 +1259,24 @@ pub fn init_isolation(
     }
     // 去掉 context-path 末尾斜杠，得到 "/rust-simple-mvc"（context_path 为空则 ctx_prefix=""）
     let ctx = context_path.trim().trim_end_matches('/').to_string();
-    let _ = ISOLATION.set(IsolationTable {
+    let mut slot = isolation().lock().unwrap();
+    if slot.is_some() {
+        tracing::warn!("hystrix isolation already installed");
+        return;
+    }
+    *slot = Some(Arc::new(IsolationTable {
+        owner: None,
         trie,
         ctx_prefix: ctx,
         commands: dashmap::DashMap::new(),
-    });
+    }));
     tracing::info!(
         "hystrix zconf-driven isolation initialized ({} patterns)",
         rules.len()
     );
 }
 
-/// 业务作用：把 原实现 风格通配 "/download/*" 转成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
+/// 业务作用：把 配置中的通配 "/download/*" 转成 matchit 0.8 的命名 catch-all "/download/{*rest}"。
 /// matchit 要求 catch-all 必须带名字且在末尾；非 "/*" 结尾的（已是具体路由）原样返回。
 /// 注：matchit 0.8 起 catch-all 用花括号 {*rest}（0.7 是 *rest），与 axum 0.8 路由占位一致。
 ///
@@ -1298,34 +1290,38 @@ fn normalize_pattern(pattern: &str) -> String {
     }
 }
 
-/// 业务作用：全局中间件（对标 HystrixDashboardFilter.doFilter）：拿请求 path 在 Trie 上匹配。
-///   命中 → 按"匹配到的模式"懒加载/复用 Command，套 bulkhead+超时+指标后执行；
-///   未命中 / 未初始化 → 直接放行（不影响硬编码路由和无需隔离的路由）。
-/// 用法见 main.rs：整个 app 套一层 from_fn(dispatch)。
-///
-/// # 参数
-/// - `req`: 本次进入全局中间件的 HTTP 请求。
-/// - `next`: 未命中隔离规则或执行通过时的 axum 放行句柄。
+/// 业务作用：按固定路由模板匹配隔离规则并复用命令，受管关闭期间拒绝新执行。
+/// 参数说明：`req` 为业务 HTTP 请求；`next` 为取得许可后执行的业务链路。
+/// 返回：未匹配时原样放行；命中时返回业务、降级或隔离响应，目录关闭／超限返回 503。
 pub async fn dispatch(req: Request, next: Next) -> Response {
     // 没配 hystrix.isolation → ISOLATION 未初始化 → 全部放行
-    let Some(table) = ISOLATION.get() else {
+    let table = isolation().lock().unwrap().clone();
+    let Some(table) = table else {
         return next.run(req).await;
+    };
+    // 路由表借用归入旧代责任，关闭后不得在下一代目录创建命令。
+    let _guard = match &table.owner {
+        Some(owner) => match owner.upgrade().and_then(|owner| owner.enter().ok()) {
+            Some(guard) => Some(guard),
+            None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
+        None => None,
     };
     // 剥掉 context-path 前缀，得相对路径再匹配（"/rust-simple-mvc/download/x" → "/download/x"）。
     // strip_prefix 失败（path 本就不带前缀，如 axum nest 已剥过）则原样用——两种情况都正确。
     let full = req.uri().path();
     let rel = full.strip_prefix(&table.ctx_prefix).unwrap_or(full);
-    let rel = if rel.is_empty() { "/" } else { rel };
+    let rel = if rel.is_empty() {
+        "/"
+    } else {
+        rel
+    };
     match table.trie.at(rel) {
         Ok(m) => {
             // 通配匹配到的只是【一份共享参数】(并发/超时/tps)，不是桶本身。
             let cfg = m.value;
-            // 对标 原实现 HystrixDashboardFilter：每个【接口(路由)】有自己独立的 Command/圈/信号量；
-            //   Trie(matchingGet) 只负责把参数查出来，同模式下各接口【共用同一份参数值】。
-            // 桶身份 = 本次命中的【真实路由模板】(对标 原实现 的 collector.getUrl())：
-            //   用 axum 的 MatchedPath（如 "/download/*rest"）——它按 handler【有界】，
-            //   不会像“原始具体路径”那样每个文件名炸出一个新桶（路径变量值不应拆桶）。
-            //   理论兜底：拿不到 MatchedPath 时退回配置模式 cfg.pattern（仍有界）。
+            // 每个路由模板使用独立的 Command 和信号量；匹配配置只提供参数。
+            // 以 MatchedPath 作为桶身份，避免路径变量为每个业务对象生成新桶；缺失时回退配置模式。
             let route: String = match req.extensions().get::<axum::extract::MatchedPath>() {
                 Some(mp) => {
                     let t = mp.as_str();
@@ -1335,31 +1331,31 @@ pub async fn dispatch(req: Request, next: Next) -> Response {
                 None => cfg.pattern.clone(),
             };
             // 按【真实路由】取/建独立 Command（computeIfAbsent）。clone 出 Arc 后立刻结束分段锁再 .await。
-            let cmd = table
-                .commands
-                .entry(route.clone())
-                .or_insert_with(|| {
-                    // 首次见到该路由才建 Command；建时自动注册进 REGISTRY → Dashboard/CostTime 看得到。
-                    // 参数(并发/超时/tps)来自通配匹配 cfg —— 同模式下各接口共用同一份参数值。
+            let cmd = match table.commands.entry(route.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
                     let c = match cfg.tps_weight {
-                        Some(w) => {
-                            let c = Command::with_tps(
-                                &route,
-                                "isolation",
-                                cfg.max_concurrent,
-                                cfg.timeout,
-                                w,
-                            );
-                            // 计 TPS 的命令，CostTime 日志尾巴带实时 tps
-                            c.set_extra(|_period_ms| format!("tps={:.0}/s", current_tps()));
-                            c
-                        }
+                        Some(w) => Command::with_tps(
+                            &route,
+                            "isolation",
+                            cfg.max_concurrent,
+                            cfg.timeout,
+                            w,
+                        ),
                         None => Command::new(&route, "isolation", cfg.max_concurrent, cfg.timeout),
                     };
-                    c.set_path(&route); // 显示真实路由（如 "/spot/kline"、"/download/{*rest}"）
+                    // 拒绝的候选不能存入路由缓存，否则失败名称仍会无界累积。
+                    if !c.admitted.load(Ordering::Acquire) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    if cfg.tps_weight.is_some() {
+                        c.set_extra(|_period_ms| format!("tps={:.0}/s", current_tps()));
+                    }
+                    c.set_path(&route);
+                    entry.insert(c.clone());
                     c
-                })
-                .clone();
+                }
+            };
             // 命中 → 套 bulkhead + 超时 + 指标执行（复用 ① 的 Command::run）
             cmd.run(req, next).await
         }
@@ -1377,6 +1373,7 @@ pub use hystrix_macro::{global_fallback, hystrix};
 #[doc(hidden)]
 pub mod __private {
     pub use crate::fallback::{CollectedGlobalFallback, HYSTRIX_COLLECTED_GLOBAL_FALLBACKS};
+    pub use crate::managed::{CollectedCommand, CommandSlot, COLLECTED_COMMANDS};
     pub use axum;
     pub use linkme;
 }

@@ -3,7 +3,7 @@
 //! [`ApiProblem`] 是现代 profile 的统一错误表示(取代 RFC 7807)。核心成员 `type`/`title`/`status`/
 //! `detail`/`instance` 之外,用扩展成员 `code`(稳定错误码)与 `violations`(字段级校验违规)。
 //!
-//! **脱敏纪律**:`detail` 只放**客户端可修复**信息;底层错误链、SQL、Redis key、Token、密钥、
+//! **脱敏纪律**:`detail` 只放**客户端可纠正**信息;底层错误链、SQL、Redis key、Token、密钥、
 //! 内部路径**不得**出现在任何成员里。Problem Details 不是内部调试信息的泄露通道。
 
 use axum::http::{header, StatusCode};
@@ -18,7 +18,7 @@ pub struct FieldViolation {
     pub field: String,
     /// 稳定违规码(如 `required`、`out_of_range`),用于客户端分支,非高基数。
     pub code: &'static str,
-    /// 面向客户端的可修复描述,不含内部细节。
+    /// 面向客户端的可纠正描述,不含内部细节。
     pub message: String,
 }
 
@@ -35,7 +35,7 @@ pub struct ApiProblem {
     pub status: StatusCode,
     /// 稳定业务/错误码(扩展成员),供客户端稳定分支。
     pub code: &'static str,
-    /// 面向客户端的可修复描述;`None` 时省略。**不得**含底层错误链/SQL/key/token/路径。
+    /// 面向客户端的可纠正描述;`None` 时省略。**不得**含底层错误链/SQL/key/token/路径。
     pub detail: Option<String>,
     /// 本次发生的标识(通常是 request id);`None` 时省略。
     pub instance: Option<String>,

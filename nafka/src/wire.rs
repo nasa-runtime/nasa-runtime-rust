@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::error::{NafkaError, Result};
 use crate::types::{KafkaHeader, KafkaHeaders};
 
-// ==================== 固定 header(与参照实现逐字节一致,禁止改名) ====================
+// ==================== 固定协议 header；改名会破坏生产者与消费者互通 ====================
 
 /// publish 未指定 event 时写入的默认事件名;消费端 header 缺失同样回退此值。
 pub const DEFAULT_EVENT: &str = "DEFAULT";
@@ -177,7 +177,7 @@ pub fn mode_wire_name(mode: naws_proto::Mode) -> &'static str {
     }
 }
 
-/// 业务作用：从 wire 名解析 Mode;大小写不敏感(参照实现消费端即忽略大小写比较)。
+/// 业务作用：从 wire 名解析 Mode，比较时忽略大小写。
 ///
 /// # 参数
 /// - `name`: header 携带的 mode 名。
@@ -239,7 +239,7 @@ pub trait DecodePayload: Sized + Send + 'static {
     fn decode(bytes: &[u8]) -> Result<Self>;
 }
 
-// JSON blanket:一切 serde 类型默认走 JSON UTF-8,与参照实现互通。
+// JSON blanket:一切 serde 类型默认走 JSON UTF-8,共享消息的消费者必须采用同一 JSON 结构。
 // 与下方 Proto<T> 的具体 impl 不重叠:Proto<T> 不实现 Serialize/DeserializeOwned,
 // 且孤儿规则封死了下游补实现的可能，该编译期边界不能由下游绕开。
 impl<T: Serialize + Sync + 'static> EncodePayload for T {

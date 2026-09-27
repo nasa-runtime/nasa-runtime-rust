@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["scheduling"] }
+nasa = { version = "1.0.3", features = ["scheduling"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 ```
 

@@ -10,15 +10,15 @@
 # ============================================================================
 [package]
 name = "nafka"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-description = "NASA Kafka 组件:发布/消费组/广播/assign/DLT/少拷贝 passthrough,业务经 nasa::kafka 使用"
+keywords = ["kafka", "schema-registry", "messaging", "runtime", "async"]
+categories = ["asynchronous", "network-programming"]
+description = "NASA Kafka runtime with bounded producers, consumers, DLT, and optional Confluent Schema Registry client"
 
 [dependencies]
 # tracing 是 rdkafka 的 optional 依赖生成的隐式 feature；
@@ -33,14 +33,15 @@ futures = "0.3"
 # linkme 作为收集点宿主，#[kafka_consumer] 的静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
 # ProtocolBytes 是与上游既有实现逐字节兼容的 wire codec。
-naws-proto = { version = "1.0.0" }
-natelemetry = { version = "1.0.1" }
-nafka-macro = { version = "1.0.0", optional = true }
+naws-proto = { version = "1.0.1" }
+natelemetry = { version = "1.0.2" }
+nafka-macro = { version = "1.0.1", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
-nasecret = { version = "1.0.0", optional = true }
+nasecret = { version = "1.0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 zeroize = { version = "1", optional = true }
+nametrics-core = { version = "1.0.2", optional = true }
 
 [features]
 default = ["macros"]
@@ -52,5 +53,6 @@ tls = ["rdkafka/ssl-vendored"]
 # librdkafka 构建阶段丢失目标系统的 GSS/Kerberos 链接依赖。
 gssapi = ["rdkafka/gssapi", "rdkafka/ssl-vendored"]
 zstd = ["rdkafka/zstd"]
-# 实验性 Confluent-compatible Schema Registry adapter；不进入默认/full，待真实业务合同收敛后再稳定。
+# Confluent-compatible Schema Registry adapter；保持显式 feature，并纳入门面的完整能力组合。
 schema-registry = ["dep:async-trait", "dep:base64", "dep:nasecret", "dep:reqwest", "dep:zeroize"]
+schema-registry-metrics = ["schema-registry", "dep:nametrics-core"]

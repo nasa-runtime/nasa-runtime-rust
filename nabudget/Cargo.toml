@@ -1,6 +1,6 @@
 [package]
 name = "nabudget"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA provider-neutral absolute request budget and cancellation contract"
@@ -11,5 +11,5 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }

@@ -7,7 +7,7 @@
 // 从 proto 手写 codec 提炼:读字段上的 #[proto(tag = N)],按 Rust 字段类型分类
 // (Option<String>/Option<Vec<u8>>/Option<Vec<Option<String>>> 为可空引用字段;
 //  i64/i32/i8/bool 为 primitive,恒编码),生成 VARINT_TLV + BITPACK_TLV 的
-// encode/decode 与 `WireCodec` impl,与手写逐字节一致(golden 对拍验证)。
+// encode/decode 与 `WireCodec` impl，编码布局由字段协议属性决定。
 //
 // 生成代码用 `crate::__rt::*` 路径(仅服务于 proto 内部 schema;wire 规范见 架构说明 附录 A)。
 // ============================================================================

@@ -13,6 +13,17 @@ pub type Result<T> = std::result::Result<T, RestDiscoveryError>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RestDiscoveryError {
+    /// 当前实例已经永久关闭，旧句柄不能登记新的工作。
+    #[error("REST runtime is closed")]
+    RuntimeClosed,
+
+    /// 关闭已生效，但仍有任务或调用尚未在截止点前退出。
+    #[error("REST runtime shutdown is incomplete")]
+    ShutdownIncomplete,
+
+    /// 动态服务订阅超过配置上限。
+    #[error("REST discovery service state limit reached")]
+    DiscoveryStateLimit,
     /// `RestDiscovery::get()/try_get()` 在 init 之前被调用。
     #[error("RestDiscovery 未初始化:请先在 main 调用 RestDiscovery::init_with_discovery 或 init_external_only")]
     NotInitialized,
@@ -115,13 +126,11 @@ pub enum RestDiscoveryError {
     #[error("HTTP 发送失败:{0}")]
     Http(#[from] reqwest::Error),
 
-    /// 便捷方法(send_json/send_text)遇到非 2xx;body 只保留有限摘要,避免日志打爆/泄露大响应。
-    #[error("HTTP 状态错误 {status}:{body_snippet}")]
+    /// 便捷方法遇到非 2xx；远端正文不进入公开错误，避免凭据、用户数据或内部诊断经错误转换外泄。
+    #[error("HTTP 状态错误 {status}")]
     HttpStatus {
         /// 下游返回的非 2xx HTTP 状态。
         status: reqwest::StatusCode,
-        /// 响应体摘要,用于排障但避免记录完整大响应。
-        body_snippet: String,
     },
 
     /// 2xx 响应体解码/解包失败(`unwrap = "data"`:body 非合法 JSON、缺解包字段、或字段值类型不匹配)。
@@ -131,4 +140,16 @@ pub enum RestDiscoveryError {
         /// 响应体不符合调用方约定的原因。
         reason: String,
     },
+}
+
+impl From<nabudget::BudgetError> for RestDiscoveryError {
+    /// 业务作用：保留显式取消和绝对截止点耗尽的区别。
+    /// 参数说明：`error` 为本地等待终止原因。
+    /// 返回：对应 REST 稳定错误，不推断远端副作用。
+    fn from(error: nabudget::BudgetError) -> Self {
+        match error {
+            nabudget::BudgetError::Cancelled => Self::Cancelled,
+            nabudget::BudgetError::DeadlineExceeded => Self::BudgetExhausted,
+        }
+    }
 }

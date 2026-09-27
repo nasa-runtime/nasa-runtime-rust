@@ -1,15 +1,15 @@
 # mapper —— 声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
 [package]
 name = "namapper"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Declarative mapper runtime for SQLx and ambient transactions"
+description = "Declarative MySQL mapper with ambient transactions, atomic SQL metrics, and bounded threshold notifications"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "mapper", "sql", "database", "observability"]
+categories = ["database", "asynchronous"]
 
 [lib]
 name = "namapper"
@@ -17,23 +17,20 @@ name = "namapper"
 [features]
 default = []
 grouped-cache = ["dep:cacheable"]
-redis-cache = ["dep:redis"]
+redis-cache = ["namapper-core/redis-cache"]
 
 [dependencies]
-namapper-macro = { package = "namapper-macro", version = "1.0.1" }
-natx = { package = "natx", version = "1.0.2" }
+namapper-core = { version = "1.0.0" }
+namapper-macro = { package = "namapper-macro", version = "1.0.2" }
+natx = { package = "natx", version = "1.0.3" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-hex = "0.4"
 tracing = "0.1"
 linkme = "0.3"
-tokio = { version = "1", features = ["sync", "time"] }
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-cacheable = { version = "1.0.1", optional = true }
-redis = { version = "1", features = ["tokio-comp", "cluster-async"], optional = true }
+cacheable = { version = "1.0.2", optional = true }

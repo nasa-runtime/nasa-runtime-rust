@@ -1,10 +1,10 @@
 // ============================================================================
-// src/pubsub.rs：对齐既有 RedisProxy subscribe/pub/publish 与 Subscriber 语义。
+// Redis Pub/Sub 的发布、订阅与重连恢复。
 //
 // · publish:经 `Conn`(单节点/cluster 通用);classic Pub/Sub 在 cluster 下跨节点传播。
 // · subscribe:派生**专用** Pub/Sub 连接
 //   返回 `Subscription`,`next_message()` 拉取消息(显式拉模型,业务自行 loop/spawn)。
-// 设计取向(对照 原实现 @Subscribe 注解驱动):Rust 用**显式订阅 + 拉取**,不做注解魔法/自动分发。
+// 设计取向:Rust 用**显式订阅 + 拉取**,不做注解魔法/自动分发。
 // ============================================================================
 
 use futures::StreamExt;
@@ -47,7 +47,7 @@ pub struct Subscription {
     ps: redis::aio::PubSub,
     /// 重连用:原始 client(clone 廉价,仅配置)。
     client: redis::Client,
-    /// 已订阅频道 / 模式(reconnect 重放 + `subscribed_*` 自省;对照 原实现 getSubscribedTopics)。
+    /// 已订阅频道与模式，用于重连后恢复订阅及 `subscribed_*` 查询。
     channels: Vec<String>,
     patterns: Vec<String>,
 }
@@ -97,7 +97,7 @@ impl Subscription {
         Ok(())
     }
 
-    /// 业务作用：当前已订阅频道(对照 原实现 getSubscribedTopics)。
+    /// 业务作用：当前已订阅频道。
     pub fn subscribed_channels(&self) -> &[String] {
         &self.channels
     }
@@ -169,7 +169,7 @@ impl RedisClient {
     ///
     /// ⚠ **cluster 下返回值不可作为全局订阅者数**:classic Pub/Sub 消息能跨节点传播
     /// 到订阅者,但 `PUBLISH` 的 integer reply 在 redis-rs cluster 路由下只反映**被路由到的那个节点视角**
-    /// 的订阅者数(实测 cluster 返回 0、单机返回 1)。**不要**用它判断"是否无人在线 / 全局 delivery 数";
+    /// 的订阅者数。**不要**用它判断"是否无人在线 / 全局 delivery 数";
     /// 需要全局在线/送达计数请走 socket/registry 侧在线表或业务 ACK。单机下返回值即本机订阅者数,可用。
     ///
     /// # 参数

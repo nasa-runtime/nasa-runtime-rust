@@ -1,25 +1,12 @@
-// ============================================================================
-// src/search/array.rs —— JSON_ARRAY / JSON_ARRAY_BUCKET 操作。
-// 保留四种 DataType 与五段 Lua，并对齐既有 JsonArraySupport、
-// JsonArrayLuaScripts 与 JsonArrayOperations。
+// RedisJSON 数组与分桶数组操作。
 //
-// 模型:
-//   · JsonArray:1 个 ARRAY key(prefix + @JsonArrayKey 值拼接)装多个子文档,
-//     子文档以 @RsId 在数组内唯一;查询/删除走 RedisJSON JSONPath filter;
-//   · JsonArrayBucket:同一组 array key 散到 N 个桶(子文档按
-//     floorMod(原实现_string_hash(subId), N) 定桶——**持久化协议**,见 DocMeta);
-//     所有桶 key 共享 `{body}` hash tag 必落同 slot,跨桶操作(find/remove/count
-//     in array)用 Lua 把 N 次 RTT 收敛为 1 次且不触发 CROSSSLOT。
+// JsonArray 在一个键中存储多个以业务 ID 区分的子文档，查询和删除使用 JSONPath。
+// JsonArrayBucket 按 UTF-16 String.hashCode 与 floorMod 将子文档分配到固定桶；
+// 同组桶共享 hash tag，跨桶 Lua 在一个 slot 内执行，避免 CROSSSLOT。
 //
-// Lua 脚本:5 个逐字节照搬 原实现 JsonArrayLuaScripts(语义注释见各常量;
-// SHA1 一致 ⇒ 与 原实现 进程共享 server 端脚本缓存)。EVALSHA + NOSCRIPT fallback
-// 由 redis-rs 的 Script 内建(对照 原实现 evalScript 的手工 fallback)。
-//
-// 不支持(构建期拒绝,对照 原实现):ARRAY 模式查询无 sort/limit(JSONPath 无对应);
-// ⚠ @JsonArrayKey 不可变约束:saveOrReplace 只在**当前**算出的目标 key 上
-// DEL+APPEND——业务改了 array key 字段值再保存,旧 key 里的旧子文档不会被清
-// (跨 key/slot,CROSSSLOT 阻拦),必须先显式 remove_sub_doc(旧 parts) 再 save。
-// ============================================================================
+// ARRAY 查询不支持排序和显式分页。数组键字段属于持久化布局，saveOrReplace 只更新
+// 当前派生的键；改变字段值前必须显式删除旧 parts 下的子文档，避免遗留旧记录。
+// Script 使用 EVALSHA，NOSCRIPT 时回退加载脚本。
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -33,7 +20,7 @@ use super::{DataType, DocMeta, RedisDocument};
 use crate::client::RedisClient;
 use crate::error::{NasaRedisError, Result};
 
-// ───────────────────────── 5 个 Lua(逐字节照搬 原实现)─────────────────────────
+// 数组的原子更新脚本。
 
 /// "key 不存在则 JSON.SET 初始化 array,否则 JSON.ARRAPPEND 追加"。单 key,多 value。
 /// JSON.ARRAPPEND 不接受新 key(报 "could not perform this operation on a key that
@@ -105,7 +92,7 @@ return total
 
 // ───────────────────────── JsonArrayOps ─────────────────────────
 
-/// JSON 数组操作执行器(对照 原实现 JsonArraySupport;仅 ARRAY 系 DataType 可绑定)。
+/// JSON 数组操作执行器。
 pub struct JsonArrayOps<T: RedisDocument> {
     client: Arc<RedisClient>,
     meta: &'static DocMeta,
@@ -144,8 +131,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
                 )));
             }
             //**非 unknown command 的错误(ACL 禁 JSON.TYPE/超时/READONLY/代理异常)不静默忽略**
-            // ——与 `SearchActuator::bind`(actuator.rs)对齐;此前 fall through 到 Ok 会误判模块可用,bind
-            // fail-fast 失效,首次 save/find 才暴露。JSON.TYPE 对缺失 key 返回 nil=Ok,出别的错 = 真异常,上抛。
+            // JSON.TYPE 对缺失 key 返回 nil；其它错误无法证明模块可用，必须在绑定阶段上抛。
             return Err(e.into());
         }
         Ok(Self {
@@ -370,7 +356,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── 内部工具 ─────────
 
-    /// 业务作用：路由:ARRAY 模式单 key;BUCKET 模式按 subId 定桶(对照 原实现 keyForSubDoc)。
+    /// 业务作用：路由:ARRAY 模式单 key;BUCKET 模式按 subId 定桶。
     ///
     /// # 参数
     /// - `parts`: 路径、占位符或 SQL 片段拆分后的部分。
@@ -382,10 +368,9 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         }
     }
 
-    /// 业务作用：构造 `$[?(@.{id_name}=={literal})]` filter(按 subId 精确查/删)。
-    /// 字面量形态按 meta.id_numeric:数字直出(校验可解析,防注入/形态错),
-    /// 字符串走 JSON 转义加引号——形态错了 `==` 永远不命中(对照 原实现 jsonLiteral
-    /// 靠 Object 运行时类型分流,Rust 靠 meta 标记)。
+    /// 业务作用：构造按子文档 ID 精确匹配的 `$[?(@.{id_name}=={literal})]` 条件。
+    /// 数字先解析并规范化，字符串经过 JSON 转义；类型由 id_numeric 决定，必须与存储值一致。
+    /// 返回：安全的 JSONPath 条件；数字无效或非有限时返回错误。
     ///
     /// # 参数
     /// - `sub_id`: 业务标识,用于定位具体对象或记录。
@@ -445,15 +430,11 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         }
     }
 
-    // Deletes JSON values matching the array filter.
-    ///
-    /// # 参数
-    /// 业务作用：- `key`: 当前 Redis 命令操作的 key。
-    /// - `filter`: 待应用的查询、日志或字段过滤条件。
+    /// 业务作用：删除数组过滤条件选中的 JSON 值，缺失 key 按幂等删除处理。
+    /// 参数说明：`key` 为文档 key；`filter` 为已构造的 JSONPath 过滤条件。
+    /// 返回：成功时返回删除数量；连接或 RedisJSON 命令失败时上抛错误。
     async fn json_del(&self, key: &str, filter: &str) -> Result<u64> {
-        // `JSON.DEL` 对 missing key 返回 0 而不报错，因此此前前置
-        // `EXISTS` 既无必要、又引入两步非原子的 TOCTTOU 窗口(EXISTS 后、DEL 前被并发删)。直接 `JSON.DEL`
-        // (本就幂等)单条 RTT。
+        // JSON.DEL 对缺失 key 返回 0，直接执行即可维持幂等语义并避免检查与删除之间的竞态。
         let n: i64 = redis::cmd("JSON.DEL")
             .arg(key)
             .arg(filter)
@@ -499,7 +480,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     }
 }
 
-/// 业务作用：chunk 是否含命中:非 None/空串/空数组/null(对照 原实现 chunkNonEmpty)。
+/// 业务作用：chunk 是否含命中:非 None/空串/空数组/null。
 ///
 /// # 参数
 /// - `chunk`: 分片上传中的单个文件块。

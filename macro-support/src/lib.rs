@@ -63,6 +63,8 @@ pub struct HandlerWrapper {
 /// - `block`: 被注解函数的原函数体。
 /// - `inner_ident`: 内层 `async fn` 的名字,应带宏前缀避免与业务标识符相撞。
 /// - `arg_prefix`: 外层参数名前缀,同样应带宏前缀。
+///
+/// 返回：签名可安全拆分时返回内外层包装产物；不支持的签名形态返回 `None`。
 pub fn wrap_handler(
     sig: &syn::Signature,
     block: &syn::Block,
@@ -94,6 +96,9 @@ pub fn wrap_handler(
     Some(HandlerWrapper {
         outer_inputs,
         inner_fn: quote! {
+            /// 业务作用：在监控包装内保留原处理函数的参数模式与返回类型，使业务错误推断保持一致。
+            /// 参数说明：参数沿用被包装处理函数的业务输入声明。
+            /// 返回：原处理函数的执行结果，不改变其错误类型。
             async fn #inner_ident(#inner_inputs) #inner_output #block
         },
         call_inner: quote! { #inner_ident(#(#call_args),*).await },
@@ -104,6 +109,8 @@ pub fn wrap_handler(
 ///
 /// # 参数
 /// - `package`: Cargo 包名，例如 `hystrix`、`cacheable`、`natx` 或 `naweb`。
+///
+/// 返回：能够解析时返回 Cargo 识别的 crate 身份，否则返回 `None`。
 fn crate_name_compat(package: &str) -> Option<proc_macro_crate::FoundCrate> {
     proc_macro_crate::crate_name(package).ok()
 }
@@ -120,54 +127,72 @@ fn crate_name_compat(package: &str) -> Option<proc_macro_crate::FoundCrate> {
 ///
 /// - `module`: 门面 crate 下的模块名，例如 `hystrix`、`cache`、`tx` 或 `scheduling`。
 /// - `legacy`: 直接依赖的包名，用于兼容未走门面导出的调用方。
+///
+/// 返回：直接运行时或门面模块的可解析路径；两类依赖均不存在时返回编译提示。
 pub fn runtime_root(module: &str, legacy: &str) -> Result<TokenStream, String> {
+    runtime_root_nested(&[module], module, legacy)
+}
+
+/// 业务作用：解析支持多级门面模块的运行时根，同时保持直接运行时优先和 Cargo 重命名语义。
+///
+/// 参数说明：
+/// - `modules`：门面 crate 下按顺序追加的模块段，例如 `tx`、`pgsql`。
+/// - `feature_hint`：依赖缺失时向使用者展示的门面 feature 名称。
+/// - `legacy`：直接依赖的 Cargo 包名。
+///
+/// 返回：直接运行时存在时返回其 crate 根；否则返回 nasa 门面下的嵌套路径；两者都缺失时返回提示。
+pub fn runtime_root_nested(
+    modules: &[&str],
+    feature_hint: &str,
+    legacy: &str,
+) -> Result<TokenStream, String> {
     use proc_macro_crate::{crate_name, FoundCrate};
-    // ① 旧直接依赖优先(混合迁移安全:无关的 nasa 依赖不破坏未迁移的旧宏)。
-    match crate_name_compat(legacy) {
-        // proc_macro_crate 对同一 package 的各类 target **都**返回 Itself,
-        // 但只有在 lib 自身展开时 `crate` 才指向运行时 lib;
-        // 非 lib target 是【独立编译单元】,它们的 `crate` 是自己 → 必须用外部路径
-        // `::<lib>`(Cargo 已自动把本 package 的 lib 以 lib 名提供给这些 target)。否则 `crate::__private`
-        // 找不到时用 `CARGO_CRATE_NAME` 区分，并且只在它确定不等于 lib 名时才改走外部路径；
-        // 缺失或相等都保持原 `crate`，只修正已坏的非 lib 场景并保持 lib 主路径语义。
-        Some(FoundCrate::Itself) => {
+
+    if let Some(root) = direct_runtime_root(legacy) {
+        return Ok(root);
+    }
+    let modules = modules
+        .iter()
+        .map(|module| format_ident!("{module}"))
+        .collect::<Vec<_>>();
+    match crate_name(FACADE) {
+        Ok(FoundCrate::Itself) => Ok(quote!(crate #(::#modules)*)),
+        Ok(FoundCrate::Name(name)) => {
+            let name = format_ident!("{name}");
+            Ok(quote!(::#name #(::#modules)*))
+        }
+        Err(_) => Err(format!(
+            "找不到运行时依赖:请在 Cargo.toml 依赖 `nasa`(features 含 \"{feature_hint}\")\
+             或直接依赖 `{legacy}`(若短名被 crates.io 占用,使用本仓对应发布包名)"
+        )),
+    }
+}
+
+/// 业务作用：把直接运行时包解析为宏展开可用的 crate 根，并正确处理同包非 lib target。
+///
+/// 参数说明：`legacy` 是直接运行时的 Cargo 包名。
+///
+/// 返回：依赖存在时返回实际重命名路径；不存在时返回 `None` 交由门面解析。
+fn direct_runtime_root(legacy: &str) -> Option<TokenStream> {
+    use proc_macro_crate::FoundCrate;
+
+    match crate_name_compat(legacy)? {
+        FoundCrate::Itself => {
             let lib = legacy.replace('-', "_");
-            // `crate` 只在编译 **lib 目标**(含库目标内部校验场景)时正确:CARGO_CRATE_NAME==lib 且【非 bin】。
-            // 非 lib target 是独立编译单元(其 `crate` 指自己),含「bin 名 == lib 名」的边界
-            // ——此时 CARGO_CRATE_NAME==lib 但 CARGO_BIN_NAME 置位→ 仍须走外部路径 `::<lib>`。
-            // 只在【确定不是 lib 目标】时改路径；env 缺失时保守回退 `crate`，保持 lib 主路径语义。
             let compiling = std::env::var("CARGO_CRATE_NAME").unwrap_or_default();
             let is_bin = std::env::var_os("CARGO_BIN_NAME").is_some();
             let not_lib = is_bin || (!compiling.is_empty() && compiling != lib);
-            return if not_lib {
-                let n = format_ident!("{lib}");
-                Ok(quote!(::#n))
+            if not_lib {
+                let name = format_ident!("{lib}");
+                Some(quote!(::#name))
             } else {
-                Ok(quote!(crate))
-            };
+                Some(quote!(crate))
+            }
         }
-        Some(FoundCrate::Name(n)) => {
-            let n = format_ident!("{n}");
-            return Ok(quote!(::#n));
+        FoundCrate::Name(name) => {
+            let name = format_ident!("{name}");
+            Some(quote!(::#name))
         }
-        None => {}
-    }
-    // ② 门面回退(纯门面消费者走这支;含 Cargo 重命名)。
-    match crate_name(FACADE) {
-        Ok(FoundCrate::Itself) => {
-            // 在 nasa 门面 crate 自身内展开(文档示例):crate::<module>。
-            let m = format_ident!("{module}");
-            Ok(quote!(crate::#m))
-        }
-        Ok(FoundCrate::Name(n)) => {
-            let n = format_ident!("{n}");
-            let m = format_ident!("{module}");
-            Ok(quote!(::#n::#m))
-        }
-        Err(_) => Err(format!(
-            "找不到运行时依赖:请在 Cargo.toml 依赖 `nasa`(features 含 \"{module}\")\
-             或直接依赖 `{legacy}`(若短名被 crates.io 占用,使用本仓对应发布包名)"
-        )),
     }
 }
 
@@ -181,6 +206,10 @@ pub enum WebRoot {
 }
 
 /// 业务作用：解析 Web mapping 宏的运行时根：仅直接依赖 naweb-macro → 直接 naweb → nasa::web。
+///
+/// 参数说明: 无。
+///
+/// 返回：可经运行时桥访问的路径，或仅宏依赖场景使用的直接第三方路径标记。
 pub fn web_root() -> WebRoot {
     use proc_macro_crate::{crate_name, FoundCrate};
     // ① 调用方仅直接依赖 naweb-macro(宏经传递 re-export 到达时不会命中)。

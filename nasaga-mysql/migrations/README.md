@@ -16,6 +16,24 @@
 9. 按受信定义发布记录回填全部历史 participant gate，并逐组核对影响行数
 10. 确认摘要没有 `NULL`、空串、长度错误或非法字符后执行
     `saga_participant_definition_digest_required.up.sql`
+11. Orchestrator 数据库执行 `saga_instance_trace_context.up.sql`（须先于携带 trace 传播能力的
+    新版本二进制部署；旧版本按显式列名读取，加列期间可继续运行）
+12. Orchestrator 数据库执行 `saga_tenant_quota.up.sql`（须先于开启任何租户配额上限;
+    仅观测模式同样依赖该表记账）
+13. Orchestrator 数据库执行 `saga_tenant_action_rate.up.sql`（须先于配置任何租户的管理
+    动作速率上限;未配置速率的部署不读写该表）
+14. Orchestrator 数据库执行 `saga_global_audit_event.up.sql`（先创建按 Saga 隔离的提交 guard、统一事件表
+    与 trigger，再按稳定顺序取得待回填 Saga 的 guard，在同一事务内生成存量审计当前快照；须先于启用
+    全局 `audit_seq` 分页的二进制）
+15. Orchestrator 数据库执行 `saga_instance_management_query_indexes.up.sql`（须先于开放实例列表 API，
+    使租户 keyset 分页、可选 workflow、状态集合及稀疏创建时间窗均有匹配索引；状态集合按状态分别
+    有界读取并合并，因此四组 tenant/status 前导索引均属于查询合同）
+
+配额上限的启用纪律（存量库）：账本带初始化标记，仅 `reconcile_tenant_quota` 在事务内
+置位。给某租户配置上限前必须依次完成——① 全部写入方升级到记账版本（创建预留、终态释放
+已生效）；② 在受控窗口内对该租户执行一次事务内对账，把存量非终态实例入账并置位；
+③ 再下发上限配置。跳过 ② 时该租户的预留与 `verify_startup` 都会以部署错误拒绝——存量
+实例的终态释放会扣掉新实例名额，上限被静默穿透，这不是可以用"稍后对账"补救的状态。
 
 普通迁移期间先阻止旧 binary 写 Saga 表，再执行 DDL，最后滚动启动新 binary。上线前需要在与目标
 数据量相当的副本上评估 `EXPLAIN ALTER`、元数据锁等待、复制延迟和完成时间，并由部署负责人批准
@@ -68,8 +86,9 @@ Orchestrator 与参与方的 raw binary collation SQL 只适用于停写维护�
 ## 回退边界
 
 `.down.sql` 只描述 binary 回退后的结构恢复步骤，不是日常自动回滚。删除
-`saga_control_transition`、`saga_management_audit` 或 `saga_conflict_fact` 会丢失控制操作幂等、主体
-归因或人工介入证据；执行前必须导出相关事实，并确认 replay horizon 内不会再接收对应 operation。
+`saga_control_transition`、`saga_management_audit`、`saga_conflict_fact`、`saga_audit_event` 或其 stream
+guard 会丢失控制操作幂等、主体归因、人工介入证据、全局断点位置或提交顺序门禁；执行前必须导出相关
+事实，并确认 replay horizon 内不会再接收对应 operation。
 
 任何迁移动作都不得输出连接凭据、业务 payload 或完整业务键。部署日志只记录迁移文件、目标逻辑库、
 批准单号、起止时间、影响行数和脱敏错误分类。

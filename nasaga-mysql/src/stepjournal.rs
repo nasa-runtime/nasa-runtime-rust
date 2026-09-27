@@ -4,6 +4,7 @@
 //! （`UNIQUE(command_id)` 建在这里）；`saga_step` 的 phase 列只是当前 attempt 的投影。
 //! 冻结补偿计划、恢复裁决与人工介入都必须从这两张表的已提交事实出发。
 
+use nasaga_backend::{AttemptOutcomeRecord, AttemptStart, StepJournalPatch};
 use nasaga_core::{
     AttemptNo, CommandId, CompensationPlan, EffectId, SagaId, StepAttemptStatus, StepCancelStatus,
     StepCompensationStatus, StepForwardStatus, StepName, StepPhase, StepResolutionStatus,
@@ -15,49 +16,6 @@ use crate::error::{is_unique_violation, map_connection, map_database, SagaStoreE
 use crate::instance::{require_ambient_transaction, validate_reason_code};
 use crate::row::{parse_attempt_row, parse_step_row, SagaStepAttemptRow, SagaStepRow};
 use crate::MySqlSagaStore;
-
-/// 业务作用：区分 attempt 登记的两种合法结果，使创建/推进事务的崩溃重试可被幂等吸收。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptStart {
-    /// 本事务真实登记了该 attempt。
-    Recorded,
-    /// 同一 attempt 已以相同身份登记过（崩溃重试）；无新副作用。
-    AlreadyRecorded,
-}
-
-/// 业务作用：区分 outcome 记账、幂等重放与互斥事实冲突，使矛盾结果能同事务转人工留证。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptOutcomeRecord {
-    /// 本事务真实写入了该终态。
-    Recorded,
-    /// 同一 attempt 已记录完全相同的终态（重复结果事件）；无新副作用。
-    AlreadyRecorded,
-    /// 同一 attempt 已有不同终态；调用方必须记录 incoming 冲突事实并升级人工介入。
-    Conflicting {
-        /// journal 中已经提交的真实终态。
-        existing: StepAttemptStatus,
-    },
-}
-
-/// 业务作用：描述一次 step journal 投影更新；为空的字段保留列上既有值。
-///
-/// 字段说明：全部字段都是"设置为该值"而非"清空"——journal 状态只允许被显式改写，
-/// 不存在把已裁决状态抹回未知的合法业务路径。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StepJournalPatch<'a> {
-    /// 正向阶段状态；为空保留既有值。
-    pub forward_status: Option<StepForwardStatus>,
-    /// 取消屏障裁决状态；为空保留既有值。
-    pub cancel_status: Option<StepCancelStatus>,
-    /// 补偿阶段状态；为空保留既有值。
-    pub compensation_status: Option<StepCompensationStatus>,
-    /// 解决阶段状态；为空保留既有值。
-    pub resolution_status: Option<StepResolutionStatus>,
-    /// 稳定失败原因码；为空保留既有值。
-    pub last_error_code: Option<&'a str>,
-    /// 为真时把 finished_at 定格为当前时刻（已有值则保留首次定格）。
-    pub mark_finished: bool,
-}
 
 /// execute 阶段的投影更新语句；`COALESCE(execute_attempt, 0) <= ?` 保证投影单调，
 /// 旧 attempt 的迟到写入不能覆盖新 attempt 的投影。
@@ -102,7 +60,9 @@ impl MySqlSagaStore {
     ) -> Result<(), SagaStoreError> {
         // 步骤骨架必须与实例创建同事务:实例可见但步骤缺行会让恢复扫描误判"无步骤可补偿"。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         for (index, step) in definition.steps().iter().enumerate() {
             sqlx::query(
                 "INSERT IGNORE INTO saga_step (saga_id, step_name, ordinal, forward_status, \
@@ -129,7 +89,9 @@ impl MySqlSagaStore {
     ///
     /// 返回：按定义顺序排列的投影行；读回列损坏或底层失败返回错误。
     pub async fn load_steps(&self, saga_id: &SagaId) -> Result<Vec<SagaStepRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT step_name, ordinal, forward_status, cancel_status, compensation_status, \
              resolution_status, execute_effect_id, execute_command_id, execute_attempt, \
@@ -156,13 +118,48 @@ impl MySqlSagaStore {
         &self,
         saga_id: &SagaId,
     ) -> Result<bool, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(
             "SELECT EXISTS(SELECT 1 FROM saga_step WHERE saga_id = ? \
              AND compensation_status = ?) AS present",
         )
         .bind(saga_id.as_str())
         .bind(StepCompensationStatus::Succeeded.as_str())
+        .fetch_one(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        let present: i64 = row.try_get("present").map_err(map_database)?;
+        Ok(present != 0)
+    }
+
+    /// 业务作用：判断人工关闭的审计证据是否已在当前事务可见——为 `MANUALLY_CLOSED`
+    /// 唯一入边提供同事务放行事实。
+    ///
+    /// 只认 `(saga_id, operation_id)` 上 action 为 [`crate::MANUAL_CLOSE_ACTION`] 的
+    /// 审计行：操作身份与迁移触发身份必须同源，防止用其它管理操作的审计冒充关闭证据。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    /// - `operation_id`: 触发本次关闭迁移的管理 operation 身份。
+    ///
+    /// 返回：证据存在返回真；底层失败返回错误。
+    pub async fn manual_close_audited(
+        &self,
+        saga_id: &SagaId,
+        operation_id: &str,
+    ) -> Result<bool, SagaStoreError> {
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let row = sqlx::query(
+            "SELECT EXISTS(SELECT 1 FROM saga_management_audit WHERE saga_id = ? \
+             AND operation_id = ? AND action = ?) AS present",
+        )
+        .bind(saga_id.as_str())
+        .bind(operation_id)
+        .bind(crate::MANUAL_CLOSE_ACTION)
         .fetch_one(connection.as_mut())
         .await
         .map_err(map_database)?;
@@ -198,7 +195,9 @@ impl MySqlSagaStore {
         // attempt 登记必须与命令 Outbox 同事务:journal 有行而命令未发,重试会补发;
         // 命令已发而 journal 无行,结果事件将找不到去重锚点。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let effect_text = effect.to_string();
         let command_text = command.to_string();
 
@@ -233,7 +232,7 @@ impl MySqlSagaStore {
                 let Some(existing) = existing else {
                     // 本 attempt 无行却仍冲突,说明 effect/command 身份被其它步骤占用:
                     // 确定性派生保证不同输入不同身份,出现共享即身份体系被破坏。
-                    return Err(SagaStoreError::new(
+                    return Err(SagaStoreError::conflict(
                         "attempt identity collides with a different step attempt",
                     ));
                 };
@@ -244,7 +243,7 @@ impl MySqlSagaStore {
                 if existing_effect != effect_text || existing_command != command_text {
                     // 同一 attempt 出现两套身份意味着重派生结果漂移,继续执行会让
                     // 外部幂等键失效,必须显式失败转人工。
-                    return Err(SagaStoreError::new(
+                    return Err(SagaStoreError::conflict(
                         "attempt already recorded with different identities",
                     ));
                 }
@@ -302,7 +301,9 @@ impl MySqlSagaStore {
         }
         // 结果记账必须与 Inbox claim 及后续状态推进同事务,否则重复结果事件会二次记账。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_step_attempt SET status = ?, \
              outcome_event_id = COALESCE(?, outcome_event_id), \
@@ -364,7 +365,9 @@ impl MySqlSagaStore {
         saga_id: &SagaId,
         step: &StepName,
     ) -> Result<Vec<SagaStepAttemptRow>, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let rows = sqlx::query(
             "SELECT step_name, phase, attempt_no, effect_id, command_id, status, \
              outcome_event_id FROM saga_step_attempt \
@@ -395,7 +398,9 @@ impl MySqlSagaStore {
         step: &StepName,
         direction: nasaga_core::Direction,
     ) -> Result<u32, SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let count: i64 = if direction == nasaga_core::Direction::Forward {
             // 尚未进入补偿时子查询为 NULL；此时全部 resolve 都属于正向预算。
             sqlx::query_scalar(
@@ -457,7 +462,9 @@ impl MySqlSagaStore {
         // 状态投影与触发它的结果记账/状态推进同事务,防止"attempt 已终态但步骤仍 PENDING"
         // 的持久化撕裂被恢复扫描读到。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_step SET \
              forward_status = COALESCE(?, forward_status), \
@@ -509,7 +516,9 @@ impl MySqlSagaStore {
         operation_id: &str,
     ) -> Result<(), SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 审计证据必须先存在于本事务；先改投影再补审计会留下可被崩溃窗口越权利用的
         // PENDING 补偿，并让自动 worker 在人工授权尚未成立时发出外部请求。
         let updated = sqlx::query(
@@ -554,7 +563,9 @@ impl MySqlSagaStore {
         operation_id: &str,
     ) -> Result<(), SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // 只保留正向或补偿 Unknown 的行有资格重开；其它 HALTED 代表协议破坏，必须继续冻结。
         let updated = sqlx::query(
             "UPDATE saga_step AS step_row JOIN saga_management_audit AS audit_row \
@@ -603,7 +614,9 @@ impl MySqlSagaStore {
         // 计划标记与进入 COMPENSATING 的 CAS 必须同事务:只冻结实例摘要而不标记成员,
         // 恢复时将无法从持久化事实还原"哪些步骤在计划内"。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         for entry in plan.entries() {
             let updated = sqlx::query(
                 "UPDATE saga_step SET compensation_plan_version = ?, compensation_order = ?, \

@@ -2,7 +2,7 @@ use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex as StdMutex, OnceLock,
+        Arc, Mutex as StdMutex, OnceLock, Weak,
     },
     time::{Instant, SystemTime},
 };
@@ -15,6 +15,7 @@ use crate::{
     config::{ConfigStore, ConfigView},
     global,
     resources::ResourceRegistry,
+    shutdown::ShutdownTaskOutput,
     state::{StateCell, TerminalCell, TerminalIntent},
     supervisor::{ManagedTaskFuture, SupervisorClient, TaskKind, TaskSupervisor},
     ApplicationError, ApplicationMode, ApplicationPhase, ApplicationResult, ApplicationState,
@@ -28,6 +29,12 @@ use crate::{
 #[cfg(feature = "web")]
 pub type RouterTransform =
     Box<dyn FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send>;
+
+#[cfg(feature = "web")]
+pub(crate) struct RouterRegistration {
+    pub(crate) transform: RouterTransform,
+    pub(crate) scope: Option<String>,
+}
 
 /// `configure_mapping` 登记的一次类型化拦截器/安全运行时计划变换。
 ///
@@ -60,11 +67,11 @@ pub(crate) type KafkaCustomization = Box<
 
 /// `configure_migrations` 登记的一次数据源迁移门禁项:`(数据源名, 业务嵌入 migrator)`。
 ///
-/// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Ready
+/// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Prepare
 /// 阶段(监听器就绪、Web/Kafka consumer 接流之前)按数据源逐项取出,依 `database.migrations.mode`
 /// 运行 [`namigrate::run_gate`]。migrator 是嵌入式常量数据,`Send + 'static`,可跨阶段存放。
-#[cfg(feature = "db")]
-pub(crate) type MigrationRegistration = (String, namigrate::Migrator);
+#[cfg(any(feature = "db", feature = "db-pgsql"))]
+pub(crate) type MigrationRegistration = (String, crate::Migrator);
 
 #[derive(Debug, Clone)]
 /// 启动期固定的应用身份、profile、运行模式和计时基准。
@@ -158,8 +165,15 @@ impl ApplicationInfo {
 /// Application 共享的所有权根，集中保存配置、资源、状态和控制通道。
 pub(crate) struct ApplicationInner {
     info: ApplicationInfo,
-    config: ConfigStore,
+    config: Arc<ConfigStore>,
     resources: ResourceRegistry,
+    /// Service 装配窗口中受理、随后由 Runner 一次性冻结的业务 initializer。
+    ///
+    /// 登记还必须通过 `user_registration_gate` 和 `user_hook_open`，因此计划关闭与
+    /// UserHook 关闭共享同一线性化边界，不借用资源封口表示 initializer 状态。
+    initializers: crate::initialization::InitializerRegistry,
+    /// UserHook 期间登记、Seal 后冻结并在业务资源释放前执行的一次性业务停机任务。
+    shutdown_tasks: crate::shutdown::ShutdownTaskRegistry,
     state: Arc<StateCell>,
     terminal: TerminalCell,
     shutdown_requested: CancellationToken,
@@ -179,18 +193,40 @@ pub(crate) struct ApplicationInner {
     /// 组件表只在运行前构造，之后只读；用原子位集合可以让同步与异步 getter 共用同一判断，且无需
     /// 让能力句柄反向持有 Runner 或组件 trait object。
     declared_components: AtomicU32,
+    #[cfg(feature = "redis")]
+    redis_partitions: Arc<crate::redis_partition::RedisPartitionState>,
+    #[cfg(feature = "redis")]
+    redis_tasks: Arc<crate::redis_tasks::RedisTasks>,
+    #[cfg(feature = "redis")]
+    redis_derived: Arc<crate::redis_derived::RedisDerived>,
+    #[cfg(feature = "ws-client")]
+    ws_clients: Arc<crate::ws_client::WsClients>,
+    #[cfg(feature = "hystrix")]
+    hystrix_commands:
+        Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<hystrix::Command>>>>,
+    #[cfg(feature = "hystrix")]
+    hystrix_owner: OnceLock<(
+        std::sync::Weak<hystrix::ManagedRuntime>,
+        crate::ReadinessContributor,
+    )>,
     /// 汇总运行依赖动态健康的通用就绪注册表；没有贡献项时保持既有语义。
     readiness: Arc<crate::readiness::ReadinessRegistry>,
-    /// UserHook 登记的数据源迁移门禁队列;DB 组件 Ready 取走后封口。
+    /// UserHook 登记的数据源迁移门禁队列;DB 组件 Prepare 取走后封口。
     ///
-    /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Ready
+    /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Prepare
     /// 阶段一次性取走,此后再登记不可能生效,必须报阶段错误而非静默丢弃。同步互斥锁只保护一次
     /// push/take,不跨 await 持有。
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     migrations: StdMutex<Option<Vec<MigrationRegistration>>>,
+    /// UserHook 移交、Prepare 消费的唯一 RedisJob 核心计划。
+    #[cfg(feature = "redis-job")]
+    redis_job_runtime: crate::redis_job::RedisJobRuntimeState,
     /// 遥测组件 Start 发布的有界 span 导出器;span 生产者(如 Web trace 中间件)据此非阻塞入队。
     #[cfg(feature = "telemetry")]
     telemetry_exporter: OnceLock<std::sync::Arc<natelemetry::BoundedSpanExporter>>,
+    /// OTLP 指标出口的进程级统计；只在显式配置指标端点时发布。
+    #[cfg(feature = "telemetry")]
+    otlp_metrics_state: OnceLock<std::sync::Arc<crate::telemetry::OtlpMetricsState>>,
     web_addr: OnceLock<SocketAddr>,
     /// Web 组件一次写入、能力句柄只读访问的运行时元数据和请求计数器。
     #[cfg(feature = "web")]
@@ -201,12 +237,14 @@ pub(crate) struct ApplicationInner {
     /// UserHook 登记的长连接服务定制队列；语义与路由定制队列一致，取走即封口。
     #[cfg(feature = "ws")]
     ws_customizations: StdMutex<Option<Vec<WsCustomization>>>,
+    #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+    ws_cluster_plan: StdMutex<Option<crate::ws_cluster::WsClusterPlan>>,
     /// UserHook 登记的路由定制队列。
     ///
     /// `None` 表示队列已被 Web 组件在构造 Router 时一次性取走：此后再登记的定制不可能生效，
     /// 必须报阶段错误而不是静默丢弃。同步互斥锁只保护一次 push/take，不跨 await 持有。
     #[cfg(feature = "web")]
-    router_transforms: StdMutex<Option<Vec<RouterTransform>>>,
+    router_transforms: StdMutex<Option<Vec<RouterRegistration>>>,
     /// UserHook 登记的 mapping 计划变换；Ready 取走后永久封口。
     #[cfg(feature = "web")]
     mapping_transforms: StdMutex<Option<Vec<MappingTransform>>>,
@@ -217,7 +255,7 @@ pub(crate) struct ApplicationInner {
     ///
     /// 登记只发生在组件启动阶段（配置热刷新驱动尚不存在），驱动创建于 Ready、此后只读；
     /// 同步互斥锁只保护登记与整表克隆，不跨 await 持有。
-    #[cfg(any(feature = "log", feature = "nacos-config"))]
+    #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
     config_appliers: StdMutex<Vec<Arc<dyn crate::reload::ConfigApplier>>>,
     /// 日志组件的初始化发布状态，不包含日志管理器或刷盘 guard。
     #[cfg(feature = "log")]
@@ -231,20 +269,28 @@ pub(crate) struct ApplicationInner {
     /// 调度器启动结果和可选选主对象的只读发布状态。
     #[cfg(feature = "scheduling")]
     scheduling_runtime: Arc<crate::capabilities::SchedulingRuntimeState>,
+    /// UserHook 计划、Prepare 发布和运行期强类型访问共用的保序执行器状态。
+    #[cfg(feature = "partition")]
+    partition_runtime: Arc<crate::partition::PartitionRuntimeState>,
+    /// UserHook Router 计划、Ready listener 发布和运行期观察共用的 gRPC 状态。
+    #[cfg(feature = "grpc")]
+    grpc_runtime: Arc<crate::grpc::GrpcRuntimeState>,
     /// Kafka client 能力、UserHook consumer 定制和指标桥的受控发布状态。
     #[cfg(feature = "kafka")]
     kafka_runtime: Arc<crate::kafka::KafkaRuntimeState>,
     /// UserHook 注入、Saga Ready 门禁和运行期只读访问共用的受管状态。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     saga_runtime: Arc<crate::saga::SagaRuntimeState>,
     /// UserHook 注入、Outbox Ready 发布和 dispatcher 监督共用的受管状态。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     outbox_runtime: Arc<crate::outbox::OutboxRuntimeState>,
+    /// UserHook 登记、Ready 后受管执行并在停机时先于数据库收口的 Inbox 保留清理状态。
+    #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+    inbox_retention_runtime: Arc<crate::inbox::InboxRetentionRuntimeState>,
     /// 进程级统一指标注册表:各领域按 descriptor 记录到同一 hub。
     ///
     /// nafka 域为原生记录(fan-out 到本 hub,取代业务手工 sink);naweb 域经
     /// `NawebMetricsSource` 兼容源并入。nafana 迁移属门面层增量,不在 napp。
-    #[cfg(any(feature = "kafka", feature = "web"))]
     metrics_hub: Arc<nametrics_core::MetricHub>,
     /// 业务经 UserHook 注入的幂等 store;注入后 Web 组件在 Ready 装配幂等中间件。
     ///
@@ -256,6 +302,13 @@ pub(crate) struct ApplicationInner {
     /// `OnceLock` 保证只注入一次;未注入则不启用授权层(默认零行为)。
     #[cfg(feature = "web")]
     authz_registry: OnceLock<crate::authz::SharedPolicyRegistry>,
+    /// route 未命中任何授权策略时的缺省裁决；未设置时按兼容语义放行。
+    #[cfg(feature = "web")]
+    authz_unmatched: OnceLock<naauthz::UnmatchedRoutePolicy>,
+    /// `configure_router` 动态路由经 UserHook 显式登记的类型化合同；
+    /// 进入 OpenAPI 与授权覆盖对账，杜绝"逃生舱路由游离在一切审计之外"。
+    #[cfg(feature = "web")]
+    dynamic_route_contracts: std::sync::Mutex<Vec<naopenapi::RouteContract>>,
     /// 对象级授权 provider 与固定调用预算；请求边界冻结进 RequestSecurityContext。
     #[cfg(feature = "web")]
     object_authorizer: OnceLock<(crate::authz::SharedObjectAuthorizer, std::time::Duration)>,
@@ -272,7 +325,35 @@ pub struct Application {
     pub(crate) inner: Arc<ApplicationInner>,
 }
 
+/// 不延长应用生命周期的弱句柄；长生命周期业务适配器用它避免形成 Application 资源所有权环。
+#[derive(Clone)]
+pub struct WeakApplication {
+    inner: Weak<ApplicationInner>,
+}
+
+impl WeakApplication {
+    /// 业务作用：仅在应用仍存活时取得本次调用所需的强句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：应用仍存活时返回共享上下文；生命周期已经结束时返回 `None`。
+    pub fn upgrade(&self) -> Option<Application> {
+        self.inner.upgrade().map(|inner| Application { inner })
+    }
+}
+
 impl Application {
+    /// 业务作用：创建不延长 Application 生命周期的弱句柄，供受管 Handler 和回调安全保存。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：可在每次业务调用时尝试升级的弱句柄。
+    pub fn downgrade(&self) -> WeakApplication {
+        WeakApplication {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
     /// 业务作用：创建 Application、全部受管组件共享状态与唯一 TaskSupervisor 所有者。
     ///
     /// 参数说明：
@@ -285,23 +366,52 @@ impl Application {
         initial_config: Arc<ConfigView>,
     ) -> (Self, TaskSupervisor) {
         let (supervisor, task_supervisor) = TaskSupervisor::channel();
+        #[cfg(feature = "redis")]
+        let redis_activation = if info.mode == ApplicationMode::Service {
+            task_supervisor.activation_token()
+        } else {
+            CancellationToken::new()
+        };
+        let metrics_hub = Arc::new(nametrics_core::MetricHub::new());
+        crate::initialization::register_metrics(&metrics_hub)
+            .expect("initializer metric descriptors must be internally consistent");
         let application = Self {
             inner: Arc::new(ApplicationInner {
                 info,
-                config: ConfigStore::new(initial_config),
+                config: Arc::new(ConfigStore::new(initial_config)),
                 resources: ResourceRegistry::new(),
-                state: Arc::new(StateCell::new()),
+                initializers: crate::initialization::InitializerRegistry::new(),
+                shutdown_tasks: crate::shutdown::ShutdownTaskRegistry::new(),
+                state: Arc::new(StateCell::new(task_supervisor.activation_token())),
                 terminal: TerminalCell::new(),
                 shutdown_requested: CancellationToken::new(),
                 supervisor,
                 user_hook_open: AtomicBool::new(false),
                 user_registration_gate: StdMutex::new(()),
                 declared_components: AtomicU32::new(0),
+                #[cfg(feature = "redis")]
+                redis_partitions: Arc::new(crate::redis_partition::RedisPartitionState::default()),
+                #[cfg(feature = "redis")]
+                redis_tasks: Arc::new(crate::redis_tasks::RedisTasks::default()),
+                #[cfg(feature = "redis")]
+                redis_derived: Arc::new(crate::redis_derived::RedisDerived::new(redis_activation)),
+                #[cfg(feature = "ws-client")]
+                ws_clients: Arc::new(crate::ws_client::WsClients::default()),
+                #[cfg(feature = "hystrix")]
+                hystrix_commands: Arc::new(
+                    std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                ),
+                #[cfg(feature = "hystrix")]
+                hystrix_owner: OnceLock::new(),
                 readiness: Arc::new(crate::readiness::ReadinessRegistry::new()),
-                #[cfg(feature = "db")]
+                #[cfg(any(feature = "db", feature = "db-pgsql"))]
                 migrations: StdMutex::new(Some(Vec::new())),
+                #[cfg(feature = "redis-job")]
+                redis_job_runtime: crate::redis_job::RedisJobRuntimeState::new(),
                 #[cfg(feature = "telemetry")]
                 telemetry_exporter: OnceLock::new(),
+                #[cfg(feature = "telemetry")]
+                otlp_metrics_state: OnceLock::new(),
                 web_addr: OnceLock::new(),
                 #[cfg(feature = "web")]
                 web_runtime: Arc::new(crate::web_handle::WebRuntimeState::new()),
@@ -309,13 +419,15 @@ impl Application {
                 ws_runtime: Arc::new(crate::capabilities::WsRuntimeState::new()),
                 #[cfg(feature = "ws")]
                 ws_customizations: StdMutex::new(Some(Vec::new())),
+                #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+                ws_cluster_plan: StdMutex::new(None),
                 #[cfg(feature = "web")]
                 router_transforms: StdMutex::new(Some(Vec::new())),
                 #[cfg(feature = "web")]
                 mapping_transforms: StdMutex::new(Some(Vec::new())),
                 #[cfg(feature = "web")]
                 mapping_runtime: OnceLock::new(),
-                #[cfg(any(feature = "log", feature = "nacos-config"))]
+                #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
                 config_appliers: StdMutex::new(Vec::new()),
                 #[cfg(feature = "log")]
                 log_runtime: Arc::new(crate::capabilities::LogRuntimeState::new()),
@@ -327,18 +439,27 @@ impl Application {
                 ),
                 #[cfg(feature = "scheduling")]
                 scheduling_runtime: Arc::new(crate::capabilities::SchedulingRuntimeState::new()),
+                #[cfg(feature = "partition")]
+                partition_runtime: Arc::new(crate::partition::PartitionRuntimeState::new()),
+                #[cfg(feature = "grpc")]
+                grpc_runtime: Arc::new(crate::grpc::GrpcRuntimeState::new()),
                 #[cfg(feature = "kafka")]
                 kafka_runtime: Arc::new(crate::kafka::KafkaRuntimeState::new()),
-                #[cfg(feature = "saga")]
+                #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
                 saga_runtime: Arc::new(crate::saga::SagaRuntimeState::new()),
-                #[cfg(feature = "outbox")]
+                #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
                 outbox_runtime: Arc::new(crate::outbox::OutboxRuntimeState::new()),
-                #[cfg(any(feature = "kafka", feature = "web"))]
-                metrics_hub: Arc::new(nametrics_core::MetricHub::new()),
+                #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+                inbox_retention_runtime: Arc::new(crate::inbox::InboxRetentionRuntimeState::new()),
+                metrics_hub,
                 #[cfg(feature = "web")]
                 idempotency_store: OnceLock::new(),
                 #[cfg(feature = "web")]
                 authz_registry: OnceLock::new(),
+                #[cfg(feature = "web")]
+                authz_unmatched: OnceLock::new(),
+                #[cfg(feature = "web")]
+                dynamic_route_contracts: std::sync::Mutex::new(Vec::new()),
                 #[cfg(feature = "web")]
                 object_authorizer: OnceLock::new(),
                 #[cfg(feature = "web")]
@@ -366,7 +487,6 @@ impl Application {
         self.inner.state.load()
     }
 
-    #[cfg(feature = "outbox")]
     /// 业务作用：订阅进程生命周期转换，供受管组件在 Ready 与停机边界被精确唤醒。
     ///
     /// 参数说明: 无。
@@ -397,8 +517,9 @@ impl Application {
 
     /// 业务作用：封口就绪注册表:此后组件/业务不能再注册 readiness contributor。
     ///
-    /// 由 Runner 在 UserHook 成功、资源封口之后、Ready 之前调用(与 `resources().seal()` 同处),
-    /// 防止运行期无界新增贡献项名称。组件必须在 Start 或 UserHook 开放期完成注册。
+    /// 由 Runner 在 Initialization 成功后、Ready 之前调用(与 `resources().seal()` 同处),
+    /// 防止运行期无界新增贡献项名称。组件必须在 Start/UserHook 登记，hosted
+    /// initializer 必须在 Initialization 登记。
     ///
     /// # 参数
     ///
@@ -443,6 +564,14 @@ impl Application {
     /// `changed_ids` 判轮换。
     pub fn secrets(&self) -> Arc<nasecret::SecretSnapshot> {
         Arc::clone(self.inner.config.load().secrets())
+    }
+
+    /// 业务作用：让受管凭据资源与公开配置读取共享同一个原子发布点。
+    /// 参数说明：无。
+    /// 返回：配置存储的共享所有权；资源不持有 Application，从而不形成生命周期引用环。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn saga_config_store(&self) -> Arc<ConfigStore> {
+        Arc::clone(&self.inner.config)
     }
 
     /// 业务作用：从当前单一快照反序列化完整强类型配置。
@@ -552,6 +681,93 @@ impl Application {
             .register_named_managed(qualifier, value)
     }
 
+    /// 业务作用：在 UserHook 期间登记一个只在应用停机阶段执行一次的异步业务任务。
+    ///
+    /// 任务所有权在登记成功后立即交给 Application；Runner 会在受监督任务收口之后、业务资源释放
+    /// 之前按优先级顺序执行，并将单项失败、超时或 panic 隔离到停机报告中。
+    /// 已接管 future 在注册表、待执行列表和执行中均隔离单次析构展开；外层直接取消时只同步告警，
+    /// 不保证运行异步停机主体，也不生成正常停机报告。
+    ///
+    /// 参数说明：
+    /// - `priority`：业务停机任务集合内的顺序，数值越小越先执行。
+    /// - `name`：应用内唯一的稳定任务名；首尾空白会被去除，名称不能为空、超长、含控制字符、URL、
+    ///   凭据语义词或明显随机标识。调用方必须使用固定业务名称，不能拼接对象身份或秘密。
+    /// - `task`：已经构造完成、只在停机阶段由 Runner 执行一次的异步任务；任务不能执行阻塞 I/O。
+    ///
+    /// 返回：任务完整写入当前 Application 的登记集合时成功；UserHook 尚未开放或已经关闭、名称非法、
+    /// 重名、达到数量上限或拒绝后析构发生 panic 时返回错误，失败登记不会把 future 留在容器中。
+    pub fn register_graceful_shutdown<N, F, O>(
+        &self,
+        priority: i32,
+        name: N,
+        task: F,
+    ) -> ApplicationResult<()>
+    where
+        N: Into<Arc<str>>,
+        F: std::future::Future<Output = O> + Send + 'static,
+        O: ShutdownTaskOutput,
+    {
+        let name = name.into();
+        let future: crate::shutdown::ShutdownTaskFuture =
+            Box::pin(async move { task.await.into_shutdown_task_result() });
+        let mut future = Some(future);
+        let result = {
+            let _gate = self
+                .inner
+                .user_registration_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_user_hook_open("graceful shutdown task registration")
+                .and_then(|()| {
+                    self.inner
+                        .shutdown_tasks
+                        .register(priority, name, &mut future)
+                })
+        };
+        // 名称转换与拒绝后的析构都可能重入 Application；必须位于登记门之外，避免业务代码自锁。
+        if future.is_some_and(crate::shutdown::release_shutdown_task) {
+            return Err(ApplicationError::new(
+                ComponentId::Application,
+                ApplicationPhase::UserHook,
+                "rejected graceful shutdown task panicked while being released",
+            ));
+        }
+        result
+    }
+
+    /// 业务作用：在 Service UserHook 装配窗口登记一个运行时 initializer。
+    ///
+    /// 参数说明：
+    /// - `spec`：包含 canonical 身份、顺序、依赖与生存类型的元数据。
+    /// - `initializer`：在三轮全局屏障之间保持状态的唯一实例。
+    ///
+    /// 返回：整项在 UserHook 结束前线性化写入时成功；拒绝时隔离实例释放，保留 Batch、窗口或规格错误。
+    pub fn register_initializer<I>(
+        &self,
+        spec: crate::InitializerSpec,
+        initializer: I,
+    ) -> ApplicationResult<()>
+    where
+        I: crate::Initialization,
+    {
+        // 门禁拒绝也会释放调用方移交的实例；先建立保护，避免析构展开覆盖登记错误。
+        let initializer = crate::initialization::own_initializer(Box::new(initializer));
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("initializer registration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Application,
+                ApplicationPhase::UserHook,
+                "runtime initializers are only accepted during the Service user hook",
+            ));
+        }
+        self.inner.initializers.register(spec, initializer)
+    }
+
     /// 业务作用：异步借用一个无 qualifier 的已登记资源。
     ///
     /// # 参数
@@ -617,14 +833,76 @@ impl Application {
         self.spawn_task(name.into(), TaskKind::Critical, task).await
     }
 
+    /// 业务作用：在 UserHook 登记一个只有 Application 发布 Ready 后才构造并 poll 的关键服务任务。
+    ///
+    /// 该入口用于业务自管 listener 或其它入站端点：启动失败、初始化未完成或已进入
+    /// 停机时，任务工厂不会被调用。运行后提前退出与 `spawn_critical` 相同，触发故障停机。
+    ///
+    /// 参数说明：
+    /// - `name`：应用任务组内唯一且非空的稳定名称。
+    /// - `serve`：Ready 发布后才接收组级取消令牌并构造服务 future 的一次性工厂。
+    ///
+    /// 返回：Supervisor 完整受理等待任务后返回真实 `TaskId`；Batch、非 UserHook、重名或通道关闭时返回错误。
+    pub async fn serve_when_ready<N, F, Fut>(&self, name: N, serve: F) -> ApplicationResult<TaskId>
+    where
+        N: Into<Arc<str>>,
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        self.ensure_user_hook_open("ready-gated service registration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Supervisor,
+                ApplicationPhase::UserHook,
+                "ready-gated services are not allowed in Batch mode",
+            ));
+        }
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(ApplicationError::new(
+                ComponentId::Supervisor,
+                ApplicationPhase::UserHook,
+                "ready-gated service name cannot be empty",
+            ));
+        }
+        let token = self.inner.supervisor.task_token();
+        let application = self.clone();
+        let guarded: ManagedTaskFuture = Box::pin(async move {
+            let mut states = application.subscribe_state();
+            loop {
+                match *states.borrow() {
+                    ApplicationState::Starting => {}
+                    ApplicationState::Ready => break,
+                    ApplicationState::Stopping
+                    | ApplicationState::Stopped
+                    | ApplicationState::Failed => return Ok(()),
+                }
+                tokio::select! {
+                    _ = token.cancelled() => return Ok(()),
+                    changed = states.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            serve(token).await
+        });
+        self.inner
+            .supervisor
+            .register(name, TaskKind::Critical, guarded)
+            .await
+    }
+
     /// 业务作用：按名称获取数据源连接池句柄。
     ///
     /// 返回 clone handle 是 `MySqlPool` 自身的共享语义（内部就是 `Arc` 池），不等于把资源移出容器；
     /// 单库配置 `database` 注册在 `default` 名下。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是数据源 qualifier；单库配置固定使用 `default`。
     ///
-    /// - `name`：数据源 qualifier；单库配置固定使用 `default`。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回共享 pool；停机、缺失或
+    /// 组件未声明时返回类型化错误。
     #[cfg(feature = "db")]
     pub async fn datasource(&self, name: &str) -> ApplicationResult<natx::MySqlPool> {
         self.ensure_component_declared(
@@ -632,7 +910,44 @@ impl Application {
             ApplicationPhase::Running,
             "datasource access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Db, "datasource access")?;
         crate::db::datasource_handle(self, name).await
+    }
+
+    /// 业务作用：获取规范化 `default` datasource，作为单库兼容配置与无参装载的唯一快捷入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`default` 已由当前 Application 发布时返回共享 pool；缺失时失败且不猜测其它实例。
+    #[cfg(feature = "db")]
+    pub async fn default_datasource(&self) -> ApplicationResult<natx::MySqlPool> {
+        self.datasource(crate::db::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：按名称获取受 Application catalog 保护的 PostgreSQL datasource。
+    ///
+    /// 参数说明：`name` 是跨 driver 唯一的 datasource qualifier。
+    ///
+    /// 返回：名称存在且 driver 为 PostgreSQL 时返回共享 PgPool；错配、缺失或停机时返回类型化错误。
+    #[cfg(feature = "db-pgsql")]
+    pub async fn pg_datasource(&self, name: &str) -> ApplicationResult<natx_pgsql::PgPool> {
+        self.ensure_component_declared(
+            ComponentId::Db,
+            ApplicationPhase::Running,
+            "PostgreSQL datasource access",
+        )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Db, "PostgreSQL datasource access")?;
+        crate::db::pg_datasource_handle(self, name).await
+    }
+
+    /// 业务作用：获取 `default` 名下的 PostgreSQL datasource，不猜测其它唯一实例。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`default` 实际绑定 PostgreSQL 时返回 pool；绑定 MySQL 或缺失时返回明确错误。
+    #[cfg(feature = "db-pgsql")]
+    pub async fn default_pg_datasource(&self) -> ApplicationResult<natx_pgsql::PgPool> {
+        self.pg_datasource(crate::db::DEFAULT_DATASOURCE).await
     }
 
     /// 业务作用：为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
@@ -641,21 +956,20 @@ impl Application {
     /// `sqlx::migrate!("./migrations")` 构造 [`Migrator`](crate::Migrator) 并按数据源名登记。
     /// 具体裁决(disabled/validate/apply)由配置 `database.migrations.mode`(多库为
     /// `datasources.<名>.migrations.mode`)决定,生产默认 `validate`(只读校验版本一致,绝不改
-    /// schema)。门禁在 DB 组件 Ready 阶段执行——因 `db` 声明序在 `web`/`kafka` 之前,故迁移在任何
+    /// schema)。门禁在 DB 组件 Prepare 阶段执行，早于 initializer 与任何
     /// 监听器接流、任何 Kafka consumer 启动之前完成;校验失败(未应用、checksum 漂移)直接 fail
     /// startup,监听端口从不对外服务。
     ///
-    /// 不新增 `"migration"` 组件字符串:它是已声明 `db` 组件的 Ready 前子阶段。
+    /// 不新增 `"migration"` 组件字符串:它是已声明 `db` 组件的 Prepare 子阶段。
     ///
-    /// # 参数
+    /// 参数说明：
     ///
-    /// - `datasource`:目标数据源 qualifier;单库配置固定 `default`,须与已配置数据源同名。
+    /// - `datasource`:目标数据源 qualifier，trim 后为 1 至 128 字节；单库配置固定 `default`，须与已配置数据源同名。
     /// - `migrator`:业务 `sqlx::migrate!(...)` 生成的嵌入式 migrator。
     ///
-    /// # 错误
-    ///
-    /// 非 UserHook 阶段、未声明 `db` 组件、数据源名为空、同一数据源重复登记,或 Ready 已封口时返回
-    /// 阶段错误。门禁运行期的未应用/漂移/后端错误在 DB 组件 Ready 阶段转成启动失败(只含版本与稳定
+    /// 返回：Service UserHook 内登记成功时返回 `Ok`；非 UserHook 阶段、未声明 `db` 组件、
+    /// 数据源名为空或超过 128 字节、同一数据源重复登记、计划超过 128 项，或 Ready 已封口时返回
+    /// 阶段错误。门禁运行期的未应用/漂移/后端错误在 DB 组件 Prepare 阶段转成启动失败(只含版本与稳定
     /// reason,不含 SQL 正文)。
     ///
     /// # 示例
@@ -663,11 +977,11 @@ impl Application {
     /// ```ignore
     /// app.configure_migrations("default", sqlx::migrate!("./migrations"))?;
     /// ```
-    #[cfg(feature = "db")]
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
     pub fn configure_migrations(
         &self,
         datasource: &str,
-        migrator: namigrate::Migrator,
+        migrator: crate::Migrator,
     ) -> ApplicationResult<()> {
         // 与 ws/router 定制登记同一把 Hook 边界线性化锁:先持锁再复查门,消除"检查时开放、写入时
         // Hook 已结束"的竞态。
@@ -682,22 +996,21 @@ impl Application {
             ApplicationPhase::UserHook,
             "migration registration",
         )?;
-        // 门禁在 DB 组件 Ready 阶段执行,而 Batch 模式不执行 Ready:登记会被静默丢弃。
-        // 与其静默漏跑,不如直接拒绝并指向显式 API——Batch 任务可在 Hook 里自行调用
-        // `nasa::run_gate`(经 `nasa::MigrationSettings` 构造设置)完成一次性校验/应用。
+        // Batch 的 Prepare 早于其工作负载 UserHook，此时登记迁移已经错过该边界。
+        // 因此只接纳 Service 动态计划；Batch 须用静态 MIGRATION_PLANS 参与工作负载之前的门禁。
         if self.inner.info.mode() == ApplicationMode::Batch {
             return Err(ApplicationError::new(
                 ComponentId::Db,
                 ApplicationPhase::UserHook,
-                "configure_migrations requires Service mode; the migration gate runs in the DB Ready sub-phase, which Batch does not execute. Run namigrate::run_gate explicitly in a batch hook instead",
+                "configure_migrations requires Service mode; Batch must register static MIGRATION_PLANS before its workload",
             ));
         }
         let datasource = datasource.trim();
-        if datasource.is_empty() {
+        if datasource.is_empty() || datasource.len() > 128 {
             return Err(ApplicationError::new(
                 ComponentId::Db,
                 ApplicationPhase::UserHook,
-                "configure_migrations datasource name cannot be empty",
+                "configure_migrations datasource name must contain 1 to 128 bytes",
             ));
         }
         let mut slot = self
@@ -718,6 +1031,14 @@ impl Application {
                 ComponentId::Db,
                 ApplicationPhase::UserHook,
                 format!("datasource `{datasource}` already has a registered migration set"),
+            ));
+        }
+        // 在 Hook 内即限制保留容量；Prepare 仍会合并静态工厂并复验总量，不能用动态上限代替总量门禁。
+        if registrations.len() >= 128 {
+            return Err(ApplicationError::new(
+                ComponentId::Db,
+                ApplicationPhase::UserHook,
+                "configure_migrations supports at most 128 datasource plans",
             ));
         }
         registrations.push((datasource.to_owned(), migrator));
@@ -746,12 +1067,32 @@ impl Application {
         })
     }
 
+    /// 业务作用：由遥测组件发布唯一 OTLP 指标出口状态，供管理面读取导出结果。
+    ///
+    /// 参数说明：
+    /// - `state`: 导出任务与 Application 共享的原子计数状态。
+    ///
+    /// 返回：首次发布成功；重复发布以 Telemetry Start 错误拒绝。
+    #[cfg(feature = "telemetry")]
+    pub(crate) fn publish_otlp_metrics_state(
+        &self,
+        state: std::sync::Arc<crate::telemetry::OtlpMetricsState>,
+    ) -> ApplicationResult<()> {
+        self.inner.otlp_metrics_state.set(state).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Telemetry,
+                ApplicationPhase::Start,
+                "OTLP metrics state was already published",
+            )
+        })
+    }
+
     /// 业务作用：获取遥测组件发布的有界 span 导出器;未声明遥测组件或未启用时返回 `None`。
     ///
     /// # 参数
     ///
     /// 本方法无参数;span 生产者用它非阻塞入队,拿不到即表示遥测未激活,直接跳过入队。
-    /// 仅在同时启用 `web` 时编译:目前唯一生产者是 Web trace 中间件。
+    /// Web、调度与消息组件都只取得该只写能力，不能接管 exporter 生命周期。
     #[cfg(feature = "telemetry")]
     pub(crate) fn telemetry_exporter(
         &self,
@@ -777,6 +1118,19 @@ impl Application {
             .map(|exporter| exporter.snapshot())
     }
 
+    /// 业务作用：返回 OTLP 指标批次、样本与失败摘要，不暴露 endpoint 或 label 值。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：显式配置 `telemetry.otlp_metrics_endpoint` 时返回当前累计值；未启用时返回 `None`。
+    #[cfg(feature = "telemetry")]
+    pub fn otlp_metrics_snapshot(&self) -> Option<crate::telemetry::OtlpMetricsSnapshot> {
+        self.inner
+            .otlp_metrics_state
+            .get()
+            .map(|state| state.snapshot())
+    }
+
     /// 业务作用：显式记录一个业务子 span。
     ///
     /// 给 db/redis/kafka 等**非 web 调用点**用的显式插桩入口:业务把 handler 里拿到的
@@ -791,6 +1145,8 @@ impl Application {
     ///
     /// - `name`:低基数 span 名。
     /// - `trace`:父链路上下文(通常来自请求扩展),子 span 沿用其 trace-id。
+    ///
+    /// 返回：无；遥测未启用时直接结束，启用时仅尝试非阻塞入队。
     #[cfg(feature = "telemetry")]
     pub fn record_span(&self, name: impl Into<String>, trace: &natelemetry::TraceContext) {
         let Some(exporter) = self.inner.telemetry_exporter.get() else {
@@ -813,29 +1169,33 @@ impl Application {
             start_unix_nano: now,
             end_unix_nano: now,
             http_status_code: None,
+            attributes: Vec::new(),
         });
     }
 
-    /// 业务作用：取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Ready 阶段调用一次)。
+    /// 业务作用：取走并封口 UserHook 登记的全部迁移门禁项(DB 组件 Prepare 阶段调用一次)。
     ///
     /// # 参数
     ///
     /// 本方法无参数;取走后队列置 `None`,此后 `configure_migrations` 一律返回封口错误。
-    #[cfg(feature = "db")]
-    pub(crate) fn take_migrations(&self) -> Vec<MigrationRegistration> {
-        self.inner
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    pub(crate) fn take_migrations(&self) -> ApplicationResult<Vec<MigrationRegistration>> {
+        let runtime = self
+            .inner
             .migrations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::migrations::collect(runtime)
     }
 
     /// 业务作用：按名称获取 Redis 客户端句柄。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是 Redis 实例 qualifier；单实例配置固定使用 `default`。
     ///
-    /// - `name`：Redis 实例 qualifier；单实例配置固定使用 `default`。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回同一受管客户端；停机、
+    /// 缺失或组件未声明时返回类型化错误。
     #[cfg(feature = "redis")]
     pub async fn redis(&self, name: &str) -> ApplicationResult<Arc<nadis::RedisClient>> {
         self.ensure_component_declared(
@@ -843,7 +1203,18 @@ impl Application {
             ApplicationPhase::Running,
             "redis client access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Redis, "redis client access")?;
         crate::redis::redis_handle(self, name).await
+    }
+
+    /// 业务作用：获取 Redis 的规范化默认 source，对应无参资源装载语义。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`primary`/`default` 配置已发布时返回同一 `Arc<RedisClient>`；缺失时失败。
+    #[cfg(feature = "redis")]
+    pub async fn default_redis(&self) -> ApplicationResult<Arc<nadis::RedisClient>> {
+        self.redis(crate::redis::DEFAULT_REDIS).await
     }
 
     /// 业务作用：按 client name 获取 Kafka 的受控发布、健康和运行控制句柄。
@@ -851,17 +1222,14 @@ impl Application {
     /// 句柄不会暴露 `KafkaProxy`、consumer registry 或 shutdown 权；最终关闭始终由
     /// Application active stack 执行。
     ///
-    /// # 参数
+    /// 参数说明：`name` 是 `kafka.client_name` 或 `kafkas` map key；必须非空且已经在 Start 发布。
     ///
-    /// - `name`：`kafka.client_name` 或 `kafkas` map key；必须非空且已经在 Start 发布。
-    ///
-    /// # 返回
-    ///
-    /// 返回共享底层 client 的轻量受控句柄，克隆不会新建连接。
+    /// 返回：当前 Application 仍处于 Starting/Ready 且名称存在时返回共享底层 client 的轻量
+    /// 受控句柄，克隆不会新建连接。
     ///
     /// # 错误
     ///
-    /// 组件未声明、client 不存在或尚未完成 Start 发布时返回 Kafka 组件错误。
+    /// 组件未声明、Application 已进入停机、client 不存在或尚未完成 Start 发布时返回 Kafka 组件错误。
     #[cfg(feature = "kafka")]
     pub fn kafka(&self, name: &str) -> ApplicationResult<crate::capabilities::KafkaHandle> {
         self.ensure_component_declared(
@@ -869,6 +1237,7 @@ impl Application {
             ApplicationPhase::Running,
             "kafka capability access",
         )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Kafka, "kafka capability access")?;
         let capability = self.inner.kafka_runtime.client(name).ok_or_else(|| {
             ApplicationError::new(
                 ComponentId::Kafka,
@@ -880,6 +1249,16 @@ impl Application {
             capability,
             Arc::clone(&self.inner.state),
         ))
+    }
+
+    /// 业务作用：获取显式命名为 `default` 的 Kafka client，不猜测唯一 client 或第一个条目。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：完整受管 client 表中存在 `default` 时返回受控句柄；否则返回 Kafka 组件错误。
+    #[cfg(feature = "kafka")]
+    pub fn default_kafka(&self) -> ApplicationResult<crate::capabilities::KafkaHandle> {
+        self.kafka("default")
     }
 
     /// 业务作用：获取日志组件的只读运行时能力句柄。
@@ -957,10 +1336,17 @@ impl Application {
         Ok(cacheable::cache_handle())
     }
 
-    /// 业务作用：从 Ready 阶段发布的静态业务路由事实生成 OpenAPI 3.1 文档。
+    /// 业务作用：从 Ready 阶段发布的静态业务路由事实与已登记的动态路由合同生成 OpenAPI 3.1 文档。
     ///
-    /// `configure_router` 追加的不透明路由没有可审计的类型元数据，刻意不进入文档。授权标记同时合并
+    /// `configure_router` 追加的不透明路由默认没有可审计的类型元数据，不自动入档；确有对外合同的
+    /// 动态路由经 [`Self::register_route_contract`] 显式提交后与静态路由同等入档。授权标记同时合并
     /// 端点声明和当前 route policy 快照，避免把运行时收紧的路由误报成公开接口。
+    ///
+    /// 参数说明：
+    /// - `title`：公开 API 文档标题。
+    /// - `version`：应用对外声明的 API 版本。
+    ///
+    /// 返回：Web 能力已发布时返回合并静态与显式动态合同的 OpenAPI 3.1 JSON；能力未就绪时返回应用错误。
     #[cfg(feature = "web")]
     pub fn openapi_document(
         &self,
@@ -1069,6 +1455,36 @@ impl Application {
                             .is_some_and(|policies| policies.is_protected(&route_id)),
                 }
             });
+        // 动态路由的显式合同与静态路由同等入档;同 method/path 与 operation_id 冲突由
+        // generate 的既有校验统一拒绝,不在此处重复实现。授权标记同样合并当前策略快照,
+        // 避免运行时被策略收紧的动态路由在文档中误报为公开接口。
+        let routes = routes.chain(self.dynamic_route_contracts().into_iter().map(
+            |mut contract| {
+                let effective_path = if context_path.is_empty() {
+                    contract.path.clone()
+                } else {
+                    format!("{context_path}{}", contract.path)
+                };
+                let route_id = format!("{} {effective_path}", contract.method);
+                contract.auth_required = contract.auth_required
+                    || policy_set
+                        .as_ref()
+                        .is_some_and(|policies| policies.is_protected(&route_id));
+                // 授权仍使用真实 Axum route ID；OpenAPI 只转换 catch-all 语法，并必须把
+                // Application 的挂载前缀写进公开 path，避免文档把不存在的根路径暴露给调用方。
+                contract.path = effective_path
+                    .split('/')
+                    .map(|segment| {
+                        segment
+                            .strip_prefix("{*")
+                            .and_then(|tail| tail.strip_suffix('}'))
+                            .map_or_else(|| segment.to_owned(), |name| format!("{{{name}}}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                contract
+            },
+        ));
         naopenapi::generate(title, version, routes).map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Web,
@@ -1164,6 +1580,624 @@ impl Application {
         ))
     }
 
+    /// 业务作用：为受管 Redis 来源登记独立分区消费计划，等待宿主统一 Ready 才消费。
+    /// 参数说明：`source` 为 Redis qualifier；`critical` 决定健康失败是否终止应用；`register` 只登记领域 handler。
+    /// 返回：Service UserHook 中首次登记成功；晚到、重复、错误模式或未声明 Redis 时拒绝。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_partition<F>(
+        &self,
+        source: &str,
+        critical: bool,
+        register: F,
+    ) -> ApplicationResult<()>
+    where
+        F: FnOnce(&mut nadis::partition::PreparedPartition) -> Result<(), nadis::NasaRedisError>
+            + Send
+            + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis partition plan registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis partition plan registration",
+        )?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Redis,
+                ApplicationPhase::UserHook,
+                "Redis partition requires Service mode",
+            ));
+        }
+        self.inner
+            .redis_partitions
+            .configure(source, critical, register)
+    }
+
+    /// 业务作用：取得已经准备的指定来源消费器，复用其独立发布和执行预算。
+    /// 参数说明：`source` 为受管 Redis qualifier。
+    /// 返回：已准备句柄；应用关闭或来源未准备时拒绝，不惰性建立运行态。
+    #[cfg(feature = "redis")]
+    pub fn redis_partition(
+        &self,
+        source: &str,
+    ) -> ApplicationResult<Arc<nadis::partition::RunningPartition>> {
+        self.ensure_infrastructure_lookup_open(ComponentId::Redis, "Redis partition access")?;
+        self.inner.redis_partitions.runtime(source)
+    }
+
+    /// 业务作用：取得各受管来源的独立运行快照。
+    /// 参数说明：无。
+    /// 返回：有界且不包含消息内容或业务键的观察值。
+    #[cfg(feature = "redis")]
+    pub fn redis_partition_observations(&self) -> Vec<crate::RedisPartitionObservation> {
+        self.inner.redis_partitions.observations()
+    }
+
+    /// 业务作用：查询聚合停机已经采集的逐来源责任报告。
+    /// 参数说明：无。
+    /// 返回：最近等待的证明；调用不会重新请求停止。
+    #[cfg(feature = "redis")]
+    pub fn redis_partition_stop_results(&self) -> Vec<crate::RedisPartitionStopResult> {
+        self.inner.redis_partitions.reports()
+    }
+
+    /// 业务作用：让生命周期执行器共享唯一 Redis 分区聚合 owner。
+    /// 参数说明：无。
+    /// 返回：当前应用的内部状态，不复用通用 partition 注册表。
+    #[cfg(feature = "redis")]
+    pub(crate) fn redis_partitions(&self) -> Arc<crate::redis_partition::RedisPartitionState> {
+        self.inner.redis_partitions.clone()
+    }
+
+    /// 业务作用：在启动期登记订阅处理策略，由 Redis 子能力负责连接、监听、监督与停止。
+    /// 参数说明：`name` 为 redis_subscriptions 名称；`handler` 接受单条消息并返回处理 future。
+    /// 返回：合法唯一登记成功；不在此处开放消息处理。Pub/Sub 不提供持久重投。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_subscription<F, Fut>(
+        &self,
+        name: &str,
+        handler: F,
+    ) -> ApplicationResult<()>
+    where
+        F: Fn(nadis::pubsub::Message) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ApplicationResult<()>> + Send + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis subscription registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis subscription registration",
+        )?;
+        self.inner.redis_tasks.register(
+            name,
+            std::sync::Arc::new(move |message| Box::pin(handler(message))),
+        )
+    }
+
+    /// 业务作用：供 Redis 组件访问本应用的派生任务 owner。
+    /// 参数说明：无。
+    /// 返回：与其它应用隔离的所有权句柄。
+    #[cfg(feature = "redis")]
+    pub(crate) fn redis_tasks(&self) -> Arc<crate::redis_tasks::RedisTasks> {
+        self.inner.redis_tasks.clone()
+    }
+
+    /// 业务作用：在 Service 装配窗口登记普通 Stream 的事件处理目录。
+    /// 参数说明：`name` 对应 redis_streams 计划；`setup` 只登记处理策略。
+    /// 返回：合法唯一登记成功；封口、来源能力缺失或重复时拒绝。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_stream<F>(&self, name: &str, setup: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(nadis::stream::StreamSubscriber) -> nadis::stream::StreamSubscriber
+            + Send
+            + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis Stream registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis Stream registration",
+        )?;
+        self.inner
+            .redis_derived
+            .register_stream(name, Box::new(setup))
+    }
+
+    /// 业务作用：登记共享组 Proxy 路由，消费与回收由宿主统一激活。
+    /// 参数说明：`name` 对应 redis_proxies 计划；`setup` 登记主题与事件处理器。
+    /// 返回：登记成功不创建连接，错误阻止后续业务放行。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_proxy<F>(&self, name: &str, setup: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(&mut nadis::proxy::PreparedProxy) + Send + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis Proxy registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis Proxy registration",
+        )?;
+        self.inner
+            .redis_derived
+            .register_proxy(name, Box::new(setup))
+    }
+
+    /// 业务作用：取得配置预装配的受管微批，不将最终关闭权交给业务。
+    /// 参数说明：`name` 对应 redis_pipelines 计划。
+    /// 返回：命名调用句柄，Service Ready 或 Batch 工作负载前完成装配。
+    #[cfg(feature = "redis")]
+    pub async fn redis_pipeline(
+        &self,
+        name: &str,
+    ) -> ApplicationResult<crate::ManagedRedisPipeline> {
+        Ok(self
+            .named_resource::<crate::ManagedRedisPipeline>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：取得受管 Proxy 发布入口，保持原消息与未知结果语义。
+    /// 参数说明：`name` 对应 redis_proxies 计划。
+    /// 返回：本代命名发布句柄；未准备或名称错误时拒绝。
+    #[cfg(feature = "redis")]
+    pub async fn redis_proxy(&self, name: &str) -> ApplicationResult<crate::ManagedRedisProxy> {
+        Ok(self
+            .named_resource::<crate::ManagedRedisProxy>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：读取普通 Stream、Proxy 和微批任务的有界运行观测。
+    /// 参数说明：无。
+    /// 返回：命名计划状态，采样不创建业务副作用。
+    #[cfg(feature = "redis")]
+    pub fn redis_derived_observations(&self) -> Vec<crate::RedisDerivedObservation> {
+        self.inner.redis_derived.observations()
+    }
+
+    /// 业务作用：向 Redis 生命周期提供本应用独占的派生资源 owner。
+    /// 参数说明：无。
+    /// 返回：不跨应用复用的状态句柄。
+    #[cfg(feature = "redis")]
+    pub(crate) fn redis_derived(&self) -> Arc<crate::redis_derived::RedisDerived> {
+        self.inner.redis_derived.clone()
+    }
+
+    /// 业务作用：在 Service 装配期间登记命名出站客户端的有界事件回调。
+    /// 参数说明：`name` 匹配 ws_clients；`event` 为协议事件名；`handler` 必须同步非阻塞。
+    /// 返回：合法唯一登记成功，不启动连接；Ready 前不会调用业务回调。
+    #[cfg(feature = "ws-client")]
+    pub fn configure_ws_client_event<F>(
+        &self,
+        name: &str,
+        event: &str,
+        handler: F,
+    ) -> ApplicationResult<()>
+    where
+        F: Fn(naws::proto::Message) + Send + Sync + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("outbound client callback registration")?;
+        self.inner
+            .ws_clients
+            .register(name, event, Arc::new(handler))
+    }
+
+    /// 业务作用：取得无需入站服务的命名出站客户端业务句柄。
+    /// 参数说明：`name` 为 ws_clients 中启用的名称。
+    /// 返回：本代发送与观察句柄，不授予重连配置或最终关闭权。
+    #[cfg(feature = "ws-client")]
+    pub async fn ws_client(&self, name: &str) -> ApplicationResult<crate::ManagedWsClient> {
+        Ok(self
+            .named_resource::<crate::ManagedWsClient>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：读取命名出站客户端的本地连接与任务状态。
+    /// 参数说明：无。
+    /// 返回：固定目录下的名称、连接状态和活动子任务数量。
+    #[cfg(feature = "ws-client")]
+    pub fn ws_client_observations(&self) -> Vec<(String, bool, usize)> {
+        self.inner.ws_clients.observations()
+    }
+
+    /// 业务作用：向标准装配提供本应用的出站客户端 owner。
+    /// 参数说明：无。
+    /// 返回：本代独占的目录与关闭状态。
+    #[cfg(feature = "ws-client")]
+    pub(crate) fn ws_clients(&self) -> Arc<crate::ws_client::WsClients> {
+        self.inner.ws_clients.clone()
+    }
+
+    /// 业务作用：让出站领域入口等待宿主唯一的 Ready 发布。
+    /// 参数说明：无。
+    /// 返回：领域 owner 仅等待、不主动开放的启动信号。
+    #[cfg(feature = "ws-client")]
+    pub(crate) fn startup_activation(&self) -> CancellationToken {
+        self.inner.state.activation_token()
+    }
+
+    /// 业务作用：向标准装配移交本代命令目录的访问权，目录与业务收尾保持相同生存期。
+    /// 参数说明：无。
+    /// 返回：当前 Application 独占的有界配置目录。
+    #[cfg(feature = "hystrix")]
+    pub(crate) fn hystrix_commands(
+        &self,
+    ) -> Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<hystrix::Command>>>> {
+        self.inner.hystrix_commands.clone()
+    }
+
+    /// 业务作用：登记隔离命令的关键 owner 供最终接流复验，不延长其清理责任。
+    /// 参数说明：`runtime` 为当前代次 owner；`health` 为对应健康证据。
+    /// 返回：首次登记成功，重复安装返回准备错误。
+    #[cfg(feature = "hystrix")]
+    pub(crate) fn set_hystrix_owner(
+        &self,
+        runtime: &Arc<hystrix::ManagedRuntime>,
+        health: crate::ReadinessContributor,
+    ) -> ApplicationResult<()> {
+        self.inner
+            .hystrix_owner
+            .set((Arc::downgrade(runtime), health))
+            .map_err(|_| {
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Prepare,
+                    "hystrix owner already registered",
+                )
+            })
+    }
+
+    /// 业务作用：取得受管配置中预装配的显式隔离命令，不向业务移交全局安装权。
+    /// 参数说明：`name` 为 hystrix.commands 中的固定名称。
+    /// 返回：当前代次命令；不存在或装配尚未完成时失败，旧命令关闭后拒绝调用。
+    #[cfg(feature = "hystrix")]
+    pub async fn hystrix_command(&self, name: &str) -> ApplicationResult<Arc<hystrix::Command>> {
+        self.inner
+            .hystrix_commands
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Prepare,
+                    "managed hystrix command unavailable",
+                )
+            })
+    }
+
+    /// 业务作用：在 Service UserHook 内提交 default 保序执行器的启动期容量计划，作为同名 YAML 计划的代码入口。
+    ///
+    /// 本入口只移交纯参数，不创建 worker。组件会在 UserHook 成功结束后的 Prepare 阶段构造并
+    /// 发布执行器，因此 Hook 后续失败不会遗留脱离 Application 所有权的后台任务。
+    ///
+    /// 参数说明：
+    /// - `plan`: 已完成容量与停机预算校验的执行器计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `partition` 且首次提交时成功；同名 YAML、重复、晚到或 Batch
+    /// 调用返回阶段错误，两个入口不会合并。Running 阶段需要新增执行域时，应由业务直接持有
+    /// napart 注册表，不能绕过受管集合的冻结边界。
+    #[cfg(feature = "partition")]
+    pub fn configure_partition(
+        &self,
+        plan: crate::partition::PartitionApplicationPlan,
+    ) -> ApplicationResult<()> {
+        self.configure_partition_runner(napart::DEFAULT_RUNNER, plan)
+    }
+
+    /// 业务作用：在 Service UserHook 内为稳定名称提交一份分区 Runner 计划。
+    ///
+    /// 本入口只登记纯参数并注册独立 readiness；Runner 在 Prepare 按名称顺序启动。YAML 与
+    /// UserHook 可以配置不同名称，但同名配置必须拒绝，不能合并推断。调用成功不表示 Runner 已经
+    /// 发布，同一 UserHook 内不能立即通过 `partition_runner` 取得该句柄。
+    ///
+    /// 参数说明：
+    /// - `name`: 配置常量中的有界稳定 Runner 名称。
+    /// - `plan`: 已校验的独立容量、控制和停机计划。
+    ///
+    /// 返回：UserHook 开放、组件已声明且名称首次登记时成功；同名 YAML、重复或晚到返回错误。
+    #[cfg(feature = "partition")]
+    pub fn configure_partition_runner(
+        &self,
+        name: impl AsRef<str>,
+        plan: crate::partition::PartitionApplicationPlan,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("partition plan configuration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::UserHook,
+                "partition plans are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::UserHook,
+            "partition plan configuration",
+        )?;
+        let name = crate::partition::runner_name(name.as_ref(), ApplicationPhase::UserHook)?;
+        if self.inner.partition_runtime.has_yaml_plan(&name) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::UserHook,
+                "partition plan conflict: use either YAML `partition` or configure_partition for the same Runner, not both",
+            ));
+        }
+        let critical = plan.critical();
+        self.inner.partition_runtime.configure(name.clone(), plan)?;
+        let contributor = crate::partition::register_runner_readiness(self, &name, critical)?;
+        self.inner
+            .partition_runtime
+            .install_contributor(name, contributor)
+    }
+
+    /// 业务作用：在 Service UserHook 内把本进程唯一 RedisJob 计划移交给独立生命周期组件。
+    ///
+    /// 该入口只冻结定义与 Handler，不接触 Redis；组件在 Prepare 精确绑定 source 并执行外部门禁，
+    /// Ready 才开放消费，因此 Hook 或 initializer 失败不会留下脱管执行器。
+    ///
+    /// 参数说明：
+    /// - `plan`: 尚未 prepare 的拥有式核心计划。
+    ///
+    /// 返回：UserHook 开放、已声明 `redis-job` 且首次提交时成功；重复或晚到提交返回阶段错误。
+    #[cfg(feature = "redis-job")]
+    pub fn configure_redis_jobs(&self, plan: nadis::job::RedisJobPlan) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("RedisJob plan configuration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::UserHook,
+                "RedisJob plans are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::RedisJob,
+            ApplicationPhase::UserHook,
+            "RedisJob plan configuration",
+        )?;
+        self.inner.redis_job_runtime.configure(plan)
+    }
+
+    /// 业务作用：取得 Ready 后发布的多 source RedisJob 业务门面，不取得后台任务或停机所有权。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件且应用处于 Ready 时返回门面；启动中、停机中或未声明时返回阶段错误。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job(&self) -> ApplicationResult<nadis::job::JobRuntimeHandle> {
+        self.ensure_component_declared(
+            ComponentId::RedisJob,
+            ApplicationPhase::Running,
+            "RedisJob capability access",
+        )?;
+        if self.state() != ApplicationState::Ready {
+            return Err(ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob capability is available only while the application is Ready",
+            ));
+        }
+        self.inner.redis_job_runtime.handle().ok_or_else(|| {
+            ApplicationError::new(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob runtime handle is not published",
+            )
+        })
+    }
+
+    /// 业务作用：显式选择 source 并取得结构化 RedisJob 控制 API，业务不接触 Lua 或裸返回码。
+    ///
+    /// 参数说明：`qualifier` 为冻结计划中的 canonical source id。
+    ///
+    /// 返回：应用 Ready 且 source 存在并接受准入时返回控制门面；否则保留结构化根因。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job_control(&self, qualifier: &str) -> ApplicationResult<nadis::job::JobControl> {
+        self.redis_job()?.control(qualifier).map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob control source is unavailable",
+                error,
+            )
+        })
+    }
+
+    /// 业务作用：显式选择 source 并取得 RedisJob 查询、健康与指标 API。
+    ///
+    /// 参数说明：`qualifier` 为冻结计划中的 canonical source id。
+    ///
+    /// 返回：应用 Ready 且 source 存在时返回查询门面；未知 source 保留结构化根因。
+    #[cfg(feature = "redis-job")]
+    pub fn redis_job_query(&self, qualifier: &str) -> ApplicationResult<nadis::job::JobQuery> {
+        self.redis_job()?.query(qualifier).map_err(|error| {
+            ApplicationError::with_source(
+                ComponentId::RedisJob,
+                ApplicationPhase::Running,
+                "RedisJob query source is unavailable",
+                error,
+            )
+        })
+    }
+
+    /// 业务作用：向独立 RedisJob 生命周期组件提供私有的一次性计划槽，不向业务侧暴露阶段绕行入口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与当前 Application 绑定的计划状态容器。
+    #[cfg(feature = "redis-job")]
+    pub(crate) fn redis_job_runtime_state(&self) -> &crate::redis_job::RedisJobRuntimeState {
+        &self.inner.redis_job_runtime
+    }
+
+    /// 业务作用：取得由 Application 唯一拥有且仍开放准入的保序执行器业务句柄。
+    ///
+    /// Prepare 发布后即可调用，因此静态工厂与 initializer 三阶段能使用同一容器句柄；停机开始后
+    /// 新调用会被拒绝，已经取得的句柄仍由执行器自身的 ShuttingDown 错误阻止新任务。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件、Prepare 已完成且执行器仍接受任务时返回共享句柄；否则返回明确阶段错误。
+    #[cfg(feature = "partition")]
+    pub fn partition(&self) -> ApplicationResult<crate::partition::PartitionApplicationHandle> {
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::Running,
+            "partition executor access",
+        )?;
+        if matches!(
+            self.state(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::Running,
+                "partition executor access is closed during application shutdown",
+            ));
+        }
+        self.inner.partition_runtime.default_runner()
+    }
+
+    /// 业务作用：按稳定名称取得由 Application 唯一管理的分区 Runner 业务句柄。
+    ///
+    /// 返回句柄不含启停权；停止、重启和损耗报告仍归 Application 生命周期 action。名称只允许
+    /// 来自 YAML 或 UserHook 冻结计划，不能用请求字段动态创建执行域。
+    ///
+    /// 参数说明：
+    /// - `name`: 已配置的稳定 Runner 名称。
+    ///
+    /// 返回：Prepare 已发布且该 Runner 仍接纳任务时返回句柄；未知、未就绪或停机中返回错误。
+    #[cfg(feature = "partition")]
+    pub fn partition_runner(
+        &self,
+        name: impl AsRef<str>,
+    ) -> ApplicationResult<crate::partition::PartitionApplicationHandle> {
+        self.ensure_component_declared(
+            ComponentId::Partition,
+            ApplicationPhase::Running,
+            "named partition Runner access",
+        )?;
+        if matches!(
+            self.state(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            return Err(ApplicationError::new(
+                ComponentId::Partition,
+                ApplicationPhase::Running,
+                "partition Runner access is closed during application shutdown",
+            ));
+        }
+        self.inner.partition_runtime.runner(name.as_ref())
+    }
+
+    /// 业务作用：把保序执行器的计划与发布状态借给唯一生命周期组件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享状态所有权副本；仅组件内部用于 Prepare 线性化消费与发布。
+    #[cfg(feature = "partition")]
+    pub(crate) fn partition_runtime(&self) -> Arc<crate::partition::PartitionRuntimeState> {
+        Arc::clone(&self.inner.partition_runtime)
+    }
+
+    /// 业务作用：在 Service UserHook 内登记一个 generated gRPC server，由 Application 统一装配。
+    ///
+    /// 本入口不构造 Router、不绑定端口。组件在 Prepare 封口 registry，并在全部 initializer 成功后的
+    /// Ready 阶段自动加入 health/reflection 和消息边界，因此业务初始化失败时不会提前接流。
+    ///
+    /// 参数说明：
+    /// - `service`: `nagrpc-build` 生成且尚未加入其它 Router 的 server。
+    ///
+    /// 返回：UserHook 开放、已声明 `grpc` 且 service 身份唯一时成功；晚到、重复或 Batch 调用返回错误。
+    #[cfg(feature = "grpc")]
+    pub fn register_grpc_service<S>(&self, service: S) -> ApplicationResult<()>
+    where
+        S: nagrpc::ManagedGrpcService,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_user_hook_open("gRPC service registration")?;
+        if self.info().mode() != ApplicationMode::Service {
+            return Err(ApplicationError::new(
+                ComponentId::Grpc,
+                ApplicationPhase::UserHook,
+                "gRPC services are only accepted during the Service user hook",
+            ));
+        }
+        self.ensure_component_declared(
+            ComponentId::Grpc,
+            ApplicationPhase::UserHook,
+            "gRPC service registration",
+        )?;
+        self.inner.grpc_runtime.register(service)
+    }
+
+    /// 业务作用：取得已由 Ready 阶段发布且不含 shutdown 权限的 gRPC listener 观察句柄。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：已声明组件且 listener 已绑定时返回地址、状态、连接、accept 失败计数与持续时长视图；
+    /// 否则返回阶段错误。Bound 只表示预绑定；全应用放行后才会转为 Running，句柄存在不是接流证明。
+    #[cfg(feature = "grpc")]
+    pub fn grpc(&self) -> ApplicationResult<nagrpc::GrpcServerObserver> {
+        self.ensure_component_declared(
+            ComponentId::Grpc,
+            ApplicationPhase::Running,
+            "gRPC listener access",
+        )?;
+        self.inner.grpc_runtime.observer()
+    }
+
+    /// 业务作用：把 gRPC registry 与观察发布状态借给唯一生命周期组件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享状态所有权副本；仅用于 Prepare 线性消费和 Ready 发布。
+    #[cfg(feature = "grpc")]
+    pub(crate) fn grpc_runtime(&self) -> Arc<crate::grpc::GrpcRuntimeState> {
+        Arc::clone(&self.inner.grpc_runtime)
+    }
+
     /// 业务作用：在 UserHook 内提交本进程唯一的 Saga 运行计划，交由组件执行 Ready 门禁和托管。
     ///
     /// 计划提交不等于能力已发布。组件会在 UserHook 结束后先校验本地步骤合同与历史非终态实例，
@@ -1173,7 +2207,7 @@ impl Application {
     /// - `plan`：包含 Orchestrator、命名参与方或两者的完整运行计划。
     ///
     /// 返回：UserHook 开放、已声明 `saga` 且首次提交时成功；重复、晚到或空计划返回阶段错误。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub fn configure_saga(
         &self,
         mut plan: crate::saga::SagaApplicationPlan,
@@ -1194,11 +2228,29 @@ impl Application {
             ApplicationPhase::UserHook,
             "saga managed outbox configuration",
         )?;
+        crate::saga::validate_custom_plan_submission(self, &plan)?;
         // 先验证角色拓扑，再把 publisher 移交给 Outbox；否则空计划失败会留下无法由调用方重试
         // 覆盖的半配置 Outbox，破坏 UserHook 内一次纠错的原子性。
         plan.validate()?;
-        let outbox = plan.take_outbox_plan()?;
-        self.inner.outbox_runtime.configure(outbox)?;
+        #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
+        {
+            let grpc_services = plan.take_grpc_services();
+            if !grpc_services.is_empty() {
+                self.ensure_component_declared(
+                    ComponentId::Grpc,
+                    ApplicationPhase::UserHook,
+                    "saga gRPC transport registration",
+                )?;
+            }
+            // Saga transport 与普通业务 service 必须在 Prepare 封口前进入同一个 registry；任何
+            // 重名或 descriptor 冲突在此拒绝，不能到 listener 绑定后再形成第二套路由。
+            for service in grpc_services {
+                self.inner.grpc_runtime.register_boxed(service)?;
+            }
+        }
+        for outbox in plan.take_outbox_plans()? {
+            self.inner.outbox_runtime.configure(outbox)?;
+        }
         self.inner.saga_runtime.configure(plan)
     }
 
@@ -1211,7 +2263,7 @@ impl Application {
     /// - `plan`：包含 publisher 与明确毒丸策略的完整计划。
     ///
     /// 返回：UserHook 开放、组件已声明且首次提交时成功；重复或晚到配置返回阶段错误。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub fn configure_outbox(
         &self,
         plan: crate::outbox::OutboxApplicationPlan,
@@ -1230,12 +2282,45 @@ impl Application {
         self.inner.outbox_runtime.configure(plan)
     }
 
+    /// 业务作用：为既有 Outbox 计划登记业务事件发布目标，使业务与 Saga 可以共享同一事务域和 dispatcher。
+    ///
+    /// 参数说明：`datasource` 对应计划的事务域；`aggregate_type` 与 `event_type` 精确匹配持久事件；`publisher` 负责下游确认。
+    ///
+    /// 返回：UserHook 内登记成功；重复、非法名称或覆盖 Saga 保留协议均拒绝。Ready 核对对应计划存在，封口后不可变更。
+    /// 业务目标继承计划的顺序、毒丸与重试策略；瞬态故障应返回 `OutboxPublishError::transient`。
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
+    pub fn register_outbox_publisher(
+        &self,
+        datasource: &str,
+        aggregate_type: &str,
+        event_type: &str,
+        publisher: Arc<dyn naoutbox_core::OutboxPublisher + Send + Sync>,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("outbox publisher registration")?;
+        self.ensure_component_declared(
+            ComponentId::Outbox,
+            ApplicationPhase::UserHook,
+            "outbox publisher registration",
+        )?;
+        self.inner.outbox_runtime.register_publisher(
+            datasource,
+            aggregate_type,
+            event_type,
+            publisher,
+        )
+    }
+
     /// 业务作用：取得 Outbox Ready 后发布的只读积压与投递观测入口。
     ///
     /// 参数说明: 无。
     ///
     /// 返回：组件已声明且通过 Ready 时返回句柄；未声明、未就绪或停机后返回错误。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub fn outbox(&self) -> ApplicationResult<crate::outbox::OutboxHandle> {
         self.ensure_component_declared(
             ComponentId::Outbox,
@@ -1253,7 +2338,7 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：应用声明 `saga` 且已通过 Ready 门禁时返回句柄；未声明、未就绪或停机后返回错误。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub fn saga(&self) -> ApplicationResult<crate::saga::SagaHandle> {
         self.ensure_component_declared(
             ComponentId::Saga,
@@ -1399,11 +2484,39 @@ impl Application {
     /// 未声明 `web` 组件、调用时已离开 UserHook，或 Ready 已取走定制队列时返回阶段错误。
     /// transform 自身若在 Ready 构造路由时 panic，在 `panic = "unwind"` 构建中会被转换成 Web
     /// 启动错误；启用框架探针时，重复占用其保留路径也会拒绝启动。
+    /// 启用 Saga HTTP 入站时拒绝这种不透明变换；应使用 `configure_router_scoped` 提供可验证的业务作用域。
     #[cfg(feature = "web")]
     pub fn configure_router<F>(&self, transform: F) -> ApplicationResult<()>
     where
         F: FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send + 'static,
     {
+        self.register_router_transform(None, Box::new(transform))
+    }
+
+    /// 业务作用：把手写 Router 限定在静态业务前缀内，允许与 Saga 专用认证链共享 listener。
+    ///
+    /// 参数说明：`prefix` 是不含 context path 的非根静态路径，`transform` 使用相对于该前缀的路径构建子 Router，例如 /ops 作用域内的 /status。
+    /// 同一前缀的变换按登记顺序接收已有子路由；其它前缀和自动端点不会进入该变换。
+    ///
+    /// 返回：UserHook 期间登记成功返回 `Ok`；非法前缀或阶段错误拒绝，Ready 前复验与保留前缀的交集。
+    #[cfg(feature = "web")]
+    pub fn configure_router_scoped<F>(&self, prefix: &str, transform: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(axum::Router<Application>) -> axum::Router<Application> + Send + 'static,
+    {
+        crate::web::router_boundary::validate_business_scope(prefix)?;
+        self.register_router_transform(Some(prefix.to_owned()), Box::new(transform))
+    }
+
+    /// 业务作用：在统一登记门禁内保存路由变换及可证明的作用域，阻止 Ready 后修改服务图。
+    /// 参数说明：`scope` 为空表示不透明原始变换，非空表示只开放该业务前缀；`transform` 是一次性路由构造。
+    /// 返回：启动 Hook 开放时保存登记；组件缺失或队列封口时拒绝且不改变已发布路由。
+    #[cfg(feature = "web")]
+    fn register_router_transform(
+        &self,
+        scope: Option<String>,
+        transform: RouterTransform,
+    ) -> ApplicationResult<()> {
         let _gate = self
             .inner
             .user_registration_gate
@@ -1427,7 +2540,7 @@ impl Application {
                 "router configuration is closed; configure_router is only available while the application startup hook is running",
             ));
         };
-        transforms.push(Box::new(transform));
+        transforms.push(RouterRegistration { transform, scope });
         Ok(())
     }
 
@@ -1622,6 +2735,93 @@ impl Application {
         Ok(())
     }
 
+    /// 业务作用：登记以受管 Redis 来源承载的 WS 集群策略，连接和任务由宿主管理。
+    /// 参数说明：`redis_ref` 为 Redis qualifier，`node_id` 为稳定节点，`stream_key` 为广播流，`incarnation` 为外部持久权威授予的单调节点代次。
+    /// 返回：UserHook 内首次登记成功；来源组件未声明、名称非法或重复策略时拒绝。
+    #[cfg(feature = "ws-redis")]
+    pub fn configure_ws_redis(
+        &self,
+        redis_ref: &str,
+        node_id: &str,
+        stream_key: &str,
+        incarnation: naws::cluster::Incarnation,
+    ) -> ApplicationResult<()> {
+        self.set_ws_cluster_plan(
+            crate::ws_cluster::WsClusterPlan::redis(redis_ref, node_id, stream_key, incarnation)?,
+            ComponentId::Redis,
+        )
+    }
+
+    /// 业务作用：登记 WS Kafka 协议计划，复用命名 Kafka client 并统一接管消费、发布与停机。
+    /// 参数说明：`kafka_ref` 为独占 WS 消费的 client；`config` 和 `contract` 指定协议策略，`incarnation` 为外部持久权威授予的单调节点代次。
+    /// 返回：UserHook 内首次登记成功；重复策略或组件未声明时拒绝，协议与来源校验在 Ready 装配时完成。
+    #[cfg(feature = "ws-kafka")]
+    pub fn configure_ws_kafka(
+        &self,
+        kafka_ref: &str,
+        config: naws::kafka::WsKafkaRuntimeConfig,
+        contract: naws::kafka::WsKafkaTopicContract,
+        incarnation: naws::cluster::Incarnation,
+    ) -> ApplicationResult<()> {
+        self.set_ws_cluster_plan(
+            crate::ws_cluster::WsClusterPlan::kafka(kafka_ref, config, contract, incarnation)?,
+            ComponentId::Kafka,
+        )
+    }
+
+    /// 业务作用：在 UserHook 边界内原子接收唯一 WS 集群计划。
+    /// 参数说明：`plan` 为无副作用领域策略，`dependency` 为必须先声明的来源组件。
+    /// 返回：登记成功后由 WS Ready 消费；窗口关闭或重复登记不改变已有计划。
+    #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+    fn set_ws_cluster_plan(
+        &self,
+        plan: crate::ws_cluster::WsClusterPlan,
+        dependency: ComponentId,
+    ) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("WS cluster plan")?;
+        self.ensure_component_declared(
+            ComponentId::Ws,
+            ApplicationPhase::UserHook,
+            "WS cluster plan",
+        )?;
+        self.ensure_component_declared(
+            dependency,
+            ApplicationPhase::UserHook,
+            "WS cluster source",
+        )?;
+        let mut slot = self
+            .inner
+            .ws_cluster_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return Err(ApplicationError::new(
+                ComponentId::Ws,
+                ApplicationPhase::UserHook,
+                "WS cluster plan is already registered",
+            ));
+        }
+        *slot = Some(plan);
+        Ok(())
+    }
+
+    /// 业务作用：在 Ready 装配阶段移交 WS 集群计划的唯一所有权。
+    /// 参数说明：无。
+    /// 返回：已登记计划；未启用集群时为空，不建立连接。
+    #[cfg(any(feature = "ws-redis", feature = "ws-kafka"))]
+    pub(crate) fn take_ws_cluster_plan(&self) -> Option<crate::ws_cluster::WsClusterPlan> {
+        self.inner
+            .ws_cluster_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     /// 业务作用：返回长连接服务实际绑定的 TCP 地址。
     ///
     /// # 参数
@@ -1735,7 +2935,9 @@ impl Application {
         feature = "log",
         feature = "nacos-config",
         feature = "db",
+        feature = "db-pgsql",
         feature = "redis",
+        feature = "redis-job",
         feature = "cache",
         feature = "saga",
         feature = "outbox",
@@ -1743,7 +2945,9 @@ impl Application {
         feature = "web",
         feature = "ws",
         feature = "nacos-discovery",
-        feature = "scheduling"
+        feature = "scheduling",
+        feature = "partition",
+        feature = "grpc"
     ))]
     pub(crate) fn ensure_component_declared(
         &self,
@@ -1764,6 +2968,43 @@ impl Application {
         ))
     }
 
+    /// 业务作用：在 Application 进入停机或终态后封口基础设施 getter，阻止新句柄越过资源所有权边界。
+    ///
+    /// Starting 仍允许 UserHook、Prepare 与 Ready 组件选择已经发布的受管资源；Stopping 之后只有此前
+    /// 已借出的句柄可以在全局预算内排空，新的 datasource、Redis 或 Kafka 句柄一律拒绝。
+    ///
+    /// 参数说明：
+    /// - `component`：拥有目标基础设施资源的组件。
+    /// - `capability`：不含 qualifier、endpoint 或凭据的稳定能力名称。
+    ///
+    /// 返回：Starting/Ready 时允许继续查找；Stopping、Stopped 或 Failed 时返回对应阶段的类型化错误。
+    #[cfg(any(
+        feature = "db",
+        feature = "db-pgsql",
+        feature = "redis",
+        feature = "kafka"
+    ))]
+    fn ensure_infrastructure_lookup_open(
+        &self,
+        component: ComponentId,
+        capability: &'static str,
+    ) -> ApplicationResult<()> {
+        let state = self.state();
+        if matches!(state, ApplicationState::Starting | ApplicationState::Ready) {
+            return Ok(());
+        }
+        let phase = match state {
+            ApplicationState::Stopping => ApplicationPhase::Stopping,
+            ApplicationState::Stopped | ApplicationState::Failed => ApplicationPhase::Stopped,
+            ApplicationState::Starting | ApplicationState::Ready => unreachable!(),
+        };
+        Err(ApplicationError::new(
+            component,
+            phase,
+            format!("{capability} is unavailable while application state is {state:?}"),
+        ))
+    }
+
     /// 业务作用：取走全部路由定制并关闭登记入口。
     ///
     /// 取走即封口：这是"定制能否生效"的线性化点，之后的 `configure_router` 一律得到阶段错误。
@@ -1772,7 +3013,7 @@ impl Application {
     ///
     /// 本方法无参数；只有 Web 组件在 Ready 构造 Router 时调用一次。
     #[cfg(feature = "web")]
-    pub(crate) fn take_router_transforms(&self) -> Vec<RouterTransform> {
+    pub(crate) fn take_router_transforms(&self) -> Vec<RouterRegistration> {
         self.inner
             .router_transforms
             .lock()
@@ -1883,9 +3124,22 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：只增加共享所有权、不复制 Orchestrator 或参与方运行时的状态句柄。
-    #[cfg(feature = "saga")]
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
     pub(crate) fn saga_runtime(&self) -> Arc<crate::saga::SagaRuntimeState> {
         Arc::clone(&self.inner.saga_runtime)
+    }
+
+    /// 业务作用：导出 Saga Redis Streams 消费面的 Prometheus 指标文本——受管消费的
+    /// 积压、PEL 年龄、处理时长与死信计数按 (stream, group) 分组,供外部采集器或
+    /// 诊断路径在 `/metrics` 端点之外直接读取。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Prometheus exposition 文本;未装配任何 stream 消费者时为空串。纯内存
+    /// 读取,不触发 I/O,任何生命周期阶段可安全调用。
+    #[cfg(any(feature = "saga-redis-stream", feature = "saga-redis-stream-pgsql"))]
+    pub fn saga_stream_metrics_prometheus(&self) -> String {
+        crate::saga::render_stream_metrics(&self.saga_runtime())
     }
 
     /// 业务作用：取得 Outbox 生命周期共享状态，供组件与公开能力使用同一权限源。
@@ -1893,9 +3147,19 @@ impl Application {
     /// 参数说明: 无。
     ///
     /// 返回：共享状态句柄；克隆不复制 publisher 或计数。
-    #[cfg(feature = "outbox")]
+    #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
     pub(crate) fn outbox_runtime(&self) -> Arc<crate::outbox::OutboxRuntimeState> {
         Arc::clone(&self.inner.outbox_runtime)
+    }
+
+    /// 业务作用：取得 Inbox 保留清理的 Application 级唯一性与指标所有权根。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：共享运行时状态；克隆不会复制计划、计数或清理任务。
+    #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
+    pub(crate) fn inbox_retention_runtime(&self) -> Arc<crate::inbox::InboxRetentionRuntimeState> {
+        Arc::clone(&self.inner.inbox_retention_runtime)
     }
 
     /// 业务作用：返回进程级统一指标 hub:各领域按 descriptor 记录到此。
@@ -1903,24 +3167,86 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数;返回共享 hub 的 Arc 副本,克隆只增加所有权不复制注册表。
-    #[cfg(any(feature = "kafka", feature = "web"))]
     pub(crate) fn metrics_hub(&self) -> Arc<nametrics_core::MetricHub> {
         Arc::clone(&self.inner.metrics_hub)
     }
 
-    /// 业务作用：把一个兼容领域源(自持 registry、自渲染 Prometheus)并入进程级统一 hub。
+    /// 业务作用：在 UserHook 窗口为可选的 YAML 命名引用登记通知渠道，由框架调度投递。
+    /// 进程默认通知使用 nanotify_core::init，不需要本入口；default 为保留名称。
+    /// 参数说明：`provider_ref` 必须指向已启用的 custom provider，`provider` 为渠道实现。
+    /// 返回：登记成功；非 UserHook、重复或未配置引用拒绝，登记本身不发送消息。
+    #[cfg(feature = "mapper-observability")]
+    pub async fn register_notify_provider(
+        &self,
+        provider_ref: &str,
+        provider: Arc<dyn nanotify_core::Notify>,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("notification provider registration")?;
+        let runtime = self
+            .resources()
+            .get::<Arc<crate::sql_observability::SqlObservabilityRuntime>>()
+            .await?;
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 资源读取经过 await，必须在注册锁内重新确认窗口，封口后不允许追加入站渠道。
+        self.ensure_user_hook_open("notification provider registration")?;
+        runtime.register_custom(provider_ref, provider)
+    }
+
+    /// 业务作用：提供当前实际使用的 SQL 观测策略，业务无需读取可能等待重启的候选配置。
+    /// 参数说明：`datasource` 为冻结数据源名，`method` 为可选完整 Mapper 方法身份。
+    /// 返回：逐叶继承后的脱敏策略；未启用组件或目录外身份返回错误。
+    #[cfg(feature = "mapper-observability")]
+    pub async fn sql_observability_effective(
+        &self,
+        datasource: &str,
+        method: Option<&str>,
+    ) -> ApplicationResult<namapper_core::observability::config::EffectivePolicy> {
+        let runtime = self
+            .resources()
+            .get::<Arc<crate::sql_observability::SqlObservabilityRuntime>>()
+            .await?;
+        runtime.effective(datasource, method)
+    }
+
+    /// 业务作用：在统一文本或 OTLP 快照前请求刷新已提交外部事实；各源按自身低频窗口复用缓存。
     ///
-    /// 供 `nasa` 门面层把 **nafana** 等 napp 不直接依赖的领域接入同一 `/metrics`:门面构造领域源后
-    /// 在业务 UserHook 调用本方法,其族即随框架 `/metrics` 一并渲染,并纳入 descriptor 冲突审计。
+    /// 参数说明: 无。
     ///
-    /// # 参数
+    /// 返回：所有已声明外部源的缓存可用或完整发布新快照时成功；查询失败时返回对应组件错误、
+    /// 保留上一份值并更新源级失败与快照年龄指标，调用出口不得据此丢弃无关指标族。
+    #[cfg(any(feature = "telemetry", feature = "web", feature = "observability"))]
+    pub(crate) async fn refresh_metric_sources(&self) -> ApplicationResult<()> {
+        #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
+        if self
+            .ensure_component_declared(
+                ComponentId::Outbox,
+                ApplicationPhase::Running,
+                "outbox metric refresh",
+            )
+            .is_ok()
+        {
+            crate::outbox::refresh_metrics(&self.outbox_runtime()).await?;
+        }
+        Ok(())
+    }
+
+    /// 业务作用：把一个自持 registry 的兼容领域源并入进程级统一 hub。
     ///
-    /// - `source`:领域自渲染源;其 descriptor 会并入统一 catalog,值仍由源自渲染。
+    /// 供独立持有的领域指标源接入同一目录；对象存储和 Schema Registry 的标准受管计划已自动登记，
+    /// 不能再为同一受管资源重复调用本方法。
+    /// 门面构造领域源后在业务 UserHook 调用本方法，其族即随 Prometheus 与 OTLP 一并发布，
+    /// 并纳入 descriptor 冲突审计。登记能力属于 Application 核心合同，不依赖 Web 或 Kafka feature。
     ///
-    /// # 错误
+    /// 参数说明：
+    /// - `source`: 领域指标源；descriptor 并入统一 catalog，结构化快照供 Prometheus 与 OTLP 共用，
+    ///   空快照旧源只回落到自身文本入口。
     ///
-    /// 源的任一 descriptor 与已注册项语义冲突时返回阶段错误。
-    #[cfg(any(feature = "kafka", feature = "web"))]
+    /// 返回：UserHook 仍开放且全部 descriptor 与既有目录兼容时成功；阶段已封口或任一族语义冲突时
+    /// 返回 Application 阶段错误。
     pub fn register_metrics_source(
         &self,
         source: Arc<dyn nametrics_core::LegacyMetricsSource>,
@@ -1931,12 +3257,35 @@ impl Application {
             .register_legacy_source(source)
             .map_err(|conflict| {
                 ApplicationError::new(
-                    ComponentId::Web,
+                    ComponentId::Application,
                     ApplicationPhase::UserHook,
                     format!(
                         "metric source descriptor `{}` conflicts with an existing registration",
                         conflict.name
                     ),
+                )
+            })
+    }
+
+    /// 业务作用：在 DB Prepare 阶段原子登记冻结 datasource 与后端对应关系的指标源。
+    ///
+    /// 参数说明：`catalog` 是当前 Application 已发布且仍受 owner 保护的 catalog。
+    ///
+    /// 返回：descriptor 和最坏序列预算同时登记成功时完成；冲突或预算不足会阻止 Ready。
+    #[cfg(feature = "db-pgsql")]
+    pub(crate) fn register_database_backend_metrics(
+        &self,
+        catalog: Arc<natx_core::DataSourceCatalog>,
+    ) -> ApplicationResult<()> {
+        let (source, worst_case_series) = crate::db::backend_metrics_source(&catalog);
+        self.inner
+            .metrics_hub
+            .register_legacy_source_reserved(source, worst_case_series)
+            .map_err(|error| {
+                ApplicationError::new(
+                    ComponentId::Db,
+                    ApplicationPhase::Prepare,
+                    format!("datasource backend metrics registration failed: {error}"),
                 )
             })
     }
@@ -1960,6 +3309,30 @@ impl Application {
                 ComponentId::Web,
                 ApplicationPhase::UserHook,
                 "idempotency store has already been injected".to_string(),
+            )
+        })
+    }
+
+    /// 业务作用：由标准装配路径在 Web Ready 前安装已经验证的幂等 store。
+    /// 参数说明：`store` 为当前应用拥有的命名受管 store。
+    /// 返回：未被自定义或其它标准路径占用时安装成功；重复安装拒绝。
+    #[cfg(all(
+        feature = "web",
+        any(
+            feature = "idempotency-mysql",
+            feature = "idempotency-pgsql",
+            feature = "idempotency-redis"
+        )
+    ))]
+    pub(crate) fn install_managed_idempotency_store(
+        &self,
+        store: crate::idempotency::SharedIdempotencyStore,
+    ) -> ApplicationResult<()> {
+        self.inner.idempotency_store.set(store).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::Prepare,
+                "managed idempotency store conflicts with an existing installation",
             )
         })
     }
@@ -1997,6 +3370,113 @@ impl Application {
     #[cfg(feature = "web")]
     pub(crate) fn authz_registry(&self) -> Option<crate::authz::SharedPolicyRegistry> {
         self.inner.authz_registry.get().cloned()
+    }
+
+    /// 业务作用：设置 route 未命中任何授权策略时的缺省裁决，在 UserHook 阶段调用一次。
+    ///
+    /// 兼容缺省 `Permit` 会让漏配策略的受保护 route 静默放行；`Observe` 保持放行但记录命中
+    /// 证据(计数+每 route 首次警示日志)供灰度清点；`Deny` 把缺省翻转为 fail-closed。声明公开
+    /// (auth_required=false)的路由与框架探针路由自动豁免于 Observe/Deny;`Deny` 下仍存在未命中
+    /// 策略的鉴权 route 时 Web 装配在 Ready 期失败,漏配在部署期显形而不是上线后全量 403。
+    /// `Observe`/`Deny` 要求已注入策略注册表,否则 Ready 期拒绝装配;未注入注册表且保持缺省
+    /// `Permit` 时授权层行为不变。同一缺省也可经 YAML `server.authz_unmatched_route` 配置
+    /// (词表 permit/observe/deny);两处同时出现且不一致时 Web 装配拒绝,不做静默优先级。
+    ///
+    /// 参数说明：
+    /// - `policy`: 三态未命中缺省。
+    ///
+    /// 返回：首次注入成功时返回 `Ok(())`；UserHook 已封口或策略已经注入时拒绝覆盖。
+    #[cfg(feature = "web")]
+    pub fn set_authz_unmatched_policy(
+        &self,
+        policy: naauthz::UnmatchedRoutePolicy,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("authz unmatched policy injection")?;
+        self.inner.authz_unmatched.set(policy).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "authz unmatched-route policy has already been injected".to_string(),
+            )
+        })
+    }
+
+    /// 业务作用：读取 UserHook 是否注入了未命中缺省(Web 装配用);最终生效值由 Web Ready 期
+    /// 与 YAML `server.authz_unmatched_route` 统一解析,双源冲突拒绝装配。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：已注入时返回对应策略，否则返回 `None`，不在读取路径隐式写入默认值。
+    #[cfg(feature = "web")]
+    pub(crate) fn authz_unmatched_policy_injected(&self) -> Option<naauthz::UnmatchedRoutePolicy> {
+        self.inner.authz_unmatched.get().copied()
+    }
+
+    /// 业务作用：为 `configure_router` 动态路由登记显式类型化合同，在 UserHook 阶段调用。
+    ///
+    /// 逃生舱路由没有可审计的类型元数据，默认游离在 OpenAPI 与授权覆盖对账之外;确有对外合同的
+    /// 动态路由经本入口提交 method、path、schema 与授权要求后，与静态路由同等进入文档生成和
+    /// 启动期授权对账。合同事实由业务声明,框架不从任意 Router 运行时猜测;同 method/path 或
+    /// 重复 operation_id 与静态路由冲突时,由文档生成的既有冲突校验拒绝。
+    ///
+    /// 参数说明：
+    /// - `contract`: 动态路由的完整类型化合同;`path` 不含 context_path 前缀,与静态路由口径一致。
+    ///
+    /// 返回：合同形态有效且 UserHook 仍开放时完成登记；method、path、operation_id 非法或阶段
+    /// 已封口时返回定位明确的生命周期错误。
+    #[cfg(feature = "web")]
+    pub fn register_route_contract(
+        &self,
+        contract: naopenapi::RouteContract,
+    ) -> ApplicationResult<()> {
+        self.ensure_user_hook_open("dynamic route contract registration")?;
+        // 启动期只做定位友好的形态校验;完整冲突与 schema 校验由 generate 的既有门禁承担。
+        if contract.method.trim().is_empty()
+            || !contract
+                .method
+                .chars()
+                .all(|character| character.is_ascii_uppercase())
+        {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract method must be non-empty uppercase".to_string(),
+            ));
+        }
+        if !contract.path.starts_with('/') {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract path must start with '/'".to_string(),
+            ));
+        }
+        if contract.operation_id.trim().is_empty() {
+            return Err(ApplicationError::new(
+                ComponentId::Web,
+                ApplicationPhase::UserHook,
+                "dynamic route contract operation_id must be non-empty".to_string(),
+            ));
+        }
+        self.inner
+            .dynamic_route_contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(contract);
+        Ok(())
+    }
+
+    /// 业务作用：读取已登记的动态路由合同(文档生成与授权对账用)。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：当前已登记合同的拥有型快照；调用方修改返回值不会改变容器内冻结账目。
+    #[cfg(feature = "web")]
+    pub(crate) fn dynamic_route_contracts(&self) -> Vec<naopenapi::RouteContract> {
+        self.inner
+            .dynamic_route_contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// 业务作用：在 UserHook 注入对象级授权 provider；provider 错误/超时均 fail closed。
@@ -2087,34 +3567,33 @@ impl Application {
 
     /// 业务作用：为一个运行依赖注册初始未就绪的动态贡献项。
     ///
-    /// # 参数
+    /// 参数说明：
+    /// - `component`：贡献项归属的稳定组件身份，用于形成可定位错误。
+    /// - `name`：框架构造的非空稳定名称（如 `db:default`），不含地址、凭据或业务负载。
+    /// - `policy`：该依赖影响全局就绪的策略（关键/非关键、失败/恢复阈值、stale 窗）。
     ///
-    /// - `component`：负责更新该贡献项并承担错误归因的组件身份。
-    /// - `name`：框架生成的非空稳定名称，不得包含地址、凭据或业务负载。
-    ///
-    /// # 返回
-    ///
-    /// 首次注册成功时返回该组件独占的原子更新句柄。
-    ///
-    /// # 参数
-    ///
-    /// - `component`:贡献项归属的稳定组件身份,用于形成可定位错误。
-    /// - `name`:框架构造的非空稳定名称(如 `db:default`),不含配置秘密。
-    /// - `policy`:该依赖影响全局就绪的策略(关键/非关键、失败/恢复阈值、stale 窗)。
+    /// 返回：首次注册成功时返回该组件独占的原子更新句柄；名称、策略或阶段非法时失败。
     ///
     /// # 错误
     ///
     /// 名称为空、重名、封口后或阈值非法时返回 Start 阶段错误。
-    #[cfg(any(
-        feature = "kafka",
-        feature = "db",
-        feature = "redis",
-        feature = "nacos-config",
-        feature = "nacos-discovery",
-        feature = "telemetry",
-        feature = "cache",
-        feature = "web"
-    ))]
+    #[cfg_attr(
+        not(any(
+            feature = "redis",
+            feature = "kafka",
+            feature = "outbox",
+            feature = "db",
+            feature = "web",
+            feature = "grpc",
+            feature = "saga",
+            feature = "nacos-discovery",
+            feature = "partition",
+            feature = "nacos-config",
+            feature = "cache",
+            feature = "telemetry"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn register_readiness(
         &self,
         component: ComponentId,
@@ -2140,6 +3619,50 @@ impl Application {
                     }
                 };
                 ApplicationError::new(component, ApplicationPhase::Start, detail)
+            })
+    }
+
+    /// 业务作用：为 hosted initializer 登记一个受封口约束的动态就绪贡献项。
+    ///
+    /// 参数说明：
+    /// - `initializer`：冻结计划中的 canonical initializer 身份。
+    /// - `name`：已限定在 initializer 下的稳定贡献项名。
+    /// - `policy`：影响全局就绪的阈值与 stale 策略。
+    ///
+    /// 返回：首次登记返回独占更新句柄；重名、策略非法或 Seal 后返回初始化错误。
+    pub(crate) fn register_initializer_readiness(
+        &self,
+        initializer: Arc<str>,
+        name: Arc<str>,
+        policy: crate::readiness::ReadinessPolicy,
+    ) -> ApplicationResult<crate::readiness::ReadinessContributor> {
+        self.inner
+            .readiness
+            .register_component(
+                Arc::<str>::from(format!("initializer/{initializer}")),
+                name,
+                policy,
+            )
+            .map_err(|error| {
+                let detail = match error {
+                    crate::readiness::RegisterError::EmptyName => {
+                        "initializer readiness contributor name is empty"
+                    }
+                    crate::readiness::RegisterError::Duplicate => {
+                        "initializer readiness contributor name is already registered"
+                    }
+                    crate::readiness::RegisterError::Sealed => {
+                        "initializer readiness registration is closed after Seal"
+                    }
+                    crate::readiness::RegisterError::InvalidPolicy => {
+                        "initializer readiness thresholds must be greater than zero"
+                    }
+                };
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Initialization,
+                    detail,
+                )
             })
     }
 
@@ -2228,8 +3751,8 @@ impl Application {
     /// # 返回
     ///
     /// 本方法无返回值；句柄按登记顺序进入配置重应用集合。
-    // 目前只有 log 是可热刷组件；驱动侧 feature 单独打开时该入口空置属于预期形态。
-    #[cfg(any(feature = "log", feature = "nacos-config"))]
+    // 仅启用配置驱动但未启用可热刷新组件时，该登记入口可以空置。
+    #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
     #[cfg_attr(not(feature = "log"), allow(dead_code))]
     pub(crate) fn register_config_applier(&self, applier: Arc<dyn crate::reload::ConfigApplier>) {
         self.inner
@@ -2244,8 +3767,11 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数；只有配置热刷新驱动在 Ready 阶段读取一次。
-    #[cfg(any(feature = "log", feature = "nacos-config"))]
-    #[cfg_attr(not(feature = "nacos-config"), allow(dead_code))]
+    #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
+    #[cfg_attr(
+        not(any(feature = "nacos-config", feature = "config-watch")),
+        allow(dead_code)
+    )]
     pub(crate) fn config_appliers(&self) -> Vec<Arc<dyn crate::reload::ConfigApplier>> {
         self.inner
             .config_appliers
@@ -2273,14 +3799,48 @@ impl Application {
         debug_assert!(!was_open, "user hook registration gate must open only once");
     }
 
-    /// 业务作用：在 Runner 首次观察到 Hook 终止事件后关闭公共登记入口。
+    /// 业务作用：在 Service UserHook 开始前同步开放 initializer 运行时登记。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：无返回值；Runner 每个 Service 生命周期只调用一次。
+    pub(crate) fn open_initializer_registration(&self) {
+        self.inner.initializers.open();
+    }
+
+    /// 业务作用：在 UserHook 登记门关闭后取走完整运行时 initializer 集合。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：首次冻结返回全部已受理项；重复冻结返回 Initialization 阶段错误。
+    pub(crate) fn freeze_initializers(
+        &self,
+    ) -> ApplicationResult<Vec<crate::initialization::InitializerRegistration>> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.inner.initializers.freeze()
+    }
+
+    /// 业务作用：关闭公共登记后释放尚未交给启动计划的 initializer，保持先实例后依赖的回滚次序。
+    /// 参数说明：无。
+    /// 返回：每个实例的次要释放错误；不会替换生命周期已经确定的首次终止原因。
+    pub(crate) fn release_pending_initializers(&self) -> Vec<ApplicationError> {
+        // 先等待已通过检查的同步登记完成，防止释放清单与最后一次登记交错。
+        self.close_user_hook();
+        self.inner.initializers.release_pending()
+    }
+
+    /// 业务作用：在 Runner 观察到 Hook 终止或被直接释放时关闭公共登记入口。
     ///
     /// 关闭先于任务通道收口、资源封存和反向清理。这样仍在运行的业务 future 即使晚一步获得调度，
     /// 也只能得到阶段错误，不能在清理开始后继续增加资源或任务。
     ///
-    /// # 参数
+    /// 参数说明：无。
     ///
-    /// 本方法无参数；重复关闭安全。
+    /// 返回：无返回值；重复关闭安全，返回后已通过登记检查的同步写入均已完成。
     pub(crate) fn close_user_hook(&self) {
         // 关闭与全部同步登记共用一个临界区；取得锁之后没有已通过检查但尚未写入的调用。
         let _gate = self
@@ -2304,6 +3864,40 @@ impl Application {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+    }
+
+    /// 业务作用：冻结业务停机任务登记，使停机计划与 UserHook 的结束边界保持一致。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首次封存或重复封存均成功；已经进入执行或关闭阶段时保持现有状态。
+    pub(crate) fn seal_shutdown_tasks(&self) -> ApplicationResult<()> {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.inner.shutdown_tasks.seal()
+    }
+
+    /// 业务作用：一次性移交业务停机任务所有权给 Runner。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：首次调用返回按稳定顺序排列的任务；重复调用返回空集合，未封口时返回阶段错误。
+    pub(crate) fn take_shutdown_tasks(
+        &self,
+    ) -> ApplicationResult<Vec<crate::shutdown::ShutdownTaskEntry>> {
+        self.inner.shutdown_tasks.take_for_shutdown()
+    }
+
+    /// 业务作用：关闭业务停机任务注册表并释放容器仍持有的任务 future。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：释放任务时收集的次要错误；重复调用安全，任务 future 在同步锁释放后逐项隔离析构。
+    pub(crate) fn close_shutdown_tasks(&self) -> Vec<ApplicationError> {
+        self.inner.shutdown_tasks.close()
     }
 
     /// 业务作用：返回 Runner 和组件使用的资源注册表。
@@ -2333,7 +3927,7 @@ impl Application {
     /// - `value`：本地树与远端 overlay 合并、插值后的完整最终树。
     /// - `sources`：形成该版本的来源摘要（本地文件 + Nacos 文档）。
     #[cfg(feature = "nacos-config")]
-    pub(crate) fn set_bootstrap_config(
+    pub(crate) async fn set_bootstrap_config(
         &self,
         value: serde_json::Value,
         sources: Vec<crate::ConfigSource>,
@@ -2341,63 +3935,89 @@ impl Application {
         let current = self.config_view();
         let version = current.snapshot().version();
         // secret 在脱敏前解析;Bootstrap 合并失败即 fail-closed。
-        let view =
-            crate::config::resolve_view(version, value, sources, current.reload_statuses().clone())
-                .map_err(|error| {
-                    ApplicationError::with_source(
-                        ComponentId::Config,
-                        ApplicationPhase::Bootstrap,
-                        "secret resolution failed while merging bootstrap config",
-                        error,
-                    )
-                })?;
+        let view = crate::config::resolve_candidate_async(version, value, sources)
+            .await
+            .map(|prepared| prepared.finish(current.reload_statuses().clone()))
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::Config,
+                    ApplicationPhase::Bootstrap,
+                    "secret resolution failed while merging bootstrap config",
+                    error,
+                )
+            })?;
         self.publish_config(view);
         Ok(())
     }
 
-    /// 业务作用：发布一个热刷新配置版本：版本自增并携带新的目标应用状态表。
-    ///
-    /// # 参数
-    ///
-    /// - `expected_current_version`：驱动计算状态表时读取到的当前版本，用于拒绝并发覆盖。
-    /// - `value`：本轮全量重拉合并后的完整树。
-    /// - `sources`：本轮包含的来源摘要。
-    /// - `statuses`：该版本对应的各目标应用状态。
-    #[cfg(feature = "nacos-config")]
-    pub(crate) fn publish_reloaded_config(
+    /// 业务作用：完成候选 secret 和安全资源准备，尚不安装任何运行态。
+    /// 参数说明：`expected` 为当前版本；`value` 为原始候选；`sources` 为来源摘要。
+    /// 返回：同代准备材料；准备失败保持当前配置与日志。
+    #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+    pub(crate) async fn prepare_reloaded_config(
         &self,
-        expected_current_version: u64,
+        expected: u64,
         value: serde_json::Value,
         sources: Vec<crate::ConfigSource>,
-        statuses: std::collections::HashMap<crate::ReloadTarget, crate::ReloadStatus>,
-    ) -> ApplicationResult<u64> {
-        let current = self.config_view();
-        if current.snapshot().version() != expected_current_version {
-            return Err(ApplicationError::new(
-                ComponentId::Config,
-                ApplicationPhase::Running,
-                "config view changed while a reload candidate was being prepared",
-            ));
-        }
-        let next = expected_current_version.checked_add(1).ok_or_else(|| {
+    ) -> ApplicationResult<crate::config::ResolvedCandidate> {
+        let version = expected.checked_add(1).ok_or_else(|| {
             ApplicationError::new(
                 ComponentId::Config,
                 ApplicationPhase::Running,
                 "config snapshot version reached its maximum value",
             )
         })?;
-        // secret 在脱敏前解析;解析失败保留 last-good(不发布,对外 generation 不变)。
-        let view =
-            crate::config::resolve_view(next, value, sources, statuses).map_err(|error| {
+        let prepared = crate::config::resolve_candidate_async(version, value, sources)
+            .await
+            .map_err(|error| {
                 ApplicationError::with_source(
                     ComponentId::Config,
                     ApplicationPhase::Running,
-                    "secret resolution failed while publishing a reloaded config",
+                    "secret candidate preparation failed",
                     error,
                 )
             })?;
-        self.publish_config(view);
-        Ok(next)
+        #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+        let prepared = {
+            let mut prepared = prepared;
+            prepared.saga_security =
+                crate::saga::security::prepare_security_materials(self, prepared.secrets.clone())?;
+            prepared
+        };
+        Ok(prepared)
+    }
+
+    /// 业务作用：复验当前候选权威后同步安装并发布真实状态，安装开始后不再响应取消。
+    /// 参数说明：`expected` 为准备时版本；`prepared` 为完整材料；`cancel` 为驱动取消信号；`install` 只安装已准备资源。
+    /// 返回：安装与发布完成时返回新版本；失去版本权威或提交前已取消时不调用安装。
+    #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+    pub(crate) fn publish_prepared_config(
+        &self,
+        expected: u64,
+        prepared: crate::config::ResolvedCandidate,
+        cancel: &tokio_util::sync::CancellationToken,
+        install: impl FnOnce() -> std::collections::HashMap<crate::ReloadTarget, crate::ReloadStatus>,
+    ) -> ApplicationResult<u64> {
+        let version = prepared.snapshot.version();
+        let published = self.inner.config.publish_with(expected, || {
+            // 取消只在最终同步段之前裁决，避免日志已生效而配置状态未发布。
+            if cancel.is_cancelled() || self.cancellation_token().is_cancelled() {
+                return Err(ApplicationError::new(
+                    ComponentId::Config,
+                    ApplicationPhase::Running,
+                    "config candidate cancelled before installation",
+                ));
+            }
+            Ok(prepared.finish(install()))
+        })?;
+        if !published {
+            return Err(ApplicationError::new(
+                ComponentId::Config,
+                ApplicationPhase::Running,
+                "config candidate no longer owns the publication version",
+            ));
+        }
+        Ok(version)
     }
 
     /// 业务作用：一次性发布 Web Ready 阶段得到的运行时身份。
@@ -2439,15 +4059,74 @@ impl Application {
         })
     }
 
-    /// 业务作用：发布 Starting 到 Ready 的唯一合法转换。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数；所有 Ready action 成功后才能调用。
-    pub(crate) fn mark_ready(&self) -> ApplicationResult<()> {
-        self.inner
-            .state
-            .transition(ApplicationState::Starting, ApplicationState::Ready)
+    /// 业务作用：在关键领域本地状态保护范围内发布唯一 Ready 状态及共同启动许可。
+    /// 参数说明：`deadline` 为全局启动截止时刻，取得所有保护后再次复验。
+    /// 返回：领域失效或预算耗尽时保持屏障关闭，否则统一开放领域与受管任务。
+    pub(crate) fn mark_ready(&self, deadline: tokio::time::Instant) -> ApplicationResult<()> {
+        #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+        let mut evidence = Vec::new();
+        #[cfg(feature = "redis")]
+        evidence.extend(self.inner.redis_derived.critical_health());
+        #[cfg(feature = "ws-client")]
+        evidence.extend(self.inner.ws_clients.critical_health());
+        #[cfg(feature = "hystrix")]
+        if let Some((_, health)) = self.inner.hystrix_owner.get() {
+            evidence.push(health.clone());
+        }
+        let publish = &mut || {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "startup deadline exceeded before Ready publication",
+                ));
+            }
+            // 取得较晚领域的保护可能耗时；最终状态提交前不能沿用已经过期的较早证据。
+            #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+            if evidence.iter().any(|health| !health.ready_now()) {
+                return Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "critical readiness evidence expired before Ready publication",
+                ));
+            }
+            self.inner
+                .state
+                .transition(ApplicationState::Starting, ApplicationState::Ready)
+        };
+        #[cfg(feature = "redis")]
+        let publish = &mut || self.inner.redis_derived.publish_ready(publish);
+        #[cfg(feature = "hystrix")]
+        let publish = &mut || {
+            let Some((owner, health)) = self.inner.hystrix_owner.get() else {
+                return publish();
+            };
+            let result = owner.upgrade().and_then(|owner| {
+                owner.with_running(|| {
+                    health.observe(
+                        crate::DependencyState::Ready,
+                        crate::readiness::reason::HEALTHY,
+                        std::time::Instant::now(),
+                    );
+                    publish()
+                })
+            });
+            result.unwrap_or_else(|| {
+                health.observe(
+                    crate::DependencyState::NotReady,
+                    crate::readiness::reason::DEGRADED,
+                    std::time::Instant::now(),
+                );
+                Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "hystrix owner exited before Ready",
+                ))
+            })
+        };
+        #[cfg(feature = "ws-client")]
+        let publish = &mut || self.inner.ws_clients.publish_ready(publish);
+        publish()
     }
 
     /// 业务作用：发布 Ready 到 Stopping 的转换。
@@ -2549,7 +4228,9 @@ impl Application {
     /// # 参数
     ///
     /// - `operation`：只包含 API 类别、不包含业务输入的稳定诊断名称。
-    fn ensure_user_hook_open(&self, operation: &str) -> ApplicationResult<()> {
+    ///
+    /// 返回：UserHook 登记窗口仍开放时成功；封口后返回稳定阶段错误。
+    pub(crate) fn ensure_user_hook_open(&self, operation: &str) -> ApplicationResult<()> {
         if self.inner.user_hook_open.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2593,6 +4274,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::NacosConfig => 3,
         ComponentId::Db => 4,
         ComponentId::Redis => 5,
+        ComponentId::RedisJob => 21,
         ComponentId::Web => 6,
         ComponentId::Ws => 7,
         ComponentId::NacosDiscovery => 8,
@@ -2606,6 +4288,10 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::Cache => 16,
         ComponentId::Saga => 17,
         ComponentId::Outbox => 18,
+        ComponentId::Partition => 19,
+        ComponentId::Grpc => 20,
+        ComponentId::SqlObservability => 22,
+        ComponentId::Observability => 23,
     }
 }
 
@@ -2614,13 +4300,14 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 19] = [
+    const ALL: [ComponentId; 24] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
         ComponentId::NacosConfig,
         ComponentId::Db,
         ComponentId::Redis,
+        ComponentId::RedisJob,
         ComponentId::Web,
         ComponentId::Ws,
         ComponentId::NacosDiscovery,
@@ -2634,6 +4321,10 @@ const _: () = {
         ComponentId::Cache,
         ComponentId::Saga,
         ComponentId::Outbox,
+        ComponentId::Partition,
+        ComponentId::Grpc,
+        ComponentId::SqlObservability,
+        ComponentId::Observability,
     ];
     let mut i = 0;
     while i < ALL.len() {

@@ -4,43 +4,13 @@
 //! COMMIT 前崩溃时留下虚假成功指标。查询只返回低基数聚合，不暴露 tenant、saga_id
 //! 或 step 等高基数标签。
 
+use std::collections::BTreeMap;
+
+use nasaga_backend::{SagaLifecycleQuantiles, SagaStoreMetrics};
 use sqlx::Row as _;
 
 use crate::error::{corrupt, map_connection, map_database, SagaStoreError};
 use crate::MySqlSagaStore;
-
-/// 业务作用：表示 MySQL 中可重建的 Saga 运行指标快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SagaStoreMetrics {
-    /// 历史创建实例数。
-    pub started_total: u64,
-    /// 进入 `COMPLETED` 的历史迁移数。
-    pub completed_total: u64,
-    /// 进入 `COMPENSATED` 的历史迁移数。
-    pub compensated_total: u64,
-    /// 进入 `MANUAL_INTERVENTION` 的历史迁移数。
-    pub manual_intervention_total: u64,
-    /// 参与方报告 `UNKNOWN` 的历史 attempt 数。
-    pub unknown_result_total: u64,
-    /// attempt 号大于 1 的历史重试数。
-    pub retry_attempt_total: u64,
-    /// 已持久化的互斥事实数。
-    pub conflict_total: u64,
-    /// 当前正向执行实例数。
-    pub running_current: u64,
-    /// 当前等待 Unknown 裁决实例数。
-    pub waiting_resolution_current: u64,
-    /// 当前执行补偿实例数。
-    pub compensating_current: u64,
-    /// 当前人工介入实例数。
-    pub manual_intervention_current: u64,
-    /// 当前可领取且已到期的 durable timer 数。
-    pub due_timer_current: u64,
-    /// 已终结实例的持久化生命周期样本数。
-    pub lifecycle_duration_count: u64,
-    /// 已终结实例从创建到最后状态更新的累计微秒数。
-    pub lifecycle_duration_micros_sum: u64,
-}
 
 impl MySqlSagaStore {
     /// 业务作用：从已提交的 Saga 表聚合一份低基数运行指标快照。
@@ -58,13 +28,16 @@ impl MySqlSagaStore {
                 "Saga metrics time must be non-negative",
             ));
         }
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        let mut connection = natx::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let row = sqlx::query(
             "SELECT \
              CAST((SELECT COUNT(*) FROM saga_instance) AS SIGNED) AS started_total, \
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'COMPLETED') AS SIGNED) AS completed_total, \
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'COMPENSATED') AS SIGNED) AS compensated_total, \
              CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'MANUAL_INTERVENTION') AS SIGNED) AS manual_total, \
+             CAST((SELECT COUNT(*) FROM saga_transition WHERE to_state = 'MANUALLY_CLOSED') AS SIGNED) AS manually_closed_total, \
              CAST((SELECT COUNT(*) FROM saga_step_attempt WHERE status = 'UNKNOWN') AS SIGNED) AS unknown_total, \
              CAST((SELECT COUNT(*) FROM saga_step_attempt WHERE attempt_no > 1) AS SIGNED) AS retry_total, \
              CAST((SELECT COUNT(*) FROM saga_conflict_fact) AS SIGNED) AS conflict_total, \
@@ -73,12 +46,23 @@ impl MySqlSagaStore {
              CAST((SELECT COUNT(*) FROM saga_instance WHERE status = 'COMPENSATING') AS SIGNED) AS compensating_current, \
              CAST((SELECT COUNT(*) FROM saga_instance WHERE status = 'MANUAL_INTERVENTION') AS SIGNED) AS manual_current, \
              CAST((SELECT COUNT(*) FROM saga_timer WHERE state = 'READY' AND available_at <= ?) AS SIGNED) AS due_timer_current, \
-             CAST((SELECT COUNT(*) FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'FAILED')) AS SIGNED) AS duration_count, \
+             CAST((SELECT COUNT(*) FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED')) AS SIGNED) AS duration_count, \
              CAST((SELECT COALESCE(SUM(TIMESTAMPDIFF(MICROSECOND, created_at, updated_at)), 0) \
-                FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'FAILED')) AS SIGNED) AS duration_micros_sum",
+                FROM saga_instance WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED')) AS SIGNED) AS duration_micros_sum",
         )
         .bind(now_ms)
         .fetch_one(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+
+        let samples = sqlx::query(
+            "SELECT workflow_name AS workflow, definition_version, \
+             TIMESTAMPDIFF(MICROSECOND, created_at, updated_at) AS duration_micros \
+             FROM saga_instance \
+             WHERE status IN ('COMPLETED', 'COMPENSATED', 'MANUALLY_CLOSED') \
+             ORDER BY updated_at DESC LIMIT 10000",
+        )
+        .fetch_all(connection.as_mut())
         .await
         .map_err(map_database)?;
 
@@ -87,6 +71,7 @@ impl MySqlSagaStore {
             completed_total: metric(&row, "completed_total")?,
             compensated_total: metric(&row, "compensated_total")?,
             manual_intervention_total: metric(&row, "manual_total")?,
+            manually_closed_total: metric(&row, "manually_closed_total")?,
             unknown_result_total: metric(&row, "unknown_total")?,
             retry_attempt_total: metric(&row, "retry_total")?,
             conflict_total: metric(&row, "conflict_total")?,
@@ -97,8 +82,62 @@ impl MySqlSagaStore {
             due_timer_current: metric(&row, "due_timer_current")?,
             lifecycle_duration_count: metric(&row, "duration_count")?,
             lifecycle_duration_micros_sum: metric(&row, "duration_micros_sum")?,
+            lifecycle_quantiles: lifecycle_quantiles(samples)?,
         })
     }
+}
+
+/// 业务作用：把有界终态实例样本按冻结流程版本分组并计算稳定最近秩分位数。
+///
+/// 参数说明：`rows` 是按最近更新时间截取的终态生命周期样本。
+///
+/// 返回：样本字段合法时返回低基数流程分组；持久字段异常时返回损坏错误。
+fn lifecycle_quantiles(
+    rows: Vec<sqlx::mysql::MySqlRow>,
+) -> Result<Vec<SagaLifecycleQuantiles>, SagaStoreError> {
+    let mut grouped = BTreeMap::<(String, u32), Vec<u64>>::new();
+    for row in rows {
+        let workflow: String = row
+            .try_get("workflow")
+            .map_err(|_| corrupt("Saga lifecycle workflow"))?;
+        let version: u32 = row
+            .try_get("definition_version")
+            .map_err(|_| corrupt("Saga lifecycle definition version"))?;
+        let duration: i64 = row
+            .try_get("duration_micros")
+            .map_err(|_| corrupt("Saga lifecycle duration"))?;
+        grouped
+            .entry((workflow, version))
+            .or_default()
+            .push(u64::try_from(duration).map_err(|_| corrupt("Saga lifecycle duration"))?);
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|((workflow, definition_version), mut values)| {
+            values.sort_unstable();
+            SagaLifecycleQuantiles {
+                workflow,
+                definition_version,
+                sample_count: values.len() as u64,
+                p50_micros: percentile(&values, 50),
+                p95_micros: percentile(&values, 95),
+                p99_micros: percentile(&values, 99),
+            }
+        })
+        .collect())
+}
+
+/// 业务作用：按最近秩定义读取非空有序样本的整数百分位。
+///
+/// 参数说明：`values` 是升序微秒样本，`percent` 是 1 到 100 的固定观测百分位。
+///
+/// 返回：返回对应最近秩值；空输入返回零。
+fn percentile(values: &[u64], percent: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let rank = (values.len() * percent).div_ceil(100).saturating_sub(1);
+    values[rank.min(values.len() - 1)]
 }
 
 /// 业务作用：从 MySQL 聚合行中安全解码非负计数。

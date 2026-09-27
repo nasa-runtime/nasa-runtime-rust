@@ -2,16 +2,39 @@
 
 `nasched` 是异步任务和定时任务运行时。它重新导出 `async-macro` 的 `#[Async]`、`#[scheduled]`、`#[EnableScheduling]`，并提供调度启动、停机、leader gate、运行记录、misfire claim 等运行期能力。
 
+## 核心价值与执行架构
+
+调度器把“名义触发时刻”“当前节点执行权”和“实际业务运行”分开：cron 或 timer 先产生稳定拍次，
+leader gate 决定节点是否具备触发资格，FireLog claim 再对需要去重的拍次取得跨节点权威。只有通过
+全部门禁的拍次才进入执行记录并创建 `scheduled <任务名>` 新根 span；失权或重复拍次只记录 Skipped。
+
+```text
+cron / fixed rate / fixed delay
+              │ 名义触发时刻
+              v
+ leader gate → FireLog claim → Started → 业务 future → Finished
+      └──────────拒绝────────────→ Skipped
+```
+
+leader-only 和 claim 都不替代业务幂等或外部写 fencing：租约可能在业务运行期间失效，具有外部副作用
+的任务仍需在提交前复验权威并携带可由下游拒绝的 token。调度器不提供物理 exactly-once，也不推断
+业务事务边界。
+
 业务项目通过 `nasa` 门面开启调度能力：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["scheduling"] }
+nasa = { version = "1.0.3", features = ["scheduling"] }
 ```
 
 ## 什么时候用
 
-- 用 `#[Async]` 做“调用即后台跑”的异步入口。
+- 用 `#[Async]` 做“调用即后台跑”的异步入口(spawn 形态,返回 JoinHandle,无顺序合同)。
+- 用 `#[Async(runner = <表达式>, spec = <TaskSpec 表达式>)]` 把自由 async fn 提交进业务持有的
+  napart `PartitionRunner`(需 feature `partition`):首参作为分区路由键(`Hash + Clone + Send +
+  'static`),同键顺序由 `spec` 冻结,函数返回 `Result<Submission, SubmitRejection>`——容量、
+  停机与顺序门禁拒绝原样暴露;runner/spec 是编译期类型校验的普通表达式,不存在按名字查执行器
+  的运行期定位。
 - 用 `#[scheduled]` 做无人调用、按固定频率、固定延迟、一次性延迟或 cron 自动触发的任务。
 - 用 `start_scheduled()` 做本地单机调度。
 - 用 `start_scheduled_with(SchedulerOptions::clustered_with_id(...))` 做 leader-only 集群调度。
@@ -245,6 +268,16 @@ fn with_recorders(a: Arc<dyn ExecutionRecorder>, b: Arc<dyn ExecutionRecorder>) 
 }
 ```
 
+## 调度 trace
+
+受管 Application 同时声明 `"telemetry"` 与 `"scheduling"` 时，调度器会在 leader gate 和
+FireLog claim 都通过后为实际执行创建新根 span。span 名为稳定的 `scheduled <任务名>`，并携带
+`scheduler.task.name` 与 `scheduler.scheduled_at_ms`；未取得 leader 或 claim 的拍次只记录
+Skipped，不创建执行 span。新根 sampled 位只由遥测组件冻结的 `root_sample_ratio` 决定。
+
+直接调用 `start_scheduled_with` 时，可通过 `SchedulerOptions::with_span_recorder` 接入同一管道。
+没有记录器仍会为实际执行建立未采样环境上下文，使 REST/Kafka 等出站调用不会误报 sampled。
+
 ## nadis 集成
 
 开启门面的 `scheduling-cluster` feature 后，可使用 `NadisLeaderGate`、`NadisFireLog`、
@@ -252,7 +285,7 @@ fn with_recorders(a: Arc<dyn ExecutionRecorder>, b: Arc<dyn ExecutionRecorder>) 
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["scheduling-cluster"] }
+nasa = { version = "1.0.3", features = ["scheduling-cluster"] }
 ```
 
 ```rust
@@ -280,6 +313,10 @@ async fn start(
 
 `shutdown_scheduled()` 会 abort 非 cron 后台 loop、关闭 cron scheduler，并复位启动指纹。手工装配时
 由唯一生命周期 owner 在优雅停机阶段调用；受管 `"scheduling"` 组件会自动执行。
+
+Service 模式下 Application 的调度收口先于 UserHook 登记的业务停机任务。`register_graceful_shutdown` 用于一次性
+业务 close/flush，不用于承载 cron 或周期循环，也不应再次调用受管调度器的关闭入口。
+独立模式仍由调用方拥有调度生命周期，不能把释放某个业务句柄当作任务已经退出的证明。
 
 ```rust
 nasa::scheduling::shutdown_scheduled().await?;
@@ -340,4 +377,5 @@ nasa::scheduling::start_scheduled_with(opts).await?;
 - `fixed_rate` 默认允许重叠；需要串行时使用 `fixed_delay` 或显式并发上限。
 - leader gate 只决定本拍是否可执行，不替代业务幂等和 fencing。
 - misfire 补漏只适用于声明了 `fire_once` 的 cron 任务。
+- 调度 span 只表示已经取得本拍执行权的运行，不表示 leader 选举或 claim 尝试本身成功。
 - 调度器和后台任务必须由唯一 owner 显式停机，不能遗留 detached task。

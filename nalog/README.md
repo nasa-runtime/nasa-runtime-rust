@@ -1,12 +1,13 @@
 # nalog
 
-`nalog` 是基于 `tracing` 的日志组件，提供兼容旧 logback 风格的 formatter、运行期级别热切、按天和按大小滚动、保留清理、独立 error.log。
+`nalog` 是基于 `tracing` 的日志组件，提供可配置 formatter、运行期级别热切、按天和按大小滚动、
+保留清理与独立 error.log。
 
 业务项目通过门面开启 `log`：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["log"] }
+nasa = { version = "1.0.3", features = ["log"] }
 ```
 
 ## 控制台日志
@@ -98,7 +99,7 @@ log:
 | `clean_history_on_start` | `true` | 启动时是否清理过期归档；也兼容 `cleanHistoryOnStart`。 |
 | `split_error_file` | `true` | 是否单独写 `error.log`。 |
 | `color` | `false` | 文件日志是否输出 ANSI 颜色。 |
-| `pattern` | 内置 pattern | logback 风格输出 pattern；也兼容 `log_pattern`、`logPattern`、`LOG_PATTERN`。 |
+| `pattern` | 内置 pattern | 输出 pattern；也接受 `log_pattern`、`logPattern`、`LOG_PATTERN`。 |
 
 启动代码：
 
@@ -121,12 +122,33 @@ let _guard = if let Some(file) = &resolved.file {
 };
 ```
 
-热刷新日志级别时只需要调用 `nasa::log::set_level(&new_cfg.log.level)`；文件目录和滚动策略属于
-appender 生命周期配置，通常随进程重启生效。
+独立调用 `nasa::log::set_level(&new_cfg.log.level)` 只调整过滤级别，不会替换文件 appender。
+需要同时应用目录、pattern 或滚动策略时，由唯一 owner 使用 `LogManager` 准备并安装新配置；
+Application 的 `"log"` 组件已负责这一流程。
 
 ## 主要边界
 
+Application 的 `"log"` 组件持有文件 guard，业务停机任务和资源清理先于日志收口。业务自有日志适配器
+可由唯一 owner 管理，但不要再用 `register_graceful_shutdown` 重复关闭受管 appender。
+停机失败与最终摘要使用运行时独立的同步诊断通道，不依赖日志组件继续存活。
+
 - 初始化 owner 只能有一个；重复安装 subscriber 或文件 appender 会返回明确错误。
-- 运行期只热切 level，目录、pattern 和滚动策略需要重启后生效。
+- 受管日志支持级别、目录、pattern 与滚动配置的候选准备和安装；失败时保留已生效输出。
 - 日志字段不得包含 secret、token、连接串、请求正文或未脱敏身份信息。
 - 文件 guard 必须由应用生命周期持有到停机 flush 完成。
+
+## Application 接入
+
+门面开启 `application,log` 并声明 `"log"`；本地文件监听或 Nacos 更新驱动配置候选。
+组件先在发布锁外准备日志文件，再在 `publication_gate` 内同步安装日志并发布实际 reload 状态。
+
+```text
+候选 log 配置 → prepare：打开资源，保留当前输出 → install：切换 writer 与过滤器
+                                                          ↓
+                                     发布 ConfigView → 锁外回收旧 guard
+```
+
+prepare 不提前滚动或清理当前文件；install 不执行外部 I/O。旧 guard 交给单线程、有界回收器，
+停机等待回收退出。安装前取消可以丢弃候选；安装开始后必须完成同次配置视图与状态发布。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

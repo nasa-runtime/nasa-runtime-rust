@@ -1,0 +1,20 @@
+[package]
+name = "nasaga-backend"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Provider-neutral Saga persistence models and capability contracts"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["saga", "workflow", "persistence", "transaction", "microservices"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+async-trait = "0.1"
+nainbox-core = { version = "1.0.2" }
+nasaga-core = { version = "1.0.1" }
+natx-core = { version = "1.0.0" }
+naoutbox-core = { version = "1.0.2" }
+uuid = { version = "1", features = ["v4", "v5"] }

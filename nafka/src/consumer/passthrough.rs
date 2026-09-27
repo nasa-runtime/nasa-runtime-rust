@@ -371,7 +371,13 @@ impl PassthroughFailure {
         let detail = detail.to_string();
         let cleaned: String = detail
             .chars()
-            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .map(|ch| {
+                if ch.is_control() {
+                    ' '
+                } else {
+                    ch
+                }
+            })
             .take(256)
             .collect();
         let safe_detail = (!cleaned.trim().is_empty()).then_some(cleaned);

@@ -1,15 +1,21 @@
-// ============================================================================
-// src/partition/mod.rs —— Kafka 式 Stream 分区框架:路由 / Key 布局 / 发布 / typestate。
-// 对齐既有 RedisPartition 与 BatchStreamMessageListenerContainer 的公开语义。
-//
-// 当前实现边界：
-//   · 兼容路由、三阶段 typestate、串行 worker、全局在飞预算、PEL 重投与再平衡已接线；
-//   · disposition/retry-op、Park/DLQ/ForceRepublish、管理命令、V2 FencingStamp、
-//     bootstrap owner 接管、墓碑 ACK、autoTrim 与 ACK 后异步 XDEL 已接线；
-//   · Cluster 为保证所有多 key Lua 同槽，按“分区组”使用一个 hash tag：同组全部分区固定到
-//     一个 slot，不是每分区一个 slot。需要跨 master 扩吞吐时，应拆成多个隔离组；
-//   · 尚未提供单组跨 slot PollDomain 分片或独立 GroupConsumer lease 抽象。
-// ============================================================================
+//! Redis Stream 分区消费：来源租约、不可变计划、业务键顺序与独立确认责任。
+//!
+//! 一个 RunningPartition 拥有专属 napart Runner 集合，按 source、group 或 stream 划分执行与容量。
+//! 不同 Redis 源的实例各自拥有独立执行域、容量与停机控制，同名 runner 不跨实例复用。
+//! Redis key 布局、信封、retry-op 与 disposition 协议保持跨语言兼容。
+//! 本地同 key 顺序不是跨进程业务锁，生产者应将同一业务键路由到同一物理来源。
+
+mod activation;
+mod execution;
+mod limits;
+mod plan;
+mod publisher;
+mod shutdown;
+pub use limits::{PartitionExecutorCfg, PartitionExecutorScope, PartitionLimits};
+pub use plan::{PartitionRecord, RecordIdentity};
+pub use publisher::PublisherSnapshot;
+pub use runtime::{ExecutionDomainSnapshot, PartitionSnapshot};
+pub use shutdown::PartitionShutdownReport;
 
 /// 分区消费管理命令协议。
 pub mod command;
@@ -34,15 +40,15 @@ use crate::error::{NasaRedisError, Result};
 use crate::lock::DistributedLock;
 
 // ─────────────────────────────────────────────────────────────────────────
-// 一、原实现 兼容哈希(KeyLayoutV1 路由;混跑/读 原实现 数据的前提)
+// 一、Java 兼容哈希(KeyLayoutV1 路由;混跑/读 Java 数据的前提)
 //
 // compat 前缀只表示"局部算法保持兼容":例如字符串 hash、整数 hash、浮点格式化。
 // 它不等价于 CompatibilityProfile::LegacyV1,后者是整套 wire/锁/ACK/marker 运行模式。
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 业务作用：原实现 `String.hashCode()` 逐位复刻:
+/// 业务作用：Java `String.hashCode()` 逐位复刻:
 /// h = `s[0]*31^(n-1) + ... + s[n-1]`,按 **UTF-16 code unit** 计算(不是字节、不是 char)。
-/// wrapping 运算对齐 原实现 int 溢出语义。权威向量:"abc" → 96354。
+/// wrapping 运算对齐 Java int 溢出语义。权威向量:"abc" → 96354。
 ///
 /// # 参数
 /// - `s`: 要按历史字符串哈希规则处理的文本。
@@ -51,7 +57,7 @@ pub fn compat_string_hash(s: &str) -> i32 {
         .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
 }
 
-/// 业务作用：原实现 `Long.hashCode()`:`(int)(value ^ (value >>> 32))`(>>> 是无符号右移)。
+/// 业务作用：Java `Long.hashCode()`:`(int)(value ^ (value >>> 32))`(>>> 是无符号右移)。
 ///
 /// # 参数
 /// - `v`: 要按历史长整型哈希规则处理的整数。
@@ -59,7 +65,7 @@ pub fn compat_long_hash(v: i64) -> i32 {
     (v ^ ((v as u64) >> 32) as i64) as i32
 }
 
-/// 业务作用：路由:`(hash & Integer.MAX_VALUE) % count`(屏蔽符号位,原实现 RedisPartition 同款)。
+/// 业务作用：路由:`(hash & Integer.MAX_VALUE) % count`(屏蔽符号位,Java RedisPartition 同款)。
 ///
 /// # 参数
 /// - `key`: 业务路由键文本。
@@ -92,26 +98,32 @@ fn command_timeout_millis(timeout: std::time::Duration) -> Result<u64> {
         .map_err(|_| NasaRedisError::Config("partition command timeout 毫秒值溢出".into()))
 }
 
-/// 业务作用：**逐位复刻既有系统的 `Double.toString`，保证浮点值跨语言格式一致**。
-/// Rust `f64::to_string()` 与 原实现 系统性分叉:整数值无 `.0`(`1.0`→"1" vs 原实现 "1.0")、科学计数法阈值
-/// 与写法不同(`1e10`→"10000000000" vs 原实现 "1.0E10")。浮点作 @JsonArrayKey/id/bucket subId 或 HASH 字段
-/// 存储时,格式不一致 = 跨语言 key/值字节分叉、数据不通。本函数对齐 原实现 规则:
-///   · `m ∈ [10⁻³, 10⁷)` → 十进制(整数值补 `.0`);否则 → 科学计数法 `d.dddE±exp`(大写 E);
-///   · 有效数字取**最短可往返**表示(Rust `{:e}` 与 原实现 FloatingDecimal 对绝大多数值一致)。
-/// ⚠ 残留:极少数"最短表示"在 Rust/原实现 间选位不同的边界值仍可能 1 位之差(深层 dtoa 差异),
-/// 典型业务值(价格/数量)一致;JSON 模式由 serde_json 自有格式,不经本函数。
+/// 业务作用：按 Java `Double.toString` 的记法和指数阈值输出浮点文本，供跨语言 key 与字段编码使用。
+/// 绝对值位于 `[10⁻³, 10⁷)` 时使用十进制，整数补 `.0`；其它非零有限值使用大写 `E` 的科学计数法。
+/// 有效数字采用 Rust 的最短可往返表示，与 Java 的部分边界值可能选位不同，不保证所有 f64 逐字节一致。
+/// 依赖跨语言 key 一致性的调用方应限制输入范围或采用整数、字符串身份；JSON 编码不经本函数。
 ///
-/// # 参数
-/// - `v`: 要按历史浮点文本格式化规则输出的值。
+/// 参数说明：`v` 为待格式化浮点值，允许 NaN、无穷和带符号零。
+/// 返回：符合上述记法的文本；保留负零，非有限值使用 `NaN`、`Infinity` 或 `-Infinity`。
 pub fn compat_double_to_string(v: f64) -> String {
     if v.is_nan() {
         return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+        return if v > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .to_string();
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+        return if v.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        }
+        .to_string();
     }
     let neg = v < 0.0;
     // Rust `{:e}` = 最短尾数 + 指数(一位整数位):如 "1.23456e2"、"1e0"、"1e-1"。
@@ -136,7 +148,11 @@ pub fn compat_double_to_string(v: f64) -> String {
         }
     } else {
         // 科学计数法:d.ddddE±exp(尾数至少一位小数,大写 E)
-        let frac = if digits.len() > 1 { &digits[1..] } else { "0" };
+        let frac = if digits.len() > 1 {
+            &digits[1..]
+        } else {
+            "0"
+        };
         format!("{}.{}E{}", &digits[..1], frac, exp)
     };
     if neg {
@@ -153,7 +169,7 @@ pub fn compat_double_to_string(v: f64) -> String {
 /// 分区组的 key 布局。字段即协议——改名 = 新 layout 版本 + 数据迁移。
 #[derive(Debug, Clone)]
 pub struct KeyLayout {
-    /// stream 前缀,同时是 consumer group 名(原实现 defaultGroup 语义)。
+    /// stream 前缀,同时是 consumer group 名(Java defaultGroup 语义)。
     pub prefix: String,
     /// 本节点 profile(**仅** nodes ZSET key 按 profile 隔离,见 `nodes()`)。
     pub profile: CompatibilityProfile,
@@ -170,7 +186,7 @@ impl KeyLayout {
 
     /// 业务作用：分区锁的【业务 key】:`{prefix}:lock:{p}`。**不含 profile**(锁是分区归属最终仲裁,两 profile 抢同一把锁)。
     /// 注意:传给 DistributedLock 后会再叠锁前缀,最终 Redis key =
-    /// `DISTRIBUTED-LOCK:{prefix}:lock:{p}` —— 原实现 双前缀逐字节一致。
+    /// `DISTRIBUTED-LOCK:{prefix}:lock:{p}` —— Java 双前缀逐字节一致。
     ///
     /// # 参数
     /// - `p`: 分区编号。
@@ -180,8 +196,8 @@ impl KeyLayout {
 
     /// 业务作用：活节点 ZSET。
     ///   · RustV2 → `{prefix}:nodes:v2`(Redis TIME 时基,独立心跳域);
-    ///   · 原实现V1 → `{prefix}:nodes`(墙钟时基,**与 原实现 节点互通**,不能加后缀)。
-    /// 这样 RustV2 与墙钟节点(原实现V1/真 原实现)**物理隔离**,跨时基误驱逐(score 时基不一致驱逐存活异
+    ///   · LegacyV1 → `{prefix}:nodes`(墙钟时基,**与 Java 节点互通**,不能加后缀)。
+    /// 这样 RustV2 与墙钟节点(LegacyV1/Java)**物理隔离**,跨时基误驱逐(score 时基不一致驱逐存活异
     /// profile 节点 → 双 claim 窗口)从根上消除。lock/group/stream **一律不加后缀**(它们是跨 profile 单
     /// owner 的共同信任根,见上)。副作用仅 fair-share 失衡(混部期负载倾斜),非数据正确性问题——锁互斥
     /// + fence 仍保证每分区单 owner。与 `rebalance` 心跳时钟分流收敛到同一 `self.profile` 判定,避免漂移。
@@ -197,7 +213,7 @@ impl KeyLayout {
         format!("{}:wake", self.prefix)
     }
 
-    /// 业务作用：consumer group 名 = prefix(原实现:组名与 stream 前缀同名,全节点共用)。
+    /// 业务作用：consumer group 名 = prefix(Java:组名与 stream 前缀同名,全节点共用)。
     pub fn group(&self) -> &str {
         &self.prefix
     }
@@ -319,13 +335,9 @@ async fn build_group_layout(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 三、事件信封(`Envelope` = **标准 serde JSON**,原实现↔Rust 双向互通的线格式)。
-// 产品决定(2026-06-14):**只支持标准 JSON,不支持 Jackson default-typing=true**(那套
-// `["类名",{}]` 多态字节 codec = codec-jackson-compat,已撤销不交付)。原实现 端关闭
-// default-typing(标准 JSON)即可:原实现 写 → Rust 消费、Rust 写 → 原实现 消费,均走本 Envelope。
-// 原实现V1 / RustV2 两 profile 的 partition **都用这同一套标准 JSON Envelope**(profile 只影响
-// fencing 强弱,不影响线格式),故跨语言 stream 互通两 profile 皆可(RustV2 额外有 V2 fence,
-// 对 原实现 不可见)。
+// 事件信封使用标准 JSON 对象；LegacyV1 与 RustV2 使用相同字段和 data entry field。
+// Jackson default-typing=true 的类名包装数组不属于此线格式；跨语言发送方须关闭该包装。
+// profile 决定租约与 fencing 协议，不改变 Envelope 编码。
 // ─────────────────────────────────────────────────────────────────────────
 
 /// 业务作用：反序列化:**显式 `null` 或字段缺省 → `T::default()`**(
@@ -343,11 +355,10 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// stream 消息体(写入 entry 的 `data` field;对照 原实现 `PooledEvtData` 四字段,字段名对齐)。
-/// **标准 serde JSON**——任意语言(原实现 default-typing=false 等)写出的 `{topic,event,data,passthrough}`
-/// 与本结构逐字段互通。**反序列化忽略 null / 容忍缺省**:topic/event 缺省或 null → `""`、data 缺省或
-/// null → `Value::Null`、passthrough 缺省或 null → `None`(Option 原生),故"原实现 不传 data / 写 topic:null"
-/// 等不再解码失败进毒。序列化仍输出纯标准 JSON(passthrough=None 时省略)。
+/// 写入 Stream entry 的 `data` field 的标准 JSON 信封，字段为 topic、event、data、passthrough。
+/// topic/event 缺省或 null 解码为 `""`，data 缺省或 null 解码为 `Value::Null`，
+/// passthrough 缺省或 null 解码为 `None`；空路由仍由消费计划匹配门禁拒绝。
+/// 序列化输出标准 JSON，passthrough 为 None 时省略该字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     #[serde(default, deserialize_with = "de_null_as_default")]
@@ -360,45 +371,36 @@ pub struct Envelope {
     /// `serde_json::Value` 原生把 `null` 解成 `Value::Null`;`#[serde(default)]` 覆盖字段缺省。
     #[serde(default)]
     pub data: serde_json::Value,
-    /// 透传上下文(traceId 等)。**产品决定(2026-06-14):Rust 不做 原实现 的 thread-local/MDC 隐式
-    /// 透传**——需要传上下文就**显式**放进业务的 `data` 或显式参数。本字段仅保留 **wire 兼容**(与
-    /// 原实现 标准 JSON envelope 互通),框架**不自动捕获/注入**。
-    /// Option 原生:缺省/null → None。
+    /// 显式传递的上下文，逐条消费通过 PartitionRecord 暴露；不会自动捕获或恢复 thread-local/MDC。
+    /// 缺省或 null 表示没有上下文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passthrough: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// stream entry 中装信封的 field 名(原实现 DATA_FIELD 同款)。
+/// stream entry 中装信封的 field 名(Java DATA_FIELD 同款)。
 pub const DATA_FIELD: &str = "data";
 
 // ─────────────────────────────────────────────────────────────────────────
 // 四、handler 注册形态
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 类型擦除后的批量 handler:输入 = 一批 `(entry_id, data JSON 值)`。
-/// 返回**失败 ID 子集**(业务类型 `T` 解码也要逐 ID,坏 data 只让该 ID 进
-/// failed;handler 失败只影响实际传入它的 ID)。空返回 = 全部成功。
-///   · 每条 value 单独 `from_value::<T>`,坏的进 failed,不进 handler;
-///   · handler 只收成功解码的 `Vec<T>`;handler Err → 这批传入的 ID 全进 failed;
-///   · handler panic 由本闭包内 catch_unwind 归约为"这批传入的 ID 全 failed",不外溢。
+/// 批量回调的兼容类型：输入为 `(entry_id, data JSON 值)` 列表，输出为失败 ID 子集。
+/// 空输出表示全部成功；本类型本身不执行解码、异常隔离或持久确认。
 pub type ErasedHandler = Arc<
     dyn Fn(Vec<(String, serde_json::Value)>) -> futures::future::BoxFuture<'static, Vec<String>>
         + Send
         + Sync,
 >;
 
-/// (topic, event) → handler 的路由表(prepare 阶段填充,start 后只读)。
+/// 兼容批量回调的 `(topic, event)` 路由表；PreparedPartition 使用另行冻结的消费计划。
 pub type HandlerMap = HashMap<(String, String), ErasedHandler>;
 
 // ─────────────────────────────────────────────────────────────────────────
 // 五、typestate 三阶段(:register 只在 Prepared;start(self) 消费进 Running)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 阶段一:已 prepare(stream/consumer group 已建,**未抢任何锁**——
-/// 原实现 注释原文:"避免 listener 还没 register 完就启 task 拉消息找不到 listener 而丢消息")。
-/// 默认组的**逻辑 ID**(map key sentinel,对照 原实现 `DEFAULT_GROUP_NAME=""`)。group-scoped 管理 API
-/// 用它定位默认组;隔离组用其逻辑短名。**与 Redis stream prefix 解耦**——默认组 prefix=`default_group`,
-/// 但 map key 恒为 `""`,从而 `default_group` 与某隔离组逻辑名相同也不会撞 key。
+/// 默认组的逻辑 ID，group-scoped 管理 API 使用空字符串定位默认组，隔离组使用逻辑短名。
+/// 逻辑 ID 与 Redis Stream prefix 分离，default_group 与隔离组短名相同也不会覆盖路由。
 pub const DEFAULT_GROUP_ID: &str = "";
 
 /// 一个已 prepare 的分区组(默认组或隔离组):stream/consumer group 已建,handler 待注册。
@@ -408,7 +410,7 @@ struct PreparedGroup {
     id: String,
     layout: KeyLayout,
     count: u32,
-    handlers: HandlerMap,
+    plans: plan::PlanMap,
     /// 本组 resolved `PartitionCfg`(rebalance/min_idle/drain/handler/poison 等;默认组=父级)。
     cfg: PartitionCfg,
     /// 本组 resolved `StreamCfg`(batch/poll/inflight;默认组=全局)。
@@ -421,19 +423,24 @@ pub struct PreparedPartition {
     lock: Arc<DistributedLock>,
     /// 本节点标识(consumer name + 心跳 member;每次启动唯一;**全组共用同一 node_id**)。
     node_id: String,
-    /// **多组**(对照 原实现 `RedisPartition.groups`):`[0]` = 默认组(id=`""`),其余 = 隔离组。
+    /// 分区组集合：`[0]` = 默认组(id=`""`),其余 = 隔离组。
     groups: Vec<PreparedGroup>,
-    /// topic → `groups` 下标(未命中 = 默认组 `[0]`;对照 原实现 `topicToGroupName`)。
+    /// topic → `groups` 下标（未命中时使用默认组 `[0]`）。
     topic_to_group: HashMap<String, usize>,
+    /// 旧链式注册入口保留首个配置错误，启动前拒绝而不覆盖原 handler。
+    registration_error: Option<NasaRedisError>,
+    next_plan_id: u32,
 }
 
 /// 阶段二:运行中(coordinator/再平衡/心跳已启动)。只可 publish 与 shutdown。
 pub struct RunningPartition {
+    stop: Arc<shutdown::ShutdownOperation>,
+    start_gate: tokio_util::sync::CancellationToken,
     /// **默认组** runtime(= `groups[""]`;无 group 参数的管理 API 默认作用它,向后兼容单组语义)。
     inner: Arc<runtime::GroupRuntime>,
     /// 全部组(含默认组)runtime:**逻辑 ID** → runtime(默认组 key=`""`,**不会与隔离组逻辑名撞**)。
     groups: HashMap<String, Arc<runtime::GroupRuntime>>,
-    /// topic → **逻辑 ID**(未命中 = 默认组,走 `inner`;对照 原实现 `resolveStream` 路由)。
+    /// topic → **逻辑 ID**（未命中时走 inner 中的默认组）。
     topic_to_group: HashMap<String, String>,
 }
 
@@ -445,17 +452,9 @@ impl PreparedPartition {
     /// - `client`: 分区框架使用的 Redis 客户端。
     /// - `lock`: 分区 owner 竞争使用的分布式锁组件。
     pub async fn prepare(client: Arc<RedisClient>, lock: Arc<DistributedLock>) -> Result<Self> {
-        // 产品决定(2026-06-14):partition 的线格式是**标准 serde JSON**(`Envelope`),与 原实现
-        // (default-typing=false 标准 JSON)双向互通——原实现 写 Rust 消费、Rust 写 原实现 消费均可。
-        // 故 原实现V1 / RustV2 **两 profile 的 partition 都支持**(不再因缺少 jackson-compat 而拒绝
-        // 原实现V1);profile 仅影响 fencing:RustV2 用 V2 fence stamp(更强,对 原实现 不可见),原实现V1
-        // 用 V1 holds 双检查 + 裸 XACK(与 原实现 锁层一致)。**不支持的只有 Jackson default-typing=true**
-        // 那套多态字节(已声明)。⚠ 跨语言共享 stream 前应做 golden-bytes 验证 原实现 标准 JSON
-        // envelope 字段与本 `Envelope` 对齐(topic/event/data/passthrough + `data` field 名)。
+        // 两种 profile 共用标准 JSON Envelope；启用设施与物理布局校验先于任何远端建组副作用。
         let cfg = client.config().partition.clone();
-        // enabled 接线(此前 enabled=false 仍创建 stream/group
-        // ——"配置看起来有效、实际完全不生效"比不提供更危险)。enabled 是总开关
-        // (对齐 原实现 partition.enabled),false 时 prepare fail-fast,绝不静默建组。
+        // 未显式启用时拒绝准备，避免仅构造配置就创建 Stream 和消费组。
         if !cfg.enabled {
             return Err(NasaRedisError::Config(
                 "partition.enabled=false:分区设施未启用。需启用请显式设 \
@@ -463,8 +462,7 @@ impl PreparedPartition {
                     .into(),
             ));
         }
-        // count 防御(已在 RedisConfig::validate 于 connect 时 fail-fast;此处再挡一次,
-        // 防 connect 后改配置的路径)。
+        // 物理分区数必须非零，否则发布取模与持锁来源集合都无法成立。
         if cfg.count == 0 {
             return Err(NasaRedisError::Config("partition.count 必须 > 0".into()));
         }
@@ -480,10 +478,8 @@ impl PreparedPartition {
                 "partition.default_group 非法:必须无首尾空白、非空、不超过 {MAX_REDIS_NAME_BYTES} 字节且不得含 `{{`/`}}`/`:`(cluster 下作 hash-tag)"
             )));
         }
-        // ── 多组准备(对照 原实现 RedisPartition.groups):默认组 + 各隔离组 ──
-        // 每组各自 build_group_layout(cluster `{base}` hash-tag relayout + 同槽自检 + XGROUP CREATE)。
-        // 隔离组 base = `{default_group}:{逻辑名}`(原实现 streamPrefix),与默认组互不阻塞、cluster 下各自
-        // 一个 slot(高频/低频隔离 + 天然分散到不同 master)。
+        // 每组独立创建物理布局并证明 Lua key 同槽；不同组的 hash tag 不承诺落在不同 master。
+        // 本地执行与容量隔离由 executor.scope 决定，物理分组本身不保证慢任务互不影响。
         let mut groups: Vec<PreparedGroup> = Vec::with_capacity(1 + cfg.groups.len());
         let mut topic_to_group: HashMap<String, usize> = HashMap::new();
 
@@ -497,7 +493,7 @@ impl PreparedPartition {
             id: DEFAULT_GROUP_ID.to_string(),
             layout: def_layout,
             count: cfg.count,
-            handlers: HashMap::new(),
+            plans: HashMap::new(),
             cfg: def_cfg,
             stream_cfg: global_stream.clone(),
         });
@@ -519,10 +515,10 @@ impl PreparedPartition {
             } else {
                 cfg.count
             };
-            let base = format!("{}:{}", cfg.default_group, logical); // 原实现 streamPrefix = defaultGroup:groupName
+            let base = format!("{}:{}", cfg.default_group, logical); // Java streamPrefix = defaultGroup:groupName
             let layout = build_group_layout(&client, &base, gcount).await?;
             let idx = groups.len();
-            // topic 路由:空 topics → 逻辑名本身即唯一 topic(对照 原实现)
+            // topic 路由:topics 为空时，逻辑组名本身即唯一 topic
             let topics: Vec<String> = if gcfg.topics.is_empty() {
                 vec![logical.clone()]
             } else {
@@ -546,7 +542,7 @@ impl PreparedPartition {
                 id: logical.clone(),
                 layout,
                 count: gcount,
-                handlers: HashMap::new(),
+                plans: HashMap::new(),
                 // per-group resolved 配置(覆盖 → 父级/全局)
                 cfg: gcfg.resolved_partition(&cfg, gcount),
                 stream_cfg: gcfg.resolved_stream(&global_stream),
@@ -560,131 +556,325 @@ impl PreparedPartition {
         Ok(Self {
             client,
             lock,
-            // node_id:进程级唯一(对照 原实现 nodeId;全组共用), incarnation 要求
+            // node_id:进程级唯一并由全部组共用, incarnation 要求
             node_id: format!("n-{}", uuid::Uuid::new_v4().simple()),
             groups,
             topic_to_group,
+            registration_error: None,
+            next_plan_id: 1,
         })
     }
 
-    /// 业务作用：注册 handler(仅 Prepared 阶段;Running 后路由表只读——typestate 保证)。
-    /// T = 业务消息类型,注册时单态化反序列化(运行期无反射)。
+    /// 业务作用：登记兼容批量 handler；重复或非法路由保留首个注册，并在 start 返回配置错误。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `topic`: 要绑定的业务 topic。
     /// - `event`: 要绑定的业务事件名。
     /// - `f`: 批量处理该 topic/event 的异步 handler。
+    ///
+    /// 返回：返回当前准备对象供链式调用；需要立即取得注册错误时使用 `try_register_legacy`。
     pub fn register<T, F, Fut>(&mut self, topic: &str, event: &str, f: F) -> &mut Self
     where
         T: DeserializeOwned + Send + 'static,
         F: Fn(Vec<T>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
     {
-        let f = Arc::new(f);
-        let h: ErasedHandler = Arc::new(move |items: Vec<(String, serde_json::Value)>| {
-            let f = Arc::clone(&f);
-            Box::pin(async move {
-                //**逐 ID 反序列化为 T**——坏 data 只让该 ID 进 failed,
-                // 不连坐整桶;handler 只收成功解码的 Vec<T>。
-                let mut typed: Vec<T> = Vec::with_capacity(items.len());
-                let mut good_ids: Vec<String> = Vec::with_capacity(items.len());
-                let mut failed: Vec<String> = Vec::new();
-                for (id, v) in items {
-                    match serde_json::from_value::<T>(v) {
-                        Ok(t) => {
-                            typed.push(t);
-                            good_ids.push(id);
-                        }
-                        Err(e) => {
-                            tracing::error!(id, err = %e, "业务类型解码失败,该 ID 单独进重投/毒消息");
-                            failed.push(id);
-                        }
-                    }
-                }
-                if typed.is_empty() {
-                    return failed;
-                }
-                // handler 失败/panic → 这批传入的 good_ids 全进 failed(只影响实际传入它的 ID)
-                let fut = std::panic::AssertUnwindSafe(f(typed));
-                match futures::FutureExt::catch_unwind(fut).await {
-                    Ok(Ok(())) => failed, // 仅 typed-decode 失败
-                    Ok(Err(e)) => {
-                        tracing::warn!(err = %e, "handler 返回失败,本桶成功解码的 ID 转重投");
-                        failed.extend(good_ids);
-                        failed
-                    }
-                    Err(_) => {
-                        tracing::error!("handler panic,本桶成功解码的 ID 转重投(不外溢整批)");
-                        failed.extend(good_ids);
-                        failed
-                    }
-                }
-            })
-        });
-        // 路由到 topic 所属组(未隔离 = 默认组 [0];对照 原实现 topicToGroupName)。
-        let idx = self.topic_to_group.get(topic).copied().unwrap_or(0);
-        self.groups[idx]
-            .handlers
-            .insert((topic.to_string(), event.to_string()), h);
+        if let Err(error) = self.try_register_legacy(topic, event, f) {
+            if self.registration_error.is_none() {
+                self.registration_error = Some(error);
+            }
+        }
         self
     }
 
-    /// 业务作用：start:消费 self(typestate),为**每个组**启动 coordinator + 心跳/再平衡 + wake 订阅。
+    /// 业务作用：在注册点校验并冻结兼容批量路由，保留逐条解码与成功子集一次 Vec 调用的语义。
+    ///
+    /// 参数说明：
+    /// - `topic`: 非空、无首尾空白的业务主题。
+    /// - `event`: 非空、无首尾空白的事件名称。
+    /// - `f`: 接收本桶成功解码数据的批量异步 handler。
+    ///
+    /// 返回：成功返回当前准备对象；非法或重复路由返回错误，已有 handler 不受影响。
+    pub fn try_register_legacy<T, F, Fut>(
+        &mut self,
+        topic: &str,
+        event: &str,
+        f: F,
+    ) -> Result<&mut Self>
+    where
+        T: DeserializeOwned + Send + 'static,
+        F: Fn(Vec<T>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        activation::validate_route(topic, event)?;
+        let idx = self.topic_to_group.get(topic).copied().unwrap_or(0);
+        let key = (topic.to_string(), event.to_string());
+        // 必须在创建和发布新闭包前拒绝冲突，否则旧 handler 会失去路由归属。
+        if self.groups[idx].plans.contains_key(&key) {
+            return Err(NasaRedisError::Config(format!(
+                "partition route already registered: ({topic}, {event})"
+            )));
+        }
+        let id = self.reserve_plan_id()?;
+        self.groups[idx]
+            .plans
+            .insert(key, plan::ConsumerPlan::legacy::<T, _, _>(id, f));
+        Ok(self)
+    }
+
+    /// 业务作用：签发不复用的计划身份，同时给有序和无序任务保留独立 TaskType。
+    /// 参数说明: 无。
+    /// 返回：身份空间充足时递增；耗尽时拒绝登记。
+    fn reserve_plan_id(&mut self) -> Result<u32> {
+        let id = self.next_plan_id;
+        if id >= u32::MAX / 2 {
+            return Err(NasaRedisError::Config(
+                "consumer plan identity exhausted".into(),
+            ));
+        }
+        self.next_plan_id += 1;
+        Ok(id)
+    }
+
+    /// 业务作用：把多个 topic 的同一事件绑定到共享业务键顺序域。
+    /// 参数说明：`topics` 为主题集合；`event` 为事件；`key_fn` 提取可选键；`handler` 接收单条已解码记录。
+    /// 返回：全部路由合法且无冲突时原子登记计划；失败不改变已有路由。
+    pub fn register_partitioned<T, K, I, S, KF, H, Fut>(
+        &mut self,
+        topics: I,
+        event: impl Into<String>,
+        key_fn: KF,
+        handler: H,
+    ) -> Result<&mut Self>
+    where
+        T: DeserializeOwned + Send + 'static,
+        K: std::hash::Hash,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        KF: Fn(&T) -> Option<K> + Send + Sync + 'static,
+        H: Fn(PartitionRecord<T>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        self.register_partitioned_with_weight(topics, event, key_fn, |_| 0, handler)
+    }
+
+    /// 业务作用：登记带额外堆分配估算的单记录计划，在调用业务前完成正文预算核算。
+    /// 参数说明：`topics`、`event` 定义路由；`key_fn` 提取业务键；`weight` 估算 T 的额外堆分配；`handler` 执行业务。
+    /// 返回：路由集合一次性登记；空集合、重复路由或身份耗尽返回配置错误。
+    pub fn register_partitioned_with_weight<T, K, I, S, KF, WF, H, Fut>(
+        &mut self,
+        topics: I,
+        event: impl Into<String>,
+        key_fn: KF,
+        weight: WF,
+        handler: H,
+    ) -> Result<&mut Self>
+    where
+        T: DeserializeOwned + Send + 'static,
+        K: std::hash::Hash,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        KF: Fn(&T) -> Option<K> + Send + Sync + 'static,
+        WF: Fn(&T) -> usize + Send + Sync + 'static,
+        H: Fn(PartitionRecord<T>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        let event = event.into();
+        let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
+        let mut seen = std::collections::HashSet::new();
+        if topics.is_empty() {
+            return Err(NasaRedisError::Config(
+                "consumer plan topics cannot be empty".into(),
+            ));
+        }
+        for topic in &topics {
+            activation::validate_route(topic, &event)?;
+            let idx = self.topic_to_group.get(topic).copied().unwrap_or(0);
+            if !seen.insert(topic)
+                || self.groups[idx]
+                    .plans
+                    .contains_key(&(topic.clone(), event.clone()))
+            {
+                return Err(NasaRedisError::Config(format!(
+                    "partition route already registered: ({topic}, {event})"
+                )));
+            }
+        }
+        let id = self.reserve_plan_id()?;
+        let plan = plan::ConsumerPlan::typed(id, key_fn, weight, handler);
+        // 候选全集通过校验后才同步发布各路由，避免多主题计划只登记一部分。
+        for topic in topics {
+            let idx = self.topic_to_group.get(&topic).copied().unwrap_or(0);
+            self.groups[idx]
+                .plans
+                .insert((topic, event.clone()), plan.clone());
+        }
+        Ok(self)
+    }
+
+    /// 业务作用：复验全部注册与远端 Stream/group 合同，在所有组监督任务就绪后一次性开放消费。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：全部组就绪时返回运行句柄；配置或远端合同失败时关闭未激活任务并返回错误。
     pub async fn start(self) -> Result<RunningPartition> {
+        self.start_inner(true).await
+    }
+
+    /// 业务作用：完成全部来源和执行域准备，消费仍等待宿主的整体启动屏障。
+    /// 参数说明：无。
+    /// 返回：已准备的运行句柄；调用 activate 前不抢占来源或执行 handler，失败沿启动 owner 清理。
+    pub async fn start_suspended(self) -> Result<RunningPartition> {
+        self.start_inner(false).await
+    }
+
+    /// 业务作用：按宿主是否持有后续屏障建立受监督执行域。
+    /// 参数说明：`activate` 决定本次准备成功后是否立即开放消费。
+    /// 返回：全部合同通过后返回运行态；任一失败保留原错误并撤销部分准备。
+    async fn start_inner(self, activate: bool) -> Result<RunningPartition> {
         let PreparedPartition {
             client,
             lock,
             node_id,
             groups,
             topic_to_group,
+            registration_error,
+            next_plan_id,
         } = self;
+        if let Some(error) = registration_error {
+            return Err(error);
+        }
+        activation::validate_routes(&groups)?;
+        let mut activation = activation::PlanActivation::new();
+        let config = client.config().partition.clone();
+        for group in &groups {
+            config.limits.validate(group.stream_cfg.batch_size)?;
+        }
+        let execution_plan = execution::ExecutionPlan::build(
+            &groups,
+            &config.executor,
+            &config.limits,
+            (next_plan_id - 1) as usize,
+        )?;
+        let core =
+            runtime::engine::RedisPartitionRuntime::new(config.limits.clone(), execution_plan)?;
+        // 首次可取消的启动等待前登记全部域，防止部分 Runner 启动后失去回滚 owner。
+        activation.track_core(core.clone());
+        if let Err(error) = core.start(activation.start_gate()).await {
+            return Err(activation.rollback(error).await);
+        }
+        let publisher = publisher::PublisherCoordinator::new(config.limits.clone());
         let ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
         let mut runtimes: HashMap<String, Arc<runtime::GroupRuntime>> = HashMap::new();
-        let mut started: Vec<Arc<runtime::GroupRuntime>> = Vec::new();
         let mut inner: Option<Arc<runtime::GroupRuntime>> = None;
         for (i, g) in groups.into_iter().enumerate() {
-            // 每组各自一个 GroupRuntime(独立 coordinator/poll/worker;node_id、lock、cfg 参数共用)。
+            // 物理组分别持有来源控制，消费执行与记录责任共用同一个 core。
             let rt = match runtime::GroupRuntime::start(
                 Arc::clone(&client),
                 Arc::clone(&lock),
                 g.layout,
                 g.count,
-                g.handlers,
+                g.plans,
+                core.clone(),
+                publisher.clone(),
                 node_id.clone(),
                 g.cfg,        // per-group resolved PartitionCfg
                 g.stream_cfg, // per-group resolved StreamCfg
+                activation.start_gate(),
             )
             .await
             {
                 Ok(rt) => rt,
-                // **回滚**:某组起失败时,先优雅停掉已起的组,避免其后台消费/持锁游离泄漏(多组才有的新风险;
-                // 单组失败时无已起组)。再上抛原错误。
+                // 任一组启动失败都须回滚已登记的完整资源集合，避免部分 Runner 或组任务失去清理 owner。
                 Err(e) => {
-                    futures::future::join_all(started.iter().map(|rt| rt.shutdown())).await;
-                    return Err(e);
+                    return Err(activation.rollback(e).await);
                 }
             };
             if i == 0 {
                 inner = Some(Arc::clone(&rt)); // [0] = 默认组(id="")
             }
-            started.push(Arc::clone(&rt));
+            activation.track(Arc::clone(&rt));
             runtimes.insert(g.id, rt);
         }
         let topic_to_group: HashMap<String, String> = topic_to_group
             .into_iter()
             .map(|(t, idx)| (t, ids[idx].clone()))
             .collect();
-        Ok(RunningPartition {
+        // prepare 与 start 之间远端资源可能变化；所有复验完成前禁止任一组抢锁或调用业务。
+        for runtime in runtimes.values() {
+            if let Err(error) = runtime.ensure_stream_contract().await {
+                return Err(activation.rollback(error).await);
+            }
+        }
+        if core
+            .executions
+            .domains
+            .iter()
+            .any(|domain| domain.runner.health() != napart::RunnerHealth::Healthy)
+        {
+            return Err(activation
+                .rollback(NasaRedisError::Config(
+                    "partition runner is not healthy at activation".into(),
+                ))
+                .await);
+        }
+        let running = RunningPartition {
+            start_gate: activation.start_gate(),
+            stop: shutdown::ShutdownOperation::new(
+                core,
+                publisher,
+                runtimes.values().cloned().collect(),
+            ),
             inner: inner.expect("默认组恒存在(groups[0])"),
             groups: runtimes,
             topic_to_group,
-        })
+        };
+        activation.commit(activate);
+        Ok(running)
     }
 }
 
 impl RunningPartition {
-    /// 业务作用：topic → 目标组 runtime(对照 原实现 `resolveStream`:topicToGroupName 命中走隔离组,否则默认组)。
-    /// 路由仅按 **topic**,与 event 无关(同 原实现)。
+    /// 业务作用：读取当前停机证明与未完成责任，不改变运行态。
+    /// 参数说明：无。
+    /// 返回：未开始停机或仍有在途责任时 converged 为 false。
+    pub fn shutdown_report(&self) -> PartitionShutdownReport {
+        self.stop.report()
+    }
+
+    /// 业务作用：在宿主全部启动门禁成功后一次性开放消费。
+    /// 参数说明：无。
+    /// 返回：未关闭时开放全部组；已经请求停机时保持关闭，旧句柄不能复活消费。
+    pub fn activate(&self) {
+        if !self
+            .stop
+            .core
+            .roots_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.start_gate.cancel();
+        }
+    }
+
+    /// 业务作用：同步关闭发布与消费根准入，让多来源宿主先统一停止接纳再等待。
+    /// 参数说明：无。
+    /// 返回：唯一排干操作继续持有已接纳记录、续租和 Commit 责任。
+    pub fn begin_shutdown(&self) {
+        self.stop.begin();
+    }
+
+    /// 业务作用：让宿主依赖的释放晚于消费和持久提交的实际退出。
+    /// 参数说明：`guard` 是依赖所有权守卫；每个运行态只允许登记一个宿主守卫。
+    /// 返回：登记成功后由停机操作释放；已收口时立即释放；重复登记原样返回守卫。
+    pub fn retain_shutdown_dependency<T: Send + 'static>(
+        &self,
+        guard: T,
+    ) -> std::result::Result<(), T> {
+        self.stop.retain_dependency(guard)
+    }
+
+    /// 业务作用：根据 topic 选择目标组 runtime，命中映射时走隔离组，否则走默认组。
+    /// 路由仅按 **topic**,与 event 无关(同 Java)。
     ///
     /// # 参数
     /// - `topic`: stream/partition 使用的业务主题。
@@ -738,7 +928,7 @@ impl RunningPartition {
             .await
     }
 
-    /// 业务作用：**round-robin 发布**：无路由 key 时全局轮转均摊到各分区，对齐既有 `publish(partition==null)`。
+    /// 业务作用：**round-robin 发布**：无路由 key 时全局轮转均摊到各分区。
     /// 适合无需同 key 顺序保证、只要均摊吞吐的场景;需同 key 顺序请用 `publish`/`publish_i64`。
     ///
     /// # 参数
@@ -776,7 +966,7 @@ impl RunningPartition {
     }
 
     /// 业务作用：兼容入口:入参无效返回 Ok(None) + 计数,**名字明示可能不发布**——
-    /// 给依赖 原实现 静默语义的迁移业务;新代码一律用 publish()。
+    /// 给依赖 Java 静默语义的迁移业务;新代码一律用 publish()。
     ///
     /// # 参数
     /// - `topic`: 业务 topic,为空时不发布。
@@ -797,7 +987,7 @@ impl RunningPartition {
         Ok(Some(self.publish(topic, event, key, data).await?))
     }
 
-    /// 业务作用：本节点当前持有的分区(诊断;对照 原实现 claimedPartitions)。
+    /// 业务作用：读取本节点当前持有的分区，用于诊断与运行状态展示。
     pub async fn claimed_partitions(&self) -> Vec<u32> {
         self.inner.claimed_partitions().await
     }
@@ -906,7 +1096,7 @@ impl RunningPartition {
     // 上面无 group 参数的 API = 默认组(向后兼容单组);**隔离组**用下列 `*_in(group, ...)`,group = 逻辑组 ID
     // (默认组用 `""`=`DEFAULT_GROUP_ID`,隔离组用其逻辑名)。
 
-    /// 业务作用：各组本节点持有的分区(对照 原实现 `claimedPartitions(): Map<groupName, List<Integer>>`)。key=逻辑组 ID
+    /// 业务作用：读取各组中本节点持有的分区，返回映射的 key 为逻辑组 ID
     /// (默认组 = `""`=`DEFAULT_GROUP_ID`,隔离组 = 逻辑名)。group-scoped 管理 API 的 `group` 参数用此 key。
     pub async fn claimed_partitions_by_group(&self) -> HashMap<String, Vec<u32>> {
         let mut out = HashMap::new();
@@ -916,7 +1106,7 @@ impl RunningPartition {
         out
     }
 
-    /// 业务作用：同上,但默认组 key 显示为 `<default>`(对照 原实现 诊断输出; 运维可读性)。
+    /// 业务作用：按组提供本节点持有分区的诊断视图，默认组显示为 `<default>`。
     /// **仅诊断/日志/actuator 用**;管理 API 入参仍用 `DEFAULT_GROUP_ID`(`""`),不要把 `<default>` 回传 `*_in`。
     pub async fn claimed_partitions_display(&self) -> HashMap<String, Vec<u32>> {
         self.claimed_partitions_by_group()
@@ -1035,18 +1225,56 @@ impl RunningPartition {
 
     /// 业务作用：优雅停机:**所有组并发停机**(关 admission → 等 in-flight → 逐分区
     /// 释锁 → 摘心跳 → pub wake)。`inner` 即 `groups[默认组]`(同一 Arc),由 `groups` 统一停一次。
-    pub async fn shutdown(&self) {
-        futures::future::join_all(self.groups.values().map(|rt| rt.shutdown())).await;
+    pub async fn shutdown(&self) -> PartitionShutdownReport {
+        let timeout = std::time::Duration::from_millis(self.inner.cfg.drain_timeout_ms);
+        self.shutdown_until(std::time::Instant::now() + timeout)
+            .await
+    }
+
+    /// 业务作用：在调用方期限内等待同一停机操作，超时只返回未收敛报告。
+    /// 参数说明：`deadline` 为绝对等待期限。
+    /// 返回：已排干资源证明或剩余责任；后台排干与租约继续受监督。
+    pub async fn shutdown_until(&self, deadline: std::time::Instant) -> PartitionShutdownReport {
+        self.stop.wait(deadline).await
+    }
+
+    /// 业务作用：显式撤销来源权威并请求强制停止，未取得退出证明时不主动 unlock。
+    /// 参数说明：`deadline` 为强停等待期限。
+    /// 返回：forced 报告及本地执行不确定性。
+    pub async fn force_shutdown_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> PartitionShutdownReport {
+        self.stop.force(deadline).await
+    }
+
+    /// 业务作用：取得全部消费组共用的资源、提交与就绪快照。
+    /// 参数说明: 无。
+    /// 返回：不含业务键和记录 ID 的低基数快照。
+    pub fn snapshot(&self) -> PartitionSnapshot {
+        self.stop.core.snapshot()
+    }
+
+    /// 业务作用：取得发布票据、字节和未知结果的聚合快照。
+    /// 参数说明: 无。
+    /// 返回：当前代理的发布容量与累计结果。
+    pub fn publisher_snapshot(&self) -> PublisherSnapshot {
+        self.stop.publisher.snapshot()
     }
 }
 
 impl Drop for RunningPartition {
-    /// 业务作用：未显式 shutdown 时停止所有后台 owner，禁止 coordinator、worker 或 Redis 锁看门狗泄漏。
+    /// 业务作用：析构时请求同一停机操作，不将异步清理请求解释为退出证明。
+    /// 参数说明: 无。
+    /// 返回：当前 Tokio 环境存在时开始受监督排干；无环境时撤销本地权威。
     fn drop(&mut self) {
-        // Drop 无法在当前栈上等待 Redis unlock 或业务 drain；正常路径仍必须调用 shutdown。
-        // 异常路径先关闭 admission，再由当前 runtime 复用完整 drain/unlock；无 runtime 时才 abort。
-        for runtime in self.groups.values() {
-            runtime.shutdown_on_drop();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.stop.begin();
+        } else {
+            self.stop.core.revoke_all();
+            for group in self.groups.values() {
+                group.cancel_best_effort();
+            }
         }
     }
 }

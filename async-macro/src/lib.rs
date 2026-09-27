@@ -25,7 +25,8 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, parse_quote, ItemFn, LitBool, LitInt, LitStr, ReturnType};
+use syn::parse::Parser as _;
+use syn::{parse_macro_input, parse_quote, Expr, ItemFn, LitBool, LitInt, LitStr, ReturnType};
 
 // ════════════════════════════════════════════════════════════════════════════
 // 时间换算辅助(time_unit + 字面量 duration string)
@@ -34,7 +35,7 @@ use syn::{parse_macro_input, parse_quote, ItemFn, LitBool, LitInt, LitStr, Retur
 
 /// 业务作用：`time_unit` 名 → 规范化单位记号(`ms/s/m/h/d/us/ns`)。供数字版与 string 无单位 fallback 共用。
 ///
-/// # 参数
+/// 参数说明：
 /// - `u`: 注解里填写的 `time_unit` 原始字符串,允许大小写和常见别名。
 fn canonical_time_unit(u: &str) -> Result<&'static str, String> {
     match u.trim().to_ascii_lowercase().as_str() {
@@ -53,7 +54,7 @@ fn canonical_time_unit(u: &str) -> Result<&'static str, String> {
 
 /// 业务作用：`value × 单位` → 毫秒。`us`/`ns` 仅当能**无损**折算(整除 1000 / 1_000_000)才接受,否则报错(调度精度毫秒,不静默截断)。
 ///
-/// # 参数
+/// 参数说明：
 /// - `value`: 注解中的数值部分,例如 `fixed_rate = 5` 或 duration string 中的 `5s` 的 `5`。
 /// - `unit`: 已规范化的单位记号(`ms/s/m/h/d/us/ns`)。
 /// - `ctx`: 错误定位上下文,通常是 string 原文或"数字版"。
@@ -95,7 +96,7 @@ fn unit_rank(unit: &str) -> Option<u8> {
     }
 }
 
-/// 业务作用：字面量 duration string → 毫秒(对照原 `*String` 语义)。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
+/// 业务作用：字面量 duration string → 毫秒。`fallback_unit` = 无显式单位纯整数时采用的单位(来自 time_unit,默认 `ms`)。
 /// 支持**编译期字面量**:可选 `+` 正号;纯整数(走 fallback);SIMPLE/COMPOSITE 段式 `1s500ms`/`1h12m27s`/`1d 2h 3m`(单位
 /// `d/h/m/s/ms/us/ns`,从大到小);ISO-8601 `P1DT2H`/`PT1M30S`/`PT0.5S`。负号与占位符/表达式拒绝。
 ///
@@ -123,7 +124,7 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
     if t.is_empty() {
         return Err(format!("duration \"{t0}\" 缺数值"));
     }
-    // ISO-8601:大小写不限的 P 前缀(`P...`/`P...T...`)。**不接受外层括号**(对照原 parser:括号仅属 COMPOSITE)。
+    // ISO-8601:大小写不限的 P 前缀(`P...`/`P...T...`)。**不接受外层括号**（括号仅允许用于 COMPOSITE）。
     if t.starts_with('P') || t.starts_with('p') {
         return parse_iso8601_duration(t);
     }
@@ -134,7 +135,7 @@ fn duration_str_to_ms(s: &str, fallback_unit: &str) -> Result<u64, String> {
             .map_err(|_| format!("duration \"{t0}\" 数值非法"))?;
         return unit_part_to_ms(n, fallback_unit, &format!("duration \"{t0}\""));
     }
-    // SIMPLE(单段)/ COMPOSITE(多段从大到小,可含空格)。**仅此分支允许可选外层括号** `(1s500ms)`(对照原 COMPOSITE):
+    // SIMPLE(单段)/ COMPOSITE(多段从大到小,可含空格)。**仅此分支允许可选外层括号** `(1s500ms)`:
     // 成对则剥掉,只有一侧则报错;剥后内容仍须是带单位段(`(100)`/`(PT1S)` 因无单位段/被前面分支拦截而落到这里报错)。
     let seg = if let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
         inner.trim()
@@ -408,6 +409,159 @@ fn is_anyhow_result_return(output: &ReturnType) -> bool {
     )
 }
 
+/// `#[Async]` 的执行域裁决;由属性参数在编译期唯一确定。
+enum AsyncExecutor {
+    /// 无参数:`tokio::spawn` 后台执行,返回 JoinHandle(无顺序合同)。
+    Spawn,
+    /// `runner = <expr>, spec = <expr>`:提交到 napart 分区执行域,同键保序,
+    /// 返回受理/拒绝结果(保留容量、停机与顺序门禁语义)。表达式装箱以免空变体分摊大枚举体积。
+    Partition { runner: Box<Expr>, spec: Box<Expr> },
+}
+
+/// 业务作用：解析 `#[Async(...)]` 属性参数,把执行域裁决固定在编译期。
+///
+/// 只承认两种形态:空参数(spawn)与 `runner = <路径表达式>, spec = <TaskSpec 表达式>` 成对出现
+/// (partition)。runner/spec 是普通 Rust 表达式,由类型系统在展开处校验——刻意不提供
+/// "按名字查执行器"的运行期字符串定位。
+///
+/// 参数说明：
+///
+/// - `attr`: 属性括号内的 token stream。
+///
+/// 返回：解析出的执行域；非法形态返回可直接输出的 compile_error 片段。
+fn parse_async_attr(attr: TokenStream) -> Result<AsyncExecutor, proc_macro2::TokenStream> {
+    if attr.is_empty() {
+        return Ok(AsyncExecutor::Spawn);
+    }
+    let mut runner: Option<Expr> = None;
+    let mut spec: Option<Expr> = None;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("runner") {
+            if runner.is_some() {
+                return Err(meta.error("runner 不能重复"));
+            }
+            runner = Some(meta.value()?.parse::<Expr>()?);
+            Ok(())
+        } else if meta.path.is_ident("spec") {
+            if spec.is_some() {
+                return Err(meta.error("spec 不能重复"));
+            }
+            spec = Some(meta.value()?.parse::<Expr>()?);
+            Ok(())
+        } else {
+            Err(meta.error(
+                "#[Async] 只支持空参数(spawn)或 runner = <表达式>, spec = <表达式>(分区执行域);\
+                 不存在按名字查执行器的运行期定位",
+            ))
+        }
+    });
+    if let Err(error) = parser.parse(attr) {
+        return Err(error.to_compile_error());
+    }
+    match (runner, spec) {
+        (Some(runner), Some(spec)) => Ok(AsyncExecutor::Partition {
+            runner: Box::new(runner),
+            spec: Box::new(spec),
+        }),
+        _ => Err(quote! {
+            ::core::compile_error!(
+                "#[Async] 分区执行域必须同时给出 runner 与 spec:runner 是取得 &PartitionRunner 的表达式,\
+                 spec 是冻结 TaskType 与顺序语义的 TaskSpec 表达式"
+            );
+        }),
+    }
+}
+
+/// 业务作用：把 `#[Async(runner = .., spec = ..)]` 的 async fn 改写为 napart 分区提交入口。
+///
+/// 与 spawn 形态的关键差异:任务进入命名分区执行域,同键严格/非严格顺序由 `spec` 冻结;
+/// 返回值不再是 JoinHandle,而是 napart 的受理凭据或稳定拒绝原因——容量拒绝、停机拒绝与
+/// 顺序冲突必须暴露给调用方裁决,不允许被宏吞掉。环境 trace 上下文由 napart 在提交时刻
+/// 捕获、执行时恢复,无需在此重复穿线。
+///
+/// 参数说明：
+///
+/// - `root`: 运行时根路径 token(`__private` 桥所在)。
+/// - `runner`: 求值为 `&napart::PartitionRunner` 的表达式,在调用点每次求值。
+/// - `spec`: 求值为 `napart::TaskSpec` 的表达式。
+/// - `item`: 被注解的 async fn token stream。
+///
+/// 返回：改写后的同步提交函数;形态不满足合同时返回定位明确的 compile_error。
+fn expand_partition_async(
+    root: &proc_macro2::TokenStream,
+    runner: Expr,
+    spec: Expr,
+    item: TokenStream,
+) -> TokenStream {
+    let function = match syn::parse::<ItemFn>(item) {
+        Ok(function) => function,
+        Err(_) => {
+            return quote! {
+                ::core::compile_error!(
+                    "#[Async(runner = .., spec = ..)] 只能用于自由 async fn;\
+                    impl 块与方法接收者不进入分区执行域合同"
+                );
+            }
+            .into();
+        }
+    };
+    let ItemFn {
+        attrs,
+        vis,
+        sig,
+        block,
+    } = function;
+    if sig.asyncness.is_none() {
+        return quote! {
+            ::core::compile_error!("#[Async] 只能用于 async fn(分区执行域同样不接受同步函数)");
+        }
+        .into();
+    }
+    if !matches!(sig.output, ReturnType::Default) {
+        return quote! {
+            ::core::compile_error!(
+                "#[Async(runner = .., spec = ..)] 的任务体不返回值:napart 任务以终态收口,\
+                 受理凭据经改写后的返回值(Submission)取得,业务结果经显式通道传递"
+            );
+        }
+        .into();
+    }
+    let Some(syn::FnArg::Typed(first)) = sig.inputs.first() else {
+        return quote! {
+            ::core::compile_error!(
+                "#[Async(runner = .., spec = ..)] 的首个参数是分区路由键(须 Hash + Clone + Send + 'static);\
+                 不支持 self 接收者"
+            );
+        }
+        .into();
+    };
+    let syn::Pat::Ident(key_pat) = first.pat.as_ref() else {
+        return quote! {
+            ::core::compile_error!("#[Async(runner = .., spec = ..)] 的路由键参数必须是简单标识符,不能使用解构模式");
+        }
+        .into();
+    };
+    let key_ident = &key_pat.ident;
+    let mut new_sig = sig.clone();
+    new_sig.asyncness = None;
+    new_sig.output = parse_quote!(
+        -> ::core::result::Result<
+            #root::__private::napart::Submission,
+            #root::__private::napart::SubmitRejection,
+        >
+    );
+    quote! {
+        #(#attrs)*
+        #vis #new_sig {
+            // 路由键先克隆一份参与哈希路由,原值随任务体一起移动——键的哈希在受理时刻完成,
+            // 任务体仍可读取键值。受理失败(容量/停机/顺序门禁)原样返回稳定拒绝原因。
+            let __async_partition_key = ::core::clone::Clone::clone(&#key_ident);
+            (#runner).submit_typed(__async_partition_key, #spec, move || async move #block)
+        }
+    }
+    .into()
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // #[Async] —— 简单异步执行(调用即后台跑,返回 JoinHandle)
 // ════════════════════════════════════════════════════════════════════════════
@@ -418,7 +572,10 @@ fn is_anyhow_result_return(output: &ReturnType) -> bool {
 /// (实现 Future,可 `.await` 取结果,也可丢弃 = fire-and-forget),不阻塞调用方。
 ///
 /// ## 参数
-/// **无**(`#[Async]` 不带任何参数)。
+/// 空参数 = spawn 形态(无顺序合同)。`runner = <表达式>, spec = <表达式>` = 分区执行域形态:
+/// 任务提交到业务持有的 napart `PartitionRunner`,首参作为分区路由键,同键顺序由 `spec`
+/// 冻结,函数返回 `Result<Submission, SubmitRejection>`(容量、停机与顺序门禁拒绝原样暴露)。
+/// spawn 形态的既有顺序语义不因分区形态的存在而改变。
 ///
 /// ## 用法示例
 /// ```ignore
@@ -446,27 +603,31 @@ fn is_anyhow_result_return(output: &ReturnType) -> bool {
 /// }
 /// ```
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `attr`: `#[Async(...)]` 括号内的编译期参数；当前必须为空。
-/// - `item`: 被注解的 async 函数或 inherent impl 块的 token stream。
+/// - `attr`: `#[Async(...)]` 括号内的编译期参数；空 = spawn,`runner`+`spec` = 分区执行域。
+/// - `item`: 被注解的 async 函数或 inherent impl 块的 token stream(分区形态只接受自由 async fn)。
+///
+/// 返回：合法输入展开为 spawn 或分区提交入口；不满足执行域合同时返回定位明确的编译错误。
 #[proc_macro_attribute]
 pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // 当前不支持 executor qualifier;非空参数显式报错,避免用户误以为已经按名字选择执行器。
-    // 如后续要支持多执行器,应设计为可编译期展开的路径参数,而不是运行期字符串查找。
-    if !attr.is_empty() {
-        let item2: proc_macro2::TokenStream = item.into();
-        return quote! {
-            ::core::compile_error!("#[Async] 暂不支持【属性参数】(executor qualifier 尚未实现);请直接写 #[Async](被标注函数可带 owned 参数)");
-            #item2
+    // 属性参数只承认编译期可验证的分区执行域(runner/spec 路径表达式);其余形态显式报错,
+    // 避免用户误以为存在"按名字选择执行器"的运行期字符串查找。
+    let executor = match parse_async_attr(attr) {
+        Ok(executor) => executor,
+        Err(error) => {
+            let item2: proc_macro2::TokenStream = item.into();
+            return quote! { #error #item2 }.into();
         }
-        .into();
-    }
+    };
     // 运行时根路径发现:门面 re-export → 对应门面路径;直接依赖 → ::scheduling。
     let root = match nasa_macro_support::runtime_root("scheduling", "nasched") {
         Ok(r) => r,
         Err(msg) => return quote! { ::core::compile_error!(#msg); }.into(),
     };
+    if let AsyncExecutor::Partition { runner, spec } = executor {
+        return expand_partition_async(&root, *runner, *spec, item);
+    }
 
     // 单个 async fn → "调用即 spawn、返回 JoinHandle" 的同步 fn。Ok=改写结果;Err=compile_error 片段。
     // 形态校验:① 只接受 async fn(同步 fn 丢进 spawn 会卡死 worker,应另走 spawn_blocking);
@@ -503,7 +664,12 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#attrs)*
             #vis #new_sig {
                 // 调用即 spawn:`async move #block` 按值捕获(参数/self 须 Send+'static),丢后台跑、立即返回 JoinHandle。
-                #root::__private::tokio::spawn(async move #block)
+                // spawn 不继承 task-local:在调用方任务内先捕获环境 trace 上下文(参数求值时刻),
+                // 再在后台任务内重建同一作用域;调用方无链路时为 None,零成本直通。
+                #root::__private::tokio::spawn(#root::__private::natelemetry::with_ambient(
+                    #root::__private::natelemetry::ambient(),
+                    async move #block,
+                ))
             }
         })
     };
@@ -579,7 +745,7 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ════════════════════════════════════════════════════════════════════════════
 /// 业务作用：# `#[scheduled]` —— 定时任务
 ///
-/// 贴在【零参 async fn】上,被自动注册并由调度器跑(没人调它)。**返回类型不限**——值被忽略(对照"返回值被调度器忽略")。
+/// 贴在【零参 async fn】上,被自动注册并由调度器跑(没人调它)。**返回类型不限**——值被忽略。
 /// 若返回**带显式路径的标准 Result**(`std::result::Result<_,_>` / `core::result::Result<_,_>` / `anyhow::Result<_>`),
 /// `Err` 会记 **error 日志**(任务名 + "返回 Err";**不格式化错误值,故不要求 `E: Debug`**)。
 /// **裸名 `Result<_,_>`、类型别名、`custom::Result` 一律按普通返回值忽略**(过程宏无法解析裸名真实来源,为不破坏自定义同名类型而保守处理)。
@@ -626,10 +792,12 @@ pub fn Async(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// // 旧别名仍可用:#[scheduled(every_ms = 5000)] / #[scheduled(delay_ms = 3000, every_ms = 5000)]
 /// ```
 ///
-/// # 参数
+/// 参数说明：
 ///
 /// - `attr`: `#[scheduled(...)]` 括号内的调度配置 token stream。
 /// - `item`: 被注解的零参 async 函数 token stream。
+///
+/// 返回：保留业务函数并登记静态调度元数据的 token stream；参数、签名或组合非法时返回编译错误。
 #[proc_macro_attribute]
 pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     // ⓪ 运行时根路径发现(同 #[Async])。
@@ -656,12 +824,12 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut initial_delay_ms: Option<u64> = None;
     let mut name_attr: Option<String> = None;
     let mut zone: Option<String> = None; // cron 时区(仅与 cron 同用)
-                                         // 数字版 + time_unit(对照原 timeUnit):值×单位因子折成 ms。time_unit 默认毫秒。
+                                         // 数字版 + time_unit:值×单位因子折成 ms。time_unit 默认毫秒。
     let mut fixed_rate: Option<u64> = None;
     let mut fixed_delay: Option<u64> = None;
     let mut initial_delay: Option<u64> = None;
     let mut time_unit: Option<String> = None;
-    // 字面量 duration string(对照原 *String,但只收编译期字面量):"500ms"/"5s"/"2m"/"1h"。
+    // 字面量 duration string（只接收编译期字面量）:"500ms"/"5s"/"2m"/"1h"。
     let mut fixed_rate_string: Option<String> = None;
     let mut fixed_delay_string: Option<String> = None;
     let mut initial_delay_string: Option<String> = None;
@@ -921,7 +1089,7 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
         bail!("#[scheduled] 必须给调度:cron / fixed_rate_ms(every_ms) / fixed_delay_ms / initial_delay_ms(delay_ms)");
     };
 
-    // 返回值包装(对照"返回值被调度器忽略"语义,**不限制返回类型、不附加任何约束**):
+    // 返回值包装（不限制返回类型，也不附加约束）:
     //   - 标准 Result(见 is_result_return,仅 std/core/anyhow 形态)→ `Err` 打 error 日志(带任务名)、`Ok(_)` 忽略;
     //   - 其它任意返回类型(含 `()`/`u32`/自定义 `xxx::Result`/类型别名)→ `let _ =` 忽略。
     // 注:Err 分支**不格式化错误值**(不打 `{:?}`),以免给 `E` 强加 `Debug` 约束而破坏"返回值忽略";要错误详情请在任务体内自行记录。
@@ -1021,6 +1189,8 @@ pub fn scheduled(attr: TokenStream, item: TokenStream) -> TokenStream {
                 name: #name,
                 id: #id,
                 schedule: #schedule,
+                // 调度器在 leader/claim 门禁通过后建立本拍的新根上下文并按 sampler 记录 span；
+                // 函数指针只承载业务 future，避免宏层提前创建上下文而把未取得执行权的拍次算成执行。
                 run: || ::std::boxed::Box::pin(async { #run_body }),
                 cluster: #cluster_tok,
                 misfire: #misfire_tok,

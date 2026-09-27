@@ -1,6 +1,6 @@
-//! 哈希(对照 原实现 `bcrypt`/`md5`/`sha*`)。
+//! BCrypt、MD5 与 SHA 系列哈希兼容入口。
 //!
-//! hex 大小写:`sha256` **默认大写**;`md5`(原框架 `md5DigestAsHex`=小写)/`sha1`/`sha384`/`sha512` 小写。
+//! hex 大小写合同：`sha256` 默认大写；`md5`/`sha1`/`sha384`/`sha512` 小写。
 
 use super::{hex_lower, hex_upper};
 use crate::{CryptoError, Result};
@@ -11,9 +11,8 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 
 // ==================== BCrypt ====================
 
-/// 业务作用: BCrypt 加密(密码哈希,OsRng 随机盐)。cost=10 + **`$2a$` 版本前缀**对齐 原实现 原框架 `BCrypt.gensalt()`
-/// (安全说明.3:bcrypt crate 默认产 `$2b$`,而 原框架/jBCrypt 用 `$2a$`;统一 `$2a$` 保 Rust 生成的 hash
-/// 能被 原实现 侧 `checkpw` 验证。≤72 字节口令下 `$2a`/`$2b` 算法等价,仅前缀字面不同)。
+/// 业务作用: BCrypt 加密(密码哈希,OsRng 随机盐)。cost=10，并固定使用可与存量 jBCrypt 数据互验的
+/// `$2a$` 版本前缀；≤72 字节口令下 `$2a`/`$2b` 算法等价，仅前缀字面不同。
 ///
 /// # 参数
 /// - `content`: 待哈希的口令文本。
@@ -36,15 +35,18 @@ pub fn bcrypt_check(content: &str, hash: &str) -> bool {
 
 // ==================== MD5 / SHA ====================
 
-/// 业务作用: MD5 摘要(**小写** hex,32 字符;对照 原框架 `md5DigestAsHex`)。仅遗留兼容。
+/// 业务作用: MD5 摘要(**小写** hex,32 字符)。仅用于遗留数据兼容。
 ///
 /// # 参数
 /// - `content`: 要计算摘要的 UTF-8 文本。
+///
+/// # 返回
+/// 返回 32 字符的小写十六进制 MD5 摘要；该入口不执行随机化或盐处理。
 pub fn md5(content: &str) -> String {
     hex_lower(&Md5::digest(content.as_bytes()))
 }
 
-/// 业务作用: SHA-256(**大写** hex,默认;对照 原实现 `sha256(content)`)。
+/// 业务作用: 计算 SHA-256 并输出大写十六进制摘要。
 ///
 /// # 参数
 /// - `content`: 要计算摘要的 UTF-8 文本。

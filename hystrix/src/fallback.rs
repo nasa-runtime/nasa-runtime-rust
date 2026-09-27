@@ -178,6 +178,8 @@ pub static HYSTRIX_COLLECTED_GLOBAL_FALLBACKS: [CollectedGlobalFallback];
 pub enum GlobalFallbackInstallError {
     /// 当前进程已经手动安装过处理器，不允许静默替换。
     AlreadyInstalled,
+    /// 受管运行已冻结全局降级归属，不接纳不可撤销的手动运行实例。
+    ManagedRuntimeActive,
     /// 已存在属性宏收集项，不能再手动安装另一个实现。
     CollectedHandlerPresent {
         /// 已收集实现的静态声明位置。
@@ -209,6 +211,9 @@ impl std::fmt::Display for GlobalFallbackInstallError {
     /// 返回格式化结果，不泄露处理器内部状态。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ManagedRuntimeActive => {
+                formatter.write_str("受管运行不允许安装进程级手动降级实例")
+            }
             Self::AlreadyInstalled => formatter.write_str("全局降级处理器已经手动安装"),
             Self::CollectedHandlerPresent { handler } => {
                 write!(
@@ -244,6 +249,7 @@ enum GlobalFallbackOrigin {
     Collected(&'static str),
 }
 
+/// 业务作用：把全局降级处理器与其安装来源绑定，保证进程内只发布一份可追溯运行时。
 struct GlobalFallbackRuntime {
     handler: GlobalFallbackHandlerKind,
     origin: GlobalFallbackOrigin,
@@ -255,6 +261,7 @@ thread_local! {
     static GLOBAL_FALLBACK_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// 业务作用：在一次全局降级调用期间持有线程局部递归门禁，并在离开作用域时解除门禁。
 struct GlobalFallbackGuard;
 
 impl Drop for GlobalFallbackGuard {
@@ -304,6 +311,10 @@ fn collected_sources() -> Vec<&'static str> {
 pub fn install_global_fallback(
     handler: Arc<dyn GlobalFallbackHandler>,
 ) -> Result<(), GlobalFallbackInstallError> {
+    let owner = crate::managed::lock_owner();
+    if owner.is_some() {
+        return Err(GlobalFallbackInstallError::ManagedRuntimeActive);
+    }
     let sources = collected_sources();
     match sources.as_slice() {
         [] => {}
@@ -394,6 +405,15 @@ pub fn initialize_global_fallback() -> Result<(), GlobalFallbackInstallError> {
 /// 唯一实现已成功安装返回 `true`；没有实现或存在配置冲突返回 `false`。
 pub fn global_fallback_installed() -> bool {
     initialize_global_fallback().is_ok() && GLOBAL_FALLBACK.get().is_some()
+}
+
+/// 业务作用：识别持有运行资源的手动进程级降级实现，避免受管 owner 误认其可撤销。
+/// 参数说明：无。
+/// 返回：已有手动实现时为 true，静态收集函数不计入。
+pub(crate) fn has_manual_fallback() -> bool {
+    GLOBAL_FALLBACK
+        .get()
+        .is_some_and(|runtime| runtime.origin == GlobalFallbackOrigin::Manual)
 }
 
 /// 全局降级执行结果，供命令运行时选择业务响应、内置响应并记录原因。

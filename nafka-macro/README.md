@@ -5,8 +5,19 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["kafka"] }
+nasa = { version = "1.0.3", features = ["kafka"] }
 ```
+
+## 生成与运行架构
+
+```text
+消费函数 + 属性 ──→ 编译期签名校验 ──→ 静态 consumer descriptor
+                                             │
+                                             └─→ nafka / Application 启动与消费
+```
+
+宏只生成类型适配和静态登记；非法参数组合或不支持的函数签名在编译期拒绝。连接、拉取、确认、重试、
+停机和消费指标都由 `nafka` 运行时拥有，宏本身没有运行期状态或独立观测入口。
 
 ```rust
 use nasa::kafka::kafka_consumer;

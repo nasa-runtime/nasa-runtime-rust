@@ -152,6 +152,8 @@ pub(crate) struct KafkaClientCapability {
     readiness: std::sync::RwLock<KafkaReadinessSnapshot>,
     /// Start 注入 proxy、UserHook 安装真实 sink 的内部时序桥。
     metrics: Arc<crate::kafka::KafkaMetricsBridge>,
+    #[cfg(feature = "ws-kafka")]
+    ws_consumer_owner: bool,
 }
 
 #[cfg(feature = "kafka")]
@@ -164,6 +166,7 @@ impl KafkaClientCapability {
     /// - `proxy`：Start 已完成本地构造、尚未启动 consumer 的原始运行时。
     /// - `contributor`：Application readiness registry 为本 client 分配的独占贡献句柄。
     /// - `metrics`：Start 时注入 proxy 的内部可替换指标桥。
+    /// - `_ws_consumer_owner`：WS 子能力是否可独占本 client 的消费登记。
     ///
     /// # 返回
     ///
@@ -173,6 +176,7 @@ impl KafkaClientCapability {
         proxy: nafka::KafkaProxy,
         contributor: crate::readiness::ReadinessContributor,
         metrics: Arc<crate::kafka::KafkaMetricsBridge>,
+        _ws_consumer_owner: bool,
     ) -> Self {
         Self {
             readiness: std::sync::RwLock::new(KafkaReadinessSnapshot {
@@ -184,6 +188,8 @@ impl KafkaClientCapability {
             proxy,
             contributor,
             metrics,
+            #[cfg(feature = "ws-kafka")]
+            ws_consumer_owner: _ws_consumer_owner,
         }
     }
 
@@ -256,8 +262,8 @@ impl KafkaClientCapability {
 
 /// Kafka 组件对业务开放的受控发布、健康和运行控制句柄。
 ///
-/// 句柄不公开原始 `KafkaProxy`、consumer registry、admin 写操作或 shutdown；即使业务长期
-/// 持有它，容器 action 仍能独立完成两段停机。
+/// 句柄不公开原始 `KafkaProxy`、consumer registry、连接入口或 shutdown；producer、admin 与消费
+/// 控制能力都派生自容器已创建的同一 client，即使业务长期持有句柄，容器 action 仍能独立完成两段停机。
 #[cfg(feature = "kafka")]
 #[derive(Clone)]
 pub struct KafkaHandle {
@@ -269,6 +275,21 @@ pub struct KafkaHandle {
 
 #[cfg(feature = "kafka")]
 impl KafkaHandle {
+    /// 业务作用：把关闭权移交给同宿主的 WS 协议 owner，拒绝争用普通消费注册表。
+    /// 参数说明：无。
+    /// 返回：client 显式关闭 collected consumers 时提供内部 proxy；其它配置拒绝。
+    #[cfg(feature = "ws-kafka")]
+    pub(crate) fn ws_runtime_proxy(&self) -> ApplicationResult<nafka::KafkaProxy> {
+        self.ensure_operation_open("ws cluster assembly", true)?;
+        if !self.capability.ws_consumer_owner {
+            return Err(ApplicationError::new(
+                ComponentId::Kafka,
+                ApplicationPhase::Ready,
+                "WS Kafka requires container.consumers=disabled on its named client",
+            ));
+        }
+        Ok(self.capability.proxy.clone())
+    }
     /// 业务作用：从组件私有能力根创建业务句柄。
     ///
     /// # 参数
@@ -298,11 +319,36 @@ impl KafkaHandle {
         self.capability.client_name()
     }
 
+    /// 业务作用：向同一组件内的受管协议适配器暴露 Kafka 已冻结的 DLT 后缀。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：消费端实际按 `<source-topic><suffix>` 持久死信时使用的后缀。
+    #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
+    pub(crate) fn dead_letter_topic_suffix(&self) -> &str {
+        &self
+            .capability
+            .proxy
+            .config()
+            .behavior
+            .dead_letter_topic_suffix
+    }
+
+    /// 业务作用：读取 Kafka 消费端是否把 DLT 持久成功作为前移强制条件。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：死信不可达时保留源 offset 则返回真；可用性优先跳过时返回假。
+    #[cfg(any(feature = "saga-kafka", feature = "saga-kafka-pgsql"))]
+    pub(crate) fn dead_letter_required(&self) -> bool {
+        self.capability.proxy.config().behavior.dead_letter_required
+    }
+
     /// 业务作用：返回 Kafka 能力相对于统一 Application 的当前生命周期。
     ///
-    /// # 返回
+    /// 参数说明：无。
     ///
-    /// Starting/Ready/Draining/Closed/Failed 之一，不暴露 nafka 内部状态机。
+    /// 返回：Starting/Ready/Draining/Closed/Failed 之一，不暴露 nafka 内部状态机。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
         ComponentLifecycleState::from(self.application_state.load())
     }
@@ -1177,6 +1223,86 @@ pub struct NacosDiscoveryHandle {
     application_state: Arc<StateCell>,
 }
 
+/// 服务发现中由框架验证并选出的原生 gRPC endpoint。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcDiscoveredEndpoint {
+    host: String,
+    port: u16,
+    tls_mode: GrpcDiscoveredTlsMode,
+    authority: String,
+}
+
+/// 发现端点声明的 TLS 合同；调用方必须按该模式提供匹配的 client 身份与信任根。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcDiscoveredTlsMode {
+    /// 明文原生 gRPC，仅适用于部署明确允许的网络边界。
+    Disabled,
+    /// 服务端 TLS，客户端必须验证 authority。
+    Server,
+    /// 双向 TLS，客户端还必须提供受信身份。
+    Mutual,
+}
+
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+impl GrpcDiscoveredEndpoint {
+    /// 业务作用：返回 provider 给出的可拨号主机或 IP。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：经过 provider 健康过滤且非空的实例地址。
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// 业务作用：返回 gRPC metadata 中声明的独立端口，不复用 REST 主端口。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：非零的实际 gRPC listener 端口。
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// 业务作用：返回 endpoint 的 TLS 模式，供 client 装配匹配的身份与信任根。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：Disabled、Server 或 Mutual 中的一个封闭值。
+    pub fn tls_mode(&self) -> GrpcDiscoveredTlsMode {
+        self.tls_mode
+    }
+
+    /// 业务作用：返回 TLS SNI/证书校验使用的 authority；元数据未覆盖时使用注册 IP。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不含 scheme、端口和路径的 authority。
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    /// 业务作用：构造 generated client 可直接交给 `nasa::grpc::Endpoint` 的基础 URI。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 TLS 模式选择 `http` 或 `https`，IPv6 地址自动加方括号。
+    pub fn uri(&self) -> String {
+        let scheme = if self.tls_mode == GrpcDiscoveredTlsMode::Disabled {
+            "http"
+        } else {
+            "https"
+        };
+        let host = if self.host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{scheme}://{host}:{}", self.port)
+    }
+}
+
 #[cfg(feature = "nacos-discovery")]
 impl NacosDiscoveryHandle {
     /// 业务作用：从容器共享状态创建服务发现能力句柄。
@@ -1236,6 +1362,66 @@ impl NacosDiscoveryHandle {
         Ok(wants_registration)
     }
 
+    /// 业务作用：向受管协议适配器提供同一次发现查询中的完整实例记录，保持端点和元数据绑定。
+    /// 参数说明：`service` 是受信配置指定的注册服务名。
+    /// 返回：发现中心的健康实例集合；会话已关闭或查询失败时返回错误，不回退到历史地址。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) async fn saga_instances(
+        &self,
+        service: &str,
+    ) -> ApplicationResult<Vec<rest_discovery_nacos::Instance>> {
+        let session = self.session()?;
+        let instances = session
+            .lock()
+            .await
+            .discover_instances(service)
+            .await
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "cannot resolve Saga service instances",
+                    error,
+                )
+            })?;
+        Ok(instances)
+    }
+
+    /// 业务作用：从注册中心选择一条声明原生 gRPC 协议且 endpoint 合同完整的健康实例。
+    ///
+    /// 参数说明：
+    /// - `service`: 注册中心内的服务名，不是 protobuf service full name。
+    ///
+    /// 返回：至少存在一条合法 gRPC endpoint 时返回其地址、端口、TLS 与 authority；查询失败或没有
+    /// 合格实例时返回服务发现错误，绝不把 REST 主端口猜成 gRPC 端口。
+    #[cfg(feature = "grpc")]
+    pub async fn grpc_endpoint(&self, service: &str) -> ApplicationResult<GrpcDiscoveredEndpoint> {
+        let session = self.session()?;
+        let instances = session
+            .lock()
+            .await
+            .discover_instances(service)
+            .await
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "cannot resolve a gRPC service endpoint",
+                    error,
+                )
+            })?;
+        instances
+            .into_iter()
+            .find_map(parse_grpc_endpoint)
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ComponentId::NacosDiscovery,
+                    ApplicationPhase::Running,
+                    "no healthy instance publishes a valid gRPC endpoint",
+                )
+            })
+    }
+
     /// 业务作用：返回与 Application 同源的组件生命周期状态。
     ///
     /// # 参数
@@ -1265,6 +1451,64 @@ impl NacosDiscoveryHandle {
                 )
             })
     }
+}
+
+/// 业务作用：把 provider 的固定 metadata 映射为 typed gRPC endpoint，并拒绝不完整或开放式值域。
+///
+/// 参数说明：
+/// - `instance`: 已通过 provider 健康过滤的服务实例。
+///
+/// 返回：协议、端口、TLS 模式与 authority 均合法时返回 typed endpoint，否则跳过该实例。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+fn parse_grpc_endpoint(instance: rest_discovery_nacos::Instance) -> Option<GrpcDiscoveredEndpoint> {
+    if instance.metadata.get("nasa.grpc.protocol")?.as_str() != "grpc" {
+        return None;
+    }
+    let port = instance.metadata.get("nasa.grpc.port")?.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    let tls_mode = match instance.metadata.get("nasa.grpc.tls_mode")?.as_str() {
+        "disabled" => GrpcDiscoveredTlsMode::Disabled,
+        "server" => GrpcDiscoveredTlsMode::Server,
+        "mutual" => GrpcDiscoveredTlsMode::Mutual,
+        _ => return None,
+    };
+    let authority = instance
+        .metadata
+        .get("nasa.grpc.authority")
+        .map(String::as_str)
+        .filter(|value| valid_grpc_authority(value))
+        .unwrap_or(&instance.ip)
+        .to_owned();
+    if !valid_grpc_authority(&authority) {
+        return None;
+    }
+    Some(GrpcDiscoveredEndpoint {
+        host: instance.ip,
+        port,
+        tls_mode,
+        authority,
+    })
+}
+
+/// 业务作用：限制发现 authority 为单一 DNS/IP 身份，阻止 metadata 注入 scheme、端口或路径。
+///
+/// 参数说明：
+/// - `value`: provider metadata 或实例 IP 中取得的候选 authority。
+///
+/// 返回：长度有界、无首尾空白且不含 URI 分隔符时为 `true`。
+#[cfg(all(feature = "nacos-discovery", feature = "grpc"))]
+fn valid_grpc_authority(value: &str) -> bool {
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !value.is_empty()
+        && value.len() <= 253
+        && value == value.trim()
+        && !value
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b':' | b'?' | b'#' | b'@'))
 }
 
 /// 服务发现组件发布会话但不转移关闭所有权的内部状态。

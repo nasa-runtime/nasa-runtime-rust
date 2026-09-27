@@ -1,0 +1,32 @@
+[package]
+name = "nasaga-runtime-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL durable Saga orchestration with datasource-bound transactions, outbox recovery, and authenticated transports"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["saga", "postgresql", "workflow", "compensation", "microservices"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+anyhow = "1"
+linkme = "0.3"
+nainbox-pgsql = { version = "1.0.0" }
+naoutbox-pgsql = { version = "1.0.0" }
+nasaga-backend = { version = "1.0.0" }
+nasaga-core = { version = "1.0.1" }
+nasaga-pgsql = { version = "1.0.0" }
+nasaga-runtime-core = { version = "1.0.0" }
+natelemetry = { version = "1.0.2" }
+natx-pgsql = { version = "1.0.0" }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
+serde_json = "1"
+
+[features]
+default = []
+kafka = ["nasaga-runtime-core/kafka"]
+redis-stream = ["nasaga-runtime-core/redis-stream"]
+grpc-transport = ["nasaga-runtime-core/grpc-transport"]

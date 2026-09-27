@@ -123,7 +123,7 @@ pub struct FenceMeta {
 /// per-tag init Lua
 /// ①不存在→建 Initializing;②round 相同且字段完整→幂等;③本地 round 更大→拒;
 /// ④输入更大→仅覆盖 Initializing&&counter 全零的旧态(单 tag 简化:覆盖即重建);
-/// ⑤字段残缺→CORRUPT(禁猜值修复)。
+/// ⑤字段残缺→CORRUPT（禁止猜测缺省值）。
 const TAG_INIT_LUA: &str = r#"
 local state = redis.call('HGET', KEYS[1], 'state')
 local round = tonumber(redis.call('HGET', KEYS[1], 'round') or '0')
@@ -523,9 +523,8 @@ pub async fn acquire_stamp(
             "acquire_stamp 被拒: {tag}"
         )));
     }
-    // 数值边界纪律(架构自检订正:原先 unwrap_or 猜值——解析失败静默回退会让
-    // 损坏的 fence state 伪装成合法 stamp):epoch/counter 解析失败、counter 非正、
-    // 超 i64::MAX 一律视为不可恢复协议错误,**不猜值、不 wrapping**。
+    // epoch/counter 解析失败、counter 非正或超 i64::MAX 时拒绝创建 stamp，
+    // 防止损坏的 fence state 经默认值或数值回绕变成合法控制权威。
     let epoch: u64 = match arr.get(1) {
         Some(redis::Value::BulkString(b)) => String::from_utf8_lossy(b).parse().map_err(|_| {
             NasaRedisError::ProtocolMarker(format!(

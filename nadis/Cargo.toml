@@ -1,17 +1,29 @@
-# nadis：对齐既有工具包、cache 与 Redis 五件套公开语义的基础层。
+# nadis：Redis 命令、幂等管线、分布式协作和业务键有序分区消费基础层。
 # 本 crate 提供 client、commands、codec、keytag、显式 PipelineSession、分布式锁、
 # partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
 name = "nadis"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Redis 基础层(client/commands/pipeline/lock;兼容 RedisProxy 五件套)"
+description = "Redis 基础层：业务键有序分区消费、Stream/Proxy 生命周期、有界微批、幂等管线、锁与 RedisJob"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["redis", "stream", "partition", "async", "backpressure"]
+categories = ["asynchronous", "concurrency", "database"]
+readme = "README.md"
+documentation = "https://docs.rs/nadis"
+include = [
+    "src/**/*.rs",
+    "src/**/*.lua",
+    "Cargo.toml",
+    "README.md",
+    "docs/**/*.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "NOTICE",
+]
 
 
 [lib]
@@ -25,17 +37,35 @@ search = []
 # 生成代码根路径经 nasa-macro-support 发现(直依=::nadis/门面=::nasa::redis),
 # 故 derive 蕴含 search;消费者只需依赖 nadis(开 derive),无需直依宏 crate。
 derive = ["dep:nadis-derive", "search"]
+# job：完整分布式任务运行时（调度、执行器注册、租约、Fanout、drain）。
+# 必须显式开启，避免只用基础命令与幂等计数的项目编译 Cron、Fanout 与后台运行时。
+job = ["dep:base64", "dep:cron", "dep:chrono", "dep:chrono-tz", "dep:natelemetry"]
 [dependencies]
-nabase = { package = "nabase", version = "1.0.1" }
-nadis-derive = { package = "nadis-derive", version = "1.0.0", optional = true }
+nabudget = { version = "1.0.2" }
+# Job payload 的稳定 Base64 编码；仅 job feature 启用。
+base64 = { version = "0.22", optional = true }
+# Cron 表达式下一触发时刻计算；仅 job feature 启用（调度器触发引擎）。
+cron = { version = "0.15", optional = true }
+# 触发引擎的时刻与时区运算基座；仅 job feature 启用。
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+# 触发引擎的命名时区解析（如 "UTC"、"Asia/Shanghai"）；仅 job feature 启用。
+chrono-tz = { version = "0.10", optional = true }
+nabase = { package = "nabase", version = "1.0.2" }
+napart = { version = "1.1.2" }
+nadis-derive = { package = "nadis-derive", version = "1.0.1", optional = true }
 redis = { version = "1", features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-# preserve_order：Value 保持字段插入顺序（即结构体声明顺序），省略 null 时不会
-# BTreeMap 字母序重排,维持与 原实现(Jackson 声明序)的 JSON 字节对齐。
+# preserve_order：Value 保持字段插入顺序（即结构体声明顺序），省略 null 后也不会按字母序重排，
+# 从而为摘要、幂等比较和线协议生成稳定 JSON 字节。
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1"
 futures = "0.3"
 tracing = "0.1"
+# 手工触发在环境链路作用域内记录 trace_id 与派生 run_id 的关联；wire 与共享 Lua 不携带 trace。
+natelemetry = { version = "1.0.2", optional = true }
 uuid = { version = "1", features = ["v4"] }
+# nonce 幂等计数的跨语言账本身份与 canonical slot token 摘要；与 Java SHA-256 逐字节一致。
+sha2 = "0.10"
+hex = "0.4"

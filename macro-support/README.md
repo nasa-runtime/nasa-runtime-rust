@@ -8,6 +8,8 @@
 
 - 旧直接依赖优先，例如直接依赖 `natx` 时展开为 `::natx`。
 - 没有旧依赖时回退门面，例如展开为 `::nasa::tx` 或 Cargo 重命名后的 `::company_nasa::tx`。
+- 嵌套门面使用 `runtime_root_nested` 逐段生成路径，例如 PostgreSQL 事务展开到
+  `::nasa::tx::pgsql`，直接依赖仍解析为 `::natx_pgsql`。
 - `naweb-macro` 保留旧布局兼容：直接依赖宏 crate 时仍可走裸 `::axum` / `::linkme` / `::tracing`。
 - 两类依赖都缺时返回错误文案，宏侧转成 `compile_error!`，提示"依赖 `nasa`(features 含对应模块)或直接依赖运行时 crate"——不会 panic，也不会产生难定位的路径错误。
 
@@ -18,6 +20,11 @@
 
 ```rust
 let root = macro_support::runtime_root("tx", "natx")?;
+let pg_root = macro_support::runtime_root_nested(
+    &["tx", "pgsql"],
+    "tx-pgsql",
+    "natx-pgsql",
+)?;
 ```
 
 业务项目不应直接调用本 crate。
@@ -29,7 +36,7 @@ let root = macro_support::runtime_root("tx", "natx")?;
 业务侧需要配置的是 Cargo feature，不是 yml：
 
 ```toml
-nasa = { version = "1.0.0", features = ["tx", "mapper", "cache"] }
+nasa = { version = "1.0.3", features = ["tx", "mapper", "cache"] }
 ```
 
 规则说明：

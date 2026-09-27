@@ -6,7 +6,7 @@
 
 use crate::error::{
     ContractResult, ContractViolation, CODE_TRANSITION_FORWARD_AFTER_COMPENSATION,
-    CODE_TRANSITION_ILLEGAL,
+    CODE_TRANSITION_ILLEGAL, CODE_TRANSITION_MANUAL_CLOSE_UNAUDITED,
 };
 
 /// 业务作用：表示 Saga 实例的业务状态；持久化 CAS 的 `AND status = ?` 只在本集合内迁移。
@@ -30,6 +30,12 @@ pub enum SagaStatus {
     Compensated,
     /// 停止自动推进，等待人工裁决；不伪造任何业务终态。
     ManualIntervention,
+    /// 终态：系统外人工处置完成后由已审计管理动作关闭自动化。
+    ///
+    /// 它只表达"自动化已由人工关闭"这一事实——不声称业务成功（`COMPLETED`）也不声称
+    /// 补偿完成（`COMPENSATED`），未完成的补偿计划仍作为快照保留。唯一入边是
+    /// `MANUAL_INTERVENTION`，且必须携带同事务已写入的管理审计证据。
+    ManuallyClosed,
 }
 
 impl SagaStatus {
@@ -52,6 +58,7 @@ impl SagaStatus {
             Self::Completed => "COMPLETED",
             Self::Compensated => "COMPENSATED",
             Self::ManualIntervention => "MANUAL_INTERVENTION",
+            Self::ManuallyClosed => "MANUALLY_CLOSED",
         }
     }
 
@@ -71,6 +78,7 @@ impl SagaStatus {
             "COMPLETED" => Some(Self::Completed),
             "COMPENSATED" => Some(Self::Compensated),
             "MANUAL_INTERVENTION" => Some(Self::ManualIntervention),
+            "MANUALLY_CLOSED" => Some(Self::ManuallyClosed),
             _ => None,
         }
     }
@@ -79,9 +87,12 @@ impl SagaStatus {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：`Completed` 与 `Compensated` 返回真。
+    /// 返回：`Completed`、`Compensated` 与 `ManuallyClosed` 返回真。
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Compensated)
+        matches!(
+            self,
+            Self::Completed | Self::Compensated | Self::ManuallyClosed
+        )
     }
 
     /// 业务作用：判断该状态下是否仍允许自动发出新的业务命令。
@@ -151,6 +162,10 @@ impl SagaStatus {
             (Self::ManualIntervention, Self::Compensating)
             | (Self::ManualIntervention, Self::Running)
             | (Self::ManualIntervention, Self::WaitingResolution) => true,
+
+            // 系统外处置完成后的人工关闭:唯一通往 MANUALLY_CLOSED 的边。业务前置
+            // (同事务审计证据)由 check_transition 统一施加,不在结构层放行普通触发。
+            (Self::ManualIntervention, Self::ManuallyClosed) => true,
 
             // 终态不可再迁移；其余组合一律视为不变量破坏。
             _ => false,
@@ -249,11 +264,14 @@ impl ControlState {
 /// 业务作用：承载状态迁移的业务前置条件，使结构性合法与业务合法在同一处裁决。
 ///
 /// 字段说明：`any_compensation_succeeded` 表示本实例是否已经真实发生过补偿副作用，
-/// 它决定人工裁决能否把实例送回正向执行。
+/// 它决定人工裁决能否把实例送回正向执行；`manual_close_audited` 表示与本次触发同
+/// 事务的人工关闭审计证据已经落库，它是 `MANUALLY_CLOSED` 唯一入边的放行条件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TransitionGuard {
     /// 是否已有任一步骤补偿成功。
     pub any_compensation_succeeded: bool,
+    /// 本次触发对应的人工关闭审计证据是否已在同一事务内写入。
+    pub manual_close_audited: bool,
 }
 
 impl TransitionGuard {
@@ -266,6 +284,20 @@ impl TransitionGuard {
     pub fn new(any_compensation_succeeded: bool) -> Self {
         Self {
             any_compensation_succeeded,
+            manual_close_audited: false,
+        }
+    }
+
+    /// 业务作用：构造人工关闭迁移的业务前置条件快照。
+    ///
+    /// 参数说明：
+    /// - `audited`: 与本次触发身份一致的人工关闭审计是否已在同一事务内落库。
+    ///
+    /// 返回：可传入 [`check_transition`] 的前置条件值。
+    pub fn manual_close(audited: bool) -> Self {
+        Self {
+            any_compensation_succeeded: false,
+            manual_close_audited: audited,
         }
     }
 }
@@ -305,6 +337,16 @@ pub fn check_transition(
         return Err(ContractViolation::new(
             CODE_TRANSITION_FORWARD_AFTER_COMPENSATION,
             "cannot resume forward execution after a compensation has already succeeded",
+        ));
+    }
+
+    // 人工关闭是持久终态,只表达"系统外处置后由人工关闭自动化"。没有同事务审计证据
+    // 的关闭无法幂等重放、无法归因,也会给自动 worker 打开伪造终态的通道,因此该边
+    // 只接受已落库的管理审计作为放行条件。
+    if to == SagaStatus::ManuallyClosed && !guard.manual_close_audited {
+        return Err(ContractViolation::new(
+            CODE_TRANSITION_MANUAL_CLOSE_UNAUDITED,
+            "MANUALLY_CLOSED requires a same-transaction management audit record",
         ));
     }
 

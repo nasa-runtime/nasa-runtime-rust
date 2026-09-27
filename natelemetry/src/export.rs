@@ -61,6 +61,33 @@ pub struct SpanRecord {
     pub end_unix_nano: u64,
     /// 可选 HTTP 状态码；server span 用于映射 OTLP status。
     pub http_status_code: Option<u16>,
+    /// 有界 span 属性；属性名必须稳定，值不得包含请求正文、凭据或无界对象内容。
+    pub attributes: Vec<SpanAttribute>,
+}
+
+/// 一个可导出的字符串 span 属性。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanAttribute {
+    /// 稳定属性名。
+    pub key: String,
+    /// 已脱敏且有界的属性值；调度时刻等协议规定的数值维度可以逐 span 变化。
+    pub value: String,
+}
+
+impl SpanAttribute {
+    /// 业务作用：构造一个低基数 span 属性，由导出层映射到 OTLP `KeyValue`。
+    ///
+    /// 参数说明：
+    /// - `key`：稳定属性名。
+    /// - `value`：已脱敏且有界的字符串值。
+    ///
+    /// 返回：保留调用方语义的 span 属性；不会在此入口做截断或重命名。
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
 }
 
 /// 一次 span 入队结果。
@@ -131,7 +158,23 @@ impl SpanRecorder {
         Self { exporter }
     }
 
+    /// 业务作用：按 exporter 冻结的新根采样率裁决一条没有上游上下文的链路。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：本次新根应携带 sampled 标志时为 `true`；已有上游上下文不得调用本入口改写其决定。
+    pub fn should_sample_root(&self) -> bool {
+        self.exporter.should_sample_root()
+    }
+
     /// 业务作用：开始一个以 `parent` 为父的 span，并返回用于传播的子上下文与完成 guard。
+    ///
+    /// 参数说明：
+    /// - `name`：低基数 span 名称。
+    /// - `parent`：已冻结采样位的上游上下文。
+    /// - `kind`：导出时使用的 OTLP span 类型。
+    ///
+    /// 返回：持有派生子上下文的 guard；完成或离开作用域时只提交一次。
     pub fn start(
         &self,
         name: impl Into<String>,
@@ -141,10 +184,36 @@ impl SpanRecorder {
         SpanGuard {
             recorder: self.clone(),
             name: Some(name.into()),
-            parent: *parent,
+            parent: Some(*parent),
             context: parent.child(random_span_id()),
             kind,
             start_unix_nano: unix_nanos_now(),
+            attributes: Vec::new(),
+        }
+    }
+
+    /// 业务作用：按 exporter 的冻结 sampler 开始一个没有上游父 span 的新根，并附加稳定属性。
+    ///
+    /// 参数说明：
+    /// - `name`：低基数 span 名。
+    /// - `kind`：OTLP span kind。
+    /// - `attributes`：已脱敏、低基数的属性集合。
+    ///
+    /// 返回：携带本次根上下文的 guard；未采样时仍可传播上下文，但完成时不进入导出队列。
+    pub fn start_root(
+        &self,
+        name: impl Into<String>,
+        kind: SpanKind,
+        attributes: impl IntoIterator<Item = SpanAttribute>,
+    ) -> SpanGuard {
+        SpanGuard {
+            recorder: self.clone(),
+            name: Some(name.into()),
+            parent: None,
+            context: TraceContext::new_root(self.should_sample_root()),
+            kind,
+            start_unix_nano: unix_nanos_now(),
+            attributes: attributes.into_iter().collect(),
         }
     }
 }
@@ -163,10 +232,11 @@ impl std::fmt::Debug for SpanRecorder {
 pub struct SpanGuard {
     recorder: SpanRecorder,
     name: Option<String>,
-    parent: TraceContext,
+    parent: Option<TraceContext>,
     context: TraceContext,
     kind: SpanKind,
     start_unix_nano: u64,
+    attributes: Vec<SpanAttribute>,
 }
 
 impl SpanGuard {
@@ -180,7 +250,12 @@ impl SpanGuard {
         self.export(http_status_code)
     }
 
-    /// 业务作用：取走 span 名并只提交一次完整记录；重复完成按 closed 丢弃处理。
+    /// 业务作用：取走 span 名并只提交一次完整记录；未采样链路只传播，重复完成按 closed 丢弃。
+    ///
+    /// 参数说明：
+    /// - `http_status_code`：可选 HTTP 状态码，供 OTLP status 映射；非 HTTP span 传空。
+    ///
+    /// 返回：入队、未采样、队列满或导出器关闭的稳定结果。
     fn export(&mut self, http_status_code: Option<u16>) -> ExportOutcome {
         let Some(name) = self.name.take() else {
             return ExportOutcome::DroppedClosed;
@@ -192,11 +267,12 @@ impl SpanGuard {
             name,
             trace_id_hex: self.context.trace_id_hex(),
             span_id_hex: self.context.parent_id_hex(),
-            parent_span_id_hex: Some(self.parent.parent_id_hex()),
+            parent_span_id_hex: self.parent.map(|parent| parent.parent_id_hex()),
             kind: self.kind,
             start_unix_nano: self.start_unix_nano,
             end_unix_nano: unix_nanos_now().max(self.start_unix_nano),
             http_status_code,
+            attributes: std::mem::take(&mut self.attributes),
         })
     }
 }

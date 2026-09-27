@@ -5,7 +5,7 @@
 //! Outbox(可靠投递复用 Outbox),与业务写同事务落库、由 dispatcher/CDC 发出,避免"业务成功但
 //! 审计丢失"。
 //!
-//! 本 crate **不依赖 `napp`**;时间由调用方传入(用 `nadate::UtcClock`),context 只放**已脱敏**字段。
+//! 本 crate **不依赖 `napp`**;时间由调用方传入(可使用 `nabase::date::UtcClock`),context 只放**已脱敏**字段。
 
 #![forbid(unsafe_code)]
 

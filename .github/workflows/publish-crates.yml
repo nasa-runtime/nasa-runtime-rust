@@ -12,14 +12,16 @@ on:
           - 2
           - 3
           - 4
+          - naml
+          - napart
           - 5
           - 6
           - 7
           - 8
-          - naml
-          - napart
+          - 9
+          - 10
       confirm:
-        description: "naml 专批输入 publish-naml-1.0.2；napart 专批输入 publish-napart-1.1.1"
+        description: "输入 publish-<batch>，例如 publish-4、publish-naml 或 publish-napart"
         required: true
         type: string
 
@@ -32,7 +34,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NAPART_RELEASE_COMMIT: 965c12245304902269ea5d8534391c5cd5756d30
 
 jobs:
   guard:
@@ -46,17 +47,9 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            naml)
+            naml|napart|1|2|3|4|5|6|7|8|9|10)
               expected_ref="refs/heads/release/1.0.3"
-              expected_confirm="publish-naml-1.0.2"
-              ;;
-            napart)
-              expected_ref="refs/heads/release/1.0.3"
-              expected_confirm="publish-napart-1.1.1"
-              ;;
-            1|2|3|4|5|6|7|8)
-              expected_ref="refs/heads/release/1.0.2"
-              expected_confirm="publish-1.0.2"
+              expected_confirm="publish-${RELEASE_BATCH}"
               ;;
             *)
               echo "未知发布批次: $RELEASE_BATCH" >&2
@@ -80,14 +73,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
-      - name: select immutable napart source
-        if: inputs.batch == 'napart'
-        shell: bash
-        run: |
-          # napart 必须先于门面依赖下限进入 registry；专批从已验收且依赖仍可解析的提交打包。
-          git merge-base --is-ancestor "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA"
-          git diff --exit-code "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA" -- napart
-          git checkout --detach "$NAPART_RELEASE_COMMIT"
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
         with:
           components: clippy,rustfmt
@@ -99,42 +85,8 @@ jobs:
           RELEASE_BATCH: ${{ inputs.batch }}
         shell: bash
         run: |
-          case "$RELEASE_BATCH" in
-            naml)
-              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
-              ;;
-            1)
-              echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
-              ;;
-            2)
-              echo "RELEASE_CRATES=naidempotency nainbox-core naoutbox-core nametrics-core natelemetry" >> "$GITHUB_ENV"
-              ;;
-            3)
-              echo "RELEASE_CRATES=async-macro nacache-macro namapper-macro rest-client-macro nanum" >> "$GITHUB_ENV"
-              ;;
-            4)
-              echo "RELEASE_CRATES=natx nanacos nadis nafka naweb" >> "$GITHUB_ENV"
-              ;;
-            5)
-              echo "RELEASE_CRATES=cacheable hystrix nafana nagrpc naopenapi" >> "$GITHUB_ENV"
-              ;;
-            6)
-              echo "RELEASE_CRATES=naml naaudit-mysql nasaga-macro naidempotency-mysql nasaga-mysql" >> "$GITHUB_ENV"
-              ;;
-            7)
-              echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
-              ;;
-            8)
-              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
-              ;;
-            napart)
-              echo "RELEASE_CRATES=napart" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "未知发布批次: $RELEASE_BATCH" >&2
-              exit 1
-              ;;
-          esac
+          release_crates="$(.github/scripts/release-crates.sh "$RELEASE_BATCH")"
+          echo "RELEASE_CRATES=$release_crates" >> "$GITHUB_ENV"
       - name: verify registry dependency policy
         shell: bash
         run: |
@@ -145,6 +97,12 @@ jobs:
             cargo metadata --locked --no-deps --format-version 1 |
               jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
           )
+      - name: verify previous batches use registry
+        env:
+          RELEASE_BATCH: ${{ inputs.batch }}
+        run: .github/scripts/verify-release-transition.sh "$RELEASE_BATCH"
+      - name: verify release topology
+        run: .github/scripts/verify-release-plan.sh
       - name: verify formatting
         run: cargo fmt --all -- --check
       - name: verify clippy
@@ -166,26 +124,9 @@ jobs:
           scan_root="$RUNNER_TEMP/crate-scan"
           mkdir -p "$scan_root"
           for crate_name in $RELEASE_CRATES; do
+            .github/scripts/verify-release-version.sh "$crate_name"
             cargo package --locked -p "$crate_name"
             version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            case "$crate_name" in
-              naml)
-                expected_version="1.0.2"
-                ;;
-              napart)
-                expected_version="1.1.1"
-                ;;
-              natx|nafka|napp|nasa)
-                expected_version="1.0.2"
-                ;;
-              *)
-                expected_version="1.0.1"
-                ;;
-            esac
-            if [[ "$version" != "$expected_version" ]]; then
-              echo "$crate_name 版本不是 $expected_version: $version" >&2
-              exit 1
-            fi
             archive="target/package/${crate_name}-${version}.crate"
             if [[ ! -f "$archive" ]]; then
               echo "未生成归档: $archive" >&2
@@ -210,6 +151,14 @@ jobs:
               echo "$crate_name 归档包含验证性内容" >&2
               exit 1
             fi
+            if grep -REn --binary-files=without-match '修复|(^|[^[:alnum:]_])[Bb][Uu][Gg]([_-]?[0-9]+)?([^[:alnum:]_]|$)|V[0-9]+[-.][0-9]+|§[0-9]+[-.][0-9]+' "$crate_scan_dir"; then
+              echo "$crate_name 归档包含公开文本禁用表述" >&2
+              exit 1
+            fi
+            if grep -REn --binary-files=without-match '原框架|后续维护|本次补齐|质量活动|质量检查记录|质量检查结果|审查过程|审查记录|复审记录|验收记录|验收结果|发布历史|历次发布|版本沿革|自动化助手|Claude|Codex|ChatGPT|AI助手|AI 助手|大模型生成|临时调试|临时验证|失效路径|((本轮|本次|测试|验收|审查|质量).*(执行结果|执行记录))|((执行结果|执行记录).*(本轮|本次|测试|验收|审查|质量))|((类似|相当于|对标|类比|照搬).*(Spring|Java|Golang|Node\.js|\.NET|Django|Rails))|((Spring|Java|Golang|Node\.js|\.NET|Django|Rails).*(类似|相当于|对标|类比|照搬))' "$crate_scan_dir"; then
+              echo "$crate_name 归档包含内部过程或无关类比" >&2
+              exit 1
+            fi
           done
 
   publish:
@@ -221,56 +170,17 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
-      - name: select immutable napart source
-        if: inputs.batch == 'napart'
-        shell: bash
-        run: |
-          # 发布阶段复验源码未漂移，保证上传内容与 verify 阶段使用同一不可变提交。
-          git merge-base --is-ancestor "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA"
-          git diff --exit-code "$NAPART_RELEASE_COMMIT" "$GITHUB_SHA" -- napart
-          git checkout --detach "$NAPART_RELEASE_COMMIT"
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
+      - name: install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
         shell: bash
         run: |
-          case "$RELEASE_BATCH" in
-            naml)
-              echo "RELEASE_CRATES=naml" >> "$GITHUB_ENV"
-              ;;
-            1)
-              echo "RELEASE_CRATES=macro-support nabase naauthz nabudget nadisc" >> "$GITHUB_ENV"
-              ;;
-            2)
-              echo "RELEASE_CRATES=naidempotency nainbox-core naoutbox-core nametrics-core natelemetry" >> "$GITHUB_ENV"
-              ;;
-            3)
-              echo "RELEASE_CRATES=async-macro nacache-macro namapper-macro rest-client-macro nanum" >> "$GITHUB_ENV"
-              ;;
-            4)
-              echo "RELEASE_CRATES=natx nanacos nadis nafka naweb" >> "$GITHUB_ENV"
-              ;;
-            5)
-              echo "RELEASE_CRATES=cacheable hystrix nafana nagrpc naopenapi" >> "$GITHUB_ENV"
-              ;;
-            6)
-              echo "RELEASE_CRATES=naml naaudit-mysql nasaga-macro naidempotency-mysql nasaga-mysql" >> "$GITHUB_ENV"
-              ;;
-            7)
-              echo "RELEASE_CRATES=config-boot naidempotency-redis namapper rest-discovery nasched" >> "$GITHUB_ENV"
-              ;;
-            8)
-              echo "RELEASE_CRATES=nasaga-runtime naws rest-discovery-nacos napp nasa" >> "$GITHUB_ENV"
-              ;;
-            napart)
-              echo "RELEASE_CRATES=napart" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "未知发布批次: $RELEASE_BATCH" >&2
-              exit 1
-              ;;
-          esac
+          release_crates="$(.github/scripts/release-crates.sh "$RELEASE_BATCH")"
+          echo "RELEASE_CRATES=$release_crates" >> "$GITHUB_ENV"
       - name: publish crates sequentially
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -339,25 +249,7 @@ jobs:
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           for crate_name in $RELEASE_CRATES; do
             version="$(printf '%s' "$metadata" | jq -r --arg name "$crate_name" '.packages[] | select(.name == $name) | .version')"
-            case "$crate_name" in
-              naml)
-                expected_version="1.0.2"
-                ;;
-              napart)
-                expected_version="1.1.1"
-                ;;
-              natx|nafka|napp|nasa)
-                expected_version="1.0.2"
-                ;;
-              *)
-                expected_version="1.0.1"
-                ;;
-            esac
-            if [[ "$version" != "$expected_version" ]]; then
-              echo "$crate_name 版本不是 $expected_version: $version" >&2
-              exit 1
-            fi
-
+            .github/scripts/verify-release-version.sh "$crate_name"
             cargo package --locked -p "$crate_name"
             archive="target/package/${crate_name}-${version}.crate"
             local_checksum="$(sha256sum "$archive" | awk '{print $1}')"
@@ -375,6 +267,7 @@ jobs:
                   verify_existing_archive "$crate_name" "$version" "$archive" "$remote_checksum"
                   echo "$crate_name $version 已发布且内容等价，安全跳过"
                 fi
+                .github/scripts/verify-registry-resolution.sh "$crate_name"
                 continue
                 ;;
               404)
@@ -388,6 +281,7 @@ jobs:
 
             publish_log="$RUNNER_TEMP/${crate_name}-${version}.publish.log"
             publish_attempt=1
+            accepted_checksum="$local_checksum"
             while true; do
               if (( publish_attempt > 1 )); then
                 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
@@ -397,6 +291,8 @@ jobs:
                   if [[ "$remote_checksum" != "$local_checksum" ]]; then
                     verify_existing_archive "$crate_name" "$version" "$archive" "$remote_checksum"
                   fi
+                  # 等价归档可以来自不同提交；回读必须核对已验证的远端字节，不能再套用本地 VCS checksum。
+                  accepted_checksum="$remote_checksum"
                   break
                 fi
                 if [[ "$http_code" != "404" ]]; then
@@ -460,8 +356,10 @@ jobs:
               exit 1
             fi
             remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
-            if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
+            if [[ -z "$remote_checksum" || "$remote_checksum" != "$accepted_checksum" ]]; then
               echo "$crate_name $version 发布后 checksum 不匹配" >&2
               exit 1
             fi
+            # API 可见不代表稀疏索引已经可解析；独立临时工程不继承根级 patch，必须解析到 registry 源。
+            .github/scripts/verify-registry-resolution.sh "$crate_name"
           done

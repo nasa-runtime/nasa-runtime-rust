@@ -1,13 +1,8 @@
 //! 长连接消息中心的协议模型与 wire codec。
 //!
-//! 定义业务消息、鉴权帧、关闭原因、集群事件和多种二进制编码模式。
-// ============================================================================
-// proto —— ProtocolBytes 的 Rust 移植(逐字节兼容 原实现 原工具包)。
-//
-// 手写 VARINT_TLV + BITPACK_TLV codec(由 proto-derive 派生)+ serde 实现的 JSON_BYTES,
-// 覆盖 Message / AuthRequest / AuthResponse / CloseReason / ClusterEvent,
-// FAST_FIXED 按路线图后置(架构说明)。wire 规范见 架构说明 附录 A。
-// ============================================================================
+//! 定义业务消息、鉴权帧、关闭原因、集群事件和多种有界编码模式。VARINT_TLV 与 BITPACK_TLV
+//! 显式控制字段 tag、长度和顺序，JSON_BYTES 通过 serde 属性控制字段名称和缺省值。
+//! FAST_FIXED 只保留稳定 ordinal，当前编解码会返回 `CodecError::Unsupported`。
 
 mod io;
 mod json;
@@ -25,8 +20,7 @@ pub mod __rt {
     pub use crate::json::{from_slice as json_from_slice, to_vec as json_to_vec};
 }
 
-/// 序列化模式。**ordinal 必须与 原实现 `ProtocolBytes.Mode` 一致**:
-/// 它既是 Frame 头部的 mode byte,也是 ClusterEvent.messageMode 的取值。
+/// 序列化模式；ordinal 是稳定线协议字段，同时用于 Frame mode byte 与 ClusterEvent.messageMode。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mode {

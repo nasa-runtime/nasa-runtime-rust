@@ -117,8 +117,9 @@ pub enum CmdState {
 }
 
 /// 业务作用：取 Redis 服务端时间(**毫秒**)——deadline 的唯一时钟基准。
-/// TIME 返回 [秒, 微秒];只取秒位会让同一秒内 elapsed=0,timeout_ms=0/小值的过期判定
-/// 永不触发(实测踩中)→ 毫秒 = 秒*1000 + 微秒/1000。
+/// TIME 返回 [秒, 微秒]，换算时同时使用两部分，保持同秒内毫秒 deadline 的判定精度。
+/// 参数说明：`client` 为提供权威时钟的 Redis 客户端。
+/// 返回：有效服务端时间的毫秒值；格式或网络错误拒绝继续判定 deadline。
 pub(crate) async fn redis_now(client: &Arc<RedisClient>) -> Result<u64> {
     let v: Vec<String> = redis::cmd("TIME").query_async(&mut client.conn()).await?;
     //**fail-closed**——TIME 响应损坏不得静默归零(now=0 会让
@@ -270,8 +271,7 @@ async fn put_result(
     let rkey = result_key(layout, p, operation_id);
     let payload = serde_json::to_string(r).map_err(|e| NasaRedisError::Codec(e.to_string()))?;
     if matches!(r.state, CmdState::Succeeded | CmdState::Rejected) {
-        //终态写 + TTL 必须**原子**(`SET ... EX`)——旧实现 SET 与
-        // EXPIRE 分离,崩在中间会永久保留 result。终态保留 24h(长于 producer 查询窗口)。
+        // 终态与 24 小时 TTL 原子写入，避免崩溃留下无法到期的结果，并覆盖 producer 查询窗口。
         let _: redis::Value = redis::cmd("SET")
             .arg(&rkey)
             .arg(payload.as_str())

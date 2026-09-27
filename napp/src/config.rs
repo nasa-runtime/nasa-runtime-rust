@@ -156,6 +156,8 @@ pub enum ReloadTarget {
     Application,
     /// 由指定内置组件消费的配置。
     Component(ComponentId),
+    /// 由宿主管理但没有独立组件身份的配置段。
+    Managed(Arc<str>),
     /// 由给定稳定名称标识的业务钩子消费的配置。
     UserHook(Arc<str>),
 }
@@ -240,13 +242,21 @@ impl ReloadStatus {
 #[derive(Debug)]
 pub struct ConfigView {
     snapshot: Arc<ConfigSnapshot>,
+    pending_bootstrap: Option<Arc<BootstrapMaterials>>,
+    #[cfg(feature = "secret-http")]
+    pub(crate) http_clients: Arc<std::collections::BTreeMap<String, crate::tls_http::PreparedHttp>>,
     reload_statuses: Arc<HashMap<ReloadTarget, ReloadStatus>>,
     /// 与本代 config 同 generation 的已解析 secret 集合;真实值只在此。
     secrets: Arc<nasecret::SecretSnapshot>,
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    saga_security: Option<Arc<crate::saga::security::SagaSecuritySnapshot>>,
     /// 对**原始**候选树求得的私有 fingerprint,供 reload 无变化判断(不对外)。
     ///
     /// 只有 nacos-config reload 驱动读取它;无该特性的构建仍存储(始终随视图一起构造),故 allow。
-    #[cfg_attr(not(feature = "nacos-config"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "nacos-config", feature = "config-watch")),
+        allow(dead_code)
+    )]
     candidate_fingerprint: [u8; 32],
 }
 
@@ -264,31 +274,14 @@ impl ConfigView {
         let generation = snapshot.version();
         Self {
             snapshot,
+            pending_bootstrap: None,
+            #[cfg(feature = "secret-http")]
+            http_clients: Arc::new(std::collections::BTreeMap::new()),
             reload_statuses: Arc::new(reload_statuses),
             secrets: Arc::new(nasecret::SecretSnapshot::builder(generation).build()),
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            saga_security: None,
             candidate_fingerprint: [0; 32],
-        }
-    }
-
-    /// 业务作用：创建携带同 generation secret 快照的配置视图(secret 已在脱敏前解析)。
-    ///
-    /// # 参数
-    ///
-    /// - `snapshot`：**脱敏后**的配置快照。
-    /// - `reload_statuses`：各目标对该版本的应用状态。
-    /// - `secrets`：同 generation 已解析 secret 集合。
-    /// - `candidate_fingerprint`：对原始候选树求得的私有 fingerprint。
-    pub(crate) fn with_secrets(
-        snapshot: Arc<ConfigSnapshot>,
-        reload_statuses: HashMap<ReloadTarget, ReloadStatus>,
-        secrets: Arc<nasecret::SecretSnapshot>,
-        candidate_fingerprint: [u8; 32],
-    ) -> Self {
-        Self {
-            snapshot,
-            reload_statuses: Arc::new(reload_statuses),
-            secrets,
-            candidate_fingerprint,
         }
     }
 
@@ -301,8 +294,16 @@ impl ConfigView {
         &self.secrets
     }
 
+    /// 业务作用：读取与当前 secret 同代发布的全部 Saga 安全资源。
+    /// 参数说明：无。
+    /// 返回：已准备的凭据快照；初始装配期间为空，由组件持有初始材料。
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) fn saga_security(&self) -> Option<Arc<crate::saga::security::SagaSecuritySnapshot>> {
+        self.saga_security.clone()
+    }
+
     /// 业务作用：返回原始候选树的私有 fingerprint,供 reload 无变化判断。
-    #[cfg(feature = "nacos-config")]
+    #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
     pub(crate) fn candidate_fingerprint(&self) -> [u8; 32] {
         self.candidate_fingerprint
     }
@@ -335,6 +336,29 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
+    /// 业务作用：在既有发布门禁内复验版本、安装运行态并发布同代配置。
+    /// 参数说明：`expected` 为材料准备时版本；`finish` 为只执行同步安装和视图组装的动作。
+    /// 返回：版本仍匹配时执行并发布；版本不符时不调用安装，失败不发布。
+    #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
+    pub(crate) fn publish_with(
+        &self,
+        expected: u64,
+        finish: impl FnOnce() -> crate::ApplicationResult<Arc<ConfigView>>,
+    ) -> crate::ApplicationResult<bool> {
+        let _gate = self
+            .publication_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 先复验再调用安装，避免失去候选权威后仍改变日志运行态。
+        if self.current.load().snapshot().version() != expected {
+            return Ok(false);
+        }
+        let next = finish()?;
+        self.current.store(next.clone());
+        self.updates.send_replace(next);
+        Ok(true)
+    }
+
     /// 业务作用：使用版本 1 视图初始化配置存储和 watch 通道。
     ///
     /// # 参数
@@ -408,12 +432,143 @@ pub(crate) fn resolve_view(
     sources: Vec<ConfigSource>,
     reload_statuses: HashMap<ReloadTarget, ReloadStatus>,
 ) -> Result<Arc<ConfigView>, crate::secret::SecretResolveError> {
+    if crate::secret::requires_async(&raw)? {
+        let tree = crate::secret::redact_structure(&raw)?;
+        let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&raw).map_err(|_| {
+            crate::secret::SecretResolveError::MalformedSpec {
+                id: Arc::from("secrets"),
+                detail: "cannot encode bootstrap candidate".into(),
+            }
+        })?);
+        if encoded.len() > 1024 * 1024 {
+            return Err(crate::secret::SecretResolveError::MalformedSpec {
+                id: Arc::from("secrets"),
+                detail: "bootstrap candidate exceeds 1 MiB".into(),
+            });
+        }
+        let mut view = ConfigView::new(
+            Arc::new(ConfigSnapshot::new(version, tree, sources)),
+            reload_statuses,
+        );
+        view.pending_bootstrap = Some(Arc::new(BootstrapMaterials(encoded)));
+        return Ok(Arc::new(view));
+    }
+    Ok(resolve_candidate(version, raw, sources)?.finish(reload_statuses))
+}
+
+/// 尚未安装的候选材料，不包含临时应用状态，不能被配置订阅者读取。
+pub(crate) struct ResolvedCandidate {
+    pub(crate) snapshot: Arc<ConfigSnapshot>,
+    #[cfg(feature = "secret-http")]
+    http_clients: Arc<std::collections::BTreeMap<String, crate::tls_http::PreparedHttp>>,
+    pub(crate) secrets: Arc<nasecret::SecretSnapshot>,
+    candidate_fingerprint: [u8; 32],
+    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    pub(crate) saga_security: Option<Arc<crate::saga::security::SagaSecuritySnapshot>>,
+}
+
+impl ResolvedCandidate {
+    /// 业务作用：安装完成后把真实目标状态与准备材料组装为完整视图。
+    /// 参数说明：`statuses` 为本次同步安装所得的最终状态表。
+    /// 返回：同代配置、secret、安全资源及 HTTP 客户端实际应用版本构成的不可变视图。
+    pub(crate) fn finish(
+        self,
+        mut statuses: HashMap<ReloadTarget, ReloadStatus>,
+    ) -> Arc<ConfigView> {
+        // HTTP 客户端已随候选完整准备，调用句柄从此视图取资源；初始装配与每次发布共享同一成功代次。
+        // 准备失败的候选不会到达此处，不能提前推进旧视图中的最后成功版本。
+        statuses.insert(
+            ReloadTarget::Managed(Arc::from("http_clients")),
+            ReloadStatus::applied(self.snapshot.version()),
+        );
+        Arc::new(ConfigView {
+            snapshot: self.snapshot,
+            pending_bootstrap: None,
+            #[cfg(feature = "secret-http")]
+            http_clients: self.http_clients,
+            reload_statuses: Arc::new(statuses),
+            secrets: self.secrets,
+            candidate_fingerprint: self.candidate_fingerprint,
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            saga_security: self.saga_security,
+        })
+    }
+}
+
+/// 业务作用：在任何运行态改变之前解析 secret 并保存脱敏后的候选材料。
+/// 参数说明：`version` 为候选代次；`raw` 为原始合并树；`sources` 为输入来源摘要。
+/// 返回：不带应用状态的材料；任一 secret 无法解析时拒绝。
+pub(crate) fn resolve_candidate(
+    version: u64,
+    raw: Value,
+    sources: Vec<ConfigSource>,
+) -> Result<ResolvedCandidate, crate::secret::SecretResolveError> {
     let resolution = crate::secret::resolve_and_redact(&raw, version)?;
-    let snapshot = Arc::new(ConfigSnapshot::new(version, resolution.redacted, sources));
-    Ok(Arc::new(ConfigView::with_secrets(
-        snapshot,
-        reload_statuses,
-        Arc::new(resolution.snapshot),
-        resolution.candidate_fingerprint,
-    )))
+    #[cfg(feature = "secret-http")]
+    let http_clients = crate::tls_http::prepare(&resolution.redacted, &resolution.snapshot)?;
+    Ok(ResolvedCandidate {
+        #[cfg(feature = "secret-http")]
+        http_clients: Arc::new(http_clients),
+        snapshot: Arc::new(ConfigSnapshot::new(version, resolution.redacted, sources)),
+        secrets: Arc::new(resolution.snapshot),
+        candidate_fingerprint: resolution.candidate_fingerprint,
+        #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+        saga_security: None,
+    })
+}
+
+/// 异步引导尚未解析的有界原始材料；只在引导阶段保留且不参与诊断。
+struct BootstrapMaterials(zeroize::Zeroizing<Vec<u8>>);
+impl std::fmt::Debug for BootstrapMaterials {
+    /// 业务作用：禁止配置视图 Debug 输出引导候选明文。
+    /// 参数说明：`formatter` 为调试输出目标。
+    /// 返回：固定隐藏标记。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted bootstrap material>")
+    }
+}
+
+impl ConfigView {
+    /// 业务作用：为首次异步引导借出原始候选，业务 getter 不暴露该材料。
+    /// 参数说明：无。
+    /// 返回：待准备树或无待处理材料；解码失败不给出明文原因。
+    pub(crate) fn bootstrap_candidate(&self) -> crate::ApplicationResult<Option<Value>> {
+        if self.pending_bootstrap.is_none() && self.candidate_fingerprint == [0; 32] {
+            return Ok(Some(self.snapshot.value().clone()));
+        }
+        self.pending_bootstrap
+            .as_ref()
+            .map(|raw| {
+                serde_json::from_slice(&raw.0).map_err(|_| {
+                    crate::ApplicationError::new(
+                        crate::ComponentId::Config,
+                        crate::ApplicationPhase::Bootstrap,
+                        "invalid retained bootstrap candidate",
+                    )
+                })
+            })
+            .transpose()
+    }
+}
+
+/// 业务作用：在宿主预算内准备本地和外部秘密，产物尚不能被订阅者观察。
+/// 参数说明：`version` 为候选代次；`raw` 为原始树；`sources` 为来源摘要。
+/// 返回：全部解析成功后的脱敏材料，失败不产生可发布的部分视图。
+pub(crate) async fn resolve_candidate_async(
+    version: u64,
+    raw: Value,
+    sources: Vec<ConfigSource>,
+) -> Result<ResolvedCandidate, crate::secret::SecretResolveError> {
+    let resolution = crate::secret::resolve_async(&raw, version).await?;
+    #[cfg(feature = "secret-http")]
+    let http_clients = crate::tls_http::prepare(&resolution.redacted, &resolution.snapshot)?;
+    Ok(ResolvedCandidate {
+        #[cfg(feature = "secret-http")]
+        http_clients: Arc::new(http_clients),
+        snapshot: Arc::new(ConfigSnapshot::new(version, resolution.redacted, sources)),
+        secrets: Arc::new(resolution.snapshot),
+        candidate_fingerprint: resolution.candidate_fingerprint,
+        #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+        saga_security: None,
+    })
 }

@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["nacos-sdk"] }
+nasa = { version = "1.0.3", features = ["nacos-sdk"] }
 ```
 
 ## 配置中心拉取
@@ -44,6 +44,9 @@ while rx.changed().await.is_ok() {
     let _ = bundle;
 }
 ```
+
+`required` 引用在配置缺失或拉取失败时立即返回错误。`optional` 只在服务端明确确认配置不存在时
+跳过；鉴权失败、网络中断和协议错误仍会终止本次拉取或刷新，避免把基础设施异常当成正常缺省。
 
 ## 服务注册与下线
 

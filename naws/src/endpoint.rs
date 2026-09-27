@@ -16,7 +16,7 @@ use crate::session::SessionHandle;
 /// endpoint async handler 统一装箱后的 future 类型。
 pub type BoxFut = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-/// 事件处理器。对齐 原实现 sync=true / sync=false 的两种执行语义。
+/// 事件处理器，支持同步返回与异步 future 两种业务执行方式。
 #[derive(Clone)]
 pub enum EventHandler {
     /// 读循环内同步执行:只允许短 CPU 操作,**不可 await/阻塞**。
@@ -107,7 +107,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 业务作用：同步事件(对齐 原实现 sync=true)。事件名重复 / 空 → panic(配置期编程错误,快速失败)。
+    /// 业务作用：同步事件。事件名重复 / 空 → panic(配置期编程错误,快速失败)。
     ///
     /// # 参数
     /// - `event`: endpoint 内注册的业务事件名,用于匹配入站 `Message.events`。
@@ -120,7 +120,7 @@ impl EndpointBuilder {
         self
     }
 
-    /// 业务作用：异步事件(对齐 原实现 sync=false)。`f` 返回一个 future。事件名重复 / 空 → panic。
+    /// 业务作用：异步事件。`f` 返回一个 future。事件名重复 / 空 → panic。
     ///
     ///
     /// # 参数

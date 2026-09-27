@@ -34,6 +34,7 @@ struct OutlierState {
 
 /// 客户端拥有的隔离状态集合。
 pub(crate) struct ResilienceRuntime {
+    admission: Mutex<()>,
     bulkheads: DashMap<String, Arc<Semaphore>>,
     circuits: DashMap<String, Arc<Mutex<CircuitState>>>,
     outliers: DashMap<String, Arc<Mutex<OutlierState>>>,
@@ -43,6 +44,7 @@ impl ResilienceRuntime {
     /// 业务作用：创建空的有界隔离状态集合；状态只会在服务首次调用时按需分配。
     pub(crate) fn new() -> Self {
         Self {
+            admission: Mutex::new(()),
             bulkheads: DashMap::new(),
             circuits: DashMap::new(),
             outliers: DashMap::new(),
@@ -55,9 +57,16 @@ impl ResilienceRuntime {
         service: &str,
         options: &RestResilienceOptions,
     ) -> Result<OwnedSemaphorePermit> {
+        if service.is_empty() || service.len() > 256 {
+            return Err(RestDiscoveryError::ResilienceStateLimit);
+        }
         let semaphore = match self.bulkheads.get(service) {
             Some(existing) => Arc::clone(existing.value()),
             None => {
+                let _admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if self.bulkheads.len() >= MAX_SERVICE_STATES {
                     return Err(RestDiscoveryError::ResilienceStateLimit);
                 }
@@ -87,6 +96,10 @@ impl ResilienceRuntime {
         let state = match self.circuits.get(service) {
             Some(existing) => Arc::clone(existing.value()),
             None => {
+                let _admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if self.circuits.len() >= MAX_SERVICE_STATES {
                     return Err(RestDiscoveryError::ResilienceStateLimit);
                 }
@@ -152,6 +165,10 @@ impl ResilienceRuntime {
         let state = match self.outliers.get(&key) {
             Some(existing) => Arc::clone(existing.value()),
             None => {
+                let _admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if self.outliers.len() >= MAX_OUTLIER_STATES {
                     return;
                 }

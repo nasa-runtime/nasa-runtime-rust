@@ -2,6 +2,51 @@
 
 `namapper` 是声明式 Mapper。业务用 `trait + 属性宏` 声明 SQL，宏生成 `*Client`，运行时基于
 `sqlx` 执行 MySQL SQL，并接入 `natx` / `nasa::tx` ambient 事务和可选二级缓存。
+所有生成方法默认记录低开销的调用与数据库指标，区分缓存命中、连接等待、SQL 执行和流消费；
+与 Application 组合后通过 YAML 控制开发 SQL/参数日志、慢操作与失败日志、有界异步通知及指标出口。
+
+## SQL 观测
+
+同时启用 `application` 和 `mapper` 时自动装配，无需业务 Hook、定时任务或 metrics Router。
+基础采集始终开启，逐条 SQL 与参数输出默认关闭。所有可调策略支持 YAML，省略父级、空对象与只配置
+一个叶子均按递归默认值补齐；覆盖按方法、数据源、全局顺序继承。
+
+```yaml
+sql:
+  observability:
+    console:
+      enabled: true
+      include_parameters: true
+```
+
+上例要求应用明确运行在 `local`、`development`、`dev` 或 `test` 环境；参数名命中凭据语义时强制脱敏，
+未知类型使用占位，不增加 Mapper 参数的必需 trait bound。生产保持参数输出关闭。
+完整字段、默认值、指标口径、覆盖规则和失败边界见
+[后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+通知失败不改变 SQL 返回、事务结果或数据库 readiness；原有 `MapperMetrics` 仍只承担兼容缓存事件。
+
+### 阈值通知的运行路径
+
+宏登记方法身份 → 连接与事务门禁 → SQLx 实际执行 → 原子终态、日志与有界通知入队。
+方法总耗时和 SQL 执行耗时分别记录；缓存命中不增加数据库调用，连接等待、缓存后处理与 Stream
+消费者处理时间不计入慢 SQL 阈值。数据库客户端计时不等于服务端纯执行时间。
+
+业务先通过 `nasa::application::notifications::init` 安装 `Notify`，再开启通知：
+
+```yaml
+sql:
+  observability:
+    slow_sql:
+      threshold_ms: 1000
+    alerts:
+      slow_sql:
+        enabled: true
+        cooldown_ms: 0
+```
+
+原始耗时达到或超过阈值即命中，关闭慢日志仍可通知。默认冷却为 60000 ms，设为 0 后每次命中均尝试
+入队；没有业务实现则忽略，队列满或下游失败可能丢失。worker 统一放行后调用业务实现，HTTP REST、
+gRPC 或其它通知微服务协议均由业务决定，SQL 路径不等待网络发送。
 
 推荐业务项目通过门面 crate 使用：
 
@@ -24,7 +69,7 @@ use nasa::mapper::{Mapper, Query, Insert, Update, Delete, Execute};
 
 - 需要运行时拼任意表名、列名、SQL 片段的场景。`namapper` 明确禁止 `${...}` 和裸 `?`。
 - 跨多个 datasource 的同一个分布式事务。
-- 首版 `StreamQuery` 的动态 SQL、IN 列表或事务内流式读取。
+- `StreamQuery` 的动态 SQL、IN 列表与 `checked` 组合(编译期拒绝)。
 
 ## 安装
 
@@ -32,7 +77,7 @@ use nasa::mapper::{Mapper, Query, Insert, Update, Delete, Execute};
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["mapper"] }
+nasa = { version = "1.0.3", features = ["mapper"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -42,16 +87,19 @@ serde = { version = "1", features = ["derive"] }
 需要 Redis Hash 二级缓存：
 
 ```toml
-nasa = { version = "1.0.0", features = ["mapper-redis-cache"] }
+nasa = { version = "1.0.3", features = ["mapper-redis-cache"] }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 ```
 
 直接依赖 `namapper`：
 
 ```toml
-namapper = { version = "1.0.0" }
-natx = { version = "1.0.0" }
+namapper = { version = "1.0.2" }
+natx = { version = "1.0.3" }
 ```
+
+分页、排序和 Mapper 缓存合同由 `namapper-core` 单点定义，并由 `namapper` 与 `namapper-pgsql` 原名重导出。
+混合 MySQL/PostgreSQL 应用的自定义 L2、codec 与指标实现无需为两个数据库重复实现 trait。
 
 ## 启动初始化
 
@@ -74,8 +122,8 @@ async fn init_db() -> anyhow::Result<()> {
 在 `#[application]` 运行时下，以上装配自动完成，业务入口不再写启动代码：
 
 - 声明 `db` 组件：按 `database` / `datasources.<name>` 配置先单连接探测、再建池，并注入本运行时（等价 `try_init` / `try_init_datasource`）。
-- 声明 `cache` 组件（`nasa` feature 含 `mapper-redis-cache`）：自动安装默认 Mapper L2（`RedisMapperL2Cache`，与 `#[cached]` 的 L2 共用同一条 cluster 连接）。
-- Service 模式在对外提供服务之前自动调用 `assert_l2_cache_installed_for_cached_queries()`：存在 `cache = true` 查询却没有任何 L2 安装路径（组件或启动 Hook 显式装配）时启动失败，而不是生产静默绕过缓存。
+- 声明 `cache` 组件会托管通用两级缓存；Mapper L2 仍由业务在启动 Hook 中显式构造并安装，可复用受管 Redis 连接。
+- Service 模式在对外提供服务之前自动调用 `assert_l2_cache_installed_for_cached_queries()`：存在 `cache = true` 查询但启动 Hook 尚未安装默认 L2 时启动失败，而不是生产静默绕过缓存。
 
 下文的手工装配说明面向不使用应用运行时的项目。
 
@@ -161,7 +209,7 @@ Trait 级 `#[Mapper(...)]`：
 | `typed_cache_codec` | `Query` | 方法级强类型 codec |
 | `flush_cache` | 全部 | 写操作默认 `true`，Query 默认 `false` |
 | `flush_refs` | 全部 | 是否展开 `clear_also` / `clear_when` |
-| `tx` | 非 StreamQuery | `"auto"` 或 `"mandatory"`，`"never"` 首版不支持 |
+| `tx` | 非 StreamQuery | `"auto"`、`"mandatory"` 或 `"never"`(拒绝在 ambient 事务内执行) |
 | `datasource` | 全部 | 覆盖 trait 级 datasource |
 | `strict_params` | 全部 | 覆盖 trait 级严格参数检查 |
 | `checked` | 静态 Query | 使用 `sqlx::query!` / `query_as!` 编译期校验 |
@@ -612,7 +660,7 @@ impl UserService {
 async fn find_for_update(&self, id: i64) -> anyhow::Result<UserRow>;
 ```
 
-`tx = "mandatory"` 在无事务调用时返回 Err。`tx = "never"` 首版不支持。
+`tx = "mandatory"` 在无事务调用时返回 Err。`tx = "never"` 在 ambient 事务内调用时于取连接前返回 Err——供副作用不允许随外层事务回滚的语句(如自治审计写)把违规调用显式暴露。
 
 ## 场景 21：多数据源
 
@@ -654,7 +702,7 @@ async fn find_archive(&self, id: i64) -> anyhow::Result<Option<UserRow>>;
 
 ## 场景 22：Query 二级缓存
 
-当前 `Mapper` trait 默认 `cache = true`，但只有注入 L2 cache 后才会真正读写缓存；没有注入时会绕过缓存查库。生产建议启动时调用 `assert_l2_cache_installed_for_cached_queries()`，防止以为启用了缓存但实际没有安装；`#[application]` 运行时的 Service 模式会在就绪前自动执行该断言，声明 `cache` 组件即自动安装默认 L2。
+当前 `Mapper` trait 默认 `cache = true`，但只有注入 L2 cache 后才会真正读写缓存；没有注入时会绕过缓存查库。生产建议启动时调用 `assert_l2_cache_installed_for_cached_queries()`，防止以为启用了缓存但实际没有安装；`#[application]` 运行时的 Service 模式会在就绪前自动执行该断言，但不会构造或安装默认 L2，业务必须在启动 Hook 中显式完成装配。
 
 > **事务内缓存必须显式 opt-in**：`cache = true` 的 `Query` 在普通无事务场景读写 L2；在 `#[transactional]` ambient 事务内默认绕过 L2，避免把未提交视图写入共享缓存。业务确认某个查询在事务内也可以读写 L2 时，显式写 `cache_in_tx = true`。事务内需要读实时/未提交数据、行锁、或不想污染共享缓存的方法继续写 `cache = false`（`FOR UPDATE` / 行锁查询见场景 20）。写操作的失效仍在 commit 后执行、rollback 不清。
 
@@ -711,7 +759,7 @@ fn install_default_cache(cache: Arc<dyn nasa::mapper::MapperL2Cache>) -> anyhow:
 
 ## 场景 23：Redis Hash 二级缓存
 
-打开 `mapper-redis-cache` feature 后可使用内置 Redis Hash cache。Redis key 是 Mapper `key`，Hash field 是 `sql:{normalized_sql}:...`。`#[application]` 运行时下声明 `cache` 组件即自动完成本场景的安装，无需手写以下代码。
+打开 `mapper-redis-cache` feature 后可使用内置 Redis Hash cache。Redis key 是 Mapper `key`，Hash field 是 `sql:{normalized_sql}:...`。`#[application]` 运行时也要求在启动 Hook 中显式完成以下装配；`cache` 组件只负责通用缓存与 Redis 生命周期，不推断 Mapper 缓存策略。
 
 ```rust
 use std::sync::Arc;
@@ -1055,7 +1103,7 @@ trait UserProfileMapper {
 
 ## 场景 30：枚举 ordinal
 
-对齐历史 `EnumIntegerHandler` 的 ordinal 语义。
+枚举持久化采用稳定 ordinal 语义。
 
 ```rust
 #[derive(Copy, Clone, Debug, PartialEq, Eq, nasa::mapper::MapperEnum)]
@@ -1102,7 +1150,13 @@ trait OrderMapper {
 
 ## 场景 31：StreamQuery
 
-首版 `StreamQuery` 只支持静态 SQL、标量 bind、无动态标签、无 IN 列表、无缓存、无事务参数。返回 `MapperStream<T>`。
+`StreamQuery` 只支持静态 SQL、标量 bind、无动态标签、无 IN 列表、无缓存、无事务参数。返回 `MapperStream<T>`。
+
+事务边界：`#[transactional]` ambient 事务**外**由生成代码持有 datasource 池连接；ambient
+事务**内**的流走事务连接——本事务未提交的写入对流可见，且不再要求整个结果集
+驻留内存。事务内的流持有事务连接的槽锁直到被消费完或丢弃：流存活期间同一事务不得发出其它语句
+(与"不要同时持有两个 conn 句柄"同一合同)；未释放就返回事务体会在提交门禁处得到
+"transaction connection is still held at commit" 的显式失败，而不是静默卡死。
 
 ```rust
 #[nasa::mapper::Mapper(key = "user_stream", cache = false)]
@@ -1157,9 +1211,11 @@ trait UserMapper {
 let mapper = UserRepository::new();
 ```
 
-## 场景 34：Mapper 指标（可观测）
+## 场景 34：兼容缓存事件指标
 
-Mapper 在缓存相关路径会发出指标事件。实现 `MapperMetrics` 可接入 Prometheus、日志或诊断探针，用 `set_default_mapper_metrics` 进程级安装一次即可（`record` 内部应避免 panic 和长阻塞）。
+`MapperMetrics` 仅接收缓存事件，不是 SQL 基础指标或慢通知的安装入口。SQL 观测自动采集，无需实现
+该 trait。需要额外消费缓存事件时，用 `set_default_mapper_metrics` 进程级安装一次即可，`record`
+内部应避免 panic 和长阻塞。
 
 ```rust
 use std::sync::Arc;

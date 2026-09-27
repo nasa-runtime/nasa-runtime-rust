@@ -2,14 +2,26 @@
 
 `naws` 是通用长连接框架，覆盖 TCP/WebSocket/socket.io 兼容层、NASA wire codec、endpoint/handler 抽象、鉴权、背压、心跳、优雅关闭，以及可选的 Redis Stream 或 Kafka 集群 transport。它不包含业务逻辑，业务通过 endpoint 注册事件处理。
 
+原生 TCP `Client` 也可单独用于出站连接：Application 的 `ws-client` feature 按名称拥有首连认证、
+统一启动许可、重连健康和全部连接子任务的退出责任，无需入站 listener。Service 与 Batch 均可发送，
+协议与生命周期边界见[出站 Client](#原生-tcp-client-与-application)。
+
 业务项目通过门面开启 `ws`：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["ws"] }
+nasa = { version = "1.0.3", features = ["ws"] }
 ```
 
 ## 服务端
+
+启用 `application,ws` 并声明 `#[nasa::application("ws")]` 时，通过 `app.configure_ws` 提交鉴权与
+endpoint 定制，由组件统一拥有监听、会话排空和关闭。业务一次性收尾可在 UserHook 使用
+`register_graceful_shutdown`；其执行晚于入站会话收口，不能再依靠这些会话发送必须成功的最后一条消息，
+也不应重复关闭受管 server。确有最终通知需求时，应放在会话自身的可确认协议或排空合同中。
+
+以下为独立服务端装配，调用方持有 `RunningServer` 并负责显式等待有预算的关闭；不要与受管组件同时
+创建相同 listener。
 
 ```rust
 use nasa::ws::{AuthResult, Endpoint, Server};
@@ -109,10 +121,9 @@ let server = nasa::ws::Server::builder()
 - **空目标列表 = 不发给任何节点,不是广播。** `publish_to(&[])`(以及元素全为空串的列表)在 wire 上
   编成"存在但为空"的 target 列表,接收端一律不投递。只有 `target_nodes` **缺省**才表示广播。
   否则"发给零个节点"会退化成"发给所有节点",路由原语失败开放。
-- **incarnation 接收侧限长 20 位十进制。** `Incarnation::from_epoch` 的 `{epoch:020}` 契约此前只在
-  构造侧成立,接收侧不校验。一条携带 39 位巨值 incarnation 的事件会把该 node id 的围栏顶到天花板,
-  此后真实节点的全部事件都因 incarnation 更小被静默拒绝,而 tombstone 按设计永不过期——
-  恢复要重启**所有对端**进程。现在超长值在解析期即判非法。
+- **incarnation 接收侧只接受 1 至 20 位 ASCII 十进制正数。** `Incarnation::from_epoch` 使用
+  `{epoch:020}` 生成固定宽度文本。接收端在更新 fence 前拒绝超长值，防止异常大值永久抬高
+  节点围栏并持续拒绝正常事件；tombstone 不依靠过期回收。
 
 ## 背压与安全
 
@@ -205,7 +216,7 @@ Redis 集群广播是 at-most-once 语义，适合 presence 对账、订阅状�
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.0", features = ["ws-kafka"] }
+nasa = { version = "1.0.3", features = ["ws-kafka"] }
 # 生产使用 SASL_SSL 时再加 "kafka-tls"；使用 Zstd 时再加 "kafka-zstd"。
 ```
 
@@ -427,5 +438,59 @@ handler 即使已经调用 `ack()`，之后返回 `Err`/panic/timeout 时，本�
 
 实现落点：`sender.rs` 负责一次 frame 物化和共享 outbox backing allocation；`wire.rs` 负责
 borrowed/owned 编码一致性；`nafka/src/consumer/passthrough.rs` 的公开生命周期合同限制 borrowed record
-不能逃逸 poll 回调。真实 broker 的 raw/empty/tombstone、commit、assignment 和故障场景由仓库外验证
-工作区覆盖，不进入产品发布包。
+不能逃逸 poll 回调。
+
+## Application 接入
+
+Application 用 `configure_ws_redis` 或 `configure_ws_kafka` 绑定来源组件、节点与显式 `Incarnation`，
+框架装配集群依赖并管理退出。`Incarnation` 的持久单调性由部署方保证；Kafka 来源不能同时启用
+collected consumers，避免两个消费 owner 竞争同一来源。
+
+`bind_suspended` 可先绑定端口，统一 Ready 后 `activate` 才处理连接，启动失败不会提前接流。
+健康任务与 listener 共用停机 owner；SIGTERM 和主动关闭都先撤销准入，等待 listener 与集群任务
+退出后才释放来源。端口已绑定不能作为业务就绪的依据。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
+## 原生 TCP Client 与 Application
+
+`Client` 使用 NASA 原生 TCP 帧协议；WebSocket/socket.io 属于服务端能力，Client 不接受 ws/wss URL。
+门面组合 `application,ws-client` 后，以 `ws_clients.<name>` 显式启用，无需入站 listener。
+Service 在 UserHook 调用 `configure_ws_client_event`，框架完成首连认证并在 Ready 后放行业务回调；
+Batch 可取得 `app.ws_client(name).await` 发送句柄，不登记长期回调。
+Service 的发送、回调与宿主任务共用一次启动许可，公开 Ready 时无需再等待监控激活。
+关键连接在 Ready 发布前失去认证则拒绝启动；运行期断连或重连时为 NotReady，重新认证后恢复。
+可选连接断连时为 Degraded；关键 owner 退出触发停机。健康包含协议检测和周期采样间隔。
+配置、健康和容量见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#纯出站-tcp-帧客户端)。
+
+### 出站运行架构
+
+```text
+ws_clients + 同代认证材料 → Prepare 首连与 AUTH → 等待宿主启动许可
+        → Service 发送与回调 / Batch 发送
+        → 断连撤销连接事实 → 等待旧 writer、heartbeat → 重连与重新认证
+关闭 → 拒绝发送与重新连接 → 等待 supervisor、writer、heartbeat 全部退出
+```
+
+首连超时或认证失败拒绝启动；运行期重连不会重放业务消息。Ready 前的连接保护只覆盖本地已观察
+到的认证与任务事实，不承诺同步检测网络隔离。关闭与状态发布串行，晚到认证不能重新开放旧句柄。
+
+独立 Client 可使用 `capacity(queue_capacity, max_frame_bytes)` 与 `start_suspended()`；默认立即允许
+业务分发。暂停激活期间最多保留 64 条业务帧，合计正文不超过单帧限制，控制帧持续处理，超限断线。
+多个入口需要共同开放时可传入 `activation_barrier(token)`，token 的取消表示发布许可；仅由宿主
+取消该信号，不逐项调用 `activate()`。`with_authenticated_connection` 可在本地认证事实的保护范围
+内提交短小同步的宿主状态；闭包不能阻塞、重入客户端或执行业务，不证明远端此刻存活。
+`connect()` future 被丢弃或外层超时会取消首连；TCP 与 AUTH 使用同一连接超时。
+每次重连先等待旧 writer、heartbeat 退出，再发布新连接。无 PONG 超过两个心跳周期会关闭本连接；
+周期为服务端 timeout 的一半，至少 1 秒，未提供 timeout 时为 30 秒。
+
+`close()` 只请求关闭；`wait_closed()` / `close_and_wait()` 等待 supervisor、writer、heartbeat
+全部退出后才释放再次 connect 的门禁。`active_tasks()` 是任务存活数，`callback_failures()` 记录被隔离的
+回调 panic。回调必须同步且不阻塞；阻塞回调会延迟整个连接退出。
+执行器销毁时也由各任务 future 的释放守卫归还责任，收尾 owner 与连接任务全部释放后才清除
+会话并解除运行门禁；这类中断记录 `Disconnected`，不表示排队消息已经送达。
+`observation()` 分开给出认证、PONG 的最近间隔与固定失败类别，正常对端关闭、认证拒绝、读写、
+协议、心跳、容量和回调异常不会混成一个 connected 标志。初始没有 PONG 时保持 None，不能用认证
+成功替代心跳证据；历史失败保留到下一次失败，重新认证不会清除已有故障事实。
+`send_message()` 的帧限制含 type/mode，返回 true 仅表示本地有界队列接受；关闭、断线可丢弃排队消息，
+不保证远端收到或执行。认证 token 固定到本次配置，不支持自动轮换、透明重发或 TLS。

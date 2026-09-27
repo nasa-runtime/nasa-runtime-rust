@@ -1,491 +1,416 @@
-//! NASA Saga 运行时：Orchestrator 推进引擎与参与方 adapter 支撑。
+//! NASA Saga 运行时：可恢复的 Orchestrator、参与方事务 adapter 与 transport 裁决。
 //!
 //! 职责边界：`nasaga-core` 是纯裁决，`nasaga-mysql` 是持久化与 CAS，
 //! 本 crate 把二者组装成可运行的推进引擎——创建、结果推进、durable timer、有界重试、
-//! 崩溃恢复（durable timer + at-least-once Outbox 天然承担）与管理命令。宿主层
-//! （`napp` 托管组件）负责把 Kafka 消费循环、timer 轮询循环接到这里，本 crate 不
+//! 崩溃恢复（durable timer + at-least-once Outbox 天然承担）、租户治理与管理命令。宿主层
+//! （`napp` 托管组件）负责把所选 transport 消费循环、timer 轮询循环接到这里，本 crate 不
 //! 自行 `tokio::spawn` 任何无限循环。
+//!
+//! # 端到端架构
+//!
+//! Orchestrator 在一个本地事务内提交结果 Inbox、实例 CAS、attempt/transition、durable timer
+//! 与下一 command Outbox；参与方在自己的本地事务内提交 command Inbox、gate、业务事实与
+//! result Outbox。两端通过至少一次 transport 连接，`effect_id` 跨重投稳定，重复由 Inbox 和
+//! 目标业务幂等键吸收。进程崩溃后由数据库事实恢复，不依赖内存队列续跑。
+//!
+//! Kafka 与 Redis Streams feature 提供完整消费裁决；HTTP 入口提供认证/重放构件；gRPC feature
+//! 提供框架 generated command/result client/server、mTLS leaf principal 绑定与封闭收据。Application
+//! 入站计划把 service 自动登记进唯一 `nagrpc` registry；独立宿主仍显式拥有 listener、deadline 与
+//! drain。`TraceContext` 只作为已验证的显式输入传播，不读取 ambient 状态，也不是投递前置条件。
+//!
+//! # 受管可靠 client
+//!
+//! `napp` 为 client 角色构造远程发起入口：业务事实与 start-intent 使用
+//! `saga.client.datasource_ref` 对应 MySQL 事务，dispatcher 固定扫描同一库。显式
+//! `outbox.datasource_ref` 不一致时在 Ready 前拒绝；省略该字段不改变绑定。事务内追加成功不等于
+//! 外层提交成功，本地已受理也不等于远端完成；远端不可用或收据丢失时保持原事件身份重投。
 //!
 //! # 能力范围与明确不承诺
 //!
 //! - Orchestration、带不可变版本的严格串行步骤、MySQL store、Outbox/Inbox 可靠通道；
-//! - transport 层 producer 认证（topic-to-owner/端到端签名）与 quarantine 在 Kafka
-//!   接入层落地，本层假定 envelope 已通过认证，但仍做**身份复验**（派生比对）兜底；
+//! - transport 层 producer 认证（topic-to-owner、mTLS 或端到端签名）在 connector
+//!   边界落地，本层仍做**身份复验**（派生比对）兜底；
 //! - 公开保证只能是"本地 ACID + Outbox 至少一次 + Inbox 幂等 + 持久化状态机与显式
 //!   补偿 = 最终一致性"；不承诺物理 exactly-once、跨服务 ACID 或并发 Saga 隔离性。
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod envelope;
-mod management;
-mod observability;
-mod orchestrator;
+mod backend;
+mod catalog;
 mod participant;
-mod registry;
-mod timers;
-mod transaction;
-#[cfg(feature = "kafka")]
-mod transport;
-mod transport_auth;
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-stream",
+    feature = "grpc-transport"
+))]
+mod transport_shared;
 
-pub use envelope::{
-    derive_result_event_id, SagaCommandEnvelope, SagaResultEnvelope, VerifiedIdentity,
-    COMMAND_EVENT_TYPE, RESULT_EVENT_TYPE, SAGA_AGGREGATE_TYPE,
+pub use backend::{MySqlSagaBackend, MySqlSagaTransactionRunner};
+pub use catalog::{
+    acknowledge_catalog_generation_for, activate_definition_for,
+    activate_definition_with_operation_for, catalog_generation_fully_acknowledged_for,
+    deprecate_definition_for, deprecate_definition_with_operation_for, load_definition_for,
+    load_dynamic_catalog_for, publish_definition_for, register_capability_for,
+    retire_catalog_replica_for, retire_definition_with_operation_for,
 };
-pub use management::{SagaAuditTrail, SagaManagementContext, SagaManagementPermission};
-pub use observability::SagaOperationalMetrics;
-pub use orchestrator::{
-    HandleOutcome, Orchestrator, OrchestratorConfig, StartOutcome, StartSagaRequest, TimerOutcome,
+pub use nasaga_backend::SagaInstanceRow;
+pub use nasaga_runtime_core::{
+    derive_result_event_id, select_capability_route, select_capability_routes,
+    validate_capability_route_contract, validate_redis_stream_route, CapabilityDescriptor,
+    CapabilityReceipt, DefinitionActivationGate, DefinitionArtifact, DefinitionCatalogError,
+    DefinitionLifecycle, DefinitionLifecycleOperation, DefinitionPublishDisposition,
+    DefinitionRecord, DynamicCatalogSnapshot, HandleOutcome, OrchestratorConfig,
+    RegisteredCapability, SagaAuditPage, SagaAuditPageCursor, SagaAuditRecord, SagaAuditTrail,
+    SagaCommandEnvelope, SagaConcurrencyError, SagaManagementContext, SagaManagementError,
+    SagaManagementExpectation, SagaManagementPermission, SagaOperationalMetrics,
+    SagaResultEnvelope, StartOutcome, StartSagaError, StartSagaRequest, TenantActionRate,
+    TimerOutcome, VerifiedIdentity, COMMAND_EVENT_TYPE, RESULT_EVENT_TYPE, SAGA_AGGREGATE_TYPE,
 };
-pub use transport_auth::{
-    render_saga_http_command_dlt_metric, SagaHttpMessageAuthError, SagaHttpMessageAuthFailure,
-    SagaHttpMessageAuthenticator, SagaHttpReplayGuard, SagaHttpReplayMetricAggregate,
-    SagaHttpReplayMetrics, SagaHttpReplayPlane, SagaHttpSignedMessage,
+pub use nasaga_runtime_core::{
+    render_saga_latency_metrics, saga_latency_snapshot, SagaLatencySnapshot, SAGA_LATENCY_BUCKETS,
+};
+pub use nasaga_runtime_core::{SagaPayload, SagaPayloadContract, SagaPayloadError};
+/// 既有 MySQL Orchestrator 入口；全部状态裁决由 `nasaga-runtime-core` 执行。
+pub type Orchestrator = nasaga_runtime_core::Orchestrator<MySqlSagaBackend>;
+/// 既有 MySQL Participant 入口；业务代码不需要增加泛型参数。
+pub type ParticipantRuntime = nasaga_runtime_core::ParticipantRuntime<MySqlSagaBackend>;
+/// 既有已认证 MySQL Participant 能力视图。
+pub type AuthenticatedParticipantRuntime<'a> =
+    nasaga_runtime_core::AuthenticatedParticipantRuntime<'a, MySqlSagaBackend>;
+pub use nasaga_runtime_core::{
+    render_saga_http_command_dlt_metric, SagaHttpCredentialSource, SagaHttpCredentials,
+    SagaHttpMessageAuthError, SagaHttpMessageAuthFailure, SagaHttpMessageAuthenticator,
+    SagaHttpReplayGuard, SagaHttpReplayMetricAggregate, SagaHttpReplayMetrics, SagaHttpReplayPlane,
+    SagaHttpSignedMessage,
 };
 
-/// 业务作用：把 Participant command 处理错误映射为 transport 可执行的重试或隔离动作。
-///
-/// command 没有 Orchestrator `PAUSED` 延后语义；本地事务未提交只能有界重试，来源、身份或
-/// 合同错误则立即进入 durability-first DLT，绝不能占用 Participant Inbox。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandDeliveryDisposition {
-    /// 本地事务未提交，保留 Kafka offset 做有预算重投。
-    Retry,
-    /// COMMIT/回滚结果需要持续重投收敛，保留 offset 且不消耗 DLT 预算。
-    Defer,
-    /// 消息违反不可恢复的来源、身份或步骤合同，应进入 DLT。
-    DeadLetter,
-}
-
-// 枚举、线协议原因码、反向解析和脱敏文本必须从同一声明生成；新增错误类型时禁止接收端白名单漏改。
-macro_rules! define_saga_command_processing_errors {
-    (
-        $(
-            $(#[$variant_meta:meta])*
-            $variant:ident => ($reason:literal, $display:literal)
-        ),+ $(,)?
-    ) => {
-        /// 业务作用：用封闭类型标记 Saga command 的不可恢复投递错误，禁止 transport 解析错误文本。
-        ///
-        /// 未带本标记的数据库、事务与业务 `Retryable` 错误一律按瞬态错误处理；只有 transport
-        /// 身份入口、宏生成的精确步骤门禁和 payload codec 可以构造这些稳定结论。
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[non_exhaustive]
-        pub enum SagaCommandProcessingError {
-            $(
-                $(#[$variant_meta])*
-                $variant,
-            )+
-        }
-
-        /// 业务作用：公布 HTTP/Kafka connector 共同接受的全部稳定 command DLT 原因码。
-        ///
-        /// 接收端不得复制一份字符串 `match`；应调用
-        /// [`SagaCommandProcessingError::from_dead_letter_reason`] 完成封闭解析。
-        pub const SAGA_COMMAND_DEAD_LETTER_REASONS: &[&str] = &[$($reason),+];
-
-        impl SagaCommandProcessingError {
-            /// 业务作用：返回可安全写入 DLT header、HTTP 正文和低基数日志的稳定原因码。
-            ///
-            /// 参数说明: 无。
-            ///
-            /// 返回：不包含 envelope、payload 或底层错误细节的原因码。
-            pub const fn dead_letter_reason(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $reason,)+
-                }
-            }
-
-            /// 业务作用：把 connector 收到的原因码反向解析为封闭协议错误，拒绝未知文本控制 DLT。
-            ///
-            /// 参数说明：
-            /// - `reason`: HTTP 正文或 DLT header 中未经信任的候选原因码。
-            ///
-            /// 返回：精确命中已发布白名单时返回对应错误类型；大小写、空白或未知值返回 `None`。
-            pub fn from_dead_letter_reason(reason: &str) -> Option<Self> {
-                match reason {
-                    $($reason => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
-        }
-
-        impl std::fmt::Display for SagaCommandProcessingError {
-            /// 业务作用：输出稳定、脱敏的 command 错误分类，供事务回滚链和运维日志识别。
-            ///
-            /// 参数说明：
-            /// - `formatter`: 标准格式化输出目标。
-            ///
-            /// 返回：分类文本写入成功返回 `Ok`，底层格式化失败返回对应错误。
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str(match self {
-                    $(Self::$variant => $display,)+
-                })
-            }
-        }
-
-        impl std::error::Error for SagaCommandProcessingError {}
-    };
-}
-
-define_saga_command_processing_errors! {
-    /// transport 认证出的 producer 不在 Participant 冻结的 Orchestrator 信任表中。
-    ProducerUnauthorized => (
-        "saga_command_producer_unauthorized",
-        "saga command producer is unauthorized"
-    ),
-    /// envelope 自报身份、派生身份或编码不合法。
-    IdentityInvalid => (
-        "saga_command_identity_invalid",
-        "saga command identity is invalid"
-    ),
-    /// command topic 未获授权承载 envelope 指向的 workflow/version/step。
-    RouteUnauthorized => (
-        "saga_command_route_unauthorized",
-        "saga command route is unauthorized"
-    ),
-    /// phase、取消能力或业务 payload 违反已发布步骤合同。
-    ContractInvalid => (
-        "saga_command_contract_invalid",
-        "saga command contract is invalid"
-    ),
-}
-
-/// 业务作用：限制同一 Kafka command 的瞬态重试次数，避免故障业务或数据库长期阻塞分区。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandDeliveryPolicy {
-    /// 普通失败可重投的最大序号；下一次普通失败自动升级为 `DeadLetter`。
-    pub max_retries: u32,
-}
-
-impl Default for CommandDeliveryPolicy {
-    /// 业务作用：提供有界的默认命令重投预算，避免单条故障消息无限阻塞分区。
-    ///
-    /// 参数说明：无。
-    ///
-    /// 返回：最多允许十六次普通失败重投的策略。
-    fn default() -> Self {
-        Self { max_retries: 16 }
-    }
-}
-
-impl CommandDeliveryPolicy {
-    /// 业务作用：结合本次普通失败预算序号给出 command 最终投递动作。
-    ///
-    /// 参数说明：
-    /// - `error`: Participant command 处理错误。
-    /// - `retry_attempt`: `ConsumeCtx` 的普通失败预算序号，从 1 开始。
-    ///
-    /// 返回：类型化不可恢复错误立即隔离；普通错误在预算内重试，超预算
-    /// 进入 DLT；COMMIT/回滚关键阶段始终 `Defer`。
-    pub fn decide(self, error: &anyhow::Error, retry_attempt: u32) -> CommandDeliveryDisposition {
-        let disposition = classify_command_delivery_error(error);
-        if disposition == CommandDeliveryDisposition::Retry && retry_attempt > self.max_retries {
-            CommandDeliveryDisposition::DeadLetter
-        } else {
-            disposition
-        }
-    }
-}
-
-/// 业务作用：为 Saga command hosted consumer 提供稳定的 Retry/DLT 分类。
-///
-/// 参数说明：
-/// - `error`: transport 身份门禁或 Participant 事务返回的错误。
-///
-/// 返回：类型化来源、身份与合同错误进入 `DeadLetter`；不可 ACK 的事务阶段
-/// 进入无 DLT 预算 `Defer`；任意其它错误保守进入有预算 `Retry`。
-pub fn classify_command_delivery_error(error: &anyhow::Error) -> CommandDeliveryDisposition {
-    if command_dead_letter_reason(error).is_some() {
-        CommandDeliveryDisposition::DeadLetter
-    } else if error.chain().any(|cause| {
-        cause
-            .downcast_ref::<SagaTransactionError>()
-            .is_some_and(|error| error.requires_unbounded_redelivery())
-    }) {
-        CommandDeliveryDisposition::Defer
-    } else {
-        CommandDeliveryDisposition::Retry
-    }
-}
-
-/// 业务作用：从完整错误链中提取可安全跨 transport 传播的 command DLT 原因码。
-///
-/// HTTP、Kafka 与其它 connector 必须复用这一个封闭分类，避免同一确定性协议错误在不同通道中
-/// 分别退化成无限重试或依赖错误文本的脆弱判定。
-///
-/// 参数说明：
-/// - `error`: Participant command 处理返回的完整错误链。
-///
-/// 返回：命中 [`SagaCommandProcessingError`] 时返回稳定、低基数原因码；事务或业务瞬态错误返回
-/// `None`，由 transport 保留原消息并执行有界重试。
-pub fn command_dead_letter_reason(error: &anyhow::Error) -> Option<&'static str> {
-    error.chain().find_map(|cause| {
-        cause
-            .downcast_ref::<SagaCommandProcessingError>()
-            .map(|error| error.dead_letter_reason())
-    })
-}
-
-/// 业务作用：把 Orchestrator 结果处理错误映射为 transport 层可执行的投递动作。
-///
-/// 宿主 Kafka consumer 必须依据该分类决定延后、重试或进入 DLT；ACK 只由成功的
-/// [`HandleOutcome`] 驱动，错误分支没有推断提交成功的权限。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultDeliveryDisposition {
-    /// 本地事务未提交，保留 Kafka offset 做有预算重投。
-    Retry,
-    /// 控制态暂不允许消费，保留 Kafka offset 且不消耗毒消息预算。
-    Defer,
-    /// 消息违反不可恢复的协议合同，应保留原文后进入 DLT。
-    DeadLetter,
-}
-
-/// 业务作用：用封闭类型标记 Saga result 的可信投递分类，禁止 transport 解析错误文本
-/// 决定 offset 是否前移。
-///
-/// 未带本标记的数据库、事务和未知错误一律按有预算瞬态错误处理；只有协议入口和暂停
-/// 门禁可以构造这些稳定结论。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SagaResultProcessingError {
-    /// 实例处于 `PAUSED`，恢复后必须继续处理同一结果，不能因等待时间进入 DLT。
-    Paused,
-    /// transport 认证出的 producer 无权为目标步骤作证。
-    ProducerUnauthorized,
-    /// envelope 自报身份、派生身份或编码不合法。
-    IdentityInvalid,
-    /// envelope 与固定实例/definition 的封闭合同不一致。
-    ContractInvalid,
-}
-
-impl SagaResultProcessingError {
-    /// 业务作用：返回可安全写入 DLT header 和低基数日志的稳定原因码。
-    ///
-    /// 参数说明: 无。
-    ///
-    /// 返回：暂停态没有 DLT 原因码；协议错误返回不含 envelope 或底层错误细节的原因码。
-    pub fn dead_letter_reason(self) -> Option<&'static str> {
-        match self {
-            Self::Paused => None,
-            Self::ProducerUnauthorized => Some("saga_result_producer_unauthorized"),
-            Self::IdentityInvalid => Some("saga_result_identity_invalid"),
-            Self::ContractInvalid => Some("saga_result_contract_invalid"),
-        }
-    }
-}
-
-impl std::fmt::Display for SagaResultProcessingError {
-    /// 业务作用：输出稳定、脱敏的错误分类，供事务回滚链和运维日志识别。
-    ///
-    /// 参数说明：
-    /// - `formatter`: 标准格式化输出目标。
-    ///
-    /// 返回：分类文本写入成功返回 `Ok`，底层格式化失败返回对应错误。
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Paused => "saga result processing deferred while instance is paused",
-            Self::ProducerUnauthorized => "saga result producer is unauthorized",
-            Self::IdentityInvalid => "saga result identity is invalid",
-            Self::ContractInvalid => "saga result contract is invalid",
-        })
-    }
-}
-
-impl std::error::Error for SagaResultProcessingError {}
-
-/// 业务作用：限制同一 Kafka 消息的瞬态重试次数，避免单条故障消息形成无限重试风暴。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResultDeliveryPolicy {
-    /// 普通失败可重投的最大序号；下一次普通失败自动升级为 `DeadLetter`。
-    pub max_retries: u32,
-}
-
-impl Default for ResultDeliveryPolicy {
-    /// 业务作用：提供有界的默认结果重投预算，同时保留提交不确定分支的持续收敛语义。
-    ///
-    /// 参数说明：无。
-    ///
-    /// 返回：最多允许十六次普通失败重投的策略。
-    fn default() -> Self {
-        Self { max_retries: 16 }
-    }
-}
-
-impl ResultDeliveryPolicy {
-    /// 业务作用：结合当前普通失败预算序号给出最终投递动作。
-    ///
-    /// 参数说明：
-    /// - `error`: Saga 结果处理错误。
-    /// - `retry_attempt`: `ConsumeCtx` 中排除 `HandlerDeferred` 的本次普通失败预算序号，从 1 开始。
-    ///
-    /// 返回：未超过预算时保留基础分类；超过预算的瞬态错误进入 DLT；`Defer` 不消耗
-    /// 毒消息预算，确保长时间暂停不会改变业务投递语义。
-    pub fn decide(self, error: &anyhow::Error, retry_attempt: u32) -> ResultDeliveryDisposition {
-        let disposition = classify_result_delivery_error(error);
-        if disposition == ResultDeliveryDisposition::Retry && retry_attempt > self.max_retries {
-            ResultDeliveryDisposition::DeadLetter
-        } else {
-            disposition
-        }
-    }
-}
-
-/// 业务作用：为 Saga 结果消费宿主提供稳定的 ACK/重试/DLT 分类。
-///
-/// 参数说明：
-/// - `error`: `handle_result` 返回的错误。
-///
-/// 返回：类型化协议错误进入 `DeadLetter`；暂停进入不受毒消息预算影响的 `Defer`；
-/// 其余错误（包括任意文本相同的外部错误）都保守进入有预算 `Retry`。
-pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDisposition {
-    if error.chain().any(|cause| {
-        cause
-            .downcast_ref::<SagaTransactionError>()
-            .is_some_and(|error| error.requires_unbounded_redelivery())
-    }) {
-        return ResultDeliveryDisposition::Defer;
-    }
-    let classified = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<SagaResultProcessingError>().copied());
-    match classified {
-        Some(SagaResultProcessingError::Paused) => ResultDeliveryDisposition::Defer,
-        Some(
-            SagaResultProcessingError::ProducerUnauthorized
-            | SagaResultProcessingError::IdentityInvalid
-            | SagaResultProcessingError::ContractInvalid,
-        ) => ResultDeliveryDisposition::DeadLetter,
-        None => ResultDeliveryDisposition::Retry,
-    }
-}
-
-pub use nasaga_mysql::{TimerFencingToken, TimerFencingTokenIssuer};
-pub use participant::{
-    AuthenticatedParticipantRuntime, ParticipantCommandTrust, ParticipantHandled,
-    ParticipantRuntime, SagaCommandService,
+pub use nasaga_runtime_core::{
+    classify_command_delivery_error, classify_result_delivery_error, command_dead_letter_reason,
+    CommandDeliveryDisposition, CommandDeliveryPolicy, ResultDeliveryDisposition,
+    ResultDeliveryPolicy, SagaCommandProcessingError, SagaResultProcessingError,
+    SAGA_COMMAND_DEAD_LETTER_REASONS,
 };
-pub use registry::DefinitionRegistry;
-pub use timers::{
-    derive_timer_id, KIND_CANCEL_TIMEOUT, KIND_COMPENSATE_TIMEOUT,
+
+// 检索查询/摘要与 fencing 类型同为公开管理面输入输出,经本 crate 统一再导出。
+pub use nasaga_mysql::{
+    validate_saga_instance_query, SagaInstanceQuery, SagaInstanceQueryParameterError,
+    SagaInstanceSummary, TimerFencingToken, TimerFencingTokenIssuer, SAGA_INSTANCE_TIME_MAX_MS,
+    SAGA_INSTANCE_TIME_MIN_MS,
+};
+// 链路上下文的公开类型:发起入口与 transport 收据以它显式传递 trace,宏展开也经本
+// 重导出引用,避免业务/宏直接依赖 natelemetry 坐标。
+pub use nasaga_core::ServiceIdentity;
+pub use nasaga_runtime_core::{
+    derive_scheduled_business_key, derive_timer_id, DefinitionRegistry, ParticipantCommandTrust,
+    ParticipantHandled, SagaTransactionError, ScheduledBatchReport, ScheduledBatchSpec,
+    ScheduledItem, KIND_CANCEL_TIMEOUT, KIND_COMPENSATE_TIMEOUT,
     KIND_COMPENSATION_RESOLUTION_BUDGET, KIND_FORWARD_RESOLUTION_BUDGET, KIND_INSTANCE_DEADLINE,
     KIND_RESOLUTION_BUDGET, KIND_RESOLVE_TIMEOUT, KIND_STEP_TIMEOUT,
 };
-pub use transaction::SagaTransactionError;
 #[cfg(feature = "kafka")]
-pub use transport::{
-    ParticipantCommandHandler, SagaCommandHandler, SagaCommandRoute, SagaKafkaCommandConsumer,
-    SagaKafkaCommandConsumerConfig, SagaKafkaResultConsumer, SagaKafkaResultConsumerConfig,
-    SagaResultHandler,
+pub use nasaga_runtime_core::{
+    SagaCommandRoute, SagaKafkaCommandConsumer, SagaKafkaCommandConsumerConfig,
+    SagaKafkaResultConsumerConfig,
+};
+pub use natelemetry::TraceContext;
+pub use participant::SagaCommandService;
+/// 既有 MySQL Kafka result consumer；默认 handler 保持为 MySQL Orchestrator。
+#[cfg(feature = "kafka")]
+pub type SagaKafkaResultConsumer<H = Orchestrator> =
+    nasaga_runtime_core::SagaKafkaResultConsumer<H>;
+#[cfg(feature = "grpc-transport")]
+pub use nasaga_runtime_core::{
+    grpc_proto, orchestrator_proto, outbox_disposition_of, SagaGrpcBindingError,
+    SagaGrpcCommandServer, SagaGrpcCommandTransportService, SagaGrpcPeerBinding,
+    SagaGrpcPeerIdentity, SagaGrpcReceipt, SagaGrpcResultServer, SagaGrpcResultTransportService,
+};
+#[cfg(feature = "redis-stream")]
+pub use nasaga_runtime_core::{
+    publisher_duplicate_hints_total, safe_trim_by_group_frontier, stream_group_backlog,
+    verify_stream_transport_ready, SagaRedisStreamCommandConsumer, SagaRedisStreamPublisher,
+    SagaRedisStreamResultConsumer, SagaStreamAuth, SagaStreamConsumerConfig, SagaStreamPoller,
+    SagaStreamVerificationKey, StreamPollReport,
+};
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-stream",
+    feature = "grpc-transport"
+))]
+pub use nasaga_runtime_core::{SagaCommandHandler, SagaResultHandler};
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-stream",
+    feature = "grpc-transport"
+))]
+pub use transport_shared::ParticipantCommandHandler;
+
+pub use nasaga_runtime_core::{
+    collect_workflow_definitions, verify_descriptors, SagaStepDescriptor, SagaWorkflowDescriptor,
+    COLLECTED_SAGA_STEPS, COLLECTED_SAGA_WORKFLOWS,
 };
 
-use nasaga_core::{CancelMode, Compensation, ResolutionMode};
+/// 业务作用：为受管 transport 擦除具体业务 Service 类型，同时保留 MySQL Participant 的事务提交边界。
+pub trait ManagedSagaCommandHandler: Send + Sync + 'static {
+    /// 业务作用：把已认证命令交给宏生成的精确步骤适配器。
+    ///
+    /// 参数说明：
+    /// - `envelope`: 已通过路径、签名和 producer 门禁的命令。
+    /// - `producer`: 从受信凭据映射出的 Orchestrator 身份。
+    /// - `receipt_trace`: 收据携带的可选链路上下文。
+    ///
+    /// 返回：参与方本地事务提交后返回可确认结论；未提交时返回错误。
+    fn handle<'a>(
+        &'a self,
+        envelope: &'a SagaCommandEnvelope,
+        producer: &'a ServiceIdentity,
+        receipt_trace: Option<&'a TraceContext>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<ParticipantHandled>> + Send + 'a>,
+    >;
+}
 
-/// 业务作用：`#[saga]` 宏为每个本地步骤生成的静态 descriptor。
-///
-/// descriptor 只描述**本地** handler 的合同投影，不能充当全局 workflow definition；
-/// 启动预检把它与注册表中的 definition 对齐，不一致时拒绝 Ready。
-#[derive(Debug, Clone, Copy)]
-pub struct SagaStepDescriptor {
+/// 业务作用：描述一个允许 managed 模式构造的本地步骤 Service 工厂。
+#[derive(Clone, Copy)]
+pub struct ManagedSagaStepFactory {
     /// workflow 名称。
     pub workflow: &'static str,
     /// definition 版本。
     pub definition_version: u32,
     /// 步骤名称。
     pub step: &'static str,
-    /// 业务 Service 类型名，用于诊断与资源容器解析。
-    pub service_type: &'static str,
-    /// 是否可补偿；与 definition 的 `Compensation` 声明比对。
-    pub compensation: Compensation,
-    /// 取消形态；与 definition 的 `CancelMode` 声明比对。
-    pub cancel_mode: CancelMode,
-    /// 是否允许返回 `Unknown`；与 definition 的 `ResolutionSpec` 比对。
-    pub allow_unknown: bool,
-    /// 本地托管的解决能力；`Some(Poll)` 表示 descriptor 同时绑定类型化查询 handler。
-    pub resolution_mode: Option<ResolutionMode>,
-    /// 源码位置（file:line），用于重复/漂移诊断。
+    /// 多数据源参与方使用的本地事务域绑定；单数据源参与方保持为空。
+    pub binding: Option<&'static str>,
+    /// 使用已冻结 Participant runtime 构造类型擦除 handler。
+    pub factory:
+        fn(std::sync::Arc<ParticipantRuntime>) -> std::sync::Arc<dyn ManagedSagaCommandHandler>,
+    /// 声明位置，仅用于 Ready 冲突定位。
     pub source: &'static str,
 }
 
-/// 本 binary 内 `#[saga]` 收集到的全部本地 step descriptor。
-///
-/// `linkme` 只能收集当前 binary 的本地 handler，不能跨部署发现完整业务链——
-/// 全局 definition 始终由 Orchestrator 注册表持有。
+/// 当前二进制中显式允许受管构造的全部 MySQL 步骤工厂。
 #[linkme::distributed_slice]
-pub static COLLECTED_SAGA_STEPS: [SagaStepDescriptor];
+pub static COLLECTED_MANAGED_SAGA_STEPS: [ManagedSagaStepFactory];
 
-/// 业务作用：校验本 binary 收集的 descriptor 集合自洽，并与注册表中的 definition 对齐。
+/// 业务作用：把 `Default` 构造的业务 Service 与 MySQL Participant runtime 绑定为受管 handler。
 ///
-/// 拒绝：同一 `(workflow, version, step)` 重复注册（两个 handler 抢同一步骤）；
-/// descriptor 引用的 definition 已注册但步骤缺失或合同字段漂移（补偿能力、取消形态、
-/// `allow_unknown` 不一致）。definition 未注册的 descriptor 允许存在——参与方 binary
-/// 可能只托管步骤而不托管 Orchestrator，其对齐由受信 contract projection 分发承担。
+/// 参数说明：`runtime` 持有同源本地事务能力，`service` 是宏声明的业务步骤实现。
 ///
-/// 参数说明：
-/// - `registry`: definition 注册表。
-///
-/// 返回：全部一致返回 `Ok`；任一冲突返回携带步骤定位的错误，调用方拒绝 Ready。
-pub fn verify_descriptors(registry: &DefinitionRegistry) -> anyhow::Result<()> {
-    let mut seen = std::collections::BTreeSet::new();
-    for descriptor in COLLECTED_SAGA_STEPS {
-        let key = (
-            descriptor.workflow,
-            descriptor.definition_version,
-            descriptor.step,
-        );
-        // 同一 binary 内同一步骤只允许一个 handler:两个实现会对同一命令产生
-        // 两份互相竞争的业务效果。
-        if !seen.insert(key) {
-            anyhow::bail!(
-                "duplicate #[saga] step `{}` v{} `{}` (second registration at {})",
-                descriptor.workflow,
-                descriptor.definition_version,
-                descriptor.step,
-                descriptor.source
-            );
-        }
-        let workflow =
-            nasaga_core::WorkflowName::new(descriptor.workflow).map_err(|violation| {
-                anyhow::anyhow!("bad descriptor workflow: {}", violation.code())
-            })?;
-        let version = nasaga_core::DefinitionVersion::new(descriptor.definition_version)
-            .map_err(|violation| anyhow::anyhow!("bad descriptor version: {}", violation.code()))?;
-        let Some(definition) = registry.get(&workflow, version) else {
-            continue;
-        };
-        let step = nasaga_core::StepName::new(descriptor.step)
-            .map_err(|violation| anyhow::anyhow!("bad descriptor step: {}", violation.code()))?;
-        let Some(step_def) = definition.step(&step) else {
-            anyhow::bail!(
-                "descriptor step `{}` is absent from workflow `{}` v{} ({})",
-                descriptor.step,
-                descriptor.workflow,
-                descriptor.definition_version,
-                descriptor.source
-            );
-        };
-        // descriptor 与 definition 漂移必须在 Ready 前失败,不能等运行期毒消息暴露。
-        if step_def.compensation() != descriptor.compensation
-            || step_def.cancel_mode() != descriptor.cancel_mode
-            || step_def.resolution().allow_unknown() != descriptor.allow_unknown
-            || step_def.resolution().mode() != descriptor.resolution_mode
-        {
-            anyhow::bail!(
-                "descriptor contract drift on step `{}` of `{}` v{} ({})",
-                descriptor.step,
-                descriptor.workflow,
-                descriptor.definition_version,
-                descriptor.source
-            );
-        }
+/// 返回：不暴露具体 Service 类型的共享 handler。
+#[doc(hidden)]
+pub fn managed_saga_step_handler<S>(
+    runtime: std::sync::Arc<ParticipantRuntime>,
+    service: S,
+) -> std::sync::Arc<dyn ManagedSagaCommandHandler>
+where
+    S: SagaCommandService,
+{
+    std::sync::Arc::new(ManagedSagaCommandHandlerAdapter { runtime, service })
+}
+
+/// 业务作用：保存受管 MySQL Participant runtime 与单个类型化业务 Service。
+struct ManagedSagaCommandHandlerAdapter<S> {
+    runtime: std::sync::Arc<ParticipantRuntime>,
+    service: S,
+}
+
+impl<S> ManagedSagaCommandHandler for ManagedSagaCommandHandlerAdapter<S>
+where
+    S: SagaCommandService,
+{
+    /// 业务作用：经宏生成适配器执行完整 Inbox、gate、业务事实与结果 Outbox 事务序。
+    ///
+    /// 参数说明：
+    /// - `envelope`: 已认证命令。
+    /// - `producer`: 受信 Orchestrator 身份。
+    /// - `receipt_trace`: 可选链路上下文。
+    ///
+    /// 返回：本地提交明确时返回可确认结论，否则返回错误并保留源事件。
+    fn handle<'a>(
+        &'a self,
+        envelope: &'a SagaCommandEnvelope,
+        producer: &'a ServiceIdentity,
+        receipt_trace: Option<&'a TraceContext>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<ParticipantHandled>> + Send + 'a>,
+    > {
+        Box::pin(self.service.handle_saga_command_traced(
+            &self.runtime,
+            envelope,
+            producer,
+            receipt_trace,
+        ))
     }
+}
+
+/// 业务作用：在指定 MySQL 事务域中建立并复验 Orchestrator 独占的 Saga、result Inbox 与 command Outbox 持久结构。
+///
+/// 参数说明：`datasource` 是 Application 已冻结的 MySQL datasource qualifier。
+///
+/// 返回：全部结构可用时成功；连接、DDL 或最终结构门禁失败时返回错误。
+pub async fn ensure_orchestrator_schema_for(datasource: &str) -> anyhow::Result<()> {
+    let mut lock_connection = acquire_schema_lock(datasource).await?;
+    nasaga_mysql::MySqlSagaStore::ensure_schema_on_connection(&mut lock_connection).await?;
+    nainbox_mysql::MySqlInbox::ensure_schema_on_connection(&mut lock_connection).await?;
+    naoutbox_mysql::MySqlOutbox::ensure_schema_on_connection(&mut lock_connection).await?;
+    ensure_http_replay_schema(&mut lock_connection).await?;
+    catalog::ensure_schema(&mut lock_connection).await?;
+    release_schema_lock(&mut lock_connection).await?;
     Ok(())
 }
 
-/// 宏展开专用的内部再导出；业务代码不得直接使用。
+/// 业务作用：在指定 MySQL 事务域中建立并复验 participant gate、command Inbox 与 result Outbox 持久结构。
+///
+/// 参数说明：`datasource` 是 participant binding 唯一绑定的 MySQL datasource qualifier。
+///
+/// 返回：全部本地事务结构可用时成功；任一结构不可用时返回错误。
+pub async fn ensure_participant_schema_for(datasource: &str) -> anyhow::Result<()> {
+    let mut lock_connection = acquire_schema_lock(datasource).await?;
+    nasaga_mysql::MySqlSagaStore::ensure_participant_schema_on_connection(&mut lock_connection)
+        .await?;
+    nainbox_mysql::MySqlInbox::ensure_schema_on_connection(&mut lock_connection).await?;
+    naoutbox_mysql::MySqlOutbox::ensure_schema_on_connection(&mut lock_connection).await?;
+    ensure_http_replay_schema(&mut lock_connection).await?;
+    release_schema_lock(&mut lock_connection).await?;
+    Ok(())
+}
+
+/// 业务作用：在角色事务域中建立跨副本共享的 HTTP nonce 一次性裁决表。
+///
+/// 参数说明：`connection` 是持有当前 database schema 自举锁的连接。
+///
+/// 返回：表与过期索引可用时成功；DDL 权限或结构冲突返回错误并阻止 Ready。
+async fn ensure_http_replay_schema(connection: &mut natx::Conn) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS nasa_saga_http_replay_claim (\
+             producer VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\
+             nonce CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\
+             expires_at_ms BIGINT NOT NULL,\
+             claimed_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),\
+             PRIMARY KEY (producer, nonce),\
+             INDEX idx_nasa_saga_http_replay_expiry (expires_at_ms)\
+         ) ENGINE=InnoDB",
+    )
+    .execute(connection.as_mut())
+    .await?;
+    let valid_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() \
+         AND table_name = 'nasa_saga_http_replay_claim' AND is_nullable = 'NO' AND (\
+           (column_name = 'producer' AND column_type = 'varchar(128)' AND collation_name = 'ascii_bin') OR \
+           (column_name = 'nonce' AND column_type = 'char(32)' AND collation_name = 'ascii_bin') OR \
+           (column_name = 'expires_at_ms' AND column_type = 'bigint') OR \
+           (column_name = 'claimed_at' AND column_type = 'timestamp(6)'))",
+    )
+    .fetch_one(connection.as_mut())
+    .await?;
+    let table_valid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() \
+         AND table_name = 'nasa_saga_http_replay_claim' AND engine = 'InnoDB' \
+         AND table_collation = @@collation_database",
+    )
+    .fetch_one(connection.as_mut())
+    .await?;
+    let primary_columns: Option<String> = sqlx::query_scalar(
+        "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') \
+         FROM information_schema.statistics WHERE table_schema = DATABASE() \
+         AND table_name = 'nasa_saga_http_replay_claim' AND index_name = 'PRIMARY' \
+         AND non_unique = 0 GROUP BY index_name",
+    )
+    .fetch_optional(connection.as_mut())
+    .await?;
+    let expiry_columns: Option<String> = sqlx::query_scalar(
+        "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') \
+         FROM information_schema.statistics WHERE table_schema = DATABASE() \
+         AND table_name = 'nasa_saga_http_replay_claim' \
+         AND index_name = 'idx_nasa_saga_http_replay_expiry' GROUP BY index_name",
+    )
+    .fetch_optional(connection.as_mut())
+    .await?;
+    anyhow::ensure!(
+        valid_columns == 4
+            && table_valid == 1
+            && primary_columns.as_deref() == Some("producer,nonce")
+            && expiry_columns.as_deref() == Some("expires_at_ms"),
+        "Saga HTTP replay schema contract is invalid"
+    );
+    Ok(())
+}
+
+/// 业务作用：在共享 MySQL 事务域中原子占用已验真的 producer/nonce，阻止其它副本再次受理同一请求。
+///
+/// 参数说明：
+/// - `datasource`: 接收角色唯一绑定的数据源。
+/// - `producer`: 已通过 HMAC 的逻辑发送方。
+/// - `nonce`: 已通过格式与时间窗校验的一次性值。
+/// - `now_ms`: 接收端当前 Unix 毫秒。
+/// - `expires_at_ms`: 本 claim 必须保留到的时间边界。
+///
+/// 返回：首次占用返回真；时间窗内重复返回假；数据库失败返回错误且不得进入业务处理。
+pub async fn claim_http_replay_for(
+    datasource: &str,
+    producer: &str,
+    nonce: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<bool> {
+    let mut connection = natx::conn_for(datasource).await?;
+    // 过期证据只影响容量，不影响正确性；有界清理避免请求路径一次删除无上限历史行。
+    sqlx::query(
+        "DELETE FROM nasa_saga_http_replay_claim WHERE expires_at_ms < ? ORDER BY expires_at_ms LIMIT 256",
+    )
+    .bind(now_ms)
+    .execute(connection.as_mut())
+    .await?;
+    let result = sqlx::query(
+        "INSERT IGNORE INTO nasa_saga_http_replay_claim (producer, nonce, expires_at_ms) VALUES (?, ?, ?)",
+    )
+    .bind(producer)
+    .bind(nonce)
+    .bind(expires_at_ms)
+    .execute(connection.as_mut())
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// 业务作用：在目标 MySQL database 范围内取得跨进程 schema 自举互斥权，使多副本 DDL 串行化。
+///
+/// 参数说明：`datasource` 是已冻结的 MySQL qualifier。
+///
+/// 返回：三十秒内取得 database 级 named lock 时返回持锁连接；超时或连接失败时返回错误。
+async fn acquire_schema_lock(datasource: &str) -> anyhow::Result<natx::Conn> {
+    let mut connection = natx::conn_for(datasource).await?;
+    // 会话锁从请求发出起就可能已在服务端生效；把连接预先置为丢弃态，确保任务取消、
+    // DDL 失败或解锁结果不确定时通过物理断连释放权威，不把持锁会话归还连接池。
+    connection.close_on_drop()?;
+    // MySQL 把 named lock 限制为 64 字节；database 名可占满自身上限，因此以稳定摘要
+    // 保留逐库互斥域，避免合法长库名绕过后续结构门禁。
+    let acquired: Option<i64> =
+        sqlx::query_scalar("SELECT GET_LOCK(CONCAT('nasa:saga:', MD5(DATABASE())), 30)")
+            .fetch_one(connection.as_mut())
+            .await?;
+    anyhow::ensure!(acquired == Some(1), "Saga schema lock is unavailable");
+    Ok(connection)
+}
+
+/// 业务作用：在全部结构复验成功后显式释放 MySQL schema 自举权。
+///
+/// 参数说明：`connection` 是取得 named lock 的同一 session。
+///
+/// 返回：服务端确认释放时成功；丢失持有权或往返失败时返回错误。
+async fn release_schema_lock(connection: &mut natx::Conn) -> anyhow::Result<()> {
+    let released: Option<i64> =
+        sqlx::query_scalar("SELECT RELEASE_LOCK(CONCAT('nasa:saga:', MD5(DATABASE())))")
+            .fetch_one(connection.as_mut())
+            .await?;
+    anyhow::ensure!(released == Some(1), "Saga schema lock ownership was lost");
+    Ok(())
+}
+
+/// 宏展开专用的内部再导出；业务代码不应直接使用。
+#[doc(hidden)]
 pub mod __private {
     pub use anyhow;
     pub use linkme;
     pub use nasaga_core as core;
+    pub use nasaga_runtime_core as runtime_core;
 }

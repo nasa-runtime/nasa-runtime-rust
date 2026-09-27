@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["config-boot", "nacos-sdk"] }
+nasa = { version = "1.0.3", features = ["config-boot", "nacos-sdk"] }
 ```
 
 ## 启动期加载
@@ -150,6 +150,22 @@ if bootstrap.nacos.enabled {
 ```
 
 热刷新时继续复用同一 import 顺序：`nacos_refs_for_bootstrap` 生成监听列表，`watch_many_channel` 收到 `ConfigBundle` 后调用 `assemble_overlays_from_bundle_for_bootstrap`，再重新 `load_with_overlays`。
+
+## Application 配置架构
+
+门面开启 `application,nacos-config,nacos-sdk` 并声明 `"nacos-config"` 时，Application 负责首拉、
+远端观察和停机；业务不再重复安装 watcher。额外开启 `yml-watch` 并设置 `config_watch.enabled`
+可观察本地来源。两类变化都按同一 import 顺序重建候选，本地更新保留当前有效的远端 overlay。
+
+```text
+本地 bootstrap → 有序 import 与远端文本 → naml 合并与插值 → 完整候选
+                                                             ↓
+                                       材料及资源准备 → 发布 ConfigView
+```
+
+`config-boot` 本体只产出 overlay；secret、TLS、日志资源的准备与实际配置应用状态由 Application
+管理。候选失败保留旧视图，不能把收到远端通知当作业务资源已经切换的证明。配置中心引导凭据
+必须有独立信任根，不能依赖尚待该配置中心提供的材料。
 
 ## 主要边界
 

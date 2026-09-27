@@ -98,6 +98,8 @@ pub const CODE_TRANSITION_ILLEGAL: &str = "transition_illegal";
 /// 已经发生补偿副作用后仍试图恢复正向执行。
 pub const CODE_TRANSITION_FORWARD_AFTER_COMPENSATION: &str =
     "transition_forward_after_compensation";
+/// 缺少同事务管理审计证据的人工关闭迁移，属于越权或伪造终态企图。
+pub const CODE_TRANSITION_MANUAL_CLOSE_UNAUDITED: &str = "transition_manual_close_unaudited";
 /// 冻结补偿计划时发现已成功的不可补偿步骤，属于不变量破坏。
 pub const CODE_PLAN_SUCCEEDED_PIVOT: &str = "plan_contains_succeeded_pivot";
 /// step journal 引用了 definition 中不存在的步骤。

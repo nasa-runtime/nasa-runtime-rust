@@ -1,0 +1,18 @@
+[package]
+name = "naaudit-pgsql"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Transactional PostgreSQL audit sink backed by a named PgOutbox datasource"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postgresql", "audit", "outbox", "transaction"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+async-trait = "0.1"
+naaudit = { version = "1.0.1" }
+naoutbox-pgsql = { version = "1.0.0" }
+natx-pgsql = { version = "1.0.0" }

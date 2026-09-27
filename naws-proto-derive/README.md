@@ -6,7 +6,7 @@ VARINT_TLV、BITPACK_TLV 和 JSON_BYTES 分派代码。它是 `naws-proto` 的�
 
 ```toml
 [dependencies]
-naws-proto-derive = { version = "1" }
+naws-proto-derive = { version = "1.0.1" }
 ```
 
 业务项目通常只依赖 `naws-proto`；只有维护协议 schema 的 crate 才直接依赖本包。
@@ -32,7 +32,7 @@ struct LoginReq {
 ## 适用场景
 
 - 维护 `naws-proto` 内的长连接 schema，避免手写 VARINT_TLV / BITPACK_TLV 字段编解码。
-- 保持结构体定义、字段 tag 和 wire 编码绑定，便于跨语言 golden 对拍。
+- 保持结构体定义、字段 tag 和 wire 编码绑定，便于验证跨语言线协议兼容性。
 - 迁移旧协议时，把旧版字段 tag 和类型明确写在结构体上。
 
 ## 边界
@@ -74,6 +74,6 @@ struct QuoteEvent {
 | 新增可选字段 | 使用新且唯一的 tag，并保持旧 tag 语义不变。 |
 | 修改字段类型 | 视为协议不兼容，分配新 tag 或新增版本化结构体。 |
 | 删除字段 | 永久保留其 tag，不得复用给其它语义。 |
-| 切换编码模式 | 先补 golden 对拍,确认 BITPACK、VARINT、JSON 三种入口行为符合预期。 |
+| 切换编码模式 | 先用固定线协议样本确认 BITPACK、VARINT、JSON 三种入口保持约定行为。 |
 
 不要用 yml 控制 schema；schema 一旦变化就属于协议升级，应通过代码评审和兼容性验证处理。

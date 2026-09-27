@@ -1,22 +1,11 @@
-// ============================================================================
-// src/lock.rs —— 分布式锁(文档;对照 原实现 LettuceDistributedLock)。
+// 基于 Redis hash、holder 与租约的分布式锁，通知通道为 `{完整锁 key}:pub`。
 //
-// V1 互锁保证:4 个 Lua **逐字节照搬** 原实现(hash 结构 + holder field + 重入计数),
-// 原实现/Rust 节点可竞争同一把锁;解锁通知通道 = `{完整锁 key}:pub`(原实现 :444 同款)。
+// 首次 acquire 在服务端持锁，本地 reenter 只增加 permit；最后一个 permit 才能释放服务端锁。
+// holder 由进程 UUID 与 guard 序号组成，不依赖线程。Drop 仅尽力停止续租并异步解锁，
+// 需要等待释放结果时使用 unlock().await 或 with_lock。
 //
-// 与既有实现的显式差异如下，均为稳定语义：
-//   · 本地重入:首次 acquire 仅一次服务端 LOCK(服务端计数恒 1);`guard.reenter()` 只加
-//     本地 permit;最后一个 permit 显式 unlock 才发服务端 UNLOCK;提前 unlock 返回
-//     Err(StillReentered)。互斥语义与 原实现 一致,崩溃残留同靠 lease 过期回收。
-//   · holder = INSTANCE_ID(进程 uuid):guard_seq——async 无线程亲和,不用 threadId;
-//   · Drop 仅 best-effort(取消看门狗 + spawn UNLOCK),正确性入口 = 显式
-//     unlock().await / with_lock();
-//   · 看门狗:每锁一个 task,interval(lease/3) 调 RENEW;网络异常保留 Unknown 重试,
-//     仅服务端明确返回 0 才判 Lost(watch 通知);CancellationToken 取消即终结,
-//     Guard 不复用 → 无 原实现 的 generation/released 幽灵续期问题;
-//   · 等锁(TOCTOU 全保留):订阅 `{lockkey}:pub` **确认就绪后立即再抢一次**,再
-//     select!(消息, sleep(PTTL 兜底), 总超时)。
-// ============================================================================
+// 看门狗按 lease/3 续租，网络不确定时保留 Unknown，仅确定失去 holder 时报告 Lost。
+// 等待者在订阅确认后再次争锁，避免遗漏通知；通知丢失时以 PTTL 与总等待期限兜底。
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -31,7 +20,7 @@ use crate::client::RedisClient;
 use crate::config::MAX_REDIS_RUNTIME_DURATION_MS;
 use crate::error::{NasaRedisError, Result};
 
-// ── 4 个 Lua:与 原实现 LettuceDistributedLock 逐字节一致(:64/:87/:109/:128)──
+// 锁脚本共享 hash holder 协议；修改布局会影响节点之间的互斥。
 
 const LOCK_LUA: &str = r#"if redis.call('exists', KEYS[1]) == 0 then
     redis.call('hincrby', KEYS[1], ARGV[2], 1)
@@ -71,7 +60,7 @@ end
 return 0
 "#;
 
-/// 业务作用：进程级实例标识(对照 原实现 INSTANCE_ID;Rust 端每次启动唯一,不落盘)。
+/// 业务作用：进程级实例标识。
 fn instance_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
@@ -79,7 +68,7 @@ fn instance_id() -> &'static str {
 
 static GUARD_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 三态持有判定(对照 原实现 holdsStatus:1 / 0 / 异常→null)。
+/// 三态持有判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoldStatus {
     /// 服务端锁仍由当前 holder 持有。
@@ -90,7 +79,7 @@ pub enum HoldStatus {
     Unknown,
 }
 
-/// 分布式锁工厂(对照 原实现 LettuceDistributedLock 实例)。
+/// 分布式锁工厂。
 /// Clone 廉价(Arc + String + u64),供 `lock()` 超时路径 spawn 可取消安全的获取任务(R-P1i)。
 #[derive(Clone)]
 pub struct DistributedLock {
@@ -115,22 +104,11 @@ struct GuardInner {
 }
 
 impl GuardInner {
-    /// 业务作用：服务端 UNLOCK + pub 唤醒(unlock 与 Drop 共用)。
-    ///
-    ///先 UNLOCK 再 **无条件** cancel 看门狗,而非"先 cancel 再
-    /// UNLOCK"。理由:
-    ///   1. guard 已被 `unlock(self)` 消费,返回后无重试路径、无 `lost` 订阅者——所以无论 UNLOCK
-    ///      成功与否都**必须** cancel,否则看门狗成孤儿,对一把已无 guard 的锁续租到进程死。
-    ///   2. 先 cancel 会留窗口:看门狗停转但 UNLOCK 未落,期间锁"无人续租";先 UNLOCK 则锁一直被
-    ///      正常续租直到真正释放那一刻,语义更干净(要么释放、要么仍被续租)。
-    ///   3. UNLOCK 成功后即便有在途 RENEW 完成也无害:`RENEW_LUA` 以 `hexists(holder)==1` 为条件,
-    ///      锁已删则返 0,绝不会复活已删锁或窃他人锁(无双持有风险)。
-    ///
-    ///UNLOCK 命令本身报错(连接抖动)时,**释放结果不确定**——命令可能已落、
-    /// 也可能没落。本 guard 已消费、无重试路径,故仍 cancel 看门狗(避免孤儿续租,见 1.),锁由 lease
-    /// 兜底过期;并返回 `ExecutionUnknown`(而非裸 Redis 错误)让调用方知"可能未释放、可能已释放"。
-    /// (注:原实现 unlock 在 UNLOCK 失败时**不停看门狗**让锁继续被续租;Rust 因 `unlock(self)` 消费
-    /// guard、无法保留续租通道,因此选择 cancel + lease 兜底,并把不确定释放状态显式返回给调用方。)
+    /// 业务作用：尝试服务端 UNLOCK，并在请求结束后无条件停止看门狗。
+    /// 先尝试解锁使持有期间续租持续有效；guard 已被消费，随后必须取消续租，避免无人持有的
+    /// 孤立看门狗长期占锁。RENEW 仅更新仍存在的 holder，不会复活已删除的锁。
+    /// 参数说明：无。
+    /// 返回：确定释放时成功；请求失败时返回 ExecutionUnknown，残留锁由租约过期回收。
     async fn server_unlock(self: &Arc<Self>) -> Result<()> {
         let r: std::result::Result<Option<i64>, redis::RedisError> = redis::Script::new(UNLOCK_LUA)
             .key(&self.lock_key)
@@ -161,9 +139,8 @@ impl GuardInner {
 
 /// 锁守卫:`reenter()` 重入(共享同一 inner),最后一个 permit 显式 `unlock()` 释放。
 ///
-/// `inner` 用 `Option` 是为了让 `unlock`/`Drop` 能把 Arc **安全 move 出**(`take()`)后各自恰好
-/// 释放一份引用——避免历史上 `Arc::clone(&self.inner) + mem::forget(self)` 的净泄漏(clone +1、
-/// forget 跳过原件 -1,每次 unlock 泄漏一整个 `GuardInner`)。全安全实现,保持本 crate 零 unsafe。
+/// inner 使用 Option，使 unlock 与 Drop 可以通过 take 移交 Arc，保证每份引用只释放一次。
+/// 解锁不会遗留持有续租状态的额外引用，守卫销毁仍遵循租约与显式解锁的边界。
 pub struct LockGuard {
     inner: Option<Arc<GuardInner>>,
 }
@@ -305,19 +282,15 @@ impl DistributedLock {
                             Ok(Ok(1)) => {} // 续期成功
                             Ok(Ok(_)) => {
                                 // **服务端明确返 0**:锁已不归本 holder(过期被抢/被删)→ 真 Lost(definitive)。
-                                // 这是**唯一**判 lost 的依据(对齐 原实现 + still_held/holds_status 的"Unknown≠真丢锁")。
+                                // 这是**唯一**判 lost 的依据。
                                 let _ = wd.lost_tx.send(true);
                                 lost_guard.1 = false;
                                 tracing::warn!(key = %wd.lock_key, "看门狗:服务端确认锁已丢失,停止续期");
                                 break;
                             }
-                            //(CLIENT PAUSE 实测修正):RENEW 报错/超时 = **Unknown**,
-                            // **绝不判 lost、绝不 break**,只 log + 下轮继续续租(对齐 原实现:网络异常只重试)。
-                            // 原"连续 2 失败降级 lost + break"会:① 对覆盖 ≤lease 的瞬时抖动**误报 lost**→
-                            // coordinator 误下健康分区致 rebalance 抖动;② break 后永不恢复续租,把可恢复抖动
-                            // 变成不可逆丢锁(被暂停的 RENEW 在 pause 结束后仍会迟到执行、续上锁,实测锁仍在)。
-                            // 真分区下本节点也连不上 Redis、无法造成双写危害(且 RustV2 fencing 兜底陈旧写),
-                            // 分区愈合后 RENEW 会返回 1（锁仍在）或 0（已被抢占），返回 0 时再判定 lost。
+                            // RENEW 报错或超时只能证明结果未知，迟到的命令仍可能完成续租。
+                            // 保留看门狗并重试，直到服务端明确返回失权；调用方仍须在业务副作用前复验
+                            // holder，RustV2 写入还受 fencing 约束，不能把 Unknown 当作持锁证明。
                             Ok(Err(e)) => tracing::warn!(key = %wd.lock_key, err = %e, "看门狗续期异常(Unknown),继续重试"),
                             Err(_) => tracing::warn!(key = %wd.lock_key, "看门狗续期超时(Unknown),继续重试"),
                         }
@@ -331,8 +304,7 @@ impl DistributedLock {
     /// 业务作用：阻塞式加锁。TOCTOU 防御:订阅就绪后立即再抢,再 select!(通知, PTTL 兜底)。
     ///
     ///`timeout` 是**绝对 deadline**,覆盖整个获取过程——try_lock(SET NX)、
-    /// `get_async_pubsub`、`subscribe`、`PTTL`、等待**全部**纳入。此前 deadline 只在等待 select!
-    /// 内生效,任一 Redis await 挂死(连接抖动/重连)会让 `lock(key, Some(1s))` 远超 1s。
+    /// `get_async_pubsub`、`subscribe`、`PTTL` 和等待均受同一期限约束，连接重试不能重新开始计时。
     ///
     /// # 参数
     /// - `key`: 业务锁 key;可传未加前缀的业务 key 或已完整加前缀的锁 key。
@@ -356,7 +328,7 @@ impl DistributedLock {
                 //   · 争用未果(常态):内层 lock_inner 在 napping/重试间到点自返 LockTimeout → 在 **~t** 返回;
                 //   · 某次 redis await 真挂死(连接抖动):内层卡在 await 无法自返 → 外层 timeout_at 命中后给
                 //     一小段 grace 让**那一次在途 LOCK** 收敛:若拿到 guard 则持有它干净 `unlock()`(绝无幽灵)
-                //     后返 LockTimeout;grace 内仍未收敛才 abort,残留幽灵由 A-6 全新 holder 兜底 ≤lease 自愈。
+                //     后返回 LockTimeout；grace 内仍未收敛才 abort，独立 holder 的残留锁由租约过期回收。
                 // 即上界为 **deadline + grace**(grace 仅覆盖挂死那一次 LOCK 的 1-RTT 收敛,非每次都吃满)。
                 let this = self.clone();
                 let lk = lock_key.clone();
@@ -503,7 +475,7 @@ impl DistributedLock {
         Ok(out)
     }
 
-    /// 业务作用：三态持有检测(HOLDS_LUA + 异常→Unknown;对照 原实现 holdsStatus)。
+    /// 业务作用：检查 holder 的三态持有结果；确定持有为 Held，确定缺失为 Lost，查询失败为 Unknown。
     /// `full_key` 保持幂等；即使误传已含前缀的 `guard.lock_key()`，也不会因双前缀而恒判
     /// Lost;持有自己锁的便捷查询仍推荐 `guard.still_held()`(零前缀风险)。
     ///
@@ -525,6 +497,16 @@ impl DistributedLock {
 }
 
 impl LockGuard {
+    /// 业务作用：缺少任务退出证明时只停止续租，禁止析构路径提前主动解锁。
+    /// 参数说明: 无。
+    /// 返回：消费守卫但不发送 UNLOCK，服务端租约按自身期限结束。
+    pub(crate) fn abandon(mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.cancel.cancel();
+            inner.released.store(true, Ordering::Release);
+        }
+    }
+
     /// 业务作用：取内部共享态。`inner` 只在 `unlock`/`Drop` 消费 self 时被 `take()`,而那两处消费后不再访问
     /// self,故常规方法调用期间恒为 `Some`;`expect` 是不可达的编程错误兜底。
     #[inline]
@@ -584,8 +566,7 @@ impl LockGuard {
     /// 服务端锁未动);最后一个 permit → 停看门狗 + 服务端 UNLOCK + pub 唤醒等锁者。
     pub async fn unlock(mut self) -> Result<()> {
         // 把 Arc move 出(self.inner 置 None):本方法负责这一份 permit 的 depth 递减,
-        // 随后 self 走 Drop 时因 inner 为 None 不再重复递减。`inner` 在函数结束时正好释放一份引用,
-        // 无泄漏(旧实现 clone+forget 会净泄漏一份)。
+        // 随后 self 走 Drop 时因 inner 为 None 不再重复递减，`inner` 在函数结束时释放这一份引用。
         let inner = self
             .inner
             .take()

@@ -9,10 +9,24 @@ pub(crate) const PANIC_MARKER_MAX_BYTES: usize = 512;
 ///
 /// 该 hook 不读取 payload、线程名和回溯，也不调用旧 hook，从源头阻止未脱敏业务文本先于 Runner 泄漏。
 ///
+/// 执行应用生命周期的每个入口都必须先调用本函数——`catch_unwind` 发生在 panic hook 之后，
+/// 只捕获错误无法阻止默认 hook 先把业务 payload 写到 stderr。多入口重复调用由 `Once` 收敛，
+/// 保证首次安装最早生效且不重复替换。
+///
 /// # 参数
 ///
 /// 本函数无参数；调用后 hook 持续生效到进程退出。
 pub(crate) fn install_process_panic_hook() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(install_hook);
+}
+
+/// 业务作用：执行一次实际的 hook 替换。
+///
+/// 参数说明: 无。
+///
+/// 返回：无返回值；替换后进程内任何 panic 只输出受控位置标记。
+fn install_hook() {
     std::panic::set_hook(Box::new(|info: &PanicHookInfo<'_>| {
         let marker = match info.location() {
             Some(location) => panic_marker(location.file(), location.line(), location.column()),

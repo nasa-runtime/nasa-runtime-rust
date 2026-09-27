@@ -1,16 +1,7 @@
-// ============================================================================
-// src/config.rs —— 配置类(文档;默认值对齐 配置全景表,即 原实现 源码默认)。
-//
-// 命名约定:
-//   · legacy = 历史协议/历史运行模式。它影响 wire 名、锁语义、marker、路由等持久化边界。
-//   · compat = 单个兼容算法/格式化函数。它只复刻某个局部规则,不代表整套运行模式。
-//
-// 纪律
-//   · CompatibilityProfile 没有 Default,RedisConfig 反序列化缺 profile 即失败——
-//     这是持久化/跨语言协议,不允许新项目无意承担 原实现V1 约束,也不允许误连;
-//   · namespace 必填:协议标记 nasa:protocol:{namespace} 的作用域。
-// 装配模型:业务在 #[tokio::main] 里构造本配置 → RedisClient::connect(cfg)。
-// ============================================================================
+// Redis 配置显式选择 CompatibilityProfile 与 namespace。
+// profile 决定持久化键、心跳时钟、锁、ACK 与事件编码，缺省时拒绝反序列化，避免误连。
+// namespace 决定协议标记 nasa:protocol:{namespace} 的作用域。
+// legacy 表示整套兼容协议模式，compat 只表示局部算法或格式，不得混淆二者。
 
 use serde::{Deserialize, Serialize};
 
@@ -31,21 +22,30 @@ pub(crate) const MAX_PARTITION_TOPICS: usize = 4_096;
 /// Tokio 定时器驱动的 Redis 运行参数统一使用工作区的一年上限。
 pub(crate) const MAX_REDIS_RUNTIME_DURATION_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
+/// 业务作用：提供跨语言固定的默认 Redis source id，避免本地资源名进入持久协议。
+///
+/// 参数说明: 无。
+///
+/// 返回：默认 source id `primary`。
+fn default_redis_qualifier() -> String {
+    "primary".to_owned()
+}
+
 /// 兼容性 profile:决定 key 布局/心跳时钟/锁协议/ACK 协议/Stream 事件编码,
 /// 业务只能整体选择,不能拼出半兼容组合。**无 Default,必须显式指定。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompatibilityProfile {
-    /// 原实现 互通/灰度:key 命名、锁 Lua、wire 与 原实现 逐字节一致。
+    /// 使用 LegacyV1 的键命名、锁协议与事件编码；共享数据的节点必须遵守相同字节协议。
     /// legacy 表示整套历史协议模式,不是单个 helper 的局部兼容逻辑。
     LegacyV1,
     /// 纯 Rust 集群：启用 V2 fencing 任期 stamp 与原子 fenced ACK 等增强能力。
     /// **心跳时钟**:
     ///   · **RustV2 = Redis TIME**(`nodes` ZSET 分数与过期驱逐 `now_ms` 同走服务端时钟,全集群单一
     ///     时钟源,节点墙钟漂移不再误判存活);
-    ///   · 原实现V1/原实现 = 本地墙钟(与 原实现 节点逐字节互通必须同时基)。
-    /// ⚠ **RustV2 节点不得与墙钟(原实现V1/原实现)节点共享同一 group 的 `nodes` ZSET**——两类用不同
+    ///   · LegacyV1 = 本地墙钟。
+    /// ⚠ **RustV2 节点不得与墙钟(LegacyV1)节点共享同一 group 的 `nodes` ZSET**——两类用不同
     /// 时基写分数 + 各用自己的 now_ms 驱逐,时钟差几秒即互相误判过期 ZREM → 虚假 owner 抖动/双 claim
-    /// 窗口。(1 把本注释误改为"两 profile 同墙钟"与代码相反,本轮据实复原。)
+    /// 窗口；部署时必须为两类时钟协议使用不同 group。
     RustV2,
 }
 
@@ -67,11 +67,15 @@ impl CompatibilityProfile {
 /// `Debug` 手写脱敏:`url` 内可能内嵌密码(`redis://:pass@host`),打印时去掉 userinfo,
 /// 避免下游 `tracing::debug!(?cfg)` / `{:?}` 把连接串密码泄漏进日志(公共库默认防御)。
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedisConfig {
     /// Redis 连接串,格式如 `redis://[:password@]host:port[/db]`。
     pub url: String,
     /// 协议命名空间(协议标记 key 的作用域;通常 = 业务系统名)。
     pub namespace: String,
+    /// 语言无关的逻辑数据源标识；默认源固定为 `primary`。
+    #[serde(default = "default_redis_qualifier")]
+    pub qualifier: String,
     /// 兼容性 profile,无默认值。
     pub profile: CompatibilityProfile,
     #[serde(default)]
@@ -89,6 +93,9 @@ pub struct RedisConfig {
     #[serde(default)]
     /// 分区消费配置。
     pub partition: PartitionCfg,
+    #[serde(default)]
+    /// nonce 幂等计数账本布局；缺席时首次调用按默认值惰性解析，显式配置时受管生命周期会在 Ready 前准备。
+    pub idempotent_counter: Option<crate::idempotent::IdempotentCounterCfg>,
 }
 
 /// 业务作用：去掉 redis 连接串里的 userinfo(`scheme://[user][:password]@` → `scheme://***@`),用于脱敏日志。
@@ -113,12 +120,14 @@ impl std::fmt::Debug for RedisConfig {
         f.debug_struct("RedisConfig")
             .field("url", &redact_url(&self.url))
             .field("namespace", &self.namespace)
+            .field("qualifier", &self.qualifier)
             .field("profile", &self.profile)
             .field("command", &self.command)
             .field("pipeline", &self.pipeline)
             .field("lock", &self.lock)
             .field("stream", &self.stream)
             .field("partition", &self.partition)
+            .field("idempotent_counter", &self.idempotent_counter)
             .finish()
     }
 }
@@ -138,12 +147,14 @@ impl RedisConfig {
         Self {
             url: url.into(),
             namespace: namespace.into(),
+            qualifier: default_redis_qualifier(),
             profile,
             command: CommandCfg::default(),
             pipeline: PipelineCfg::default(),
             lock: LockCfg::default(),
             stream: StreamCfg::default(),
             partition: PartitionCfg::default(),
+            idempotent_counter: None,
         }
     }
 
@@ -182,6 +193,14 @@ impl RedisConfig {
     /// 业务作用：启动期校验(connect 内调用)。
     ///
     pub fn validate(&self) -> crate::error::Result<()> {
+        if self.partition.enabled {
+            self.partition.limits.validate(self.stream.batch_size)?;
+            for group in self.partition.groups.values() {
+                self.partition
+                    .limits
+                    .validate(group.resolved_stream(&self.stream).batch_size)?;
+            }
+        }
         let semaphore_max = tokio::sync::Semaphore::MAX_PERMITS;
         if self.url.is_empty() {
             return Err(crate::error::NasaRedisError::Config("url 为空".into()));
@@ -193,6 +212,23 @@ impl RedisConfig {
             return Err(crate::error::NasaRedisError::Config(format!(
                 "namespace 必须为无首尾空白的非空名称，且不超过 {MAX_REDIS_NAME_BYTES} 字节"
             )));
+        }
+        if self.qualifier.trim().is_empty()
+            || self.qualifier != self.qualifier.trim()
+            || self.qualifier.len() > MAX_REDIS_NAME_BYTES
+            || self.qualifier.contains([':', '{', '}'])
+            || !self
+                .qualifier
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+        {
+            return Err(crate::error::NasaRedisError::Config(format!(
+                "qualifier 必须为无首尾空白的非空 ASCII 名称，只能包含字母数字与 '.' '_' '-'，且不超过 {MAX_REDIS_NAME_BYTES} 字节"
+            )));
+        }
+        // 显式配置在建连前先做纯本地校验；缺省路径保留惰性默认，不能仅因普通 Redis 用法触发能力探测。
+        if let Some(idempotent_counter) = &self.idempotent_counter {
+            idempotent_counter.snapshot(self.profile)?;
         }
         if self.lock.lease_ms < 3_000 {
             return Err(crate::error::NasaRedisError::Config(
@@ -388,11 +424,11 @@ impl RedisConfig {
                         group = %logical,
                         drain_timeout_ms = resolved_drain,
                         handler_timeout_ms = resolved_handler,
-                        "隔离组 drain_timeout_ms < handler_timeout_ms：停机时在途 handler 可能在优雅排水完成前被中断"
+                        "隔离组 drain_timeout_ms < handler_timeout_ms：普通停机可能先返回未收敛报告，后台继续等待当前业务"
                     );
                 }
                 let topics: Vec<&str> = if g.topics.is_empty() {
-                    vec![logical.as_str()] // 空 topics → 逻辑名即 topic(对照 原实现)
+                    vec![logical.as_str()] // 空 topics → 逻辑名即 topic
                 } else {
                     g.topics.iter().map(|s| s.as_str()).collect()
                 };
@@ -416,6 +452,11 @@ impl RedisConfig {
                         ));
                     }
                 }
+            }
+            if self.partition.enabled
+                && (self.partition.limits.max_read_waiters as u64) < total_partitions
+            {
+                return cfg("partition.limits.max_read_waiters 必须覆盖全部可持有物理来源".into());
             }
         }
         if self.partition.rebalance_ms == 0 {
@@ -462,20 +503,16 @@ impl RedisConfig {
             ));
         }
         //`max_redeliver=0` 会让每条消息首投(deliveries>=1)即判毒 → 全量进毒处置(与
-        // `ProxyCfg.max_redeliver` 同纪律,retry.rs 用 `effective > max_redeliver` 判毒)。fail-fast。
+        // `ProxyCfg.max_redeliver` 同纪律，精确重试以有效投递次数超过上限为毒消息处置条件)。fail-fast。
         if self.partition.max_redeliver == 0 {
             return cfg("partition.max_redeliver 必须 >= 1(否则首投即判毒)".into());
         }
-        //`handler_timeout_ms` 是 **per-bucket(每个 (topic,event) 桶)**,非
-        // per-batch——一批 K 个桶最坏占用 K×handler_timeout。若 `drain_timeout_ms < handler_timeout_ms`,
-        // 停机时只要有在途批次,优雅 drain 的绝对 deadline 必先到 → worker 被硬中断留 PEL,"优雅排水"
-        // 退化为硬中断。这是软关系(不 fail-fast,部署可能有意如此),仅 warn 提示。
+        // 等待窗口短于 handler 超时可能先返回未收敛，既有排干操作仍必须继续受监督。
         if self.partition.drain_timeout_ms < self.partition.handler_timeout_ms {
             tracing::warn!(
                 drain_timeout_ms = self.partition.drain_timeout_ms,
                 handler_timeout_ms = self.partition.handler_timeout_ms,
-                "drain_timeout_ms < handler_timeout_ms:停机时在途 handler 未结束 drain 即到点硬中断留 PEL,\
-                 优雅排水会退化为硬中断(handler_timeout 还是 per-bucket,一批多桶更易触发)"
+                "drain_timeout_ms < handler_timeout_ms:停机等待可能先返回未收敛，已登记任务继续排干"
             );
         }
         if self.stream.batch_size == 0 {
@@ -573,7 +610,7 @@ impl Default for CommandCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineCfg {
-    /// 单个 PipelineSession 的**滚动 auto-flush 阈值**(对齐 原实现 pipelineLength=1000):当前批到此条数即
+    /// 单个 PipelineSession 的**滚动 auto-flush 阈值**:当前批到此条数即
     /// seal 后台发出、会话续接,**不报错**(第 1001 条无缝接续)。
     pub session_max_commands: usize,
     /// 单批累计参数字节阈值:加上本命令会超此值即先 auto-flush 当前批(防单批超大 value 占满内存)。
@@ -601,15 +638,15 @@ impl Default for PipelineCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LockCfg {
-    /// 锁 key 前缀(原实现 默认 "DISTRIBUTED-LOCK:";三级回退在 原实现 侧,Rust 单层显式)。
+    /// 锁 key 前缀，默认 `DISTRIBUTED-LOCK:`，由本配置显式指定。
     pub prefix: String,
-    /// 锁过期 ms(原实现 默认 30000);看门狗每 lease/3 续期。
+    /// 锁租约毫秒数，默认 30000；看门狗每 lease/3 续期。
     pub lease_ms: u64,
 }
 impl Default for LockCfg {
     /// 业务作用：构造分布式锁默认配置。
     ///
-    /// 默认前缀兼容原实现,lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
+    /// 默认前缀为 DISTRIBUTED-LOCK:，lease 为 30s；看门狗按 lease/3 续租,因此业务锁默认能覆盖常见短事务。
     fn default() -> Self {
         Self {
             prefix: "DISTRIBUTED-LOCK:".into(),
@@ -622,10 +659,9 @@ impl Default for LockCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamCfg {
-    /// 托管模式 = 冷流再 poll 间隔(NOBLOCK);仅非 group XREAD 才是 BLOCK 参数。原实现 默认 500。
-    /// **已接线**:冷流 Backoff / coordinator loop 等待。
+    /// 分区消费的冷流轮询间隔(NOBLOCK)；普通非 group XREAD 使用此值作为 BLOCK 时长。
     pub poll_timeout_ms: u64,
-    /// XREADGROUP COUNT。**已接线**。
+    /// 单次 XREADGROUP 的 COUNT，消费器据此预留完整响应及后继责任。
     pub batch_size: usize,
     /// 自动裁剪保留窗，既有默认值为 1 小时。leader 每 `auto_trim_rate_ms`
     /// 对各分区 stream `XTRIM MINID ~ {now-本值}`。`auto_trim_rate_ms=0` 时本值不生效(裁剪禁用)。
@@ -636,13 +672,13 @@ pub struct StreamCfg {
     /// 下一周期，停机在业务 drain 后做末次 flush。**0 = 禁用**，此时 entry 留在 stream；
     /// 只有 autoTrim 同时启用时才会按其保留窗回收。
     pub async_del_record_period_ms: u64,
-    /// 全局在飞批次预算上界。**已接线**:= coordinator budget Semaphore 容量。
+    /// 当前物理组同时进行的读取批次上限，仍受全部组共享的 partition.limits 约束。
     pub inflight_max: usize,
 }
 impl Default for StreamCfg {
     /// 业务作用：构造 stream 消费默认配置。
     ///
-    /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行,并设置全局在飞批次预算。
+    /// 默认以 500ms 冷流轮询、100 条批量和 1 小时数据保留窗运行，并限制组内同时读取的批次数。
     fn default() -> Self {
         Self {
             poll_timeout_ms: 500,
@@ -673,6 +709,10 @@ pub enum PoisonPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionCfg {
+    /// 本源全部消费组的责任总预算；执行隔离模式在此总额内划分固定域份额。
+    pub limits: crate::partition::PartitionLimits,
+    /// 当前 RedisPartition 专属的本地执行器配置。
+    pub executor: crate::partition::PartitionExecutorCfg,
     /// 是否启用 partition 消费。
     pub enabled: bool,
     /// 默认消费组名称。
@@ -687,39 +727,37 @@ pub struct PartitionCfg {
     pub holds_check_interval_ms: u64,
     /// 停机 drain 等待毫秒数。
     pub drain_timeout_ms: u64,
-    /// 同一批次连续失败的重投上限;超过即触发 poison_policy。
+    /// 单条记录的重投上限，结合精确 PEL delivery count 判定毒消息。
     pub max_redeliver: u32,
-    /// handler 强制 timeout ms(文档 handler 契约:超时一律按失败留 PEL)。
-    /// ⚠ **per-bucket(每个 (topic,event) 桶各套一次),非 per-batch**:一批含
-    /// K 个桶时最坏占用 ≈K×handler_timeout。配 `drain_timeout_ms` 时务必 ≥ 本值,否则停机优雅 drain
-    /// 会被在途 handler 拖到硬中断(validate 已 warn)。
-    /// 注意:对**纯 CPU、不 yield** 的 handler 无效(async 无法中断不让出的同步块),那类
-    /// 业务须自行 spawn_blocking / 自带超时;本 timeout 兜住会 await 的慢 handler。
+    /// 单次 handler 超时：单记录计划按条计时，兼容批量计划按一次 Vec 调用计时。
+    /// 超时保留 PEL 进入精确重试；正常停机等待期限不自动升级为强停。
+    /// handler 必须协作让出，不能派生脱离监督的副作用任务；不让出的同步代码不能由异步超时证明终止。
     pub handler_timeout_ms: u64,
     /// 毒消息策略(默认 Park——fail-closed:停拉隔离等运维处置,**不自动删数据**;
     ///文档 V2 默认即 Park,Drop 是显式选择的不可恢复丢弃)。
     pub poison_policy: PoisonPolicy,
-    /// **隔离组**(对照 原实现 `partition.groups.{逻辑名}`):把高频/重 topic 隔离到独立 stream 组,
-    /// 与默认组及其它组**互不阻塞消费**(高频/低频、高高频/高低频隔离)。空 = 仅默认组(向后兼容)。
+    /// **隔离组**:把高频/重 topic 隔离到独立 stream 组,
+    /// 各组具有独立物理 Stream 和读取参数，执行与容量隔离由 `executor.scope` 决定；空配置仅启用默认组。
     /// key = 逻辑短名(不含 default_group 前缀;不得为空/含 `{`/`}`)。实际 stream 前缀 =
-    /// `{default_group}:{逻辑名}`(对照 原实现 streamPrefix)。
+    /// `{default_group}:{逻辑名}`。
     #[serde(default)]
     pub groups: std::collections::HashMap<String, PartitionGroupCfg>,
 }
 impl Default for PartitionCfg {
     /// 业务作用：构造 partition 模式默认配置。
     ///
-    /// 默认关闭 partition,但保留原实现的默认组名、64 分区、10s 再平衡和 Park 毒消息策略。
+    /// 默认关闭 partition，使用默认组名、64 分区、10s 再平衡与 Park 毒消息策略。
     fn default() -> Self {
         Self {
+            limits: Default::default(),
+            executor: Default::default(),
             enabled: false,
             default_group: "SINGLE-CONSUME".into(),
             count: 64,
             rebalance_ms: 10_000,
             min_idle_ms: 30_000,
             holds_check_interval_ms: 5_000,
-            // 停机预算必须长于默认的单桶处理超时，否则默认配置下每个仍在处理慢任务的实例都会被
-            // 强制中断，无法兑现先排空再退出的生命周期语义。
+            // 默认等待窗口覆盖一次业务超时；窗口到达只结束本次等待，后台责任继续排干。
             drain_timeout_ms: 35_000,
             max_redeliver: 5,
             handler_timeout_ms: 30_000,
@@ -729,18 +767,18 @@ impl Default for PartitionCfg {
     }
 }
 
-/// 单个隔离组配置(对照 原实现 `PartitionGroup` 的 yml `partition.groups.{逻辑名}`)。
-/// 路由(topics)+ 分区数(count)+ **per-group 运行时参数覆盖**(对照 原实现 per-group override):每个
+/// 单个隔离组配置。
+/// 路由(topics)+ 分区数(count)+ **per-group 运行时参数覆盖**:每个
 /// `Option` 字段 `None` = 继承父级 `PartitionCfg` / 全局 `StreamCfg`,`Some` = 覆盖。让高频组用更大 batch、
 /// 更短 poll/rebalance,慢任务组用更长 drain/min_idle 等。**覆盖值进 protocol marker**(异构运行参数 fail-closed)。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PartitionGroupCfg {
-    /// 路由到本隔离组的 topic 列表;空 = 逻辑组名本身即唯一 topic(对照 原实现 `isolate(topic, topic, count)`)。
+    /// 路由到本隔离组的 topic 列表;空 = 逻辑组名本身即唯一 topic。
     pub topics: Vec<String>,
     /// 本组分区数;0 = 继承 `partition.count`。
     pub count: u32,
-    // ── per-group 运行时覆盖(None = 继承父级 partition.*;对照 原实现 PartitionGroup)──
+    // 每个 group 的运行时覆盖项；None 继承父级 partition 配置。
     /// 再平衡周期 ms(继承 `partition.rebalance_ms`)。
     pub rebalance_ms: Option<u64>,
     /// XAUTOCLAIM min-idle ms(继承 `partition.min_idle_ms`)。
@@ -760,7 +798,7 @@ pub struct PartitionGroupCfg {
     pub batch_size: Option<usize>,
     /// 冷流再 poll 间隔 ms(继承 `stream.poll_timeout_ms`)。
     pub poll_timeout_ms: Option<u64>,
-    /// 全局在飞批次预算(继承 `stream.inflight_max`)。
+    /// 本组同时读取的批次数上限（继承 `stream.inflight_max`）。
     pub inflight_max: Option<usize>,
 }
 
@@ -769,6 +807,8 @@ impl PartitionGroupCfg {
     /// 用于 `GroupRuntime`:`cfg.groups` 清空(per-group 无嵌套组),`enabled/default_group` 沿父级(runtime 不读)。
     pub(crate) fn resolved_partition(&self, parent: &PartitionCfg, count: u32) -> PartitionCfg {
         PartitionCfg {
+            limits: parent.limits.clone(),
+            executor: parent.executor.clone(),
             enabled: parent.enabled,
             default_group: parent.default_group.clone(),
             count,

@@ -12,7 +12,7 @@
 //       按【组】组织(一个 group = 一个 Redis Hash)，以【显式失效】为主、长兜底 TTL 兜底。
 //       支持 invalidate_field/invalidate_group 与关联失效；single-flight 两级
 //       去重(进程内 tokio::Mutex + Redis SET NX 分布式锁)。
-//       适合：写库后要让缓存立刻失效、需要强一致 / 关联失效的场景（撮合/账务）。
+//       适合：按业务组显式失效的 cache-aside 场景；并发中的旧 loader 仍可能回填旧值。
 //
 // 本文件提供显式缓存调用：service 主动执行 get_or_load / invalidate，不依赖数据访问层隐式拦截。
 //
@@ -20,29 +20,20 @@
 // ⚠️ GroupedCache 的 per-field 兜底 TTL 用 HPEXPIRE，需 Redis 7.4+。
 // ============================================================================
 
-// 作为可复用组件提供，尚未全部接入路由，故整体 allow dead_code。真正接入后可移除本行。
-#![allow(dead_code)]
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
-// ── import 逐行说明（Rust 的 use ≈ 原实现 的 import，:: ≈ .，但有两个关键差异见 ★）──
-use std::collections::{HashMap, HashSet}; // GroupedCache 关联失效表用：HashMap<组, 关联组集合>；HashSet 去重
-use std::future::Future; // Future trait：异步计算的"凭证/占位符"，约束 loader 返回值；.await 才真正驱动它跑
-use std::sync::Arc; // 原子引用计数（Atomically Ref-Counted）：多请求/多线程共享同一份所有权。
-                    //   clone 只让计数 +1、不深拷贝；计数归零才真正析构。这里用它共享同一把锁 / clear_map。
-use std::sync::RwLock; // 读写锁：GroupedCache.clear_map 注册罕见、读多（每次失效都读），std RwLock 足够；
-                       //   ★ 它是【同步】锁，绝不能跨 .await 持有 —— 本文件只在同步代码段内 read()/write()
-use std::time::{Duration, Instant}; // Duration=时长（给 sleep/锁 TTL）；Instant=单调时钟（算等待截止点）
-
-use dashmap::DashMap; // 分段锁保护的并发 HashMap，保存 single-flight 的 key 到锁映射。
-use rand::Rng; // ★ trait：gen_range 等方法"挂"在这个 trait 上。Rust 里方法解析靠"trait 必须在作用域内"，
-               //   不 use 进来，哪怕类型对，conn.gen_range(..) 也编译不过（原实现 没有这个概念）
-use redis::aio::ConnectionManager; // 异步 Redis【单机】连接管理器：句柄可 clone、内部自带断线重连（GroupedCache 仍用它作单机演示）
-use redis::cluster_async::ClusterConnection; // 异步 Redis 集群连接（redis 1.2.2,cluster_async 已优化）
-use redis::AsyncCommands; // ★ 同理：.get()/.pset_ex()/.hget()/.hset()/.del()/.pexpire() 等命令方法由这个 trait 提供，
-                          //   必须 use 进来才能在 conn 上点出来
-use serde::de::DeserializeOwned; // 约束：能从 JSON 反序列化出【完全自有】的值（读缓存时用，详见 where 注释）
-use serde::Serialize; // 约束：能序列化成 JSON（写缓存时用 serde_json::to_string）
-use tokio::sync::Mutex; // 异步互斥锁：锁可以【跨 .await 持有】。注意不是 std::sync::Mutex——后者跨 await 持有会出问题
-use tracing::{debug, warn}; // 结构化记录缓存命中、降级和失效故障。
+use dashmap::DashMap;
+use rand::Rng;
+use redis::aio::ConnectionManager;
+use redis::cluster_async::ClusterConnection;
+use redis::AsyncCommands;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use tokio::sync::Mutex;
+use tracing::{debug, warn};
 
 /// 释放分布式锁的 compare-and-del 脚本（Lua，在 Redis 服务端原子执行）。GroupedCache 用。
 /// 只有锁值仍等于自己写入的 token 才删，否则不动。
@@ -53,47 +44,67 @@ use tracing::{debug, warn}; // 结构化记录缓存命中、降级和失效故�
 ///   KEYS[1] = 锁 key；ARGV[1] = 自己的 token
 const UNLOCK_LUA: &str = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
-// ── single-flight 锁项的 RAII 守卫（CacheLayer 与 GroupedCache 共用，防错误路径泄漏锁表）──
-// 旧实现只在 get_or_load 成功末尾手动 remove_if 回收锁项；loader 报错 / 序列化失败的 `?` 早退路径会绕过它，
-// 导致该 key 的 Arc<Mutex> 永久滞留在 locks 表 —— 一批失败 key 累积下来 locks 无界增长
-// （内存隐患，且可被构造大量失败 key 打爆）。改成 RAII：守卫在【任何】出口（正常返回 / ? 早退 /
-// panic 展开）的 Drop 里都回收锁项。
-//
-// ── 关于 <'b>：它是【生命周期参数(lifetime)】，不是类型、不是值，而是给"借用能活多久"起的一个名字 ──
-//   ※ 这里特意用 'b（不是惯例的 'a）来说明：名字是【任意】的，叫 'a / 'b / 'x 都行，编译完全等价。
-//     生命周期名只是编译期的一个标签，不产生任何运行时开销，编译后即被擦除。
-//   · 为什么需要它：本结构体存的是【借用】(带 & 的字段)，不是自有数据 —— `locks: &DashMap`、
-//     `key: &str` 都只是"指向别人的指针"，没拿所有权。Rust 没有 GC，编译器必须在【编译期】证明：
-//     "这些指针指向的东西，在 FlightGuard 活着的全程都还没被释放"，否则就是悬垂指针(dangling)。
-//     `'b` 就是用来做这个证明的标签。任何【含借用字段】的 struct，都必须给借用标上生命周期。
-//   · 怎么读：`<'b>` = 给这个 struct 引入一个名叫 'b 的生命周期；字段里的 `&'b DashMap`、`&'b str`
-//     表示"这两个借用都至少要活到 'b 这么久"。编译器据此得出约束：
-//     【FlightGuard 实例的存活范围 ⊆ 'b】，即守卫绝不能比它借用的 locks / key 活得更久。
-//     在 get_or_load 里它借的是函数局部的 self.locks 和 key —— 函数返回时守卫先 Drop、之后局部变量
-//     才离开作用域 → 守卫总是"先死"，约束成立，编译通过。
-//   · 特例 'static：表示"整个程序期间都有效"，是唯一有固定含义的生命周期名（其余都可随意命名）。
-//   · impl 上的 <'_> 是"匿名生命周期"：有但不必起名，让编译器推断（等价 impl<'b>...FlightGuard<'b>）。
-/// key 级 single-flight 锁表的 RAII 清理守卫。
-///
-/// 业务读取同一个缓存 key 时只允许一个 loader 进入后端加载；这个守卫确保 loader 正常返回、提前返回或
-/// panic 展开时都能把对应锁项从 `locks` 表中移除，避免失败 key 持续累积造成内存增长。
+/// 写入前确认补偿删除权限；Redis 脚本不回滚，因此过期失败必须在原子执行段中撤下新值。
+const WRITE_FIELD_LUA: &str = r#"
+if not redis.acl_check_cmd('HSET', KEYS[1], ARGV[1], ARGV[2])
+    or not redis.acl_check_cmd('HDEL', KEYS[1], ARGV[1]) then
+    return redis.error_reply('grouped cache requires HSET and HDEL permission')
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+local expiry = redis.pcall('HPEXPIRE', KEYS[1], ARGV[3], 'FIELDS', 1, ARGV[1])
+if expiry.err or expiry[1] ~= 1 then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    return redis.error_reply('grouped cache field expiry unavailable')
+end
+return 1
+"#;
+
+/// 同 key 的持有者和等待者共同保有锁项；最后一个请求退出时回收。
 struct FlightGuard<'b> {
-    // &'b：借用 locks 表（不夺所有权）；'b 标明这个借用的有效期，守卫不能比它活得久
     locks: &'b DashMap<String, Arc<Mutex<()>>>,
-    // &'b str：借用本次的 single-flight key（借用不拷贝字符串）；同一个 'b → 和上面同期有效
     key: &'b str,
-    // 这个字段是【自有数据】（Arc 持有所有权，不是借用），所以它不带 'b、不参与生命周期约束
-    lock: Arc<Mutex<()>>,
+    lock: Option<Arc<Mutex<()>>>,
 }
+
+impl<'b> FlightGuard<'b> {
+    /// 业务作用：在等待互斥锁之前登记请求，取消等待也能归还锁项引用。
+    /// 参数说明：`locks` 为进程内锁表；`key` 为完整缓存身份。
+    /// 返回：与同 key 所有在途请求共享锁的守卫，不跨异步等待持有锁表分段锁。
+    fn enter(locks: &'b DashMap<String, Arc<Mutex<()>>>, key: &'b str) -> Self {
+        let lock = locks
+            .entry(key.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .value()
+            .clone();
+        Self {
+            locks,
+            key,
+            lock: Some(lock),
+        }
+    }
+
+    /// 业务作用：取得本请求登记的互斥锁，锁守卫必须先于请求登记释放。
+    /// 参数说明：无。
+    /// 返回：当前 flight 的锁；引用受登记守卫生命周期约束。
+    fn mutex(&self) -> &Mutex<()> {
+        self.lock.as_deref().expect("flight remains registered")
+    }
+}
+
 impl Drop for FlightGuard<'_> {
-    /// 业务作用：释放 key 级 single-flight 锁表条目。
-    ///
-    /// Drop 是 Rust 的析构钩子（≈ 没有的 原实现 finalize，但确定性触发）：离开作用域立刻跑。
+    /// 业务作用：归还当前请求的登记，只回收没有持有者和等待者的锁项。
+    /// 参数说明：无。
+    /// 返回：最后一个请求退出后移除对应项；其它请求继续使用同一把锁。
     fn drop(&mut self) {
-        // remove_if + Arc::ptr_eq：只在表里的 Arc 仍是"我们这一把"（同一块内存）时才删，
-        // 不误删后来者新建的同 key 锁（地址不同 → ptr_eq 为 false → 不删）
-        self.locks
-            .remove_if(self.key, |_, v| Arc::ptr_eq(v, &self.lock));
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
+        // 引用归还和最后持有者判定必须在同一分段锁内完成，避免并发退出遗留空锁项。
+        self.locks.remove_if(self.key, move |_, current| {
+            let same = Arc::ptr_eq(current, &lock);
+            drop(lock);
+            same && Arc::strong_count(current) == 1
+        });
     }
 }
 
@@ -353,30 +364,9 @@ impl CacheLayer {
             get_ms
         );
 
-        // ---- 2. 未命中：进入 single-flight 临界区（防击穿）----
-        // entry(key).or_insert_with(...)：取本 key 对应的锁，没有就新建一把空 Mutex 并塞进表。
-        //   Mutex::new(()) 锁的是"空元组 ()"——我们要的只是互斥这个动作本身，不需要锁保护任何数据。
-        // ★ 关键陷阱：entry() 返回的引用内部攥着 DashMap 的【分段写锁】。所以这里立刻
-        //   .value().clone() 把里面的 Arc 拷一份出来，让整条语句结束时那个分段写锁守卫即刻释放；
-        //   否则若攥着它去执行下面的 lock().await，期间别的线程对同段做 entry() 就会互相死锁。
-        let lock = self
-            .locks
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .value()
-            .clone();
-        // 拿锁；其他并发同 key 请求在此 .await 处串行排队等待。
-        // _guard 是 RAII 守卫：它活着 = 锁被持有；它离开作用域（函数 return / 走出当前块）= 自动解锁，
-        //   无需手动 unlock（对比 原实现 的 synchronized 块或 try/finally + lock.unlock()）。
-        //   变量名带下划线前缀，表示"只为副作用而持有、不会去读它的值"，否则编译器会警告未使用变量。
-        let _guard = lock.lock().await;
-        // 锁项回收交给 RAII 守卫：任何出口（含下面 ? 早退）都会在 Drop 里删表项，杜绝泄漏。
-        // 声明在 _guard 之后 → Drop 先于 _guard 执行（先删表项再解锁），二者用的是不同的锁，无死锁。
-        let _flight = FlightGuard {
-            locks: &self.locks,
-            key: &key,
-            lock: lock.clone(),
-        };
+        // 先登记再等待，避免持有者退出时把等待者仍在使用的锁移除。
+        let flight = FlightGuard::enter(&self.locks, &key);
+        let _guard = flight.mutex().lock().await;
 
         // ---- 3. double-check：拿到锁后再查一次，避免每个等待者都各自回源 ----
         // 经典的双重检查锁（DCL）：第一个请求在临界区内回源 + 写回缓存期间，后到的同 key 请求都堵在
@@ -391,10 +381,7 @@ impl CacheLayer {
         }
 
         // ---- 4. 回源（调用方提供的 loader，比如真正查 DB）----
-        // loader() 调一次拿到 Future，.await 驱动它跑完，结尾的 ? 是【错误传播运算符】：
-        //   若结果是 Err(e)，立即让 get_or_load 整个函数 return Err(e)（连带前面已写好的清理也不再执行）；
-        //   若是 Ok(v)，则解包出里面的值赋给 data。≈ 原实现 的"往上抛异常"，但完全显式、写在表达式末尾。
-        // 【插桩】计回源(loader,通常是查 DB)这一段的耗时
+        // 回源失败直接交还业务错误；守卫负责归还单飞责任，不将失败写入缓存。
         let t_db = Instant::now();
         let data = loader().await?;
         tracing::debug!(
@@ -429,47 +416,19 @@ impl CacheLayer {
     }
 }
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ GroupedCache —— 分组缓存 + 跨节点 single-flight                          ║
-// ║                                                                            ║
-// ║ B. 写失效 / 关联失效                                                       ║
-// ║   · 按【组】组织：一个 group = 一个 Redis Hash，entry 是 hash 的 field      ║
-// ║   · invalidate_field(group, field) = HDEL            （≈ removeObject）     ║
-// ║   · invalidate_group(group)        = DEL 整个 Hash    （≈ clear()）         ║
-// ║   · 关联失效 register_clear_ref(source, also_clear)                        ║
-// ║                                                                            ║
-// ║ C. 跨节点 single-flight（防分布式击穿）：两级去重                          ║
-// ║   ① 进程内 tokio::Mutex（本节点并发压成 1）                                ║
-// ║   ② Redis SET NX 分布式锁（跨节点压成 1，只有抢到锁的节点回源）            ║
-// ║   没抢到的节点轮询等缓存出现；超时降级自行回源（防持锁节点崩溃饿死）。      ║
-// ║                                                                            ║
-// ║ 取舍：hash + 显式失效为主 + 长兜底 TTL                                         ║
-// ║   显式 invalidate 保新鲜（写库后必须调）；另设【长兜底 TTL（小时/天级）】作 ║
-// ║   安全网，防两类灾难：① 漏调/写-删竞态/崩在 del 前 → 否则永久脏；          ║
-// ║   ② 无 TTL 的 hash 永不淘汰 → field（尤其负缓存）堆积 OOM。               ║
-// ║   兜底 TTL 从 group【首次创建】起算、不被后续写续命（set-once），故热点组也 ║
-// ║   会周期性整组过期重建。                                                    ║
-// ║                                                                            ║
-// ║ 已知取舍（诚实标注）：                                                      ║
-// ║   · 非框架透明：需 service 主动 get_or_load + 写后主动 invalidate。        ║
-// ║   · per-field 兜底 TTL：用 Redis 7.4+ 的 HPEXPIRE 给单个 field 设过期      ║
-// ║     （HPEXPIRE ... NX，set-once）。空哨兵/正常值各自 backstop_ttl 后过期，  ║
-// ║     穿透产生的 field 也按 field 各自自动淘汰（不必整组一起过期）。          ║
-// ║   · 大 key / Cluster：一个 group = 一个 key = 单 slot/单节点，务必把       ║
-// ║     namespace 切细、控制单组 field 基数，避免热点大 hash 集中单节点。       ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// GroupedCache 按 Redis Hash 组织缓存，支持单字段、整组及关联组失效。
+// 进程内 single-flight 覆盖同 key 的全部持有者与等待者；跨节点锁仅减少重复回源，
+// 等待超时或租期短于 loader 时仍可能并发回源，不构成跨节点严格互斥或强一致协议。
+// 正 TTL 在每次字段写入时重新计时，空哨兵和正常值分别过期，不设置整组固定到期点。
+// 旧 loader 可在失效完成后重新回填并开始新的 TTL，因此提交后的陈旧窗口不只取决于 TTL。
+// 每个 group 位于同一个 Redis slot，业务须限制单组字段数量与写入速率。
 
 /// 分组缓存层。被多个 service 共享，外层通常包 `Arc<GroupedCache>` 注入。
-pub struct GroupedCache {
+pub struct GroupedCache<C = ConnectionManager> {
     // Redis 连接管理器（内部是可 clone 的句柄，自带断线重连）
-    redis: ConnectionManager,
-    // 【兜底 TTL】（毫秒，0 = 不设）。注意：它【不是】用来保证新鲜度的（新鲜度由显式 invalidate 负责），
-    // 而是纯【安全网】——只在"漏调 invalidate / 写-删竞态 / 进程崩在 del 前"等失效路径出问题时救命：
-    //   · 防永久脏读：再脏也最多脏到这个 TTL 到点（建议设【小时/天级】，正常永远等不到它过期）
-    //   · 防无界膨胀/OOM：无 TTL 的 hash 永不淘汰，堆积的 field（尤其负缓存）会撑爆内存
-    // 关键：本 TTL 是【per-field】的（HPEXPIRE），从【该 field 首次创建】起算、不被后续写续命
-    //   （HPEXPIRE ... NX：仅当该 field 尚无 TTL 时才设）。故每个 field 各自到点过期重建，
-    //   漏清的脏 field 也能被兜底清掉，且互不影响（不像 per-group 那样整组一起过期）。
+    redis: C,
+    // 每次成功写入后独立计算字段保留时间（毫秒，0 = 不设）；不限制 loader 延迟或瞬时字段基数。
+    // 写值与设置过期同脚本完成，过期失败撤下本次字段；其它 field 的过期时间不受影响。
     backstop_ttl_ms: u64,
     // 分布式锁持有 TTL（毫秒）：抢到锁的节点最多持有这么久；即便它崩了，锁也会到点自动释放，不会永久卡住别人
     lock_ttl_ms: u64,
@@ -484,26 +443,63 @@ pub struct GroupedCache {
     clear_map: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 }
 
-impl GroupedCache {
-    /// 业务作用：构造。`backstop_ttl_secs` = 兜底 TTL（秒）。
-    /// 以显式 invalidate 为主、长兜底 TTL 防漏清/防 OOM。
-    ///   · 建议设【小时/天级】（如 86400 = 1 天）：正常靠失效保新鲜，TTL 永远等不到，只在漏网时救命。
-    ///   · 设 0 = 关闭兜底；仅当调用方能够保证写库后必定清理缓存时使用。
-    /// 其余参数（锁 TTL / 等待 / 轮询）给了一组保守默认值，需要可后续暴露 setter。
-    ///
-    /// # 参数
-    /// - `redis`: Redis 单机连接管理器,用于 Hash 读写、分布式锁和组失效。
-    /// - `backstop_ttl_secs`: 每个 Hash field 的兜底 TTL 秒数;`0` 表示不设置兜底过期。
-    pub fn new(redis: ConnectionManager, backstop_ttl_secs: u64) -> Self {
+impl<C> GroupedCache<C>
+where
+    C: redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
+{
+    /// 业务作用：在接纳分组缓存请求前证明 field TTL 可用，探针与清理在同一脚本完成。
+    /// 参数说明：无。
+    /// 返回：过期语义确认时成功；权限、版本或返回异常时拒绝，未启用 TTL 时不创建探针。
+    pub async fn verify_field_ttl(&self) -> anyhow::Result<()> {
+        if self.backstop_ttl_ms == 0 {
+            return Ok(());
+        }
+        let key = format!(
+            "cache:field-probe:{}:{}",
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let ttl: i64 = redis::Script::new(r#"
+if not redis.acl_check_cmd('DEL', KEYS[1]) or not redis.acl_check_cmd('HSET', KEYS[1], 'probe', '1') then
+    return redis.error_reply('cache probe permissions are insufficient')
+end
+if not redis.acl_check_cmd('HPEXPIRE', KEYS[1], 5000, 'FIELDS', 1, 'probe') then
+    return redis.error_reply('cache field expiry permission is insufficient')
+end
+redis.call('HSET', KEYS[1], 'probe', '1')
+local expiry = redis.pcall('HPEXPIRE', KEYS[1], 5000, 'FIELDS', 1, 'probe')
+if expiry.err then
+    redis.call('DEL', KEYS[1])
+    return redis.error_reply('cache field expiry is unavailable')
+end
+local ttl = redis.pcall('HPTTL', KEYS[1], 'FIELDS', 1, 'probe')
+redis.call('DEL', KEYS[1])
+if ttl.err then return redis.error_reply('cache field TTL cannot be observed') end
+return ttl[1]
+"#).key(&key).invoke_async(&mut self.redis.clone()).await?;
+        anyhow::ensure!(
+            ttl > 0 && ttl <= 5000,
+            "cache field expiry is not effective"
+        );
+        Ok(())
+    }
+
+    /// 业务作用：创建按组显式失效、每次字段写入独立过期的缓存。
+    /// 参数说明：`redis` 为 Redis 连接；`backstop_ttl_secs` 为字段保留秒数，最大一年，零表示不设置过期。
+    /// 返回：配置合法时返回缓存；越界时 panic，需要可恢复错误的调用方使用 try_new。
+    /// 禁用过期时业务自行限制字段保留与数量；正 TTL 也不能消除旧 loader 晚到回填的窗口。
+    pub fn new(redis: C, backstop_ttl_secs: u64) -> Self {
         Self::try_new(redis, backstop_ttl_secs)
             .expect("grouped cache backstop TTL must fit Redis milliseconds")
     }
 
-    /// 业务作用：校验 Redis 毫秒 TTL 后构造；外部配置应优先使用本入口，把单位转换错误留在启动阶段。
-    pub fn try_new(redis: ConnectionManager, backstop_ttl_secs: u64) -> anyhow::Result<Self> {
+    /// 业务作用：在启动阶段校验 field 过期配置，避免写入后才发现过期范围无效。
+    /// 参数说明：`redis` 为单机连接；`backstop_ttl_secs` 为每次写入后的过期秒数，最大一年，零表示不设置过期。
+    /// 返回：配置合法时返回分组缓存；越界时返回错误，不写入 Redis。
+    pub fn try_new(redis: C, backstop_ttl_secs: u64) -> anyhow::Result<Self> {
         let backstop_ttl_ms = backstop_ttl_secs
             .checked_mul(1000)
-            .filter(|millis| *millis <= i64::MAX as u64)
+            .filter(|millis| *millis <= 365 * 24 * 60 * 60 * 1000)
             .ok_or_else(|| anyhow::anyhow!("backstop_ttl_secs exceeds Redis TTL range"))?;
         Ok(Self {
             redis,
@@ -530,8 +526,6 @@ impl GroupedCache {
     pub fn register_clear_ref(&self, source_group: &str, also_clear: &[&str]) {
         // 拿写锁：注册是写操作。write() 返回 RAII 守卫，本语句块结束即释放（不跨 .await，安全）
         let mut map = self.clear_map.write().unwrap();
-        // entry(k).or_default()：取 source_group 对应的集合，没有就插一个空 HashSet 再返回可变引用
-        //   （≈ 原实现 的 computeIfAbsent(k, _ -> new HashSet<>())）
         let set = map.entry(source_group.to_string()).or_default();
         // 把每个关联组登记进去。*g 是 &&str → &str 的解引用；to_string 转成自有 String 存表
         for g in also_clear {
@@ -580,28 +574,10 @@ impl GroupedCache {
             return Ok(v);
         }
 
-        // ---- 2. 进程内 single-flight（先把本节点并发压成 1）+ RAII 防泄漏 ----
-        // 单飞 key：group 与 field 拼一起，避免不同 (group,field) 撞同一把锁。format! ≈ String.format
-        let sf_key = format!("{group}::{field}");
-        // 取本 key 的锁，没有就新建一把空 Mutex(()) 塞进表。
-        // ★ 关键陷阱：entry() 返回的引用内部攥着 DashMap 的分段写锁，所以立刻 .value().clone() 把里面
-        //   的 Arc 拷一份出来，让整条语句结束时分段写锁即释放；否则攥着它去 lock().await 会和别的线程死锁。
-        let lock = self
-            .locks
-            .entry(sf_key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .value()
-            .clone();
-        // 拿锁：同节点其他同 key 请求在此 .await 处串行排队等待。
-        // _guard 是 RAII 守卫：活着=持锁，离开作用域=自动解锁；下划线前缀表示"只为副作用持有、不读它"
-        let _guard = lock.lock().await;
-        // 单飞锁项的回收交给 FlightGuard：本函数任何出口（含下面 ? 早退）都会在 Drop 里删表项，杜绝泄漏。
-        // 声明在 _guard 之后 → Drop 先于 _guard（先删表项再解锁）；两者是不同的锁，无死锁。
-        let _flight = FlightGuard {
-            locks: &self.locks,
-            key: &sf_key,
-            lock: lock.clone(),
-        };
+        // 编码长度区分组名和 field 边界，业务名称中的分隔符不会串用锁项。
+        let sf_key = format!("{}:{group}{field}", group.len());
+        let flight = FlightGuard::enter(&self.locks, &sf_key);
+        let _guard = flight.mutex().lock().await;
 
         // ---- 3. double-check：拿到锁后再查一次 ----
         // 同节点的等待者在第一个请求回源+回填期间都堵在上面 lock().await；待其放锁，它们依次拿锁后
@@ -612,7 +588,7 @@ impl GroupedCache {
 
         // ---- 4. 跨节点 single-flight：抢 Redis 分布式锁（SET key token NX PX ttl）----
         // 锁 key 与单飞 key 区分前缀，避免和业务缓存键混淆
-        let lock_key = format!("sf:lock:{group}::{field}");
+        let lock_key = format!("sf:lock:{}:{group}{field}", group.len());
         // token：本次持锁的唯一标识，用于释放时 compare-and-del（防误删他人锁）。
         // rand::random::<u64>() 取一个随机 u64；{:016x} 格式化成 16 位十六进制字符串
         let token = format!("{:016x}", rand::random::<u64>());
@@ -706,7 +682,7 @@ impl GroupedCache {
     /// - `field`: Hash field,通常由业务缓存 key 归一化得到。
     async fn try_read<T: DeserializeOwned>(
         &self,
-        conn: &mut ConnectionManager,
+        conn: &mut C,
         group: &str,
         field: &str,
     ) -> Option<T> {
@@ -739,14 +715,16 @@ impl GroupedCache {
 
     /// 业务作用：回源 + 回填（HSET），并按需给【该 field】设 per-field 兜底 TTL（HPEXPIRE，带抖动防雪崩）。
     ///
-    /// # 参数
+    /// 返回：回源成功时返回业务值；缓存写入或过期失败会记录降级，回源失败直接返回错误。
+    ///
+    /// 参数说明：
     /// - `conn`: 执行 HSET/HPEXPIRE 的 Redis connection manager。
     /// - `group`: 场景对应的 Redis Hash key。
     /// - `field`: Hash field,通常由业务缓存 key 归一化得到。
     /// - `loader`: 缓存未命中时执行的回源加载闭包。
     async fn load_and_fill<T, F, Fut>(
         &self,
-        conn: &mut ConnectionManager,
+        conn: &mut C,
         group: &str,
         field: &str,
         loader: F,
@@ -768,31 +746,21 @@ impl GroupedCache {
                 group, field
             );
         }
-        // HSET group field payload：写回缓存。turbofish ::<_,_,_,()> 末位 () = 不关心返回值
-        if let Err(e) = conn.hset::<_, _, _, ()>(group, field, &payload).await {
-            // 写缓存失败不影响业务返回，只记日志（数据已经从 loader 拿到了）
-            warn!("grouped cache hset failed: {}", e);
-        } else if self.backstop_ttl_ms > 0 {
-            // per-field 兜底 TTL（Redis 7.4+ 的 HPEXPIRE）：给【单个 field】设毫秒级过期。
-            //   HPEXPIRE key ms NX FIELDS 1 field
-            //   · NX = 仅当该 field 当前【没有】过期时间时才设 → "set-once"：从该 field 首次创建起算，
-            //          后续写入（HSET 不会清已有 field 的 TTL）不续命，故漏清的脏 field 也会到点被清。
-            //   · 相比旧的 per-group PEXPIRE：每个 field 各自过期、互不影响，连穿透产生的负缓存 field
-            //          也能按 field 单独自动淘汰（不必整组一起过期）。
-            //   · FIELDS 1 field = 只给这 1 个 field 设；HPEXPIRE 返回每 field 一个状态码（数组），这里用不上。
-            // 0~1000ms 抖动防雪崩（大量 field 不在同一刻集体过期）；as i64 因毫秒数用 i64
+        let result = if self.backstop_ttl_ms == 0 {
+            conn.hset::<_, _, _, ()>(group, field, &payload).await
+        } else {
             let jitter: u64 = rand::thread_rng().gen_range(0..=1000);
-            let ms = (self.backstop_ttl_ms + jitter) as i64;
-            // redis-rs 0.25 未必有高层 hpexpire 方法，用 cmd 手拼最稳；&mut *conn 把 &mut 重借一份传进去
-            let _: redis::RedisResult<Vec<i64>> = redis::cmd("HPEXPIRE")
-                .arg(group)
-                .arg(ms)
-                .arg("NX")
-                .arg("FIELDS")
-                .arg(1)
+            // 脚本内写入和过期不可被其它写入穿插；过期失败时删除本次字段，避免留下永久缓存。
+            redis::Script::new(WRITE_FIELD_LUA)
+                .key(group)
                 .arg(field)
-                .query_async(&mut *conn)
-                .await;
+                .arg(&payload)
+                .arg(self.backstop_ttl_ms + jitter)
+                .invoke_async::<()>(&mut *conn)
+                .await
+        };
+        if let Err(error) = result {
+            warn!("grouped cache write with expiry failed: {}", error);
         }
         // 返回从 loader 拿到的数据（即使上面写缓存失败，业务仍拿到正确结果）
         Ok(data)

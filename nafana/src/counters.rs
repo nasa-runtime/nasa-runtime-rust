@@ -2,7 +2,8 @@
 //!
 //! rolling.rs 负责 10s 实时快照；二者在热路径同源记录、各管一轨:
 //! counter/bucket/sum/count 永远单调递增,**绝不**从滚动窗口重算(合同)。
-//! 热路径全部 Relaxed 原子,无锁。
+//! 热路径使用无锁原子；直方图先登记总数，再以 Release 发布 bucket，保证并发快照不会看到
+//! bucket 领先于 count 的不完整观测。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -62,33 +63,42 @@ impl LatencyHistogram {
         }
     }
 
-    /// 业务作用：记录一次执行耗时。
+    /// 业务作用：记录一次执行耗时，并按 count 先于 bucket 的发布顺序维持并发快照不变量。
     ///
-    /// # 参数
-    /// - `elapsed`: 本次执行耗时(进入执行区到出结局)。
+    /// 参数说明：
+    /// - `elapsed`: 本次执行耗时（进入执行区到产出结局）。
+    ///
+    /// 返回：无；累计总数、命中 bucket 与耗时总和，读取方一旦看到 bucket 增量就一定能看到对应总数。
     pub(crate) fn observe(&self, elapsed: Duration) {
         let micros = elapsed.as_micros() as u64;
+        // 总数必须先于 bucket 登记；bucket 的 Release 与快照的 Acquire 配对，避免统一指标目录
+        // 把并发写入中的正常样本误判为 bucket 总和超过 count 的畸形数据。
+        self.count.fetch_add(1, Ordering::Relaxed);
         for (i, bound_ms) in LATENCY_BOUNDS_MS.iter().enumerate() {
             if micros <= bound_ms * 1000 {
-                self.buckets[i].fetch_add(1, Ordering::Relaxed);
+                self.buckets[i].fetch_add(1, Ordering::Release);
                 break;
             }
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_micros.fetch_add(micros, Ordering::Relaxed);
     }
 
-    /// 业务作用：导出渲染视图:按 `le` 语义累计后的桶数组 + count + sum(秒)。
+    /// 业务作用：导出可供文本与结构化出口共用的直方图当前视图。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：按 `le` 语义累计的 bucket、总数与秒数总和；并发写入时允许短暂把尚未可见的有限
+    /// bucket 计入 `+Inf`，但不会返回 bucket 总和超过 count 的快照，下一次读取会自然收敛。
     pub(crate) fn export(&self) -> HistogramExport {
         let mut cumulative = [0u64; 13];
         let mut acc = 0u64;
         for (i, b) in self.buckets.iter().enumerate() {
-            acc += b.load(Ordering::Relaxed);
+            acc += b.load(Ordering::Acquire);
             cumulative[i] = acc;
         }
         HistogramExport {
             cumulative,
-            count: self.count.load(Ordering::Relaxed),
+            count: self.count.load(Ordering::Acquire),
             sum_seconds: self.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         }
     }

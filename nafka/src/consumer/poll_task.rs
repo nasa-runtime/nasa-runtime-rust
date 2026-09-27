@@ -914,7 +914,11 @@ fn run_owner_session(
         OwnerMode::Assign { partitions, .. } => partitions.clone(),
         OwnerMode::Subscribe { .. } => Vec::new(),
     };
-    let mut assignment_epoch = if assignment.is_empty() { 0 } else { 1 };
+    let mut assignment_epoch = if assignment.is_empty() {
+        0
+    } else {
+        1
+    };
     // 固定 assign 也必须等一次成功 poll 之后才发布 ready：本地 assign 不代表 broker 可达，
     // 会话入口就发布等于把刚撤销的 ready 租约当场恢复，await_group_ready 便再也
     // 反映不出 broker 中断。
@@ -950,8 +954,7 @@ fn run_owner_session(
     // 仪表采样节流：主循环每轮都跑，但 sink 是用户实现，不能按 poll 频率打。
     let mut last_gauge_sample = Instant::now() - GAUGE_SAMPLE_INTERVAL;
     while !stopping {
-        // 暂停行、ready 租约都在循环内被十几处改写，逐处补发必然漏（此前只有 rebalance
-        // 那一个采样点，恰恰是"什么都没暂停"的时刻）。这里按固定节奏统一重采一次。
+        // 暂停行与 ready 租约可在多个分支变化，按固定节奏统一采样，避免仪表停留在旧状态。
         if last_gauge_sample.elapsed() >= GAUGE_SAMPLE_INTERVAL {
             publish_health_gauges(&runtime, &plan.group, &health);
             last_gauge_sample = Instant::now();
@@ -2011,11 +2014,7 @@ fn publish_assignment_health(
 
 /// 业务作用：从 health 快照采样一次并发布 group 级仪表。
 ///
-/// **所有** ready 租约与暂停行的观测都必须走这里，原因是各写各的必然漂移：
-/// 此前 4 个改 ready 租约的点只有 2 个碰 gauge（`Revoked` 分支清了租约却不发 0，
-/// eager 撤销后若重新 join 卡住，gauge 就永远停在 1）；而 `paused_partitions`
-/// 唯一的采样点在 assignment 发布内，即"什么都没暂停"的那一刻——
-/// 稳态下 halt 掉 12 个分区也永远报的是若干天前采到的 0。
+/// ready 租约与暂停分区统一从同一健康快照采样，使撤销、重新加入和暂停变化都反映到指标。
 ///
 /// 语义定义（写在这里是因为它必须唯一）：
 /// - `group_ready` = 是否持有有效 assignment 租约。空 assignment 也算 1，
@@ -2028,6 +2027,8 @@ fn publish_assignment_health(
 /// - `runtime`: 指标出口。
 /// - `group`: group.id 标签。
 /// - `health`: 共享健康快照。
+///
+/// 返回：无；读取快照后释放锁，再向用户提供的 MetricsSink 发布仪表，避免回调持锁。
 fn publish_health_gauges(
     runtime: &Arc<KafkaProxyInner>,
     group: &str,
@@ -4500,14 +4501,6 @@ fn prepare_typed_message(
     }
 }
 
-/// 业务作用：从透传上下文提取低基数 trace id；缺失或非字符串时返回空串。
-fn consume_trace_id(ctx: &ConsumeCtx) -> &str {
-    ctx.passthrough
-        .get("traceId")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-}
-
 /// 业务作用：在每次调用业务 handler 前，同步可信总投递序号与独立的普通失败预算序号。
 ///
 /// 同一 offset 退避后会重新解码为新的记录；这里仍在最终调用点覆盖一次，确保 batch 合并、
@@ -4553,12 +4546,18 @@ fn annotate_delivery_attempt(
 /// - `runtime`: 提供 owner 外部异步运行时与 handler 超时。
 /// - `route`: 本次调用的冻结 route。
 /// - `records`: 同分区、同 route 的非空连续交付 run。
+/// - `handler_ambient`：从消息传播信息派生的 handler 环境 trace。
+///
+/// 返回：handler 的完成结局；超过冻结预算时返回稳定超时失败。
 fn invoke_typed_handler(
     runtime: &Arc<KafkaProxyInner>,
     route: &Arc<dyn crate::consumer::erased::ErasedConsumer>,
     records: Vec<ErasedRecord>,
+    handler_ambient: Option<natelemetry::TraceContext>,
 ) -> InvocationOutcome {
-    let future = route.invoke(records);
+    // handler 全程处于消息链路的环境作用域:业务在处理中发起的出站调用(REST/Kafka)未显式绑定
+    // 上下文时自动延续本条消息的 trace,与 HTTP 入站中间件的作用域语义一致。
+    let future = natelemetry::with_ambient(handler_ambient, route.invoke(records));
     if let Some(timeout) = runtime.config.behavior.handler_timeout_ms {
         runtime.runtime.block_on(async {
             match tokio::time::timeout(Duration::from_millis(timeout), future).await {
@@ -4756,16 +4755,27 @@ fn process_logical_typed_batch(
                     let last_offset = sources
                         .last()
                         .map_or(first.offset, |source| source.ctx.offset);
-                    let trace_id = consume_trace_id(first);
-                    let consumer_span = first.trace_context().and_then(|parent| {
-                        runtime.span_recorder.as_ref().map(|recorder| {
-                            recorder.start(
-                                "Kafka consume",
-                                &parent,
-                                natelemetry::SpanKind::Consumer,
-                            )
-                        })
+                    // 缺失或非法 traceparent 的消息必须建立新根：否则 handler 内的 REST/Kafka
+                    // 出站调用仍会断链。新根是否采样沿用 exporter 的冻结策略；未装 recorder 时
+                    // 只传播不记录，避免为了关联性擅自增加遥测出口负载。
+                    let parent = first.trace_context().unwrap_or_else(|| {
+                        natelemetry::TraceContext::new_root(
+                            runtime
+                                .span_recorder
+                                .as_ref()
+                                .is_some_and(natelemetry::SpanRecorder::should_sample_root),
+                        )
                     });
+                    let trace_id = parent.trace_id_hex();
+                    let consumer_span = runtime.span_recorder.as_ref().map(|recorder| {
+                        recorder.start("Kafka consume", &parent, natelemetry::SpanKind::Consumer)
+                    });
+                    // handler 的环境上下文与 consumer span 同一 span-id;recorder 未启用时
+                    // 也派生子上下文,保证下游 parent 指向本次消费而不是上游 producer。
+                    let handler_ambient = consumer_span
+                        .as_ref()
+                        .map(natelemetry::SpanGuard::context)
+                        .or_else(|| Some(parent.child(natelemetry::random_span_id())));
                     let outcome = if route.meta().shape == ConsumerShape::Batch {
                         let span = tracing::info_span!(
                             "kafka.consume_batch",
@@ -4781,7 +4791,9 @@ fn process_logical_typed_batch(
                             retry_attempt,
                             trace_id
                         );
-                        span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
+                        span.in_scope(|| {
+                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
+                        })
                     } else {
                         let span = tracing::info_span!(
                             "kafka.consume",
@@ -4795,7 +4807,9 @@ fn process_logical_typed_batch(
                             retry_attempt,
                             trace_id
                         );
-                        span.in_scope(|| invoke_typed_handler(runtime, &route, decoded_records))
+                        span.in_scope(|| {
+                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
+                        })
                     };
                     if let Some(span) = consumer_span {
                         let _ = span.finish(None);
@@ -5279,7 +5293,7 @@ fn build_dlt_record<S: DeadLetterSource + ?Sized>(
     // 规范 原文写的是"原记录已带 X-Nasa-DLT-Origin-Topic 时"判定为递归，但该 header
     // 由生产者任意填写：任何有写权限的客户端只要发一条「合法 event + 伪造 origin header +
     // 解不出来的 payload」，就能让该分区进入 Halt(RecursiveDlt) 并停止消费，直到人工介入
-    // ——等于把"一条消息瘫痪一个分区"的能力交给了外部（已实测复现）。它同时堵死了
+    // ——外部单条消息可能阻塞整个分区。它同时阻断了
     // "把 DLT 记录重放回业务 topic"这一正常运维流程：重放记录天然带着 origin header，
     // 再次失败时本应重新进 DLT，却会把分区打成 Halt。
     //

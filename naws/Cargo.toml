@@ -1,20 +1,17 @@
-# ws —— 通用 Rust 长连接框架库(对照 原实现 原工具包/netty)。
-# transport(TCP/WebSocket/socket.io)+ wire codec + Server/Client/Session/Sender +
-# endpoint/handler 抽象 + 背压/心跳/优雅关闭 + 集群 fan-out。**不含业务逻辑**。
-# 业务服务见独立工程 socket-center(通过 git 或 crates.io 依赖门面 nasa)。
-#
-# nasa-runtime-rust workspace 成员(维护约束 合并方案):协议层见同级 ws-proto / ws-proto-derive,
-# 依赖别名保持 `use proto::...` 与 `ws::proto` 不变。
+# ws —— 有界 TCP/WebSocket 长连接消息中心。
+# 提供 wire codec、Server/Client/Session/Sender、endpoint/handler、背压、心跳、排空和可选集群 fan-out，
+# 不包含具体业务路由与身份策略。
 [package]
 name = "naws"
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "纯 Rust 长连接消息中心框架(对照原长连接模块);通用 lib,业务无关。"
+description = "NASA 长连接消息中心与原生 TCP Client：鉴权、背压、心跳、可等待的关闭与可选集群 transport"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["tcp", "websocket", "client", "async", "backpressure"]
 categories.workspace = true
 # 打包边界：JS demo 依赖由 npm ci 恢复，绝不打进 crate；
 exclude = ["examples/node_modules/**"]
@@ -25,7 +22,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # 协议层:发布包名 naws-proto,别名 `proto` 保持全部源码/公开 API 不变。
-naws-proto = { package = "naws-proto", version = "1.0.0" }
+naws-proto = { package = "naws-proto", version = "1.0.1" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 bytes = "1"
@@ -42,7 +39,7 @@ serde_json = { version = "1", optional = true }
 # 二进制 payload ↔ socket.io 文本的 base64 桥接(可选,随 socketio 启用)
 base64 = { version = "0.22", optional = true }
 # 消息队列数据面适配器；只在 socket 集群场景按需启用。
-nafka = { version = "1.0.2", optional = true, default-features = false }
+nafka = { version = "1.0.3", optional = true, default-features = false }
 smallvec = { version = "1", optional = true }
 
 [features]

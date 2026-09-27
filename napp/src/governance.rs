@@ -297,24 +297,114 @@ pub async fn api_security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// 业务作用：总 deadline 中间件:建立预算写入扩展,并对整个请求处理施加绝对超时;超时返回固定 504。
+/// 业务作用：让 handler 和响应体共享绝对预算，请求退出时取消相关下游等待。
+/// 参数说明：`total` 为总时长；`request` 为入站请求；`next` 为后续处理链。
+/// 返回：响应头产生前预算终止返回 504；响应头发出后到期则终止响应体，保留已发送状态码。
 pub async fn enforce_request_deadline(
     State(total): State<std::time::Duration>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let budget = RequestBudget::from_now(total);
+    let guard = budget.cancel_on_drop();
     request.extensions_mut().insert(budget.clone());
-    let result = tokio::time::timeout_at(budget.deadline(), next.run(request)).await;
-    budget.cancel();
+    let result = budget.run(next.run(request)).await;
     match result {
-        Ok(response) => response,
+        Ok(response) => {
+            let (parts, body) = response.into_parts();
+            // 响应头不是请求完成点；取消责任随 body 移交，覆盖流式消费、断开和未消费即丢弃。
+            Response::from_parts(
+                parts,
+                axum::body::Body::new(BudgetBody::new(body, budget, guard)),
+            )
+        }
         Err(_) => (
             StatusCode::GATEWAY_TIMEOUT,
             [(header::RETRY_AFTER, "1")],
             "request deadline exceeded",
         )
             .into_response(),
+    }
+}
+
+/// 保留数据帧和 trailers 的预算响应体，不为每个响应另建后台任务。
+struct BudgetBody {
+    inner: axum::body::Body,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    owner: Option<nabudget::BudgetGuard>,
+    finished: bool,
+}
+
+impl BudgetBody {
+    /// 业务作用：接管响应体及其预算取消责任。
+    /// 参数说明：`inner` 为原响应体；`budget` 为入站预算；`owner` 为请求生命周期守卫。
+    /// 返回：在同一截止点终止传输、结束时通知下游的响应体。
+    fn new(inner: axum::body::Body, budget: RequestBudget, owner: nabudget::BudgetGuard) -> Self {
+        let deadline = Box::pin(tokio::time::sleep_until(budget.deadline()));
+        Self {
+            inner,
+            deadline,
+            cancelled: Box::pin(async move { budget.cancelled().await }),
+            owner: Some(owner),
+            finished: false,
+        }
+    }
+}
+
+impl http_body::Body for BudgetBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::BoxError;
+
+    /// 业务作用：在预算有效时转发响应帧，取消或到期后停止流式发送。
+    /// 参数说明：`cx` 为传输层轮询上下文。
+    /// 返回：原数据或 trailers；预算终止时返回一次固定错误，随后结束。
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::future::Future;
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        // 在读取下一帧前优先裁决取消，已经取消的请求不会继续消耗上游流。
+        let stopped = if this.cancelled.as_mut().poll(cx).is_ready() {
+            Some(nabudget::BudgetError::Cancelled)
+        } else if this.deadline.as_mut().poll(cx).is_ready() {
+            Some(nabudget::BudgetError::DeadlineExceeded)
+        } else {
+            None
+        };
+        if let Some(error) = stopped {
+            this.finished = true;
+            this.owner.take();
+            return Poll::Ready(Some(Err(Box::new(error))));
+        }
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+            Poll::Ready(value) => {
+                this.finished = true;
+                this.owner.take();
+                Poll::Ready(value.map(|result| result.map_err(Into::into)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// 业务作用：向传输层报告已完成的预算响应体。
+    /// 参数说明：无。
+    /// 返回：仅在本 owner 已结束时报告结束，确保空 body 也经过取消责任释放。
+    fn is_end_stream(&self) -> bool {
+        self.finished
+    }
+
+    /// 业务作用：保留响应体长度提示，避免改变已知长度响应的传输形式。
+    /// 参数说明：无。
+    /// 返回：原响应体的大小提示。
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
     }
 }
 

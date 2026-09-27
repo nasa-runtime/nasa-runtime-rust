@@ -11,13 +11,13 @@ use crate::client::RestDiscoveryClient;
 /// 全局门面内部持有的轻量运行时。发布到全局前必须是「可用状态」(provider 已连、rest 已建)。
 pub struct RemoteRuntime {
     rest: Arc<RestDiscoveryClient>,
-    /// 保留 provider 句柄:第三阶段的 service-list 刷新任务会用到;第一阶段仅持有。
+    /// 与当前 REST 实例共同持有发现 provider，避免仍有任务时提前释放。
     _discovery: Option<Arc<dyn DiscoveryClient>>,
 }
 
 impl RemoteRuntime {
     /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
-    pub(crate) fn new(
+    pub fn new(
         rest: Arc<RestDiscoveryClient>,
         discovery: Option<Arc<dyn DiscoveryClient>>,
     ) -> Self {

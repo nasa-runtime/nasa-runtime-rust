@@ -251,20 +251,25 @@ impl ApplicationSpec {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：声明 Saga、Kafka、Outbox、Web、长连接、注册发现或调度时返回 Service，否则返回 Batch。
+    /// 返回：声明长驻组件或存在静态 hosted initializer 时返回 Service，否则返回 Batch。
     pub(crate) fn resolve_auto_mode(&self) -> ApplicationMode {
-        if self.components.iter().any(|component| {
-            matches!(
-                component,
-                ComponentId::Saga
-                    | ComponentId::Kafka
-                    | ComponentId::Outbox
-                    | ComponentId::Web
-                    | ComponentId::Ws
-                    | ComponentId::NacosDiscovery
-                    | ComponentId::Scheduling
-            )
-        }) {
+        if crate::initialization::has_hosted_static_initializer()
+            || self.components.iter().any(|component| {
+                matches!(
+                    component,
+                    ComponentId::Saga
+                        | ComponentId::RedisJob
+                        | ComponentId::Kafka
+                        | ComponentId::Outbox
+                        | ComponentId::Web
+                        | ComponentId::Ws
+                        | ComponentId::NacosDiscovery
+                        | ComponentId::Scheduling
+                        | ComponentId::Partition
+                        | ComponentId::Grpc
+                )
+            })
+        {
             ApplicationMode::Service
         } else {
             ApplicationMode::Batch
@@ -279,16 +284,24 @@ impl ApplicationSpec {
     /// 返回：模式与组件相容时成功；Batch 包含任一长生命周期组件时返回配置错误。
     pub(crate) fn validate_mode(&self, mode: ApplicationMode) -> ApplicationResult<()> {
         if mode == ApplicationMode::Batch {
+            if crate::initialization::has_hosted_static_initializer() {
+                return Err(spec_error(
+                    "batch mode cannot activate a hosted initializer",
+                ));
+            }
             if let Some(component) = self.components.iter().find(|component| {
                 matches!(
                     component,
                     ComponentId::Saga
+                        | ComponentId::RedisJob
                         | ComponentId::Kafka
                         | ComponentId::Outbox
                         | ComponentId::Web
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
                         | ComponentId::Scheduling
+                        | ComponentId::Partition
+                        | ComponentId::Grpc
                 )
             }) {
                 return Err(spec_error(format!(
@@ -336,10 +349,18 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
             "component `outbox` requires managed `db` to be declared",
         ));
     }
+    if components.contains(&ComponentId::RedisJob) && !components.contains(&ComponentId::Redis) {
+        return Err(spec_error(
+            "component `redis-job` requires managed `redis` to be declared",
+        ));
+    }
 
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::SqlObservability, ComponentId::Db)?;
+    ensure_before_if_both(components, ComponentId::Observability, ComponentId::Web)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Redis)?;
+    ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Web)?;
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Ws)?;
@@ -356,6 +377,10 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Web, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Saga)?;
+    // Saga 的 Redis Streams 受管 transport 在 Saga Ready 阶段需要已建立的 Redis 客户端;
+    // 反向顺序会让 Ready 探测拿不到连接。停机按逆序执行,消费停止后 Redis 才释放。
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::Saga)?;
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::Db, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Saga, ComponentId::Outbox)?;
@@ -368,6 +393,22 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Scheduling)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Cache, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Kafka, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::RedisJob)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Auth)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Ws)?;
+    ensure_before_if_both(
+        components,
+        ComponentId::RedisJob,
+        ComponentId::NacosDiscovery,
+    )?;
+    ensure_before_if_both(components, ComponentId::RedisJob, ComponentId::Scheduling)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Ws)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::NacosDiscovery)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Scheduling)?;
@@ -377,6 +418,7 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Db)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Saga)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Redis)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::RedisJob)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Outbox)?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Web)?;
@@ -387,11 +429,33 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
         ComponentId::NacosDiscovery,
     )?;
     ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Scheduling)?;
+    ensure_before_if_both(components, ComponentId::Telemetry, ComponentId::Grpc)?;
     // cache:redis 先于 cache(配 redis_ref 时复用其连接),cache 先于 kafka/web。cache 不强制
     // Service 和 Batch 都可使用该能力；仅在同时声明 Redis 时校验相对顺序，避免把可选后端误设为强依赖。
     ensure_before_if_both(components, ComponentId::Redis, ComponentId::Cache)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Kafka)?;
     ensure_before_if_both(components, ComponentId::Cache, ComponentId::Web)?;
+    // partition 在 UserHook 后才按计划创建，不依赖外部组件；放在流量入口之前使宏生成的组件图
+    // 与“先具备本地执行能力，再开放业务入口”的诊断顺序一致。真实停机顺序仍由 active stack 保证。
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Web)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Ws)?;
+    ensure_before_if_both(
+        components,
+        ComponentId::Partition,
+        ComponentId::NacosDiscovery,
+    )?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Scheduling)?;
+    // gRPC Router 在 Ready 才构造并绑定，所有 handler 依赖必须先启动，反向停机则先关闭
+    // listener 再释放数据库、消息 transport 与本地执行器。服务发现必须最后发布并最先摘除。
+    ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Db, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Redis, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Cache, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Partition, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Saga, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Outbox, ComponentId::Grpc)?;
+    ensure_before_if_both(components, ComponentId::Grpc, ComponentId::NacosDiscovery)?;
     // auth:配置中心先于 auth(读最终 overlay),auth 先于 Web(Ready 发布 Authenticator 供 Web 消费)。
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Auth)?;
     ensure_before_if_both(components, ComponentId::Kafka, ComponentId::Auth)?;

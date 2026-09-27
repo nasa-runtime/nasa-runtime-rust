@@ -70,8 +70,7 @@ pub(super) async fn control_loop(rt: Arc<GroupRuntime>) {
                     }
                 }
             }
-            //XAUTOCLAIM **cursor 分页**(每轮最多 PAGE_BUDGET 页)——长 PEL
-            // 不再"每轮只处理一页且每轮从 0 重扫",显著缩短旧命令恢复延迟;预算上限防饿死新命令。
+            // XAUTOCLAIM 沿 cursor 连续读取，每轮限制 PAGE_BUDGET 页，避免长 PEL 回收饿死新命令。
             const PAGE_BUDGET: u32 = 4;
             let mut cursor = "0".to_string();
             let mut pages = 0u32;
@@ -156,11 +155,10 @@ pub(super) async fn control_loop(rt: Arc<GroupRuntime>) {
 }
 
 /// 业务作用：解析 command stream 的 XREADGROUP/XAUTOCLAIM 响应,抽取 (entry_id, op 字段)。
-/// **RESP2/RESP3 双形态**(RESP3 下命令通道半适配——本函数是第三个
-/// XREADGROUP 解析器,第 25 轮只修了 poll.rs/proxy.rs 两处,漏了这里):
+/// 支持 RESP2/RESP3 两种顶层容器：
 /// - XREADGROUP `>` 顶层:RESP2 `[[stream,[entries]],...]`(部分形态 Set)/ RESP3 `{stream:[entries]}`(Map);
 /// - XREADGROUP NOBLOCK 无新消息:`Nil`(空轮,非错误);
-/// - entry/fields 段:两协议都是 Array(本地 `?protocol=resp3` 实测确认,XAUTOCLAIM 同样顶层仍是 Array)。
+/// - entry/fields 段:两协议都是 Array，XAUTOCLAIM 的顶层同样是 Array。
 ///
 /// XAUTOCLAIM 路径由调用方包成合成 `Array([[key, entries]])` 走 Array 臂,不受影响。
 pub(super) fn collect_cmd_entries(v: redis::Value, out: &mut Vec<(String, String)>) {
@@ -206,13 +204,13 @@ fn collect_cmd_stream_entries(entries_v: redis::Value, out: &mut Vec<(String, St
         let (Some(idv), Some(V::Array(fields) | V::Set(fields))) = (it.next(), it.next()) else {
             continue;
         };
-        let id = String::from_utf8_lossy(&value_bytes(idv)).into_owned();
+        let id = String::from_utf8_lossy(&wire::bytes(idv).unwrap_or_default()).into_owned();
         let mut fit = fields.into_iter();
         while let (Some(f), Some(val)) = (fit.next(), fit.next()) {
-            if value_bytes(f) == b"op" {
+            if wire::bytes(f).unwrap_or_default() == b"op" {
                 out.push((
                     id.clone(),
-                    String::from_utf8_lossy(&value_bytes(val)).into_owned(),
+                    String::from_utf8_lossy(&wire::bytes(val).unwrap_or_default()).into_owned(),
                 ));
             }
         }
@@ -287,48 +285,19 @@ pub(super) async fn run_command(rt: &Arc<GroupRuntime>, p: u32, op_id: &str) -> 
     }
 }
 
-/// 业务作用：后台 orphan sweep actor:周期对本节点持有分区做
-/// `XAUTOCLAIM min_idle` 收编滞留 PEL,经 `Event::OrphansClaimed` 回灌 coordinator——
-/// **Redis I/O 不在 coordinator 主循环上**,不阻塞 shutdown/lost/事件处理。
-/// 串行扫描(每分区一次,backlog 多页);独立 cancel 跟随 rt.cancel。
+/// 业务作用：周期请求空闲来源重查 PEL，实际读取仍由来源唯一监督者执行。
+/// 参数说明：`rt` 为当前组。
+/// 返回：后台关闭时退出，不在此任务中发起 XAUTOCLAIM。
 pub(super) async fn sweep_loop(rt: Arc<GroupRuntime>) {
-    let interval = Duration::from_millis(rt.cfg.min_idle_ms.max(1_000));
-    let mut tick = tokio::time::interval(interval);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut tick = tokio::time::interval(Duration::from_millis(rt.cfg.min_idle_ms.max(1000)));
+    tick.tick().await;
     loop {
         tokio::select! {
             _ = rt.bg_cancel.cancelled() => return,
-            _ = tick.tick() => {}
-        }
-        //**只扫 coordinator 发布的 Ready/Backoff 票据**(带 claim generation),
-        // 不再扫全部 claimed——避免对 InFlight/Recovering/RetryBackoff/Parked 分区 XAUTOCLAIM
-        // 改 PEL owner/idle;收编结果带 generation 回灌,coordinator 换代/换态即作废。
-        let tickets: Vec<(u32, u64)> = rt.sweepable.lock().expect("sweepable").clone();
-        for (p, generation) in tickets {
-            if rt.bg_cancel.is_cancelled() {
-                return;
-            }
-            //执行前**重校验 ticket 仍有效**——slot 仍在 sweepable 同代(未转
-            // InFlight/Recovering/Parked/换代)且本节点仍持有(owner_ctx)。否则跳过,不动其 PEL。
-            let valid = rt
-                .sweepable
-                .lock()
-                .expect("sweepable")
-                .iter()
-                .any(|&(q, g)| q == p && g == generation)
-                && rt.owner_ctx.lock().expect("owner_ctx").contains_key(&p);
-            if !valid {
-                continue;
-            }
-            let ids = super::retry::sweep_partition(&rt, p, rt.cfg.min_idle_ms).await;
-            // 回灌前再确认本节点仍持有(缩窄 XAUTOCLAIM 后→回灌前的窗口;generation 仍由 coordinator 二次校验)
-            if !ids.is_empty() && rt.owner_ctx.lock().expect("owner_ctx").contains_key(&p) {
-                let _ = rt
-                    .event_tx
-                    .send(Event::OrphansClaimed { p, generation, ids })
-                    .await;
+            _ = tick.tick() => {
             }
         }
+        rt.core.request_recovery(&rt.layout.prefix);
     }
 }
 
@@ -352,7 +321,9 @@ pub(super) async fn wake_loop(rt: Arc<GroupRuntime>) {
             tokio::select! {
                 _ = rt.bg_cancel.cancelled() => return,
                 m = msgs.next() => {
-                    if m.is_none() { break; } // 连接断:重建订阅
+                    if m.is_none() {
+                        break;
+                    }
                     let _ = rebalance_once(&rt).await;
                 }
             }

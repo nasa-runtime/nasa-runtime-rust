@@ -126,7 +126,7 @@ impl<'a> PolicyContext<'a> {
     }
 }
 
-/// 客户端入站消息的路由授权。**默认 deny**(对齐修复后 原实现 RoutePolicy.denyAll)。
+/// 客户端入站消息的路由授权。**默认 deny**。
 /// 只作用于客户端触发的自动 relay;服务端直接 `Sender::send` 不经过它。
 pub type InboundPolicy = Arc<dyn Fn(&PolicyContext, &Message) -> RouteDecision + Send + Sync>;
 
@@ -135,7 +135,7 @@ pub fn deny_all() -> InboundPolicy {
     Arc::new(|_ctx, _m| RouteDecision::Deny)
 }
 
-/// 业务作用：全放行(对齐 原实现 RoutePolicy.allowAll);仅在确需开放客户端路由时显式用。
+/// 业务作用：全放行;仅在确需开放客户端路由时显式用。
 pub fn allow_all() -> InboundPolicy {
     Arc::new(|_ctx, _m| RouteDecision::RelayAndHandle)
 }

@@ -27,7 +27,6 @@ use crate::problem::ApiProblem;
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 const MAX_CLIENT_KEY_BYTES: usize = 190;
-const LEASE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 参与幂等的请求/响应体上限;超限拒绝。
 const MAX_IDEMPOTENT_BODY: usize = 1 << 20;
@@ -58,71 +57,37 @@ impl IdempotencyLayerState {
     }
 }
 
-/// 首次执行占位的取消安全守卫。
-///
-/// Web 请求 future 可能被入口 deadline、客户端断连或服务排空直接取消；这些路径不会继续执行普通
-/// `abort().await`。守卫在 Drop 时只针对本次 fingerprint + 随机 lease 发起 best-effort 清理，绝不会
-/// 删除后来取得同一 key 的 owner。持久后端另有 lease TTL 作为进程崩溃时的最终兜底。
+/// 请求退出前是否取得持久完成确认；未知结果保留占位，不通过取消推断业务未执行。
 struct ExecutionLeaseGuard {
-    store: SharedIdempotencyStore,
-    key: IdempotencyKey,
-    fingerprint: RequestFingerprint,
-    lease: ExecutionLease,
     armed: bool,
 }
 
 impl ExecutionLeaseGuard {
-    /// 业务作用：为一次首次执行绑定 store、命名空间、fingerprint 与随机 lease，并默认启用清理。
-    fn new(
-        store: SharedIdempotencyStore,
-        key: IdempotencyKey,
-        fingerprint: RequestFingerprint,
-        lease: ExecutionLease,
-    ) -> Self {
-        Self {
-            store,
-            key,
-            fingerprint,
-            lease,
-            armed: true,
-        }
+    /// 业务作用：在业务 handler 开始前建立未知结果的观测责任。
+    /// 参数说明：无。
+    /// 返回：尚未取得持久完成确认的守卫，不创建清理任务。
+    fn new() -> Self {
+        Self { armed: true }
     }
 
-    /// 业务作用：完成或显式 abort 后关闭 Drop 清理，防止重复请求后端。
+    /// 业务作用：在后端确认完成后解除未知结果观测。
+    /// 参数说明：无。
+    /// 返回：退出时不再报告未确认状态。
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
 impl Drop for ExecutionLeaseGuard {
-    /// 业务作用：请求 future 非正常结束时，在有界后台任务中 best-effort 释放仍属于本 owner 的 lease。
+    /// 业务作用：保留未确认业务结果的占位，避免取消后立即允许相同请求再次产生副作用。
+    /// 参数说明：无。
+    /// 返回：只记录固定原因，不发起 abort、不创建后台任务；后续裁决仍由 store 合同决定。
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        if self.armed {
             tracing::warn!(
-                route_id = %self.key.route_id,
-                "idempotency lease cleanup could not start because no Tokio runtime is active"
+                "idempotency execution ended without confirmed completion; reservation retained"
             );
-            return;
-        };
-        let store = Arc::clone(&self.store);
-        let key = self.key.clone();
-        let fingerprint = self.fingerprint;
-        let lease = self.lease;
-        runtime.spawn(async move {
-            if !matches!(
-                tokio::time::timeout(LEASE_CLEANUP_TIMEOUT, store.abort(&key, fingerprint, lease))
-                    .await,
-                Ok(Ok(true))
-            ) {
-                tracing::warn!(
-                    route_id = %key.route_id,
-                    "cancelled idempotency lease could not be released"
-                );
-            }
-        });
+        }
     }
 }
 
@@ -403,18 +368,11 @@ pub async fn idempotency(
         .with_detail("the Idempotency-Key was reused with a different request body")
         .into_response(),
         IdempotencyOutcome::FirstExecution => {
-            let mut lease_guard =
-                ExecutionLeaseGuard::new(Arc::clone(&state.store), key.clone(), fingerprint, lease);
+            let mut lease_guard = ExecutionLeaseGuard::new();
             let request = Request::from_parts(parts, Body::from(bytes));
             let response = next.run(request).await;
             if !storable_status(response.status()) {
-                match state.store.abort(&key, fingerprint, lease).await {
-                    Ok(true) => lease_guard.disarm(),
-                    Ok(false) | Err(_) => tracing::warn!(
-                        route_id = %key.route_id,
-                        "idempotency lease could not be released for a non-storable response"
-                    ),
-                }
+                // HTTP 状态码不能证明业务没有提交；保留占位，禁止靠自动释放立即重放副作用。
                 return response;
             }
             let stored_headers = storable_headers(&response);

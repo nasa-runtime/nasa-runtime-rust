@@ -2,12 +2,22 @@
 
 `naws-proto` 是 NASA 长连接协议层，提供 wire schema、`WireCodec` 编解码 trait，以及 VARINT_TLV、BITPACK_TLV、JSON_BYTES 等模式的逐字节兼容实现。`naws` 在网络层收发 frame，协议细节由本 crate 处理。
 
+## 协议架构
+
+```text
+业务 schema ──→ derive 或手写 WireCodec ──→ payload 字节
+payload 字节 + Mode ──→ naws 外层 frame ──→ TCP / WebSocket
+```
+
+本 crate 只校验并转换完整 payload，不拥有连接、鉴权、重试或指标。非法 mode、越界长度、截断字段和
+尾随字节返回 `CodecError`；外层 frame 完整性、连接观测和流量限制由 `naws` 负责。
+
 业务类型优先从 `nasa::ws` 门面取得；自定义协议结构体还需要派生宏包：
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["ws"] }
-naws-proto-derive = { version = "1" }
+nasa = { version = "1.0.3", features = ["ws"] }
+naws-proto-derive = { version = "1.0.1" }
 ```
 
 ## 派生消息体
@@ -53,7 +63,7 @@ struct JsonPayload {
 ## 边界
 
 - 本 crate 只处理字节协议，不启动 TCP/WebSocket 服务。
-- 修改 schema 前需要做 golden 对拍，避免破坏旧客户端兼容。
+- 修改 schema 时必须保持字段 tag、顺序、可空性和 mode ordinal 的线协议兼容。
 - 业务项目通常通过 `naws::proto` 或 `nasa::ws::proto` 使用。
 
 ## 行为边界

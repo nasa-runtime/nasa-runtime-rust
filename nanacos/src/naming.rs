@@ -103,7 +103,7 @@ fn validate_instance(inst: &Instance) -> anyhow::Result<()> {
     anyhow::ensure!(!inst.ip.trim().is_empty(), "nacos: instance ip 不能为空");
     client::ensure_no_outer_ws("instance.ip", &inst.ip)?;
     anyhow::ensure!(inst.port != 0, "nacos: instance port 不能为 0");
-    // weight 允许 0(已实测 Nacos 接受 weight=0 注册):0 = 已注册但不承载流量(平滑摘流/预注册);
+    // weight 允许为 0，表示实例已注册但不承载流量，用于平滑摘流或预注册。
     // discover/subscribe_channel 会用 is_traffic_instance 过滤掉 weight≤0,discover_all 保留。
     anyhow::ensure!(
         inst.weight.is_finite() && inst.weight >= 0.0,

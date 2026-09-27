@@ -1,5 +1,5 @@
 // ============================================================================
-// runtime/autotrim.rs：对齐既有 streamAutoTrim 语义的自动裁剪任务。
+// 根据分区保留策略运行 Stream 自动裁剪任务。
 //
 // 问题:partition stream 的 ACK **只移 PEL、不删 entry**,长跑节点 stream 单调增长 → OOM。
 // 解法:**leader** 每 `auto_trim_rate_ms`(默认 60s)对所有分区 stream 跑 `XTRIM MINID ~ {now-保留窗}`,
@@ -29,9 +29,8 @@ pub(super) async fn auto_trim_loop(rt: Arc<GroupRuntime>) {
         format!("{}:leader", rt.layout.prefix),
         Duration::from_millis(rt.cfg.rebalance_ms.max(1)),
     );
-    //把内层 election 任务的 abort_handle 也纳入分区统一 abort 集——否则 bg deadline
-    // 超时 abort_all 掉 auto_trim_loop 时,`leader.shutdown()` 来不及执行、election_loop 成孤儿、leader 锁
-    // 看门狗继续续租,阻塞新 leader 接任至 lease 过期(此前靠 lease 兜底,现彻底干净)。
+    // election 与裁剪循环必须一同接受停机控制，避免裁剪循环中止后孤立的选举任务继续续租，
+    // 阻碍其它节点取得裁剪领导权。
     if let Some(ah) = leader.abort_handle() {
         rt.bg_aborts.lock().expect("bg_aborts").push(ah);
     }
@@ -44,8 +43,7 @@ pub(super) async fn auto_trim_loop(rt: Arc<GroupRuntime>) {
         tokio::select! {
             _ = rt.bg_cancel.cancelled() => break,
             _ = tick.tick() => {
-                //经 run_if_leader_cancellable 跑整轮 XTRIM(不再裸读 is_leader)——
-                // 失主即中断本轮(term token cancel),双主跑长任务窗口压回 ≤1 tick;cancellable 不再是死代码。
+                // 裁剪绑定当前领导任期的取消令牌，失权后停止继续派发；已发送的 Redis 命令无法撤销。
                 let rt2 = Arc::clone(&rt);
                 leader
                     .run_if_leader_cancellable(|tok| async move { trim_round(&rt2, &tok).await })
@@ -113,7 +111,7 @@ async fn trim_round(rt: &Arc<GroupRuntime>, term: &tokio_util::sync::Cancellatio
 ///
 ///**fail-closed**——只有 `count==0`(真·空 PEL)才返 `Ok(None)`(调用方仅按时间裁剪);
 /// 顶层/count/min-id **形态异常一律 `Err`**(让调用方保守跳过本分区,绝不退化成纯时间裁剪而误删 PEL 中
-/// Park/DLQ-pending 的 entry)。此前把"解析失败"也当空 PEL 是残留的 fail-open 入口。
+/// Park/DLQ-pending 的 entry)。
 ///
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
@@ -124,7 +122,7 @@ async fn oldest_pending_id(
     stream: &str,
     group: &str,
 ) -> std::result::Result<Option<String>, redis::RedisError> {
-    // Builds a Redis protocol parse error.
+    // 无法证明 PEL 为空时保留解析错误，禁止调用方放宽裁剪边界。
     ///
     /// # 参数
     /// 业务作用：- `msg`: 业务消息体或事件载荷。

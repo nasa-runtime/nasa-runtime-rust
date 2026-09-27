@@ -1,5 +1,5 @@
 // ============================================================================
-// src/commands.rs —— 类型化命令层(文档;对照 原实现 RedisProxy 的命令 API 子集)。
+// 类型化 Redis 命令层，统一计时、连接和错误语义。
 //
 // 第一阶段只覆盖 Lock/Pipeline/常用命令(不 1:1 抄 150 个方法)
 // 红线:
@@ -150,7 +150,7 @@ impl RedisClient {
     ///
     /// - `keys`: 待删除的一组 Redis key；空切片会短路返回 `0`，cluster 下必须同槽。
     pub async fn del(&self, keys: &[&str]) -> Result<u64> {
-        //空切片短路返回 0(对齐 原实现 `isEmpty` 短路)——否则 `DEL`(无 key)
+        //空切片短路返回 0——否则 `DEL`(无 key)
         // 触发 Redis "wrong number of arguments" 报错。
         if keys.is_empty() {
             return Ok(0);
@@ -277,7 +277,7 @@ impl RedisClient {
     /// - `key`: 哈希结构所在的 Redis key。
     /// - `fields`: 待删除的 hash field 列表；空切片会短路返回 `0`。
     pub async fn h_del(&self, key: &str, fields: &[&str]) -> Result<u64> {
-        //空切片短路返回 0(对齐 原实现)——否则 `HDEL key`(无 field)报参数错误。
+        //空切片短路返回 0——否则 `HDEL key`(无 field)报参数错误。
         if fields.is_empty() {
             return Ok(0);
         }
@@ -316,13 +316,13 @@ impl RedisClient {
     }
 
     /// 业务作用：ZREM:移除一个或多个成员(放宽到 `ToRedisArgs`,单值/批量同一方法,
-    /// 对齐 原实现 varargs,避免批量删被迫 N 次往返)。单个 `&str` 仍直接可传。
+    /// 支持批量成员，一次往返完成删除；单个 `&str` 也可直接传入。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
     /// - `members`: 集合或有序集合成员列表。
     pub async fn z_rem<V: ToRedisArgs + Send + Sync>(&self, key: &str, members: V) -> Result<u64> {
-        //空 members → no-op `Ok(0)`,不发空 `ZREM`(对照 原实现 zRem;否则 Redis arity error)。
+        //空 members → no-op `Ok(0)`,不发空 `ZREM`。
         if members.num_of_args() == 0 {
             return Ok(0);
         }
@@ -393,7 +393,7 @@ impl RedisClient {
         self.timed(c.smembers(key)).await
     }
 
-    // ════════════════════ ② 命令广度(对照 原实现 RedisProxy)════════════════════
+    // ════════════════════ ② 命令广度════════════════════
 
     // ───────────────────────── string / 批量 ─────────────────────────
 
@@ -411,7 +411,7 @@ impl RedisClient {
         self.timed(c.set_nx(key, val)).await
     }
 
-    /// 业务作用：MGET:批量取(缺失键 → None,顺序对应)。空切片短路返回空 Vec(对齐 原实现)。
+    /// 业务作用：MGET:批量取(缺失键 → None,顺序对应)。空切片短路返回空 Vec。
     ///
     /// # 参数
     /// - `keys`: Redis key 列表,用于批量读取、删除或集合运算。
@@ -423,7 +423,7 @@ impl RedisClient {
         self.timed(c.mget(keys)).await
     }
 
-    /// 业务作用：MSET:批量写。空切片短路(对齐 原实现)。
+    /// 业务作用：MSET:批量写。空切片短路。
     ///
     /// # 参数
     /// - `items`: 已编译的日志 pattern 片段列表。
@@ -461,7 +461,7 @@ impl RedisClient {
     }
 
     /// 业务作用：EXPIREAT:绝对过期(**秒级** unix 时间戳)。
-    /// ⚠ **跨语言迁移陷阱**:原实现 `expireAt(key, millis)` 是**毫秒**戳;
+    /// 参数使用秒级时间戳，传入毫秒值会产生错误的过期点。
     /// 本方法显式命名 `_secs` 杜绝同名不同单位的静默错误。毫秒戳请用 `expire_at_millis`。
     ///
     /// # 参数
@@ -473,7 +473,7 @@ impl RedisClient {
         self.timed(c.expire_at(key, unix_secs)).await
     }
 
-    /// 业务作用：PEXPIREAT:绝对过期(**毫秒级** unix 时间戳;对齐 原实现 `expireAt(key, millis)`)。
+    /// 业务作用：PEXPIREAT:绝对过期(**毫秒级** unix 时间戳)。
     ///
     /// # 参数
     ///
@@ -676,7 +676,7 @@ impl RedisClient {
         key: &str,
         members: V,
     ) -> Result<Vec<bool>> {
-        //空 members → 空结果,不发空 `SMISMEMBER`(对照 原实现 sMisMember 空 vals 返回 emptyMap)。
+        //空 members → 空结果,不发空 `SMISMEMBER`。
         if members.num_of_args() == 0 {
             return Ok(Vec::new());
         }
@@ -718,13 +718,13 @@ impl RedisClient {
     }
 
     /// 业务作用：SREM:移除一个或多个成员,返回移除数(放宽到 `ToRedisArgs` 支持批量,
-    /// 对齐 原实现 varargs)。单个 `&str` 仍直接可传。
+    /// 支持批量成员，一次往返完成删除；单个 `&str` 也可直接传入。
     ///
     /// # 参数
     /// - `key`: 当前 Redis 命令操作的 key。
     /// - `members`: 集合或有序集合成员列表。
     pub async fn s_rem<V: ToRedisArgs + Send + Sync>(&self, key: &str, members: V) -> Result<u64> {
-        //空 members → no-op `Ok(0)`,不发空 `SREM`(对照 原实现 sRem)。
+        //空 members → no-op `Ok(0)`,不发空 `SREM`。
         if members.num_of_args() == 0 {
             return Ok(0);
         }
@@ -741,7 +741,7 @@ impl RedisClient {
         self.timed(c.spop(key)).await
     }
 
-    /// 业务作用：SPOP key count：随机弹出至多 count 个成员，与参照实现的批量语义一致。
+    /// 业务作用：使用 SPOP key count 随机弹出至多 count 个成员。
     /// redis-rs `spop` 无 count 形态,这里直接拼命令(execute_raw 已套 timeout)。
     ///
     /// # 参数
@@ -765,7 +765,7 @@ impl RedisClient {
     /// - `val`: 要写入 Redis 或发送到下游的值。
     pub async fn l_push<V: ToRedisArgs + Send + Sync>(&self, key: &str, val: V) -> Result<u64> {
         //返回新长度,空值无法 no-op(返 0 会误导调用方);**fail-fast**——
-        // 不把 Redis arity error 泄漏给调用方(对照 原实现 lPush 空 vals 直接 return)。
+        // 不把 Redis arity error 泄漏给调用方。
         if val.num_of_args() == 0 {
             return Err(crate::error::NasaRedisError::Config(
                 "l_push: values 不能为空".into(),
@@ -927,7 +927,7 @@ impl RedisClient {
         self.timed(c.append(key, val)).await
     }
 
-    /// 业务作用：HDECRBY:HINCRBY 负 delta(对照 原实现 hDecrBy)。
+    /// 业务作用：HDECRBY:HINCRBY 负 delta。
     ///
     /// # 参数
     ///
@@ -1044,7 +1044,7 @@ impl RedisClient {
             .await
     }
 
-    // ───────────────────────── 直接 Stream 命令(对照 原实现 RedisProxy 裸 Stream API)─────────────
+    // ───────────────────────── 直接 Stream 命令─────────────
     // partition 内部用 XREADGROUP/XAUTOCLAIM/XACK,这里把 RedisProxy 暴露的"运维/低频"
     // Stream 命令补成对外类型化方法(execute_raw 已套 command.timeout_ms)。
 
@@ -1115,7 +1115,7 @@ impl RedisClient {
     /// - `ids`: 待删除的 entry id 列表；空白 id 会被过滤，过滤后为空则短路返回 `0`。
     pub async fn x_del(&self, key: &str, ids: &[&str]) -> Result<u64> {
         //过滤 blank id,过滤后为空 → no-op `Ok(0)`,不发空 `XDEL`
-        // (对照 原实现 RedisProxy.xDel:空/全 blank 直接返回 0,否则 Redis arity error)。
+        // 空集合或全部空白的 ID 不发送命令，避免 Redis 参数数量错误。
         let ids: Vec<&str> = ids
             .iter()
             .copied()
@@ -1133,7 +1133,7 @@ impl RedisClient {
     }
 
     /// 业务作用：XTRIM MAXLEN ~:**近似**裁剪(`~` 让引擎按整 macro-node 裁,O(1) 摊销,可能超额保留),返回删除数。
-    /// ⚠ 需严格限长用 `x_trim_maxlen_exact`(原实现 默认是精确 MAXLEN)。
+    /// ⚠ 需严格限长用 `x_trim_maxlen_exact`。
     ///
     /// # 参数
     ///
@@ -1150,7 +1150,7 @@ impl RedisClient {
         .await
     }
 
-    /// 业务作用：XTRIM MAXLEN(**精确**裁剪到 maxlen 条,对齐 原实现 默认),返回删除数。`maxlen=0` 清空 stream。
+    /// 业务作用：XTRIM MAXLEN(**精确**裁剪到 maxlen 条),返回删除数。`maxlen=0` 清空 stream。
     ///
     /// # 参数
     ///
@@ -1218,7 +1218,7 @@ impl RedisClient {
     }
 
     /// 业务作用：XGROUP CREATE:建消费组。`id="$"` 只读新消息、`"0"` 从头;`mkstream`=stream 不存在则创建。
-    /// 组已存在返回 BUSYGROUP 错误——调用方按需吞掉(对照 原实现 ignoreBusyGroup)。
+    /// 已存在的 consumer group 可视为初始化完成，其它 Redis 错误仍需传播。
     ///
     /// # 参数
     ///
@@ -1243,7 +1243,7 @@ impl RedisClient {
     }
 
     /// 业务作用：XGROUP CREATE,**幂等**:组已存在(BUSYGROUP)吞掉返回 false,新建返回 true,其余错误上抛
-    /// (对齐 原实现 `ignoreBusyGroup`,免调用方手动判错串)。
+    /// 已存在的 consumer group 可视为初始化完成，其它 Redis 错误仍需传播。
     ///
     /// # 参数
     ///
@@ -1285,7 +1285,7 @@ impl RedisClient {
     /// - `ids`: 待确认的 entry id 列表；空白 id 会被过滤，过滤后为空则短路返回 `0`。
     pub async fn x_ack(&self, key: &str, group: &str, ids: &[&str]) -> Result<u64> {
         //过滤 blank id,过滤后为空 → no-op `Ok(0)`,不发空 `XACK`
-        // (对照 原实现 RedisProxy.ack:空/全 blank 直接返回,否则 Redis arity error)。
+        // 空 ID 集合不发送命令，避免 Redis 参数数量错误。
         let ids: Vec<&str> = ids
             .iter()
             .copied()
@@ -1381,5 +1381,52 @@ impl RedisClient {
         // 命中 → [key, value];超时 → nil
         let r: Option<(String, T)> = cmd.query_async(&mut conn).await?;
         Ok(r)
+    }
+}
+
+impl RedisClient {
+    /// 业务作用：在调用链绝对预算内执行无写入副作用的 GET。
+    /// 参数说明：`key` 为键；`budget` 为入站传递的预算。
+    /// 返回：缓存值、不存在或调用错误；已取消时不轮询命令，不自动重试。
+    pub async fn get_with_budget<T: FromRedisValue>(
+        &self,
+        key: &str,
+        budget: &nabudget::RequestBudget,
+    ) -> Result<Option<T>> {
+        budget.run(self.get(key)).await?
+    }
+
+    /// 业务作用：在调用链绝对预算内读取 Hash 字段。
+    /// 参数说明：`key` 为 Hash；`field` 为字段；`budget` 为共享预算。
+    /// 返回：字段值、未命中或错误；取消停止本地等待，不改变共享键。
+    pub async fn h_get_with_budget<T: FromRedisValue>(
+        &self,
+        key: &str,
+        field: &str,
+        budget: &nabudget::RequestBudget,
+    ) -> Result<Option<T>> {
+        budget.run(self.h_get(key, field)).await?
+    }
+
+    /// 业务作用：使批量只读查询共享同一绝对预算。
+    /// 参数说明：`keys` 为已满足来源槽约束的键；`budget` 为共享预算。
+    /// 返回：按输入顺序返回值或错误；不为单个 key 重新开始计时。
+    pub async fn mget_with_budget<T: FromRedisValue>(
+        &self,
+        keys: &[&str],
+        budget: &nabudget::RequestBudget,
+    ) -> Result<Vec<Option<T>>> {
+        budget.run(self.mget(keys)).await?
+    }
+
+    /// 业务作用：在请求预算内查询键存在性。
+    /// 参数说明：`key` 为键；`budget` 为共享预算。
+    /// 返回：存在性或明确的取消、到期、后端错误。
+    pub async fn exists_with_budget(
+        &self,
+        key: &str,
+        budget: &nabudget::RequestBudget,
+    ) -> Result<bool> {
+        budget.run(self.exists(key)).await?
     }
 }

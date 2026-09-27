@@ -72,6 +72,8 @@ pub struct RedisNotifier {
     /// 取消信号:shutdown 时 cancel,reader 的 XREAD BLOCK / 重连 sleep / connect 在 select 中
     /// 立即被打断退出,不必等满 read_block_ms。
     cancel: CancellationToken,
+    reader_connected: Arc<AtomicBool>,
+    publisher_connected: Arc<AtomicBool>,
 }
 
 impl RedisNotifier {
@@ -102,6 +104,8 @@ impl RedisNotifier {
             xadd_failed: Arc::new(AtomicU64::new(0)),
             tasks: TaskTracker::new(),
             cancel: CancellationToken::new(),
+            reader_connected: Arc::new(AtomicBool::new(false)),
+            publisher_connected: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -113,6 +117,26 @@ impl RedisNotifier {
     /// 业务作用：累计 XADD 实际写失败丢弃数(入队后写 Redis 失败),供 health/metrics 上报。
     pub fn xadd_failed(&self) -> u64 {
         self.xadd_failed.load(Ordering::Relaxed)
+    }
+
+    /// 业务作用：报告广播读写两侧当前连接是否均可用。
+    /// 参数说明：无。
+    /// 返回：已就绪且未关闭、两项任务仍持有连接时返回真；不承诺消息可靠交付。
+    pub fn is_healthy(&self) -> bool {
+        !self.cancel.is_cancelled()
+            && self.reader_connected.load(Ordering::Acquire)
+            && self.publisher_connected.load(Ordering::Acquire)
+    }
+}
+
+struct ConnectionObservation(Arc<AtomicBool>);
+
+impl Drop for ConnectionObservation {
+    /// 业务作用：任务退出或异常展开后撤销历史连接成功观测。
+    /// 参数说明：无。
+    /// 返回：健康立即变为未连接。
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -154,6 +178,13 @@ impl Notifier for RedisNotifier {
     /// # 参数
     /// - `on_message`: Redis notifier 收到跨节点消息时调用的回调。
     fn start(&self, on_message: OnMessage) -> super::ReadyFuture {
+        if self.cancel.is_cancelled() {
+            return Box::pin(async {
+                Err(super::StartError::NotReady(
+                    "redis notifier is closed".into(),
+                ))
+            });
+        }
         // 单次启动:重复 start 返回 AlreadyStarted,不生成第二套 reader。
         if self
             .started
@@ -174,8 +205,12 @@ impl Notifier for RedisNotifier {
         let sd = self.shutdown.clone();
         let xadd_failed = self.xadd_failed.clone();
         let cancel_pub = self.cancel.clone();
+        let publisher_connected = self.publisher_connected.clone();
+        let observation = ConnectionObservation(publisher_connected.clone());
         self.tasks.spawn(async move {
+            let _observation = observation;
             'outer: while !sd.load(Ordering::Relaxed) {
+                publisher_connected.store(false, Ordering::Release);
                 // connect 也与 cancel 二选一:shutdown 立即退出,不被连接握手拖住。
                 let conn_fut = client.get_multiplexed_async_connection();
                 let mut conn = tokio::select! {
@@ -191,6 +226,7 @@ impl Notifier for RedisNotifier {
                         }
                     }
                 };
+                publisher_connected.store(true, Ordering::Release);
                 loop {
                     // recv 与 cancel 二选一:shutdown 立即退出,不等下一条 payload。
                     let payload = tokio::select! {
@@ -227,11 +263,15 @@ impl Notifier for RedisNotifier {
         let count = self.config.read_count;
         let sd = self.shutdown.clone();
         let cancel = self.cancel.clone();
+        let reader_connected = self.reader_connected.clone();
+        let observation = ConnectionObservation(reader_connected.clone());
         self.tasks.spawn(async move {
+            let _observation = observation;
             // 游标只解析一次(首连);重连时**保留** last_id 续读,不跳过断连期间的消息。
             let mut last_id: Option<String> = None;
             let mut ready_tx = Some(ready_tx);
             while !sd.load(Ordering::Relaxed) {
+                reader_connected.store(false, Ordering::Release);
                 // 阻塞型 XREAD BLOCK 必须关掉 multiplexed 连接默认 500ms 响应超时(否则 BLOCK 被误判超时)。
                 let conn_cfg = redis::AsyncConnectionConfig::new().set_response_timeout(None);
                 let conn_fut = client.get_multiplexed_async_connection_with_config(&conn_cfg);
@@ -266,6 +306,7 @@ impl Notifier for RedisNotifier {
                     }
                 }
                 // 起始游标已定(= 当前流末尾)→ 触发 ready;此后 id>cursor 的新消息必被读到,不丢。
+                reader_connected.store(true, Ordering::Release);
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -302,6 +343,7 @@ impl Notifier for RedisNotifier {
                             }
                         }
                         Err(e) => {
+                            reader_connected.store(false, Ordering::Release);
                             tracing::warn!("redis XREAD error: {e}; reconnecting");
                             break; // 连接异常 → 跳出内层重连(保留 last_id 由 resolve 重新对齐)
                         }

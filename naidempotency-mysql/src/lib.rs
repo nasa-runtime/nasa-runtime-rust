@@ -1,7 +1,8 @@
 //! 幂等 store 的 MySQL 后端。
 //!
-//! 实现 [`naidempotency::IdempotencyStore`],经 [`natx::conn`] 取连接:
-//! - 在 `natx::run`（`#[transactional]`）**事务内**调用 → 幂等记录与业务写**共享同一事务**，原子提交或回滚。
+//! 实现 [`naidempotency::IdempotencyStore`]，经 [`natx::conn_for`] 选择句柄绑定的数据源：
+//! - 在同源 `natx::run_for`（或带 datasource 的 `#[transactional]`）**事务内**调用 →
+//!   幂等记录与业务写**共享同一事务**，原子提交或回滚。
 //! - 事务外调用(如框架幂等中间件)→ 走连接池,得到**跨重启/跨副本**持久化的 response-cache 语义。
 //!
 //! `begin` 用 `INSERT`(唯一主键)竞态安全地占位:插入成功=首次;主键冲突则 `SELECT` 现有行裁决
@@ -39,21 +40,81 @@ const CREATE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS idempotency_record_v2
      PRIMARY KEY (tenant, subject, route_id, client_key) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
-/// MySQL 幂等 store。无自身状态:每次操作经 `natx::conn()` 取连接,自动感知 ambient 事务。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MySqlIdempotencyStore;
+/// MySQL 幂等 store；句柄固定 datasource，避免多库部署隐式落到默认池。
+#[derive(Debug, Clone)]
+pub struct MySqlIdempotencyStore {
+    datasource: natx::DatasourceRef,
+}
+
+impl Default for MySqlIdempotencyStore {
+    /// 业务作用：以兼容语义构造绑定默认 datasource 的幂等 store。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：与 [`MySqlIdempotencyStore::new`] 相同的轻量句柄。
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MySqlIdempotencyStore {
-    /// 业务作用：创建 store(不建连;连接在每次操作时经 natx 获取)。
+    /// 业务作用：创建绑定默认 datasource 的幂等 store，不提前建立连接。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：后续操作经 natx 默认数据源取得连接的轻量句柄。
     pub fn new() -> Self {
-        Self
+        Self {
+            datasource: natx::DatasourceRef::default(),
+        }
+    }
+
+    /// 业务作用：创建绑定命名 datasource 的幂等 store。
+    ///
+    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    ///
+    /// 返回：后续操作固定使用该 datasource；名称非法时在 I/O 前失败。
+    pub fn with_datasource(datasource: impl AsRef<str>) -> Result<Self, IdempotencyError> {
+        Ok(Self {
+            datasource: natx::DatasourceRef::new(datasource)
+                .map_err(|_| IdempotencyError::new("invalid datasource name"))?,
+        })
+    }
+
+    /// 业务作用：读取该幂等 store 全部记录绑定的 datasource 身份。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不可变、不含连接信息的 qualifier 引用。
+    pub fn datasource_ref(&self) -> &natx::DatasourceRef {
+        &self.datasource
+    }
+
+    /// 业务作用：在宿主迁移门禁之后只读核对本 store 所需表和字段，不隐式执行 DDL。
+    /// 参数说明：无。
+    /// 返回：连接和必要字段可读取时成功；表缺失、权限不足或结构不符时返回脱敏错误。
+    pub async fn validate_schema(&self) -> Result<(), IdempotencyError> {
+        let mut connection = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        sqlx::query("SELECT tenant, subject, route_id, client_key, fingerprint, lease, state, status, body, headers, lease_expires_at FROM idempotency_record_v2 WHERE 1 = 0")
+            .fetch_optional(connection.as_mut()).await.map_err(map_err)?;
+        Ok(())
     }
 
     /// 业务作用：确保幂等表存在。部署由迁移拥有 schema;此方法供演示环境自举。
     ///
     /// 需先 `natx::init` 注册默认 datasource。
     pub async fn ensure_schema() -> Result<(), IdempotencyError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        Self::ensure_schema_for("default").await
+    }
+
+    /// 业务作用：在指定 datasource 上确保幂等表结构存在。
+    ///
+    /// 参数说明：`datasource` 为启动期已注册的数据源名称。
+    ///
+    /// 返回：表已存在或创建成功时返回成功；名称、连接或 DDL 失败时返回脱敏错误。
+    pub async fn ensure_schema_for(datasource: impl AsRef<str>) -> Result<(), IdempotencyError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_err)?;
+        let mut conn = natx::conn_for(&datasource).await.map_err(map_err)?;
         sqlx::query(CREATE_TABLE_SQL)
             .execute(conn.as_mut())
             .await
@@ -65,16 +126,24 @@ impl MySqlIdempotencyStore {
 #[async_trait]
 impl IdempotencyStore for MySqlIdempotencyStore {
     /// 业务作用：以唯一键 INSERT 竞争首次执行，并对冲突记录执行租约接管或已有状态裁决。
+    ///
+    /// 参数说明：
+    /// - `key`：tenant、subject、route 与 client key 组成的幂等身份。
+    /// - `fingerprint`：当前请求等价类指纹。
+    /// - `lease`：当前执行者的随机 fencing lease。
+    ///
+    /// 返回：首次或同指纹过期接管、重放、在途、指纹冲突裁决；输入或数据库失败返回脱敏错误。
     async fn begin(
         &self,
         key: &IdempotencyKey,
         fingerprint: RequestFingerprint,
         lease: ExecutionLease,
     ) -> Result<IdempotencyOutcome, IdempotencyError> {
+        validate_key(key)?;
         // 1) 竞态安全占位:INSERT in-flight。成功=首次;主键冲突转 2) 决策。
         //    单独作用域:query 跑完即释放 Conn(事务分支持锁,不可同时持两句柄)。
         let insert = {
-            let mut conn = natx::conn().await.map_err(map_err)?;
+            let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
             sqlx::query(
                 "INSERT INTO idempotency_record_v2 \
                  (tenant, subject, route_id, client_key, fingerprint, lease, state, status, body, headers, lease_expires_at) \
@@ -93,15 +162,16 @@ impl IdempotencyStore for MySqlIdempotencyStore {
 
         match insert {
             Ok(_) => Ok(IdempotencyOutcome::FirstExecution),
-            Err(error) if is_unique_violation(&error) => {
-                // 崩溃遗留的租约可在 5 分钟后由新 owner 原子接管；未过期记录只读裁决。
-                let mut conn = natx::conn().await.map_err(map_err)?;
+            Err(error) if is_target_primary_conflict(&error) => {
+                // 请求等价类不能因租约过期被改写；只有相同 fingerprint 可在 5 分钟后由新 owner 原子接管。
+                let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
                 let takeover = sqlx::query(
                     "UPDATE idempotency_record_v2 SET fingerprint = ?, lease = ?, \
                      lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 5 MINUTE), \
                      status = NULL, body = NULL, headers = NULL \
                      WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ? \
-                     AND state = ? AND lease_expires_at < CURRENT_TIMESTAMP(6)",
+                     AND state = ? AND fingerprint = ? \
+                     AND lease_expires_at < CURRENT_TIMESTAMP(6)",
                 )
                 .bind(fingerprint.0.as_slice())
                 .bind(lease.0.as_slice())
@@ -110,6 +180,7 @@ impl IdempotencyStore for MySqlIdempotencyStore {
                 .bind(&key.route_id)
                 .bind(&key.client_key)
                 .bind(STATE_IN_FLIGHT)
+                .bind(fingerprint.0.as_slice())
                 .execute(conn.as_mut())
                 .await
                 .map_err(map_err)?;
@@ -125,6 +196,14 @@ impl IdempotencyStore for MySqlIdempotencyStore {
     }
 
     /// 业务作用：在 fingerprint 与 lease 同时匹配时把记录原子转换为可重放完成态。
+    ///
+    /// 参数说明：
+    /// - `key`：目标幂等身份。
+    /// - `fingerprint`：首次执行建立的请求等价类指纹。
+    /// - `lease`：当前执行者持有的 fencing lease。
+    /// - `response`：需要持久化并供后续请求重放的响应。
+    ///
+    /// 返回：当前 owner 完成记录时为 `true`；失权或状态已变化时为 `false`；输入或数据库失败返回错误。
     async fn complete(
         &self,
         key: &IdempotencyKey,
@@ -132,8 +211,9 @@ impl IdempotencyStore for MySqlIdempotencyStore {
         lease: ExecutionLease,
         response: StoredResponse,
     ) -> Result<bool, IdempotencyError> {
+        validate_key(key)?;
         // 只更新仍 in-flight 的记录(state 谓词)防越权覆盖;非本记录/已完成 → 0 行影响,忽略。
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
         sqlx::query(
             "UPDATE idempotency_record_v2 SET state = ?, status = ?, body = ?, headers = ? \
              WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ? \
@@ -157,13 +237,22 @@ impl IdempotencyStore for MySqlIdempotencyStore {
     }
 
     /// 业务作用：删除仍属于当前 owner 的在途记录，已完成或已换 owner 时返回 false。
+    ///
+    /// 参数说明：
+    /// - `key`：目标幂等身份。
+    /// - `fingerprint`：首次执行建立的请求等价类指纹。
+    /// - `lease`：当前执行者持有的 fencing lease。
+    ///
+    /// 返回：精确删除当前在途记录时为 `true`；失权或状态已变化时为 `false`；输入或数据库失败返回错误。
     async fn abort(
         &self,
         key: &IdempotencyKey,
         fingerprint: RequestFingerprint,
         lease: ExecutionLease,
     ) -> Result<bool, IdempotencyError> {
-        let mut conn = natx::conn().await.map_err(map_err)?;
+        validate_key(key)?;
+        let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
+        // 删除必须同时命中在途状态、fingerprint 与 lease，旧 owner 失权后不能清除新执行证据。
         sqlx::query(
             "DELETE FROM idempotency_record_v2 \
              WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ? \
@@ -191,7 +280,7 @@ impl MySqlIdempotencyStore {
         fingerprint: RequestFingerprint,
     ) -> Result<IdempotencyOutcome, IdempotencyError> {
         let row = {
-            let mut conn = natx::conn().await.map_err(map_err)?;
+            let mut conn = natx::conn_for(&self.datasource).await.map_err(map_err)?;
             sqlx::query(
                 "SELECT state, fingerprint, status, body, headers FROM idempotency_record_v2 \
                  WHERE tenant = ? AND subject = ? AND route_id = ? AND client_key = ?",
@@ -240,15 +329,56 @@ impl MySqlIdempotencyStore {
     }
 }
 
+/// 业务作用：校验复合幂等身份可按 MySQL/PostgreSQL 公共字节边界无损持久化。
+///
+/// 参数说明：
+/// - `key`：待写入复合主键的业务身份。
+///
+/// 返回：全部分量非空、无 NUL 且不超过公共字节上限时成功；否则返回脱敏错误。
+fn validate_key(key: &IdempotencyKey) -> Result<(), IdempotencyError> {
+    for (value, max) in [
+        (key.tenant.as_str(), 128_usize),
+        (key.subject.as_str(), 190),
+        (key.route_id.as_str(), 190),
+        (key.client_key.as_str(), 190),
+    ] {
+        if value.is_empty() || value.len() > max || value.contains('\0') {
+            return Err(IdempotencyError::new("invalid idempotency key"));
+        }
+    }
+    Ok(())
+}
+
 /// 业务作用：把任意底层错误映射为脱敏的 [`IdempotencyError`](绝不回显 SQL/凭据/请求体)。
 fn map_err<E>(_error: E) -> IdempotencyError {
     IdempotencyError::new("database error")
 }
 
-/// 业务作用：是否为唯一键冲突(主键已存在)。
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .map(|db| db.is_unique_violation())
+/// 业务作用：只把幂等复合主键冲突识别为既有请求，避免其它唯一约束被伪装成幂等竞争。
+///
+/// 参数说明：
+/// - `error`：首次占位 INSERT 返回的 MySQL 错误。
+///
+/// 返回：错误号为重复键且服务端索引名为 `PRIMARY` 时返回 `true`；无法结构化确认时返回 `false`。
+fn is_target_primary_conflict(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    let Some(mysql) = database.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() else {
+        return false;
+    };
+    if mysql.number() != 1062 {
+        return false;
+    }
+    mysql
+        .message()
+        .rsplit_once(" for key ")
+        .map(|(_, key)| {
+            key.trim_end_matches('.')
+                .trim_matches(['\'', '`'])
+                .rsplit('.')
+                .next()
+                == Some("PRIMARY")
+        })
         .unwrap_or(false)
 }

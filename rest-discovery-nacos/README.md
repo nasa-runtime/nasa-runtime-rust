@@ -8,8 +8,8 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1", features = ["nacos-sdk", "rest-discovery-nacos"] }
-rest-discovery-nacos = { version = "1", features = ["nacos-sdk"] }
+nasa = { version = "1.0.3", features = ["nacos-sdk", "rest-discovery-nacos"] }
+rest-discovery-nacos = { version = "1.0.2", features = ["nacos-sdk"] }
 ```
 
 ## 配置形状
@@ -69,7 +69,35 @@ session.deregister().await?;
 session.shutdown_runtime().await?;
 ```
 
-`#[application]` 的 `nacos-discovery` 组件即按这三段编排（Start 装 runtime / Ready 注册 / 停机反序）；`init_from_config` 保留给不使用应用运行时的项目。
+`#[application]` 的 `nacos-discovery` 组件在 Start 装出站 runtime，Ready 冻结实际端口与注册计划。
+全部组件、initializer 工厂和最终检查通过后统一放行，再执行远端注册；gRPC 端点还须等待
+listener Running。注册确认前 `app.is_ready()` 保持不可用，即使生命周期已经发布 Ready。
+注册受同一个原始启动 deadline 约束，失败触发统一停机；停机先注销、后关闭 runtime。
+`init_from_config` 保留给不使用应用运行时的项目，调用方负责确保实际接流后才注册。
+
+Application 的业务停机任务晚于本实例注销和入站排空，但早于出站 runtime 的最终关闭，可用于有界的
+外部业务注销或通知。它不恢复本实例接流资格，也不能再次接管同一 `DiscoverySession` 的 deregister
+或 shutdown owner。独立模式需要调用方自行维持上述先摘流、后关闭客户端的顺序。
+
+## 协议端点元数据
+
+一个实例同时开放 HTTP 与 gRPC 等多个端口时，`registration.port` 继续表示主服务端口；其它协议通过
+`AppRegistrationInfo::with_metadata` 随同一次实例注册发布，不能把 gRPC 端口冒充 HTTP 端口。Application
+的受管 gRPC 组件使用固定键 `nasa.grpc.protocol`、`nasa.grpc.port`、`nasa.grpc.tls_mode` 和
+`nasa.grpc.authority`，并保证 listener 接流后才注册、停机先注销再排空。
+
+```rust
+let app = AppRegistrationInfo::new("order-service", "10.0.0.10", 8080)
+    .with_metadata("nasa.grpc.protocol", "grpc")
+    .with_metadata("nasa.grpc.port", "50051")
+    .with_metadata("nasa.grpc.tls_mode", "server")
+    .with_metadata("nasa.grpc.authority", "grpc.order.internal");
+session.register(app).await?;
+```
+
+框架集成层可用 `DiscoverySession::discover_instances(service)` 读取经过 provider 健康过滤的实例与原始
+metadata，再投影成自己的 typed endpoint。业务不应把 credential、token、证书内容、租户或任意请求
+属性放入实例 metadata；未知协议键不能被解释成可拨号端点。
 
 ## 自定义负载均衡
 
@@ -193,4 +221,14 @@ let handle = nasa::discovery::init_from_config(&cfg.rest_discovery, app).await?;
 - 注册 IP 缺失或不安全时拒绝启动，不自动选择不可审计的网卡地址。
 - `registration.enabled=false` 只安装出站 runtime，不注册当前实例。
 - 分段生命周期必须保持“装出站 -> listener Ready -> 注册 -> 摘流 -> drain -> 关 runtime”的顺序。
+- 多协议端点必须使用受控 metadata，注册主端口与协议端口不能互相替代。
 - provider 异常时 watch 保留 last-good 的时长由 `rest.watch.stale_if_error_ms` 限定。
+
+## Application 接入
+
+Application 的 `"nacos-discovery"` 组件拥有 `DiscoverySession`。摘流与出站关闭分别执行，
+`shutdown_runtime_until` 使用宿主同一个绝对截止点等待 REST 任务退出，未完成时保留 owner；
+旧会话不会撤销后续实例的全局入口。独立 `DiscoverySession` 使用方也须等待退出证明，关闭通知
+不等同于已完成。普通 external/static/dns/custom 出站可使用 `rest_clients`，无需注册到 Nacos。
+
+配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。

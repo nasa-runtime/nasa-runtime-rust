@@ -13,10 +13,11 @@
 // ============================================================================
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nanacos::{Instance, NacosDiscoveryClient, NacosProps, RegistrationGuard};
+use nanacos::{NacosDiscoveryClient, NacosProps, RegistrationGuard};
 use rest_discovery::{
     HeuristicHttpMode, InstanceScheme, LbStrategy, LoadBalancer, NoInstancePolicy, RemoteRuntime,
     RestDiscovery, RestDiscoveryOptions, RestHeuristicOptions, RestHttpOptions, RestWatchOptions,
@@ -24,6 +25,8 @@ use rest_discovery::{
 };
 use serde::Deserialize;
 
+/// provider-neutral 实例快照，供上层 typed resolver 读取固定协议元数据。
+pub use nanacos::Instance;
 /// 带服务发现和负载均衡的底层 HTTP 客户端类型。
 ///
 /// 便利层重导出该类型，使宿主容器无需额外绑定实现 crate 路径也能提供强类型能力入口。
@@ -99,7 +102,7 @@ pub struct NacosConnConfig {
 impl std::fmt::Debug for NacosConnConfig {
     /// 业务作用：输出连接配置的调试视图;username/password 只标记是否已配置,避免日志泄露凭据。
     ///
-    /// # 参数
+    /// 参数说明:
     /// - `f`: Debug 或 Display 输出使用的标准格式化器。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NacosConnConfig")
@@ -219,6 +222,8 @@ pub struct HeuristicConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WatchConfig {
+    /// 允许保留的服务订阅身份上限，缺省为 1024。
+    pub max_services: Option<usize>,
     /// watch 不可用时的轮询间隔毫秒。
     pub poll_interval_ms: Option<u64>,
     /// 发现结果的兜底 TTL 毫秒数。
@@ -268,21 +273,38 @@ pub struct AppRegistrationInfo {
     pub ip: String,
     /// 应用自报监听端口。
     pub port: u16,
+    /// 由框架生成、需要随实例一同发布的封闭 endpoint 元数据。
+    pub metadata: HashMap<String, String>,
 }
 
 impl AppRegistrationInfo {
     /// 业务作用：构造运行期应用注册信息,供 discovery 初始化时作为配置缺省值。
     ///
-    /// # 参数
+    /// 参数说明:
     /// - `service_name`: 应用自报服务名,当配置中的注册服务名为空时作为回退。
     /// - `ip`: 应用自报监听地址,仅保留在结构中供兼容展示,不再作为注册 IP 优先级回退。
     /// - `port`: 应用自报监听端口,当配置中的注册端口为 0 时作为回退。
+    ///
+    /// 返回：元数据为空、其余字段保留调用方语义的注册信息。
     pub fn new(service_name: impl Into<String>, ip: impl Into<String>, port: u16) -> Self {
         Self {
             service_name: service_name.into(),
             ip: ip.into(),
             port,
+            metadata: HashMap::new(),
         }
+    }
+
+    /// 业务作用：追加一条由上层组件生成的实例元数据，供 provider adapter 原样发布。
+    ///
+    /// 参数说明:
+    /// - `key`: provider 可持久化的稳定元数据键。
+    /// - `value`: 不含凭据或动态业务身份的元数据值。
+    ///
+    /// 返回：带新增元数据的注册信息；同名键以后一次调用为准。
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
     }
 }
 
@@ -357,8 +379,7 @@ impl DiscoverySession {
     /// clone 只增加客户端共享引用；会话关闭运行时时仍会显式停止索引刷新和监听任务，因此外部句柄
     /// 不会阻止宿主执行停机协议，但停机后不得再发起新请求。
     ///
-    /// # 参数
-    ///
+    /// 参数说明:
     /// 本方法无参数；运行时已关闭时返回 `None`。
     pub fn rest_client(&self) -> Option<Arc<RestDiscoveryClient>> {
         self.runtime.as_ref().map(|runtime| runtime.rest())
@@ -366,8 +387,7 @@ impl DiscoverySession {
 
     /// 业务作用：是否已注册本实例。
     ///
-    /// # 参数
-    ///
+    /// 参数说明:
     /// 本方法无参数;`deregister` 之后重新变为 false。
     pub fn is_registered(&self) -> bool {
         self.registration.is_some()
@@ -405,7 +425,8 @@ impl DiscoverySession {
         let instance = Instance::new(ip.clone(), port)
             .with_ephemeral(self.config.registration.ephemeral)
             .with_healthy(self.config.registration.healthy)
-            .with_weight(self.config.registration.weight);
+            .with_weight(self.config.registration.weight)
+            .with_metadata_map(app.metadata);
         self.registration = Some(client.register(&service, instance).await?);
         // 保存注册中心可见身份(resolve 后的真实可路由 ip/port,非监听地址),供运行期回查在健康实例集里定位本实例。
         self.registered_identity = Some((service.clone(), ip, port));
@@ -457,6 +478,19 @@ impl DiscoverySession {
         Ok(Some(present))
     }
 
+    /// 业务作用：读取某服务当前可承载流量的实例及其 provider 元数据，供上层 typed resolver 选择协议端点。
+    ///
+    /// 参数说明:
+    /// - `service`: 注册中心内的服务名。
+    ///
+    /// 返回：provider 已连接时返回经过统一健康过滤的实例；连接缺失或查询失败时返回错误。
+    pub async fn discover_instances(&self, service: &str) -> anyhow::Result<Vec<Instance>> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("rest-discovery-nacos: provider 未连接,无法查询服务实例")
+        })?;
+        client.discover(service).await
+    }
+
     /// 业务作用：关闭出站客户端运行时(幂等)。
     ///
     /// 必须最后调用:在途请求、用户任务和业务资源清理都可能仍在调下游。只有当全局槽仍指向本会话
@@ -466,9 +500,22 @@ impl DiscoverySession {
     ///
     /// 本方法无参数;运行时已被取下时返回 Ok。
     pub async fn shutdown_runtime(&mut self) -> anyhow::Result<()> {
-        if let Some(runtime) = self.runtime.take() {
-            RestDiscovery::shutdown_if_current(&runtime);
+        self.shutdown_runtime_until(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+    }
+
+    /// 业务作用：撤下本会话出站入口，并等待当前代 REST 任务和调用退出。
+    /// 参数说明：`deadline` 为宿主统一停机截止点。
+    /// 返回：排干后释放会话依赖；未排干保留 owner 以便再次等待，不影响后续实例。
+    pub async fn shutdown_runtime_until(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> anyhow::Result<()> {
+        if let Some(runtime) = &self.runtime {
+            RestDiscovery::shutdown_if_current(runtime);
+            runtime.rest().shutdown(deadline).await?;
         }
+        self.runtime = None;
         self.client = None;
         Ok(())
     }
@@ -726,7 +773,11 @@ fn resolve_registration(
     nacos_discovery_ip: Option<&str>,
 ) -> anyhow::Result<(String, String, u16)> {
     let service = first_nonempty(&cfg.service_name, &app.service_name);
-    let port = if cfg.port != 0 { cfg.port } else { app.port };
+    let port = if cfg.port != 0 {
+        cfg.port
+    } else {
+        app.port
+    };
 
     anyhow::ensure!(
         !service.trim().is_empty(),
@@ -925,6 +976,13 @@ fn parse_no_instance(s: &str) -> anyhow::Result<NoInstancePolicy> {
 /// - `watch`: yml 中 `rest_discovery.rest.watch` 的轮询和退避配置。
 fn map_watch(watch: &WatchConfig) -> anyhow::Result<RestWatchOptions> {
     let mut o = RestWatchOptions::new();
+    if let Some(max_services) = watch.max_services {
+        anyhow::ensure!(
+            (1..=65536).contains(&max_services),
+            "rest_discovery.rest.watch.max_services must be between 1 and 65536"
+        );
+        o.max_services = max_services;
+    }
     if let Some(ms) = watch.poll_interval_ms {
         anyhow::ensure!(
             ms > 0,

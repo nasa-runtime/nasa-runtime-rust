@@ -1,0 +1,895 @@
+//! 实例的创建幂等、加载与 CAS 状态推进。
+//!
+//! 本模块承载两条安全不变量：
+//!
+//! 1. **创建是受保护事务**：实例 INSERT 与 `NONE -> RUNNING` 初始 transition 在同一
+//!    ambient 事务内落库，调用方在同一事务里追加首步命令 Outbox、durable timer 与 Audit，
+//!    全部原子 COMMIT。唯一键冲突时复核实例身份与业务摘要，只为同一业务意图返回已有实例。
+//! 2. **推进走数据库 CAS**：`UPDATE ... WHERE version = ? AND status = ? AND control_state = 'ACTIVE'`
+//!    影响为 0 表示状态已被其它副本推进、结果已过期或已被暂停，调用方必须重新读取并按幂等规则裁决，
+//!    不得继续用旧快照写 Outbox。`transition_seq` 直接取 CAS 推进后的 `version`。
+
+use crate::error::{map_connection, map_database, pg_u64, SagaStoreError};
+use crate::row::{
+    parse_instance_row, parse_instance_summary, SagaInstanceRow, SagaInstanceSummary,
+};
+use crate::PgSagaStore;
+use nasaga_backend::{
+    validate_saga_instance_query, CasOutcome, ControlCasOutcome, ControlTransitionSpec,
+    ManagementAuditOutcome, NewSagaInstance, SagaCreation, SagaInstanceQuery, TransitionSpec,
+};
+use nasaga_core::{
+    check_transition, ControlState, Direction, SagaId, SagaStatus, StepName, TransitionGuard,
+    TriggerKind,
+};
+use sqlx::Row as _;
+
+/// 初始 transition 的 `from_state` 哨兵值：实例诞生前没有业务状态。
+///
+/// 该值只出现在 `saga_transition.from_state`，不属于 [`SagaStatus`] 封闭集合，
+/// 因此不可能与任何真实状态迁移混淆。
+const FROM_STATE_NONE: &str = "NONE";
+
+/// 按实例身份加载快照的查询；列集合与 [`parse_instance_row`] 一一对应。
+const SELECT_INSTANCE_BY_ID_SQL: &str = "SELECT saga_id, tenant_id, workflow_name, business_key, \
+     definition_version, definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
+     compensation_plan_version, version, deadline_at, failure_code, traceparent FROM saga_instance \
+     WHERE saga_id = $1";
+
+/// 按业务幂等键加载快照的查询；列集合与 [`parse_instance_row`] 一一对应。
+const SELECT_INSTANCE_BY_BUSINESS_SQL: &str = "SELECT saga_id, tenant_id, workflow_name, \
+     business_key, definition_version, definition_digest, status, control_state, control_version, direction, \
+     start_request_digest, current_step, compensation_plan_version, version, deadline_at, failure_code, \
+     traceparent FROM saga_instance WHERE tenant_id = $1 AND workflow_name = $2 AND business_key = $3";
+
+impl PgSagaStore {
+    /// 业务作用：以受保护事务幂等创建 Saga 实例。
+    ///
+    /// 在当前 ambient 事务内写入 `status = RUNNING, version = 1` 的实例行与
+    /// `transition_seq = 1, NONE -> RUNNING` 的初始 transition；业务幂等键
+    /// `UNIQUE(tenant_id, workflow_name, business_key)` 冲突时不创建第二个实例。
+    /// 锁定读取优先复核请求 saga_id；身份已属于其它业务意图时拒绝，否则按业务键和摘要裁决重复。
+    ///
+    /// 参数说明：
+    /// - `spec`: 创建请求的全部持久化输入。
+    ///
+    /// 返回：真实创建返回 [`SagaCreation::Created`]，调用方必须在**同一事务**内补齐
+    /// 首步命令 Outbox、durable timer 与 Audit；幂等命中返回 [`SagaCreation::Existing`]，
+    /// 调用方不得再产生任何创建副作用。实例身份或请求摘要冲突时拒绝；事务缺失、
+    /// 摘要/触发身份非法或底层失败返回错误，不能把数据库失败解释为成功收据。
+    pub async fn create_instance(
+        &self,
+        spec: &NewSagaInstance<'_>,
+    ) -> Result<SagaCreation, SagaStoreError> {
+        validate_digest(spec.definition_digest)?;
+        validate_digest(spec.start_request_digest)?;
+        if let Some(digest) = spec.legacy_start_request_digest {
+            validate_digest(digest)?;
+        }
+        validate_trigger_id(spec.trigger_id)?;
+        if let Some(traceparent) = spec.traceparent {
+            validate_traceparent(traceparent)?;
+        }
+        // 创建必须与首步命令 Outbox/timer/Audit 同一事务原子提交:事务外 autocommit 会打开
+        // "实例已存在但首步命令永远丢失"的窗口。
+        require_ambient_transaction()?;
+        let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+
+        let inserted = sqlx::query(
+            "INSERT INTO saga_instance (saga_id, tenant_id, workflow_name, business_key, \
+             definition_version, definition_digest, start_request_digest, status, control_state, control_version, direction, \
+             current_step, version, deadline_at, traceparent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, 1, $12, $13) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(spec.saga_id.as_str())
+        .bind(spec.tenant.as_str())
+        .bind(spec.workflow.as_str())
+        .bind(spec.business_key.as_str())
+        .bind(i64::from(spec.definition_version.get()))
+        .bind(spec.definition_digest)
+        .bind(spec.start_request_digest)
+        .bind(SagaStatus::INITIAL.as_str())
+        .bind(ControlState::Active.as_str())
+        .bind(Direction::Forward.as_str())
+        .bind(spec.current_step.map(StepName::as_str))
+        .bind(spec.deadline_at_ms)
+        .bind(spec.traceparent)
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+
+        // 两种唯一键可能分别命中不同实例；先核对请求身份，不能让业务键命中掩盖身份占用。
+        if inserted.rows_affected() == 0 {
+            // 唯一键等待后在原事务中锁定可见事实；共享锁保持身份稳定，
+            // 并允许同一请求的并发重放共同取得收据，隔离级别拒绝读取时继续保留数据库错误。
+            let mut identity_query =
+                sqlx::QueryBuilder::<sqlx::Postgres>::new(SELECT_INSTANCE_BY_ID_SQL);
+            let by_id = identity_query
+                .push(" FOR SHARE")
+                .build()
+                .bind(spec.saga_id.as_str())
+                .fetch_optional(connection.as_mut())
+                .await
+                .map_err(map_database)?;
+            let existing = if let Some(row) = by_id {
+                let existing = parse_instance_row(&row)?;
+                // saga_id 是全局持久身份；其它租户或业务槽位的占用只能返回冲突，不能返回其快照。
+                if existing.tenant != *spec.tenant
+                    || existing.workflow != *spec.workflow
+                    || existing.business_key != *spec.business_key
+                {
+                    return Err(SagaStoreError::conflict(
+                        "saga_id collides with a different business intent",
+                    ));
+                }
+                existing
+            } else {
+                // 未占用的传输身份允许重放原业务意图，但业务行也必须保持到当前事务结束。
+                let mut business_query =
+                    sqlx::QueryBuilder::<sqlx::Postgres>::new(SELECT_INSTANCE_BY_BUSINESS_SQL);
+                let row = business_query
+                    .push(" FOR SHARE")
+                    .build()
+                    .bind(spec.tenant.as_str())
+                    .bind(spec.workflow.as_str())
+                    .bind(spec.business_key.as_str())
+                    .fetch_optional(connection.as_mut())
+                    .await
+                    .map_err(map_database)?
+                    .ok_or_else(|| {
+                        // 冲突后没有可核验的持久事实，不能推断成功或签发另一实例的收据。
+                        SagaStoreError::conflict(
+                            "creation conflict has no matching business intent",
+                        )
+                    })?;
+                parse_instance_row(&row)?
+            };
+            // business_key 只证明“同一业务槽位”；当前摘要和显式兼容摘要均不匹配时拒绝，
+            // 避免调用方把不同 payload/deadline 误认为已被接受的幂等请求。
+            if existing.start_request_digest.as_deref() != Some(spec.start_request_digest)
+                && spec
+                    .legacy_start_request_digest
+                    .is_none_or(|digest| existing.start_request_digest.as_deref() != Some(digest))
+            {
+                return Err(SagaStoreError::conflict(
+                    "business idempotency key was reused with a different start request",
+                ));
+            }
+            return Ok(SagaCreation::Existing(existing));
+        }
+
+        // RUNNING 是状态机唯一合法初始状态;初始 transition 与实例行同事务落库,
+        // 使"实例存在但没有诞生审计"的中间态不可能被观察到。
+        sqlx::query(
+            "INSERT INTO saga_transition (saga_id, transition_seq, from_state, to_state, \
+             trigger_kind, trigger_id, definition_version) VALUES ($1, 1, $2, $3, $4, $5, $6)",
+        )
+        .bind(spec.saga_id.as_str())
+        .bind(FROM_STATE_NONE)
+        .bind(SagaStatus::INITIAL.as_str())
+        .bind(spec.trigger_kind.as_str())
+        .bind(spec.trigger_id)
+        .bind(i64::from(spec.definition_version.get()))
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+
+        // natx 事务槽锁不可重入:先归还连接再回读,回读仍在同一 ambient 事务内
+        // (read-your-writes),否则嵌套取锁自死锁。
+        drop(connection);
+        let created = self.load_instance(spec.saga_id).await?.ok_or_else(|| {
+            SagaStoreError::new("instance vanished inside its own creation transaction")
+        })?;
+        Ok(SagaCreation::Created(created))
+    }
+
+    /// 业务作用：按实例身份加载已提交快照，作为一切推进裁决的输入。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    ///
+    /// 返回：存在时返回快照；不存在返回 `None`；读回列损坏或底层失败返回错误。
+    pub async fn load_instance(
+        &self,
+        saga_id: &SagaId,
+    ) -> Result<Option<SagaInstanceRow>, SagaStoreError> {
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let row = sqlx::query(SELECT_INSTANCE_BY_ID_SQL)
+            .bind(saga_id.as_str())
+            .fetch_optional(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+        row.as_ref().map(parse_instance_row).transpose()
+    }
+
+    /// 业务作用：分页扫描非终态实例，服务启动预检（definition 摘要一致性）与恢复巡检。
+    ///
+    /// 参数说明：
+    /// - `limit`: 单次最多返回的实例数（有界，防一次拉爆）。
+    ///
+    /// 返回：状态不在终态集合内的实例快照，按 saga_id 排序；读回列损坏或底层失败返回错误。
+    pub async fn list_non_terminal(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SagaInstanceRow>, SagaStoreError> {
+        self.list_non_terminal_after(None, limit).await
+    }
+
+    /// 业务作用：租户受限的实例只读检索——按 workflow、状态集合与创建时间窗过滤，
+    /// saga_id keyset 分页，服务运维定位待处置对象（此前只能直连数据库）。
+    ///
+    /// 查询是纯读动作：不携带 payload，不改变任何状态；租户过滤在 SQL 层强制，
+    /// 不同租户的实例存在性不经本查询泄漏。SQL 结构只由封闭的条件组合决定，全部业务值
+    /// 仍使用绑定参数；时间查询沿 `(created_at, saga_id)` 复合索引顺序推进。
+    ///
+    /// 参数说明：
+    /// - `query`: 租户、workflow、状态集合、创建时间窗、cursor 与页大小。
+    ///
+    /// 返回：无时间条件时按 saga_id 升序；有时间条件时按创建时刻、saga_id 升序；公共参数
+    /// 约束或数据库读取失败时返回错误。
+    pub async fn list_instances(
+        &self,
+        query: &SagaInstanceQuery<'_>,
+    ) -> Result<Vec<SagaInstanceSummary>, SagaStoreError> {
+        validate_saga_instance_query(query)
+            .map_err(|error| SagaStoreError::new(error.to_string()))?;
+        // 状态集合来自封闭枚举的稳定文本,逗号拼接后交由 PostgreSQL 数组比对;不存在把任意
+        // 文本拼进语句的通道。
+        let statuses = query.statuses.map(|set| {
+            set.iter()
+                .map(|status| status.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let has_time_window = query.created_from_ms.is_some() || query.created_to_ms.is_some();
+        let mut statement = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
+             status, control_state, control_version, definition_digest, deadline_at AS deadline_at_ms, traceparent, direction, current_step, version, failure_code, \
+             (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at_ms, \
+             (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT AS created_at_cursor_us, \
+             (EXTRACT(EPOCH FROM updated_at) * 1000)::BIGINT AS updated_at_ms \
+             FROM saga_instance WHERE tenant_id = ",
+        );
+        statement.push_bind(query.tenant.as_str());
+        if let Some(workflow) = query.workflow {
+            statement
+                .push(" AND workflow_name = ")
+                .push_bind(workflow.as_str());
+        }
+        if has_time_window {
+            if let (Some(after_created_at_us), Some(after)) =
+                (query.after_created_at_us, query.after)
+            {
+                statement
+                    .push(" AND (created_at, saga_id) > (to_timestamp(")
+                    .push_bind(after_created_at_us)
+                    .push(" / 1000000.0), ")
+                    .push_bind(after.as_str())
+                    .push(")");
+            }
+        } else {
+            statement
+                .push(" AND saga_id > ")
+                .push_bind(query.after.map(SagaId::as_str).unwrap_or(""));
+        }
+        if let Some(created_from_ms) = query.created_from_ms {
+            statement
+                .push(" AND created_at >= to_timestamp(")
+                .push_bind(created_from_ms)
+                .push(" / 1000.0)");
+        }
+        if let Some(created_to_ms) = query.created_to_ms {
+            statement
+                .push(" AND created_at < to_timestamp(")
+                .push_bind(created_to_ms)
+                .push(" / 1000.0)");
+        }
+        if let Some(statuses) = statuses.as_deref() {
+            statement
+                .push(" AND status = ANY(string_to_array(")
+                .push_bind(statuses)
+                .push(", ','))");
+        }
+        if has_time_window {
+            statement.push(" ORDER BY created_at ASC, saga_id ASC LIMIT ");
+        } else {
+            statement.push(" ORDER BY saga_id ASC LIMIT ");
+        }
+        statement.push_bind(i64::from(query.limit));
+        let rows = statement
+            .build()
+            .fetch_all(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+        rows.iter().map(parse_instance_summary).collect()
+    }
+
+    /// 业务作用：以 saga_id keyset 分页扫描非终态实例，避免启动预检只覆盖首批数据。
+    ///
+    /// 参数说明：
+    /// - `after`: 上一页最后一个 saga_id；为空从首行开始。
+    /// - `limit`: 本页最多返回的实例数，必须为正。
+    ///
+    /// 返回：严格位于 cursor 之后的非终态实例，按 saga_id 升序；参数非法、读回列损坏
+    /// 或底层失败返回错误。
+    pub async fn list_non_terminal_after(
+        &self,
+        after: Option<&SagaId>,
+        limit: u32,
+    ) -> Result<Vec<SagaInstanceRow>, SagaStoreError> {
+        if limit == 0 {
+            return Err(SagaStoreError::new(
+                "non-terminal scan page size must be positive",
+            ));
+        }
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let rows =
+            match after {
+                Some(after) => sqlx::query(
+                    "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
+                     definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
+                     compensation_plan_version, version, deadline_at, failure_code, traceparent \
+                     FROM saga_instance WHERE saga_id > $1 AND status NOT IN ($2, $3, $4) \
+                     ORDER BY saga_id ASC LIMIT $5",
+                )
+                .bind(after.as_str())
+                .bind(SagaStatus::Completed.as_str())
+                .bind(SagaStatus::Compensated.as_str())
+                .bind(SagaStatus::ManuallyClosed.as_str())
+                .bind(i64::from(limit))
+                .fetch_all(connection.as_mut())
+                .await,
+                None => sqlx::query(
+                    "SELECT saga_id, tenant_id, workflow_name, business_key, definition_version, \
+                     definition_digest, start_request_digest, status, control_state, control_version, direction, current_step, \
+                     compensation_plan_version, version, deadline_at, failure_code, traceparent \
+                     FROM saga_instance WHERE status NOT IN ($1, $2, $3) \
+                     ORDER BY saga_id ASC LIMIT $4",
+                )
+                .bind(SagaStatus::Completed.as_str())
+                .bind(SagaStatus::Compensated.as_str())
+                .bind(SagaStatus::ManuallyClosed.as_str())
+                .bind(i64::from(limit))
+                .fetch_all(connection.as_mut())
+                .await,
+            }
+            .map_err(map_database)?;
+        rows.iter().map(parse_instance_row).collect()
+    }
+
+    /// 业务作用：按业务幂等键查找实例，服务创建幂等命中与管理面按业务身份定位。
+    ///
+    /// 参数说明：
+    /// - `tenant`: 租户身份。
+    /// - `workflow`: workflow 名称。
+    /// - `business_key`: 业务幂等键。
+    ///
+    /// 返回：存在时返回快照；不存在返回 `None`；读回列损坏或底层失败返回错误。
+    pub async fn find_instance(
+        &self,
+        tenant: &nasaga_core::TenantId,
+        workflow: &nasaga_core::WorkflowName,
+        business_key: &nasaga_core::BusinessKey,
+    ) -> Result<Option<SagaInstanceRow>, SagaStoreError> {
+        let mut connection = natx_pgsql::conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let row = sqlx::query(SELECT_INSTANCE_BY_BUSINESS_SQL)
+            .bind(tenant.as_str())
+            .bind(workflow.as_str())
+            .bind(business_key.as_str())
+            .fetch_optional(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+        row.as_ref().map(parse_instance_row).transpose()
+    }
+
+    /// 业务作用：在结果推进事务内更新实例的最新因果上下文（canonical W3C traceparent）。
+    ///
+    /// 上下文是观测面元数据：更新不递增 `version`、不写 transition 行，也不参与 CAS——
+    /// 它随本次推进事务一起提交或回滚，推进输掉 CAS 时更新同样被回滚，因此已提交实例
+    /// 上的 traceparent 永远来自一次真实生效的推进或创建。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    /// - `traceparent`: 已通过 W3C 语法校验的 canonical `traceparent` 文本。
+    ///
+    /// 返回：更新成功返回 `Ok`（实例不存在时静默无行，由推进路径的 CAS 负责失败）；
+    /// 文本越界、事务缺失或底层失败返回错误。
+    pub async fn update_trace_context(
+        &self,
+        saga_id: &SagaId,
+        traceparent: &str,
+    ) -> Result<(), SagaStoreError> {
+        validate_traceparent(traceparent)?;
+        // 因果上下文必须与触发它的结果推进同事务:事务外 autocommit 会让"上下文已换新
+        // 但推进被回滚"的实例把后续命令挂到从未生效的 trace 上。
+        require_ambient_transaction()?;
+        let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        sqlx::query("UPDATE saga_instance SET traceparent = $1 WHERE saga_id = $2")
+            .bind(traceparent)
+            .bind(saga_id.as_str())
+            .execute(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+        Ok(())
+    }
+
+    /// 业务作用：以数据库 CAS 推进实例状态，并在同一事务内写 transition 审计行。
+    ///
+    /// 迁移先经 [`check_transition`] 在封闭状态机内裁决（含"已发生补偿副作用后禁止
+    /// 恢复正向"的业务门禁），再执行 `WHERE version = ? AND status = ?` 的条件更新；
+    /// `transition_seq` 直接取推进后的 `version`，不引入第二个序列来源。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 实例身份。
+    /// - `expected_version`: 调用方持有快照的实例版本，作为 CAS 预期值。
+    /// - `from_status`: 调用方持有快照的状态，必须来自持久化读取。
+    /// - `spec`: 本次推进要写入的全部内容。
+    ///
+    /// 返回：成功返回 [`CasOutcome::Applied`] 与新实例版本；版本或状态预期未命中，或
+    /// 实例已暂停时返回 `Conflict`（实例行未被修改）；同一触发重复返回
+    /// `DuplicateTrigger`（实例行已被本事务修改，
+    /// 调用方**必须回滚**整个 ambient 事务）。迁移不在封闭集合内、事务缺失或底层失败
+    /// 返回错误。
+    pub async fn advance(
+        &self,
+        saga_id: &SagaId,
+        expected_version: u64,
+        from_status: SagaStatus,
+        spec: &TransitionSpec<'_>,
+    ) -> Result<CasOutcome, SagaStoreError> {
+        validate_trigger_id(spec.trigger_id)?;
+        if let Some(failure_code) = spec.failure_code {
+            validate_reason_code(failure_code)?;
+        }
+        if let Some(plan_version) = spec.compensation_plan_version {
+            validate_digest(plan_version)?;
+        }
+        // transition 与后续补偿命令 Outbox/Audit 必须原子:状态推进了但命令丢失,
+        // 或命令发出了但状态没推进,都会造成半完成状态。
+        require_ambient_transaction()?;
+
+        // 人工介入恢复正向前必须确认没有任何补偿副作用已经发生;该事实只能来自
+        // 已提交 journal,同一事务内查询保证与 CAS 看到同一份快照。
+        let guard = if from_status == SagaStatus::ManualIntervention
+            && spec.to_status == SagaStatus::Running
+        {
+            TransitionGuard::new(self.any_compensation_succeeded(saga_id).await?)
+        } else if spec.to_status == SagaStatus::ManuallyClosed {
+            // 人工关闭的放行证据只认"与本次触发同一 operation 的 manual_close 审计行",
+            // 且触发来源必须是管理面:自动触发(事件/timer)既没有 Admin 来源也不可能
+            // 预先写入该审计,因此无法经本边伪造终态。审计行在同一事务内读取,保证
+            // 证据与 CAS 属于同一提交。
+            TransitionGuard::manual_close(
+                spec.trigger_kind == TriggerKind::Admin
+                    && self.manual_close_audited(saga_id, spec.trigger_id).await?,
+            )
+        } else {
+            TransitionGuard::default()
+        };
+        // 在写入任何行之前统一裁决结构性与业务合法性:非法迁移是不变量破坏,
+        // 必须显式失败而不是写入后再补救。
+        check_transition(from_status, spec.to_status, guard)
+            .map_err(|violation| SagaStoreError::new(violation.code()))?;
+        // version 同时充当 transition_seq；回绕会复用旧审计序号并破坏 CAS 单调性，
+        // 因此必须在发出 UPDATE 前 fail-closed，不能依赖 debug 溢出 panic 或数据库报错。
+        let new_version = expected_version
+            .checked_add(1)
+            .ok_or_else(|| SagaStoreError::new("saga version overflow"))?;
+
+        let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        // 暂停与业务推进必须争夺同一行级权威：即使 worker 先读到 ACTIVE，
+        // 运维 pause 一旦先提交，这个 CAS 也必须失败，禁止在“暂停成功”后发新命令。
+        let updated = sqlx::query(
+            "UPDATE saga_instance SET status = $1, direction = $2, current_step = $3, \
+             failure_code = COALESCE($4, failure_code), \
+             compensation_plan_version = COALESCE($5, compensation_plan_version), \
+             version = version + 1 \
+             WHERE saga_id = $6 AND version = $7 AND status = $8 AND control_state = 'ACTIVE' \
+             AND NOT EXISTS (SELECT 1 FROM saga_transition \
+                 WHERE saga_id = $6 AND trigger_kind = $9 AND trigger_id = $10)",
+        )
+        .bind(spec.to_status.as_str())
+        .bind(spec.direction.as_str())
+        .bind(spec.current_step.map(StepName::as_str))
+        .bind(spec.failure_code)
+        .bind(spec.compensation_plan_version)
+        .bind(saga_id.as_str())
+        .bind(pg_u64(expected_version)?)
+        .bind(from_status.as_str())
+        .bind(spec.trigger_kind.as_str())
+        .bind(spec.trigger_id)
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        // 没有取得推进权威时先区分稳定触发是否已经落账；重复触发不得改实例行，
+        // 版本或控制态失配则由当前处理者重新读取后裁决。
+        if updated.rows_affected() == 0 {
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM saga_transition \
+                 WHERE saga_id = $1 AND trigger_kind = $2 AND trigger_id = $3)",
+            )
+            .bind(saga_id.as_str())
+            .bind(spec.trigger_kind.as_str())
+            .bind(spec.trigger_id)
+            .fetch_one(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+            return Ok(if duplicate {
+                CasOutcome::DuplicateTrigger
+            } else {
+                CasOutcome::Conflict
+            });
+        }
+
+        // CAS 赢家独占 version=new_version,因此 (saga_id, transition_seq) 不可能撞车;
+        // 这里唯一可能的冲突是 uk_trigger:同一触发已经推进过本实例。
+        sqlx::query(
+            "INSERT INTO saga_transition (saga_id, transition_seq, from_state, to_state, \
+             trigger_kind, trigger_id, definition_version) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(saga_id.as_str())
+        .bind(pg_u64(new_version)?)
+        .bind(from_status.as_str())
+        .bind(spec.to_status.as_str())
+        .bind(spec.trigger_kind.as_str())
+        .bind(spec.trigger_id)
+        .bind(i64::from(spec.definition_version.get()))
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        // 实例进入终态即释放在飞名额:与终态迁移同一事务提交,账本不产生
+        // "已终结仍占额"或"回滚后少记"的窗口。
+        if spec.to_status.is_terminal() {
+            drop(connection);
+            self.release_tenant_quota(saga_id).await?;
+        }
+        Ok(CasOutcome::Applied { new_version })
+    }
+
+    /// 业务作用：以 CAS 切换管理面控制状态（暂停/恢复），不触碰业务状态机。
+    ///
+    /// 控制状态与业务状态正交：本操作**不递增 version 也不写 transition 行**——
+    /// version 与 transition_seq 同源，控制态切换不产生业务状态迁移，占用序号会在
+    /// 审计链里留下空洞；在途结果的记账也不因暂停而失效（暂停只停止发出新的自动动作）。
+    /// CAS 同时使用业务 version 与独立 control_version：前者阻止跨业务推进的旧操作，
+    /// 后者阻止 ACTIVE→PAUSED→ACTIVE 后旧快照再次命中的 ABA；稳定 `operation_id`
+    /// 另写独立审计链，阻止公开 API 重载最新快照后把同一旧操作再次执行。
+    ///
+    /// 参数说明：
+    /// - `spec`: 实例版本权威、from/to 状态和不可分割的 operation/actor/reason 审计事实。
+    ///
+    /// 返回：切换成功返回 `Applied`；同一 operation 已提交返回 `AlreadyApplied` 且不再次
+    /// 改状态；业务 version、control_version 或当前控制状态与预期不符返回 `Conflict`。
+    /// operation 身份被复用于另一控制动作、`from == to`、generation 非法、事务缺失或
+    /// 底层失败返回错误。
+    pub async fn set_control_state(
+        &self,
+        spec: &ControlTransitionSpec<'_>,
+    ) -> Result<ControlCasOutcome, SagaStoreError> {
+        if spec.from == spec.to {
+            return Err(SagaStoreError::new(
+                "control state transition requires distinct states",
+            ));
+        }
+        if spec.expected_control_version == 0 || spec.expected_control_version == u64::MAX {
+            return Err(SagaStoreError::new(
+                "control version must be positive and incrementable",
+            ));
+        }
+        validate_trigger_id(spec.operation_id)?;
+        validate_audit_text(spec.actor, 128, "actor")?;
+        validate_audit_text(spec.reason, 512, "reason")?;
+        // 暂停/恢复必须与 operation 审计同事务：没有审计的管理动作无法幂等重放，
+        // 也无法在事故复盘时归因。
+        require_ambient_transaction()?;
+        let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+
+        // 公开 API 会在每次调用时重载最新快照，仅靠 control_version 挡不住同一旧请求
+        // 在一次完整 ABA 后再次执行。稳定 operation_id 命中时直接返回，禁止再触碰控制态。
+        let prior = sqlx::query(
+            "SELECT from_state, to_state, actor, reason FROM saga_control_transition \
+             WHERE saga_id = $1 AND operation_id = $2 FOR UPDATE",
+        )
+        .bind(spec.saga_id.as_str())
+        .bind(spec.operation_id)
+        .fetch_optional(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        if let Some(prior) = prior {
+            let prior_from: String = prior.try_get("from_state").map_err(map_database)?;
+            let prior_to: String = prior.try_get("to_state").map_err(map_database)?;
+            let prior_actor: String = prior.try_get("actor").map_err(map_database)?;
+            let prior_reason: String = prior.try_get("reason").map_err(map_database)?;
+            if prior_from != spec.from.as_str()
+                || prior_to != spec.to.as_str()
+                || prior_actor != spec.actor
+                || prior_reason != spec.reason
+            {
+                return Err(SagaStoreError::conflict(
+                    "control operation id was reused with different audit facts",
+                ));
+            }
+            return Ok(ControlCasOutcome::AlreadyApplied);
+        }
+
+        let updated = sqlx::query(
+            "UPDATE saga_instance SET control_state = $1, control_version = control_version + 1, \
+             paused_at = CASE WHEN $2 = 'PAUSED' THEN clock_timestamp() ELSE NULL END \
+             WHERE saga_id = $3 AND version = $4 AND control_version = $5 AND control_state = $6",
+        )
+        .bind(spec.to.as_str())
+        .bind(spec.to.as_str())
+        .bind(spec.saga_id.as_str())
+        .bind(pg_u64(spec.expected_version)?)
+        .bind(pg_u64(spec.expected_control_version)?)
+        .bind(spec.from.as_str())
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        if updated.rows_affected() == 0 {
+            return Ok(ControlCasOutcome::Conflict);
+        }
+        let control_seq = spec
+            .expected_control_version
+            .checked_add(1)
+            .ok_or_else(|| SagaStoreError::new("control version overflow"))?;
+        // 审计插入失败时外层事务必须连同上面的状态 UPDATE 一起回滚，绝不留下
+        // 无稳定 operation 身份、以后无法安全判定是否执行过的控制变化。
+        sqlx::query(
+            "INSERT INTO saga_control_transition \
+             (saga_id, control_seq, from_state, to_state, operation_id, actor, reason) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(spec.saga_id.as_str())
+        .bind(pg_u64(control_seq)?)
+        .bind(spec.from.as_str())
+        .bind(spec.to.as_str())
+        .bind(spec.operation_id)
+        .bind(spec.actor)
+        .bind(spec.reason)
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        Ok(ControlCasOutcome::Applied)
+    }
+
+    /// 业务作用：在人工恢复产生状态迁移或命令 Outbox 的同一事务内登记主体与原因。
+    ///
+    /// operation id 是恢复 API 的幂等边界：完全一致重放返回 `AlreadyRecorded`，调用方
+    /// 必须直接返回当前已提交状态；任一审计事实变化都 fail-closed，防止用同一 operation
+    /// 身份掩盖第二次人工动作。
+    ///
+    /// 参数说明：
+    /// - `saga_id`: 被操作实例。
+    /// - `operation_id`: 管理请求稳定幂等身份。
+    /// - `action`: 低基数稳定动作名。
+    /// - `actor`: 认证主体稳定 id。
+    /// - `reason`: 人工动作原因或工单摘要。
+    ///
+    /// 返回：首次登记返回 `Recorded`；完全一致重放返回 `AlreadyRecorded`；事实漂移、
+    /// 事务缺失或数据库失败返回错误。
+    pub async fn record_management_operation(
+        &self,
+        saga_id: &SagaId,
+        operation_id: &str,
+        action: &str,
+        actor: &str,
+        reason: &str,
+    ) -> Result<ManagementAuditOutcome, SagaStoreError> {
+        validate_trigger_id(operation_id)?;
+        validate_audit_identifier(action, 64, "action")?;
+        validate_audit_text(actor, 128, "actor")?;
+        validate_audit_text(reason, 512, "reason")?;
+        // 审计必须与业务迁移、命令 Outbox 同事务；先落审计再失败也会整体回滚。
+        require_ambient_transaction()?;
+        let mut connection = natx_pgsql::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
+        let prior = sqlx::query(
+            "SELECT action, actor, reason FROM saga_management_audit \
+             WHERE saga_id = $1 AND operation_id = $2 FOR UPDATE",
+        )
+        .bind(saga_id.as_str())
+        .bind(operation_id)
+        .fetch_optional(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        if let Some(prior) = prior {
+            let prior_action: String = prior.try_get("action").map_err(map_database)?;
+            let prior_actor: String = prior.try_get("actor").map_err(map_database)?;
+            let prior_reason: String = prior.try_get("reason").map_err(map_database)?;
+            if prior_action != action || prior_actor != actor || prior_reason != reason {
+                return Err(SagaStoreError::conflict(
+                    "management operation id was reused with different audit facts",
+                ));
+            }
+            return Ok(ManagementAuditOutcome::AlreadyRecorded);
+        }
+        sqlx::query(
+            "INSERT INTO saga_management_audit \
+             (saga_id, operation_id, action, actor, reason) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(saga_id.as_str())
+        .bind(operation_id)
+        .bind(action)
+        .bind(actor)
+        .bind(reason)
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        Ok(ManagementAuditOutcome::Recorded)
+    }
+}
+
+/// 业务作用：统一断言当前处于 ambient 事务，拒绝关键写静默退化为 autocommit。
+///
+/// 参数说明: 无。
+///
+/// 返回：在事务内返回 `Ok`；否则返回稳定错误。
+pub(crate) fn require_ambient_transaction() -> Result<(), SagaStoreError> {
+    if !natx_pgsql::in_transaction() {
+        return Err(SagaStoreError::new(
+            "saga store writes require an ambient transaction; autocommit is forbidden",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验 definition 摘要是 64 位小写十六进制，拒绝把任意文本固定到实例。
+///
+/// 摘要列被启动预检用来判定"definition 内容未被静默改动"，格式外的值会让该校验
+/// 永远失败或永远通过。
+///
+/// 参数说明：
+/// - `digest`: 待校验的摘要文本。
+///
+/// 返回：合法返回 `Ok`；否则返回稳定错误。
+fn validate_digest(digest: &str) -> Result<(), SagaStoreError> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SagaStoreError::new(
+            "definition digest must be 64 lowercase hex characters",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验稳定失败码与 VARCHAR(64) 持久化合同一致，避免数据库截断变成毒消息重投。
+///
+/// 参数说明：
+/// - `code`: 将写入 instance/step journal 的稳定原因码。
+///
+/// 返回：非空、至多 64 字节且只含安全标识符字符时返回 `Ok`；否则返回稳定合同错误。
+pub(crate) fn validate_reason_code(code: &str) -> Result<(), SagaStoreError> {
+    if code.is_empty()
+        || code.len() > 64
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(SagaStoreError::new(
+            "reason code must be a stable identifier of at most 64 bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验触发身份的空白、长度与控制字符边界，保护 transition 唯一键与审计可读性。
+///
+/// 参数说明：
+/// - `trigger_id`: 待校验的触发身份。
+///
+/// 返回：合法返回 `Ok`；否则返回稳定错误。
+fn validate_trigger_id(trigger_id: &str) -> Result<(), SagaStoreError> {
+    if trigger_id.is_empty()
+        || trigger_id.trim() != trigger_id
+        || trigger_id.len() > 190
+        || trigger_id.chars().any(char::is_control)
+    {
+        return Err(SagaStoreError::new("invalid trigger id"));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验落库的 traceparent 是 W3C version-00 canonical 形态，保护列宽合同并
+/// 阻止把任意文本当作因果上下文持久化。
+///
+/// 只做结构校验（四段、小写十六进制、长度 55）；trace 语义合法性（全零拒绝等）由运行时
+/// 层的 `TraceContext` 解析承担，本层是最后的列合同防线。
+///
+/// 参数说明：
+/// - `traceparent`: 待持久化的 canonical `traceparent` 文本。
+///
+/// 返回：结构合法返回 `Ok`；否则返回稳定错误。
+fn validate_traceparent(traceparent: &str) -> Result<(), SagaStoreError> {
+    let mut parts = traceparent.split('-');
+    let shape_ok = traceparent.len() == 55
+        && matches!(
+            (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ),
+            (Some(version), Some(trace_id), Some(parent_id), Some(flags), None)
+                if version.len() == 2
+                    && trace_id.len() == 32
+                    && parent_id.len() == 16
+                    && flags.len() == 2
+        )
+        && traceparent
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
+    if !shape_ok {
+        return Err(SagaStoreError::new("invalid traceparent"));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验 actor/reason 审计文本，阻止列截断、控制字符注入与空主体落库。
+///
+/// 参数说明：
+/// - `value`: 待持久化文本。
+/// - `max_len`: 对应列字节上限。
+/// - `field`: 低基数字段名，仅用于脱敏错误。
+///
+/// 返回：边界合法返回成功；否则返回稳定合同错误。
+fn validate_audit_text(
+    value: &str,
+    max_len: usize,
+    field: &'static str,
+) -> Result<(), SagaStoreError> {
+    if value.is_empty()
+        || value.len() > max_len
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(SagaStoreError::new(format!("invalid management {field}")));
+    }
+    Ok(())
+}
+
+/// 业务作用：校验低基数管理动作名，避免任意文本污染索引与观测标签。
+///
+/// 参数说明：
+/// - `value`: action 名。
+/// - `max_len`: 数据库列上限。
+/// - `field`: 脱敏错误中的字段名。
+///
+/// 返回：只含安全标识符字符且长度有界时返回成功。
+fn validate_audit_identifier(
+    value: &str,
+    max_len: usize,
+    field: &'static str,
+) -> Result<(), SagaStoreError> {
+    if value.is_empty()
+        || value.len() > max_len
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(SagaStoreError::new(format!("invalid management {field}")));
+    }
+    Ok(())
+}

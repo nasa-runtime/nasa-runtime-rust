@@ -13,10 +13,20 @@ pub enum ComponentId {
     NacosConfig,
     /// 数据库连接与事务资源。
     Db,
+    /// SQL 原子指标、日志策略与有界异步通知。
+    SqlObservability,
+    /// 与业务健康隔离的指标抓取与外送。
+    Observability,
     /// Redis 连接和协议能力。
     Redis,
+    /// RedisJob 调度、执行、Fanout 与停机生命周期。
+    RedisJob,
     /// Trace 生产、导出和停机刷新。
     Telemetry,
+    /// 命名分区 Runner 执行器。
+    Partition,
+    /// 受管 gRPC service registry 与 listener。
+    Grpc,
     /// 进程内及分布式缓存。
     Cache,
     /// Kafka 发布、消费和健康状态。
@@ -57,8 +67,13 @@ impl fmt::Display for ComponentId {
             Self::Log => "log",
             Self::NacosConfig => "nacos-config",
             Self::Db => "db",
+            Self::SqlObservability => "sql-observability",
+            Self::Observability => "observability",
             Self::Redis => "redis",
+            Self::RedisJob => "redis-job",
             Self::Telemetry => "telemetry",
+            Self::Partition => "partition",
+            Self::Grpc => "grpc",
             Self::Cache => "cache",
             Self::Kafka => "kafka",
             Self::Outbox => "outbox",
@@ -85,6 +100,12 @@ pub enum ApplicationPhase {
     Start,
     /// 执行业务注册和装配钩子的阶段。
     UserHook,
+    /// 在业务初始化前执行 migration 和出站依赖门禁的阶段。
+    Prepare,
+    /// 按全局屏障执行业务 initializer 的阶段。
+    Initialization,
+    /// 关闭初始化期登记并封存资源与 readiness 的阶段。
+    Seal,
     /// 完成外部探针并发布就绪资源的阶段。
     Ready,
     /// 应用已经对外服务的阶段。
@@ -106,6 +127,9 @@ impl fmt::Display for ApplicationPhase {
             Self::Bootstrap => "bootstrap",
             Self::Start => "start",
             Self::UserHook => "user-hook",
+            Self::Prepare => "prepare",
+            Self::Initialization => "initialization",
+            Self::Seal => "seal",
             Self::Ready => "ready",
             Self::Running => "running",
             Self::Stopping => "stopping",
@@ -126,6 +150,27 @@ pub struct ApplicationError {
     source: Option<anyhow::Error>,
     /// 主失败是否已经在组件清理前写入统一诊断通道。
     reported: bool,
+}
+
+impl Drop for ApplicationError {
+    /// 业务作用：独立释放底层业务错误，避免其析构异常改变已经确定的应用终态或截断其它错误释放。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：无返回值；底层错误的单次展开被隔离并输出固定分类，异常正文不进入诊断通道。
+    fn drop(&mut self) {
+        // 先移走所有权再进入独立展开边界，防止外层集合释放时重复析构或因单项异常跳过后续项。
+        let source = self.source.take();
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(source)))
+        {
+            crate::shutdown::release_shutdown_panic_payload(payload);
+            crate::report::write_stderr(&format!(
+                "application error release warning: component={} phase={} outcome=panicked\n",
+                self.component, self.phase,
+            ));
+        }
+    }
 }
 
 impl ApplicationError {

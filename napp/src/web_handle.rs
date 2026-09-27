@@ -7,7 +7,77 @@ use std::{
     },
 };
 
+use nametrics_core::{
+    LegacyMetricsSource, MetricDescriptor, MetricKind, MetricSample, MetricValue,
+};
+
 use crate::{state::StateCell, ApplicationState, RouteMeta};
+
+static WEB_REQUESTS_BY_PROTOCOL_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_requests_by_protocol_total",
+    help: "Web listener 按 HTTP 协议统计的入站请求累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &["protocol"],
+    histogram_bounds: &[],
+};
+static WEB_HTTP2_REQUESTS_IN_FLIGHT: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_http2_requests_in_flight",
+    help: "Web listener 当前仍在路由或响应 future 中的 HTTP/2 请求数。",
+    unit: "",
+    kind: MetricKind::Gauge,
+    label_names: &[],
+    histogram_bounds: &[],
+};
+static WEB_CONNECTIONS_ACCEPTED_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_connections_accepted_total",
+    help: "Web listener 已接受的 TCP 连接累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &[],
+    histogram_bounds: &[],
+};
+static WEB_CONNECTIONS_REJECTED_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_connections_rejected_total",
+    help: "Web listener 在协议解析前按原因拒绝的 TCP 连接累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &["reason"],
+    histogram_bounds: &[],
+};
+static WEB_CONNECTIONS_ACTIVE: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_connections_active",
+    help: "Web listener 当前管理的 TCP 连接数。",
+    unit: "",
+    kind: MetricKind::Gauge,
+    label_names: &[],
+    histogram_bounds: &[],
+};
+static WEB_ACCEPT_ERRORS_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_accept_errors_total",
+    help: "Web listener 可恢复 accept 错误的累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &[],
+    histogram_bounds: &[],
+};
+static WEB_CONNECTION_ERRORS_TOTAL: MetricDescriptor = MetricDescriptor {
+    name: "napp_web_connection_errors_total",
+    help: "Web listener 协议判定或 HTTP driver 连接级错误的累计数。",
+    unit: "",
+    kind: MetricKind::Counter,
+    label_names: &[],
+    histogram_bounds: &[],
+};
+static WEB_METRIC_DESCRIPTORS: [&MetricDescriptor; 7] = [
+    &WEB_REQUESTS_BY_PROTOCOL_TOTAL,
+    &WEB_HTTP2_REQUESTS_IN_FLIGHT,
+    &WEB_CONNECTIONS_ACCEPTED_TOTAL,
+    &WEB_CONNECTIONS_REJECTED_TOTAL,
+    &WEB_CONNECTIONS_ACTIVE,
+    &WEB_ACCEPT_ERRORS_TOTAL,
+    &WEB_CONNECTION_ERRORS_TOTAL,
+];
 
 /// Web 路由在只读清单中的来源类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,7 +562,12 @@ impl WebRuntimeState {
     /// # 参数
     ///
     /// - `runtime`：当前服务任务持有的共享 Web 运行时状态。
-    pub(crate) fn begin_request(runtime: &Arc<Self>) -> WebRequestGuard {
+    /// - `http2`：请求是否由 HTTP/2 stream 承载，用于固定协议维度和在途请求会计。
+    ///
+    /// # 返回
+    ///
+    /// 返回：在请求完成或 future 取消时自动结束在途会计的守卫。
+    pub(crate) fn begin_request(runtime: &Arc<Self>, http2: bool) -> WebRequestGuard {
         runtime
             .metrics
             .requests_started
@@ -501,9 +576,240 @@ impl WebRuntimeState {
             .metrics
             .requests_in_flight
             .fetch_add(1, Ordering::Relaxed);
+        if http2 {
+            runtime
+                .metrics
+                .requests_http2
+                .fetch_add(1, Ordering::Relaxed);
+            runtime
+                .metrics
+                .http2_requests_in_flight
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            runtime
+                .metrics
+                .requests_http1
+                .fetch_add(1, Ordering::Relaxed);
+        }
         WebRequestGuard {
             runtime: Arc::clone(runtime),
+            http2,
         }
+    }
+
+    /// 业务作用：记录一条已经由操作系统 accept 的 Web TCP 连接。
+    ///
+    /// # 参数
+    ///
+    /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；只累加连接接纳事实。
+    pub(crate) fn accept_connection(runtime: &Arc<Self>) {
+        runtime
+            .metrics
+            .connections_accepted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：记录因 listener 容量门禁而在协议解析前关闭的连接。
+    ///
+    /// # 参数
+    ///
+    /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；只累加容量拒绝事实。
+    pub(crate) fn reject_connection(runtime: &Arc<Self>) {
+        runtime
+            .metrics
+            .connections_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：记录一次可恢复的 TCP accept 错误。
+    ///
+    /// # 参数
+    ///
+    /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；只累加 accept 错误事实。
+    pub(crate) fn record_accept_error(runtime: &Arc<Self>) {
+        runtime
+            .metrics
+            .accept_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：记录一条在协议判定或 HTTP driver 阶段失败的连接。
+    ///
+    /// # 参数
+    ///
+    /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；只累加连接级错误事实。
+    pub(crate) fn record_connection_error(runtime: &Arc<Self>) {
+        runtime
+            .metrics
+            .connection_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 业务作用：创建覆盖协议判定、请求处理和排空阶段的活跃连接守卫。
+    ///
+    /// # 参数
+    ///
+    /// - `runtime`：listener 与能力句柄共用的 Web 运行时状态。
+    ///
+    /// # 返回
+    ///
+    /// 返回：析构时自动递减活跃连接数的所有权守卫。
+    pub(crate) fn track_connection(runtime: &Arc<Self>) -> WebConnectionGuard {
+        runtime
+            .metrics
+            .connections_active
+            .fetch_add(1, Ordering::Relaxed);
+        WebConnectionGuard {
+            runtime: Arc::clone(runtime),
+        }
+    }
+}
+
+impl LegacyMetricsSource for WebRuntimeState {
+    /// 业务作用：返回 Web listener 在启动期登记到统一指标目录的静态指标族。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：连接容量、连接结果和协议请求维度共用的稳定 descriptor 集合。
+    fn descriptors(&self) -> &'static [&'static MetricDescriptor] {
+        &WEB_METRIC_DESCRIPTORS
+    }
+
+    /// 业务作用：把 Web 原子计数转换为 Prometheus 与 OTLP 共用的结构化快照。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：始终返回固定低基数的八条样本，不包含地址、路由或客户端输入。
+    fn snapshot(&self) -> Option<Vec<MetricSample>> {
+        let metrics = self.metrics.transport_snapshot();
+        Some(vec![
+            MetricSample {
+                name: WEB_REQUESTS_BY_PROTOCOL_TOTAL.name,
+                labels: vec![("protocol", "http1".to_owned())],
+                value: MetricValue::Counter(metrics.requests_http1),
+            },
+            MetricSample {
+                name: WEB_REQUESTS_BY_PROTOCOL_TOTAL.name,
+                labels: vec![("protocol", "http2".to_owned())],
+                value: MetricValue::Counter(metrics.requests_http2),
+            },
+            MetricSample {
+                name: WEB_HTTP2_REQUESTS_IN_FLIGHT.name,
+                labels: Vec::new(),
+                value: MetricValue::Gauge(metrics.http2_requests_in_flight as f64),
+            },
+            MetricSample {
+                name: WEB_CONNECTIONS_ACCEPTED_TOTAL.name,
+                labels: Vec::new(),
+                value: MetricValue::Counter(metrics.connections_accepted),
+            },
+            MetricSample {
+                name: WEB_CONNECTIONS_REJECTED_TOTAL.name,
+                labels: vec![("reason", "capacity".to_owned())],
+                value: MetricValue::Counter(metrics.connections_rejected),
+            },
+            MetricSample {
+                name: WEB_CONNECTIONS_ACTIVE.name,
+                labels: Vec::new(),
+                value: MetricValue::Gauge(metrics.connections_active as f64),
+            },
+            MetricSample {
+                name: WEB_ACCEPT_ERRORS_TOTAL.name,
+                labels: Vec::new(),
+                value: MetricValue::Counter(metrics.accept_errors),
+            },
+            MetricSample {
+                name: WEB_CONNECTION_ERRORS_TOTAL.name,
+                labels: Vec::new(),
+                value: MetricValue::Counter(metrics.connection_errors),
+            },
+        ])
+    }
+
+    /// 业务作用：为只消费旧文本入口的调用方追加与结构化快照同源的 Prometheus 文本。
+    ///
+    /// 参数说明：
+    /// - `output`：接收 Web 指标文本的目标缓冲区。
+    ///
+    /// 返回：无；在现有内容尾部追加固定 family 与低基数样本。
+    fn render_prometheus(&self, output: &mut String) {
+        use std::fmt::Write as _;
+
+        let metrics = self.metrics.transport_snapshot();
+        let _ = writeln!(
+            output,
+            "# HELP {} {}",
+            WEB_REQUESTS_BY_PROTOCOL_TOTAL.name, WEB_REQUESTS_BY_PROTOCOL_TOTAL.help
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE {} counter",
+            WEB_REQUESTS_BY_PROTOCOL_TOTAL.name
+        );
+        let _ = writeln!(
+            output,
+            "{}{{protocol=\"http1\"}} {}",
+            WEB_REQUESTS_BY_PROTOCOL_TOTAL.name, metrics.requests_http1
+        );
+        let _ = writeln!(
+            output,
+            "{}{{protocol=\"http2\"}} {}",
+            WEB_REQUESTS_BY_PROTOCOL_TOTAL.name, metrics.requests_http2
+        );
+        for (descriptor, metric_type, value) in [
+            (
+                &WEB_HTTP2_REQUESTS_IN_FLIGHT,
+                "gauge",
+                metrics.http2_requests_in_flight,
+            ),
+            (
+                &WEB_CONNECTIONS_ACCEPTED_TOTAL,
+                "counter",
+                metrics.connections_accepted,
+            ),
+            (&WEB_CONNECTIONS_ACTIVE, "gauge", metrics.connections_active),
+            (&WEB_ACCEPT_ERRORS_TOTAL, "counter", metrics.accept_errors),
+            (
+                &WEB_CONNECTION_ERRORS_TOTAL,
+                "counter",
+                metrics.connection_errors,
+            ),
+        ] {
+            let _ = writeln!(output, "# HELP {} {}", descriptor.name, descriptor.help);
+            let _ = writeln!(output, "# TYPE {} {metric_type}", descriptor.name);
+            let _ = writeln!(output, "{} {value}", descriptor.name);
+        }
+        let _ = writeln!(
+            output,
+            "# HELP {} {}",
+            WEB_CONNECTIONS_REJECTED_TOTAL.name, WEB_CONNECTIONS_REJECTED_TOTAL.help
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE {} counter",
+            WEB_CONNECTIONS_REJECTED_TOTAL.name
+        );
+        let _ = writeln!(
+            output,
+            "{}{{reason=\"capacity\"}} {}",
+            WEB_CONNECTIONS_REJECTED_TOTAL.name, metrics.connections_rejected
+        );
     }
 }
 
@@ -528,6 +834,34 @@ struct WebMetrics {
     responses_client_error: AtomicU64,
     /// 已生成的 5xx 响应总数。
     responses_server_error: AtomicU64,
+    /// 经 HTTP/1.0 或 HTTP/1.1 进入路由边界的请求总数。
+    requests_http1: AtomicU64,
+    /// 经 HTTP/2 进入路由边界的请求总数。
+    requests_http2: AtomicU64,
+    /// 当前仍在路由或响应 future 中的 HTTP/2 请求数。
+    http2_requests_in_flight: AtomicU64,
+    /// listener 已接纳的 TCP 连接总数。
+    connections_accepted: AtomicU64,
+    /// 因连接容量耗尽而拒绝的 TCP 连接总数。
+    connections_rejected: AtomicU64,
+    /// 当前仍由 listener 管理的 TCP 连接数。
+    connections_active: AtomicU64,
+    /// TCP accept 调用返回错误的累计次数。
+    accept_errors: AtomicU64,
+    /// 协议判定或 HTTP driver 返回错误的连接总数。
+    connection_errors: AtomicU64,
+}
+
+/// Web transport 指标源一次读取使用的内部值快照。
+struct WebTransportMetricsSnapshot {
+    requests_http1: u64,
+    requests_http2: u64,
+    http2_requests_in_flight: u64,
+    connections_accepted: u64,
+    connections_rejected: u64,
+    connections_active: u64,
+    accept_errors: u64,
+    connection_errors: u64,
 }
 
 impl WebMetrics {
@@ -545,12 +879,60 @@ impl WebMetrics {
             responses_server_error: self.responses_server_error.load(Ordering::Relaxed),
         }
     }
+
+    /// 业务作用：读取协议、连接与 HTTP/2 在途请求原子计数供统一指标源导出。
+    ///
+    /// # 参数
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回：只包含固定低基数 transport 数值的内部快照。
+    fn transport_snapshot(&self) -> WebTransportMetricsSnapshot {
+        WebTransportMetricsSnapshot {
+            requests_http1: self.requests_http1.load(Ordering::Relaxed),
+            requests_http2: self.requests_http2.load(Ordering::Relaxed),
+            http2_requests_in_flight: self.http2_requests_in_flight.load(Ordering::Relaxed),
+            connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
+            connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
+            connections_active: self.connections_active.load(Ordering::Relaxed),
+            accept_errors: self.accept_errors.load(Ordering::Relaxed),
+            connection_errors: self.connection_errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// 保证连接任务正常结束、协议失败或被排空预算取消时都能递减活跃连接数。
+pub(crate) struct WebConnectionGuard {
+    /// 只包含 Web 运行态计数器的共享引用。
+    runtime: Arc<WebRuntimeState>,
+}
+
+impl Drop for WebConnectionGuard {
+    /// 业务作用：在连接所有权结束时统一递减活跃连接计数。
+    ///
+    /// # 参数
+    ///
+    /// 参数说明: 无。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；守卫释放时只递减活跃连接计数。
+    fn drop(&mut self) {
+        self.runtime
+            .metrics
+            .connections_active
+            .fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// 保证请求完成或 future 被取消时都能递减在途计数的内部守卫。
 pub(crate) struct WebRequestGuard {
     /// 只包含 Web 运行态计数器的共享引用，不持有 Application 或路由服务图。
     runtime: Arc<WebRuntimeState>,
+    /// 当前请求是否经 HTTP/2 进入路由边界。
+    http2: bool,
 }
 
 impl WebRequestGuard {
@@ -584,10 +966,20 @@ impl Drop for WebRequestGuard {
     /// # 参数
     ///
     /// 本方法无参数；原子递减不访问 Application 生命周期或服务任务。
+    ///
+    /// # 返回
+    ///
+    /// 返回：无；同时结束通用在途请求与 HTTP/2 在途请求会计。
     fn drop(&mut self) {
         self.runtime
             .metrics
             .requests_in_flight
             .fetch_sub(1, Ordering::Relaxed);
+        if self.http2 {
+            self.runtime
+                .metrics
+                .http2_requests_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }

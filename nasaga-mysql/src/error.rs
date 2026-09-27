@@ -4,9 +4,23 @@
 //! 的原因短语，业务身份与状态值一律不回显，防止把 business key、命令载荷等敏感内容
 //! 经由错误链泄漏到低权级的观测系统。
 
+/// 业务作用：封闭 Saga store 内部的持久阶段，使 backend adapter 不解析原因文本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SagaStoreErrorKind {
+    /// 获取连接前失败，独立写尚未发出。
+    ConnectionUnavailable,
+    /// SQL 已交给数据库，是否可重试取决于外层是否受 ambient transaction 保护。
+    DatabaseOperation,
+    /// 唯一身份已绑定另一份业务事实，调用方必须重读裁决。
+    Conflict,
+    /// 配置、合同或持久数据不满足运行不变量。
+    Infrastructure,
+}
+
 /// Saga store I/O 或合同错误。文本不包含 SQL、凭据、业务键或 payload。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SagaStoreError {
+    kind: SagaStoreErrorKind,
     /// 稳定、脱敏的错误原因。
     pub reason: String,
 }
@@ -20,8 +34,54 @@ impl SagaStoreError {
     /// 返回：可直接向上传播的脱敏错误。
     pub(crate) fn new(reason: impl Into<String>) -> Self {
         Self {
+            kind: SagaStoreErrorKind::Infrastructure,
             reason: reason.into(),
         }
+    }
+
+    /// 业务作用：构造连接尚未取得的失败，供独立写安全选择重试。
+    ///
+    /// 参数说明：`reason` 是不含连接信息的稳定摘要。
+    ///
+    /// 返回：带连接阶段分类的脱敏错误。
+    fn connection_unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            kind: SagaStoreErrorKind::ConnectionUnavailable,
+            reason: reason.into(),
+        }
+    }
+
+    /// 业务作用：构造数据库操作失败，保留 ambient 与 autocommit 的不同裁决空间。
+    ///
+    /// 参数说明：`reason` 是不含 SQL 与参数的稳定摘要。
+    ///
+    /// 返回：带数据库操作阶段分类的脱敏错误。
+    fn database_operation(reason: impl Into<String>) -> Self {
+        Self {
+            kind: SagaStoreErrorKind::DatabaseOperation,
+            reason: reason.into(),
+        }
+    }
+
+    /// 业务作用：构造唯一业务身份与既有事实冲突的确定性错误。
+    ///
+    /// 参数说明：`reason` 是不含业务身份值的稳定摘要。
+    ///
+    /// 返回：可由 backend adapter 精确映射为 `Conflict` 的错误。
+    pub(crate) fn conflict(reason: impl Into<String>) -> Self {
+        Self {
+            kind: SagaStoreErrorKind::Conflict,
+            reason: reason.into(),
+        }
+    }
+
+    /// 业务作用：读取 backend adapter 用于事务裁决的封闭持久阶段。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：构造错误时固定的内部类别。
+    pub(crate) fn kind(&self) -> SagaStoreErrorKind {
+        self.kind
     }
 }
 
@@ -46,7 +106,7 @@ impl std::error::Error for SagaStoreError {}
 ///
 /// 返回：稳定的连接不可用错误。
 pub(crate) fn map_connection(_error: anyhow::Error) -> SagaStoreError {
-    SagaStoreError::new("connection unavailable")
+    SagaStoreError::connection_unavailable("connection unavailable")
 }
 
 /// 业务作用：将 SQLx 错误收敛为不泄露 SQL 与参数的数据库失败。
@@ -56,7 +116,7 @@ pub(crate) fn map_connection(_error: anyhow::Error) -> SagaStoreError {
 ///
 /// 返回：稳定的数据库操作失败错误。
 pub(crate) fn map_database(_error: sqlx::Error) -> SagaStoreError {
-    SagaStoreError::new("database operation failed")
+    SagaStoreError::database_operation("database operation failed")
 }
 
 /// 业务作用：识别唯一键冲突，使幂等入口能把"重复"与"真实故障"区分开。

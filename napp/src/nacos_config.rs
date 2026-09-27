@@ -13,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
 use crate::{
-    reload::ConfigApplier, Application, ApplicationComponent, ApplicationError, ApplicationFuture,
-    ApplicationPhase, ApplicationResult, BootstrapContext, ComponentId, ConfigSource, ConfigView,
-    ReadyContext, ReloadStatus, ReloadTarget, ShutdownAction, ShutdownContext, StartContext,
+    Application, ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase,
+    ApplicationResult, BootstrapContext, ComponentId, ConfigSource, ReadyContext, ShutdownAction,
+    ShutdownContext, StartContext,
 };
 
 /// 配置中心主动 freshness 探针间隔；同时兜底补拉可能漏掉的 watch 事件。
@@ -177,6 +177,14 @@ impl ApplicationComponent for NacosConfigComponent {
                 )
             })?;
 
+            // 连接配置中心之前必须已有独立 provider 信任根；远端 overlay 不能补造其自身认证的前置依赖。
+            if merged.get("secret_providers") != local_tree.get("secret_providers") {
+                return Err(nacos_error(
+                    ApplicationPhase::Bootstrap,
+                    "secret provider bootstrap declarations must come from local configuration",
+                ));
+            }
+
             // bootstrap-only 冲突：远端首拉不允许改写 application.*。比较基准是同步预读固定的
             // 原始 section，而不是刚刚重新读到的本地树——否则本地文件被同时改动就能绕过该判定。
             // 该比较必须早于任何组件段校验，未知字段的改写才不会先被 serde 错误遮蔽。
@@ -195,7 +203,8 @@ impl ApplicationComponent for NacosConfigComponent {
 
             context
                 .application()
-                .set_bootstrap_config(merged, nacos_sources(&imports, &boot))?;
+                .set_bootstrap_config(merged, nacos_sources(&imports, &boot))
+                .await?;
             let client = Arc::new(client);
             if !context
                 .application()
@@ -307,22 +316,23 @@ impl ApplicationComponent for NacosConfigComponent {
             );
 
             let cancel = CancellationToken::new();
-            let appliers = context
-                .application()
-                .config_appliers()
-                .into_iter()
-                .map(|applier| (applier.component(), applier))
-                .collect();
+            let publisher = crate::config_reload::CandidatePublisher::new(
+                context.application().clone(),
+                self.components.clone(),
+                self.pinned_application.clone(),
+            );
             let driver = WatchDriver {
                 receiver,
                 client: Arc::clone(&client),
                 refs,
-                application: context.application().clone(),
+
                 imports,
                 boot,
-                components: self.components.clone(),
-                pinned_application: self.pinned_application.clone(),
-                appliers,
+                publisher,
+                #[cfg(feature = "config-watch")]
+                local: crate::config_watch::LocalWatch::new(
+                    context.application().config().value(),
+                )?,
                 readiness: contributor,
                 cancel: cancel.clone(),
             };
@@ -395,15 +405,11 @@ struct WatchDriver {
     client: Arc<NacosConfigClient>,
     /// 与 watch 注册完全相同、顺序固定的配置引用。
     refs: Vec<nanacos::ConfigRef>,
-    application: Application,
+    #[cfg(feature = "config-watch")]
+    local: crate::config_watch::LocalWatch,
     imports: Vec<YmlImport>,
     boot: NacosBootstrap,
-    components: Vec<ComponentId>,
-    pinned_application: Option<Value>,
-    /// 可热刷组件在 Start 阶段登记的重应用句柄，按组件身份索引。
-    ///
-    /// 在 Ready 构造驱动时取一次快照即可：登记只发生在组件启动阶段，此后不再变化。
-    appliers: std::collections::HashMap<ComponentId, Arc<dyn ConfigApplier>>,
+    publisher: crate::config_reload::CandidatePublisher,
     /// 运行期 last-good freshness 贡献项。
     readiness: ReadinessContributor,
     cancel: CancellationToken,
@@ -423,7 +429,16 @@ impl WatchDriver {
         probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // watch 建立过程已经完成一次全量拉取；跳过 interval 的立即首 tick，避免 Ready 后重复请求。
         probe.tick().await;
+        let mut latest_bundle = self.receiver.borrow().clone();
         loop {
+            #[cfg(feature = "config-watch")]
+            let local_signal = self.local.signal.clone();
+            let local_event = async {
+                #[cfg(feature = "config-watch")]
+                local_signal.notified().await;
+                #[cfg(not(feature = "config-watch"))]
+                std::future::pending::<()>().await;
+            };
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     self.readiness.observe(
@@ -433,10 +448,32 @@ impl WatchDriver {
                     );
                     return Ok(());
                 },
+                _ = local_event => {
+                    let result = self.reload_once(&latest_bundle).await;
+                    self.readiness.observe(
+                        if result.is_ok() {
+                            DependencyState::Ready
+                        } else {
+                            DependencyState::Degraded
+                        },
+                        if result.is_ok() {
+                            reason::HEALTHY
+                        } else {
+                            reason::DEGRADED
+                        },
+                        std::time::Instant::now(),
+                    );
+                    // 固定短间隔限制事件风暴，远端和定期补拉在下一轮公平竞争。
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                    }
+                },
                 _ = probe.tick() => {
                     let now = std::time::Instant::now();
                     match self.client.fetch_many(&self.refs).await {
                         Ok(bundle) => {
+                            latest_bundle = bundle.clone();
                             match self.reload_once(&bundle).await {
                                 Ok(Some(version)) => {
                                     tracing::info!(
@@ -483,6 +520,7 @@ impl WatchDriver {
                         return Ok(());
                     }
                     let bundle = self.receiver.borrow_and_update().clone();
+                    latest_bundle = bundle.clone();
                     let now = std::time::Instant::now();
                     match self.reload_once(&bundle).await {
                         Ok(Some(version)) => {
@@ -521,7 +559,7 @@ impl WatchDriver {
     /// # 参数
     ///
     /// - `bundle`：本轮全量重拉的逐文档原文。
-    async fn reload_once(&self, bundle: &ConfigBundle) -> ApplicationResult<Option<u64>> {
+    async fn reload_once(&mut self, bundle: &ConfigBundle) -> ApplicationResult<Option<u64>> {
         let overlays = config_boot::assemble_overlays_from_bundle_for_bootstrap(
             &self.imports,
             bundle,
@@ -543,125 +581,20 @@ impl WatchDriver {
                 error,
             )
         })?;
-        // 先对候选整帧做内置组件段校验：任一段非法都不发布，旧快照继续有效。
-        // `application` 段被有意排除——它 bootstrap-only，只做原始 section 比较并记 RestartRequired，
-        // 否则远端新增/拼错 application 字段会因 deny_unknown_fields 把整帧候选一起否掉。
-        crate::sections::validate_declared_sections(
-            &self.components,
-            &merged,
-            ApplicationPhase::Running,
-        )?;
-
-        let current = self.application.config_view();
-        // 无变化判断比较**原始**候选的私有 fingerprint,而不是拿原始 `merged` 与上一帧发布的
-        // `<redacted>` 树直接比较——后者因脱敏差异每次 watch 都会误判有变、误增版本。
-        if crate::secret::candidate_fingerprint(&merged) == current.candidate_fingerprint() {
-            return Ok(None);
-        }
-        // 状态表必须与本次发布的版本号严格同版本，因此先算出候选版本再逐目标判定；
-        // 可热刷组件的 apply 也发生在这一步——先 apply 后发布，
-        // 订阅者看到新视图时，声明为 Applied 的运行态已经切换完成。
-        let current_version = current.snapshot().version();
-        let next_version = current_version.checked_add(1).ok_or_else(|| {
-            nacos_error(
-                ApplicationPhase::Running,
-                "config snapshot version reached its maximum value",
+        #[cfg(feature = "config-watch")]
+        let watch = self.local.prepare(&merged)?;
+        let published = self
+            .publisher
+            .publish(
+                merged,
+                nacos_sources(&self.imports, &self.boot),
+                &self.cancel,
             )
-        })?;
-        let statuses = self.apply_and_collect_statuses(&current, &merged, next_version);
-        let version = self.application.publish_reloaded_config(
-            current_version,
-            merged,
-            nacos_sources(&self.imports, &self.boot),
-            statuses,
-        )?;
-        debug_assert_eq!(version, next_version);
-        Ok(Some(version))
+            .await?;
+        #[cfg(feature = "config-watch")]
+        self.local.install(watch, published.is_some());
+        Ok(published)
     }
-
-    /// 业务作用：对可热刷组件执行重应用，并构造与本次发布严格同版本的目标状态表。
-    ///
-    /// 判定规则：
-    /// - `application.*`：bootstrap-only，与预读 pin 一致则推进 applied_version，被远端改写则记
-    ///   `RestartRequired` 并保留原 applied_version——本次 runtime 不会改变应用名、模式或 deadline。
-    /// - 各已声明组件：相关配置段未变化则推进 applied_version；变化且登记过重应用句柄则调用它——
-    ///   成功记 `Applied`，失败保留 last-known-good 版本并记 `ApplyFailed`（早先成功的组件不回滚，
-    ///   明确不是跨组件事务）；变化但没有句柄则如实记 `RestartRequired`。
-    ///
-    /// # 参数
-    ///
-    /// - `current`：当前已发布的同版本视图，提供各目标的上一次成功 apply 版本。
-    /// - `candidate`：尚未发布的候选配置树。
-    /// - `next_version`：本次即将发布的快照版本。
-    fn apply_and_collect_statuses(
-        &self,
-        current: &ConfigView,
-        candidate: &Value,
-        next_version: u64,
-    ) -> std::collections::HashMap<ReloadTarget, ReloadStatus> {
-        let current_tree = current.snapshot().value();
-        let mut statuses = std::collections::HashMap::new();
-
-        let application_status = if candidate.get("application") == self.pinned_application.as_ref()
-        {
-            ReloadStatus::applied(next_version)
-        } else {
-            ReloadStatus::restart_required(
-                applied_version_of(current, &ReloadTarget::Application),
-                "remote overlays changed bootstrap-only `application.*`",
-            )
-        };
-        statuses.insert(ReloadTarget::Application, application_status);
-
-        for component in &self.components {
-            let target = ReloadTarget::Component(*component);
-            let changed = crate::sections::sections_changed(*component, current_tree, candidate);
-            let status = if !changed {
-                ReloadStatus::applied(next_version)
-            } else if let Some(applier) = self.appliers.get(component) {
-                match applier.apply(candidate) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "component `{component}` hot-applied config version {next_version}"
-                        );
-                        ReloadStatus::applied(next_version)
-                    }
-                    Err(error) => {
-                        //：状态表里的 summary 与主报告使用同一 redactor；
-                        // 运行态保留 last-known-good，applied_version 不推进。
-                        let summary = crate::report::redact(&crate::report::error_chain(&error));
-                        tracing::warn!(
-                            "component `{component}` hot apply failed, keeping last-known-good: {summary}"
-                        );
-                        ReloadStatus::apply_failed(applied_version_of(current, &target), summary)
-                    }
-                }
-            } else {
-                ReloadStatus::restart_required(
-                    applied_version_of(current, &target),
-                    "component configuration changed but this runtime build cannot hot-apply it",
-                )
-            };
-            statuses.insert(target, status);
-        }
-        statuses
-    }
-}
-
-/// 业务作用：读取某个目标在当前视图中最后一次成功 apply 的版本。
-///
-/// 未出现在当前状态表中的目标按初始版本 1 处理，保证 `RestartRequired` 一定携带可比较的版本号。
-///
-/// # 参数
-///
-/// - `current`：当前已发布的同版本配置视图。
-/// - `target`：需要查询的配置应用目标。
-fn applied_version_of(current: &ConfigView, target: &ReloadTarget) -> u64 {
-    current
-        .reload_statuses()
-        .get(target)
-        .map(|status| status.applied_version)
-        .unwrap_or(1)
 }
 
 /// 业务作用：读取本地 `nacos` 段；段缺失时返回 `enabled=false` 的默认引导配置。
@@ -680,7 +613,29 @@ fn read_nacos_bootstrap(application: &Application) -> ApplicationResult<NacosBoo
             )
         });
     }
-    snapshot.section::<NacosBootstrap>("nacos")
+    let mut boot = snapshot.section::<NacosBootstrap>("nacos")?;
+    if boot.enabled {
+        let secrets = application.secrets();
+        for value in [&mut boot.username, &mut boot.password] {
+            if let Some(id) = value.strip_prefix("secret://") {
+                let material = secrets.get(id).ok_or_else(|| {
+                    nacos_error(
+                        ApplicationPhase::Bootstrap,
+                        "Nacos bootstrap credential is unavailable from independent secret roots",
+                    )
+                })?;
+                *value = std::str::from_utf8(material.expose())
+                    .map_err(|_| {
+                        nacos_error(
+                            ApplicationPhase::Bootstrap,
+                            "Nacos bootstrap credential is not valid text",
+                        )
+                    })?
+                    .to_owned();
+            }
+        }
+    }
+    Ok(boot)
 }
 
 /// 业务作用：从 import 列表派生本轮**远端全量重拉**所含文档的来源摘要。

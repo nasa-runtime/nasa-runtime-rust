@@ -5,22 +5,22 @@
 # ============================================================================
 [package]
 name = "natx-macro"
-version.workspace = true
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[transactional] 属性宏(事务编排)"
+description = "Compile-time MySQL and PostgreSQL ambient transaction attribute macros"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["macro", "transaction", "mysql", "postgresql", "async"]
+categories = ["asynchronous", "database"]
 
 [lib]
 proc-macro = true
 
 name = "natx_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.1" }
+nasa-macro-support = { package = "macro-support", version = "1.0.2" }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

@@ -9,9 +9,13 @@
 //! 正向裁决，`cancel_status` 记录取消屏障裁决，`compensation_status` 记录补偿进度，
 //! `resolution_status` 记录解决通道进度。外部 intent 的幂等键必须使用对应 `effect_id`。
 
+use nasaga_backend::{
+    CancelAdjudication, CompensationAdmission, ExecuteAdmission, ExternalCancelAdmission,
+    ParticipantGateKey, ResolutionAdmission, ResolutionTarget,
+};
 use nasaga_core::{
-    DefinitionVersion, EffectId, SagaId, StepCancelStatus, StepCompensationStatus,
-    StepForwardStatus, StepName, StepPhase, StepResolutionStatus, TenantId, WorkflowName,
+    EffectId, SagaId, StepCancelStatus, StepCompensationStatus, StepForwardStatus, StepName,
+    StepPhase, StepResolutionStatus,
 };
 use sqlx::Row as _;
 
@@ -46,102 +50,6 @@ const CREATE_PARTICIPANT_SQL: &str = "CREATE TABLE IF NOT EXISTS saga_participan
      UNIQUE KEY uk_execute_effect (execute_effect_id) \
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
 
-/// 业务作用：标识参与方 gate 所属的步骤，并携带与 envelope 交叉校验所需的合同字段。
-#[derive(Debug, Clone)]
-pub struct ParticipantGateKey<'a> {
-    /// 实例身份。
-    pub saga_id: &'a SagaId,
-    /// 步骤名称。
-    pub step: &'a StepName,
-    /// 租户身份；必须与 envelope 规范化 tenant 匹配。
-    pub tenant: &'a TenantId,
-    /// workflow 名称。
-    pub workflow: &'a WorkflowName,
-    /// definition 版本。
-    pub definition_version: DefinitionVersion,
-    /// definition canonical 摘要；必须与参与方首次见到的合同完全一致。
-    pub definition_digest: &'a str,
-}
-
-/// 业务作用：区分 execute 准入的三种合法裁决，驱动 adapter 决定是否调用业务 handler。
-///
-/// 分支说明：`Suppressed` 表示取消屏障已先建立 admission fence——adapter 只提交
-/// Inbox claim 并返回可 ACK 结果，**零正向业务效果**，且不得伪造 `StepRejected`
-/// （取消事实已由先前同事务写出的 `CancelConfirmed` Outbox 证明）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecuteAdmission {
-    /// 准入成功；调用方必须在同一事务内执行业务并 [`MySqlSagaStore::settle_execute`]。
-    Admitted,
-    /// 该效果已有确定终态（重投）；按既有终态返回幂等快照，不重复业务效果。
-    AlreadyTerminal(StepForwardStatus),
-    /// 取消屏障已建立，执行被本地状态拒绝；零业务效果。
-    Suppressed,
-}
-
-/// 业务作用：区分补偿准入的三种合法裁决。
-///
-/// 分支说明：`MissingForwardEffect` 表示本地既无正向成功效果也无已补偿证据——补偿只会
-/// 对 Orchestrator 已记账成功的步骤发出，出现该分支说明协议被破坏，调用方必须提交
-/// `CompensationOutcome::Halted` 合同违规事实并告警，不得自旋等待正向命令。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompensationAdmission {
-    /// 准入成功；调用方必须在同一事务内执行补偿并 [`MySqlSagaStore::settle_compensation`]。
-    Admitted,
-    /// 本地已有补偿终态或不确定事实；普通命令按原状态重发，绝不再次调用补偿业务。
-    AlreadySettled(StepCompensationStatus),
-    /// 本地无正向成功效果且无补偿证据：协议破坏，按 `Halted` 合同违规提交。
-    MissingForwardEffect,
-}
-
-/// 业务作用：区分取消屏障的三种合法裁决，与 [`nasaga_core::CancelOutcome`] 语义对齐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelAdjudication {
-    /// 执行从未开始，admission fence 已建立；零正向效果。
-    Confirmed,
-    /// 执行已有确定终态，取消无从谈起；携带真实终态供 Orchestrator 记账。
-    AlreadyTerminal(StepForwardStatus),
-    /// 已提交外部 intent、调用在途或结果未知；不谎报取消成功。
-    ResolutionPending,
-}
-
-/// 业务作用：区分 externally-cancellable 取消是否需要调用业务 handler。
-///
-/// `Admitted` 表示 store 已持有与 execute 相同的 gate 行锁，调用方必须在同一事务内调用
-/// 类型化外部取消并落账；`AlreadyAdjudicated` 表示既有屏障事实只需重发 result，禁止重复
-/// 调用可能带外部副作用的 cancel API。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalCancelAdmission {
-    /// 已取得 gate 串行化权威，可以调用外部取消 handler。
-    Admitted,
-    /// 本地已有可重放的真实取消裁决，不得再次调用外部系统。
-    AlreadyAdjudicated(CancelAdjudication),
-}
-
-/// 业务作用：标识 resolve 正在裁决正向效果还是补偿效果，避免把退款查询结果写入正向状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionTarget {
-    /// 裁决此前 `execute=UNKNOWN` 的正向效果。
-    Forward,
-    /// 裁决此前 `compensation=UNKNOWN` 的补偿效果。
-    Compensation,
-}
-
-/// 业务作用：区分 resolve 查询的准入、终态重放与协议违规，保证查询可重试但确定裁决不可回退。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionAdmission {
-    /// 存在待裁决的未知效果；调用方可以执行类型化查询 handler。
-    Admitted(ResolutionTarget),
-    /// 本地已有确定裁决；新 attempt 只重发该事实，不再次查询或执行裁决型副作用。
-    AlreadySettled {
-        /// 既有裁决所属方向。
-        target: ResolutionTarget,
-        /// 已提交的解决终态。
-        status: StepResolutionStatus,
-    },
-    /// 本地不存在任何未知效果；该 resolve 命令违反 Orchestrator/参与方合同。
-    MissingUnknownEffect,
-}
-
 impl MySqlSagaStore {
     /// 业务作用：创建参与方 gate 表。生产环境应由 migration 拥有 schema，此方法只供
     /// 受控自举环境使用。需先 `natx::init`。
@@ -150,7 +58,31 @@ impl MySqlSagaStore {
     ///
     /// 返回：建表成功返回 `Ok`；连接不可用或 DDL 失败返回脱敏错误。
     pub async fn ensure_participant_schema() -> Result<(), SagaStoreError> {
-        let mut connection = natx::conn().await.map_err(map_connection)?;
+        Self::ensure_participant_schema_for(natx::DEFAULT_DATASOURCE).await
+    }
+
+    /// 业务作用：在指定 datasource 上创建并复验参与方 gate 结构。
+    ///
+    /// 参数说明：`datasource` 是启动期已注册的数据源名称。
+    ///
+    /// 返回：结构完整时成功；名称、连接、DDL 或历史摘要门禁失败时返回脱敏错误。
+    pub async fn ensure_participant_schema_for(
+        datasource: impl AsRef<str>,
+    ) -> Result<(), SagaStoreError> {
+        let datasource = natx::DatasourceRef::new(datasource).map_err(map_connection)?;
+        let mut connection = natx::conn_for(&datasource).await.map_err(map_connection)?;
+        Self::ensure_participant_schema_on_connection(&mut connection).await
+    }
+
+    /// 业务作用：复用调用方已持有的 MySQL 连接创建并复验参与方 gate，使 schema 互斥权
+    /// 覆盖完整 DDL 与摘要门禁。
+    ///
+    /// 参数说明：`connection` 是调用方已取得 schema 互斥权的连接。
+    ///
+    /// 返回：结构完整时成功；DDL 或历史摘要门禁失败时返回脱敏错误。
+    pub async fn ensure_participant_schema_on_connection(
+        connection: &mut natx::Conn,
+    ) -> Result<(), SagaStoreError> {
         sqlx::query(CREATE_PARTICIPANT_SQL)
             .execute(connection.as_mut())
             .await
@@ -253,7 +185,9 @@ impl MySqlSagaStore {
         // gate 与业务写、结果 Outbox 必须同一事务:准入提交而业务效果丢失(或反之)
         // 都会让 Orchestrator 记到与本地事实相反的账。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // FOR UPDATE 行锁是 execute 与 cancel 的唯一串行化点;无行时锁间隙,
         // 与并发 INSERT 由唯一键仲裁。
         let existing = sqlx::query(
@@ -350,7 +284,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET forward_status = ? \
              WHERE saga_id = ? AND step_name = ? AND forward_status = ?",
@@ -390,7 +326,9 @@ impl MySqlSagaStore {
         // 取消裁决与 CancelConfirmed Outbox 必须同事务:fence 建立而取消事实丢失,
         // Orchestrator 将永远等不到裁决;反之则谎报了并未建立的屏障。
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, \
              forward_status, cancel_status, execute_effect_id, cancel_effect_id \
@@ -517,7 +455,9 @@ impl MySqlSagaStore {
         cancel_effect: &EffectId,
     ) -> Result<ExternalCancelAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         // gate 行锁在外部 cancel 调用期间保持到 COMMIT；否则并发 execute 可能在取消尚未
         // 裁决时提交外部 intent，最终同时出现 CancelConfirmed 与真实成功效果。
         let existing = sqlx::query(
@@ -658,7 +598,7 @@ impl MySqlSagaStore {
                 Ok(ExternalCancelAdmission::Admitted)
             }
             // 已提交 PENDING 说明旧调用方取得准入后绕过 settle 仍然提交；继续调用外部
-            // cancel 会建立在不完整事实之上，必须 fail-closed 等人工修复。
+            // cancel 会建立在不完整事实之上，必须 fail-closed 交由人工核对后处置。
             StepForwardStatus::Pending => Err(SagaStoreError::new(
                 "external cancel gate row was committed in PENDING state",
             )),
@@ -702,7 +642,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET forward_status = ?, cancel_status = ? \
              WHERE saga_id = ? AND step_name = ? AND cancel_status = ? \
@@ -743,7 +685,9 @@ impl MySqlSagaStore {
         cancel_effect: &EffectId,
         status: StepCancelStatus,
     ) -> Result<(), SagaStoreError> {
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET cancel_status = ?, cancel_effect_id = ? \
              WHERE saga_id = ? AND step_name = ? AND cancel_status = ?",
@@ -784,7 +728,9 @@ impl MySqlSagaStore {
         recovery_operation_id: Option<&str>,
     ) -> Result<CompensationAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, \
              forward_status, compensation_status \
@@ -918,7 +864,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let updated = sqlx::query(
             "UPDATE saga_participant_step SET compensation_status = ? \
              WHERE saga_id = ? AND step_name = ? AND compensation_status = ?",
@@ -949,8 +897,8 @@ impl MySqlSagaStore {
     /// - `resolve_effect`: resolve 阶段跨 attempt 稳定的效果身份。
     /// - `recovery_operation_id`: 已认证 Orchestrator 签发的人工恢复操作；普通命令为空。
     ///
-    /// 返回：存在未知正向/补偿效果时返回准入方向；已有终态返回稳定重放；没有未知效果时
-    /// 返回 `MissingUnknownEffect` 并持久化冻结证据。事务缺失、身份漂移或数据损坏返回错误。
+    /// 返回：存在未知正向/补偿效果时返回准入方向；已有解决终态或尚未补偿的确定正向事实
+    /// 返回稳定重放；其它无目标情形返回 `MissingUnknownEffect` 并冻结。事务或合同失败返回错误。
     pub async fn admit_resolution(
         &self,
         gate: &ParticipantGateKey<'_>,
@@ -958,7 +906,9 @@ impl MySqlSagaStore {
         recovery_operation_id: Option<&str>,
     ) -> Result<ResolutionAdmission, SagaStoreError> {
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let existing = sqlx::query(
             "SELECT tenant_id, workflow_name, definition_version, definition_digest, forward_status, \
              compensation_status, resolution_status, resolve_effect_id \
@@ -1030,6 +980,37 @@ impl MySqlSagaStore {
             });
         }
 
+        // 本地效果已提交而 result 回传未知时，resolve 只需重放确定事实，不再查询业务。
+        // 仅首次 resolution 且补偿尚未开始时方向明确；已有冻结、查询或补偿状态不能被此路径覆盖。
+        if resolution == StepResolutionStatus::None
+            && compensation == StepCompensationStatus::None
+            && matches!(
+                forward,
+                StepForwardStatus::Succeeded | StepForwardStatus::Rejected
+            )
+        {
+            let status = if forward == StepForwardStatus::Succeeded {
+                StepResolutionStatus::Succeeded
+            } else {
+                StepResolutionStatus::Rejected
+            };
+            sqlx::query(
+                "UPDATE saga_participant_step SET resolution_status = ?, resolve_effect_id = ? \
+                 WHERE saga_id = ? AND step_name = ?",
+            )
+            .bind(status.as_str())
+            .bind(resolve_effect.to_string())
+            .bind(gate.saga_id.as_str())
+            .bind(gate.step.as_str())
+            .execute(connection.as_mut())
+            .await
+            .map_err(map_database)?;
+            return Ok(ResolutionAdmission::AlreadySettled {
+                target: ResolutionTarget::Forward,
+                status,
+            });
+        }
+
         let target = if compensation == StepCompensationStatus::Unknown {
             ResolutionTarget::Compensation
         } else if forward == StepForwardStatus::Unknown {
@@ -1091,7 +1072,9 @@ impl MySqlSagaStore {
             ));
         }
         require_ambient_transaction()?;
-        let mut connection = natx::mandatory_conn().await.map_err(map_connection)?;
+        let mut connection = natx::mandatory_conn_for(&self.datasource)
+            .await
+            .map_err(map_connection)?;
         let (forward, compensation) = match (target, status) {
             (ResolutionTarget::Forward, StepResolutionStatus::Succeeded) => {
                 (Some(StepForwardStatus::Succeeded), None)

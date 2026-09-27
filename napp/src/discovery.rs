@@ -5,7 +5,6 @@ use rest_discovery_nacos::{
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use std::time::Instant;
@@ -31,16 +30,17 @@ struct DiscoveryConfigRoot {
 ///
 /// 三段的时序是这个组件存在的全部理由：
 /// - Start 只装配出站 runtime，因此 UserHook 里的建表与预热已经能用 `lb://` 调下游；
-/// - Ready 才用真实监听端口注册本实例，Hook 失败时对外从未出现过一个未就绪实例；
+/// - Ready 准备真实监听端口与注册计划，全应用放行后才注册；启动门禁失败时不发布实例；
 /// - 停机先摘流，等 Web/用户任务/业务资源 drain 完成后，才关闭出站 runtime 的后台任务。
 ///
 /// 后两条由 active stack 的严格逆序天然保证：注册动作压在 Ready，runtime 动作压在 Start，
 /// 中间隔着 business-resources / user-tasks 两个动态步骤。
 pub(crate) struct NacosDiscoveryComponent {
     session: Option<Arc<Mutex<DiscoverySession>>>,
-    /// 入站服务的就绪贡献句柄:Start 注册(seal 前),Ready 注册实例成功后 observe Ready;
+    /// 入站服务的就绪贡献句柄：Start 登记，全应用放行后注册实例成功才 observe Ready；
     /// 纯消费者(只出站)不注册,为 None。
     readiness: Option<ReadinessContributor>,
+    critical_task: Option<ApplicationFuture<'static>>,
 }
 
 impl NacosDiscoveryComponent {
@@ -53,11 +53,14 @@ impl NacosDiscoveryComponent {
         Self {
             session: None,
             readiness: None,
+            critical_task: None,
         }
     }
 }
 
-/// 业务作用：服务发现就绪策略:入站服务是关键依赖——注册中心未注册成功则不接收流量。
+/// 业务作用：服务发现就绪策略：注册中心尚未确认本实例时保持应用 readiness 为不可用。
+/// 参数说明：无。
+/// 返回：即时关键依赖策略，未注册或失去就绪证据时不报告应用可用。
 fn discovery_readiness_policy() -> ReadinessPolicy {
     ReadinessPolicy::critical_immediate()
 }
@@ -109,7 +112,7 @@ impl ApplicationComponent for NacosDiscoveryComponent {
                     "discovery capability state was already published",
                 ));
             }
-            // 入站服务在 Start(seal 前)注册关键就绪贡献项;真实注册在 Ready 完成后 observe Ready。
+            // 入站服务在 Start（seal 前）登记关键就绪贡献项；全应用放行后，远端确认注册才 observe Ready。
             // 纯消费者(只出站)不注册贡献项——它没有"本实例是否已注册"这一就绪含义。
             if session.lock().await.wants_registration() {
                 self.readiness = Some(context.application().register_readiness(
@@ -122,11 +125,9 @@ impl ApplicationComponent for NacosDiscoveryComponent {
         })
     }
 
-    /// 业务作用：用真实监听端口注册本实例，并把摘流动作压入清理栈。
-    ///
-    /// # 参数
-    ///
-    /// - `context`：提供 Application（含真实监听地址）与 active stack 的 Ready 上下文。
+    /// 业务作用：以预绑定地址冻结注册计划，登记摘流所有权，外部注册延后至全应用放行。
+    /// 参数说明：`context` 提供 Application、共享启动截止时刻与 active stack。
+    /// 返回：计划与清理权就绪时成功；未登记出站会话或纯消费者不创建注册任务。
     fn ready<'a>(&'a mut self, context: &'a mut ReadyContext<'_>) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let Some(session) = self.session.clone() else {
@@ -145,51 +146,124 @@ impl ApplicationComponent for NacosDiscoveryComponent {
             let port = registration_port(application, &config)?;
             let info = AppRegistrationInfo::new(
                 application.info().name(),
-                application
-                    .web_addr()
-                    .map(|address| address.ip().to_string())
-                    .unwrap_or_default(),
+                registration_bind_ip(application),
                 port,
             );
-            session.lock().await.register(info).await.map_err(|error| {
-                discovery_error_src(
-                    ApplicationPhase::Ready,
-                    "cannot register this instance with the discovery provider",
-                    error,
-                )
-            })?;
+            #[cfg(feature = "grpc")]
+            let info = if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+                // 这里仅取得预绑定事实；真正发布到 provider 前还须确认 listener 已取得接流许可。
+                // 元数据由框架封闭生成，业务不能注入未受管端口或 TLS 模式。
+                info.with_metadata("nasa.grpc.protocol", "grpc")
+                    .with_metadata("nasa.grpc.port", endpoint.port.to_string())
+                    .with_metadata("nasa.grpc.tls_mode", endpoint.tls_mode)
+                    .with_metadata(
+                        "nasa.grpc.authority",
+                        endpoint.authority.unwrap_or_default(),
+                    )
+            } else {
+                info
+            };
+            #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+            let info = {
+                let mut info = info;
+                for (key, value) in crate::saga::discovery_registration_metadata(
+                    application,
+                    &registration_bind_ip(application),
+                    port,
+                )? {
+                    info = info.with_metadata(key, value);
+                }
+                info
+            };
+            let cancel = CancellationToken::new();
             context.activate(Box::new(NacosDiscoveryRegistrationShutdown {
                 session: Some(session.clone()),
+                cancel: cancel.clone(),
             }));
-            // 本实例已注册到发现中心 → 关键就绪贡献项发布 Ready(句柄在 Start 已注册);
-            // 交给 monitor 周期回查本实例是否仍在自己服务的健康实例集里,运行期反映注册健康。
-            // monitor 由随后压栈的 action 拥有停机:它压在注册摘流 action 之后,故逆序停机时先取消 monitor、
-            // 再摘流——monitor 不会在我们主动 deregister 期间误判"本实例已消失"。
-            if let Some(contributor) = self.readiness.take() {
-                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
-                let application = context.application().clone();
-                let critical = config.registration.readiness_critical;
-                let monitor_cancel = CancellationToken::new();
-                let monitor = tokio::spawn(run_discovery_monitor(
-                    application,
-                    session,
-                    contributor,
-                    critical,
-                    monitor_cancel.clone(),
-                ));
-                context.activate(Box::new(NacosDiscoveryMonitorShutdown {
-                    cancel: monitor_cancel,
-                    monitor: Some(monitor),
-                }));
-            }
+            let application = context.application().clone();
+            let deadline = context.deadline();
+            let contributor = self.readiness.take();
+            self.critical_task = Some(Box::pin(async move {
+                // 此主体与 listener 共用放行屏障；注册依旧受原启动截止时刻约束，不从此处重置预算。
+                tokio::time::timeout_at(deadline.into(), async {
+                    #[cfg(feature = "grpc")]
+                    if let Ok(observer) = application.grpc() {
+                        loop {
+                            match observer.state() {
+                                nagrpc::GrpcServerState::Running => break,
+                                nagrpc::GrpcServerState::Bound => {
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.cancelled() => return Ok(()),
+                                        _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                                    }
+                                }
+                                _ => {
+                                    return Err(discovery_error(
+                                        ApplicationPhase::Running,
+                                        "gRPC endpoint is not serving",
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    let mut session = session.lock().await;
+                    // 摘流 action 先撤销本令牌再锁会话，防止停机期间启动尚未发出的注册。
+                    if cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    session.register(info).await.map_err(|error| {
+                        discovery_error_src(
+                            ApplicationPhase::Running,
+                            "cannot register this instance with the discovery provider",
+                            error,
+                        )
+                    })
+                })
+                .await
+                .map_err(|_| {
+                    discovery_error(
+                        ApplicationPhase::Running,
+                        "instance registration exceeded its startup budget",
+                    )
+                })??;
+                if let Some(contributor) = contributor {
+                    if !cancel.is_cancelled() {
+                        contributor.observe(
+                            DependencyState::Ready,
+                            reason::HEALTHY,
+                            Instant::now(),
+                        );
+                    }
+                    run_discovery_monitor(
+                        application,
+                        session,
+                        contributor,
+                        config.registration.readiness_critical,
+                        cancel,
+                    )
+                    .await;
+                }
+                Ok(())
+            }));
             Ok(())
         })
+    }
+
+    /// 业务作用：将外部注册与健康回查交给统一放行和停机监督，避免 Ready 内部自行产生可发现实例。
+    /// 参数说明：无。
+    /// 返回：一次性注册/monitor 任务；纯消费者或已经移交时返回 None。
+    fn take_critical_task(&mut self) -> Option<(&'static str, ApplicationFuture<'static>)> {
+        self.critical_task
+            .take()
+            .map(|task| ("nacos-discovery-registration", task))
     }
 }
 
 /// 停机时先摘流的可逆 action。
 struct NacosDiscoveryRegistrationShutdown {
     session: Option<Arc<Mutex<DiscoverySession>>>,
+    cancel: CancellationToken,
 }
 
 impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
@@ -204,11 +278,12 @@ impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
 
     /// 业务作用：在自身上限与全局剩余预算的较小值内完成摘流。
     ///
-    /// # 参数
-    ///
-    /// - `context`：提供全局剩余停机预算的清理上下文。
+    /// 参数说明：`context` 提供全局剩余停机预算。
+    /// 返回：先取消后续注册和回查，再摘除已有实例；失败或超时交给统一清理报告，不阻止后续资源收口。
     fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
+            // 先阻止尚未发出的注册与后续健康回查，再等待会话内的注册完成并摘流。
+            self.cancel.cancel();
             let Some(session) = self.session.take() else {
                 return Ok(());
             };
@@ -231,6 +306,15 @@ impl ShutdownAction for NacosDiscoveryRegistrationShutdown {
     }
 }
 
+impl Drop for NacosDiscoveryRegistrationShutdown {
+    /// 业务作用：生命周期 owner 被直接释放时撤销注册与监控许可，不遗留后置发布动作。
+    /// 参数说明：无。
+    /// 返回：发布取消信号；受管任务和会话的实际释放由各自所有者完成。
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 /// 在所有下游调用结束后关闭出站 runtime 的可逆 action。
 struct NacosDiscoveryRuntimeShutdown {
     session: Option<Arc<Mutex<DiscoverySession>>>,
@@ -246,18 +330,16 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
         "nacos-discovery-runtime"
     }
 
-    /// 业务作用：从进程级槽取下并关闭出站客户端后台任务。
-    ///
-    /// # 参数
-    ///
-    /// - `_context`：共享停机预算；该动作只做取下与 abort，不做网络等待。
-    fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+    /// 业务作用：撤下本实例出站入口并等待它的任务和调用退出。
+    /// 参数说明：`context` 为宿主共享停机预算。
+    /// 返回：排干后释放会话；未排干报告失败并保留当前 owner。
+    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
-            if let Some(session) = self.session.take() {
+            if let Some(session) = &self.session {
                 session
                     .lock()
                     .await
-                    .shutdown_runtime()
+                    .shutdown_runtime_until(tokio::time::Instant::from_std(context.deadline()))
                     .await
                     .map_err(|error| {
                         discovery_error_src(
@@ -267,6 +349,7 @@ impl ShutdownAction for NacosDiscoveryRuntimeShutdown {
                         )
                     })?;
             }
+            self.session = None;
             Ok(())
         })
     }
@@ -342,67 +425,9 @@ async fn run_discovery_monitor(
     }
 }
 
-/// 持有自注册就绪 monitor 的可逆停机 action:取消并在全局剩余预算内 join(辅助任务,超时不阻断其余清理)。
-struct NacosDiscoveryMonitorShutdown {
-    /// monitor 停机取消令牌。
-    cancel: CancellationToken,
-    /// spawned monitor 句柄;只 join 一次。
-    monitor: Option<JoinHandle<()>>,
-}
-
-impl ShutdownAction for NacosDiscoveryMonitorShutdown {
-    /// 业务作用：返回清理报告使用的稳定动作名称。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数;名称不含注册中心地址。
-    fn label(&self) -> &'static str {
-        "nacos-discovery-monitor"
-    }
-
-    /// 业务作用：取消 monitor 并在全局剩余停机预算内 join;超时不阻断其余清理(辅助任务)。
-    ///
-    /// # 参数
-    ///
-    /// - `context`:提供全局剩余停机预算的清理上下文。
-    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
-        Box::pin(async move {
-            self.cancel.cancel();
-            let Some(monitor) = self.monitor.as_mut() else {
-                return Ok(());
-            };
-            if tokio::time::timeout(context.remaining(), monitor)
-                .await
-                .is_err()
-            {
-                let monitor = self
-                    .monitor
-                    .take()
-                    .expect("discovery monitor remains installed while shutdown awaits it");
-                monitor.abort();
-                let _ = monitor.await;
-            } else {
-                self.monitor.take();
-            }
-            Ok(())
-        })
-    }
-}
-
-impl Drop for NacosDiscoveryMonitorShutdown {
-    /// 业务作用：停机 future 被取消或句柄提前释放时终止 monitor，避免后台注册任务脱离生命周期。
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(monitor) = self.monitor.take() {
-            monitor.abort();
-        }
-    }
-}
-
 /// 业务作用：解析注册使用的端口。
 ///
-/// 有 Web 时必须用 `web_addr()` 的真实端口——`server.port=0` 场景下配置里的 0 不是可拨号端口；
-/// 无 Web 时只能由配置显式给出非 0 端口，否则给定向错误而不是注册一个不可达实例。
+/// Web 与 gRPC 共存时保留 Web 主端口；纯 gRPC 进程使用 listener 实际端口；其它进程才读取显式端口。
 ///
 /// # 参数
 ///
@@ -415,14 +440,35 @@ fn registration_port(
     if let Some(address) = application.web_addr() {
         return Ok(address.port());
     }
+    #[cfg(feature = "grpc")]
+    if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+        return Ok(endpoint.port);
+    }
     if config.registration.port != 0 {
         return Ok(config.registration.port);
     }
     Err(discovery_error(
         ApplicationPhase::Ready,
-        "cannot register without a port: declare the `web` component, \
+        "cannot register without a port: declare `web` or `grpc`, \
          set an explicit `rest_discovery.registration.port`, or disable registration",
     ))
+}
+
+/// 业务作用：选择仅用于兼容展示的监听 IP，不参与 provider 的注册 IP 优先级。
+///
+/// 参数说明：
+/// - `application`: 提供 Web 与 gRPC 已发布 listener 的共享上下文。
+///
+/// 返回：优先返回 Web 绑定 IP；纯 gRPC 返回其绑定 IP；均不存在时返回空串。
+fn registration_bind_ip(application: &Application) -> String {
+    if let Some(address) = application.web_addr() {
+        return address.ip().to_string();
+    }
+    #[cfg(feature = "grpc")]
+    if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
+        return endpoint.authority.unwrap_or_default();
+    }
+    String::new()
 }
 
 /// 业务作用：从最终配置读取 `rest_discovery` 段；段缺失时使用禁用的缺省配置。

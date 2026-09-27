@@ -4,10 +4,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use natx::{
-    datasource::{build_pool, probe, DataSourceConfig},
-    MySqlPool,
-};
+#[cfg(not(feature = "mapper-observability"))]
+use natx::datasource::{build_pool, probe};
+use natx::{datasource::DataSourceConfig, DataSourceRegistry, MySqlPool};
 use serde::Deserialize;
 
 use crate::readiness::{reason, DependencyState, ReadinessContributor, ReadinessPolicy};
@@ -29,9 +28,9 @@ pub(crate) const DEFAULT_DATASOURCE: &str = "default";
 /// 两种写法只允许出现一种：同时出现时无法确定 `default` 该取谁，隐式合并会在多库场景下
 /// 静默改变事务默认库，因此按 直接报冲突。
 ///
-/// 两种写法都以**原始 JSON 值**接收:`migrations` 是 napp 编排字段而非 natx
-/// 数据源字段,而 `DataSourceConfig` 是 `deny_unknown_fields`,因此必须先把 `migrations` 从每个
-/// 数据源对象里剥离(见 [`split_datasource`]),再反序列化成 `DataSourceConfig`。
+/// 两种写法都以**原始 JSON 值**接收：`driver` 与 `migrations` 是 napp 编排字段而非 natx
+/// 数据源字段，而 `DataSourceConfig` 是 `deny_unknown_fields`，因此必须先由 [`split_datasource`]
+/// 解释并剥离这两个字段，再反序列化成 `DataSourceConfig`。
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DbConfigRoot {
@@ -39,14 +38,18 @@ struct DbConfigRoot {
     datasources: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// MySQL 数据源组件：启动期探测连通性、建池，并把池同时交给资源容器与事务运行时。
+/// 业务作用：在 Start 预占停机顺序，并在 Prepare 后持有动态 registry 与默认池。
+#[cfg(feature = "saga")]
+type DeferredDbResources = Arc<Mutex<Option<(Arc<DataSourceRegistry>, MySqlPool)>>>;
+
+/// MySQL 数据源组件：启动期探测连通性、建池，并把完整命名表同时交给资源容器与事务运行时。
 ///
 /// 每个池的清理所有权由建池后立即激活的 `ShutdownAction` 持有：它显式 `close().await`，因此不依赖
 /// 最后一个共享句柄何时被 drop。资源容器条目由 Runner 的组件资源步骤在同一逆序链移除。
 pub(crate) struct DbComponent {
     /// Ready 后交由 Runner 按关键任务监督的唯一 DB 健康 monitor；无数据源时为 None。
     critical_task: Option<ApplicationFuture<'static>>,
-    /// Start 建好的各数据源池;供 Ready 迁移门禁按名查找。
+    /// Start 建好的各数据源池;供 Prepare 迁移门禁按名查找。
     ///
     /// 不经资源容器读取:资源在 UserHook 后已封口,直接用 Start 已持有的 clone 更直观且不与容器
     /// 读取语义耦合。池的清理所有权仍在各自的 `DbShutdown` action,本表只是只读借道。
@@ -56,12 +59,12 @@ pub(crate) struct DbComponent {
     /// Saga 动态建库路径在 UserHook 完成后才取得默认池；该标记禁止 Start 阶段误连通用库。
     #[cfg(feature = "saga")]
     deferred_saga_default: bool,
-    /// 延后引导仍须在 readiness 封口前登记贡献项，Ready 只补真实连接观测。
+    /// 延后引导仍须在 readiness 封口前登记贡献项，Prepare 补真实连接观测。
     #[cfg(feature = "saga")]
     deferred_contributor: Option<ReadinessContributor>,
-    /// Start 阶段预先压栈的关闭槽；Ready 只填入 UserHook 已注入的池，保持任务先停、连接后关。
+    /// Start 阶段预先压栈的关闭槽；Prepare 填入 UserHook 已转交的 registry 与池。
     #[cfg(feature = "saga")]
-    deferred_shutdown_pool: Option<Arc<Mutex<Option<MySqlPool>>>>,
+    deferred_shutdown_registry: Option<DeferredDbResources>,
 }
 
 impl DbComponent {
@@ -80,13 +83,14 @@ impl DbComponent {
             #[cfg(feature = "saga")]
             deferred_contributor: None,
             #[cfg(feature = "saga")]
-            deferred_shutdown_pool: None,
+            deferred_shutdown_registry: None,
         }
     }
 }
 
 /// 单个数据源健康 monitor 的不可变输入。
 struct DbMonitorInput {
+    name: String,
     pool: MySqlPool,
     contributor: ReadinessContributor,
 }
@@ -119,7 +123,8 @@ async fn run_db_monitor(
     application: Application,
     inputs: Vec<DbMonitorInput>,
 ) -> ApplicationResult<()> {
-    loop {
+    let mut lifecycle = application.subscribe_state();
+    'monitor: loop {
         match application.state() {
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
                 let now = Instant::now();
@@ -131,7 +136,10 @@ async fn run_db_monitor(
                 return Ok(());
             }
             ApplicationState::Starting => {
-                tokio::time::sleep(DB_MONITOR_INTERVAL).await;
+                // Ready 或停机转换必须立即唤醒 monitor，不能让固定探测间隔侵占全局停机预算。
+                if lifecycle.changed().await.is_err() {
+                    return Ok(());
+                }
                 continue;
             }
             ApplicationState::Ready => {}
@@ -140,7 +148,18 @@ async fn run_db_monitor(
         let now = Instant::now();
         for input in &inputs {
             // acquire 成功即触发 sqlx test_before_acquire ping;连接立即归还池,不占业务连接。
-            match input.pool.acquire().await {
+            // 停机权威优先于连接探测；连接池不可达时也不能等待 acquire timeout 后才开始反向清理。
+            let acquired = tokio::select! {
+                biased;
+                changed = lifecycle.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                    continue 'monitor;
+                }
+                result = natx::observed_pool_acquire(&input.name, natx::observability::ConnectionPurpose::Probe, &input.pool) => result,
+            };
+            match acquired {
                 Ok(_conn) => {
                     input
                         .contributor
@@ -153,7 +172,16 @@ async fn run_db_monitor(
                 }
             }
         }
-        tokio::time::sleep(DB_MONITOR_INTERVAL).await;
+        // 生命周期变化优先，正常运行时才等待下一轮探测。
+        tokio::select! {
+            biased;
+            changed = lifecycle.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+            }
+            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {}
+        }
     }
 }
 
@@ -167,9 +195,9 @@ impl ApplicationComponent for DbComponent {
         ComponentId::Db
     }
 
-    /// 业务作用：使用最终配置逐个数据源探测、建池并完成双写注册，或为 Saga 动态建库延后接管。
+    /// 业务作用：使用最终配置逐个数据源探测、建池并一次性发布冻结 registry，或为 Saga 动态建库延后接管。
     ///
-    /// 顺序固定为"校验 → 探测 → 建池 → 注册资源 → 注入事务运行时 → 压栈清理动作"：探测在建池之前，
+    /// 顺序固定为"校验 → 探测 → 建池 → 注册资源 → 冻结并发布 registry → 压栈 registry 封口动作"：探测在建池之前，
     /// 启动期才能看到 `Access denied`/`Unknown database` 这类真实原因而不是模糊的 acquire timeout；
     /// 清理动作在池注册成功后立刻压栈，任一后续数据源失败都能把已建好的池显式关掉。
     ///
@@ -182,16 +210,37 @@ impl ApplicationComponent for DbComponent {
         Box::pin(async move {
             let application = context.application().clone();
             #[cfg(feature = "saga")]
-            if application
+            let saga_declared = application
                 .ensure_component_declared(
                     ComponentId::Saga,
                     ApplicationPhase::Start,
                     "saga database bootstrap",
                 )
-                .is_ok()
+                .is_ok();
+            #[cfg(feature = "saga")]
+            if saga_declared
+                && crate::saga::is_managed_direct_client(&application, ApplicationPhase::Start)?
+                && application.config().value().get("database").is_none()
+                && application.config().value().get("datasources").is_none()
+            {
+                // direct client 不产生本地 Saga 事实；没有业务数据源配置时，隐式 DB 组件保持空闲，
+                // 避免为远程 start/query 权限创建无关连接池或数据库表。
+                return Ok(());
+            }
+            #[cfg(feature = "saga")]
+            if saga_declared
                 && crate::saga::database_bootstrap(&application, ApplicationPhase::Start)?
                     == crate::saga::SagaDatabaseBootstrap::UserHook
             {
+                natx::ensure_standalone_datasources_empty_for_managed_bootstrap().map_err(
+                    |error| {
+                        db_error_src(
+                            ApplicationPhase::Start,
+                            "saga user-hook database bootstrap requires an empty standalone registry",
+                            error,
+                        )
+                    },
+                )?;
                 let configured = application.config();
                 if configured.value().get("database").is_some()
                     || configured.value().get("datasources").is_some()
@@ -206,21 +255,21 @@ impl ApplicationComponent for DbComponent {
                     db_readiness_policy(),
                 )?;
                 contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
-                let shutdown_pool = Arc::new(Mutex::new(None));
-                // 延后池尚未出现也必须先占据正确的反向清理位置；若等到 Ready 才压栈，关闭动作会
+                let shutdown_registry = Arc::new(Mutex::new(None));
+                // 延后池尚未出现也必须先占据正确的反向清理位置；若等到 Prepare 才压栈，关闭动作会
                 // 越过任务清理步骤，导致 dispatcher 尚未退出时数据库连接已经开始释放。
                 context.activate(Box::new(DeferredDbShutdown {
                     name: DEFAULT_DATASOURCE.to_owned(),
-                    pool: Arc::clone(&shutdown_pool),
+                    registry: Arc::clone(&shutdown_registry),
                 }));
                 self.deferred_saga_default = true;
                 self.deferred_contributor = Some(contributor);
-                self.deferred_shutdown_pool = Some(shutdown_pool);
+                self.deferred_shutdown_registry = Some(shutdown_registry);
                 return Ok(());
             }
             let sources = read_datasources(&application)?;
-            let mut monitor_inputs: Vec<DbMonitorInput> = Vec::new();
-            for (name, config, migrations) in sources {
+            // 全部数据源的取值门禁必须先于第一次握手；否则后置非法项会让前置端点产生不必要的连接副作用。
+            for (name, config, _) in &sources {
                 config.validate().map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
@@ -228,9 +277,19 @@ impl ApplicationComponent for DbComponent {
                         error,
                     )
                 })?;
+            }
+            let mut monitor_inputs: Vec<DbMonitorInput> = Vec::new();
+            for (name, config, migrations) in sources {
+                #[cfg(feature = "mapper-observability")]
+                let logging =
+                    crate::sql_observability::statement_logging(&application, &name).await?;
                 // 无条件单连接握手探针先于建池：启动期需要保留鉴权、库缺失或拒绝连接等真实根因，
                 // 不能退化成连接池获取超时。endpoint 只暴露 host、port 与 database，凭据不进入错误正文。
-                probe(&config).await.map_err(|error| {
+                #[cfg(feature = "mapper-observability")]
+                let probe_result = natx::datasource::probe_with_logging(&config, logging).await;
+                #[cfg(not(feature = "mapper-observability"))]
+                let probe_result = probe(&config).await;
+                probe_result.map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
                         format!(
@@ -240,7 +299,11 @@ impl ApplicationComponent for DbComponent {
                         error,
                     )
                 })?;
-                let pool = build_pool(&config).map_err(|error| {
+                #[cfg(feature = "mapper-observability")]
+                let pool_result = natx::datasource::build_pool_with_logging(&config, logging);
+                #[cfg(not(feature = "mapper-observability"))]
+                let pool_result = build_pool(&config);
+                let pool = pool_result.map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
                         format!(
@@ -252,22 +315,12 @@ impl ApplicationComponent for DbComponent {
                 })?;
 
                 context.register_resource(Some(name.as_str()), pool.clone())?;
-                // 资源登记之后立刻压入显式关池动作。后续事务运行时双写仍可能失败，提前压栈才能让
-                // 该半初始化分支也执行 `close().await`，而不只依赖资源条目被动释放最后一个句柄。
+                // 资源登记之后立刻压入显式关池动作。后续 readiness、registry 冻结或发布仍可能失败，
+                // 提前压栈才能让该半初始化分支也执行 `close().await`，而不只依赖资源条目释放句柄。
                 context.activate(Box::new(DbShutdown {
                     name: name.clone(),
                     pool: Some(pool.clone()),
                 }));
-                // 双写事务运行时：`#[transactional]` 与 Mapper 仍按名字查进程级注册表，
-                // 因此业务代码零改动即可继续工作。
-                natx::try_init_datasource(name.clone(), pool.clone()).map_err(|error| {
-                    db_error_src(
-                        ApplicationPhase::Start,
-                        format!("cannot register datasource `{name}` with the transaction runtime"),
-                        error,
-                    )
-                })?;
-
                 // 启动探测已确认连通，首个就绪观测可以直接发布；之后由关键监督任务持续复验。
                 let contributor = application.register_readiness(
                     ComponentId::Db,
@@ -276,17 +329,50 @@ impl ApplicationComponent for DbComponent {
                 )?;
                 contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 monitor_inputs.push(DbMonitorInput {
+                    name: name.clone(),
                     pool: pool.clone(),
                     contributor,
                 });
 
-                // Ready 迁移门禁必须复用同一受管池，防止门禁检查与业务实际连接到不同数据库。
+                // Prepare 迁移门禁必须复用同一受管池，防止门禁检查与业务实际连接到不同数据库。
                 // 显式门禁设置按数据源留档，未配置时回退只读校验。
                 self.pools.insert(name.clone(), pool.clone());
                 if let Some(settings) = migrations {
                     self.migration_settings.insert(name.clone(), settings);
                 }
             }
+
+            #[cfg(feature = "mapper-observability")]
+            crate::sql_observability::install_mysql_pools(&application, &self.pools).await?;
+
+            // 全部 pool 建立并登记后才冻结命名表；事务、Mapper 和持久适配器只能看到
+            // 这一次完整发布，任一前置失败都不会留下可读的半张资源表。
+            let registry = Arc::new(
+                DataSourceRegistry::try_new(
+                    self.pools
+                        .iter()
+                        .map(|(name, pool)| (name.clone(), pool.clone())),
+                )
+                .map_err(|error| {
+                    db_error_src(
+                        ApplicationPhase::Start,
+                        "cannot freeze the managed datasource registry",
+                        error,
+                    )
+                })?,
+            );
+            context.register_resource(None, Arc::clone(&registry))?;
+            natx::install_managed_registry(&registry).map_err(|error| {
+                db_error_src(
+                    ApplicationPhase::Start,
+                    "cannot publish the managed datasource registry",
+                    error,
+                )
+            })?;
+            // 解析入口必须先于 pool 关闭被封口，防止停机期又发放新连接或新事务。
+            context.activate(Box::new(DbRegistryShutdown {
+                registry: Some(registry),
+            }));
 
             // 健康复验必须交由 Runner 监督；循环意外退出会让进程停机，不能留下仍接流的失明实例。
             if !monitor_inputs.is_empty() {
@@ -307,65 +393,96 @@ impl ApplicationComponent for DbComponent {
     /// 没有任何登记项时本阶段是无副作用的空操作,不触碰数据库。
     ///
     /// 参数说明：
-    /// - `context`：提供 Application(据此取走迁移登记队列)的 Ready 上下文。
+    /// - `context`：提供 Application(据此取走迁移登记队列)的 Prepare 上下文。
     ///
-    /// 返回：延后池已接管且全部迁移门禁通过时成功；池缺失、探针失败或结构漂移时拒绝 Ready。
-    fn ready<'a>(&'a mut self, context: &'a mut crate::ReadyContext<'_>) -> ApplicationFuture<'a> {
+    /// 返回：延后池已接管且全部迁移门禁通过时成功；池缺失、探针失败或结构漂移时拒绝业务初始化。
+    fn prepare<'a>(
+        &'a mut self,
+        context: &'a mut crate::PrepareContext<'_>,
+    ) -> ApplicationFuture<'a> {
         Box::pin(async move {
             let application = context.application().clone();
             #[cfg(feature = "saga")]
             if self.deferred_saga_default {
-                let pool = natx::pool_for_datasource(DEFAULT_DATASOURCE).map_err(|error| {
+                let shutdown_registry =
+                    self.deferred_shutdown_registry.take().ok_or_else(|| {
+                        db_error(
+                            ApplicationPhase::Prepare,
+                            "saga user-hook database shutdown ownership is missing",
+                        )
+                    })?;
+                // UserHook 建立的独立默认池在任何业务初始化前转交给受管
+                // registry；从此事务入口不再存在越过 Application 停机边界的强引用。
+                let registry = natx::adopt_standalone_default_registry().map_err(|error| {
                     db_error_src(
-                        ApplicationPhase::Ready,
-                        "saga user-hook database bootstrap did not install the default datasource",
+                        ApplicationPhase::Prepare,
+                        "saga user-hook database bootstrap did not install an adoptable default datasource",
                         error,
                     )
                 })?;
-                let shutdown_pool = self.deferred_shutdown_pool.take().ok_or_else(|| {
-                    db_error(
-                        ApplicationPhase::Ready,
-                        "saga user-hook database shutdown ownership is missing",
+                let pool = registry.pool(DEFAULT_DATASOURCE).map_err(|error| {
+                    db_error_src(
+                        ApplicationPhase::Prepare,
+                        "saga user-hook managed default datasource is unavailable",
+                        error,
                     )
                 })?;
                 {
-                    let mut slot = shutdown_pool
+                    let mut slot = shutdown_registry
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if slot.is_some() {
                         return Err(db_error(
-                            ApplicationPhase::Ready,
+                            ApplicationPhase::Prepare,
                             "saga user-hook database shutdown ownership was already filled",
                         ));
                     }
-                    *slot = Some(pool.clone());
+                    *slot = Some((Arc::clone(&registry), pool.clone()));
                 }
-                pool.acquire().await.map_err(|error| {
+                natx::observed_pool_acquire(
+                    DEFAULT_DATASOURCE,
+                    natx::observability::ConnectionPurpose::Probe,
+                    &pool,
+                )
+                .await
+                .map_err(|error| {
                     db_error_src(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database probe failed",
                         error,
                     )
                 })?;
                 let contributor = self.deferred_contributor.take().ok_or_else(|| {
                     db_error(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         "saga user-hook database readiness contributor is missing",
                     )
                 })?;
-                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
+                // 延后池直到 UserHook 后才存在，但 Initializer 工厂与三阶段必须经统一 Application
+                // 句柄读取它；pool 和 registry 一起登记，使资源容器与事务运行时共用同一张冻结表。
+                context.register_resource(Some(DEFAULT_DATASOURCE), pool.clone())?;
+                context.register_resource(None, Arc::clone(&registry))?;
                 self.pools
                     .insert(DEFAULT_DATASOURCE.to_owned(), pool.clone());
+                #[cfg(feature = "mapper-observability")]
+                crate::sql_observability::install_mysql_pools(&application, &self.pools).await?;
+                // 统一资源视图先完成发布，健康状态才可对 Runner 可见；即使后续 migration 门禁拒绝，
+                // 启动失败也会按既有清理栈撤销资源并显式关闭连接池。
+                contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
                 self.critical_task = Some(Box::pin(run_db_monitor(
                     application.clone(),
-                    vec![DbMonitorInput { pool, contributor }],
+                    vec![DbMonitorInput {
+                        name: DEFAULT_DATASOURCE.to_owned(),
+                        pool,
+                        contributor,
+                    }],
                 )));
             }
-            let registrations = application.take_migrations();
+            let registrations = application.take_migrations()?;
             for (name, migrator) in &registrations {
                 let pool = self.pools.get(name).ok_or_else(|| {
                     db_error(
-                        ApplicationPhase::Ready,
+                        ApplicationPhase::Prepare,
                         format!(
                             "configure_migrations registered datasource `{name}`, but it is not a configured datasource"
                         ),
@@ -378,13 +495,13 @@ impl ApplicationComponent for DbComponent {
                     .get(name)
                     .cloned()
                     .unwrap_or_default();
-                let report = namigrate::run_gate(pool, migrator, &settings)
+                let report = namigrate::run_gate_for(pool, name, migrator, &settings)
                     .await
                     .map_err(|error| {
                         // MigrationError 的 Display 已脱敏(只含版本与稳定 reason,无 SQL);不接源链,
                         // 避免底层错误正文经统一报告管道泄露。
                         db_error(
-                            ApplicationPhase::Ready,
+                            ApplicationPhase::Prepare,
                             format!("datasource `{name}` migration gate failed: {error}"),
                         )
                     })?;
@@ -417,11 +534,41 @@ struct DbShutdown {
     pool: Option<MySqlPool>,
 }
 
-/// 业务作用：持有 Start 阶段预占、Ready 阶段填充的动态默认池关闭所有权。
+/// 在任何 pool 释放前封口 natx 受管解析入口的停机动作。
+struct DbRegistryShutdown {
+    registry: Option<Arc<DataSourceRegistry>>,
+}
+
+impl ShutdownAction for DbRegistryShutdown {
+    /// 业务作用：返回 datasource registry 封口动作的稳定名称。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：不含 qualifier 或 endpoint 的固定标签。
+    fn label(&self) -> &'static str {
+        "db-registry"
+    }
+
+    /// 业务作用：撤销当前 Application 的事务资源表，使新查询在 pool 关闭前即失败。
+    ///
+    /// 参数说明：`_context` 携带全局停机预算，本动作不执行网络等待。
+    ///
+    /// 返回：无论槽位是否仍属于当前 registry 都安全完成。
+    fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+        Box::pin(async move {
+            if let Some(registry) = self.registry.take() {
+                natx::clear_managed_registry(&registry);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// 业务作用：持有 Start 阶段预占、Prepare 阶段填充的动态默认池关闭所有权。
 #[cfg(feature = "saga")]
 struct DeferredDbShutdown {
     name: String,
-    pool: Arc<Mutex<Option<MySqlPool>>>,
+    registry: DeferredDbResources,
 }
 
 #[cfg(feature = "saga")]
@@ -435,22 +582,39 @@ impl ShutdownAction for DeferredDbShutdown {
         "db-deferred-pool"
     }
 
-    /// 业务作用：在受监督任务全部退出后关闭 UserHook 注入的默认池。
+    /// 业务作用：在受监督任务全部退出后封口 UserHook registry 并关闭默认池。
     ///
     /// 参数说明：
     /// - `_context`：Runner 共享停机预算；连接池关闭由外层统一限制时长。
     ///
-    /// 返回：池尚未注入时为空操作；已注入时等待连接归还并完成关闭。
+    /// 返回：registry 已转交时先拒绝新连接再关池；尚未转交时取回并关闭引导窗口注入的全部池。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
-            let pool = self
-                .pool
+            let managed = self
+                .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            if let Some(pool) = pool {
+            if let Some((registry, pool)) = managed {
+                // 停机必须先撤销事务解析权威，否则关池等待期仍可发放新连接。
+                natx::clear_managed_registry(&registry);
                 tracing::debug!("closing deferred datasource `{}` pool", self.name);
                 pool.close().await;
+            } else {
+                // Hook 在 Prepare 接管前失败时，本轮引导窗口注入的池仍在 standalone 表；
+                // 必须先从全局入口取走再关闭，后续 Application 才不会读到启动失败的资源。
+                let pools =
+                    natx::take_standalone_datasources_for_managed_shutdown().map_err(|error| {
+                        db_error_src(
+                            ApplicationPhase::Stopping,
+                            "cannot reclaim saga user-hook standalone datasources",
+                            error,
+                        )
+                    })?;
+                for (name, pool) in pools.into_iter().rev() {
+                    tracing::debug!("closing unadopted datasource `{name}` pool");
+                    pool.close().await;
+                }
             }
             Ok(())
         })
@@ -527,8 +691,21 @@ fn read_datasources(
                     "`datasources` is declared but empty; remove it or declare at least one datasource",
                 ));
             }
+            if datasources.len() > natx::MAX_MANAGED_DATASOURCES {
+                return Err(db_error(
+                    ApplicationPhase::Start,
+                    "configured datasource count exceeds the managed limit",
+                ));
+            }
             let mut out = Vec::with_capacity(datasources.len());
             for (name, value) in datasources {
+                natx::DatasourceRef::new(&name).map_err(|error| {
+                    db_error_src(
+                        ApplicationPhase::Start,
+                        "invalid datasource qualifier",
+                        error,
+                    )
+                })?;
                 let (config, migrations) = split_datasource(value, &name, ApplicationPhase::Start)?;
                 out.push((name, config, migrations));
             }
@@ -541,11 +718,11 @@ fn read_datasources(
     }
 }
 
-/// 业务作用：从单个数据源配置对象里剥离 napp 编排字段 `migrations`,返回 (纯数据源配置, 可选门禁设置)。
+/// 业务作用：解释 MySQL-only 构建的数据源 driver，并剥离 napp 编排字段后生成建池与迁移配置。
 ///
-/// `DataSourceConfig` 是 `deny_unknown_fields`,内嵌的 `migrations` 会让它整体解析失败,因此必须在
-/// 反序列化前把该键摘出。摘出后的剩余对象仍按 `deny_unknown_fields` 严格校验,数据源字段本身的拼写
-/// 错误不受影响;`MigrationSettings` 自身同样 `deny_unknown_fields`,其内部拼写错误在此处即被拒绝。
+/// `driver: mysql` 与省略 driver 等价；显式声明 PostgreSQL 时直接指出缺少 `db-pgsql` feature，
+/// 不把编译能力缺失误报为未知配置字段。摘出编排字段后的对象仍按 `deny_unknown_fields` 严格校验，
+/// 数据源字段本身的拼写错误不受影响；`MigrationSettings` 自身同样拒绝未知字段。
 ///
 /// # 参数
 ///
@@ -557,9 +734,38 @@ fn split_datasource(
     name: &str,
     phase: ApplicationPhase,
 ) -> ApplicationResult<(DataSourceConfig, Option<namigrate::MigrationSettings>)> {
-    let migrations_value = value
+    let object = value
         .as_object_mut()
-        .and_then(|map| map.remove("migrations"));
+        .ok_or_else(|| db_error(phase, format!("datasource `{name}` must be an object")))?;
+    match object.remove("driver") {
+        None => {}
+        Some(serde_json::Value::String(driver)) if driver == "mysql" => {}
+        Some(serde_json::Value::String(driver)) if driver == "postgresql" => {
+            return Err(db_error(
+                phase,
+                format!("datasource `{name}` requires napp feature `db-pgsql`"),
+            ));
+        }
+        Some(_) => {
+            return Err(db_error(
+                phase,
+                format!("datasource `{name}` driver is invalid"),
+            ));
+        }
+    }
+    if object.contains_key("connection_topology") {
+        return Err(db_error(
+            phase,
+            format!("datasource `{name}` MySQL does not accept connection_topology"),
+        ));
+    }
+    if object.contains_key("schema") {
+        return Err(db_error(
+            phase,
+            format!("datasource `{name}` MySQL does not accept schema"),
+        ));
+    }
+    let migrations_value = object.remove("migrations");
     let migrations = match migrations_value {
         Some(raw) => {
             let settings =
@@ -635,12 +841,25 @@ pub(crate) fn validate_datasource_sections(
             })
         }
         (None, Some(datasources)) => {
+            if datasources.is_empty() {
+                return Err(db_error(
+                    phase,
+                    "`datasources` is declared but empty; remove it or declare at least one datasource",
+                ));
+            }
+            if datasources.len() > natx::MAX_MANAGED_DATASOURCES {
+                return Err(db_error(
+                    phase,
+                    "configured datasource count exceeds the managed limit",
+                ));
+            }
             for (name, value) in datasources {
-                let (config, _migrations) =
-                    split_datasource(value, &name, ApplicationPhase::Running)?;
+                natx::DatasourceRef::new(&name)
+                    .map_err(|error| db_error_src(phase, "invalid datasource qualifier", error))?;
+                let (config, _migrations) = split_datasource(value, &name, phase)?;
                 config.validate().map_err(|error| {
                     db_error_src(
-                        ApplicationPhase::Running,
+                        phase,
                         format!("invalid datasource `{name}` configuration"),
                         error,
                     )
@@ -660,40 +879,37 @@ pub(crate) fn validate_datasource_sections(
 /// - `application`：持有组件资源的共享应用上下文。
 /// - `name`：数据源 qualifier；单库配置固定为 `default`。
 ///
-/// 返回：常规池从资源容器取得；Saga 延后引导的默认池在 Ready 期间从事务运行时取得。
+/// 返回：模式机、当前 Application registry 与名称全部匹配时返回同一受管 pool；引导中、名称缺失、
+/// owner 失配或停机时返回稳定的数据源查找分类，不暴露资源容器的 Rust 类型路径。
 pub(crate) async fn datasource_handle(
     application: &Application,
     name: &str,
 ) -> ApplicationResult<MySqlPool> {
-    match application.named_resource::<MySqlPool>(name).await {
-        Ok(pool) => Ok(pool.clone()),
-        Err(resource_error) => {
-            #[cfg(feature = "saga")]
-            if name == DEFAULT_DATASOURCE
-                && application.state() == ApplicationState::Ready
-                && application
-                    .ensure_component_declared(
-                        ComponentId::Saga,
-                        ApplicationPhase::Running,
-                        "saga deferred datasource access",
-                    )
-                    .is_ok()
-                && crate::saga::database_bootstrap(application, ApplicationPhase::Running)?
-                    == crate::saga::SagaDatabaseBootstrap::UserHook
-            {
-                // 延后引导发生在资源注册表封口之后，不能伪造晚到登记；只在 Application 仍 Ready
-                // 且配置明确选择该路径时借出同一默认池，停机态继续保留资源容器的拒绝语义。
-                return natx::pool_for_datasource(DEFAULT_DATASOURCE).map_err(|error| {
-                    db_error_src(
-                        ApplicationPhase::Running,
-                        "saga deferred default datasource is unavailable",
-                        error,
-                    )
-                });
-            }
-            Err(resource_error)
-        }
-    }
+    // 引导窗口必须先由进程级权威封口，不能让尚未登记的 Application 资源覆盖 RegistryUnavailable。
+    natx_core::resolve_datasource(name, natx_core::DatabaseDriver::MySql).map_err(|error| {
+        db_error_src(
+            ApplicationPhase::Running,
+            "MySQL datasource lookup failed",
+            error,
+        )
+    })?;
+    let registry = application
+        .resource::<Arc<DataSourceRegistry>>()
+        .await
+        .map_err(|_| {
+            db_error_src(
+                ApplicationPhase::Running,
+                "MySQL datasource lookup failed",
+                natx_core::DataSourceLookupError::RegistryUnavailable,
+            )
+        })?;
+    registry.pool(name).map_err(|error| {
+        db_error_src(
+            ApplicationPhase::Running,
+            "MySQL datasource lookup failed",
+            error,
+        )
+    })
 }
 
 /// 业务作用：创建数据源组件的稳定生命周期错误。

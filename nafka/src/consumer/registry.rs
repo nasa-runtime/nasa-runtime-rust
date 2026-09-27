@@ -664,30 +664,15 @@ fn add_topics(mode: &mut OwnerMode, topics: &[String]) {
     }
 }
 
-/// 业务作用：检查 `(group,topic,event)` 路由唯一性。
-///
-/// # 参数
-///
-/// - `routes`: 已占用 route 集合。
-/// - `group`: 最终 group.id。
-/// - `topic`: topic。
-/// - `event`: event。
-/// - `id`: 当前 handler id。
-///
-/// # 错误
-///
-/// route 已被其他 handler 占用时返回注册错误。
-/// 发布注册表规模指标。
-///
-/// 单独抽出来是为了让"注册成功"与"停机归零"用同一份标签集合与同一份口径，
-/// 否则两处各写一遍必然漂移（此前只在 `start()` 成功末尾发一次、且从不归零，
-/// consumer 停掉之后仪表盘仍显示旧值）。
+/// 业务作用：按统一 client 标签发布注册表规模，供启动登记与停机归零使用。
 ///
 /// # 参数
 ///
 /// - `inner`: 指标出口。
 /// - `routes`: `(group, topic, event)` 三元组数量。
 /// - `groups`: 实际建出的 group 数量。
+///
+/// 返回：无；向 MetricsSink 写入路由数与 group 数，超出 i64 的数量按上限饱和。
 pub(crate) fn publish_registry_gauges(
     inner: &crate::KafkaProxyInner,
     routes: usize,

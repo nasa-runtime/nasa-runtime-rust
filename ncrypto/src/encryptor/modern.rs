@@ -260,7 +260,7 @@ fn derive_nc2_key(
 /// - `salt`: KDF 随机盐。
 /// - `nonce`: AES-GCM nonce。
 ///
-/// 返回: 返回与 NC1 原实现逐字节一致的 AAD。
+/// 返回: 返回符合 NC1 线格式的 AAD。
 fn nc1_aad(iterations: u32, salt: &[u8], nonce: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(
         MODERN_TOKEN_V1_PREFIX.len() + std::mem::size_of::<u32>() + salt.len() + nonce.len(),

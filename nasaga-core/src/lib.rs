@@ -33,7 +33,9 @@ mod error;
 mod identity;
 mod journal;
 mod outcome;
+mod payload;
 mod plan;
+pub use payload::{SagaPayload, SagaPayloadContract, SagaPayloadError};
 mod state;
 mod step;
 
@@ -53,7 +55,8 @@ pub use error::{
 };
 pub use identity::{
     AttemptNo, BusinessKey, CommandId, DefinitionVersion, EffectId, SagaId, ServiceIdentity,
-    StepName, StepPhase, TenantId, WorkflowName,
+    StepName, StepPhase, TenantId, WorkflowName, OPAQUE_IDENTIFIER_MAX_BYTES,
+    STRUCTURED_IDENTIFIER_MAX_BYTES,
 };
 pub use journal::{
     StepAttemptStatus, StepCancelStatus, StepCompensationStatus, StepResolutionStatus, TriggerKind,

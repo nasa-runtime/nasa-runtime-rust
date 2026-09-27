@@ -159,11 +159,12 @@ pub fn parse_unverified(token: &str) -> Result<(JwtHeader, AccessTokenClaims), T
 
 /// 业务作用：校验 access token 的 header + claims(不含签名验签)。
 ///
-/// # 参数
-///
+/// 参数说明:
 /// - `header`/`claims`:已解析的 JWT header 与 claims。
 /// - `policy`:期望 issuer/audience、算法白名单、leeway。
-/// - `now`:当前墙上时间(用 `nadate::UtcClock` 便于注入固定时钟)。
+/// - `now`:当前墙上时间(可用 `nabase::date::UtcClock` 注入时钟来源)。
+///
+/// 返回: header 和 claims 满足策略时返回成功，否则返回稳定分类的 [`TokenError`]。
 pub fn validate_access_token(
     header: &JwtHeader,
     claims: &AccessTokenClaims,

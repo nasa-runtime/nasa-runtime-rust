@@ -1,6 +1,6 @@
 // ============================================================================
 // proto/src/schema.rs —— 信封 / 控制帧 / 集群事件的结构。
-// codec 由 #[derive(ProtocolBytes)] 生成(从手写 codec 提炼,golden 对拍验证逐字节一致)。
+// codec 由 #[derive(ProtocolBytes)] 根据字段协议属性生成。
 //
 // 字段 tag / wiretype / mode 见 架构说明 附录 A.7;ClusterEvent 新 schema。
 // 建模要点:引用字段(String/数组/byte[])用 Option(nullable);
@@ -189,7 +189,7 @@ impl CloseReason {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ClusterEvent —— 集群事件(BITPACK_TLV)。修复后 schema。
+// ClusterEvent —— 集群事件(BITPACK_TLV)的完整 schema。
 // timestamp / message_mode 恒编码。
 // ════════════════════════════════════════════════════════════════════════════
 /// 集群跨节点事件,封装来源节点、fencing token、目标节点和被转发的业务消息字节。
