@@ -1,7 +1,7 @@
 # mapper-macro —— 声明式 Mapper trait 生成宏
 [package]
 name = "namapper-macro"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Declarative SQL mapper macros with static method catalogs and query lifecycle observability"
@@ -16,7 +16,7 @@ proc-macro = true
 name = "namapper_macro"
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.2" }
+nasa-macro-support = { package = "macro-support", version = "2.0.0" }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"

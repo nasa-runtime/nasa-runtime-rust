@@ -10,7 +10,7 @@ dispatcher 立即尝试投递；配置的轮询周期只负责跨进程写入、
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "outbox"] }
+nasa = { version = "2.0.0", features = ["application", "outbox"] }
 ```
 
 ```rust

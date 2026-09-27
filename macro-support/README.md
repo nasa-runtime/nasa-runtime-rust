@@ -36,7 +36,7 @@ let pg_root = macro_support::runtime_root_nested(
 业务侧需要配置的是 Cargo feature，不是 yml：
 
 ```toml
-nasa = { version = "1.0.3", features = ["tx", "mapper", "cache"] }
+nasa = { version = "2.0.0", features = ["tx", "mapper", "cache"] }
 ```
 
 规则说明：

@@ -3,7 +3,7 @@
 # 业务项目优先依赖 nasa 门面并开启 grafana feature;内部迁移可直接依赖 nafana 包。
 [package]
 name = "nafana"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "接口隔离监控、YAML 统一指标出口、集群 Dashboard 与独立单 owner 平台 controller"
@@ -19,7 +19,7 @@ readme = "README.md"
 name = "nafana"
 
 [dependencies]
-nafana-macro = { version = "1.0.2" }
+nafana-macro = { version = "2.0.0" }
 # axum: handler 与 middleware 类型(Request/Next/Response/IntoResponse);经 __private 桥暴露给宏展开
 axum = "0.8"
 # tokio: bulkhead 信号量、单请求超时、周期请求汇总任务
@@ -35,7 +35,7 @@ dashmap = "6"
 tracing = "0.1"
 # linkme:收集业务 crate 内唯一的 #[global_fallback] 终态处理入口
 linkme = "0.3"
-nametrics-core = { version = "1.0.2" }
+nametrics-core = { version = "2.0.0" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 prost = "0.14"
 snap = "1"
@@ -44,10 +44,10 @@ uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 zeroize = "1"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
-nasecret = { version = "1.0.1" }
-naml = { version = "1.0.3" }
-config-boot = { version = "1.0.2" }
-nanacos = { version = "1.0.2", default-features = false, optional = true }
+nasecret = { version = "2.0.0" }
+naml = { version = "2.0.0" }
+config-boot = { version = "2.0.0" }
+nanacos = { version = "2.0.0", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 [features]

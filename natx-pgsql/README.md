@@ -15,14 +15,14 @@ Outbox 或 Saga。依赖本 crate 不会自动启用这些能力。
 
 ```toml
 [dependencies]
-natx-pgsql = "1.0.0"
+natx-pgsql = "2.0.0"
 ```
 
 也可以通过门面只启用 PostgreSQL 事务能力：
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", default-features = false, features = ["tx-pgsql"] }
+nasa = { version = "2.0.0", default-features = false, features = ["tx-pgsql"] }
 ```
 
 ```rust

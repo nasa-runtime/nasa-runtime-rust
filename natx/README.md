@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["tx"] }
+nasa = { version = "2.0.0", features = ["tx"] }
 ```
 
 ```rust

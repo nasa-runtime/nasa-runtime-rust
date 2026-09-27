@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-runtime"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Durable NASA Saga orchestration with named datasource binding, fencing, recovery and authenticated transports"
@@ -16,18 +16,18 @@ anyhow = "1"
 # linkme 作为收集点宿主，#[saga] 的 descriptor 静态注册项落在本 crate 的 distributed slice。
 linkme = "0.3"
 # Saga 核心合同与 MySQL store 均固定使用公开坐标，避免运行时装载来源分裂的状态合同。
-nasaga-core = { version = "1.0.1" }
-nasaga-backend = { version = "1.0.0" }
-nasaga-mysql = { version = "1.0.2" }
-nasaga-runtime-core = { version = "1.0.0" }
-nainbox-core = { version = "1.0.2" }
-nainbox-mysql = { version = "1.0.2" }
-naoutbox-core = { version = "1.0.2" }
-naoutbox-mysql = { version = "1.0.2" }
+nasaga-core = { version = "2.0.0" }
+nasaga-backend = { version = "2.0.0" }
+nasaga-mysql = { version = "2.0.0" }
+nasaga-runtime-core = { version = "2.0.0" }
+nainbox-core = { version = "2.0.0" }
+nainbox-mysql = { version = "2.0.0" }
+naoutbox-core = { version = "2.0.0" }
+naoutbox-mysql = { version = "2.0.0" }
 # `TxDecision` 是提交结果不确定处理的必要合同。
-natx = { version = "1.0.3" }
+natx = { version = "2.0.0" }
 # 链路上下文共享类型:发起入口与 transport 收据显式传入 TraceContext,命令出站派生 child span。
-natelemetry = { version = "1.0.2" }
+natelemetry = { version = "2.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtime-tokio"] }

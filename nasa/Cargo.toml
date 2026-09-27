@@ -4,7 +4,7 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "1.0.3"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Rust facade for managed resources, shared startup activation, ordered shutdown, durable Saga, SQL observability, messaging, gRPC and HTTP"
@@ -266,62 +266,62 @@ full-pgsql = [
 
 [dependencies]
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "1.0.3", optional = true }
-application_macro = { package = "napp-macro", version = "1.0.2", optional = true }
-hystrix_impl = { package = "hystrix", version = "1.0.2", optional = true }
-hystrix_macro = { package = "hystrix-macro", version = "1.0.2", optional = true }
-grafana_impl = { package = "nafana", version = "1.0.2", optional = true }
-grafana_macro = { package = "nafana-macro", version = "1.0.2", optional = true }
-cache_impl = { package = "cacheable", version = "1.0.2", optional = true }
-nacache_macro = { package = "nacache-macro", version = "1.0.2", optional = true }
-tx_impl = { package = "natx", version = "1.0.3", optional = true }
-tx_pgsql_impl = { package = "natx-pgsql", version = "1.0.0", optional = true }
-migration_pgsql_impl = { package = "namigrate-pgsql", version = "1.0.0", optional = true }
-natx_macro = { package = "natx-macro", version = "1.0.1", optional = true }
-inbox_core_impl = { package = "nainbox-core", version = "1.0.2", optional = true }
-inbox_mysql_impl = { package = "nainbox-mysql", version = "1.0.2", optional = true }
-inbox_pgsql_impl = { package = "nainbox-pgsql", version = "1.0.0", optional = true }
-outbox_core_impl = { package = "naoutbox-core", version = "1.0.2", optional = true }
-outbox_mysql_impl = { package = "naoutbox-mysql", version = "1.0.2", optional = true }
-outbox_pgsql_impl = { package = "naoutbox-pgsql", version = "1.0.0", optional = true }
-idempotency_impl = { package = "naidempotency", version = "1.0.2", optional = true }
-idempotency_mysql_impl = { package = "naidempotency-mysql", version = "1.0.2", optional = true }
-idempotency_pgsql_impl = { package = "naidempotency-pgsql", version = "1.0.0", optional = true }
-idempotency_redis_impl = { package = "naidempotency-redis", version = "1.0.2", optional = true }
-openapi_impl = { package = "naopenapi", version = "1.0.2", optional = true }
-audit_impl = { package = "naaudit", version = "1.0.1", optional = true }
-audit_mysql_impl = { package = "naaudit-mysql", version = "1.0.2", optional = true }
-audit_pgsql_impl = { package = "naaudit-pgsql", version = "1.0.0", optional = true }
-secret_impl = { package = "nasecret", version = "1.0.1", optional = true }
-secret_http_impl = { package = "nasecret-http", version = "1.0.1", optional = true }
-secret_vault_impl = { package = "nasecret-vault", version = "1.0.1", optional = true }
-object_impl = { package = "naobject", version = "1.0.1", optional = true }
-saga_core_impl = { package = "nasaga-core", version = "1.0.1", optional = true }
-saga_runtime_impl = { package = "nasaga-runtime", version = "1.0.2", optional = true }
-saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "1.0.0", optional = true }
-nasaga_macro = { package = "nasaga-macro", version = "1.0.2", optional = true }
-grpc_impl = { package = "nagrpc", version = "1.0.2", optional = true }
-oauth_impl = { package = "nauth-oauth", version = "1.0.1", optional = true }
-scheduling_impl = { package = "nasched", version = "1.0.2", optional = true }
-async_macro = { package = "async-macro", version = "1.0.2", optional = true }
-web_impl = { package = "naweb", version = "1.0.2", optional = true }
-web_macro = { package = "naweb-macro", version = "1.0.1", optional = true }
-mapper_impl = { package = "namapper", version = "1.0.2", optional = true }
-mapper_pgsql_impl = { package = "namapper-pgsql", version = "1.0.0", optional = true }
-namapper_macro = { package = "namapper-macro", version = "1.0.2", optional = true }
-partition_impl = { package = "napart", version = "1.1.2", optional = true }
-ws_impl = { package = "naws", version = "1.0.2", optional = true, default-features = false }
-kafka_impl = { package = "nafka", version = "1.0.3", optional = true, default-features = false }
-redis_impl = { package = "nadis", version = "1.0.2", optional = true, default-features = false }
-crypto_impl = { package = "ncrypto", version = "1.0.1", optional = true }
-numeric_impl = { package = "nanum", version = "1.0.2", optional = true }
-log_impl = { package = "nalog", version = "1.0.1", optional = true }
-base_impl = { package = "nabase", version = "1.0.2", optional = true }
-yml_impl = { package = "naml", version = "1.0.3", optional = true }
-config_boot_impl = { package = "config-boot", version = "1.0.2", optional = true }
-image_impl = { package = "naimg", version = "1.0.1", optional = true }
-discovery_impl = { package = "nadisc", version = "1.0.2", optional = true }
-nacos_impl = { package = "nanacos", version = "1.0.2", optional = true, default-features = false }
-rest_discovery_impl = { package = "rest-discovery", version = "1.0.2", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "1.0.2", optional = true }
-rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "1.0.2", optional = true, default-features = false }
+application_impl = { package = "napp", version = "2.0.0", optional = true }
+application_macro = { package = "napp-macro", version = "2.0.0", optional = true }
+hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
+hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
+grafana_impl = { package = "nafana", version = "2.0.0", optional = true }
+grafana_macro = { package = "nafana-macro", version = "2.0.0", optional = true }
+cache_impl = { package = "cacheable", version = "2.0.0", optional = true }
+nacache_macro = { package = "nacache-macro", version = "2.0.0", optional = true }
+tx_impl = { package = "natx", version = "2.0.0", optional = true }
+tx_pgsql_impl = { package = "natx-pgsql", version = "2.0.0", optional = true }
+migration_pgsql_impl = { package = "namigrate-pgsql", version = "2.0.0", optional = true }
+natx_macro = { package = "natx-macro", version = "2.0.0", optional = true }
+inbox_core_impl = { package = "nainbox-core", version = "2.0.0", optional = true }
+inbox_mysql_impl = { package = "nainbox-mysql", version = "2.0.0", optional = true }
+inbox_pgsql_impl = { package = "nainbox-pgsql", version = "2.0.0", optional = true }
+outbox_core_impl = { package = "naoutbox-core", version = "2.0.0", optional = true }
+outbox_mysql_impl = { package = "naoutbox-mysql", version = "2.0.0", optional = true }
+outbox_pgsql_impl = { package = "naoutbox-pgsql", version = "2.0.0", optional = true }
+idempotency_impl = { package = "naidempotency", version = "2.0.0", optional = true }
+idempotency_mysql_impl = { package = "naidempotency-mysql", version = "2.0.0", optional = true }
+idempotency_pgsql_impl = { package = "naidempotency-pgsql", version = "2.0.0", optional = true }
+idempotency_redis_impl = { package = "naidempotency-redis", version = "2.0.0", optional = true }
+openapi_impl = { package = "naopenapi", version = "2.0.0", optional = true }
+audit_impl = { package = "naaudit", version = "2.0.0", optional = true }
+audit_mysql_impl = { package = "naaudit-mysql", version = "2.0.0", optional = true }
+audit_pgsql_impl = { package = "naaudit-pgsql", version = "2.0.0", optional = true }
+secret_impl = { package = "nasecret", version = "2.0.0", optional = true }
+secret_http_impl = { package = "nasecret-http", version = "2.0.0", optional = true }
+secret_vault_impl = { package = "nasecret-vault", version = "2.0.0", optional = true }
+object_impl = { package = "naobject", version = "2.0.0", optional = true }
+saga_core_impl = { package = "nasaga-core", version = "2.0.0", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.0", optional = true }
+saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.0", optional = true }
+nasaga_macro = { package = "nasaga-macro", version = "2.0.0", optional = true }
+grpc_impl = { package = "nagrpc", version = "2.0.0", optional = true }
+oauth_impl = { package = "nauth-oauth", version = "2.0.0", optional = true }
+scheduling_impl = { package = "nasched", version = "2.0.0", optional = true }
+async_macro = { package = "async-macro", version = "2.0.0", optional = true }
+web_impl = { package = "naweb", version = "2.0.0", optional = true }
+web_macro = { package = "naweb-macro", version = "2.0.0", optional = true }
+mapper_impl = { package = "namapper", version = "2.0.0", optional = true }
+mapper_pgsql_impl = { package = "namapper-pgsql", version = "2.0.0", optional = true }
+namapper_macro = { package = "namapper-macro", version = "2.0.0", optional = true }
+partition_impl = { package = "napart", version = "2.0.0", optional = true }
+ws_impl = { package = "naws", version = "2.0.0", optional = true, default-features = false }
+kafka_impl = { package = "nafka", version = "2.0.0", optional = true, default-features = false }
+redis_impl = { package = "nadis", version = "2.0.0", optional = true, default-features = false }
+crypto_impl = { package = "ncrypto", version = "2.0.0", optional = true }
+numeric_impl = { package = "nanum", version = "2.0.0", optional = true }
+log_impl = { package = "nalog", version = "2.0.0", optional = true }
+base_impl = { package = "nabase", version = "2.0.0", optional = true }
+yml_impl = { package = "naml", version = "2.0.0", optional = true }
+config_boot_impl = { package = "config-boot", version = "2.0.0", optional = true }
+image_impl = { package = "naimg", version = "2.0.0", optional = true }
+discovery_impl = { package = "nadisc", version = "2.0.0", optional = true }
+nacos_impl = { package = "nanacos", version = "2.0.0", optional = true, default-features = false }
+rest_discovery_impl = { package = "rest-discovery", version = "2.0.0", optional = true }
+rest_client_macro = { package = "rest-client-macro", version = "2.0.0", optional = true }
+rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "2.0.0", optional = true, default-features = false }

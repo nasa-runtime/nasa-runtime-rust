@@ -8,7 +8,7 @@ MySQL/PostgreSQL 持久 adapter 共用的异步角色合同。事件字段包含
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["outbox"] }
+nasa = { version = "2.0.0", features = ["outbox"] }
 ```
 
 ```rust

@@ -3,7 +3,7 @@
 # 业务通过 `nasa::log` 门面使用；crate 名避免与 crates.io 的 `log` 包冲突。
 [package]
 name = "nalog"
-version = "1.0.1"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA tracing 日志：配置候选准备与原子安装、级别和格式热切、按天/大小滚动、有界归档与退出刷盘"
@@ -17,7 +17,7 @@ categories.workspace = true
 [lib]
 name = "nalog"
 [dependencies]
-nabase = { package = "nabase", version = "1.0.2" }
+nabase = { package = "nabase", version = "2.0.0" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

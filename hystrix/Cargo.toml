@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 hystrix feature。
 [package]
 name = "hystrix"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "接口级隔离、超时、降级与 Dashboard 指标；支持 Application 受管命令目录和有序关闭"
@@ -18,7 +18,7 @@ readme = "README.md"
 [lib]
 name = "hystrix"
 [dependencies]
-hystrix-macro = { version = "1.0.2" }
+hystrix-macro = { version = "2.0.0" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

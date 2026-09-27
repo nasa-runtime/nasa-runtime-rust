@@ -19,9 +19,9 @@ adapter 不自行提交或投递。回滚撤销同事务中的业务写与审计
 
 ```toml
 [dependencies]
-naaudit = "1.0.1"
-naaudit-pgsql = "1.0.0"
-natx-pgsql = "1.0.0"
+naaudit = "2.0.0"
+naaudit-pgsql = "2.0.0"
+natx-pgsql = "2.0.0"
 ```
 
 业务经门面使用时开启 `audit-pgsql`，从 `nasa::audit::pgsql` 导入 sink，并从 `nasa::audit` 使用公共事件

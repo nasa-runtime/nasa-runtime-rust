@@ -222,32 +222,32 @@ impl JobScanner {
         let first = self.first_at_or_after(definition, expected, cutoff)?;
         let limit = self.config.max_catch_up_runs as usize;
         let mut selected = VecDeque::with_capacity(limit);
-        let cursor;
-        if definition.schedule_type() == JobScheduleType::FixedRate && first <= redis_now {
-            let interval = definition.interval_ms() as i64;
-            let total = (redis_now - first) / interval + 1;
-            let retained = total.min(self.config.max_catch_up_runs as i64);
-            let selected_first = checked_add_mul(first, total - retained, interval)?;
-            for index in 0..retained {
-                selected.push_back(checked_add_mul(selected_first, index, interval)?);
-            }
-            cursor = checked_add_mul(first, total, interval)?;
-        } else {
-            let mut next = first;
-            let mut advanced = 0;
-            while next <= redis_now {
-                if selected.len() == limit {
-                    selected.pop_front();
+        let cursor =
+            if definition.schedule_type() == JobScheduleType::FixedRate && first <= redis_now {
+                let interval = definition.interval_ms() as i64;
+                let total = (redis_now - first) / interval + 1;
+                let retained = total.min(self.config.max_catch_up_runs as i64);
+                let selected_first = checked_add_mul(first, total - retained, interval)?;
+                for index in 0..retained {
+                    selected.push_back(checked_add_mul(selected_first, index, interval)?);
                 }
-                selected.push_back(next);
-                next = next_fire_at(definition, next)?;
-                advanced += 1;
-                if advanced > CRON_ADVANCE_LIMIT {
-                    return Err(config_error("CATCH_UP 推进次数超过安全上限"));
+                checked_add_mul(first, total, interval)?
+            } else {
+                let mut next = first;
+                let mut advanced = 0;
+                while next <= redis_now {
+                    if selected.len() == limit {
+                        selected.pop_front();
+                    }
+                    selected.push_back(next);
+                    next = next_fire_at(definition, next)?;
+                    advanced += 1;
+                    if advanced > CRON_ADVANCE_LIMIT {
+                        return Err(config_error("CATCH_UP 推进次数超过安全上限"));
+                    }
                 }
-            }
-            cursor = next;
-        }
+                next
+            };
 
         if selected.is_empty() {
             return Ok(vec![item(definition, expected, cursor, true, true, true)]);

@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-mysql"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Durable named-datasource MySQL store for NASA Saga state, fencing, audit, quotas and recovery"
@@ -14,9 +14,9 @@ categories = ["asynchronous", "database"]
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-nasaga-backend = { version = "1.0.0" }
-nasaga-core = { version = "1.0.1" }
+nasaga-backend = { version = "2.0.0" }
+nasaga-core = { version = "2.0.0" }
 # Saga store、Inbox 与 Outbox 必须共享 natx 的同一 ambient transaction。
-natx = { version = "1.0.3" }
+natx = { version = "2.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 uuid = { version = "1", features = ["v4", "v5"] }

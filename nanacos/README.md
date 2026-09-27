@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["nacos-sdk"] }
+nasa = { version = "2.0.0", features = ["nacos-sdk"] }
 ```
 
 ## 配置中心拉取

@@ -29,7 +29,7 @@ WorkflowDefinition + definition digest
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["saga"] }
+nasa = { version = "2.0.0", features = ["saga"] }
 ```
 
 ## 定义流程

@@ -9,9 +9,9 @@ global 或单 lane 权威，再通过 `FOR UPDATE SKIP LOCKED` 按稳定 `id` �
 
 ```toml
 [dependencies]
-naoutbox-core = "1.0.2"
-naoutbox-pgsql = "1.0.0"
-natx-pgsql = "1.0.0"
+naoutbox-core = "2.0.0"
+naoutbox-pgsql = "2.0.0"
+natx-pgsql = "2.0.0"
 ```
 
 ```rust

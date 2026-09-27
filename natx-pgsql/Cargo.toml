@@ -1,6 +1,6 @@
 [package]
 name = "natx-pgsql"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Named ambient PostgreSQL transactions with managed datasource ownership and connection wait observability"
@@ -12,9 +12,9 @@ categories = ["asynchronous", "database"]
 readme = "README.md"
 
 [dependencies]
-nabudget = { version = "1.0.2" }
-natx-core = { version = "1.0.0" }
-natx-macro = { package = "natx-macro", version = "1.0.1" }
+nabudget = { version = "2.0.0" }
+natx-core = { version = "2.0.0" }
+natx-macro = { package = "natx-macro", version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 anyhow = "1"

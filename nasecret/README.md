@@ -5,7 +5,7 @@ prepare/commit/abort 两阶段轮换。它不依赖应用运行时，也不把�
 
 ```toml
 [dependencies]
-nasecret = "1.0.1"
+nasecret = "2.0.0"
 ```
 
 `nasecret` 不读取 yml，也不依赖应用运行时；调用方负责把自己的配置模型映射成 `SecretSpec`。

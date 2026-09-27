@@ -10,14 +10,14 @@
 
 ```toml
 [dependencies]
-naml = "1.0.3"
+naml = "2.0.0"
 ```
 
 需要文件变化观察时显式开启 `watch` feature：
 
 ```toml
 [dependencies]
-naml = { version = "1.0.3", features = ["watch"] }
+naml = { version = "2.0.0", features = ["watch"] }
 ```
 
 ## 运行架构与顺序不变量

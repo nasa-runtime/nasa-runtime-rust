@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-naimg = "1.0.1"
+naimg = "2.0.0"
 ```
 
 质量加等比缩放：
@@ -50,7 +50,7 @@ let out = naimg::compress(&input_bytes, &opts, None)?;
 
 - `quality` 只影响 JPEG；PNG 等格式会忽略。
 - `format = None` 时保留输入格式。
-- 1.0 支持 JPEG、PNG、GIF、WebP、BMP、ICO、TIFF、PNM、QOI、TGA；AVIF、EXR 等未声明
+- 支持 JPEG、PNG、GIF、WebP、BMP、ICO、TIFF、PNM、QOI、TGA；AVIF、EXR 等未声明
   格式不会随默认构建编入，业务应在上传边界先转换。
 - `scale <= 0`、`width/height = 0`、`quality` 越界会返回错误。
 - 输出像素上限为 100MP，用于防止异常放大导致 OOM。

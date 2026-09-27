@@ -8,8 +8,8 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["nacos-sdk", "rest-discovery-nacos"] }
-rest-discovery-nacos = { version = "1.0.2", features = ["nacos-sdk"] }
+nasa = { version = "2.0.0", features = ["nacos-sdk", "rest-discovery-nacos"] }
+rest-discovery-nacos = { version = "2.0.0", features = ["nacos-sdk"] }
 ```
 
 ## 配置形状

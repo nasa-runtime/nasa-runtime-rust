@@ -1,6 +1,6 @@
 [package]
 name = "nainbox-mysql"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA Inbox MySQL backend with named natx datasource binding and ambient transaction deduplication"
@@ -12,9 +12,9 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 anyhow = "1"
-nainbox-core = { version = "1.0.2" }
+nainbox-core = { version = "2.0.0" }
 async-trait = "0.1"
-natx = { version = "1.0.3" }
+natx = { version = "2.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 tokio = { version = "1", features = ["time"] }
 # 保留清理的 advisory lock 归还失败必须留下告警证据,否则后续轮次持续 contended 无从定位。

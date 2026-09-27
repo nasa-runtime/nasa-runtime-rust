@@ -7,7 +7,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["log"] }
+nasa = { version = "2.0.0", features = ["log"] }
 ```
 
 ## 控制台日志

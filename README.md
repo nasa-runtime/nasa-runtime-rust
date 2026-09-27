@@ -735,7 +735,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.0", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。

@@ -1,6 +1,6 @@
 [package]
 name = "namigrate-pgsql"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "PostgreSQL migration gate with session-affine advisory locking"
@@ -12,8 +12,8 @@ categories = ["database", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-namigrate-core = { version = "1.0.0" }
-natx-core = { version = "1.0.0" }
+namigrate-core = { version = "2.0.0" }
+natx-core = { version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 tokio = { version = "1", features = ["time"] }
 async-trait = "0.1"

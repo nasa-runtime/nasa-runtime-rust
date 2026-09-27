@@ -22,7 +22,7 @@ span。OTLP 编码、HTTP sink 和生命周期由 `napp` 受管组件装配。
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "telemetry", "web"] }
+nasa = { version = "2.0.0", features = ["application", "telemetry", "web"] }
 ```
 
 ```rust

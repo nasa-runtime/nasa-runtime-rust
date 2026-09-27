@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["mapper"] }
+nasa = { version = "2.0.0", features = ["mapper"] }
 ```
 
 ## 静态目录与运行架构

@@ -62,7 +62,7 @@ Saga 的 managed 角色与 datasource 由运行时读取最终配置，宏不推
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "log", "redis", "cache", "web"] }
+nasa = { version = "2.0.0", features = ["application", "log", "redis", "cache", "web"] }
 ```
 
 ```rust

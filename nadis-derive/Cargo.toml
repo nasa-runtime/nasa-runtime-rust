@@ -2,7 +2,7 @@
 # 宏只调用 nadis 的公开 API(DocMeta/FieldMeta/RedisDocument)，手写 impl 与派生 impl 共享同一运行时语义。
 [package]
 name = "nadis-derive"
-version = "1.0.1"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA RedisDocument 派生宏：RediSearch/RedisJSON 元数据与字段转换"
@@ -21,4 +21,4 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 # 运行时路径发现支持直接依赖 nadis、经 nasa::redis 门面使用以及 Cargo 依赖重命名。
-nasa-macro-support = { package = "macro-support", version = "1.0.2" }
+nasa-macro-support = { package = "macro-support", version = "2.0.0" }

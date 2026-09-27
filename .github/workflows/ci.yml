@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master, release/1.0.4]
+    branches: [main, master, release/2.0.0]
   pull_request:
 
 env:
@@ -41,8 +41,8 @@ jobs:
       - run: cargo check -p nasa --features kafka-zstd
       - run: cargo check -p nasa --features kafka-schema-registry
       - run: cargo check -p nasa --features secret-http
-      - run: cargo check -p nasa --features object-store-experimental
-      - run: cargo check -p nasa --features grpc-experimental
+      - run: cargo check -p nasa --features object-store
+      - run: cargo check -p nasa --features grpc
       - run: cargo check -p nasa --features application,web,openapi
       # 默认密码构建不得隐式打开 legacy RSA 私钥路径；迁移 feature 另做隔离编译。
       - run: cargo check -p ncrypto --no-default-features

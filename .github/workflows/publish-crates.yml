@@ -48,7 +48,7 @@ jobs:
         run: |
           case "$RELEASE_BATCH" in
             naml|napart|1|2|3|4|5|6|7|8|9|10)
-              expected_ref="refs/heads/release/1.0.4"
+              expected_ref="refs/heads/release/2.0.0"
               expected_confirm="publish-${RELEASE_BATCH}"
               ;;
             *)
@@ -215,7 +215,7 @@ jobs:
             fi
             mkdir -p "$local_dir" "$remote_dir"
             curl --fail --silent --show-error --location \
-              --user-agent "nasa-runtime-release/1.0" \
+              --user-agent "nasa-runtime-release/2.0.0" \
               --output "$remote_archive" \
               "https://crates.io/api/v1/crates/${crate_name}/${version}/download"
             actual_remote_checksum="$(sha256sum "$remote_archive" | awk '{print $1}')"
@@ -256,7 +256,7 @@ jobs:
             response_file="$RUNNER_TEMP/${crate_name}-${version}.json"
             version_url="https://crates.io/api/v1/crates/${crate_name}/${version}"
             http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-              --user-agent "nasa-runtime-release/1.0" "$version_url")"
+              --user-agent "nasa-runtime-release/2.0.0" "$version_url")"
 
             case "$http_code" in
               200)
@@ -285,7 +285,7 @@ jobs:
             while true; do
               if (( publish_attempt > 1 )); then
                 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                  --user-agent "nasa-runtime-release/1.0" "$version_url")"
+                  --user-agent "nasa-runtime-release/2.0.0" "$version_url")"
                 if [[ "$http_code" == "200" ]]; then
                   remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
                   if [[ "$remote_checksum" != "$local_checksum" ]]; then
@@ -339,7 +339,7 @@ jobs:
             published=false
             for _ in {1..30}; do
               http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                --user-agent "nasa-runtime-release/1.0" "$version_url")"
+                --user-agent "nasa-runtime-release/2.0.0" "$version_url")"
               if [[ "$http_code" == "200" ]]; then
                 published=true
                 break

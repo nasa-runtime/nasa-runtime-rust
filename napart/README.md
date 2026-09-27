@@ -33,7 +33,7 @@ Runner 共享调用方提供的 Tokio runtime，因此隔离的是调度状态�
 
 ```toml
 [dependencies]
-napart = "1.1.2"
+napart = "2.0.0"
 ```
 
 ```rust

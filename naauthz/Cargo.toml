@@ -1,6 +1,6 @@
 [package]
 name = "naauthz"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA route authorization with same-generation policy defaults, atomic snapshots, and fail-closed object decisions"

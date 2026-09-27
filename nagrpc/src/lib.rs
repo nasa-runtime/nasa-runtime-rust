@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -28,6 +27,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use prost::Message;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{oneshot, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
@@ -171,11 +171,9 @@ pub trait GrpcTlsAcceptorSource: Send + Sync {
 fn build_tls_acceptor(
     identity: &GrpcTlsIdentity,
 ) -> Result<tokio_rustls::TlsAcceptor, GrpcServerError> {
-    let certificates = rustls_pemfile::certs(&mut BufReader::new(
-        identity.certificate_chain_pem.as_slice(),
-    ))
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| GrpcServerError::TlsConfiguration)?;
+    let certificates = CertificateDer::pem_slice_iter(identity.certificate_chain_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| GrpcServerError::TlsConfiguration)?;
     if certificates.is_empty() {
         return Err(GrpcServerError::TlsConfiguration);
     }
@@ -184,10 +182,8 @@ fn build_tls_acceptor(
         identity.minimum_remaining,
         identity.clock_skew,
     )?;
-    let private_key =
-        rustls_pemfile::private_key(&mut BufReader::new(identity.private_key_pem.as_slice()))
-            .map_err(|_| GrpcServerError::TlsConfiguration)?
-            .ok_or(GrpcServerError::TlsConfiguration)?;
+    let private_key = PrivateKeyDer::from_pem_slice(identity.private_key_pem.as_slice())
+        .map_err(|_| GrpcServerError::TlsConfiguration)?;
 
     // 同版本依赖的 feature 会合并；显式选择本组件的算法实现，不推断或改写宿主全局 provider。
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -196,7 +192,7 @@ fn build_tls_acceptor(
         .map_err(|_| GrpcServerError::TlsConfiguration)?;
     let mut server = if let Some(client_ca_pem) = &identity.client_ca_pem {
         let mut roots = rustls::RootCertStore::empty();
-        let client_roots = rustls_pemfile::certs(&mut BufReader::new(client_ca_pem.as_slice()))
+        let client_roots = CertificateDer::pem_slice_iter(client_ca_pem.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| GrpcServerError::TlsConfiguration)?;
         if client_roots.is_empty() {
@@ -498,10 +494,9 @@ impl GrpcTlsIdentity {
     ///
     /// 返回：证书链满足时间与 serverAuth 门禁时返回 Unix 秒；否则返回 TLS 配置错误。
     pub fn certificate_expiry_timestamp(&self) -> Result<u64, GrpcServerError> {
-        let certificates =
-            rustls_pemfile::certs(&mut BufReader::new(self.certificate_chain_pem.as_slice()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| GrpcServerError::TlsConfiguration)?;
+        let certificates = CertificateDer::pem_slice_iter(self.certificate_chain_pem.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| GrpcServerError::TlsConfiguration)?;
         if certificates.is_empty() {
             return Err(GrpcServerError::TlsConfiguration);
         }
@@ -557,7 +552,7 @@ pub fn client_certificate_principal(
     use std::fmt::Write as _;
 
     client_certificate_expiry_timestamp(certificate_chain_pem)?;
-    let certificate = rustls_pemfile::certs(&mut BufReader::new(certificate_chain_pem))
+    let certificate = CertificateDer::pem_slice_iter(certificate_chain_pem)
         .next()
         .transpose()
         .map_err(|_| GrpcServerError::TlsConfiguration)?
@@ -577,7 +572,7 @@ pub fn client_certificate_principal(
 pub fn client_certificate_expiry_timestamp(
     certificate_chain_pem: &[u8],
 ) -> Result<u64, GrpcServerError> {
-    let certificates = rustls_pemfile::certs(&mut BufReader::new(certificate_chain_pem))
+    let certificates = CertificateDer::pem_slice_iter(certificate_chain_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| GrpcServerError::TlsConfiguration)?;
     validate_certificate_purpose_lifetime(&certificates, Duration::ZERO, Duration::ZERO, false)

@@ -19,7 +19,7 @@ dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["saga-runtime"] }
+nasa = { version = "2.0.0", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
 # gRPC generated service/client 与封闭收据：features = ["saga-grpc"]

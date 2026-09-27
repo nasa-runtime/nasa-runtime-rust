@@ -5,7 +5,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["web"] }
+nasa = { version = "2.0.0", features = ["web"] }
 ```
 
 ```rust
@@ -110,7 +110,7 @@ let app = nasa::web::Router::new().nest(&cfg.server.context_path, router);
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["web-security"] }
+nasa = { version = "2.0.0", features = ["web-security"] }
 ```
 
 `web-security` 默认不开放 legacy RSA 私钥运算，也不会因 `full` 隐式开放。只有仍需遗留 RSA

@@ -1,6 +1,6 @@
 [package]
 name = "naidempotency-pgsql"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "PostgreSQL idempotency store with named ambient transactions, lease fencing, and durable replay"
@@ -12,8 +12,8 @@ categories = ["database", "web-programming"]
 readme = "README.md"
 
 [dependencies]
-naidempotency = { version = "1.0.2" }
-natx-pgsql = { version = "1.0.0" }
+naidempotency = { version = "2.0.0" }
+natx-pgsql = { version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 async-trait = "0.1"
 serde_json = "1"

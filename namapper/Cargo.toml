@@ -1,7 +1,7 @@
 # mapper —— 声明式 Mapper 运行时桥 + re-export #[Mapper]/#[Query]
 [package]
 name = "namapper"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Declarative MySQL mapper with ambient transactions, atomic SQL metrics, and bounded threshold notifications"
@@ -20,9 +20,9 @@ grouped-cache = ["dep:cacheable"]
 redis-cache = ["namapper-core/redis-cache"]
 
 [dependencies]
-namapper-core = { version = "1.0.0" }
-namapper-macro = { package = "namapper-macro", version = "1.0.2" }
-natx = { package = "natx", version = "1.0.3" }
+namapper-core = { version = "2.0.0" }
+namapper-macro = { package = "namapper-macro", version = "2.0.0" }
+natx = { package = "natx", version = "2.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql", "chrono", "json"] }
 async-trait = "0.1"
 anyhow = "1"
@@ -33,4 +33,4 @@ linkme = "0.3"
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-cacheable = { version = "1.0.2", optional = true }
+cacheable = { version = "2.0.0", optional = true }

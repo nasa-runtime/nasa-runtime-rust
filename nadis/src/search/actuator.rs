@@ -1034,7 +1034,12 @@ fn val_f64(v: &redis::Value) -> Option<f64> {
 fn info_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
     match v {
         redis::Value::Map(m) => m.iter().map(|(k, v)| (k, v)).collect(),
-        redis::Value::Array(a) => a.chunks_exact(2).map(|c| (&c[0], &c[1])).collect(),
+        redis::Value::Array(a) => a
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (&c[0], &c[1]))
+            .collect(),
         _ => Vec::new(),
     }
 }

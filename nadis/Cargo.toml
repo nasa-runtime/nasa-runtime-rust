@@ -3,7 +3,7 @@
 # partition、search 与 leader 能力；业务项目应经 nasa 门面的 `redis` feature 引用。
 [package]
 name = "nadis"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Redis 基础层：业务键有序分区消费、Stream/Proxy 生命周期、有界微批、幂等管线、锁与 RedisJob"
@@ -41,7 +41,7 @@ derive = ["dep:nadis-derive", "search"]
 # 必须显式开启，避免只用基础命令与幂等计数的项目编译 Cron、Fanout 与后台运行时。
 job = ["dep:base64", "dep:cron", "dep:chrono", "dep:chrono-tz", "dep:natelemetry"]
 [dependencies]
-nabudget = { version = "1.0.2" }
+nabudget = { version = "2.0.0" }
 # Job payload 的稳定 Base64 编码；仅 job feature 启用。
 base64 = { version = "0.22", optional = true }
 # Cron 表达式下一触发时刻计算；仅 job feature 启用（调度器触发引擎）。
@@ -50,9 +50,9 @@ cron = { version = "0.15", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
 # 触发引擎的命名时区解析（如 "UTC"、"Asia/Shanghai"）；仅 job feature 启用。
 chrono-tz = { version = "0.10", optional = true }
-nabase = { package = "nabase", version = "1.0.2" }
-napart = { version = "1.1.2" }
-nadis-derive = { package = "nadis-derive", version = "1.0.1", optional = true }
+nabase = { package = "nabase", version = "2.0.0" }
+napart = { version = "2.0.0" }
+nadis-derive = { package = "nadis-derive", version = "2.0.0", optional = true }
 redis = { version = "1", features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -64,7 +64,7 @@ thiserror = "1"
 futures = "0.3"
 tracing = "0.1"
 # 手工触发在环境链路作用域内记录 trace_id 与派生 run_id 的关联；wire 与共享 Lua 不携带 trace。
-natelemetry = { version = "1.0.2", optional = true }
+natelemetry = { version = "2.0.0", optional = true }
 uuid = { version = "1", features = ["v4"] }
 # nonce 幂等计数的跨语言账本身份与 canonical slot token 摘要；与 Java SHA-256 逐字节一致。
 sha2 = "0.10"

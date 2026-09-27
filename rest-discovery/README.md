@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["rest-discovery"] }
+nasa = { version = "2.0.0", features = ["rest-discovery"] }
 ```
 
 ## 全局初始化

@@ -1,6 +1,6 @@
 [package]
 name = "nainbox-pgsql"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "PostgreSQL Inbox backend with named ambient transactions and target-key deduplication"
@@ -14,8 +14,8 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-nainbox-core = { version = "1.0.2" }
-natx-pgsql = { version = "1.0.0" }
+nainbox-core = { version = "2.0.0" }
+natx-pgsql = { version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { version = "1", features = ["time"] }
 # 保留清理的 advisory lock 归还失败必须留下告警证据,否则后续轮次持续 contended 无从定位。

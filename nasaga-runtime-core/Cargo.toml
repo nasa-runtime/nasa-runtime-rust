@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-runtime-core"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Backend-neutral NASA Saga state machine and shared runtime state"
@@ -26,12 +26,12 @@ include = [
 anyhow = "1"
 async-trait = "0.1"
 linkme = "0.3"
-nasaga-backend = { version = "1.0.0" }
-nasaga-core = { version = "1.0.1" }
-nainbox-core = { version = "1.0.2" }
-naoutbox-core = { version = "1.0.2" }
-natelemetry = { version = "1.0.2" }
-natx-core = { version = "1.0.0" }
+nasaga-backend = { version = "2.0.0" }
+nasaga-core = { version = "2.0.0" }
+nainbox-core = { version = "2.0.0" }
+naoutbox-core = { version = "2.0.0" }
+natelemetry = { version = "2.0.0" }
+natx-core = { version = "2.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -40,14 +40,14 @@ uuid = { version = "1", features = ["v4", "v5"] }
 tracing = "0.1"
 hmac = "0.12"
 url = "2"
-nafka = { version = "1.0.3", optional = true, default-features = false }
-nadis = { version = "1.0.2", optional = true }
+nafka = { version = "2.0.0", optional = true, default-features = false }
+nadis = { version = "2.0.0", optional = true }
 redis = { version = "1", optional = true, features = ["tokio-comp", "script", "connection-manager", "cluster-async"] }
 tokio = { version = "1", optional = true, features = ["time"] }
-nagrpc = { version = "1.0.2", optional = true }
+nagrpc = { version = "2.0.0", optional = true }
 
 [build-dependencies]
-nagrpc-build = { version = "1.0.0" }
+nagrpc-build = { version = "2.0.0" }
 
 [features]
 default = []

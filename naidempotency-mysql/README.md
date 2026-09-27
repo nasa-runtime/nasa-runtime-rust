@@ -7,7 +7,7 @@ ambient MySQL 事务；事务外调用时提供跨重启、跨副本的持久响
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "idempotency-mysql"] }
+nasa = { version = "2.0.0", features = ["application", "idempotency-mysql"] }
 ```
 
 ```rust

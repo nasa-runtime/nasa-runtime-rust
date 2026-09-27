@@ -51,14 +51,14 @@ remote write 没有 scrape `up`：失联规则引用平台持续提供的 `platf
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["grafana", "web"] }
+nasa = { version = "2.0.0", features = ["grafana", "web"] }
 ```
 
 只使用原生 Axum 路由时不需要 `web` feature：
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["grafana"] }
+nasa = { version = "2.0.0", features = ["grafana"] }
 axum = "0.8"
 ```
 
@@ -66,7 +66,7 @@ axum = "0.8"
 
 ```toml
 [dependencies]
-nafana = "1.0.2"
+nafana = "2.0.0"
 axum = "0.8"
 ```
 

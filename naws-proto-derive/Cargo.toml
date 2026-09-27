@@ -1,7 +1,7 @@
 # naws-proto-derive —— `#[derive(ProtocolBytes)]` 派生宏，为 naws-proto 的 wire schema 生成 codec 调用。
 [package]
 name = "naws-proto-derive"
-version = "1.0.1"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "#[derive(ProtocolBytes)] —— 从 proto 手写 codec 提炼的派生宏(VARINT_TLV + BITPACK_TLV)。"

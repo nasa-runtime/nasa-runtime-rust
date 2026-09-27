@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "web"] }
+nasa = { version = "2.0.0", features = ["application", "web"] }
 ```
 
 ```rust

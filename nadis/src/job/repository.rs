@@ -1868,7 +1868,7 @@ impl JobRepository {
             _ => return Err(protocol("job_reap active 非法")),
         };
         let mut fanout_requests = Vec::with_capacity((raw.len() - 3) / 3);
-        for fields in raw[3..].chunks_exact(3) {
+        for fields in raw[3..].as_chunks::<3>().0 {
             let run_id = value_to_string(&fields[0]);
             let fanout_id = value_to_string(&fields[1]);
             let root_attempt = value_to_string(&fields[2])
@@ -2246,7 +2246,7 @@ fn interpret_schedule_scan(raw: &[redis::Value]) -> Result<ScheduleDueScan> {
         return Err(protocol("scan_due 成员三元组不完整"));
     }
     let mut entries = Vec::with_capacity(body.len() / 3);
-    for chunk in body.chunks_exact(3) {
+    for chunk in body.as_chunks::<3>().0 {
         entries.push(DueEntry {
             job_name: value_to_string(&chunk[0]),
             logical_fire_at: value_to_string(&chunk[1])
@@ -2292,7 +2292,7 @@ fn interpret_index_scan(raw: &[redis::Value]) -> Result<DueIndexScan> {
         return Err(protocol("scan_due 通用模式成员二元组不完整"));
     }
     let mut entries = Vec::with_capacity(body.len() / 2);
-    for pair in body.chunks_exact(2) {
+    for pair in body.as_chunks::<2>().0 {
         entries.push(DueIndexEntry {
             member: value_to_string(&pair[0]),
             score: value_to_string(&pair[1])

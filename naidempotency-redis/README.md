@@ -7,7 +7,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "idempotency-redis"] }
+nasa = { version = "2.0.0", features = ["application", "idempotency-redis"] }
 ```
 
 ```rust

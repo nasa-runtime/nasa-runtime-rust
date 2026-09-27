@@ -26,9 +26,10 @@
 - [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。
-- [ ] `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致；已有组件采用
-      crates.io 最高已发布稳定版本（包含已撤回版本）的下一个补丁号，首次公开的组件使用 `1.0.0`。
-      同版本只允许未撤回且归档内容等价的续传；不能复用撤回版本，也不能跳过补丁号。
+- [ ] 根项目、全部组件、内部依赖与公开接入示例统一使用 `2.0.0`；
+      `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致。
+      新版本必须高于 crates.io 最高已发布稳定版本（包含已撤回版本）；首次公开的组件也遵守统一计划。
+      同版本只允许未撤回且归档内容等价的续传，不能复用撤回版本。
 - [ ] 每个批次发布并回读后，在干净工作树运行 `prepare-next-release-batch.sh <completed-batch>`；只删除
       已上线 crate 的根级 `[patch.crates-io]` 本地覆盖，审阅并提交 `Cargo.toml` 与 `Cargo.lock` 后才启动
       下一批。

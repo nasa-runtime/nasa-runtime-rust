@@ -7,7 +7,7 @@
 
 ```toml
 [dependencies]
-namigrate-pgsql = "1.0.0"
+namigrate-pgsql = "2.0.0"
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 

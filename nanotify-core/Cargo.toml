@@ -1,6 +1,6 @@
 [package]
 name = "nanotify-core"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Optional business-initialized notifications with bounded non-blocking queues and atomic delivery metrics"
@@ -14,5 +14,5 @@ categories = ["asynchronous"]
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-nametrics-core = { version = "1.0.2" }
+nametrics-core = { version = "2.0.0" }
 tokio = { version = "1", features = ["sync"] }

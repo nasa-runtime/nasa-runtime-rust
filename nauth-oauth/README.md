@@ -17,7 +17,7 @@ readiness 转为不可用，刷新成功、失败和陈旧状态由运行时观�
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "oauth", "web-security"] }
+nasa = { version = "2.0.0", features = ["application", "oauth", "web-security"] }
 ```
 
 ```rust

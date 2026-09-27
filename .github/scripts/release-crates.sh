@@ -12,40 +12,40 @@ fi
 release_items() {
   case "$1" in
     naml)
-      printf '%s\n' "naml@1.0.3"
+      printf '%s\n' "naml@2.0.0"
       ;;
     napart)
-      printf '%s\n' "napart@1.1.2"
+      printf '%s\n' "napart@2.0.0"
       ;;
     1)
-      printf '%s\n' "macro-support@1.0.2 naauthz@1.0.2 nabase@1.0.2 nabudget@1.0.2 nadisc@1.0.2 nagrpc-build@1.0.0 naidempotency@1.0.2 naimg@1.0.1 nainbox-core@1.0.2 nametrics-core@1.0.2"
+      printf '%s\n' "macro-support@2.0.0 naauthz@2.0.0 nabase@2.0.0 nabudget@2.0.0 nadisc@2.0.0 nagrpc-build@2.0.0 naidempotency@2.0.0 naimg@2.0.0 nainbox-core@2.0.0 nametrics-core@2.0.0"
       ;;
     2)
-      printf '%s\n' "namigrate-core@1.0.0 nanum@1.0.2 naopenapi@1.0.2 naoutbox-core@1.0.2 nasaga-core@1.0.1 nasecret@1.0.1 natelemetry@1.0.2 naws-proto-derive@1.0.1 ncrypto@1.0.1 rest-client-macro@1.0.2"
+      printf '%s\n' "namigrate-core@2.0.0 nanum@2.0.0 naopenapi@2.0.0 naoutbox-core@2.0.0 nasaga-core@2.0.0 nasecret@2.0.0 natelemetry@2.0.0 naws-proto-derive@2.0.0 ncrypto@2.0.0 rest-client-macro@2.0.0"
       ;;
     3)
-      printf '%s\n' "async-macro@1.0.2 hystrix-macro@1.0.2 naaudit@1.0.1 nacache-macro@1.0.2 nadis-derive@1.0.1 nafana-macro@1.0.2 nafka-macro@1.0.1 nagrpc@1.0.2 nalog@1.0.1 namapper-macro@1.0.2 nanacos@1.0.2"
+      printf '%s\n' "async-macro@2.0.0 hystrix-macro@2.0.0 naaudit@2.0.0 nacache-macro@2.0.0 nadis-derive@2.0.0 nafana-macro@2.0.0 nafka-macro@2.0.0 nagrpc@2.0.0 nalog@2.0.0 namapper-macro@2.0.0 nanacos@2.0.0"
       ;;
     4)
-      printf '%s\n' "nanotify-core@1.0.0 naobject@1.0.1 napp-macro@1.0.2 nasaga-macro@1.0.2 nasecret-http@1.0.1 nasecret-vault@1.0.1 natx-macro@1.0.1 nauth-oauth@1.0.1 naweb-macro@1.0.1 naws-proto@1.0.1"
+      printf '%s\n' "nanotify-core@2.0.0 naobject@2.0.0 napp-macro@2.0.0 nasaga-macro@2.0.0 nasecret-http@2.0.0 nasecret-vault@2.0.0 natx-macro@2.0.0 nauth-oauth@2.0.0 naweb-macro@2.0.0 naws-proto@2.0.0"
       ;;
     5)
-      printf '%s\n' "config-boot@1.0.2 hystrix@1.0.2 nadis@1.0.2 nafka@1.0.3 namapper-core@1.0.0 natx-core@1.0.0 naweb@1.0.2 rest-discovery@1.0.2"
+      printf '%s\n' "config-boot@2.0.0 hystrix@2.0.0 nadis@2.0.0 nafka@2.0.0 namapper-core@2.0.0 natx-core@2.0.0 naweb@2.0.0 rest-discovery@2.0.0"
       ;;
     6)
-      printf '%s\n' "cacheable@1.0.2 nafana@1.0.2 naidempotency-redis@1.0.2 namigrate@1.0.1 namigrate-pgsql@1.0.0 nasaga-backend@1.0.0 nasched@1.0.2 natx@1.0.3 natx-pgsql@1.0.0 naws@1.0.2 rest-discovery-nacos@1.0.2"
+      printf '%s\n' "cacheable@2.0.0 nafana@2.0.0 naidempotency-redis@2.0.0 namigrate@2.0.0 namigrate-pgsql@2.0.0 nasaga-backend@2.0.0 nasched@2.0.0 natx@2.0.0 natx-pgsql@2.0.0 naws@2.0.0 rest-discovery-nacos@2.0.0"
       ;;
     7)
-      printf '%s\n' "naidempotency-mysql@1.0.2 naidempotency-pgsql@1.0.0 nainbox-mysql@1.0.2 nainbox-pgsql@1.0.0 namapper@1.0.2 namapper-pgsql@1.0.0 naoutbox-mysql@1.0.2 naoutbox-pgsql@1.0.0 nasaga-mysql@1.0.2 nasaga-pgsql@1.0.0 nasaga-runtime-core@1.0.0"
+      printf '%s\n' "naidempotency-mysql@2.0.0 naidempotency-pgsql@2.0.0 nainbox-mysql@2.0.0 nainbox-pgsql@2.0.0 namapper@2.0.0 namapper-pgsql@2.0.0 naoutbox-mysql@2.0.0 naoutbox-pgsql@2.0.0 nasaga-mysql@2.0.0 nasaga-pgsql@2.0.0 nasaga-runtime-core@2.0.0"
       ;;
     8)
-      printf '%s\n' "naaudit-mysql@1.0.2 naaudit-pgsql@1.0.0 nasaga-runtime@1.0.2 nasaga-runtime-pgsql@1.0.0"
+      printf '%s\n' "naaudit-mysql@2.0.0 naaudit-pgsql@2.0.0 nasaga-runtime@2.0.0 nasaga-runtime-pgsql@2.0.0"
       ;;
     9)
-      printf '%s\n' "napp@1.0.3"
+      printf '%s\n' "napp@2.0.0"
       ;;
     10)
-      printf '%s\n' "nasa@1.0.3"
+      printf '%s\n' "nasa@2.0.0"
       ;;
     *)
       echo "未知发布批次: $1" >&2

@@ -16,7 +16,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = [
+nasa = { version = "2.0.0", features = [
     "application",
     "config-boot",
     "log",
@@ -35,7 +35,7 @@ PostgreSQL 服务把 `tx`、`mapper` 换成 `tx-pgsql`、`mapper-pgsql`；需要
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = [
+nasa = { version = "2.0.0", features = [
     "application", "config-boot", "log", "tx-pgsql", "mapper-pgsql", "web",
 ] }
 ```
@@ -86,7 +86,7 @@ Application 依据角色作用域的 datasource_ref 选择 driver、创建角色
 
 ~~~toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "saga-runtime", "web"] }
+nasa = { version = "2.0.0", features = ["application", "saga-runtime", "web"] }
 ~~~
 
 纯 Orchestrator 的业务入口可以为空：

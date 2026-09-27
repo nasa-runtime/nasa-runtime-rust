@@ -5,7 +5,7 @@
 # ============================================================================
 [package]
 name = "natx-macro"
-version = "1.0.1"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Compile-time MySQL and PostgreSQL ambient transaction attribute macros"
@@ -20,7 +20,7 @@ proc-macro = true
 
 name = "natx_macro"
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.2" }
+nasa-macro-support = { package = "macro-support", version = "2.0.0" }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

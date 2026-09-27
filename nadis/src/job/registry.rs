@@ -700,7 +700,7 @@ fn interpret_snapshot(
         return Err(protocol("fanout_snapshot 成员字段不完整"));
     }
     let mut members = Vec::with_capacity(body.len() / 7);
-    for chunk in body.chunks_exact(7) {
+    for chunk in body.as_chunks::<7>().0 {
         members.push(ExecutorMember {
             node_identity: value_to_string(&chunk[0]),
             executor_id: value_to_string(&chunk[1]),

@@ -10,7 +10,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["ws"] }
+nasa = { version = "2.0.0", features = ["ws"] }
 ```
 
 ## 服务端
@@ -216,7 +216,7 @@ Redis 集群广播是 at-most-once 语义，适合 presence 对账、订阅状�
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["ws-kafka"] }
+nasa = { version = "2.0.0", features = ["ws-kafka"] }
 # 生产使用 SASL_SSL 时再加 "kafka-tls"；使用 Zstd 时再加 "kafka-zstd"。
 ```
 

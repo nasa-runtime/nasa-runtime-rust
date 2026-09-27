@@ -115,7 +115,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = [
+nasa = { version = "2.0.0", features = [
     "application",
     "tx",
     "mapper",
@@ -401,10 +401,10 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "grpc"] }
+nasa = { version = "2.0.0", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "1.0.0"
+nagrpc-build = "2.0.0"
 ```
 
 1. 在 `build.rs` 调用 `nagrpc_build::compile("proto/order.proto")`；

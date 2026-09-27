@@ -146,7 +146,7 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ## 最小入口
 
 ```toml
-nasa = { version = "1.0.3", features = [
+nasa = { version = "2.0.0", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -359,7 +359,7 @@ UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "tx-pgsql"] }
+nasa = { version = "2.0.0", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 
@@ -1315,10 +1315,10 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["application", "grpc"] }
+nasa = { version = "2.0.0", features = ["application", "grpc"] }
 
 [build-dependencies]
-nagrpc-build = "1.0.0"
+nagrpc-build = "2.0.0"
 ```
 
 ```rust

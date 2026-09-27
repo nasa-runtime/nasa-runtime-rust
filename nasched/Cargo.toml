@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 scheduling feature；内部迁移可直接依赖 nasched 包。
 [package]
 name = "nasched"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA async and scheduled task runtime with leader gates, misfire claims, execution records, and authority-aware tracing"
@@ -25,16 +25,16 @@ cluster = ["dep:nadis"]
 partition = ["dep:napart"]
 
 [dependencies]
-async-macro = { version = "1.0.2" }
+async-macro = { version = "2.0.0" }
 # 仅 cluster feature 下编入:把 nadis::Leader 适配成 LeaderGate;core 不依赖它。
-nadis = { package = "nadis", version = "1.0.2", optional = true }
+nadis = { package = "nadis", version = "2.0.0", optional = true }
 linkme = "0.3"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-cron-scheduler = "0.13"
 # 宏展开经 __private 桥恢复调用方 trace 上下文;调度触发以新根链路关联下游调用。
-natelemetry = { version = "1.0.2" }
+natelemetry = { version = "2.0.0" }
 # `#[Async]` 分区执行域形态的提交内核;feature `partition` 显式启用。
-napart = { version = "1.1.2", optional = true }
+napart = { version = "2.0.0", optional = true }
 # misfire 补偿需要计算上一拍应触发时刻；tokio-cron-scheduler 内部使用 croner，因此直接依赖同款做反向搜索。
 croner = "2"
 tracing = "0.1"

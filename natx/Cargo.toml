@@ -2,7 +2,7 @@
 # 业务项目优先依赖 nasa 门面并开启 tx feature；内部迁移可直接依赖 natx 包。
 [package]
 name = "natx"
-version = "1.0.3"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Named ambient MySQL transactions with managed datasource ownership and connection wait observability"
@@ -16,9 +16,9 @@ categories = ["database", "asynchronous"]
 [lib]
 name = "natx"
 [dependencies]
-nabudget = { version = "1.0.2" }
-natx-core = { version = "1.0.0" }
-natx-macro = { package = "natx-macro", version = "1.0.1" }
+nabudget = { version = "2.0.0" }
+natx-core = { version = "2.0.0" }
+natx-macro = { package = "natx-macro", version = "2.0.0" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "mysql"] }
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 anyhow = "1"

@@ -1,6 +1,6 @@
 [package]
 name = "napp-macro"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA application entry for managed multi-source lifecycle and dependency-ordered initializers"
@@ -14,7 +14,7 @@ categories.workspace = true
 proc-macro = true
 
 [dependencies]
-nasa-macro-support = { package = "macro-support", version = "1.0.2" }
+nasa-macro-support = { package = "macro-support", version = "2.0.0" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

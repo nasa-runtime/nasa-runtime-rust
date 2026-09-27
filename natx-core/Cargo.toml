@@ -1,6 +1,6 @@
 [package]
 name = "natx-core"
-version = "1.0.0"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Backend-neutral datasource ownership, transaction outcomes, and atomic connection observability"
@@ -13,8 +13,8 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
-nametrics-core = { version = "1.0.2" }
-nanotify-core = { version = "1.0.0" }
+nametrics-core = { version = "2.0.0" }
+nanotify-core = { version = "2.0.0" }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

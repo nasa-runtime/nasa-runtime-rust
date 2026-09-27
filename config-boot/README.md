@@ -6,7 +6,7 @@
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["config-boot", "nacos-sdk"] }
+nasa = { version = "2.0.0", features = ["config-boot", "nacos-sdk"] }
 ```
 
 ## 启动期加载

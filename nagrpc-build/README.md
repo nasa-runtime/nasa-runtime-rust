@@ -20,10 +20,10 @@ server 手写运行时适配的重复工作。
 
 ```toml
 [dependencies]
-nasa = { version = "1.0.3", features = ["grpc"] }
+nasa = { version = "2.0.0", features = ["grpc"] }
 
 [build-dependencies]
-nagrpc-build = "1.0.0"
+nagrpc-build = "2.0.0"
 ```
 
 最小 `build.rs`：

@@ -37,8 +37,8 @@ SQLx 错误在擦除前分类；通知失败不改变 SQL 返回、事务结果�
 
 ```toml
 [dependencies]
-namapper-pgsql = "1.0.0"
-natx-pgsql = "1.0.0"
+namapper-pgsql = "2.0.0"
+natx-pgsql = "2.0.0"
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
@@ -94,7 +94,7 @@ Mapper 通过同一 `natx-pgsql` registry 使用该 pool。
 
 ```toml
 [dependencies]
-namapper-pgsql = { version = "1.0.0", features = ["redis-cache"] }
+namapper-pgsql = { version = "2.0.0", features = ["redis-cache"] }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 ```
 

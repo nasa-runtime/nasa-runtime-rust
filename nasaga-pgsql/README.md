@@ -23,8 +23,8 @@ datasource 与 ambient transaction。
 
 ```toml
 [dependencies]
-nasaga-pgsql = "1.0.0"
-natx-pgsql = "1.0.0"
+nasaga-pgsql = "2.0.0"
+natx-pgsql = "2.0.0"
 ```
 
 ```rust

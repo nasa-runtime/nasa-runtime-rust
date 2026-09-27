@@ -5,7 +5,7 @@
 # Web scrape adapter 与 Telemetry OTLP exporter 各自读取同一 MetricHub,不重新拥有领域指标语义。
 [package]
 name = "nametrics-core"
-version = "1.0.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Provider-neutral metric catalog with atomic series budgets and shared structured/Prometheus snapshots"
