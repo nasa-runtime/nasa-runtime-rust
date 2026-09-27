@@ -96,11 +96,9 @@ nasecret-http = { path = "nasecret-http" }
 nanotify-core = { path = "nanotify-core" }
 # 覆盖项统一门面、宏与实现的本地依赖身份；未覆盖组件由 registry 解析。
 cacheable = { path = "cacheable" }
-nadis-derive = { path = "nadis-derive" }
 nafka = { path = "nafka" }
 namapper = { path = "namapper" }
 namapper-core = { path = "namapper-core" }
-namapper-macro = { path = "namapper-macro" }
 namapper-pgsql = { path = "namapper-pgsql" }
 namigrate = { path = "namigrate" }
 namigrate-pgsql = { path = "namigrate-pgsql" }
@@ -124,12 +122,8 @@ naoutbox-pgsql = { path = "naoutbox-pgsql" }
 naaudit-mysql = { path = "naaudit-mysql" }
 naaudit-pgsql = { path = "naaudit-pgsql" }
 # 同一依赖图中的组件必须统一来源，避免本地覆盖与 registry 副本造成类型不兼容或状态分裂。
-naaudit = { path = "naaudit" }
 naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
-nalog = { path = "nalog" }
-nacache-macro = { path = "nacache-macro" }
-async-macro = { path = "async-macro" }
 nasaga-backend = { path = "nasaga-backend" }
 nasaga-mysql = { path = "nasaga-mysql" }
 nasaga-pgsql = { path = "nasaga-pgsql" }
@@ -142,9 +136,6 @@ naoutbox-mysql = { path = "naoutbox-mysql" }
 naobject = { path = "naobject" }
 # 门面与 Application 生命周期必须共享同一 napart 身份，否则受管句柄无法流经公开门面类型。
 napart = { path = "napart" }
-# 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
-nagrpc = { path = "nagrpc" }
-nanacos = { path = "nanacos" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
 config-boot = { path = "config-boot" }
 naweb = { path = "naweb" }
@@ -156,9 +147,6 @@ nadis = { path = "nadis" }
 # 调度运行时与门面宏桥必须共享同一依赖身份。
 nasched = { path = "nasched" }
 # 覆盖项中的宏与可选门面能力必须复用对应本地来源，避免另行解析为 registry 副本。
-hystrix-macro = { path = "hystrix-macro" }
-nafana-macro = { path = "nafana-macro" }
-nafka-macro = { path = "nafka-macro" }
 nasa = { path = "nasa" }
 nauth-oauth = { path = "nauth-oauth" }
 naweb-macro = { path = "naweb-macro" }
