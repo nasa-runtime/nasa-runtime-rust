@@ -91,10 +91,7 @@ categories = ["asynchronous", "web-programming"]
 # 成员间依赖使用公开版本约束；保留的 workspace patch 统一相应 crate 的本地依赖身份。
 # 归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
 [patch.crates-io]
-nasecret-vault = { path = "nasecret-vault" }
-nasecret-http = { path = "nasecret-http" }
-nanotify-core = { path = "nanotify-core" }
-# 覆盖项统一门面、宏与实现的本地依赖身份；未覆盖组件由 registry 解析。
+# 覆盖项统一门面与实现的本地依赖身份；未覆盖组件由 registry 解析。
 cacheable = { path = "cacheable" }
 nafka = { path = "nafka" }
 namapper = { path = "namapper" }
@@ -111,7 +108,6 @@ naml = { path = "naml" }
 # 本地/registry 双身份,ambient 事务和幂等门禁会静默失效。
 natx = { path = "natx" }
 natx-core = { path = "natx-core" }
-natx-macro = { path = "natx-macro" }
 natx-pgsql = { path = "natx-pgsql" }
 nainbox-mysql = { path = "nainbox-mysql" }
 nainbox-pgsql = { path = "nainbox-pgsql" }
@@ -122,7 +118,6 @@ naoutbox-pgsql = { path = "naoutbox-pgsql" }
 naaudit-mysql = { path = "naaudit-mysql" }
 naaudit-pgsql = { path = "naaudit-pgsql" }
 # 同一依赖图中的组件必须统一来源，避免本地覆盖与 registry 副本造成类型不兼容或状态分裂。
-naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
 nasaga-backend = { path = "nasaga-backend" }
 nasaga-mysql = { path = "nasaga-mysql" }
@@ -130,10 +125,7 @@ nasaga-pgsql = { path = "nasaga-pgsql" }
 nasaga-runtime-core = { path = "nasaga-runtime-core" }
 nasaga-runtime = { path = "nasaga-runtime" }
 nasaga-runtime-pgsql = { path = "nasaga-runtime-pgsql" }
-nasaga-macro = { path = "nasaga-macro" }
 naoutbox-mysql = { path = "naoutbox-mysql" }
-# 对象存储指标源在门面构造，adapter 与门面必须共享同一 naobject 类型身份。
-naobject = { path = "naobject" }
 # 门面与 Application 生命周期必须共享同一 napart 身份，否则受管句柄无法流经公开门面类型。
 napart = { path = "napart" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
@@ -142,11 +134,7 @@ naweb = { path = "naweb" }
 nafana = { path = "nafana" }
 # 门面与 Application 生命周期必须共享同一 napp 类型身份，避免受管句柄和组件快照分裂。
 napp = { path = "napp" }
-napp-macro = { path = "napp-macro" }
 nadis = { path = "nadis" }
 # 调度运行时与门面宏桥必须共享同一依赖身份。
 nasched = { path = "nasched" }
-# 覆盖项中的宏与可选门面能力必须复用对应本地来源，避免另行解析为 registry 副本。
 nasa = { path = "nasa" }
-nauth-oauth = { path = "nauth-oauth" }
-naweb-macro = { path = "naweb-macro" }
