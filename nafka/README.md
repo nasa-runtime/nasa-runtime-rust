@@ -17,8 +17,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 相关文档：
 
-- [naws Kafka 集成](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/naws/README.md)：WebSocket、socket.io 与 Kafka passthrough。
-- [napp 受管生命周期](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#kafka-受管模式)：组件配置、Ready、健康和两段停机。
+- [naws Kafka 集成](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naws/README.md)：WebSocket、socket.io 与 Kafka passthrough。
+- [napp 受管生命周期](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#kafka-受管模式)：组件配置、Ready、健康和两段停机。
 - [Schema Registry](#schema-registry)：wire、缓存、控制面、观测与能力边界。
 
 ## 能力概览
@@ -165,7 +165,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 受管配置在数据面字段之外增加严格 `container` 段；单 client 使用 `kafka`，多 client 使用互斥的
 `kafkas.<name>`。完整字段、ReadyRule 和顺序见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md)。属性 consumer 的
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md)。属性 consumer 的
 `client` 必须命中一个 `consumers: collected` client；容器在 UserHook 后一次性冻结 registry，并在对外
 Ready 前等待真实 join/assignment 或 producer metadata。
 
@@ -1196,7 +1196,7 @@ kafka:
 
 Kafka header 只表达逻辑路由和消息元数据，不能指定任意 IP、host 或端口。最终出站只能选择预注册的
 本地 `Sender`、session 和白名单 sink。完整的 control/data plane、header 契约和 frame 流程见
-[naws README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/naws/README.md#websocket--kafka-集群推送与少拷贝)。
+[naws README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naws/README.md#websocket--kafka-集群推送与少拷贝)。
 
 ## 安全配置
 

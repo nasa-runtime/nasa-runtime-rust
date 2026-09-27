@@ -189,9 +189,9 @@ Prometheus 与 OTLP 读取同一组结构化 source。
 通知是非持久的尽力投递，不提供跨副本去重；窗口告警由监控后端聚合。
 投递超时从 worker 开始处理时计算，包含安全重试与退避，但不包含排队和等待启动放行；队列没有 TTL。
 
-渠道合同与业务注册配置见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md)。
+渠道合同与业务注册配置见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nanotify-core/README.md)。
 业务主动实现 `Notify` 调用通知微服务，框架不选择通信协议或直接连接消息渠道。
-抓取、remote write 和平台资源见 [nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafana/README.md)。
+抓取、remote write 和平台资源见 [nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/README.md)。
 
 ## SQL 与缓存合同
 
