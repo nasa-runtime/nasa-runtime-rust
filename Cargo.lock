@@ -2240,8 +2240,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "naaudit-mysql"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1eb661a809748d142b2017e5a453703436d40e7e158b95c5100096ef00b2e90"
+dependencies = [
+ "async-trait",
+ "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "naaudit-pgsql"
 version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "naaudit-pgsql"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d9916946a88b653c6d191b3de784c53628e492bdd26bcaa580bc3ee0986143a"
 dependencies = [
  "async-trait",
  "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3385,8 +3409,8 @@ dependencies = [
  "linkme",
  "matchit",
  "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naaudit-mysql",
- "naaudit-pgsql",
+ "naaudit-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naaudit-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naauthz 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nabudget 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3417,8 +3441,8 @@ dependencies = [
  "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
- "nasaga-runtime-pgsql",
+ "nasaga-runtime 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3484,8 +3508,8 @@ dependencies = [
  "hystrix 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hystrix-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naaudit-mysql",
- "naaudit-pgsql",
+ "naaudit-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naaudit-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nabase 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nacache-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3520,8 +3544,8 @@ dependencies = [
  "napp-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
- "nasaga-runtime-pgsql",
+ "nasaga-runtime 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3690,6 +3714,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasaga-runtime"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2589b26d8ebd20ec1a7f8af79e7939a13244fc2e97f070a93e80d3a15f2e138"
+dependencies = [
+ "anyhow",
+ "hex",
+ "linkme",
+ "nainbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nasaga-runtime-core"
 version = "2.0.0"
 dependencies = [
@@ -3752,6 +3802,26 @@ dependencies = [
 [[package]]
 name = "nasaga-runtime-pgsql"
 version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "linkme",
+ "nainbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
+name = "nasaga-runtime-pgsql"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4c0f038d6cff0d443fd72a6b9e36236f1beae795f071ac5e9de07f7a7ef7c3d"
 dependencies = [
  "anyhow",
  "linkme",
