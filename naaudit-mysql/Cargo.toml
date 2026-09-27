@@ -7,8 +7,8 @@ description = "NASA MySQL 事务审计：复用命名 datasource 并与业务写
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mysql", "audit", "outbox", "transaction"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 async-trait = "0.1"

@@ -914,8 +914,8 @@ HTTP/1/h2c listener。
 | [nainbox-mysql](nainbox-mysql/README.md) | `inbox` | Inbox 标记与业务副作用同事务 | 复用 `database.*` |
 | [nainbox-pgsql](nainbox-pgsql/README.md) | `inbox-pgsql` | PostgreSQL Inbox 标记与业务副作用同事务 | 复用显式或受管 `natx-pgsql` pool |
 | [naaudit](naaudit/README.md) | `audit` | 脱敏业务审计事件与事务型 sink 合同 | 无独立配置根 |
-| [naaudit-mysql](naaudit-mysql/README.md) | `audit` | 审计事件写入同事务 MySQL Outbox | 复用 `database.*` |
-| [naaudit-pgsql](naaudit-pgsql/README.md) | `audit-pgsql` | 审计事件写入同事务 PostgreSQL Outbox | 复用显式或受管 `natx-pgsql` pool |
+| [naaudit-mysql](naaudit-mysql/README.md) | `audit` | 审计事件写入同事务 MySQL Outbox | 连接使用 `database.*` 或 `datasources.*`；受管 sink 使用 `audit_sinks.*` |
+| [naaudit-pgsql](naaudit-pgsql/README.md) | `audit-pgsql` | 审计事件写入同事务 PostgreSQL Outbox | 连接使用 `database.*` 或 `datasources.*`；受管 sink 使用 `audit_sinks.*` |
 | [hystrix](hystrix/README.md) | `hystrix` | 有界隔离、超时、指标流；可选 Application 命令目录与有序关闭 | `hystrix.enabled`、`hystrix.isolation`、`hystrix.commands` |
 | [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 与 `#[global_fallback]`；受管命令缓存随应用实例切换 | 由 `hystrix` 运行时读取 |
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
