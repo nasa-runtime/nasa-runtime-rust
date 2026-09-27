@@ -81,7 +81,7 @@ Prometheus 与 OTLP 使用同一份指标合同。Pool 使用数是 total 与 id
 Pool acquire、事务槽等待与 Mapper 慢 SQL 使用独立阈值，不能用等待时间触发慢 SQL 通知。
 `alerts.acquire_timeout` 默认只选 `mapper` 用途；其它用途需显式声明。业务安装 `Notify` 后由 worker
 调用适配器，未安装则忽略。完整配置见
-[SQL 与连接观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+[SQL 与连接观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 
 受管 `sql.observability.console` 通过 `build_pool_with_logging`、`probe_with_logging` 以及相应的
 `*_in_schema_with_logging` 入口设置 SQLx ConnectOptions。关闭时不产生逐条语句日志；开启时关闭

@@ -98,7 +98,7 @@ Pool total、idle、in_use 为近似瞬时状态，使用数以饱和减法计�
 不使用 Mapper 的 `slow_sql.threshold_ms`。连接超时通知通过 `alerts.acquire_timeout` 启用，默认
 只包含 `mapper` 用途；`migration/probe/direct` 需显式加入 `purposes`。业务须先安装 `Notify`，
 没有实现时忽略。完整配置见
-[SQL 与连接观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+[SQL 与连接观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 
 受管应用通过 `sql.observability.console.enabled` 控制逐条 SQL 日志；底层建池和探测适配使用
 `datasource::build_pool_with_logging` 与 `probe_with_logging`。关闭时 SQLx 不产生语句事件；开启时
