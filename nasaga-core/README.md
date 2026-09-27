@@ -84,4 +84,4 @@ let definition = WorkflowDefinition::new(
 - 资源竞争仍需由业务唯一键、条件更新、语义锁或可交换操作保护。
 
 部署与恢复边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

@@ -4,7 +4,7 @@
 后端专用代码生成。业务应优先使用 `namapper`、`namapper-pgsql` 或 `nasa` 门面，通常不直接依赖本 crate。
 每个方法同时生成静态观测身份和生命周期守卫，逻辑调用与实际 SQLx 调用独立计量，结果流按 poll 与
 终态计量。开发参数显示不增加原参数类型的必需 trait bound；策略由运行时 YAML 冻结。
-合同见 [namapper-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+合同见 [namapper-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 
 ```toml
 [dependencies]

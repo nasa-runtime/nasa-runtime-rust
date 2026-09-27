@@ -93,7 +93,7 @@ Batch 不支持活跃命名路由；显式命名引用不存在或禁用仍拒�
 
 `app.sql_observability_effective(datasource, method).await` 返回冻结的有效配置，不包含 SQL、URL 或
 凭据。外部注入 Pool 的已有 SQLx 日志选项不由 Application 追溯修改，调用方须在建池时设置。
-通知 provider 配置与通信边界见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md)，
+通知 provider 配置与通信边界见 [nanotify-core](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nanotify-core/README.md)，
 独立或 Web 指标出口、remote write 与 controller 边界见
 [nafana](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/README.md)。
 
@@ -413,7 +413,7 @@ scheduling:
 未取得退出证明时保留依赖责任，不能把取消通知视为 I/O 与租约已经退出。
 独立组件使用方仍可持有 `RunningPartition` 自行管理生命周期。
 完整合同见
-[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/docs/partition.md)。
+[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/docs/partition.md)。
 
 ### Redis 多源
 
@@ -551,7 +551,7 @@ redis:
 `redis.job` 根字段是所有被引用 source 的默认值，`sources.<qualifier>` 只是稀疏覆盖；没有覆盖块的已托管
 source 仍可被任务使用。定义引用未知 source 或 `enabled: false` 的覆盖时启动失败，不会回退到
 `primary`。完整协议、独立 `RedisJobPlan`、Fanout、Cron 和观测合同见
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#redisjob)。
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
 
 ## 跨副本分布式业务配额
 
@@ -1332,7 +1332,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 受管模式读取固定 `grpc` 根；字段、默认值和硬上限见
-[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md#application-受管模式)。
+[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md#application-受管模式)。
 缺少业务 service、重复或晚到登记、ABI/descriptor 冲突、未知方法策略、非法 TLS/容量配置或端口绑定
 失败都会阻止 Ready，且不会留下监听任务。显式 `grpc.health_only: true` 可启动只有标准 health 的
 基础设施 listener。`app.grpc()` 只返回 `GrpcServerObserver`，业务不能越过组件直接 shutdown。

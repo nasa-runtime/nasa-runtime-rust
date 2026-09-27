@@ -95,4 +95,4 @@ topic 路由和投递预算由运行时与部署配置负责。
 - `externally-cancellable` 的取消结论必须来自真实业务裁决，不能由 adapter 推测。
 
 完整运行合同见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

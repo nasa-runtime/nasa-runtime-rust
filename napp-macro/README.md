@@ -3,8 +3,8 @@
 `#[nasa::application(...)]` 与 `#[nasa::initializer(...)]` 属性宏的实现 crate。业务项目不直接依赖它，
 经 `nasa` 门面的 `application` feature 使用。initializer 会在 migration 和出站依赖准备完成后、
 入站能力开放前参与三轮全局初始化屏障；运行时语义见
-[napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md) 与
-[运维指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/operations.md)。
+[napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md) 与
+[运维指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/operations.md)。
 
 宏把业务的异步 `main` 改写为统一进程入口：
 
@@ -52,7 +52,7 @@
 
 同类资源的单源根与多源根互斥，引用未知名称会在 Ready 前拒绝，不会回退到默认或唯一实例。完整字段、
 同源事务要求和停机边界见
-[napp 的单源与多源章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#yaml-创建单源与多源)。
+[napp 的单源与多源章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
 
 Saga 的 managed 角色与 datasource 由运行时读取最终配置，宏不推断默认库。可靠 client 的 append
 和 dispatcher 使用同一 `saga.client.datasource_ref`；显式 `outbox.datasource_ref` 冲突在 Ready 前
@@ -90,7 +90,7 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 清理所有权，最后一个 future 析构后才释放依赖。保留 Application 副本不会重新开放入口。
 
 完整名称、数量、共享期限和资源所有权约束见
-[业务优雅停机任务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务优雅停机任务)。
+[业务优雅停机任务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务优雅停机任务)。
 
 ## `#[nasa::initializer]`
 

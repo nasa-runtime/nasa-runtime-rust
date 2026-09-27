@@ -92,7 +92,7 @@ sql:
 `grafana.observability` 显式启用独立/Web 抓取或 remote write，关闭出口不停止内部采集。
 平台资源由独立 controller 管理，remote write 失联只引用平台提供的期望实例指标。
 完整配置见 [SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)、
-[通知接口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md) 和
+[通知接口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nanotify-core/README.md) 和
 [观测出口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/OBSERVABILITY.md)。
 
 ## 请求安全与链路传播
@@ -165,7 +165,7 @@ consumer/producer 使用 client name。引用不存在时会在 Ready 前失败�
 `nasa::saga::pgsql`。同一原子链必须使用相同
 qualifier；不同 datasource 之间不构成一个事务。source 集合、endpoint、凭据和身份字段在运行期
 保持冻结，变化后必须重启。完整 YAML 与生命周期合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#yaml-创建单源与多源)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#yaml-创建单源与多源)。
 
 ### Inbox 保留治理
 
@@ -195,7 +195,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 声明组件时必须启用对应 feature。`auth` 必须与 `web` 同时声明；`hystrix`、`grafana`、`mapper`、
 `openapi` 等是函数级或门面能力，不是组件字符串。完整生命周期合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md)。
 
 `#[nasa::application("saga")]` 隐式纳入 DB 与 Outbox，业务无需再声明 `"db"` 或 `"outbox"`；
 `#[nasa::application("outbox")]` 可脱离 Saga 独立运行，并隐式纳入 DB。Inbox 是事务内原语，没有独立
@@ -215,7 +215,7 @@ Ready；未设置该字段时不影响 client 的数据源绑定。
 
 该能力不建立跨库事务，不把 Ready 当作流程完成证明；运行中应同时关注 `napp_outbox_pending`、
 `napp_outbox_published_total`、`napp_outbox_dead` 和远端实例查询。完整配置见
-[client 发起等级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#client-发起等级)。
+[client 发起等级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#client-发起等级)。
 
 ## Redis 分区消费门面
 
@@ -238,7 +238,7 @@ Ready、逐来源健康与聚合停机；单独声明 `"redis"` 不会自动注�
 共用截止点并发排干，未完成时保留依赖责任。独立使用方持有 `RunningPartition` 并自行等待
 `shutdown_until(deadline)`；只有显式 `force_shutdown_until` 才请求有损中止。
 完整配置、逐条注册和容量算法见
-[nadis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#业务键有序分区消费)。
+[nadis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#业务键有序分区消费)。
 
 ## RedisJob 门面
 
@@ -272,8 +272,8 @@ Application Ready 后，业务控制面通过 `app.redis_job_control(qualifier)`
 `app.redis_job_query(qualifier)` 显式选 source；未知或已停止准入的 source 返回结构化错误，不会回退到
 `primary`。取得的门面不拥有 shutdown 权限，停机仍由 Application 唯一编排。多 source 配置、独立
 `RedisJobPlan` 与完整运行边界见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#redisjob-受管模式) 和
-[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/README.md#redisjob)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redisjob-受管模式) 和
+[nadis README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/README.md#redisjob)。
 
 ## 跨副本业务配额门面
 
@@ -303,7 +303,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 选择 fail-closed。与 `web` 同时启用后，`distributed_rate_limit` 可按已解析客户端 IP、已验证
 Principal 的 tenant 或 subject/client_id，以及摘要后的 API key 计量；来源缺失时按冻结策略放行或
 拒绝，超额返回 `429` / `Retry-After`。完整装配顺序、窗口上限和键空间合同见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#跨副本分布式业务配额)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#跨副本分布式业务配额)。
 
 ## 业务初始化屏障
 
@@ -322,7 +322,7 @@ Ready，并严格逆序停止已取得所有权的任务、撤销 action 并关�
 配置，执行与条件工厂共同消费 `application.startup_timeout_ms` 的全局绝对预算。
 
 完整元数据、`one-shot`/`hosted` 任务激活、指标与幂等边界见
-[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务-initializer)。
+[napp README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务-initializer)。
 
 ## 业务优雅停机任务
 
@@ -360,7 +360,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 `panic=abort`、同步阻塞和析构自身展开期间的未隔离再次 panic 不属于可隔离范围。
 
 完整 API 签名、生命周期位置、名称边界和资源所有权约束见
-[napp 的业务优雅停机任务章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#业务优雅停机任务)。
+[napp 的业务优雅停机任务章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务优雅停机任务)。
 
 ## 稳定基础设施合同
 
@@ -390,10 +390,10 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 并发布 Application Ready 后统一接流。gRPC 的 `Bound` 观察状态不是 health Serving；发现注册确认
 之前动态 readiness 仍不可用。独立 gRPC 可用 `ServerPlan::bind` 与一次性激活权接入自己的启动屏障。
 
-完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nafka/README.md#schema-registry)、
-[naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/naobject/README.md) 和
-[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md)，以及
-[napp Web listener](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#web-http-listener-受管模式)。
+完整合同见 [nafka Schema Registry](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#schema-registry)、
+[naobject](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naobject/README.md) 和
+[nagrpc](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)，以及
+[napp Web listener](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#web-http-listener-受管模式)。
 
 ### gRPC 完整接入
 
@@ -422,7 +422,7 @@ readiness、发现 metadata、指标和反向停机；`nasa::grpc` 是业务运�
 并连接 codegen ABI 和 `ManagedGrpcService` 适配，使运行时能在 bind 前验证 service/method 目录、冲突和
 方法策略。协议已由独立 contract crate 发布时，应用不再需要自己的 `build.rs`，只依赖 `nasa` 与该
 contract crate。完整配置、安全、发现、指标、兼容门禁和独立模式见
-[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nagrpc/README.md)。
+[nagrpc README](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nagrpc/README.md)。
 
 ## 受管配置与资源取得
 
