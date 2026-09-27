@@ -175,7 +175,7 @@ Redis 分区消费由 `nadis::RunningPartition` 建立这些执行域，提供 `
 不同 Runner 而绕过前序确认。napart 本身不接管 Redis、PEL 或分布式租约，也不跨 Runner 建立
 顺序关系；其 `TaskStatus::Completed` 不能替代持久消息 ACK。
 具体源级预算和失败语义见
-[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nadis/docs/partition.md)。
+[Redis 分区消费](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadis/docs/partition.md)。
 
 ## 提交、背压与取消
 
