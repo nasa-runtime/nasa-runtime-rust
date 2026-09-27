@@ -2326,7 +2326,7 @@ dependencies = [
  "nabase 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nabudget 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nadis-derive 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "napart",
+ "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde",
@@ -3024,6 +3024,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "napart"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b2ea8e5fe4c2938a5ea5d06b3dd96cbc35c743df44a4d4adbd58d193522ab11"
+dependencies = [
+ "arc-swap",
+ "dashmap",
+ "futures-util",
+ "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "napp"
 version = "2.0.0"
 dependencies = [
@@ -3076,7 +3090,7 @@ dependencies = [
  "naoutbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql",
  "naoutbox-pgsql",
- "napart",
+ "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime",
  "nasaga-runtime-pgsql",
  "nasched",
@@ -3175,7 +3189,7 @@ dependencies = [
  "naoutbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-mysql",
  "naoutbox-pgsql",
- "napart",
+ "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp",
  "napp-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3363,7 +3377,7 @@ dependencies = [
  "croner",
  "linkme",
  "nadis",
- "napart",
+ "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tokio-cron-scheduler",
