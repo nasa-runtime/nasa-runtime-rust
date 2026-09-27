@@ -103,9 +103,7 @@ namapper-core = { path = "namapper-core" }
 namapper-macro = { path = "namapper-macro" }
 namapper-pgsql = { path = "namapper-pgsql" }
 namigrate = { path = "namigrate" }
-namigrate-core = { path = "namigrate-core" }
 namigrate-pgsql = { path = "namigrate-pgsql" }
-nanum = { path = "nanum" }
 naws = { path = "naws" }
 # 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
 hystrix = { path = "hystrix" }
@@ -122,20 +120,16 @@ nainbox-pgsql = { path = "nainbox-pgsql" }
 naidempotency-mysql = { path = "naidempotency-mysql" }
 naidempotency-pgsql = { path = "naidempotency-pgsql" }
 naidempotency-redis = { path = "naidempotency-redis" }
-naoutbox-core = { path = "naoutbox-core" }
 naoutbox-pgsql = { path = "naoutbox-pgsql" }
 naaudit-mysql = { path = "naaudit-mysql" }
 naaudit-pgsql = { path = "naaudit-pgsql" }
-# 同版本双身份消除:成员既按 path 直依赖、又经其它成员的公开坐标传递引用的 crate,
-# 必须统一来源,否则类型跨身份流动即编译失败或行为分裂。
-ncrypto = { path = "ncrypto" }
+# 同一依赖图中的组件必须统一来源，避免本地覆盖与 registry 副本造成类型不兼容或状态分裂。
 naaudit = { path = "naaudit" }
 naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
 nalog = { path = "nalog" }
 nacache-macro = { path = "nacache-macro" }
 async-macro = { path = "async-macro" }
-nasaga-core = { path = "nasaga-core" }
 nasaga-backend = { path = "nasaga-backend" }
 nasaga-mysql = { path = "nasaga-mysql" }
 nasaga-pgsql = { path = "nasaga-pgsql" }
@@ -150,11 +144,8 @@ naobject = { path = "naobject" }
 napart = { path = "napart" }
 # 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
 nagrpc = { path = "nagrpc" }
-# 指标统一目录与领域结构化快照必须共享同一类型身份，才能由 Application 完成文本与 OTLP 双出口。
-natelemetry = { path = "natelemetry" }
 nanacos = { path = "nanacos" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
-nasecret = { path = "nasecret" }
 config-boot = { path = "config-boot" }
 naweb = { path = "naweb" }
 nafana = { path = "nafana" }
@@ -164,14 +155,10 @@ napp-macro = { path = "napp-macro" }
 nadis = { path = "nadis" }
 # 调度运行时与门面宏桥必须共享同一依赖身份。
 nasched = { path = "nasched" }
-# 门面与声明式 REST 客户端宏必须共享同一依赖身份，确保生成代码使用一致的错误和参数类型。
-rest-client-macro = { path = "rest-client-macro" }
-# 工作区成员使用同一组本地版本；宏与可选门面能力也不能另行解析为 registry 副本。
+# 覆盖项中的宏与可选门面能力必须复用对应本地来源，避免另行解析为 registry 副本。
 hystrix-macro = { path = "hystrix-macro" }
 nafana-macro = { path = "nafana-macro" }
 nafka-macro = { path = "nafka-macro" }
-naopenapi = { path = "naopenapi" }
 nasa = { path = "nasa" }
 nauth-oauth = { path = "nauth-oauth" }
 naweb-macro = { path = "naweb-macro" }
-naws-proto-derive = { path = "naws-proto-derive" }
