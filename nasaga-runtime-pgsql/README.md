@@ -10,7 +10,7 @@ Application 受管可靠 client 同样把业务事实、start-intent 和 dispatc
 生命周期。`deprecated → retired` 必须确认实例、迟到结果所依赖的事实、保留 Outbox 与审计均无引用，
 且没有有效 capability 租约；退休不删除历史事实或代替数据保留策略。受管 HTTP/gRPC API、Nacos
 发现、HMAC/mTLS 轮换与分段延迟观测由 `napp` 统一装配，配置见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 ## 核心价值
 

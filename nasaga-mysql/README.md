@@ -128,4 +128,4 @@ Application 会复验当前角色作用域内的 `datasource_ref`、`outbox.data
 - 排序规则转换可能重建大表，执行方式和资源预算必须由部署负责人批准。
 
 完整运行边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

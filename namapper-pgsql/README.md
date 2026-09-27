@@ -13,7 +13,7 @@
 
 MySQL/PostgreSQL 使用同一固定词表、指标桶和通知规则，但 driver 与数据源身份严格区分。
 SQLx 错误在擦除前分类；通知失败不改变 SQL 返回、事务结果或数据库 readiness。
-完整默认配置与边界见 [后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+完整默认配置与边界见 [后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 
 ### 阈值通知与执行边界
 

@@ -9,7 +9,7 @@ dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两
 生命周期。`deprecated → retired` 必须确认实例、迟到结果所依赖的事实、保留 Outbox 与审计均无引用，
 且没有有效 capability 租约；退休不删除历史事实或代替数据保留策略。受管 HTTP/gRPC API、Nacos
 发现、HMAC/mTLS 轮换与分段延迟观测由 `napp` 统一装配，配置见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 ## 核心价值
 
@@ -252,4 +252,4 @@ PostgreSQL 使用各自与排序匹配的索引查询。稀疏状态位于历史
   后才构成完整入站链路；单独使用裁决器或 generated client 不会自行创建这些运行边界。
 
 部署、恢复和容量边界见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。

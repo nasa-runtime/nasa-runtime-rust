@@ -77,7 +77,7 @@ dispatcher。覆盖按 `method > datasource > global` 逐叶继承，空对象�
 `alerts.slow_sql.cooldown_ms=0`；默认冷却为 60000 ms。判定使用原始耗时 `>= slow_sql.threshold_ms`，
 不包含连接等待与消费者处理时间，也不依赖 `slow_sql.log_enabled`。有界队列不承诺故障下绝对送达。
 策略在启动时冻结；日志级别可热刷新，但不能借此改变 SQL 连接选项。完整默认 YAML、范围、生产
-数据边界及指标口径见 [SQL 观测合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+数据边界及指标口径见 [SQL 观测合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 
 业务实现 `nanotify_core::Notify` 并调用 `nanotify_core::init(Arc<dyn Notify>)` 安装进程实现。
 告警省略 `provider_ref` 即使用默认实现，无需声明 `notifications.providers`；未初始化时忽略通知，
@@ -1041,7 +1041,7 @@ HTTP HMAC 和 gRPC mTLS 随配置视图一次发布，`saga.credential_overlap_m
 出站、capability 续租和 Catalog 执行资格共同读取当前安全合同，非法候选保留上一份有效配置。动态 principal
 使用 `secret://certificate_ref`，既有连接在每个 RPC 上也要复验；静态 `sha256:...` 保持固定身份。
 完整发现配置、证书轮换和多副本收敛边界见
-[Saga 生产指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 业务通过 `SagaHandle::orchestrator` 或 `pgsql_orchestrator` 取得 `SagaOrchestratorHandle`，可发起、查询、
 暂停实例和读取运行指标；每次业务调用复验组件资格。句柄不暴露底层 Arc、registry 替换、timer 领取或

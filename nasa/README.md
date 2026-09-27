@@ -50,12 +50,12 @@ participant 或 client；managed 模式支持 HTTP、gRPC、Kafka 与 Redis Stre
 并由 Application 构造标准 API、Catalog、签名 definition 发布、capability 续租、timer 与 dispatcher，
 普通业务不提交运行计划。Saga 不把远端调用伪装成跨服务 ACID，也不承诺物理 exactly-once 或并发隔离。
 完整合同见
-[napp Saga 受管模式](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#saga-受管模式)。
+[napp Saga 受管模式](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#saga-受管模式)。
 
 Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与 schema 合同，以及 Nacos
 协调侧服务发现。HTTP HMAC 与 gRPC mTLS 可通过完整配置快照热轮换；definition 退休保留实例、
 消息与审计引用门禁。部署、轮换与观测配置见
-[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/docs/saga-production.md)。
+[Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
 门面还提供四项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter、
 可独立运行或交给 Application 托管的 gRPC listener，以及由 Application 独占的受管 Web listener。
@@ -91,7 +91,7 @@ sql:
 
 `grafana.observability` 显式启用独立/Web 抓取或 remote write，关闭出口不停止内部采集。
 平台资源由独立 controller 管理，remote write 失联只引用平台提供的期望实例指标。
-完整配置见 [SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)、
+完整配置见 [SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)、
 [通知接口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/nanotify-core/README.md) 和
 [观测出口](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafana/OBSERVABILITY.md)。
 
@@ -177,7 +177,7 @@ qualifier；不同 datasource 之间不构成一个事务。source 集合、endp
 `Application::inbox_retention_snapshot()` 与统一指标端点公开轮次、删除、owner 争用、预算耗尽、失败
 轮次和最老候选年龄的无标签聚合账目。该能力只清理已经提交且超过安全窗口的去重标记，不创建生产
 索引，不延长消息系统实际可重投的期限，也不改变 Inbox 仅覆盖同一数据库事务内副作用的边界。完整
-配置入口和指标名见 [napp Inbox 章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/napp/README.md#inbox-去重标记保留)。
+配置入口和指标名见 [napp Inbox 章节](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#inbox-去重标记保留)。
 
 ## 应用入口
 

@@ -22,7 +22,7 @@ sql:
 上例要求应用明确运行在 `local`、`development`、`dev` 或 `test` 环境；参数名命中凭据语义时强制脱敏，
 未知类型使用占位，不增加 Mapper 参数的必需 trait bound。生产保持参数输出关闭。
 完整字段、默认值、指标口径、覆盖规则和失败边界见
-[后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/main/namapper-core/README.md#sql-观测与配置)。
+[后端中立 SQL 观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-core/README.md#sql-观测与配置)。
 通知失败不改变 SQL 返回、事务结果或数据库 readiness；原有 `MapperMetrics` 仍只承担兼容缓存事件。
 
 ### 阈值通知的运行路径
@@ -103,7 +103,7 @@ natx = { version = "2.0.0" }
 
 ## 启动初始化
 
-Mapper client 不持有 `MySqlPool`。所有 SQL 默认从 `nasa::tx` / `natx` 全局连接池取连接；在 `#[transactional]` 作用域内自动加入当前事务。
+Mapper client 不持有 `MySqlPool`。所有 SQL 按 datasource 名称从 `nasa::tx` / `natx` 事务运行时取连接；在同源 `#[transactional]` 作用域内自动加入当前事务。
 
 ```rust
 use sqlx::mysql::MySqlPoolOptions;
@@ -121,7 +121,7 @@ async fn init_db() -> anyhow::Result<()> {
 
 在 `#[application]` 运行时下，以上装配自动完成，业务入口不再写启动代码：
 
-- 声明 `db` 组件：按 `database` / `datasources.<name>` 配置先单连接探测、再建池，并注入本运行时（等价 `try_init` / `try_init_datasource`）。
+- 声明 `db` 组件：按 `database` / `datasources.<name>` 配置校验、探测并建立连接池，统一发布由 Application 拥有的冻结 datasource registry；不能再调用 standalone 的 `try_init` / `try_init_datasource` 建立第二份连接池权威。
 - 声明 `cache` 组件会托管通用两级缓存；Mapper L2 仍由业务在启动 Hook 中显式构造并安装，可复用受管 Redis 连接。
 - Service 模式在对外提供服务之前自动调用 `assert_l2_cache_installed_for_cached_queries()`：存在 `cache = true` 查询但启动 Hook 尚未安装默认 L2 时启动失败，而不是生产静默绕过缓存。
 

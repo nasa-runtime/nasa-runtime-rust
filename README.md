@@ -883,7 +883,7 @@ HTTP/1/h2c listener。
 | [rest-client-macro](rest-client-macro/README.md) | `rest-client` | 声明式 REST 客户端宏 | `rest_clients.*` |
 | [naweb](naweb/README.md) | `web` / `web-security` | Axum 路由、interceptor 与端点安全运行时 | `server.*` 由 napp 读取 |
 | [naweb-macro](naweb-macro/README.md) | `web` | MVC 风格路由注解和路由收集 | 编译期属性，无运行期配置 |
-| [namapper](namapper/README.md) | `mapper` / `mapper-redis-cache` | MySQL 声明式 SQL Mapper、动态 SQL、二级缓存 | `mysql.*`、`datasources.*`、`mapper.*`、`redis.*` |
+| [namapper](namapper/README.md) | `mapper` / `mapper-redis-cache` | MySQL 声明式 SQL Mapper、动态 SQL、二级缓存 | `database.*`、`datasources.*`、`sql.observability.*`；L2 显式安装 |
 | [namapper-macro](namapper-macro/README.md) | `mapper` | Mapper 派生和 SQL 注解宏 | 由 `namapper` 运行时读取 |
 | [namapper-core](namapper-core/README.md) | runtime 内部合同 | 后端中立分页、排序、缓存合同、共享缓存运行时与结构化 SQL 节点 | 不读取业务配置 |
 | [namapper-pgsql](namapper-pgsql/README.md) | `mapper-pgsql` / `mapper-redis-cache-pgsql` | PostgreSQL Mapper、`$n` bind、动态 SQL、流式结果与 Redis L2 | standalone 显式注册 pool；Application 模式复用受管 datasource |
