@@ -97,7 +97,8 @@ sql:
 
 ## 请求安全与链路传播
 
-门面通过 `nasa::authz` 暴露完整 route 裁决快照。策略集合、未命中三态缺省和 generation 同代冻结，
+同时启用 `application,web` 后，通过 `nasa::application` 使用 `PolicyRegistry`、
+`PolicyDecisionSnapshot` 与 `RequestSecurityContext`。策略集合、未命中三态缺省和 generation 同代冻结，
 Web 边界、registry 入口与 handler 请求上下文不会各自读取不同代配置；显式策略不会被公开路由豁免
 绕过。对象授权沿用同一请求快照，provider 缺失、拒绝、错误或超时都拒绝访问。身份验签仍由
 `nasa::oauth` 或业务认证层完成，授权入口只消费已经验证的 `Principal`。
@@ -108,8 +109,10 @@ OAuth/JWKS 或业务认证 → Principal → route 完整快照 → handler 对�
 无上游上下文 ── exporter sampler ───→ 新根；无 exporter 时保持未采样
 ```
 
-`nasa::telemetry` 严格继承合法上游的 sampled 位，只有受管 exporter 能按 `root_sample_ratio` 裁决
-无上游的新根。`nasa::scheduling` 在 leader 与 claim 权威均取得后才创建调度执行 span；拒绝拍次只
+链路传播严格继承合法上游的 sampled 位，只有受管 exporter 能按 `root_sample_ratio` 裁决
+无上游的新根。`application,web` 组合通过 `nasa::application::TraceContext` 暴露链路上下文；
+再启用 `telemetry` 并声明同名组件时，由 Application 配置并持有 exporter。
+`nasa::scheduling` 在 leader 与 claim 权威均取得后才创建调度执行 span；拒绝拍次只
 记录 Skipped。该组合提供传播与低基数观测，不替业务建立身份信任、对象归属、跨服务采样协调或
 exactly-once 调度。
 

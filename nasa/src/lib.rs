@@ -84,7 +84,8 @@
 //!
 //! # 请求安全与链路传播
 //!
-//! `authz` 门面公开同代 route 策略、未命中缺省与 generation 的完整裁决快照；Web、registry 与
+//! `application,web` 组合通过 `nasa::application` 公开授权类型，以及同代 route 策略、未命中缺省
+//! 与 generation 的完整裁决快照；Web、registry 与
 //! handler 请求上下文使用同一语义，显式策略不会被公开 route 豁免绕过。对象授权 provider 不能
 //! 明确放行时 fail-closed；身份验签仍由 `oauth` 或业务认证层负责。
 //!

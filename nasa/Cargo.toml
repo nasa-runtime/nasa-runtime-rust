@@ -93,7 +93,7 @@ mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro", "application_impl?/mapp
 mapper-pgsql = ["tx-pgsql", "dep:mapper_pgsql_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 mapper-cache-grouped-pgsql = ["mapper-pgsql", "cache", "mapper_pgsql_impl/grouped-cache"]
-# 弱依赖桥：同时启用 application 时，编入 Mapper L2 启动兜底断言；具体 L2 仍由业务 Hook 显式安装。
+# 同时启用 application 时，编入 Mapper L2 启动门禁，并支持通过 mapper_cache 配置纳管 Redis L2。
 mapper-redis-cache = ["mapper", "mapper_impl/redis-cache", "application_impl?/mapper-cache"]
 mapper-redis-cache-pgsql = ["mapper-pgsql", "mapper_pgsql_impl/redis-cache", "application_impl?/mapper-cache-pgsql"]
 # 命名分区 Runner；同时启用 application 时纳入逐域 readiness 与反序停机。
@@ -124,8 +124,8 @@ redis = ["dep:redis_impl", "application_impl?/redis"]
 redis-job = ["application", "redis", "redis_impl/job", "application_impl?/redis-job"]
 # rate-limit：跨副本分布式业务配额，由 RateLimitProvider 与 nadis Redis 后端实现并经 nasa::application 暴露。
 rate-limit = ["application", "redis", "application_impl/rate-limit"]
-# telemetry：OpenTelemetry traces 组件。启用后可声明 #[application("telemetry")]；
-# 传播由 Web trace 中间件自动完成,v1 无业务直调 API(配置驱动 + 日志 sink)。
+# 同时启用 application 时，编入受管 span 队列、日志或 OTLP/HTTP 导出以及停机 flush。
+# Web trace 中间件负责提取上游上下文；采样与导出由 telemetry 配置控制。
 telemetry = ["application_impl?/telemetry"]
 # Redis 子能力向下透传(同 ws-* 纪律):search = RediSearch/RedisJSON 封装;
 # derive = #[derive(RedisDocument)](蕴含 search,宏生成代码引用 search 类型)。
