@@ -573,15 +573,16 @@ driver mismatch；显式配置 PostgreSQL `schema` 时，它同时设置业务�
 其依赖图不包含 MySQL runtime。需要混配时同时开启实际使用的 MySQL 与 PostgreSQL feature。
 
 `migrations` 配置只决定 `disabled`、`validate`、`apply`、锁等待和 PostgreSQL session topology，不会
-从目录自动发现业务 SQL。Service 在 UserHook 中使用
+从目录自动发现业务 SQL。Service 可以在 UserHook 中使用
 `app.configure_migrations("reporting", sqlx::migrate!("./migrations"))?` 登记构建期嵌入的 migration；
 同一数据源只能登记一次，门禁在 initializer 与入站监听之前执行。业务需直接依赖启用对应 driver 和
 `migrate` 的 `sqlx`，例如 PostgreSQL 使用
 `sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }`。门禁模式不是
 `disabled` 时，PostgreSQL 事务级代理还必须提供指向同一 database/schema 的
-`migrations.session_url`，Application 会在 advisory lock 前复验目标身份。Batch 应在 Hook 内显式调用
-MySQL 的 `nasa::application::run_gate` 或 PostgreSQL 的 `nasa::migration::pgsql::run_gate`，不能使用该
-登记入口。
+`migrations.session_url`，Application 会在 advisory lock 前复验目标身份。Service 与 Batch 都可通过
+`nasa::application::MIGRATION_PLANS` 静态工厂登记迁移；Batch 在 initializer 与工作负载之前执行，
+不接受工作负载 Hook 的动态登记。静态工厂的登记方式见
+[业务 migration 登记](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#业务-migration-登记)。
 
 ## YML 配置与使用
 

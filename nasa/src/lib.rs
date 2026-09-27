@@ -181,11 +181,12 @@
 ///
 /// # Migration 门禁
 ///
-/// YAML 的 `migrations` 只定义模式、锁等待和 PostgreSQL session topology。Service 在 UserHook 用
+/// YAML 的 `migrations` 只定义模式、锁等待和 PostgreSQL session topology。Service 可以在 UserHook 用
 /// `Application::configure_migrations` 为每个 datasource 登记业务通过 `sqlx::migrate!` 嵌入的
 /// `Migrator`；门禁在 initializer 与 listener 前执行。门禁模式不是 `disabled` 时，事务级 PostgreSQL 代理必须提供独立
-/// `migrations.session_url`，并在 advisory lock 前与业务池复验 database/schema 身份。Batch 应显式
-/// 调用 MySQL 的 `application::run_gate` 或 PostgreSQL 的 `migration::pgsql::run_gate`。
+/// `migrations.session_url`，并在 advisory lock 前与业务池复验 database/schema 身份。
+/// Service 与 Batch 都可通过 `application::MIGRATION_PLANS` 静态工厂登记迁移。
+/// Batch 在 initializer 与工作负载之前执行迁移，不接受工作负载 Hook 的动态登记。
 ///
 /// # 跨副本业务配额
 ///

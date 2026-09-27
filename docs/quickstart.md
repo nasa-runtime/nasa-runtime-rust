@@ -244,8 +244,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 门禁会在 initializer 与 listener 之前执行；同一数据源只能登记一次。门禁模式不是 `disabled` 时，事务级代理应声明
 `connection_topology: transaction_pool`，并在 `migrations.session_url` 提供指向同一 database/schema
-的直连或会话级 endpoint，Application 会在取 advisory lock 前复验目标身份。Batch 模式应在 Hook 内
-显式运行 `nasa::migration::pgsql::run_gate`，不使用 `configure_migrations`。
+的直连或会话级 endpoint，Application 会在取 advisory lock 前复验目标身份。Batch 模式通过
+`nasa::application::MIGRATION_PLANS` 静态工厂登记迁移，在 initializer 与工作负载之前执行；
+不在工作负载 Hook 调用 `configure_migrations`。登记方式见 [业务 migration 登记](../napp/README.md#业务-migration-登记)。
 
 配置默认拒绝未知字段。数据库、Redis 和其它外部凭据通过环境变量或部署平台 secret 注入，不写入仓库。
 本示例已经启用 `application,web` 并声明 `"web"` 组件，因此受管 Web listener 默认只接受 HTTP/1；
