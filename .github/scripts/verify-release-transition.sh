@@ -68,6 +68,7 @@ if [[ "$blocked" != "0" ]]; then
   exit 1
 fi
 
-"$cargo_bin" metadata --locked --no-deps --format-version 1 \
+# 完整解析会拒绝尚未记录 registry 来源的旧锁文件，避免声明检查通过后才在打包阶段失败。
+"$cargo_bin" metadata --locked --format-version 1 \
   --manifest-path "$repository_root/Cargo.toml" > /dev/null
 echo "批次 $release_batch 的全部前置 crate 已解除根级 path patch，锁文件可按当前 manifest 解析"

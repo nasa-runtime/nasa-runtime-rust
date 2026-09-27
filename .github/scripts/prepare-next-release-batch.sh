@@ -62,8 +62,9 @@ else
   mv "$next_manifest" "$repository_root/Cargo.toml"
 fi
 
-# Cargo 复用既有锁定结果，仅为刚解除 patch 的依赖补充 registry package，不主动升级无关依赖。
-"$cargo_bin" metadata --no-deps --format-version 1 \
+# 必须解析完整依赖图才能把解除 patch 后的 registry 来源写入锁文件；只读取成员声明不会更新来源。
+# Cargo 复用仍满足约束的锁定结果，不主动升级无关依赖。
+"$cargo_bin" metadata --format-version 1 \
   --manifest-path "$repository_root/Cargo.toml" > /dev/null
 
 echo "批次 $completed_batch 已切换为 registry 来源；请审阅并提交 Cargo.toml 与 Cargo.lock，再执行下一批"

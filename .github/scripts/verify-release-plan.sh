@@ -62,7 +62,8 @@ registry_requirement_resolves() {
   probe_root="$plan_root/probe-$probe_counter"
   mkdir -p "$probe_root/src"
   printf 'fn main() {}\n' > "$probe_root/src/main.rs"
-  printf '[package]\nname = "release-plan-probe-%s"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\ncandidate = { package = "%s", version = "%s", default-features = %s, features = %s }\n' \
+  # 临时目录可以位于其它工作区内，独立 workspace 边界保证这里只验证 registry 合同。
+  printf '[workspace]\n\n[package]\nname = "release-plan-probe-%s"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\ncandidate = { package = "%s", version = "%s", default-features = %s, features = %s }\n' \
     "$probe_counter" "$package_name" "$requirement" "$uses_default_features" \
     "$dependency_features" > "$probe_root/Cargo.toml"
   if ! "$cargo_bin" metadata --format-version 1 --manifest-path "$probe_root/Cargo.toml" \

@@ -172,6 +172,8 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@3a8b2ad3ea1212417907ff0e1b3d0c4e121bef40 # 1.94.0
+      - name: install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev libssl-dev pkg-config
       - name: select release crates
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
@@ -279,6 +281,7 @@ jobs:
 
             publish_log="$RUNNER_TEMP/${crate_name}-${version}.publish.log"
             publish_attempt=1
+            accepted_checksum="$local_checksum"
             while true; do
               if (( publish_attempt > 1 )); then
                 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
@@ -288,6 +291,8 @@ jobs:
                   if [[ "$remote_checksum" != "$local_checksum" ]]; then
                     verify_existing_archive "$crate_name" "$version" "$archive" "$remote_checksum"
                   fi
+                  # 等价归档可以来自不同提交；回读必须核对已验证的远端字节，不能再套用本地 VCS checksum。
+                  accepted_checksum="$remote_checksum"
                   break
                 fi
                 if [[ "$http_code" != "404" ]]; then
@@ -351,7 +356,7 @@ jobs:
               exit 1
             fi
             remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
-            if [[ -z "$remote_checksum" || "$remote_checksum" != "$local_checksum" ]]; then
+            if [[ -z "$remote_checksum" || "$remote_checksum" != "$accepted_checksum" ]]; then
               echo "$crate_name $version 发布后 checksum 不匹配" >&2
               exit 1
             fi

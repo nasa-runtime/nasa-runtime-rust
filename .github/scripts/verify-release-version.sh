@@ -41,27 +41,33 @@ http_code="$(curl --silent --show-error --output "$response_file" --write-out '%
   --user-agent "nasa-runtime-release/1.0" "https://crates.io/api/v1/crates/${crate_name}")"
 case "$http_code" in
   200)
-    registry_version="$(jq -r '.crate.max_stable_version // empty' "$response_file")"
+    # 已撤回的稳定版本仍占用版本号，必须参与最高版本计算；不能仅依赖排除撤回版本的摘要字段。
+    registry_version="$(jq -r '
+      [.versions[].num | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))]
+      | max_by(split(".") | map(tonumber)) // empty
+    ' "$response_file")"
     if [[ -z "$registry_version" ]]; then
-      echo "$crate_name 的 crates.io 响应缺少 max_stable_version" >&2
+      echo "$crate_name 的 crates.io 响应没有可用的稳定版本清单" >&2
       exit 1
     fi
     if [[ ! "$registry_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
       echo "$crate_name 的 crates.io 最高稳定版本不是受支持的 SemVer: $registry_version" >&2
       exit 1
     fi
-    IFS=. read -r local_major local_minor local_patch <<< "$version"
     IFS=. read -r registry_major registry_minor registry_patch <<< "$registry_version"
-    if (( local_major < registry_major \
-      || (local_major == registry_major && local_minor < registry_minor) \
-      || (local_major == registry_major && local_minor == registry_minor && local_patch < registry_patch) )); then
-      echo "$crate_name 工作区版本 $version 低于 crates.io 最高稳定版本 $registry_version" >&2
+    expected_version="${registry_major}.${registry_minor}.$((registry_patch + 1))"
+    # 既有版本只允许内容等价的断点续传；已撤回版本不能借该路径重新进入依赖图。
+    if jq -e --arg version "$version" 'any(.versions[]; .num == $version and .yanked == true)' "$response_file" > /dev/null; then
+      echo "$crate_name $version 已从 crates.io 撤回，不能复用该版本号" >&2
       exit 1
     fi
     if [[ "$version" == "$registry_version" ]]; then
       echo "$crate_name $version 已是 crates.io 最高稳定版本，后续必须校验归档内容等价"
+    elif [[ "$version" == "$expected_version" ]]; then
+      echo "$crate_name $version 是 crates.io 最高稳定版本 $registry_version 的下一补丁号"
     else
-      echo "$crate_name $version 高于 crates.io 最高稳定版本 $registry_version"
+      echo "$crate_name 新版本必须为 ${expected_version}，当前工作区版本为 $version" >&2
+      exit 1
     fi
     ;;
   404)

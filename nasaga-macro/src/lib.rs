@@ -151,6 +151,9 @@ fn expand_workflow(
         #item_fn
 
         const _: () = {
+            /// 业务作用：把业务定义工厂接入静态工作流目录，供启动期统一构造受信定义。
+            /// 参数说明：无。
+            /// 返回：业务工厂生成的工作流定义；构造失败沿用原错误。
             fn __nasa_saga_workflow_factory()
                 -> #root::__private::anyhow::Result<#root::__private::core::WorkflowDefinition>
             {

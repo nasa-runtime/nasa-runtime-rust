@@ -29,7 +29,8 @@ trap cleanup EXIT
 
 mkdir -p "$resolution_root/src"
 printf 'fn main() {}\n' > "$resolution_root/src/main.rs"
-printf '[package]\nname = "registry-resolution-probe"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\n%s = "=%s"\n' \
+# 显式 workspace 边界阻止探针继承临时目录上层的成员约束与 path patch。
+printf '[workspace]\n\n[package]\nname = "registry-resolution-probe"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\n%s = "=%s"\n' \
   "$crate_name" "$version" > "$resolution_root/Cargo.toml"
 
 for attempt in $(seq 1 60); do

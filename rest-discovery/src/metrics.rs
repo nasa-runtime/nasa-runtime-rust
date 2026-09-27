@@ -16,10 +16,12 @@ macro_rules! rest_metrics {
 
 	    impl RestMetrics {
 	        $(
-                /// 递增一次对应分流路径的进程级计数。
+                /// 业务作用：记录一次已发生的分流决策，供进程级路由观测使用。
                 ///
                 /// 每次 REST 调用做出 DNS/注册中心/直连等决策时调用,用于后续排查路由选择原因。
 	            #[doc = $doc]
+                /// 参数说明：无。
+                /// 返回：对应决策累计计数增加，不执行发现查询或改变路由。
 	            pub(crate) fn $field(&self) {
                     self.$field.fetch_add(1, Ordering::Relaxed);
                 }

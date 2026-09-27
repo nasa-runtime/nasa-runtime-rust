@@ -96,6 +96,9 @@ pub fn wrap_handler(
     Some(HandlerWrapper {
         outer_inputs,
         inner_fn: quote! {
+            /// 业务作用：在监控包装内保留原处理函数的参数模式与返回类型，使业务错误推断保持一致。
+            /// 参数说明：参数沿用被包装处理函数的业务输入声明。
+            /// 返回：原处理函数的执行结果，不改变其错误类型。
             async fn #inner_ident(#inner_inputs) #inner_output #block
         },
         call_inner: quote! { #inner_ident(#(#call_args),*).await },
