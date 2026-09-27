@@ -88,15 +88,13 @@ homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
-# 成员间依赖使用公开版本约束；workspace patch 统一直接与传递引用的本地 crate 身份。
+# 成员间依赖使用公开版本约束；保留的 workspace patch 统一相应 crate 的本地依赖身份。
 # 归档的 normalized manifest 使用 registry 版本，不携带本地 path 或根工作区 patch。
 [patch.crates-io]
-nadisc = { path = "nadisc" }
 nasecret-vault = { path = "nasecret-vault" }
 nasecret-http = { path = "nasecret-http" }
 nanotify-core = { path = "nanotify-core" }
-# 门面、宏和实现依赖统一解析到当前工作区，避免同一进程编译出 registry/path 双重身份。
-macro-support = { path = "macro-support" }
+# 覆盖项统一门面、宏与实现的本地依赖身份；未覆盖组件由 registry 解析。
 cacheable = { path = "cacheable" }
 nadis-derive = { path = "nadis-derive" }
 nafka = { path = "nafka" }
@@ -108,7 +106,6 @@ namigrate = { path = "namigrate" }
 namigrate-core = { path = "namigrate-core" }
 namigrate-pgsql = { path = "namigrate-pgsql" }
 nanum = { path = "nanum" }
-nabase = { path = "nabase" }
 naws = { path = "naws" }
 # 门面与直接使用方必须共享同一份熔断运行时，避免 fallback 注册表按 crate 身份分裂。
 hystrix = { path = "hystrix" }
@@ -120,10 +117,8 @@ natx = { path = "natx" }
 natx-core = { path = "natx-core" }
 natx-macro = { path = "natx-macro" }
 natx-pgsql = { path = "natx-pgsql" }
-nainbox-core = { path = "nainbox-core" }
 nainbox-mysql = { path = "nainbox-mysql" }
 nainbox-pgsql = { path = "nainbox-pgsql" }
-naidempotency = { path = "naidempotency" }
 naidempotency-mysql = { path = "naidempotency-mysql" }
 naidempotency-pgsql = { path = "naidempotency-pgsql" }
 naidempotency-redis = { path = "naidempotency-redis" }
@@ -137,7 +132,6 @@ ncrypto = { path = "ncrypto" }
 naaudit = { path = "naaudit" }
 naws-proto = { path = "naws-proto" }
 rest-discovery = { path = "rest-discovery" }
-nabudget = { path = "nabudget" }
 nalog = { path = "nalog" }
 nacache-macro = { path = "nacache-macro" }
 async-macro = { path = "async-macro" }
@@ -156,9 +150,7 @@ naobject = { path = "naobject" }
 napart = { path = "napart" }
 # 门面与 Application 受管 listener 必须共享同一 nagrpc 类型身份。
 nagrpc = { path = "nagrpc" }
-nagrpc-build = { path = "nagrpc-build" }
 # 指标统一目录与领域结构化快照必须共享同一类型身份，才能由 Application 完成文本与 OTLP 双出口。
-nametrics-core = { path = "nametrics-core" }
 natelemetry = { path = "natelemetry" }
 nanacos = { path = "nanacos" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
@@ -170,8 +162,7 @@ nafana = { path = "nafana" }
 napp = { path = "napp" }
 napp-macro = { path = "napp-macro" }
 nadis = { path = "nadis" }
-# 授权快照、调度运行时与门面宏桥必须分别共享同一依赖身份。
-naauthz = { path = "naauthz" }
+# 调度运行时与门面宏桥必须共享同一依赖身份。
 nasched = { path = "nasched" }
 # 门面与声明式 REST 客户端宏必须共享同一依赖身份，确保生成代码使用一致的错误和参数类型。
 rest-client-macro = { path = "rest-client-macro" }
@@ -179,7 +170,6 @@ rest-client-macro = { path = "rest-client-macro" }
 hystrix-macro = { path = "hystrix-macro" }
 nafana-macro = { path = "nafana-macro" }
 nafka-macro = { path = "nafka-macro" }
-naimg = { path = "naimg" }
 naopenapi = { path = "naopenapi" }
 nasa = { path = "nasa" }
 nauth-oauth = { path = "nauth-oauth" }
