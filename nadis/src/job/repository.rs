@@ -81,9 +81,17 @@ static FINISH_FANOUT_ROOT: JobScript = JobScript::new(include_str!("lua/finish_f
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualFireOutcome {
     /// 首次创建成功，返回 Run 标识与 Dispatch 消息 ID。
-    Fired { run_id: String, message_id: String },
+    Fired {
+        /// 新创建的 Run 标识。
+        run_id: String,
+        /// 对应 Dispatch Stream 的消息 ID。
+        message_id: String,
+    },
     /// 同 requestId 已存在，幂等采用既有 Run。
-    Adopted { run_id: String },
+    Adopted {
+        /// 相同 requestId 已关联的 Run 标识。
+        run_id: String,
+    },
     /// 任务定义不存在。
     NotFound,
     /// 任务或命名空间未启用，或 FANOUT_ONLY 不能独立触发。
@@ -311,7 +319,10 @@ pub enum FireDueOutcome {
         message_id: String,
     },
     /// 同一逻辑时刻的 Run 已存在，幂等采用既有 Run。
-    Adopted { run_id: String },
+    Adopted {
+        /// 同一逻辑触发时刻已经创建的 Run 标识。
+        run_id: String,
+    },
     /// 误触发跳过：只推进下一调度时刻，不创建 Run。
     Skipped {
         /// 脚本观测到的权威当前毫秒。
@@ -521,17 +532,35 @@ pub enum DeferOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobRegisterOutcome {
     /// 首次或高修订号登记成功。
-    Registered { revision: i64 },
+    Registered {
+        /// 登记后 Redis 中生效的定义修订号。
+        revision: i64,
+    },
     /// 同修订号同摘要，已存在，无需改写。
-    Adopted { revision: i64 },
+    Adopted {
+        /// 已存在且摘要一致的定义修订号。
+        revision: i64,
+    },
     /// 请求修订号低于当前，已拒绝回滚。
-    Stale { revision: i64 },
+    Stale {
+        /// Redis 中阻止低修订号覆盖的当前定义修订号。
+        revision: i64,
+    },
     /// 同修订号但摘要不同，已封闭调度，等待显式管理动作。
-    Conflict { revision: i64 },
+    Conflict {
+        /// 出现摘要分歧并封闭调度的定义修订号。
+        revision: i64,
+    },
     /// 定义已被删除，低修订号不能复活。
-    Deleted { revision: i64 },
+    Deleted {
+        /// Redis 中已删除定义的当前修订号。
+        revision: i64,
+    },
     /// 已有定义声明了其它 source，不能由当前运行时收养。
-    SourceMismatch { current_source: String },
+    SourceMismatch {
+        /// 既有定义绑定的 source 名称。
+        current_source: String,
+    },
 }
 
 /// Completion Stream 一轮双界裁剪结果。

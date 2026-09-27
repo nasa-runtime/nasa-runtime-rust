@@ -1585,6 +1585,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2699,6 +2700,7 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-util",
+ "hystrix",
  "ipnet",
  "linkme",
  "matchit",

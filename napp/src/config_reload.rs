@@ -135,7 +135,7 @@ impl CandidatePublisher {
         let fixed_material_changes = prepared.secrets.changed_ids(self.initial.secrets());
         let version =
             self.application
-                .publish_prepared_config(current_version, prepared, &cancel, || {
+                .publish_prepared_config(current_version, prepared, cancel, || {
                     self.install_and_collect_statuses(
                         &current,
                         &merged,
@@ -198,6 +198,11 @@ impl CandidatePublisher {
             "rest_clients",
             "redis_leaders",
             "redis_subscriptions",
+            "redis_streams",
+            "redis_proxies",
+            "redis_pipelines",
+            "ws_clients",
+            "hystrix",
             "schema_registries",
         ] {
             let target = ReloadTarget::Managed(Arc::from(section));

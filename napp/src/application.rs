@@ -197,6 +197,18 @@ pub(crate) struct ApplicationInner {
     redis_partitions: Arc<crate::redis_partition::RedisPartitionState>,
     #[cfg(feature = "redis")]
     redis_tasks: Arc<crate::redis_tasks::RedisTasks>,
+    #[cfg(feature = "redis")]
+    redis_derived: Arc<crate::redis_derived::RedisDerived>,
+    #[cfg(feature = "ws-client")]
+    ws_clients: Arc<crate::ws_client::WsClients>,
+    #[cfg(feature = "hystrix")]
+    hystrix_commands:
+        Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<hystrix::Command>>>>,
+    #[cfg(feature = "hystrix")]
+    hystrix_owner: OnceLock<(
+        std::sync::Weak<hystrix::ManagedRuntime>,
+        crate::ReadinessContributor,
+    )>,
     /// 汇总运行依赖动态健康的通用就绪注册表；没有贡献项时保持既有语义。
     readiness: Arc<crate::readiness::ReadinessRegistry>,
     /// UserHook 登记的数据源迁移门禁队列;DB 组件 Prepare 取走后封口。
@@ -354,6 +366,12 @@ impl Application {
         initial_config: Arc<ConfigView>,
     ) -> (Self, TaskSupervisor) {
         let (supervisor, task_supervisor) = TaskSupervisor::channel();
+        #[cfg(feature = "redis")]
+        let redis_activation = if info.mode == ApplicationMode::Service {
+            task_supervisor.activation_token()
+        } else {
+            CancellationToken::new()
+        };
         let metrics_hub = Arc::new(nametrics_core::MetricHub::new());
         crate::initialization::register_metrics(&metrics_hub)
             .expect("initializer metric descriptors must be internally consistent");
@@ -364,7 +382,7 @@ impl Application {
                 resources: ResourceRegistry::new(),
                 initializers: crate::initialization::InitializerRegistry::new(),
                 shutdown_tasks: crate::shutdown::ShutdownTaskRegistry::new(),
-                state: Arc::new(StateCell::new()),
+                state: Arc::new(StateCell::new(task_supervisor.activation_token())),
                 terminal: TerminalCell::new(),
                 shutdown_requested: CancellationToken::new(),
                 supervisor,
@@ -375,6 +393,16 @@ impl Application {
                 redis_partitions: Arc::new(crate::redis_partition::RedisPartitionState::default()),
                 #[cfg(feature = "redis")]
                 redis_tasks: Arc::new(crate::redis_tasks::RedisTasks::default()),
+                #[cfg(feature = "redis")]
+                redis_derived: Arc::new(crate::redis_derived::RedisDerived::new(redis_activation)),
+                #[cfg(feature = "ws-client")]
+                ws_clients: Arc::new(crate::ws_client::WsClients::default()),
+                #[cfg(feature = "hystrix")]
+                hystrix_commands: Arc::new(
+                    std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                ),
+                #[cfg(feature = "hystrix")]
+                hystrix_owner: OnceLock::new(),
                 readiness: Arc::new(crate::readiness::ReadinessRegistry::new()),
                 #[cfg(any(feature = "db", feature = "db-pgsql"))]
                 migrations: StdMutex::new(Some(Vec::new())),
@@ -1662,6 +1690,207 @@ impl Application {
     #[cfg(feature = "redis")]
     pub(crate) fn redis_tasks(&self) -> Arc<crate::redis_tasks::RedisTasks> {
         self.inner.redis_tasks.clone()
+    }
+
+    /// 业务作用：在 Service 装配窗口登记普通 Stream 的事件处理目录。
+    /// 参数说明：`name` 对应 redis_streams 计划；`setup` 只登记处理策略。
+    /// 返回：合法唯一登记成功；封口、来源能力缺失或重复时拒绝。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_stream<F>(&self, name: &str, setup: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(nadis::stream::StreamSubscriber) -> nadis::stream::StreamSubscriber
+            + Send
+            + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis Stream registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis Stream registration",
+        )?;
+        self.inner
+            .redis_derived
+            .register_stream(name, Box::new(setup))
+    }
+
+    /// 业务作用：登记共享组 Proxy 路由，消费与回收由宿主统一激活。
+    /// 参数说明：`name` 对应 redis_proxies 计划；`setup` 登记主题与事件处理器。
+    /// 返回：登记成功不创建连接，错误阻止后续业务放行。
+    #[cfg(feature = "redis")]
+    pub fn configure_redis_proxy<F>(&self, name: &str, setup: F) -> ApplicationResult<()>
+    where
+        F: FnOnce(&mut nadis::proxy::PreparedProxy) + Send + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("Redis Proxy registration")?;
+        self.ensure_component_declared(
+            ComponentId::Redis,
+            ApplicationPhase::UserHook,
+            "Redis Proxy registration",
+        )?;
+        self.inner
+            .redis_derived
+            .register_proxy(name, Box::new(setup))
+    }
+
+    /// 业务作用：取得配置预装配的受管微批，不将最终关闭权交给业务。
+    /// 参数说明：`name` 对应 redis_pipelines 计划。
+    /// 返回：命名调用句柄，Service Ready 或 Batch 工作负载前完成装配。
+    #[cfg(feature = "redis")]
+    pub async fn redis_pipeline(
+        &self,
+        name: &str,
+    ) -> ApplicationResult<crate::ManagedRedisPipeline> {
+        Ok(self
+            .named_resource::<crate::ManagedRedisPipeline>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：取得受管 Proxy 发布入口，保持原消息与未知结果语义。
+    /// 参数说明：`name` 对应 redis_proxies 计划。
+    /// 返回：本代命名发布句柄；未准备或名称错误时拒绝。
+    #[cfg(feature = "redis")]
+    pub async fn redis_proxy(&self, name: &str) -> ApplicationResult<crate::ManagedRedisProxy> {
+        Ok(self
+            .named_resource::<crate::ManagedRedisProxy>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：读取普通 Stream、Proxy 和微批任务的有界运行观测。
+    /// 参数说明：无。
+    /// 返回：命名计划状态，采样不创建业务副作用。
+    #[cfg(feature = "redis")]
+    pub fn redis_derived_observations(&self) -> Vec<crate::RedisDerivedObservation> {
+        self.inner.redis_derived.observations()
+    }
+
+    /// 业务作用：向 Redis 生命周期提供本应用独占的派生资源 owner。
+    /// 参数说明：无。
+    /// 返回：不跨应用复用的状态句柄。
+    #[cfg(feature = "redis")]
+    pub(crate) fn redis_derived(&self) -> Arc<crate::redis_derived::RedisDerived> {
+        self.inner.redis_derived.clone()
+    }
+
+    /// 业务作用：在 Service 装配期间登记命名出站客户端的有界事件回调。
+    /// 参数说明：`name` 匹配 ws_clients；`event` 为协议事件名；`handler` 必须同步非阻塞。
+    /// 返回：合法唯一登记成功，不启动连接；Ready 前不会调用业务回调。
+    #[cfg(feature = "ws-client")]
+    pub fn configure_ws_client_event<F>(
+        &self,
+        name: &str,
+        event: &str,
+        handler: F,
+    ) -> ApplicationResult<()>
+    where
+        F: Fn(naws::proto::Message) + Send + Sync + 'static,
+    {
+        let _gate = self
+            .inner
+            .user_registration_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_user_hook_open("outbound client callback registration")?;
+        self.inner
+            .ws_clients
+            .register(name, event, Arc::new(handler))
+    }
+
+    /// 业务作用：取得无需入站服务的命名出站客户端业务句柄。
+    /// 参数说明：`name` 为 ws_clients 中启用的名称。
+    /// 返回：本代发送与观察句柄，不授予重连配置或最终关闭权。
+    #[cfg(feature = "ws-client")]
+    pub async fn ws_client(&self, name: &str) -> ApplicationResult<crate::ManagedWsClient> {
+        Ok(self
+            .named_resource::<crate::ManagedWsClient>(name)
+            .await?
+            .clone())
+    }
+
+    /// 业务作用：读取命名出站客户端的本地连接与任务状态。
+    /// 参数说明：无。
+    /// 返回：固定目录下的名称、连接状态和活动子任务数量。
+    #[cfg(feature = "ws-client")]
+    pub fn ws_client_observations(&self) -> Vec<(String, bool, usize)> {
+        self.inner.ws_clients.observations()
+    }
+
+    /// 业务作用：向标准装配提供本应用的出站客户端 owner。
+    /// 参数说明：无。
+    /// 返回：本代独占的目录与关闭状态。
+    #[cfg(feature = "ws-client")]
+    pub(crate) fn ws_clients(&self) -> Arc<crate::ws_client::WsClients> {
+        self.inner.ws_clients.clone()
+    }
+
+    /// 业务作用：让出站领域入口等待宿主唯一的 Ready 发布。
+    /// 参数说明：无。
+    /// 返回：领域 owner 仅等待、不主动开放的启动信号。
+    #[cfg(feature = "ws-client")]
+    pub(crate) fn startup_activation(&self) -> CancellationToken {
+        self.inner.state.activation_token()
+    }
+
+    /// 业务作用：向标准装配移交本代命令目录的访问权，目录与业务收尾保持相同生存期。
+    /// 参数说明：无。
+    /// 返回：当前 Application 独占的有界配置目录。
+    #[cfg(feature = "hystrix")]
+    pub(crate) fn hystrix_commands(
+        &self,
+    ) -> Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<hystrix::Command>>>> {
+        self.inner.hystrix_commands.clone()
+    }
+
+    /// 业务作用：登记隔离命令的关键 owner 供最终接流复验，不延长其清理责任。
+    /// 参数说明：`runtime` 为当前代次 owner；`health` 为对应健康证据。
+    /// 返回：首次登记成功，重复安装返回准备错误。
+    #[cfg(feature = "hystrix")]
+    pub(crate) fn set_hystrix_owner(
+        &self,
+        runtime: &Arc<hystrix::ManagedRuntime>,
+        health: crate::ReadinessContributor,
+    ) -> ApplicationResult<()> {
+        self.inner
+            .hystrix_owner
+            .set((Arc::downgrade(runtime), health))
+            .map_err(|_| {
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Prepare,
+                    "hystrix owner already registered",
+                )
+            })
+    }
+
+    /// 业务作用：取得受管配置中预装配的显式隔离命令，不向业务移交全局安装权。
+    /// 参数说明：`name` 为 hystrix.commands 中的固定名称。
+    /// 返回：当前代次命令；不存在或装配尚未完成时失败，旧命令关闭后拒绝调用。
+    #[cfg(feature = "hystrix")]
+    pub async fn hystrix_command(&self, name: &str) -> ApplicationResult<Arc<hystrix::Command>> {
+        self.inner
+            .hystrix_commands
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Prepare,
+                    "managed hystrix command unavailable",
+                )
+            })
     }
 
     /// 业务作用：在 Service UserHook 内提交 default 保序执行器的启动期容量计划，作为同名 YAML 计划的代码入口。
@@ -3522,7 +3751,7 @@ impl Application {
     /// # 返回
     ///
     /// 本方法无返回值；句柄按登记顺序进入配置重应用集合。
-    // 目前只有 log 是可热刷组件；驱动侧 feature 单独打开时该入口空置属于预期形态。
+    // 仅启用配置驱动但未启用可热刷新组件时，该登记入口可以空置。
     #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
     #[cfg_attr(not(feature = "log"), allow(dead_code))]
     pub(crate) fn register_config_applier(&self, applier: Arc<dyn crate::reload::ConfigApplier>) {
@@ -3830,15 +4059,74 @@ impl Application {
         })
     }
 
-    /// 业务作用：发布 Starting 到 Ready 的唯一合法转换。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数；所有 Ready action 成功后才能调用。
-    pub(crate) fn mark_ready(&self) -> ApplicationResult<()> {
-        self.inner
-            .state
-            .transition(ApplicationState::Starting, ApplicationState::Ready)
+    /// 业务作用：在关键领域本地状态保护范围内发布唯一 Ready 状态及共同启动许可。
+    /// 参数说明：`deadline` 为全局启动截止时刻，取得所有保护后再次复验。
+    /// 返回：领域失效或预算耗尽时保持屏障关闭，否则统一开放领域与受管任务。
+    pub(crate) fn mark_ready(&self, deadline: tokio::time::Instant) -> ApplicationResult<()> {
+        #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+        let mut evidence = Vec::new();
+        #[cfg(feature = "redis")]
+        evidence.extend(self.inner.redis_derived.critical_health());
+        #[cfg(feature = "ws-client")]
+        evidence.extend(self.inner.ws_clients.critical_health());
+        #[cfg(feature = "hystrix")]
+        if let Some((_, health)) = self.inner.hystrix_owner.get() {
+            evidence.push(health.clone());
+        }
+        let publish = &mut || {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "startup deadline exceeded before Ready publication",
+                ));
+            }
+            // 取得较晚领域的保护可能耗时；最终状态提交前不能沿用已经过期的较早证据。
+            #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+            if evidence.iter().any(|health| !health.ready_now()) {
+                return Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "critical readiness evidence expired before Ready publication",
+                ));
+            }
+            self.inner
+                .state
+                .transition(ApplicationState::Starting, ApplicationState::Ready)
+        };
+        #[cfg(feature = "redis")]
+        let publish = &mut || self.inner.redis_derived.publish_ready(publish);
+        #[cfg(feature = "hystrix")]
+        let publish = &mut || {
+            let Some((owner, health)) = self.inner.hystrix_owner.get() else {
+                return publish();
+            };
+            let result = owner.upgrade().and_then(|owner| {
+                owner.with_running(|| {
+                    health.observe(
+                        crate::DependencyState::Ready,
+                        crate::readiness::reason::HEALTHY,
+                        std::time::Instant::now(),
+                    );
+                    publish()
+                })
+            });
+            result.unwrap_or_else(|| {
+                health.observe(
+                    crate::DependencyState::NotReady,
+                    crate::readiness::reason::DEGRADED,
+                    std::time::Instant::now(),
+                );
+                Err(ApplicationError::new(
+                    ComponentId::Application,
+                    ApplicationPhase::Ready,
+                    "hystrix owner exited before Ready",
+                ))
+            })
+        };
+        #[cfg(feature = "ws-client")]
+        let publish = &mut || self.inner.ws_clients.publish_ready(publish);
+        publish()
     }
 
     /// 业务作用：发布 Ready 到 Stopping 的转换。

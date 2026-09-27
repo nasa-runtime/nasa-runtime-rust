@@ -14,6 +14,9 @@
 | RedisPartition | `redis`；`"redis"` | `redis.partition` 或每源对应段，`configure_redis_partition` 登记 handler | `redis_partition(source)` |
 | 独立 Redis 竞选 | `redis`；`"redis"` | `redis_leaders.<name>` | `redis_leader(name)` |
 | Redis Pub/Sub | `redis`；`"redis"` | `redis_subscriptions.<name>`，`configure_redis_subscription` | 启动期登记 handler |
+| 普通 Stream / Proxy / AutoPipeline | `redis`；`"redis"` | `redis_streams` / `redis_proxies` / `redis_pipelines` | `configure_redis_stream` / `configure_redis_proxy` 登记；`redis_proxy(name)` / `redis_pipeline(name)` 取得发送句柄 |
+| 原生 TCP 帧出站 | `ws-client`；无需入站组件 | `ws_clients.<name>` | `configure_ws_client_event` / `ws_client(name)` |
+| 隔离命令目录 | `hystrix`；无需组件字符串 | `hystrix.enabled` / `isolation` / `commands` | 属性命令、受管 Web dispatch、`hystrix_command(name)` |
 | Snowflake | `redis`；`"redis"` | `redis.snowflake.<name>` | `snowflake(name)` |
 | Mapper L2 | `mapper-redis-cache` 或 `mapper-redis-cache-pgsql`；`"redis"` | `mapper_cache.enabled`、`redis_ref` | Mapper 查询复用默认 L2 |
 | Mapper codec/metrics | `mapper` 或 `mapper-pgsql` | `configure_mapper_defaults` | Mapper 调用路径 |
@@ -38,7 +41,7 @@
 无 Web 的 Service 和 Batch 可以使用持久 store、审计、REST、对象和 TLS HTTP client。
 Service 的 UserHook 只登记计划；标准资源在 Prepare 装配，供 initializer、Ready 后业务取得。
 Batch 先装配所选资源，再进入工作负载。
-RedisPartition、独立 Leader/Subscription、WS 入站消费要求 Service；Batch 在工作负载前拒绝这些计划。
+普通 Stream、Proxy、RedisPartition、独立 Leader/Subscription、WS 入站消费要求 Service；Batch 在工作负载前拒绝这些计划。
 
 ## 配置准备与原子发布
 
@@ -216,3 +219,42 @@ DB 只读入口要求调用方确认无业务副作用，不按 SQL 前缀推断
 gRPC `Deadline::request_budget` 保留绝对截止点；出站使用 `propagate_request_budget` 写 `grpc-timeout`，
 再用 `call_with_budget` 响应本地取消。入站 Deadline 不含客户端断开令牌，drop 当前调用 future 不证明
 服务端未执行，业务自行 spawn 的任务也不会自动加入跨协议取消树。
+
+## 消费、出站与命令运行架构
+
+```text
+最终配置 + 启动期计划 → feature / 来源 / 容量校验 → Prepare 建立唯一 owner
+Service：initializer 取得句柄 → 关键本地权威与健康复验 → Ready 与共享启动许可
+Batch：完成装配与初始化 → 开放 Pipeline、Client 发送 → 工作负载
+关闭：撤销新调用 → 等待任务与在途责任 → 释放来源及本代全局引用
+```
+
+hystrix 的目录在 Prepare 装配后即可供初始化使用；Service 的业务收尾仍可调用命令，之后才撤销
+命令准入。Redis 派生发送与 Client 句柄在 Service 的 Ready 前拒绝业务调用，取得句柄本身不开放入口。
+
+普通 Stream、Proxy 和原生 TCP Client 的业务回调等待统一 Ready；AutoPipeline 与纯出站 Client
+支持 Batch。未激活、已关闭或超出容量的调用明确拒绝，已入队不等于远端执行成功。
+Service 的领域准入与受管终端共用一次启动许可，公开 Ready 时首次合法调用不再等待健康监控激活。
+关键任务责任、Client 认证连接和健康新鲜度在发布前复验，本地状态保护延续到发布完成；已观察到的
+失效走启动失败清理。未被观察到的远端故障不在该本地保护内，发布后的故障按运行期策略处理。
+Client 断连或重连期间，关键计划贡献 NotReady，可选计划贡献 Degraded，重新认证后恢复 Ready；
+关键 owner 意外结束仍触发停机。每秒采样与 5 秒证据过期不构成远端故障的即时通知。
+领域 owner 持有实际 join 责任，重复关闭和取消等待不会使后台任务脱离所有权；旧受管句柄不能复活。
+Proxy 只在完整 PEL 证据下清理空 consumer，整个清理过程与任务排干共用截止时间。
+Proxy 清理证据不可用或预算耗尽进入次要停机失败；本地只读快照保留具体清理分类。
+执行器销毁后不能继续沿用 Running 快照；缺少退出证据时明确失败，不推断远端写入或删除未执行。
+AutoPipeline 的单批字节限制是参数字节软边界 B＋M，不能解释为进程内存上限。
+
+hystrix 保持独立 API；显式受管时按应用代次重建属性命令缓存，业务收尾完成后才撤销配置与目录。
+这些命名计划、隔离规则和出站认证材料均冻结到启动，变化报告 `RestartRequired`。
+完整字段见 [napp](../napp/README.md#redis-streamproxyautopipeline)。
+
+| 观测入口 | 可用于判断 | 不能据此推断 |
+| --- | --- | --- |
+| `redis_derived_observations()` | 本地 consumer/reclaim/flusher 责任、进展、队列参数字节与 Proxy 清理分类 | 远端 PEL 大小、唯一消息数或业务成功数 |
+| `ws_client_observations()` | 当前连接事实、最近认证/PONG、固定失败类别与子任务数量 | 已入队消息被远端收到或执行 |
+| hystrix 命令指标与 owner 健康 | 并发拒绝、超时、调用结果与周期观测职责 | 被保护的依赖始终可达、错误率熔断状态 |
+
+Redis 派生计划的健康阈值为 1，证据 15 秒过期；Client 每秒采样，阈值为 1，5 秒过期。
+两者 `critical` 缺省 false，关键任务意外退出触发宿主停机。hystrix 观察任务的健康阈值为 1，
+5 秒过期，意外退出触发停机。健康时效包含协议检测与本地采样延迟，不能作为实时远端存活证明。

@@ -335,7 +335,12 @@ pub(crate) fn active_specs(raw: &Value) -> Result<Vec<SecretSpec>, SecretResolve
 fn inactive_component_secrets(raw: &Value) -> Result<BTreeSet<String>, SecretResolveError> {
     let mut classified = BTreeSet::new();
     let mut active = BTreeSet::new();
-    for section in ["object_stores", "http_clients", "schema_registries"] {
+    for section in [
+        "object_stores",
+        "http_clients",
+        "schema_registries",
+        "ws_clients",
+    ] {
         if let Some(plans) = raw.get(section).and_then(Value::as_object) {
             for plan in plans.values() {
                 collect_locators(plan, &mut classified);
@@ -402,7 +407,7 @@ fn collect_business_locators(raw: &Value, ids: &mut BTreeSet<String>) {
     for (name, value) in root {
         let excluded_child = match name.as_str() {
             "secrets" | "secret_providers" | "object_stores" | "http_clients"
-            | "schema_registries" => continue,
+            | "schema_registries" | "ws_clients" => continue,
             "grafana" => Some("observability"),
             "notifications" => Some("providers"),
             _ => None,

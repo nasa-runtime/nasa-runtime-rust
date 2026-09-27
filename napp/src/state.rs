@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::{ApplicationError, ApplicationPhase, ApplicationResult, ComponentId};
 
@@ -50,29 +51,35 @@ pub enum ApplicationMode {
 pub(crate) struct StateCell {
     value: AtomicU8,
     changes: watch::Sender<ApplicationState>,
+    activation: CancellationToken,
 }
 
 impl StateCell {
     /// 业务作用：创建初始为 Starting 的状态单元，并建立不会丢失最新状态的进程内通知通道。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：`activation` 为领域准入与受管任务共用的启动许可。
     ///
     /// 返回：状态只允许由 Runner 推进、观察者只能订阅的共享单元。
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(activation: CancellationToken) -> Self {
         let (changes, _receiver) = watch::channel(ApplicationState::Starting);
         Self {
             value: AtomicU8::new(ApplicationState::Starting as u8),
             changes,
+            activation,
         }
     }
 
-    /// 业务作用：以 Acquire 语义读取当前公开状态。
-    ///
-    /// # 参数
-    ///
-    /// 本方法无参数；该顺序与首次终态的 Release 提交配对。
+    /// 业务作用：以 Acquire 语义读取生命周期，只在启动许可生效后对外呈现 Ready。
+    /// 参数说明：无。
+    /// 返回：当前公开状态；Ready 已写入但许可尚未发布的短暂区间仍返回 Starting。
     pub(crate) fn load(&self) -> ApplicationState {
-        ApplicationState::from_u8(self.value.load(Ordering::Acquire))
+        let state = ApplicationState::from_u8(self.value.load(Ordering::Acquire));
+        // 公开 Ready 必须同时具备执行许可，观察者不能先看到状态再遭遇未激活拒绝。
+        if state == ApplicationState::Ready && !self.activation.is_cancelled() {
+            ApplicationState::Starting
+        } else {
+            state
+        }
     }
 
     /// 业务作用：以 CAS 执行唯一合法状态转换，并在成功后唤醒等待开放或停机边界的受管任务。
@@ -104,6 +111,10 @@ impl StateCell {
                     ),
                 )
             })?;
+        // 状态先提交、统一许可随后开放；被唤醒的终端可立即读取 Ready 和使用领域入口。
+        if next == ApplicationState::Ready {
+            self.activation.cancel();
+        }
         self.changes.send_replace(next);
         Ok(())
     }
@@ -115,6 +126,14 @@ impl StateCell {
     /// 返回：初值等于调用时最新状态的接收端，后续转换以 watch 代际通知。
     pub(crate) fn subscribe(&self) -> watch::Receiver<ApplicationState> {
         self.changes.subscribe()
+    }
+
+    /// 业务作用：向领域准备阶段提供与 Ready 发布相同的执行许可。
+    /// 参数说明：无。
+    /// 返回：只由宿主状态转换开放的信号。
+    #[cfg(feature = "ws-client")]
+    pub(crate) fn activation_token(&self) -> CancellationToken {
+        self.activation.clone()
     }
 }
 

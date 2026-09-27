@@ -6,11 +6,12 @@ name = "naws"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA 有界长连接消息中心：TCP/WebSocket、鉴权、背压、心跳与可选集群 transport"
+description = "NASA 长连接消息中心与原生 TCP Client：鉴权、背压、心跳、可等待的关闭与可选集群 transport"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["tcp", "websocket", "client", "async", "backpressure"]
 categories.workspace = true
 # 打包边界：JS demo 依赖由 npm ci 恢复，绝不打进 crate；
 exclude = ["examples/node_modules/**"]

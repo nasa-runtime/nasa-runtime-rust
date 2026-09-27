@@ -21,7 +21,9 @@ pub enum NasaRedisError {
     /// 启动未提交，清理操作仍在后台持有尚未排干的资源。
     #[error("partition start rollback not converged: {cause}; remaining: {remaining:?}")]
     StartRollbackNotConverged {
+        /// 导致启动不能提交的原始原因摘要。
         cause: String,
+        /// 启动补偿的剩余责任，后台仍持有这些资源直到收口。
         remaining: Box<crate::partition::PartitionShutdownReport>,
     },
     /// XADD 已交给发送监督者，但客户端未能取得确定结果；调用方重发可能产生重复记录。

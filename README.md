@@ -17,10 +17,12 @@ Mapper 同时提供默认采集的 SQL 指标，区分逻辑方法、真实数�
 > 名称声明：本项目是独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系，
 > 也不使用其徽章、标识、印章或其它官方视觉标识。完整声明见 [NOTICE](NOTICE)。
 
-Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+Application 标准纳管 Redis Stream／Proxy／AutoPipeline、出站 TCP 帧客户端、hystrix 命令目录、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
 secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接流前完成资源装配，统一管理健康、
 配置应用状态和停机；无需为这些能力另建连接池、监听循环或关闭任务。各能力的入口和边界见
 [受管能力合同](docs/managed-capabilities.md)。
+其中，Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
+隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
 
 ## 核心价值与运行架构
 
@@ -28,7 +30,7 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 需要的能力，同时保留各基础设施组件的真实事务、租约和故障边界。核心价值是让配置错误、资源缺失和
 安全门禁在开放流量前失败，并让运行中的权威变化、队列背压和停机排空保持可观测、可控。
 
-Service 的受管主流程如下；Batch 在工作负载前仅放行观测任务，不发布 Service Ready：
+Service 的受管主流程如下；Batch 在工作负载前装配并开放所选出站资源与观测任务，不发布 Service Ready：
 
 ```text
 本地配置 + 远端配置
@@ -36,9 +38,11 @@ Service 的受管主流程如下；Batch 在工作负载前仅放行观测任务
         v
 最终 YAML → 全量校验与资源探测 → initializer 初始化 → Ready 装配与任务工厂构造
                                                         │
-                                     最终静态检查与共享启动预算复验
+                                     静态检查、关键资源与共享启动预算复验
                                                         │
-                                     发布 Ready → 统一放行受管终端任务
+                                     本地状态保护内提交 Ready 与统一启动许可
+                                                        │
+                                     受管终端、Redis 消费与出站入口获准运行
 停机信号 ──→ 关闭业务入口 ──→ 停止新后台动作 ──→ 反向排空 ──→ 释放资源
 ```
 
@@ -49,6 +53,21 @@ Application 不提供跨数据库原子事务，也不会替业务推断租户�
 统一放行约束组件交出的终端任务与 initializer 暂存任务，不延迟 UserHook 中普通
 `spawn_background` / `spawn_critical`。业务自管 listener 使用 `serve_when_ready`；initializer 的任务
 工厂应只构造 future，不自行启动监听或派生任务。
+
+### 消费、出站与隔离命令的生命周期
+
+| 能力 | 门面 feature 与配置 | 使用与关闭边界 |
+| --- | --- | --- |
+| 普通 Stream 与 Proxy | `application,redis`，声明 `"redis"`；`redis_streams`、`redis_proxies` | Service 登记 handler，统一放行后消费；排干与 Proxy PEL 清理共用停机期限 |
+| AutoPipeline | `application,redis`，声明 `"redis"`；`redis_pipelines` | Service 与 Batch 的命名微批；有界参数字节，未知写入结果不自动重放 |
+| 原生 TCP Client | `application,ws-client`；`ws_clients` | 不需入站 listener；Service 可登记回调，Batch 可发送；入队不证明远端送达 |
+| hystrix 命令目录 | `application,hystrix`；`hystrix.enabled: true` | 固定规则、命名命令、属性命令共用本代 owner；业务收尾后排干并撤销目录 |
+
+关键 owner 的任务责任、Client 的认证连接和健康证据在 Ready 发布前复验，本地状态保护持续到
+启动许可发布完成。该顺序保证公开 Ready 时入口已获许可，不保证未被本地观察到的远端故障不会发生。
+运行期关键 Client 断连使动态 readiness 为 NotReady，重新认证后恢复；可选 Client 断连为 Degraded。
+配置和认证材料冻结到启动，变化报告 `RestartRequired`。这些能力不提供跨系统原子事务、远端送达
+保证或错误率熔断状态机。完整配置、容量和观测入口见 [napp](napp/README.md#redis-streamproxyautopipeline)。
 
 ## 受管资源装配与配置生效
 
@@ -880,7 +899,7 @@ HTTP/1/h2c listener。
 | [nasaga-runtime](nasaga-runtime/README.md) | `saga-runtime` / `saga-kafka` / `saga-redis-stream` / `saga-grpc` | Orchestrator、参与方事务 adapter、恢复管理、指标与受管 transport | 由业务注入 definition、受信 producer、路由与投递策略 |
 | [nasaga-runtime-pgsql](nasaga-runtime-pgsql/README.md) | `saga-runtime-pgsql` 及 PostgreSQL transport feature | 组合 PostgreSQL Store/Inbox/Outbox/事务并复用唯一 Saga 状态机 | 可独立运行，也可交给 Application 托管 |
 | [nasaga-macro](nasaga-macro/README.md) | `saga-runtime` | `#[saga]` descriptor 和类型化参与方 adapter | 编译期属性，无运行期配置 |
-| [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、流水线、业务键有序分区消费、锁与分布式任务 | `redis.*`、`redis.partition.*`、`redis.job.*`；分区消费支持 source/group/stream 隔离，不复用 Application 命名执行域 |
+| [nadis](nadis/README.md) | `redis` / `redis-job` | Redis 单点或集群、nonce 幂等计数、普通 Stream/Proxy、有界微批、业务键有序分区消费、锁与分布式任务 | `redis.*`、`redis.partition.*`、`redis.job.*`；普通派生计划使用 `redis_streams`、`redis_proxies`、`redis_pipelines` |
 | [nadis-derive](nadis-derive/README.md) | `redis-derive` | Redis Search 文档派生 | `redis.search.*` 由业务映射 |
 | [cacheable](cacheable/README.md) | `cache` | L1/L2 缓存、刷新保护、失效广播 | `cache.*`、`redis.*` |
 | [nacache-macro](nacache-macro/README.md) | `cache` | `#[cached]`、`#[cache_invalidate]` | 由 `cacheable` 运行时读取 |
@@ -897,8 +916,8 @@ HTTP/1/h2c listener。
 | [naaudit](naaudit/README.md) | `audit` | 脱敏业务审计事件与事务型 sink 合同 | 无独立配置根 |
 | [naaudit-mysql](naaudit-mysql/README.md) | `audit` | 审计事件写入同事务 MySQL Outbox | 复用 `database.*` |
 | [naaudit-pgsql](naaudit-pgsql/README.md) | `audit-pgsql` | 审计事件写入同事务 PostgreSQL Outbox | 复用显式或受管 `natx-pgsql` pool |
-| [hystrix](hystrix/README.md) | `hystrix` | 有界隔离、超时、指标流 | `hystrix.*` |
-| [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 宏 | 由 `hystrix` 运行时读取 |
+| [hystrix](hystrix/README.md) | `hystrix` | 有界隔离、超时、指标流；可选 Application 命令目录与有序关闭 | `hystrix.enabled`、`hystrix.isolation`、`hystrix.commands` |
+| [hystrix-macro](hystrix-macro/README.md) | `hystrix` | `#[hystrix]` 与 `#[global_fallback]`；受管命令缓存随应用实例切换 | 由 `hystrix` 运行时读取 |
 | [nafana](nafana/README.md) | `grafana` | 接口隔离、Prometheus 指标、Grafana 原生自适应接口墙 | `grafana.*`、`/metrics` |
 | [nafana-macro](nafana-macro/README.md) | `grafana` | `#[grafana]` 编译期参数校验与包装 | 无运行期 yml |
 | [nametrics-core](nametrics-core/README.md) | `application` 内部合同 | 单一指标目录、冲突审计、同源 Prometheus/OTLP 快照与样本拒绝诊断 | 无运行期 yml |
@@ -906,7 +925,7 @@ HTTP/1/h2c listener。
 | [nasched](nasched/README.md) | `scheduling` / `scheduling-cluster` | 异步任务、定时任务、Redis 集群去重 | `scheduling.*` |
 | [async-macro](async-macro/README.md) | `scheduling` | `#[Async]`、`#[scheduled]` 宏 | 由 `nasched` 运行时读取 |
 | [napart](napart/README.md) | `partition` | 命名 Runner 隔离、严格 FIFO 的保序任务窃取、有界背压、延迟稳定终态与可证明停机 | 直接模式运行期动态创建并显式停机；Application 模式由 YAML/UserHook 提交启动期计划 |
-| [naws](naws/README.md) | `ws` / `ws-redis` / `ws-socketio` | TCP/WebSocket 长连接、鉴权、广播、背压 | `ws.*` |
+| [naws](naws/README.md) | `ws` / `ws-client` / `ws-redis` / `ws-socketio` / `ws-kafka` | TCP/WebSocket 服务端、原生 TCP Client、鉴权、广播、背压与真实退出等待 | 入站 `ws.*`；命名出站 `ws_clients` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
 | [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；受管 Registry 用 `schema_registries.<name>`，独立 client 显式传入 options |

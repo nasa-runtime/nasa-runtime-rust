@@ -10,8 +10,10 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
                                                         └────→ Failed
 ```
 
-- 生命周期 `Ready` 在组件装配、业务 Hook、initializer 工厂与最终静态检查完成且共享启动预算有效时提交，
-  随后统一放行受管终端任务。gRPC `Bound` 不是 Running，服务注册待确认时 `app.is_ready()` 仍为 false。
+- 生命周期 `Ready` 在组件装配、业务 Hook、initializer 工厂与最终静态检查完成后提交；发布前在关键
+  领域的本地状态保护内复验任务责任、认证连接、健康证据与启动预算，同次发布统一启动许可。
+  公开 Ready 时受管终端、Redis 派生入口与 Client 已获许可。gRPC `Bound` 不是 Running，服务注册
+  待确认时 `app.is_ready()` 仍为 false。
 - 任一关键任务在 Running 阶段意外结束会提交失败意图，进程进入统一停机。
 - 进入 Stopping 后 readiness 先变为 false，再摘流、停止 accept、排空任务并反向释放资源。
 - `Failed` 是终态，不会回到 Running。
@@ -53,7 +55,9 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
 | 对象存储 `NotReady` / `Degraded` | 结合 `critical`、探测策略与证据时效判断，不把 HEAD 成功当作全部对象权限 |
 
 日志和命名 TLS HTTP 支持各自已声明的热应用；连接来源、对象存储、Schema Registry 与普通 REST
-参数变化要求重启。无关更新不会清除失败或重启要求；相同 fingerprint 且材料未变不会隐式重试。
+参数变化要求重启。`redis_streams`、`redis_proxies`、`redis_pipelines`、`ws_clients` 与受管
+`hystrix` 的名称、规则、容量和认证材料也冻结到启动，变化报告 `RestartRequired`。
+无关更新不会清除失败或重启要求；相同 fingerprint 且材料未变不会隐式重试。
 仅由禁用计划引用的材料不解析、不监听，共享材料存在活跃消费者时仍会观察。
 
 `diagnostic_snapshot(limit)` 只读取已有状态，limit 为 1..=256；它不执行网络探测，也不是跨组件原子
@@ -62,6 +66,28 @@ Bootstrap → Starting → UserHook → Ready → Running → Stopping → Stopp
 组件 `id` 与静态依赖在阶段执行前读取并冻结；元数据读取展开会报告 Bootstrap 错误，不执行组件
 启动阶段。阶段或清理失败保留首次终止原因，后续异常进入次要报告；同步阻塞与 `panic=abort`
 不受异步期限和展开隔离保护。
+
+## Redis 派生计划、出站 Client 与隔离命令
+
+| 现象 | 判断与处理边界 |
+| --- | --- |
+| Redis 派生计划没有业务进展 | 先核对启动许可、来源连接和实际任务数；有效空轮询可以形成读取证据，空闲不等于消费失败 |
+| 微批排队参数字节持续增长 | 检查生产速率、Redis 延迟与配置容量；B＋M 只是单批参数字节边界，不是进程内存上限 |
+| 微批返回 `ExecutionUnknown` | 通过业务幂等事实对账，不能按失败自动重放写入 |
+| Proxy 清理为 `Pending` | 已知 PEL 仍有消息，保留 consumer；本地任务结束不表示这些消息已成功处理 |
+| Proxy 清理为 `Unavailable` / `Deadline` | 查看次要停机失败，保留证据；删除回包超时不能证明远端未执行 |
+| 关键 Client 断连或重连 | 动态 readiness 为 NotReady；重新认证后恢复，永久 owner 退出触发停机 |
+| 可选 Client 断连 | 动态 readiness 为 Degraded；发送仍可能被拒绝，不能把宿主可接流当作 Client 可用 |
+| 旧 hystrix 命令返回 503 | 本代 owner 已关闭；使用当前 Application 的命名命令或属性宏，不保留跨实例静态强引用 |
+
+`redis_derived_observations()` 的完成次数包含失败与未知结果，不等于唯一消息数、PEL 数或业务成功数。
+`ws_client_observations()` 区分连接事实、认证/PONG 间隔和失败类别；发送返回 true 仅表示本地入队。
+Redis 派生计划的健康证据 15 秒过期；Client 每秒采样、5 秒过期，失败与恢复阈值均为 1。
+协议检测与采样有延迟，尚未被本地观察到的断连可能晚于 Ready 发布。关闭后的晚到认证不会恢复准入。
+
+hystrix 只有一个受管周期观测任务；其健康证据 5 秒过期，任务意外退出触发停机。Service 业务收尾
+仍可调用命令，之后才关闭准入并等待在途执行。上一代未真实退出时的新 owner 冲突需要排查未归还
+的业务 future，不能通过清空全局引用跳过等待。hystrix 不提供错误率熔断状态机。
 
 ## SQL、通知与指标出口
 

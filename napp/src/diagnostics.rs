@@ -9,32 +9,47 @@ use std::time::Instant;
 /// 单个领域快照的采样时刻；不同项之间没有全局事务保证。
 #[derive(Debug)]
 pub struct Sampled<T> {
+    /// 读取此领域快照的本地单调时刻，不表示远端事实的发生时间。
     pub sampled_at: Instant,
+    /// 该次采样取得的领域值，与其它领域不构成原子快照。
     pub value: T,
 }
 
 /// 已脱敏的目标配置状态，不包含配置正文或失败链。
 #[derive(Debug)]
 pub struct ConfigStatusSummary {
+    /// 已脱敏的配置应用目标名称。
     pub target: String,
+    /// 固定状态分类：applied、restart_required 或 apply_failed。
     pub state: &'static str,
+    /// 此目标最后成功采用的配置版本，可能落后于期望视图。
     pub applied_version: u64,
 }
 
 /// 聚合诊断的条数上限适用于每个领域；所有动态名称最多 256 个字符。
 #[derive(Debug)]
 pub struct DiagnosticSnapshot {
+    /// 本次聚合采样开始时刻。
     pub started_at: Instant,
+    /// 各领域读取完成时刻；与开始时刻共同界定采样窗口。
     pub finished_at: Instant,
+    /// 聚合结束时读取的宿主生命周期状态。
     pub state: ApplicationState,
+    /// 有界健康明细与既有 readiness 结论，不发起额外健康探测。
     pub readiness: Sampled<crate::readiness::ReadinessSnapshot>,
+    /// 本次固定配置视图的期望版本。
     pub config_version: u64,
+    /// 各配置目标的真实应用状态，按名称排序并受条数限制。
     pub config_statuses: Sampled<Vec<ConfigStatusSummary>>,
+    /// 至少一个领域的明细因条数上限被省略，聚合结论不因此变为完整清单。
     pub truncated: bool,
+    /// 遥测出口的现有统计；未创建出口时内部值为 None。
     #[cfg(feature = "telemetry")]
     pub telemetry: Sampled<Option<natelemetry::ExporterSnapshot>>,
+    /// 按 Redis 来源采样的分区运行事实，来源与执行域明细均受条数限制。
     #[cfg(feature = "redis")]
     pub redis_partitions: Sampled<Vec<crate::RedisPartitionObservation>>,
+    /// 数据源或方法身份与有效 SQL 观测策略，不包含 SQL 正文或参数。
     #[cfg(feature = "mapper-observability")]
     pub sql: Vec<
         Sampled<(

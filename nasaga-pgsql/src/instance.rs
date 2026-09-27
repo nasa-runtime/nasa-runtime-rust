@@ -146,12 +146,12 @@ impl PgSagaStore {
                     })?;
                 parse_instance_row(&row)?
             };
-            // business_key 只证明“同一业务槽位”，不能证明调用参数相同；摘要不一致
-            // 若仍按幂等成功返回，会让调用方误以为新 payload/deadline 已被接受。
+            // business_key 只证明“同一业务槽位”；当前摘要和显式兼容摘要均不匹配时拒绝，
+            // 避免调用方把不同 payload/deadline 误认为已被接受的幂等请求。
             if existing.start_request_digest.as_deref() != Some(spec.start_request_digest)
-                && !spec
+                && spec
                     .legacy_start_request_digest
-                    .is_some_and(|digest| existing.start_request_digest.as_deref() == Some(digest))
+                    .is_none_or(|digest| existing.start_request_digest.as_deref() != Some(digest))
             {
                 return Err(SagaStoreError::conflict(
                     "business idempotency key was reused with a different start request",

@@ -161,6 +161,7 @@ async fn run_redis_monitor(
             ApplicationState::Ready => {
                 application.redis_partitions().observe()?;
                 application.redis_tasks().observe()?;
+                application.redis_derived().observe()?;
             }
         }
 
@@ -341,6 +342,11 @@ impl ApplicationComponent for RedisComponent {
                 .prepare(context)
                 .await?;
             context.application().redis_tasks().prepare(context).await?;
+            context
+                .application()
+                .redis_derived()
+                .prepare(context)
+                .await?;
             Ok(())
         })
     }
@@ -741,10 +747,10 @@ fn validate_managed_config(config: &RedisConfig, phase: ApplicationPhase) -> App
 
 /// 业务作用：只在受管资源边界把 `default` 归一成协议默认 source `primary`。
 ///
-/// 参数说明：`value` 为 properties map key。
+/// 参数说明：`value` 为 properties map key 或引用该来源的 qualifier。
 ///
 /// 返回：canonical qualifier 文本。
-fn canonical_qualifier(value: &str) -> String {
+pub(crate) fn canonical_qualifier(value: &str) -> String {
     if value == DEFAULT_REDIS {
         "primary".to_owned()
     } else {

@@ -7,7 +7,7 @@ name = "nasa"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA Rust facade for managed named resources, configuration snapshots, gated lifecycle, graceful shutdown, durable Saga, SQL observability, messaging, gRPC and HTTP"
+description = "NASA Rust facade for managed resources, shared startup activation, ordered shutdown, durable Saga, SQL observability, messaging, gRPC and HTTP"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -22,7 +22,7 @@ default = []
 # 应用运行时核心：生命周期、配置快照、资源容器与受管任务监督。
 application = ["dep:application_impl", "dep:application_macro"]
 
-hystrix = ["dep:hystrix_impl", "dep:hystrix_macro"]
+hystrix = ["dep:hystrix_impl", "dep:hystrix_macro", "application_impl?/hystrix"]
 # 接口级隔离监控(nafana):bulkhead、超时、降级与 Prometheus/Grafana 观测。
 # 出口 = Prometheus `/metrics` + Grafana 面板。
 grafana = ["dep:grafana_impl", "dep:grafana_macro", "application_impl?/observability"]
@@ -102,6 +102,8 @@ partition = ["dep:partition_impl", "application_impl?/partition", "scheduling_im
 
 # 弱依赖桥：同时启用 application 时把 napp 的 ws 组件编入。
 ws = ["dep:ws_impl", "application_impl?/ws"]
+# 纯出站客户端的标准宿主接线。
+ws-client = ["dep:ws_impl", "application_impl?/ws-client"]
 # WebSocket 子能力向下透传到实现 crate。
 ws-redis = ["ws", "ws_impl/redis", "application_impl?/ws-redis"]
 ws-socketio = ["ws", "ws_impl/socketio"]
@@ -227,6 +229,7 @@ full = [
     "mapper-cache-grouped",
     "mapper-redis-cache",
     "partition",
+    "ws-client",
     "ws-redis",
     "ws-socketio",
     "kafka",

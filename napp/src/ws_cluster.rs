@@ -18,7 +18,7 @@ pub(crate) enum WsClusterPlan {
     #[cfg(feature = "ws-kafka")]
     Kafka {
         source: String,
-        config: naws::kafka::WsKafkaRuntimeConfig,
+        config: Box<naws::kafka::WsKafkaRuntimeConfig>,
         contract: naws::kafka::WsKafkaTopicContract,
         incarnation: naws::cluster::Incarnation,
     },
@@ -63,7 +63,7 @@ impl WsClusterPlan {
         }
         Ok(Self::Kafka {
             source: source.into(),
-            config,
+            config: Box::new(config),
             contract,
             incarnation,
         })
@@ -197,7 +197,7 @@ pub(crate) async fn prepare(
             let proxy = application.kafka(&source)?.ws_runtime_proxy()?;
             let node = config.local_node.clone();
             let ready_timeout = std::time::Duration::from_millis(config.ready_timeout_ms);
-            let runtime = naws::kafka::WsKafkaRuntime::new(proxy, config, contract)
+            let runtime = naws::kafka::WsKafkaRuntime::new(proxy, *config, contract)
                 .map_err(|_| error("WS Kafka runtime configuration failed"))?;
             let builder = builder
                 .cluster(node, Arc::new(runtime.notifier()))

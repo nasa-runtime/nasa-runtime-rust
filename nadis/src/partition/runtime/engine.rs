@@ -293,49 +293,84 @@ pub struct ExecutionDomainSnapshot {
     pub batch_capacity: usize,
     /// 本域可交给异步删除 owner 的 ID 上限。
     pub delete_capacity: usize,
+    /// 尚未终结的记录责任数，包含读取前预留。
     pub inflight_records: usize,
+    /// 当前保留的估算正文与解码对象字节数，包含读取预留。
     pub payload_bytes: usize,
+    /// 当前持有读取预留的批次数。
     pub active_batches: usize,
+    /// 账本中尚未收口的消费任务数。
     pub inflight_tasks: usize,
+    /// 本执行域尚未完成的异步删除责任数。
     pub async_delete_pending: usize,
+    /// 执行监督是否已进入降级状态。
     pub runner_degraded: bool,
+    /// 本执行域 Runner 是否已确认进入 Stopped 状态。
     pub runner_stopped: bool,
 }
 
 /// 共享消费状态的低基数快照，不输出 entry id、业务键或 gate token。
 #[derive(Debug, Clone, Default)]
 pub struct PartitionSnapshot {
+    /// 本实例冻结的本地执行域划分方式。
     pub executor_scope: crate::partition::PartitionExecutorScope,
     /// record、payload、batch、task 在账本锁内采样；删除与 Runner 状态独立读取。
     pub execution_domains: Vec<ExecutionDomainSnapshot>,
     /// 消费器本地准入状态，业务须显式接入 Application readiness。
     pub ready: bool,
+    /// 执行监督是否已进入降级状态。
     pub runner_degraded: bool,
+    /// 尚未终结的记录责任数，包含读取前预留。
     pub inflight_records: usize,
+    /// 当前保留的估算正文与解码对象字节数，包含读取预留。
     pub payload_bytes: usize,
+    /// 当前持有读取预留的批次数。
     pub active_batches: usize,
+    /// 等待共享读取预算的请求数。
     pub read_waiters: usize,
+    /// 账本中尚未收口的消费任务数。
     pub inflight_tasks: usize,
+    /// 业务已完成但提交责任尚未终结的记录数。
     pub pending_commits: usize,
+    /// pending_commits 中服务端提交结果尚不确定的记录数。
     pub unknown_commits: usize,
+    /// 由重试责任持有的记录数。
     pub retry_tickets: usize,
+    /// 当前保留的业务顺序键门禁数。
     pub ordered_keys: usize,
+    /// 因前驱尚未解决而处于 Blocked 状态的顺序键数。
     pub blocked_keys: usize,
+    /// 已经就绪、仍由顺序键门禁管理的待执行记录数。
     pub deferred_records: usize,
+    /// 当前无法解码或匹配消费计划、仍保留处置责任的记录数。
     pub unroutable_records: usize,
+    /// 已暂停推进、等待显式处置的记录数。
     pub parked_records: usize,
+    /// 因未解决记录而关闭新业务准入的物理来源数。
     pub blocked_sources: usize,
+    /// 进入 Park 保护态的物理来源数。
     pub parked_sources: usize,
+    /// 因单条原始 Envelope 超过 max_record_bytes 而受保护的物理来源数。
     pub oversized_sources: usize,
+    /// 因协议异常而受保护的物理来源数。
     pub protocol_error_sources: usize,
+    /// Redis 响应记录数超过读取预留形成的数量欠额，非零时关闭根准入。
     pub record_debt: usize,
+    /// 当前正文预算占用超过源级上限的字节数。
     pub byte_debt: usize,
+    /// 确认服务端提交并从本地账本移除的累计记录数。
     pub committed_records: u64,
+    /// 未确认提交而结束本地责任的累计记录数，不代表已经消费成功。
     pub retained_records: u64,
+    /// 尚未确认释放或原 holder 已失权的来源锁数。
     pub unconfirmed_locks: usize,
+    /// 在途任务中 Runner 当前报告为 Running 的数量。
     pub running_tasks: usize,
+    /// 各来源仍持有的 I/O 与载荷清理责任总数。
     pub source_io: usize,
+    /// 转交共享监督后尚未 join 回收的读取任务数。
     pub unjoined_readers: usize,
+    /// 异步删除未确认成功、保留远端记录的累计数量。
     pub delete_retained_records: u64,
 }
 
@@ -1533,8 +1568,7 @@ impl RedisPartitionRuntime {
                     .expect("ledger")
                     .abandoned
                     .values()
-                    .filter(|source| source.domain == domain)
-                    .next()
+                    .find(|source| source.domain == domain)
                     .cloned();
                 if let Some(source) = abandoned {
                     if let Some(rt) = source.group.upgrade() {

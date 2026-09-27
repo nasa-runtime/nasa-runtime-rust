@@ -25,7 +25,6 @@ use redis::Value;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{Conn, RedisClient};
@@ -101,7 +100,8 @@ impl StreamPublishItem {
 // ───────────────────────── 订阅配置类型 ─────────────────────────
 
 /// Broadcast 起点。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamStart {
     /// 从"当前时刻"起(具体 id:XREVRANGE 取最后一条已有 entry id,空/流不存在则 0-0),只收之后的新事件。
     Now,
@@ -112,7 +112,8 @@ pub enum StreamStart {
 }
 
 /// 消费组建组起点(仅首次 XGROUP CREATE 用)。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamGroupStart {
     /// 只收建组后的新消息(`$`)。
     New,
@@ -121,7 +122,8 @@ pub enum StreamGroupStart {
 }
 
 /// 消费模式。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamMode {
     /// 广播:XREAD,独立游标,所有订阅者都收到。
     Broadcast {
@@ -140,7 +142,8 @@ pub enum StreamMode {
 }
 
 /// 消费组 ACK 策略。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamAckPolicy {
     /// 默认 auto-ack:entry 完成一次分发尝试后即 ACK(handler 失败也 ACK,不滞留 PEL)。
     Auto,
@@ -154,7 +157,8 @@ pub enum StreamAckPolicy {
 }
 
 /// 订阅运行参数。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct StreamSubscribeCfg {
     /// 消费模式(广播 / 组)。
     pub mode: StreamMode,
@@ -524,9 +528,36 @@ impl StreamSubscriber {
         self
     }
 
+    /// 业务作用：提供已登记事件目录大小，用于宿主在连接前校验计划容量。
+    /// 参数说明：无。
+    /// 返回：去重后的事件处理器数量。
+    pub fn handler_count(&self) -> usize {
+        self.handlers.len()
+    }
+
     /// 业务作用：起后台订阅任务。启动阶段同步:建专用连接、解析 Broadcast 起点(XREVRANGE)/建消费组(XGROUP CREATE),
     /// 这些若失败当场返回 Err;之后进入读循环。返回 `StreamSubscription`(drop 即 best-effort 停,shutdown().await 优雅停)。
     pub async fn start(self) -> Result<StreamSubscription> {
+        let subscription = self.start_suspended().await?;
+        subscription.activate();
+        Ok(subscription)
+    }
+
+    /// 业务作用：准备专用连接与读取起点，业务读取等待宿主显式激活。
+    /// 参数说明：无。
+    /// 返回：带激活门禁及独立退出 owner 的订阅；准备失败时不创建消费循环。
+    pub async fn start_suspended(self) -> Result<StreamSubscription> {
+        self.start_suspended_with_activation(CancellationToken::new())
+            .await
+    }
+
+    /// 业务作用：准备消费任务并等待调用方统一开放多个领域入口。
+    /// 参数说明：`ready` 的取消表示许可发布；共享许可时仅由宿主取消，不能逐项调用 activate。
+    /// 返回：准备成功的订阅；许可发布前不读取或调用业务，关闭仍优先于激活。
+    pub async fn start_suspended_with_activation(
+        self,
+        ready: CancellationToken,
+    ) -> Result<StreamSubscription> {
         if self.stream.trim().is_empty()
             || self.stream != self.stream.trim()
             || self.stream.len() > MAX_REDIS_NAME_BYTES
@@ -612,46 +643,161 @@ impl StreamSubscriber {
             }
         };
 
-        let handle = tokio::spawn(run_loop(
-            self.client,
-            self.stream,
-            self.cfg,
-            self.handlers,
-            conn,
-            read_kind,
-            child,
-        ));
+        let gate = ready.clone();
+        let activity = Arc::new(crate::activity::Activity::default());
+        let active = activity.task(crate::activity::TaskKind::Consumer);
+        let progress = activity.clone();
+        let handle = tokio::spawn(async move {
+            let _active = active;
+            // 准备成功不能提前读取或 ACK；启动回滚时取消优先于统一放行。
+            tokio::select! {
+                biased;
+                _ = child.cancelled() => return,
+                _ = gate.cancelled() => {},
+            }
+            run_loop(self, conn, read_kind, child, progress).await;
+        });
+        let abort = handle.abort_handle();
+        let (done, outcome) = tokio::sync::watch::channel(StreamTaskState::Running);
+        let done = activity.completion(done);
+        let owner_cancel = cancel.clone();
+        let owner_stop = cancel.clone().drop_guard();
+        tokio::spawn(async move {
+            let _stop = owner_stop;
+            let result = handle.await;
+            let state = if result.is_ok() && owner_cancel.is_cancelled() {
+                StreamTaskState::Stopped
+            } else {
+                StreamTaskState::Failed
+            };
+            owner_cancel.cancel();
+            done.send_replace(state);
+        });
         Ok(StreamSubscription {
             cancel,
-            handle: Some(handle),
+            ready,
+            abort,
+            outcome,
+            activity,
         })
     }
 }
 
-/// 订阅句柄。`shutdown().await` 优雅停(cancel + join);drop 只 best-effort cancel(任务下一轮退出)。
+/// 普通 Stream 消费任务的退出证据，不改变消息的游标或 ACK 合同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamTaskState {
+    /// 已准备或正在消费。
+    Running,
+    /// 收到关闭请求后正常退出。
+    Stopped,
+    /// 未预期退出、panic 或强制终止。
+    Failed,
+}
+
+/// 订阅的激活与停止句柄，独立 owner 等待任务退出，取消等待不会丢失完成状态。
 pub struct StreamSubscription {
+    activity: Arc<crate::activity::Activity>,
     cancel: CancellationToken,
-    handle: Option<JoinHandle<()>>,
+    ready: CancellationToken,
+    abort: tokio::task::AbortHandle,
+    outcome: tokio::sync::watch::Receiver<StreamTaskState>,
 }
 
 impl StreamSubscription {
-    /// 业务作用：优雅停机:取消 + 等任务退出。
-    pub async fn shutdown(mut self) {
+    /// 业务作用：在本地消费责任完整时完成宿主接流裁决，与任务退出串行化。
+    /// 参数说明：`publish` 必须短小同步、不阻塞、不重入本订阅。
+    /// 返回：未关闭且任务仍运行时返回 Some，否则不执行；不保证远端连接未发生尚未观察到的故障。
+    pub fn with_running<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        self.activity
+            .with_tasks(1, 0, 0, || {
+                if self.cancel.is_cancelled() || self.state() != StreamTaskState::Running {
+                    None
+                } else {
+                    Some(publish())
+                }
+            })
+            .flatten()
+    }
+    /// 业务作用：观察消费任务和本地处理责任，不额外查询业务 Stream 或 PEL。
+    /// 参数说明：无。
+    /// 返回：有效读取与处理进展；被取消的未结束处理仍保留在未完成数量中。
+    pub fn observation(&self) -> crate::RedisTaskObservation {
+        self.activity.snapshot()
+    }
+
+    /// 业务作用：准备完成后开放本代业务读取。
+    /// 参数说明：无。
+    /// 返回：未关闭时成功，关闭后不允许重新激活。
+    pub fn activate(&self) -> bool {
+        if self.cancel.is_cancelled() {
+            return false;
+        }
+        self.ready.cancel();
+        true
+    }
+
+    /// 业务作用：停止新的读取与 handler，未 ACK 的组消息保留 PEL。
+    /// 参数说明：无。
+    /// 返回：已发出关闭请求，不等同于任务实际退出。
+    pub fn begin_shutdown(&self) {
+        self.activity.close();
         self.cancel.cancel();
-        if let Some(h) = self.handle.take() {
-            let _ = h.await;
+    }
+
+    /// 业务作用：在关闭预算耗尽时请求终止消费任务。
+    /// 参数说明：无。
+    /// 返回：请求已发出，仍应等待退出证据。
+    pub fn abort(&self) {
+        self.begin_shutdown();
+        self.abort.abort();
+    }
+
+    /// 业务作用：提供当前消费任务状态用于宿主监督。
+    /// 参数说明：无。
+    /// 返回：本地任务状态；退出证据通道丢失时报告失败，不表示所有历史消息均已消费。
+    pub fn state(&self) -> StreamTaskState {
+        let disconnected = self.outcome.has_changed().is_err();
+        let state = *self.outcome.borrow();
+        if disconnected && state == StreamTaskState::Running {
+            StreamTaskState::Failed
+        } else {
+            state
+        }
+    }
+
+    /// 业务作用：等待独立 owner 取得实际退出结果，支持重复及取消后再次等待。
+    /// 参数说明：无。
+    /// 返回：正常停止或异常退出；证据通道消失时按失败处理。
+    pub async fn wait_closed(&self) -> StreamTaskState {
+        let mut outcome = self.outcome.clone();
+        loop {
+            let state = *outcome.borrow_and_update();
+            if state != StreamTaskState::Running {
+                return state;
+            }
+            if outcome.changed().await.is_err() {
+                return StreamTaskState::Failed;
+            }
+        }
+    }
+
+    /// 业务作用：关闭消费并等待任务实际退出。
+    /// 参数说明：无。
+    /// 返回：关闭完成，异常退出记录固定原因；未确认 ACK 不自动补偿。
+    pub async fn shutdown(self) {
+        self.begin_shutdown();
+        if self.wait_closed().await == StreamTaskState::Failed {
+            tracing::warn!("Stream 消费任务异常退出");
         }
     }
 }
 
 impl Drop for StreamSubscription {
-    /// 业务作用：丢弃订阅句柄时触发协作取消。
-    ///
-    /// 不直接 abort Tokio task；读、退避、重连、handler 与 XACK 的 `select` 会观察该信号。
-    /// handler future 若正在等待会被丢弃，组消息不 ACK 并留在 PEL；纯 CPU 且不 yield 的 handler
-    /// 无法被异步取消，仍须由业务移入 `spawn_blocking` 或自行设置边界。
+    /// 业务作用：释放业务句柄时停止准入，独立 owner 保留任务等待责任。
+    /// 参数说明：无。
+    /// 返回：协作取消；纯 CPU 且不 yield 的 handler 仍须由业务提供执行边界。
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.begin_shutdown();
     }
 }
 
@@ -663,25 +809,22 @@ enum ReadKind {
     Group { group: String, consumer: String },
 }
 
-// 订阅主循环:专用连接上 BLOCK 读 → 逐 entry 按 field 分发 → 广播推进游标 / 组按策略 XACK。
-///
-/// # 参数
-/// 业务作用：- `client`: 底层客户端或连接句柄。
-/// - `stream`: 正在读取的 Redis Stream key。
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
-/// - `handlers`: stream 消息类型到业务处理器的映射。
-/// - `conn`: 订阅循环独占的 Redis connection manager。
-/// - `read_kind`: stream 消费使用的读取模式。
-/// - `cancel`: 后台任务使用的取消信号。
+/// 业务作用：读取普通 Stream，按 field 执行业务并按原策略推进游标或确认消费。
+/// 参数说明：`subscriber` 为固定来源、Stream、配置与 handler 目录；`conn` 为专用读连接；`read_kind` 为读取策略；`cancel` 关闭准入；`activity` 留存本地责任。
+/// 返回：关闭后退出；未完成 handler 或 ACK 不推断远端执行结局。
 async fn run_loop(
-    client: Arc<RedisClient>,
-    stream: String,
-    cfg: StreamSubscribeCfg,
-    handlers: HashMap<String, Handler>,
+    subscriber: StreamSubscriber,
     mut conn: Conn,
     mut read_kind: ReadKind,
     cancel: CancellationToken,
+    activity: Arc<crate::activity::Activity>,
 ) {
+    let StreamSubscriber {
+        client,
+        stream,
+        cfg,
+        handlers,
+    } = subscriber;
     // BLOCK 不能 >= 连接级 response_timeout(否则会被连接超时误杀);默认 30s >> 500ms,仅防误配。
     let resp_timeout = client.config().command.response_timeout_ms;
     let block_ms = effective_block(cfg.block_ms, resp_timeout);
@@ -745,6 +888,8 @@ async fn run_loop(
             }
         };
 
+        activity.finish(0, false);
+        activity.accept(entries.len(), 0);
         if entries.is_empty() {
             // 阻塞模式:BLOCK 已等过;非阻塞模式:歇 idle 再轮询。
             if block_ms == 0 && sleep_or_cancel(&cancel, idle).await {
@@ -806,6 +951,7 @@ async fn run_loop(
                     }
                 }
             }
+            activity.finish(1, false);
         }
     }
     tracing::debug!(stream = %stream, "stream 订阅任务退出");

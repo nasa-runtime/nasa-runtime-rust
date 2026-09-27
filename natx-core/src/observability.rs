@@ -16,17 +16,24 @@ use crate::{DatabaseDriver, MAX_MANAGED_DATASOURCES};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatementLogging {
     #[default]
+    /// 关闭逐条语句日志，不关闭基础指标。
     Disabled,
+    /// 按 Debug 级别输出语句。
     Debug,
+    /// 按 Trace 级别输出语句。
     Trace,
 }
 
 /// 调用方显式声明的连接用途，不从任务、SQL 或错误文本推断。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionPurpose {
+    /// Mapper 业务 SQL 使用的连接。
     Mapper,
+    /// 数据库迁移使用的连接。
     Migration,
+    /// 连接或服务健康探测使用的连接。
     Probe,
+    /// 业务直接访问连接池。
     Direct,
 }
 
@@ -47,11 +54,17 @@ impl ConnectionPurpose {
 /// 连接获取的稳定完成分类。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcquireOutcome {
+    /// 连接获取成功。
     Ok,
+    /// 获取连接超过期限，不能据此推断是池饱和还是建连失败。
     Timeout,
+    /// 连接池或事务连接槽已关闭。
     Closed,
+    /// 数据库连接工作任务退出导致获取失败。
     Worker,
+    /// 等待方取消，未取得连接。
     Cancelled,
+    /// 其它连接获取错误。
     Other,
 }
 
@@ -71,41 +84,62 @@ impl AcquireOutcome {
 /// SQL 执行前拒绝原因，不与数据库调用失败混合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionRejection {
+    /// 当前操作要求事务，但没有可用的 ambient transaction。
     TxRequired,
+    /// 当前操作禁止加入已有事务。
     TxForbidden,
+    /// 目标数据源与当前事务绑定的数据源不同。
     CrossDatasource,
+    /// 目标驱动与当前事务绑定的驱动不同。
     CrossDriver,
+    /// 目标名称不在数据源目录中。
     UnknownDatasource,
+    /// 数据源注册表尚未可用或已经关闭。
     RegistryUnavailable,
+    /// 事务连接已被其它操作独占，当前调用无法取得访问权。
     TxConnectionBusy,
 }
 
 /// 等待日志的固定级别。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WaitLogLevel {
+    /// 以普通运行信息记录等待超阈值。
     Info,
     #[default]
+    /// 以告警级别记录等待超阈值。
     Warn,
 }
 
 /// 启动期冻结的成功等待日志策略，不关闭基础指标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WaitObservationPolicy {
+    /// 成功等待达到该时长时命中日志规则。
     pub threshold: Duration,
+    /// 是否输出成功等待超阈值日志。
     pub log_enabled: bool,
+    /// 等待超阈值日志的级别。
     pub log_level: WaitLogLevel,
+    /// 同一等待观测单元两次日志之间的最小间隔。
     pub log_cooldown: Duration,
 }
 
 /// 启动期冻结的连接超时通知路由；只持有具体有界队列，不接受任意回调。
 pub struct AcquireAlertPolicy {
+    /// 启动期绑定的有界通知队列路由。
     pub route: AlertRoute,
+    /// 连接超时通知的业务严重度。
     pub severity: Severity,
+    /// 同一连接观测槽的通知最小间隔。
     pub cooldown: Duration,
+    /// 允许触发超时通知的连接用途集合。
     pub purposes: Vec<ConnectionPurpose>,
+    /// 产生通知的稳定服务名。
     pub service: String,
+    /// 产生通知的进程实例身份。
     pub instance: String,
+    /// 可选部署环境身份。
     pub environment: Option<String>,
+    /// 可选部署集群身份。
     pub cluster: Option<String>,
 }
 
@@ -730,8 +764,11 @@ fn snapshot_wait(
 
 /// SQLx Pool 的近似瞬时状态；各字段不是事务式同时读取。
 pub struct PoolState {
+    /// 采样时连接池内的连接总数。
     pub total: u32,
+    /// 采样时可供借用的空闲连接数。
     pub idle: u32,
+    /// 连接池配置允许的最大连接数。
     pub max: u32,
 }
 

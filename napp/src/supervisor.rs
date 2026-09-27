@@ -11,7 +11,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, oneshot},
     task::{Id as TokioTaskId, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -223,7 +223,7 @@ pub(crate) struct TaskSupervisor {
     // 放在任务集合与接收队列之后；监督器离开时，最后一个业务 future 接续持有清理尾部。
     task_lifetime: Arc<TaskLifetime>,
     /// 组件与 initializer 共用单次放行信号；登记成功不代表可以执行终端副作用。
-    activation: watch::Sender<bool>,
+    activation: CancellationToken,
 }
 
 impl TaskSupervisor {
@@ -254,7 +254,7 @@ impl TaskSupervisor {
                 task_group_state: TaskGroupState::Running,
                 task_group_token,
                 task_lifetime,
-                activation: watch::channel(false).0,
+                activation: CancellationToken::new(),
             },
         )
     }
@@ -395,27 +395,15 @@ impl TaskSupervisor {
     /// 参数说明：`future` 为已经构造但尚未 poll 的终端主体。
     /// 返回：等待统一放行的受管任务；组级取消或 owner 消失时释放主体而不执行它。
     fn guard_activation(&self, mut future: StartupCleanup<ManagedTaskFuture>) -> ManagedTaskFuture {
-        let mut activation = self.activation.subscribe();
+        let activation = self.activation.clone();
         let stop = self.task_group_token.clone();
         Box::pin(async move {
             let result = async {
-                loop {
-                    // 停机优先于放行；失败清理也会唤醒尚未开始工作的任务，归还其资源所有权。
-                    if stop.is_cancelled() {
-                        return Ok(());
-                    }
-                    if *activation.borrow() {
-                        break;
-                    }
-                    tokio::select! {
-                        biased;
-                        _ = stop.cancelled() => return Ok(()),
-                        changed = activation.changed() => {
-                            if changed.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
+                // 停机优先于放行；失败清理释放尚未执行的主体与捕获资源。
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => return Ok(()),
+                    _ = activation.cancelled() => {}
                 }
                 future.value_mut().await
             }
@@ -432,11 +420,18 @@ impl TaskSupervisor {
         })
     }
 
-    /// 业务作用：一次发布全部受管终端的执行许可，不再按任务逐个开放副作用。
+    /// 业务作用：Batch 完成启动门禁后一次发布受管任务许可，不按任务逐个开放副作用。
     /// 参数说明：无。
-    /// 返回：唤醒全部等待任务；Service 必须已发布 Application Ready，Batch 必须已完成观测静态门禁。
+    /// 返回：唤醒全部等待任务；Service 的同一许可由 Ready 状态转换发布。
     pub(crate) fn release_startup_tasks(&self) {
-        self.activation.send_replace(true);
+        self.activation.cancel();
+    }
+
+    /// 业务作用：使领域准入与受管任务共用同一次启动许可。
+    /// 参数说明：无。
+    /// 返回：由宿主独占发布权的一次性信号，领域 owner 只能等待。
+    pub(crate) fn activation_token(&self) -> CancellationToken {
+        self.activation.clone()
     }
 
     /// 业务作用：接受并确认一个注册请求，或把拒绝原因回传给调用方。

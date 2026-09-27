@@ -29,15 +29,20 @@ struct Source {
 /// 不包含租约或业务键的单来源观察值；各来源独立采样。
 #[derive(Debug, Clone)]
 pub struct RedisPartitionObservation {
+    /// 消费实例绑定的 Redis qualifier。
     pub source: String,
+    /// 读取此来源快照的本地单调时刻。
     pub sampled_at: Instant,
+    /// 本来源独立 Runner 集合的运行、容量与待收口责任。
     pub partition: PartitionSnapshot,
 }
 
 /// 多来源共享期限的停机结果，未收口来源继续由领域 owner 持有。
 #[derive(Debug, Clone)]
 pub struct RedisPartitionStopResult {
+    /// 本次停机报告对应的 Redis qualifier。
     pub source: String,
+    /// 领域排干结果；未收敛不表示责任已释放，也不证明远端提交失败。
     pub report: PartitionShutdownReport,
 }
 

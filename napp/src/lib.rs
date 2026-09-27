@@ -1,4 +1,6 @@
 //! NASA 应用生命周期运行时核心。
+//! Redis Stream、Proxy、AutoPipeline、出站 TCP 帧客户端和 hystrix 可由命名配置接入，
+//! 框架负责准备、业务激活、健康观测以及关闭后的真实退出等待。
 //!
 //! 命名 REST、幂等 store、事务审计、对象存储、Schema Registry、TLS HTTP、缓存与 Redis 派生任务
 //! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature
@@ -13,6 +15,17 @@
 //! action、资源和任务沿 active stack 逆序关闭。外部系统中已经提交的事实不属于本地回滚能力，
 //! initializer 必须通过事务或稳定幂等键保证可安全重跑。
 //!
+//! # 消费、出站与隔离命令
+//!
+//! `redis` 提供命名 Stream、Proxy 与 AutoPipeline；`ws-client` 提供原生 TCP 帧 Client，
+//! 不需要入站 listener。Service 的消费、发送与回调和宿主终端共用启动许可；initializer 可以
+//! 取得句柄，但发送入口在放行前拒绝调用。Batch 在工作负载前开放 Pipeline 与发送 Client，
+//! 不接受长期消费或回调计划。TCP Client 不提供 ws/wss、TLS、消息重放或远端送达保证。
+//!
+//! `hystrix` 的显式受管配置在 Prepare 安装本代目录、固定规则与一个周期观测任务，供后续初始化、
+//! 业务调用和收尾使用。属性宏只缓存带代次的弱引用；关闭先拒绝新调用，等待在途责任后撤销全局
+//! 入口，旧 Command 永久返回 503。上述命名配置与认证材料变化报告 `RestartRequired`。
+//!
 //! # SQL 观测与统一放行
 //!
 //! `mapper-observability` 在 DB 建连前冻结目录与 YAML 策略，自动登记方法、连接、Pool 和通知源。
@@ -20,9 +33,11 @@
 //! 需关闭默认冷却。worker 调用业务通知微服务适配器，不在 SQL 路径执行用户代码或网络请求。
 //! `observability` 从同一 MetricHub 导出，失败不改变 SQL、事务或数据库 readiness。
 //!
-//! Service 完成全部 Ready 装配与 initializer 任务工厂后，执行只读静态检查并复验共享启动期限；
-//! 发布 Application Ready 后统一放行组件与 initializer 终端主体。Batch 只在工作负载前放行观测
-//! 任务，不发布 Service Ready。通知队列非持久、容量有限，不提供绝对送达或跨副本去重。
+//! Service 完成全部 Ready 装配与 initializer 任务工厂后，执行只读静态检查。在关键领域的本地
+//! 状态保护内复验任务责任、认证连接、健康证据与共享启动期限，再提交 Ready 与统一启动许可。
+//! 公开 Ready 时受管终端和领域入口已获许可；保护不覆盖尚未被观察到的远端故障。Batch 在工作
+//! 负载前开放所选出站资源与观测任务，不发布 Service Ready。通知队列非持久、容量有限，
+//! 不提供绝对送达或跨副本去重。
 //! UserHook 中普通 `spawn_background` / `spawn_critical` 不隐式等待 Ready；自管 listener 应使用
 //! `serve_when_ready`。initializer 任务工厂只构造 future，不自行开放入口或派生脱离屏障的任务。
 //!
@@ -314,7 +329,11 @@ mod redis_job;
 #[cfg(feature = "redis-job")]
 pub use redis_job::{RedisJobDescriptor, COLLECTED_REDIS_JOBS};
 #[cfg(feature = "redis")]
+mod redis_derived;
+#[cfg(feature = "redis")]
 mod redis_tasks;
+#[cfg(feature = "redis")]
+pub use redis_derived::{ManagedRedisPipeline, ManagedRedisProxy, RedisDerivedObservation};
 #[cfg(any(feature = "log", feature = "nacos-config", feature = "config-watch"))]
 mod reload;
 #[cfg(feature = "redis")]
@@ -548,3 +567,11 @@ pub mod __private {
     #[cfg(feature = "redis-job")]
     pub use serde_json;
 }
+
+#[cfg(feature = "ws-client")]
+mod ws_client;
+#[cfg(feature = "ws-client")]
+pub use ws_client::ManagedWsClient;
+
+#[cfg(feature = "hystrix")]
+mod hystrix_managed;

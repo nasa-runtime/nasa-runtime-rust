@@ -16,12 +16,19 @@ use tokio::sync::Notify;
 /// 停机操作的当前证明与剩余责任；不收敛报告可继续等待同一操作。
 #[derive(Debug, Clone)]
 pub struct PartitionShutdownReport {
+    /// 停机操作已完成，且消费、发布、删除、锁与后台任务均取得收口证明。
     pub converged: bool,
+    /// 是否曾请求显式强停；此标志本身不代表任务已退出。
     pub forced: bool,
+    /// 已请求强停但尚未收敛，不能证明本地执行已全部结束。
     pub local_execution_uncertain: bool,
+    /// 消费侧剩余责任与执行域状态的当前采样。
     pub remaining: PartitionSnapshot,
+    /// 发布侧在途责任与累计结果的当前采样。
     pub publishes: PublisherSnapshot,
+    /// 仍由各消费组持有的异步删除责任数。
     pub async_delete_pending: usize,
+    /// 各消费组尚未结束的后台任务数。
     pub background_tasks: usize,
 }
 

@@ -1,12 +1,11 @@
 // ============================================================================
 // src/client.rs —— Rust 异步客户端 SDK。
 // 连接 + AUTH 握手 + 收发(event/uid/group/endpoint)+ 自动心跳 + 回调。
-// 兼作协议与压测的 Rust 侧收发工具。架构说明。
 // 设计同服务端:writer task 独占 mpsc outbox;reader task 解帧分派到 handler。
 // ============================================================================
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,6 +55,49 @@ pub type EventCallback = Arc<dyn Fn(Message) + Send + Sync>;
 /// 客户端连接断开后的通知回调。
 pub type DisconnectCallback = Arc<dyn Fn() + Send + Sync>;
 
+/// 客户端固定失败类别，不包含对端地址、会话或认证材料。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientFailure {
+    /// TCP 或握手超时等建连失败。
+    Connect,
+    /// 对端明确拒绝身份材料。
+    Authentication,
+    /// 对端关闭帧或读半边结束。
+    Disconnected,
+    /// 控制帧不符合当前协议状态。
+    Protocol,
+    /// 已认证连接的读取或帧解码失败。
+    Read,
+    /// 已认证连接的帧写出失败。
+    Write,
+    /// 未在心跳期限内收到 PONG。
+    Heartbeat,
+    /// 接收缓冲或发送队列无法接纳必要工作。
+    Capacity,
+    /// 同步业务回调发生已隔离的 panic。
+    Callback,
+}
+/// 客户端本地证据；时间只表示最近事件距采样时刻的间隔，不代表远端业务健康。
+#[derive(Debug, Clone)]
+pub struct ClientObservation {
+    /// 本代 owner 尚未取得全部子任务退出证据。
+    pub running: bool,
+    /// 当前存在认证成功的连接，不等于远端业务健康。
+    pub connected: bool,
+    /// supervisor、writer、heartbeat 的存活数量。
+    pub active_tasks: usize,
+    /// 已隔离的业务回调 panic 总次数。
+    pub callback_failures: usize,
+    /// 最近认证成功的间隔，关闭后仍保留该历史事实。
+    pub last_authenticated_ago: Option<Duration>,
+    /// 当前认证连接的最近 PONG 间隔，新连接认证时清空。
+    pub last_pong_ago: Option<Duration>,
+    /// 最近一次失败的固定类别，重新连接不会抹除历史失败。
+    pub last_failure: Option<ClientFailure>,
+    /// 最近失败距本次采样的间隔。
+    pub last_failure_ago: Option<Duration>,
+}
+
 /// 保存内部共享状态；用于在多个调用路径之间复用数据。
 struct Inner {
     addr: String,
@@ -66,6 +108,13 @@ struct Inner {
     auto_heartbeat: bool,
     connect_timeout: Duration,
     max_frame: usize,
+    queue_capacity: usize,
+    events_ready: CancellationToken,
+    active_tasks: AtomicUsize,
+    callback_failures: AtomicUsize,
+    last_authenticated: Mutex<Option<tokio::time::Instant>>,
+    last_pong: Mutex<Option<tokio::time::Instant>>,
+    last_failure: Mutex<Option<(ClientFailure, tokio::time::Instant)>>,
     handlers: Mutex<HashMap<String, EventCallback>>,
     on_disconnect: Mutex<Option<DisconnectCallback>>,
     outbox: Mutex<Option<mpsc::Sender<Bytes>>>,
@@ -87,6 +136,17 @@ struct Inner {
 }
 
 impl Inner {
+    /// 业务作用：撤销本地认证连接，与宿主最终接流裁决串行化。
+    /// 参数说明：`closing` 表示同时禁止自动重连。
+    /// 返回：发送队列与连接事实同时撤销；未观察到的远端故障仍由协议任务报告。
+    fn invalidate_connection(&self, closing: bool) {
+        let mut outbox = self.outbox.lock().unwrap();
+        if closing {
+            self.closed.store(true, Ordering::Release);
+        }
+        self.connected.store(false, Ordering::Release);
+        *outbox = None;
+    }
     /// 业务作用：释放运行门禁并**唤醒** `wait_closed` 等待者。所有 `running→false` 的出口(首连失败、
     /// 握手期被 close、supervisor 退出)都必须走它,否则 `close_and_wait` 会丢唤醒永久挂起
     ///。
@@ -94,10 +154,11 @@ impl Inner {
         self.running.store(false, Ordering::Release);
         self.running_done.notify_waiters();
     }
-
-    /// 业务作用：当前连接的取消令牌克隆(level-triggered;读循环/握手/退避据此即时退出)。
-    fn cancel_token(&self) -> CancellationToken {
-        self.cancel.lock().unwrap().clone()
+    /// 业务作用：记录固定类别的最近失败，供本地观测区分连接与业务回调证据。
+    /// 参数说明：`failure` 为不携带秘密材料的类别。
+    /// 返回：替换最近失败事实，不创建任务或触发重试。
+    fn record_failure(&self, failure: ClientFailure) {
+        *self.last_failure.lock().unwrap() = Some((failure, tokio::time::Instant::now()));
     }
 }
 
@@ -113,6 +174,21 @@ pub struct ClientBuilder {
 }
 
 impl Client {
+    /// 业务作用：在认证连接仍有效的本地保护范围内完成宿主接流裁决。
+    /// 参数说明：`publish` 必须是短小同步操作，不阻塞、不重入本客户端、不执行业务回调。
+    /// 返回：连接已认证且 owner 和发送队列仍有效时执行并返回 Some，否则不执行；不证明远端此刻存活。
+    pub fn with_authenticated_connection<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        let outbox = self.inner.outbox.lock().unwrap();
+        // 已关闭、失去认证或发送任务退出时证据不再完整，必须保持宿主接流屏障关闭。
+        if self.inner.closed.load(Ordering::Acquire)
+            || !self.inner.connected.load(Ordering::Acquire)
+            || !self.inner.running.load(Ordering::Acquire)
+            || outbox.as_ref().is_none_or(|sender| sender.is_closed())
+        {
+            return None;
+        }
+        Some(publish())
+    }
     /// 业务作用：创建客户端 builder。
     ///
     /// # 参数
@@ -128,6 +204,17 @@ impl Client {
                 auto_heartbeat: true,
                 connect_timeout: Duration::from_secs(5),
                 max_frame: 16 * 1024 * 1024,
+                queue_capacity: 256,
+                events_ready: {
+                    let ready = CancellationToken::new();
+                    ready.cancel();
+                    ready
+                },
+                active_tasks: AtomicUsize::new(0),
+                callback_failures: AtomicUsize::new(0),
+                last_authenticated: Mutex::new(None),
+                last_pong: Mutex::new(None),
+                last_failure: Mutex::new(None),
                 handlers: Mutex::new(HashMap::new()),
                 on_disconnect: Mutex::new(None),
                 outbox: Mutex::new(None),
@@ -154,40 +241,118 @@ impl Client {
         self.inner.session_id.lock().unwrap().clone()
     }
 
-    /// 业务作用：连接 + AUTH 握手。成功后后台 reader + heartbeat task 已启动。
-    /// auto_reconnect 开启时:**首连成功后**若断开会自动重连(首连失败仍返回 Err,由调用方决定)。
+    /// 业务作用：建立本代连接 owner 并等待首次认证，首连成功后才允许自动重连。
+    /// 参数说明：无。
+    /// 返回：认证响应或连接错误；取消等待会取消本代，运行门禁在全部子任务退出后释放。
     pub async fn connect(&self) -> Result<AuthResponse, ClientError> {
-        // 运行门禁:已在运行 → 拒绝(防多 supervisor 同时跑、互相覆盖 outbox)。
-        if self
-            .inner
-            .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ClientError::Protocol("client already connected".into()));
-        }
-        self.inner.closed.store(false, Ordering::Release);
-        // 本次连接换一枚全新取消令牌(上一枚可能已被 close 取消,CancellationToken 不能复活)。
-        *self.inner.cancel.lock().unwrap() = CancellationToken::new();
-        let (resp, framed) = match establish_once(self.inner.clone()).await {
-            Ok(v) => v,
-            Err(e) => {
-                // 首连失败/被 close 取消 → 释放门禁**并唤醒** wait_closed(否则永久挂起)。
-                self.inner.release_running();
-                return Err(e);
+        let cancel = {
+            let mut token = self.inner.cancel.lock().unwrap();
+            // 门禁与取消令牌一起更换，close 不会误取消上一代而遗漏正在创建的新代。
+            if self
+                .inner
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(ClientError::Protocol("client already connected".into()));
             }
+            self.inner.closed.store(false, Ordering::Release);
+            *token = CancellationToken::new();
+            token.clone()
         };
-        // 握手成功后、spawn supervisor 前再查 closed:若并发 close 已发生,这里直接收尾,
-        // 避免"close 的通知早于新 supervisor 开始等待"导致 wait_closed 丢唤醒。
-        if self.inner.closed.load(Ordering::Acquire) {
-            *self.inner.outbox.lock().unwrap() = None;
-            self.inner.connected.store(false, Ordering::Release);
-            self.inner.release_running();
-            return Err(ClientError::Disconnected);
+        let mut guard = ConnectWaitGuard(Some(cancel.clone()));
+        let (answer, receiver) = tokio::sync::oneshot::channel();
+        let inner = self.inner.clone();
+        let run = Arc::new(ClientRun {
+            inner: inner.clone(),
+            cancel: cancel.clone(),
+            completion: Mutex::new(RunCompletion {
+                owner_exited: false,
+                released: false,
+            }),
+        });
+        let mut owner_guard = ClientOwner {
+            run: run.clone(),
+            completed: false,
+        };
+        let tasks = tokio_util::task::TaskTracker::new();
+        let worker_inner = inner.clone();
+        let worker_cancel = cancel.clone();
+        let worker_tasks = tasks.clone();
+        inner.active_tasks.fetch_add(1, Ordering::AcqRel);
+        // 计数守卫随 future 一起移交，任务首次轮询前被取消也必须归还计数。
+        let worker_active = ActiveClientTask(run.clone());
+        let worker = tokio::spawn(async move {
+            let _active = worker_active;
+            let _stop = worker_cancel.clone().drop_guard();
+            supervisor(worker_inner, worker_cancel, worker_tasks, answer, run).await;
+        });
+        // 首次 await 前已有独立 owner；它等待 supervisor 以及被 supervisor 创建的所有任务。
+        tokio::spawn(async move {
+            let worker_completed = worker.await.is_ok();
+            cancel.cancel();
+            tasks.close();
+            tasks.wait().await;
+            owner_guard.completed = worker_completed;
+            drop(owner_guard);
+        });
+        let result = receiver.await.map_err(|_| ClientError::Disconnected)?;
+        if result.is_ok() {
+            guard.0 = None;
+        } else {
+            self.wait_closed().await;
         }
-        // 单个 supervisor task:跑读循环,断开后(如开了 auto_reconnect)在其内部 loop 重连。
-        tokio::spawn(supervisor(self.inner.clone(), framed));
-        Ok(resp)
+        result
+    }
+
+    /// 业务作用：分别读取连接、认证、PONG 与失败事实，不把任务存活视为远端可用。
+    /// 参数说明：无。
+    /// 返回：有界本地快照；事件时间与计数不是跨字段原子采样。
+    pub fn observation(&self) -> ClientObservation {
+        let failure = *self.inner.last_failure.lock().unwrap();
+        ClientObservation {
+            running: self.is_running(),
+            connected: self.is_connected(),
+            active_tasks: self.active_tasks(),
+            callback_failures: self.callback_failures(),
+            last_authenticated_ago: self
+                .inner
+                .last_authenticated
+                .lock()
+                .unwrap()
+                .map(|at| at.elapsed()),
+            last_pong_ago: self.inner.last_pong.lock().unwrap().map(|at| at.elapsed()),
+            last_failure: failure.map(|(kind, _)| kind),
+            last_failure_ago: failure.map(|(_, at)| at.elapsed()),
+        }
+    }
+
+    /// 业务作用：宿主放行后允许分发准备期间有界缓冲的业务事件。
+    /// 参数说明：无。
+    /// 返回：开放业务回调；不会重新建立已关闭连接。
+    pub fn activate(&self) {
+        self.inner.events_ready.cancel();
+    }
+
+    /// 业务作用：观察连接 owner 是否仍持有运行责任。
+    /// 参数说明：无。
+    /// 返回：只有全部子任务退出后才为 false。
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::Acquire)
+    }
+
+    /// 业务作用：观察本客户端仍存活的 supervisor、writer 和 heartbeat 数。
+    /// 参数说明：无。
+    /// 返回：任务计数，不以 connected 标志代替退出证据。
+    pub fn active_tasks(&self) -> usize {
+        self.inner.active_tasks.load(Ordering::Acquire)
+    }
+
+    /// 业务作用：提供固定维度的业务回调异常累计值。
+    /// 参数说明：无。
+    /// 返回：被隔离的 callback panic 次数，不包含业务消息内容。
+    pub fn callback_failures(&self) -> usize {
+        self.inner.callback_failures.load(Ordering::Acquire)
     }
 
     /// 业务作用：注册某事件的接收回调(可在 connect 前或后调)。
@@ -219,18 +384,47 @@ impl Client {
 
     /* ============================== 发送 ============================== */
 
-    /// 业务作用：发完整 Message(BITPACK)。返回是否成功入队。
-    ///
-    /// # 参数
-    /// - `msg`: 已组装好的业务消息信封,会按 BITPACK_TLV 编码成 EVENT frame。
+    /// 业务作用：将合法业务信封编码后提交给当前连接的有界发送队列。
+    /// 参数说明：`msg` 是完整消息信封，按 BITPACK_TLV 编码为 EVENT 帧。
+    /// 返回：true 仅证明本地入队；未激活、关闭、帧超限或队列已满均拒绝，不承诺远端执行。
     pub fn send_message(&self, msg: &Message) -> bool {
+        if self.inner.closed.load(Ordering::Acquire) || !self.inner.events_ready.is_cancelled() {
+            return false;
+        }
+        // 先检查已存在的材料字节，拒绝明显超限消息，避免为关闭或超量发送复制大正文。
+        let mut material = msg.payload.as_ref().map_or(0, Vec::len);
+        for value in [&msg.from_uid, &msg.from_client, &msg.group]
+            .into_iter()
+            .flatten()
+        {
+            material = material.saturating_add(value.len());
+        }
+        for values in [&msg.events, &msg.routers, &msg.uids, &msg.excludes]
+            .into_iter()
+            .flatten()
+        {
+            material = material.saturating_add(values.len());
+            for value in values.iter().flatten() {
+                material = material.saturating_add(value.len());
+            }
+        }
+        if material > self.inner.max_frame {
+            return false;
+        }
         let payload = match msg.encode(Mode::BitpackTlv) {
             Ok(p) => p,
             Err(_) => return false,
         };
+        if payload.len().saturating_add(2) > self.inner.max_frame
+            || self.inner.closed.load(Ordering::Acquire)
+            || !self.inner.events_ready.is_cancelled()
+        {
+            return false;
+        }
         let frame = encode_frame(frame_type::EVENT, wire_mode::BITPACK, &payload);
         match self.inner.outbox.lock().unwrap().as_ref() {
-            Some(tx) => tx.try_send(frame).is_ok(),
+            Some(tx) if !self.inner.closed.load(Ordering::Acquire) => tx.try_send(frame).is_ok(),
+            Some(_) => false,
             None => false,
         }
     }
@@ -281,19 +475,20 @@ impl Client {
     }
 
     /// 业务作用：主动关闭(**异步触发**,不阻塞):停自动重连 + 丢 outbox(writer 退出)+ 唤醒读循环/退避。
-    /// 注意:运行门禁(`running`)由 supervisor 退出时的 RAII guard 复位,**不是**本函数同步清——
+    /// 注意:运行门禁(`running`)由关闭 owner 在全部连接任务退出后复位,**不是**本函数同步清——
     /// 否则旧 supervisor 与新 connect 会互相覆盖状态。因此 close() 后**立刻** connect()
     /// 可能短暂返回 "already connected",直到旧 supervisor 收尾。`is_connected()` **不是** join 屏障
     /// (它在 close() 里被同步清,但 supervisor 仍在收尾)——要确定性重连请用 `close_and_wait()`
     /// 或 `wait_closed()` 等门禁真正释放后再 connect。
+    /// 参数说明：无。
+    /// 返回：同步撤销发送准入并通知本代取消，实际退出仍需等待连接 owner。
     pub fn close(&self) {
-        self.inner.closed.store(true, Ordering::Release);
-        *self.inner.outbox.lock().unwrap() = None;
-        self.inner.connected.store(false, Ordering::Release);
-        self.inner.cancel.lock().unwrap().cancel(); // level-triggered:即便 read_loop 尚未 select 也不丢
+        let token = self.inner.cancel.lock().unwrap();
+        self.inner.invalidate_connection(true);
+        token.cancel();
     }
 
-    /// 业务作用：等 supervisor 真正退出(运行门禁 `running` 释放)。此后 `connect()` 不会再返回
+    /// 业务作用：等 supervisor、writer 与 heartbeat 全部退出并释放运行门禁。此后 `connect()` 不会再返回
     /// "already connected"。未在运行则立即返回。
     pub async fn wait_closed(&self) {
         loop {
@@ -306,7 +501,7 @@ impl Client {
         }
     }
 
-    /// 业务作用：关闭并等待 supervisor 收尾——确定性重连屏障:`close_and_wait().await` 后即可安全 `connect()`。
+    /// 业务作用：关闭并等待全部连接任务收尾——确定性重连屏障:`close_and_wait().await` 后即可安全 `connect()`。
     pub async fn close_and_wait(&self) {
         self.close();
         self.wait_closed().await;
@@ -388,6 +583,31 @@ impl ClientBuilder {
         self
     }
 
+    /// 业务作用：限制出站队列和单帧大小，使长连接资源可纳入宿主容量预算。
+    /// 参数说明：`queue_capacity` 为待发送帧数；`max_frame_bytes` 为单帧正文上限。
+    /// 返回：容量收敛为有限正值的 builder。
+    pub fn capacity(mut self, queue_capacity: usize, max_frame_bytes: usize) -> Self {
+        self.inner.queue_capacity = queue_capacity.clamp(1, 4096);
+        self.inner.max_frame = max_frame_bytes.clamp(1, 16 * 1024 * 1024);
+        self
+    }
+
+    /// 业务作用：让认证后事件等待宿主激活，期间保持协议控制帧处理。
+    /// 参数说明：无。
+    /// 返回：带有界事件缓冲的 builder；缓冲耗尽时断开，不提前调用业务。
+    pub fn start_suspended(mut self) -> Self {
+        self.inner.events_ready = CancellationToken::new();
+        self
+    }
+
+    /// 业务作用：让发送和业务回调等待调用方统一发布启动许可，协议控制帧仍可处理。
+    /// 参数说明：`ready` 的取消表示许可发布；共享许可时仅由宿主取消，不逐项调用 activate。
+    /// 返回：使用指定屏障的 builder，许可发布前的事件仍受缓冲容量限制。
+    pub fn activation_barrier(mut self, ready: CancellationToken) -> Self {
+        self.inner.events_ready = ready;
+        self
+    }
+
     /// 业务作用：完成 builder 装配并返回可运行对象。
     pub fn build(mut self) -> Client {
         self.inner.connect_timeout = bounded_client_duration(self.inner.connect_timeout);
@@ -402,41 +622,137 @@ impl ClientBuilder {
 
 /* ============================== 后台 task ============================== */
 
-/// 业务作用：写入 writer task 内容；用于输出数据或持久化状态。
-///
-/// # 参数
-/// - `wh`: TCP 写半边。
-/// - `rx`: 后台任务接收消息的通道。
-async fn writer_task(mut wh: OwnedWriteHalf, mut rx: mpsc::Receiver<Bytes>) {
-    while let Some(bytes) = rx.recv().await {
-        if wh.write_all(&bytes).await.is_err() {
-            break;
+/// 等待方取消只取消本代，门禁仍由独立 owner 在子任务退出后释放。
+struct ConnectWaitGuard(Option<CancellationToken>);
+impl Drop for ConnectWaitGuard {
+    /// 业务作用：首连等待被丢弃时撤销本代连接请求。
+    /// 参数说明：无。
+    /// 返回：触发取消，不直接释放运行门禁。
+    fn drop(&mut self) {
+        if let Some(token) = &self.0 {
+            token.cancel();
         }
     }
-    let _ = wh.shutdown().await;
+}
+struct RunCompletion {
+    owner_exited: bool,
+    released: bool,
+}
+struct ClientRun {
+    inner: Arc<Inner>,
+    cancel: CancellationToken,
+    completion: Mutex<RunCompletion>,
+}
+impl ClientRun {
+    /// 业务作用：收尾 owner 和全部连接任务归还责任后才释放本代运行门禁。
+    /// 参数说明：无。
+    /// 返回：执行器销毁与正常退出均可完成本地收口，旧任务不能覆盖下一代连接状态。
+    fn finish_if_idle(&self) {
+        let mut completion = self.completion.lock().unwrap();
+        if !completion.owner_exited
+            || completion.released
+            || self.inner.active_tasks.load(Ordering::Acquire) != 0
+        {
+            return;
+        }
+        completion.released = true;
+        // 准入已关闭且没有存活任务，先撤销旧会话再允许新的 connect 取得运行权。
+        self.inner.invalidate_connection(false);
+        *self.inner.session_id.lock().unwrap() = None;
+        self.inner.release_running();
+    }
+}
+struct ClientOwner {
+    run: Arc<ClientRun>,
+    completed: bool,
+}
+impl Drop for ClientOwner {
+    /// 业务作用：收尾任务完成或被执行器销毁时关闭本代发送，并保留子任务的退出责任。
+    /// 参数说明：无。
+    /// 返回：最后一个任务归还后释放门禁，异常销毁记录连接中断，不宣称消息送达。
+    fn drop(&mut self) {
+        self.run.inner.invalidate_connection(true);
+        self.run.cancel.cancel();
+        if !self.completed {
+            self.run.inner.record_failure(ClientFailure::Disconnected);
+        }
+        self.run.completion.lock().unwrap().owner_exited = true;
+        self.run.finish_if_idle();
+    }
+}
+struct ActiveClientTask(Arc<ClientRun>);
+impl Drop for ActiveClientTask {
+    /// 业务作用：任务实际退出时归还计数，panic 路径同样可观察。
+    /// 参数说明：无。
+    /// 返回：减少本代存活任务计数；最后一个任务归还且收尾 owner 已退出后才解除门禁。
+    fn drop(&mut self) {
+        // 任意连接任务失去运行责任都会撤销认证事实；先取得同一发布锁，避免接流裁决使用旧证据。
+        self.0.inner.invalidate_connection(false);
+        if self.0.inner.active_tasks.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.finish_if_idle();
+        }
+    }
+}
+
+/// 业务作用：串行写出本连接的帧，连接取消时立即释放写半边。
+/// 参数说明：`wh` 是独占写半边；`rx` 是有界队列；`cancel` 仅属于本次连接；`inner` 留存失败事实。
+/// 返回：关闭或写失败后结束；已入队帧不提升为远端确认。
+async fn writer_task(
+    mut wh: OwnedWriteHalf,
+    mut rx: mpsc::Receiver<Bytes>,
+    cancel: CancellationToken,
+    inner: Arc<Inner>,
+) {
+    let _stop = cancel.clone().drop_guard();
+    loop {
+        let bytes = tokio::select! {biased; _=cancel.cancelled()=>break, item=rx.recv()=>match item {Some(bytes)=>bytes,None=>break}};
+        tokio::select! {biased; _=cancel.cancelled()=>break, result=wh.write_all(&bytes)=>if result.is_err(){inner.record_failure(ClientFailure::Write);break}}
+    }
 }
 
 type ClientFramed = FramedRead<tokio::net::tcp::OwnedReadHalf, FrameCodec>;
-
-/// 业务作用：连接 + AUTH 握手 + 启动 writer/heartbeat。返回握手结果 + 读半边(由 supervisor 跑读循环)。
-/// **不** spawn 读任务(避免 async 递归),供 connect() 与 supervisor 重连共用。
-///
-/// # 参数
-/// - `inner`: 已解析的内部值或被包装对象。
-async fn establish_once(inner: Arc<Inner>) -> Result<(AuthResponse, ClientFramed), ClientError> {
-    let cancel = inner.cancel_token();
-    // TCP connect 也可被 close() 取消:否则 close 最坏要等满 connect_timeout。
-    let stream = tokio::select! {
-        s = tokio::time::timeout(inner.connect_timeout, TcpStream::connect(&inner.addr)) => {
-            s.map_err(|_| ClientError::Timeout)??
+struct ConnectionSession {
+    framed: ClientFramed,
+    cancel: CancellationToken,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    pong: Arc<Mutex<tokio::time::Instant>>,
+}
+impl ConnectionSession {
+    /// 业务作用：旧连接子任务退出后才允许重连发布新通道。
+    /// 参数说明：无。
+    /// 返回：writer 和 heartbeat 均取得 join 证据。
+    async fn stop(&mut self) {
+        self.cancel.cancel();
+        for handle in self.handles.drain(..) {
+            let _ = handle.await;
         }
-        _ = cancel.cancelled() => return Err(ClientError::Disconnected),
-    };
-    let (read_half, write_half) = stream.into_split();
-    let (tx, rx) = mpsc::channel::<Bytes>(256);
-    tokio::spawn(writer_task(write_half, rx));
-    let mut framed = FramedRead::new(read_half, FrameCodec::new(inner.max_frame));
+    }
+}
+impl Drop for ConnectionSession {
+    /// 业务作用：异常离开连接时撤销本连接任务，顶层 tracker 继续保留等待责任。
+    /// 参数说明：无。
+    /// 返回：请求停止剩余子任务，不发布新连接状态。
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+}
 
+/// 业务作用：在同一启动截止点内完成 TCP 与认证，再创建本连接的 writer/heartbeat。
+/// 参数说明：`inner` 为固定参数；`run_cancel` 为本次运行令牌；`tasks` 跟踪所有子任务；`run` 保留本代退出责任。
+/// 返回：已认证会话；失败前不发布 outbox，握手取消时直接释放两半连接。
+async fn establish_once(
+    inner: Arc<Inner>,
+    run_cancel: &CancellationToken,
+    tasks: &tokio_util::task::TaskTracker,
+    run: &Arc<ClientRun>,
+) -> Result<(AuthResponse, ConnectionSession), ClientError> {
+    let deadline = tokio::time::Instant::now() + inner.connect_timeout;
+    let stream = tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,TcpStream::connect(&inner.addr))=>result.map_err(|_|ClientError::Timeout)??};
+    let (read_half, mut write_half) = stream.into_split();
+    let mut framed = FramedRead::new(read_half, FrameCodec::new(inner.max_frame));
     let req = AuthRequest {
         token: Some(inner.token.clone()),
         endpoint: Some(inner.endpoint.clone()),
@@ -444,92 +760,138 @@ async fn establish_once(inner: Arc<Inner>) -> Result<(AuthResponse, ClientFramed
         version: opt(&inner.version),
         ..Default::default()
     };
-    tx.send(encode_frame(
-        frame_type::AUTH,
-        wire_mode::VARINT,
-        &req.encode(Mode::VarintTlv).unwrap(),
-    ))
-    .await
-    .map_err(|_| ClientError::Disconnected)?;
-
-    // 等 AUTH_RESP:受 connect_timeout 约束,且可被 close() 取消。
-    let frame = tokio::select! {
-        f = tokio::time::timeout(inner.connect_timeout, framed.next()) => {
-            f.map_err(|_| ClientError::Timeout)?.ok_or(ClientError::Disconnected)??
-        }
-        _ = cancel.cancelled() => return Err(ClientError::Disconnected),
-    };
-    if frame.typ != frame_type::AUTH_RESP {
-        return Err(ClientError::Protocol(format!(
-            "expected AUTH_RESP, got 0x{:02x}",
-            frame.typ
-        )));
-    }
-    // 控制帧固定 VARINT:不接受任意 mode 的 AUTH_RESP。
-    if frame.mode != wire_mode::VARINT {
-        return Err(ClientError::Protocol(format!(
-            "AUTH_RESP must be VARINT mode, got 0x{:02x}",
-            frame.mode
-        )));
+    let payload = req
+        .encode(Mode::VarintTlv)
+        .map_err(|_| ClientError::Protocol("invalid auth request".into()))?;
+    let auth = encode_frame(frame_type::AUTH, wire_mode::VARINT, &payload);
+    // 握手阶段直接持有写半边，取消 future 不留下尚未纳入 owner 的 writer。
+    tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,write_half.write_all(&auth))=>result.map_err(|_|ClientError::Timeout)??};
+    let frame = tokio::select! {biased; _=run_cancel.cancelled()=>return Err(ClientError::Disconnected), result=tokio::time::timeout_at(deadline,framed.next())=>result.map_err(|_|ClientError::Timeout)?.ok_or(ClientError::Disconnected)??};
+    if frame.typ != frame_type::AUTH_RESP || frame.mode != wire_mode::VARINT {
+        return Err(ClientError::Protocol("invalid AUTH_RESP frame".into()));
     }
     let resp = AuthResponse::decode(Mode::VarintTlv, &frame.payload)
-        .map_err(|e| ClientError::Protocol(format!("bad AUTH_RESP: {e}")))?;
+        .map_err(|_| ClientError::Protocol("invalid AUTH_RESP payload".into()))?;
     if !resp.ok {
-        return Err(ClientError::AuthFailed(
-            resp.err_msg.clone().unwrap_or_default(),
-        ));
+        return Err(ClientError::AuthFailed("authentication rejected".into()));
     }
-
-    *inner.outbox.lock().unwrap() = Some(tx.clone());
-    *inner.session_id.lock().unwrap() = resp.session_id.clone();
-    inner.connected.store(true, Ordering::Release);
+    let cancel = run_cancel.child_token();
+    let (tx, rx) = mpsc::channel(inner.queue_capacity);
+    let pong = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let mut session = ConnectionSession {
+        framed,
+        cancel: cancel.clone(),
+        handles: Vec::new(),
+        pong: pong.clone(),
+    };
+    let writer_inner = inner.clone();
+    let writer_cancel = cancel.clone();
+    inner.active_tasks.fetch_add(1, Ordering::AcqRel);
+    let writer_active = ActiveClientTask(run.clone());
+    session.handles.push(tasks.spawn(async move {
+        let _active = writer_active;
+        writer_task(write_half, rx, writer_cancel, writer_inner).await;
+    }));
     if inner.auto_heartbeat {
         let period = heartbeat_period(resp.heartbeat_timeout_ms);
-        tokio::spawn(heartbeat_task(tx, period, inner.clone()));
+        let heartbeat_inner = inner.clone();
+        let heartbeat_cancel = cancel.clone();
+        let heartbeat_tx = tx.clone();
+        inner.active_tasks.fetch_add(1, Ordering::AcqRel);
+        let heartbeat_active = ActiveClientTask(run.clone());
+        session.handles.push(tasks.spawn(async move {
+            let _active = heartbeat_active;
+            heartbeat_task(
+                heartbeat_tx,
+                period,
+                heartbeat_cancel,
+                pong,
+                heartbeat_inner,
+            )
+            .await;
+        }));
     }
-    Ok((resp, framed))
+    {
+        let mut outbox = inner.outbox.lock().unwrap();
+        // 发布前复验关闭；旧代任务尚未退出时运行门禁仍禁止新的 connect。
+        if run_cancel.is_cancelled()
+            || cancel.is_cancelled()
+            || tx.is_closed()
+            || inner.closed.load(Ordering::Acquire)
+        {
+            return Err(ClientError::Disconnected);
+        }
+        *inner.last_authenticated.lock().unwrap() = Some(tokio::time::Instant::now());
+        *inner.last_pong.lock().unwrap() = None;
+        *outbox = Some(tx);
+        *inner.session_id.lock().unwrap() = resp.session_id.clone();
+        inner.connected.store(true, Ordering::Release);
+    }
+    Ok((resp, session))
 }
 
-/// 业务作用：读循环:解帧分派;连接结束(EOF/CLOSE/错误)或 close() 唤醒即返回。
-///
-/// # 参数
-/// - `framed`: 已建立连接的 frame 读取器。
-/// - `inner`: 已解析的内部值或被包装对象。
-async fn read_loop(mut framed: ClientFramed, inner: &Arc<Inner>) {
-    let cancel = inner.cancel_token();
+/// 业务作用：持续处理控制帧，激活前有界缓冲业务帧，断线或本连接取消时退出。
+/// 参数说明：`session` 属于当前连接；`inner` 提供固定回调和宿主激活屏障。
+/// 返回：读循环停止，不自行发布下一代连接。
+async fn read_loop(session: &mut ConnectionSession, inner: &Arc<Inner>) {
+    let mut pending = VecDeque::new();
+    let mut buffered_bytes = 0usize;
     loop {
-        let item = tokio::select! {
-            it = framed.next() => it,
-            _ = cancel.cancelled() => break, // close() → level-triggered,即便先于此 select 也不丢
+        if inner.events_ready.is_cancelled() {
+            while let Some(message) = pending.pop_front() {
+                if session.cancel.is_cancelled() {
+                    return;
+                }
+                dispatch(inner, message);
+            }
+            buffered_bytes = 0;
+        }
+        let item = tokio::select! {biased;
+            _=session.cancel.cancelled()=>break,
+            _=inner.events_ready.cancelled(),if !pending.is_empty()=>continue,
+            item=session.framed.next()=>item,
         };
-        let Some(item) = item else { break };
         let frame = match item {
-            Ok(f) => f,
-            Err(_) => break,
+            Some(Ok(frame)) => frame,
+            Some(Err(_)) => {
+                inner.record_failure(ClientFailure::Read);
+                break;
+            }
+            None => {
+                inner.record_failure(ClientFailure::Disconnected);
+                break;
+            }
         };
         match frame.typ {
             frame_type::EVENT | frame_type::BROADCAST => {
                 let Some(mode) = Mode::from_ordinal(frame.mode) else {
                     continue;
                 };
-                let Ok(msg) = Message::decode(mode, &frame.payload) else {
+                let Ok(message) = Message::decode(mode, &frame.payload) else {
                     continue;
                 };
-                dispatch(inner, msg);
+                if inner.events_ready.is_cancelled() {
+                    dispatch(inner, message);
+                } else {
+                    buffered_bytes = buffered_bytes.saturating_add(frame.payload.len());
+                    if pending.len() >= 64 || buffered_bytes > inner.max_frame {
+                        inner.record_failure(ClientFailure::Capacity);
+                        break;
+                    }
+                    pending.push_back(message);
+                }
             }
-            // 控制帧校验:PONG 必须 VARINT + 空 payload;非法即视为协议错误断开。
-            frame_type::PONG if frame.mode != wire_mode::VARINT || !frame.payload.is_empty() => {
-                tracing::warn!("client: malformed PONG, closing");
+            frame_type::PONG if frame.mode == wire_mode::VARINT && frame.payload.is_empty() => {
+                let now = tokio::time::Instant::now();
+                *session.pong.lock().unwrap() = now;
+                *inner.last_pong.lock().unwrap() = Some(now);
+            }
+            frame_type::PONG => {
+                inner.record_failure(ClientFailure::Protocol);
                 break;
             }
-            frame_type::PONG => {}
-            // CLOSE:校验 VARINT + 合法 CloseReason(无论如何都要断开,但校验防静默吞畸形)。
             frame_type::CLOSE => {
-                if frame.mode != wire_mode::VARINT
-                    || naws_proto::CloseReason::decode(Mode::VarintTlv, &frame.payload).is_err()
-                {
-                    tracing::warn!("client: malformed CLOSE");
-                }
+                inner.record_failure(ClientFailure::Disconnected);
                 break;
             }
             _ => {}
@@ -537,56 +899,61 @@ async fn read_loop(mut framed: ClientFramed, inner: &Arc<Inner>) {
     }
 }
 
-/// supervisor 退出守卫:任何退出路径(正常 / panic unwind)都复位状态,防 running 永久卡死
-/// (on_disconnect panic 曾使 supervisor 提前 unwind、漏掉 running=false)。
-struct SupervisorGuard {
+/// 业务作用：串行管理首连与重连，旧会话退出后才能发布新会话。
+/// 参数说明：`inner` 为本代状态；`cancel` 可终止握手和退避；`tasks` 持有子任务；`answer` 交付首连结果；`run` 保留退出责任。
+/// 返回：本代监督任务结束，最终门禁由外层 owner 在 tracker 排空后释放。
+async fn supervisor(
     inner: Arc<Inner>,
-}
-impl Drop for SupervisorGuard {
-    /// 业务作用：释放关联资源；用于对象离开作用域时执行兜底清理。
-    fn drop(&mut self) {
-        self.inner.connected.store(false, Ordering::Release);
-        *self.inner.outbox.lock().unwrap() = None;
-        self.inner.release_running();
-    }
-}
-
-/// 业务作用：连接 supervisor(每客户端一个,无递归):跑读循环;断开后按需退避重连。
-///
-/// # 参数
-/// - `inner`: 已解析的内部值或被包装对象。
-/// - `framed`: 已建立连接的 frame 读取器。
-async fn supervisor(inner: Arc<Inner>, framed: ClientFramed) {
-    let _guard = SupervisorGuard {
-        inner: inner.clone(),
+    cancel: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
+    answer: tokio::sync::oneshot::Sender<Result<AuthResponse, ClientError>>,
+    run: Arc<ClientRun>,
+) {
+    let mut session = match establish_once(inner.clone(), &cancel, &tasks, &run).await {
+        Ok((response, session)) => {
+            if answer.send(Ok(response)).is_err() {
+                cancel.cancel();
+            }
+            session
+        }
+        Err(error) => {
+            if !cancel.is_cancelled() {
+                inner.record_failure(connect_failure(&error));
+            }
+            let _ = answer.send(Err(error));
+            return;
+        }
     };
-    read_loop(framed, &inner).await;
-    on_disconnect_cleanup(&inner);
-
-    let cancel = inner.cancel_token();
     let mut backoff = inner.reconnect_min;
-    while inner.auto_reconnect && !inner.closed.load(Ordering::Acquire) {
-        // 退避 sleep 可被 close() 取消 → close 后最坏不必等到 reconnect_max。
-        tokio::select! {
-            _ = tokio::time::sleep(backoff) => {}
-            _ = cancel.cancelled() => break,
+    loop {
+        read_loop(&mut session, &inner).await;
+        // 先撤销旧通道并取得全部子任务退出证据，再通知断连与尝试下一次连接。
+        inner.invalidate_connection(false);
+        session.stop().await;
+        on_disconnect_cleanup(&inner);
+        if !inner.auto_reconnect || cancel.is_cancelled() || inner.closed.load(Ordering::Acquire) {
+            return;
         }
-        if inner.closed.load(Ordering::Acquire) {
-            break;
-        }
-        match establish_once(inner.clone()).await {
-            Ok((_, framed)) => {
-                backoff = inner.reconnect_min;
-                read_loop(framed, &inner).await;
-                on_disconnect_cleanup(&inner);
-            }
-            Err(e) => {
-                tracing::debug!("reconnect failed: {e}; retry in {backoff:?}");
-                backoff = (backoff * 2).min(inner.reconnect_max);
+        loop {
+            tokio::select! {biased; _=cancel.cancelled()=>return,_=tokio::time::sleep(backoff)=>{}}
+            match establish_once(inner.clone(), &cancel, &tasks, &run).await {
+                Ok((_, next)) => {
+                    session = next;
+                    backoff = inner.reconnect_min;
+                    break;
+                }
+                Err(error) => {
+                    if !cancel.is_cancelled() {
+                        inner.record_failure(connect_failure(&error));
+                    }
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(inner.reconnect_max);
+                }
             }
         }
     }
-    // _guard drop:复位 connected/outbox/running(任何路径,含 panic)。
 }
 
 /// 业务作用：执行断连清理；用于关闭会话状态并触发回调。
@@ -594,13 +961,14 @@ async fn supervisor(inner: Arc<Inner>, framed: ClientFramed) {
 /// # 参数
 /// - `inner`: 已解析的内部值或被包装对象。
 fn on_disconnect_cleanup(inner: &Arc<Inner>) {
-    inner.connected.store(false, Ordering::Release);
-    *inner.outbox.lock().unwrap() = None;
+    inner.invalidate_connection(false);
     *inner.session_id.lock().unwrap() = None; // 断连清旧 session_id,避免误用
     let cb = inner.on_disconnect.lock().unwrap().clone();
     if let Some(cb) = cb {
-        // 断连回调也做 panic 隔离(事件回调已隔离,这里补上)——否则 panic 掀掉 supervisor。
+        // 断连回调的异常不能越过连接 owner，使子任务失去等待责任。
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())).is_err() {
+            inner.record_failure(ClientFailure::Callback);
+            inner.callback_failures.fetch_add(1, Ordering::AcqRel);
             tracing::error!("client on_disconnect callback panicked, isolated");
         }
     }
@@ -626,28 +994,47 @@ fn dispatch(inner: &Arc<Inner>, msg: Message) {
         // 回调 panic 隔离:不让用户回调 panic 掀掉 supervisor、跳过断线清理。
         let m = msg.clone();
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(m))).is_err() {
+            inner.record_failure(ClientFailure::Callback);
+            inner.callback_failures.fetch_add(1, Ordering::AcqRel);
             tracing::error!("client event callback panicked, isolated");
         }
     }
 }
 
-/// 业务作用：运行客户端心跳任务；用于定期发送 ping 保持连接。
-///
-/// # 参数
-/// - `tx`: 后台任务发送消息的通道或事务句柄。
-/// - `period`: 任务调度周期。
-/// - `inner`: 已解析的内部值或被包装对象。
-async fn heartbeat_task(tx: mpsc::Sender<Bytes>, period: Duration, inner: Arc<Inner>) {
+/// 业务作用：本连接独立发送心跳并检测未获 PONG 的半开状态。
+/// 参数说明：`tx` 仅属于本连接；`period` 为周期；`cancel` 是连接令牌；`pong` 保存本连接最近响应；`inner` 留存失败事实。
+/// 返回：取消、发送失败或超过两个周期未获响应时关闭本连接，不读取新连接的 connected 状态。
+async fn heartbeat_task(
+    tx: mpsc::Sender<Bytes>,
+    period: Duration,
+    cancel: CancellationToken,
+    pong: Arc<Mutex<tokio::time::Instant>>,
+    inner: Arc<Inner>,
+) {
+    let _stop = cancel.clone().drop_guard();
     let mut ticker = tokio::time::interval(period);
     ticker.tick().await;
     loop {
-        ticker.tick().await;
-        if !inner.connected.load(Ordering::Acquire) {
+        tokio::select! {biased;_=cancel.cancelled()=>break,_=ticker.tick()=>{}}
+        if pong.lock().unwrap().elapsed() > period.saturating_mul(2) {
+            inner.record_failure(ClientFailure::Heartbeat);
             break;
         }
         if tx.try_send(ping()).is_err() {
+            inner.record_failure(ClientFailure::Capacity);
             break;
         }
+    }
+}
+
+/// 业务作用：将握手失败映射为固定类别，避免通过观测输出远端返回文本。
+/// 参数说明：`error` 为首连或重连失败。
+/// 返回：认证、协议或普通连接类别。
+fn connect_failure(error: &ClientError) -> ClientFailure {
+    match error {
+        ClientError::AuthFailed(_) => ClientFailure::Authentication,
+        ClientError::Protocol(_) => ClientFailure::Protocol,
+        _ => ClientFailure::Connect,
     }
 }
 

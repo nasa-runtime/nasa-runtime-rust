@@ -191,6 +191,7 @@ impl ConfigApplier for LogReloadApplier {
     /// # 参数
     ///
     /// - `candidate`：已通过整帧校验、尚未发布的候选配置树。
+    ///
     /// 返回：持有已准备文件与过滤器的候选；失败保持原输出。
     fn prepare(
         &self,

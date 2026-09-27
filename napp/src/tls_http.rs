@@ -137,9 +137,13 @@ pub struct ManagedHttpClient {
 
 /// 完整有界 HTTP 响应；配置视图是本次请求实际使用的一代。
 pub struct ManagedHttpResponse {
+    /// 远端 HTTP 状态码；完整响应不等于业务操作成功。
     pub status: u16,
+    /// 与完整正文对应的响应头，不包含后续独立请求的状态。
     pub headers: reqwest::header::HeaderMap,
+    /// 已按命名客户端容量与调用预算读取完成的响应正文。
     pub body: Vec<u8>,
+    /// 本请求实际使用的配置与凭据视图，便于按同代策略解释结果。
     pub config: Arc<ConfigView>,
 }
 

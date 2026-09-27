@@ -2,9 +2,11 @@
 
 `hystrix` 提供路由级 bulkhead 隔离、超时和 Hystrix Dashboard 指标流。业务通常通过门面使用：
 
-它是业务代码显式包裹执行体的独立命令面，不并入 Application 受管治理：Web 限流负责入站配额，
+它提供独立命令面，也可由 Application 管理配置、命令目录与周期观测：Web 限流负责入站配额，
 REST 发现客户端的 bulkhead/circuit 负责传输级失败，hystrix 负责业务判定失败、慢成功和非 REST
 出站依赖的隔离。三者不会自动互相调用或共享状态。
+受管模式把固定规则、显式命令和属性命令绑定到本代 Application，统一周期观测，业务收尾后等待
+在途调用退出再撤销目录。属性宏随实例重建命令，旧句柄永久返回 503，避免沿用已经关闭的隔离资源。
 
 ```toml
 [dependencies]
@@ -78,7 +80,7 @@ async fn detail() -> Result<Json<serde_json::Value>, AppError> {
 - 包裹真实执行体，不包裹 napart 或 `#[Async]` 的提交动作；hystrix 不感知队列等待、任务终态或取消合同。
 - 命令名必须是代码常量级低基数，不得拼接租户、订单等业务值。
 
-指标口径注意:`rollingMaxConcurrentExecutionCount` 是**进程生命周期内的并发峰值**(只增不减),不是滚动窗口内峰值——一次流量尖峰后 Dashboard 会持续显示该值。其余 rollingCount* 为 10s 滚动窗口。同名 Command 重复构造会在 Dashboard 出现重复圈(各自独立统计),注解宏路径已按 handler 缓存避免;
+指标口径注意:`rollingMaxConcurrentExecutionCount` 是**命令实例生命周期内的并发峰值**(只增不减),不是滚动窗口内峰值——一次流量尖峰后 Dashboard 会持续显示该值。其余 rollingCount* 为 10s 滚动窗口。独立模式同名 Command 重复构造会在 Dashboard 出现重复圈(各自独立统计),注解宏路径已按 handler 缓存避免;
 手动 `Command::new` 请自行复用实例——重复构造同 (group, name) 时会打一条 `warn` 提示。
 
 ## 全局降级
@@ -212,3 +214,40 @@ let app = axum::Router::new()
 
 字段名严格按上表书写：`IsolationRule` 拒绝未知字段，`timeoutMs` 这类拼写错误会让整段配置解析失败
 （应用启动失败或该次热更新失败），而不是被静默忽略成"保护未启用"。
+
+## Application 受管目录
+
+### 运行架构与关闭顺序
+
+```text
+固定规则 + 命名计划 + 静态属性描述 → Prepare 安装唯一 ManagedRuntime
+        → 本代命令目录 + 一个周期观测任务 → 初始化 / 业务调用 / 业务收尾
+        → 关闭新调用 → 等待在途业务、降级与观测退出 → 撤销规则与全局入口
+下一实例 → 新 owner 与命令目录；旧 Command 永久拒绝执行
+```
+
+owner 的存活只证明本地隔离与观测职责存在，不代表被保护的数据库、远端服务或业务结果健康。
+取消等待或执行器退出也不能代替在途业务 future 的释放证明。
+
+组合 `application,hystrix` 并配置 `hystrix.enabled: true`，无需新的组件字符串。
+`hystrix.isolation` 安装固定规则；受管 Web 自动在业务路由使用 dispatch，框架探针不纳入隔离。
+`hystrix.commands.<name>` 预装配显式命令，业务使用 `app.hystrix_command(name).await`。
+静态属性描述在 Ready 前创建本代命令，宏只缓存带代次的弱引用。配置和容量变更需要重启。
+宿主在 Ready 发布前复验 owner 准入并持有保护到发布完成，已退出的周期任务阻止启动。
+自建宿主可用 `ManagedRuntime::with_running` 提交短小同步的接流裁决；闭包不得阻塞或重入命令 owner。
+完整 YAML 见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#hystrix-命令-owner)。
+
+领域入口 `ManagedRuntime::start(rules, context_path, max_commands).await` 返回唯一 owner，
+`command(name, group, rule)` 明确报告重复／超量；需要自行装配时应等待 `shutdown()`。
+受管目录最多 4096 条，统一一个周期观测任务。手工安装的独立隔离表、独立 Command 或运行态全局
+fallback 与受管 owner 冲突；静态全局 fallback 描述可跨应用复用。直接构造的受管 Command 若身份、
+容量或数值不合法，执行时返回 503，不登记新任务。独立模式仍保持原有警告和参数归一化行为。
+
+Service 业务收尾之后才关闭命令准入，已经进入的业务和降级继续持有本代责任。所有在途调用和观察
+任务退出后撤销规则与目录，关闭等待被取消仍由独立 owner 完成。下一代使用自己的规则和宏实例，
+旧 Command 永久返回 503；业务自写的静态 `Arc<Command>` 不会自动切换代次，应改用命名受管句柄
+或属性宏。该模式不增加错误率 Open/HalfOpen/Closed 状态机。
+
+执行器销毁时，任务 future 的释放守卫关闭准入并记录失败；最后一个任务和在途业务 future
+归还后才撤销本代全局引用。仍由外部持有的业务 future 会继续阻止新 owner 安装，不能把执行器
+结束直接当作业务完成。`shutdown()` 对强制销毁返回 `TaskFailed`，旧命令仍返回 503。

@@ -2522,12 +2522,12 @@ pub struct MicroBatchCfg {
     /// 入队队列容量；满时生产者异步等待可用容量。
     pub queue_capacity: usize,
     /// **单命令参数字节上限**(0=不限)。超限的命令入队即拒绝(字节级背压)。
-    /// 与 `queue_capacity` 联合给出队列字节上界 ≈ `queue_capacity × max_command_bytes`,防大 value 撑爆内存。
+    /// 队列参数字节不超过 `queue_capacity × max_command_bytes`；不包含 Cmd 容量、RESP 编码、
+    /// 当前批次、响应和等待生产者持有的内存，不能解释为进程内存上限。
     pub max_command_bytes: usize,
     /// **单批参数字节软上限**(0=不限):累计达此立即 flush(即便未满 `max_batch`/窗口),防单条巨 pipeline。
-    /// ⚠ **软上限**:检查在收下一条之后,故实际批字节**最多超出一条命令的字节**
-    /// (≤ `max_command_bytes`,若已设)。需要硬上限请配 `max_command_bytes` 收敛单条体量;真·硬上限
-    /// 若业务需要严格硬上限,需扩展为"溢出命令转下批首"的分批策略。
+    /// 正常合批与关闭排干都在累计达到 B 后停止收集；若单条最多 M 字节，保守上界为 B＋M。
+    /// 合法命令可使本批跨过 B；每批仍受 `max_batch` 限制，不能把 B 当作硬内存限制。
     pub max_batch_bytes: usize,
 }
 
@@ -2621,22 +2621,45 @@ fn join_err_to_unknown(e: tokio::task::JoinError) -> Result<()> {
 /// 自动微批管道:后台任务把多生产者的命令合批成一条 pipeline 发出。`Arc` 共享给多调用方。
 pub struct AutoPipeline {
     tx: mpsc::Sender<BatchJob>,
+    activity: Arc<crate::activity::Activity>,
     cancel: CancellationToken,
     /// 单命令字节上限(0=不限),入队前检查(从 `MicroBatchCfg` 复制)。
     max_command_bytes: usize,
-    handle: std::sync::Mutex<Option<JoinHandle<()>>>,
-    /// 多个持有者共享同一个 drain 完成信号；取得 handle 的调用者等待后台退出后发布 true，
-    /// 其它调用者等待 watch，不能以 handle 已被取走作为排干完成的证明。
-    drained: tokio::sync::watch::Sender<bool>,
+    admission: std::sync::Mutex<bool>,
+    abort: tokio::task::AbortHandle,
+    /// 完成状态由独立 owner 留存；取消任意等待方不转移 flusher 的退出责任。
+    outcome: tokio::sync::watch::Receiver<AutoPipelineState>,
+}
+
+/// 自动微批后台任务的本地运行状态，不代表所有远端命令执行成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPipelineState {
+    /// 合批或排干仍在进行。
+    Running,
+    /// 已接纳命令均产生回执，flusher 正常退出；具体执行结果由各回执决定。
+    Drained,
+    /// 任务异常或被强制终止，未取得回执的命令保留结果未知。
+    Failed,
 }
 
 impl AutoPipeline {
-    /// 业务作用：启动后台合批任务。
-    ///
-    /// # 参数
-    ///
-    /// - `client`: 后台 flusher 使用的共享 Redis 客户端。
-    /// - `cfg`: 自动微批窗口、批大小、队列容量和字节背压配置。
+    /// 业务作用：在 flusher 责任完整时完成宿主接流裁决，与任务退出串行化。
+    /// 参数说明：`publish` 必须短小同步、不阻塞、不重入本微批入口。
+    /// 返回：未关闭且任务仍运行时返回 Some，否则不执行；不推断远端命令结果。
+    pub fn with_running<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        self.activity
+            .with_tasks(0, 0, 1, || {
+                if self.cancel.is_cancelled() || self.state() != AutoPipelineState::Running {
+                    None
+                } else {
+                    Some(publish())
+                }
+            })
+            .flatten()
+    }
+    /// 业务作用：创建有界入队通道、合批任务及独立的关闭等待 owner。
+    /// 参数说明：`client` 为固定 Redis 来源；`cfg` 为窗口、条数及参数字节容量。
+    /// 返回：可共享的自动微批句柄；最后一个句柄释放时关闭准入，owner 继续等待任务退出。
     pub fn start(client: Arc<RedisClient>, cfg: MicroBatchCfg) -> Arc<Self> {
         let queue_capacity = cfg
             .queue_capacity
@@ -2644,14 +2667,40 @@ impl AutoPipeline {
         let (tx, rx) = mpsc::channel(queue_capacity);
         let cancel = CancellationToken::new();
         let max_command_bytes = cfg.max_command_bytes;
-        let handle = tokio::spawn(flush_loop(client, rx, cfg, cancel.clone()));
-        let (drained, _) = tokio::sync::watch::channel(false);
+        let activity = Arc::new(crate::activity::Activity::default());
+        let active = activity.task(crate::activity::TaskKind::Flusher);
+        let progress = activity.clone();
+        let worker_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let _active = active;
+            flush_loop(client, rx, cfg, worker_cancel, progress).await;
+        });
+        let abort = handle.abort_handle();
+        let (done, outcome) = tokio::sync::watch::channel(AutoPipelineState::Running);
+        let done = activity.completion(done);
+        let task_cancel = cancel.clone();
+        let owner_activity = activity.clone();
+        let owner_stop = cancel.clone().drop_guard();
+        // owner 从创建时起独占 JoinHandle，关闭等待方被取消也不能分离 flusher。
+        tokio::spawn(async move {
+            let _stop = owner_stop;
+            let state = if handle.await.is_ok() {
+                AutoPipelineState::Drained
+            } else {
+                AutoPipelineState::Failed
+            };
+            task_cancel.cancel();
+            owner_activity.queue_dropped();
+            done.send_replace(state);
+        });
         Arc::new(Self {
             tx,
+            activity,
             cancel,
             max_command_bytes,
-            handle: std::sync::Mutex::new(Some(handle)),
-            drained,
+            admission: std::sync::Mutex::new(true),
+            abort,
+            outcome,
         })
     }
 
@@ -2663,15 +2712,11 @@ impl AutoPipeline {
     pub async fn execute<T: FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T> {
         self.precheck(&cmd)?;
         let (otx, orx) = oneshot::channel();
-        self.tx
-            .send((cmd, otx))
-            .await
-            .map_err(|_| NasaRedisError::ExecutionUnknown("自动微批已停机,命令未提交".into()))?;
+        self.enqueue((cmd, otx)).await?;
         match orx.await {
             Ok(Ok(v)) => Ok(T::from_redis_value(v)?),
             Ok(Err(TicketErr::Server(e))) => Err(NasaRedisError::Redis(e.into())),
             Ok(Err(TicketErr::Unknown(m))) => Err(NasaRedisError::ExecutionUnknown(m)),
-            // AutoPipeline 不产生 NotSent(命令一旦 send 进队列即会被 flush);列此仅为穷尽匹配。
             Ok(Err(TicketErr::NotSent)) => Err(NasaRedisError::NotExecuted("命令未发送".into())),
             Err(_) => Err(NasaRedisError::ExecutionUnknown(
                 "微批回执通道关闭(命令可能已执行)".into(),
@@ -2689,30 +2734,45 @@ impl AutoPipeline {
     pub async fn submit(&self, cmd: redis::Cmd) -> Result<()> {
         self.precheck(&cmd)?;
         let (otx, _orx) = oneshot::channel(); // 丢弃接收端 = 不等结果
-        self.tx
-            .send((cmd, otx))
-            .await
-            .map_err(|_| NasaRedisError::ExecutionUnknown("自动微批已停机,命令未提交".into()))?;
+        self.enqueue((cmd, otx)).await?;
         Ok(())
     }
 
-    /// 业务作用：**屏障**:等此前经 [`submit`](Self::submit)/[`execute`](Self::execute) **已入队**的命令
-    /// 全部 flush 到 redis 并执行完——返回后 direct 读必能看到这些 batched 写(解决 direct/batched 混用的顺序)。
-    ///
-    /// 实现:入队一个 `PING` 并 await。同 lane 单 flusher FIFO 保证 PING 在所有 prior 命令**之后**被处理;
-    /// PING 在专用 pipeline 连接上排在那些写之后,Redis 单线程顺序执行 → PING 应答时 prior 写已生效。
+    /// 业务作用：将容量等待与关闭裁决分开，保证关闭生效后没有新命令被接纳。
+    /// 参数说明：`job` 为尚未交给 flusher 的命令及回执。
+    /// 返回：成功表示命令已入队；关闭或通道失效时明确未发送。
+    async fn enqueue(&self, job: BatchJob) -> Result<()> {
+        let permit = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Err(NasaRedisError::NotExecuted("自动微批已关闭".into())),
+            permit = self.tx.reserve() => permit.map_err(|_| NasaRedisError::NotExecuted("自动微批队列已关闭".into()))?,
+        };
+        // 容量等待期间可能关闭；同一短锁内复验并发送，避免检查与入队之间重新开放责任。
+        let open = self.admission.lock().expect("auto pipeline admission");
+        if !*open || self.cancel.is_cancelled() {
+            return Err(NasaRedisError::NotExecuted("自动微批已关闭".into()));
+        }
+        self.activity.accept(1, estimate_cmd_bytes(&job.0));
+        permit.send(job);
+        Ok(())
+    }
+
+    /// 业务作用：等待此前已入队命令经过 flusher 处理，建立同一管道的提交顺序屏障。
+    /// 参数说明：无。
+    /// 返回：屏障 PING 的结果；不汇总此前命令的服务器错误或未知结果，写入成功仍以各自回执为准。
     pub async fn barrier(&self) -> Result<()> {
         self.execute::<redis::Value>(redis::cmd("PING"))
             .await
             .map(|_| ())
     }
 
-    /// 业务作用：命令准入 + 字节级背压预检:阻塞/PubSub/全局命令 fail-fast;单命令超
-    /// `max_command_bytes` 拒绝入队。`submit`/`execute` 共用。
-    ///
-    /// # 参数
-    /// - `cmd`: 底层 Redis 命令对象。
+    /// 业务作用：拒绝已关闭管道、会改变连接语义的命令及超过单条参数字节容量的请求。
+    /// 参数说明：`cmd` 为尚未交给后台任务的原始命令。
+    /// 返回：通过本地预检或确定的未执行错误；实际入队仍会复验关闭门禁。
     fn precheck(&self, cmd: &redis::Cmd) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(NasaRedisError::NotExecuted("自动微批已关闭".into()));
+        }
         if let Some(reason) = auto_pipeline_reject(cmd) {
             return Err(NasaRedisError::Config(reason.into()));
         }
@@ -2728,42 +2788,103 @@ impl AutoPipeline {
         Ok(())
     }
 
-    /// 业务作用：停机:停收新命令 + 后台 flush 完已入队的再退出。**幂等且对并发调用安全**
-    /// 抢到 handle 的调用者 await drain 完成后广播信号;其余并发调用者**等同一 drain 完成信号**才返回,
-    /// 不会先于后台 flush 退出就误判完成(避免上游过早释放资源)。
-    pub async fn shutdown(&self) {
+    /// 业务作用：永久停止接纳新命令，通知 flusher 排干已入队责任。
+    /// 参数说明：无。
+    /// 返回：准入已关闭；不表示排干完成。
+    pub fn begin_shutdown(&self) {
+        let mut open = self.admission.lock().expect("auto pipeline admission");
+        self.activity.close();
+        *open = false;
         self.cancel.cancel();
-        let h = self.handle.lock().expect("autopipeline handle").take();
-        match h {
-            Some(h) => {
-                let _ = h.await;
-                let _ = self.drained.send(true); // 广播:drain 已完成
-            }
-            None => {
-                // 别的调用者在 drain;等其完成信号(不抢先返回)
-                let mut rx = self.drained.subscribe();
-                while !*rx.borrow() {
-                    if rx.changed().await.is_err() {
-                        break; // sender 已 drop(理论不可达:self 持有 sender)
-                    }
+    }
+
+    /// 业务作用：预算耗尽时终止 flusher；仍需等待 owner 确认退出。
+    /// 参数说明：无。
+    /// 返回：关闭准入并请求终止，未获回执的命令不能自动重放。
+    pub fn abort(&self) {
+        self.begin_shutdown();
+        self.abort.abort();
+    }
+
+    /// 业务作用：取得后台任务终态用于监督和退出裁决。
+    /// 参数说明：无。
+    /// 返回：本地任务状态；退出证据通道丢失时报告失败，不提升为远端逐命令成功。
+    pub fn state(&self) -> AutoPipelineState {
+        let disconnected = self.outcome.has_changed().is_err();
+        let state = *self.outcome.borrow();
+        if disconnected && state == AutoPipelineState::Running {
+            AutoPipelineState::Failed
+        } else {
+            state
+        }
+    }
+
+    /// 业务作用：观察当前已占用的队列容量，包括正在提交的许可。
+    /// 参数说明：无。
+    /// 返回：队列槽占用数，不含 flusher 已取出的批次。
+    pub fn queued(&self) -> usize {
+        self.tx.max_capacity() - self.tx.capacity()
+    }
+
+    /// 业务作用：读取 flusher、参数字节、未完成责任及最近批次进展。
+    /// 参数说明：无。
+    /// 返回：本地工作证据，完成数量不等于远端写入成功数量。
+    pub fn observation(&self) -> crate::RedisTaskObservation {
+        self.activity.snapshot()
+    }
+
+    /// 业务作用：关闭准入并等待 flusher 的确定终态，支持并发、重复和取消后再次等待。
+    /// 参数说明：无。
+    /// 返回：正常退出时成功；异常或强制退出时报告结果未知，逐命令仍以回执为准。
+    pub async fn shutdown_result(&self) -> Result<()> {
+        self.begin_shutdown();
+        let mut outcome = self.outcome.clone();
+        loop {
+            match *outcome.borrow_and_update() {
+                AutoPipelineState::Drained => return Ok(()),
+                AutoPipelineState::Failed => {
+                    return Err(NasaRedisError::ExecutionUnknown(
+                        "自动微批任务异常退出".into(),
+                    ))
                 }
+                AutoPipelineState::Running => {}
             }
+            if outcome.changed().await.is_err() {
+                return Err(NasaRedisError::ExecutionUnknown(
+                    "自动微批退出证据不可用".into(),
+                ));
+            }
+        }
+    }
+
+    /// 业务作用：兼容独立调用入口，等待关闭并记录异常终态。
+    /// 参数说明：无。
+    /// 返回：等待结束；需要程序化裁决的调用方使用 shutdown_result。
+    pub async fn shutdown(&self) {
+        if self.shutdown_result().await.is_err() {
+            tracing::warn!("自动微批关闭时存在未确认命令");
         }
     }
 }
 
-// Runs the background pipeline flush loop.
-///
-/// # 参数
-/// 业务作用：- `client`: 底层客户端或连接句柄。
-/// - `rx`: 后台任务接收消息的通道。
-/// - `cfg`: 配置对象,用于初始化组件或校验运行参数。
-/// - `cancel`: 后台任务使用的取消信号。
+impl Drop for AutoPipeline {
+    /// 业务作用：最后一个业务句柄释放时收回准入，独立 owner 继续承担排干责任。
+    /// 参数说明：无。
+    /// 返回：触发关闭；不伪报已退出。
+    fn drop(&mut self) {
+        self.begin_shutdown();
+    }
+}
+
+/// 业务作用：按时间窗、条数和参数字节软边界合批，关闭后使用相同边界排干队列。
+/// 参数说明：`client` 持有 Redis 依赖；`rx` 是已接纳责任；`cfg` 为容量策略；`cancel` 触发关闭；`activity` 记录本地进展。
+/// 返回：队列全部产生回执后正常结束；任务中断由外层 owner 发布异常退出证据。
 async fn flush_loop(
     client: Arc<RedisClient>,
     mut rx: mpsc::Receiver<BatchJob>,
     cfg: MicroBatchCfg,
     cancel: CancellationToken,
+    activity: Arc<crate::activity::Activity>,
 ) {
     loop {
         // 等首命令(或停机)
@@ -2772,6 +2893,7 @@ async fn flush_loop(
             j = rx.recv() => match j { Some(j) => j, None => break },
         };
         let mut batch_bytes = estimate_cmd_bytes(&first.0);
+        activity.dequeue(batch_bytes);
         let mut batch = vec![first];
         // 时间窗内收集更多,到 max_batch / max_batch_bytes 立即停。窗口收集也监听
         // cancel——否则停机时若正在收集(尤其 window 调大做大批合并),drain 会被推迟整个 window;加 cancel
@@ -2784,30 +2906,43 @@ async fn flush_loop(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 r = tokio::time::timeout_at(deadline, rx.recv()) => match r {
-                    Ok(Some(j)) => { batch_bytes += estimate_cmd_bytes(&j.0); batch.push(j); }
+                    Ok(Some(j)) => { let bytes=estimate_cmd_bytes(&j.0); activity.dequeue(bytes); batch_bytes += bytes; batch.push(j); }
                     _ => break, // 窗口到 / 通道关闭
                 }
             }
         }
-        flush_batch(&client, batch).await;
+        flush_batch(&client, batch, &activity).await;
     }
-    // 停机 drain:把 cancel **之前已入队**的命令一并发出(正常结果);cancel 之后到达的命令在 execute()
-    // 侧会得 ExecutionUnknown(通道关闭后 send 失败/不被消费)——**没丢、没假成功**,但不保证发出。
-    let mut rest = Vec::new();
-    while let Ok(j) = rx.try_recv() {
-        rest.push(j);
-    }
-    if !rest.is_empty() {
-        flush_batch(&client, rest).await;
+    // 关闭接收端后只排干已接纳集合；正常合批与排干保持相同的条数和参数字节软上限。
+    rx.close();
+    while let Some(first) = rx.recv().await {
+        let mut bytes = estimate_cmd_bytes(&first.0);
+        activity.dequeue(bytes);
+        let mut batch = vec![first];
+        while batch.len() < cfg.max_batch.max(1)
+            && (cfg.max_batch_bytes == 0 || bytes < cfg.max_batch_bytes)
+        {
+            let Some(job) = rx.recv().await else { break };
+            let size = estimate_cmd_bytes(&job.0);
+            activity.dequeue(size);
+            bytes = bytes.saturating_add(size);
+            batch.push(job);
+        }
+        flush_batch(&client, batch, &activity).await;
     }
 }
 
 /// 业务作用：派发自动微批并让各 ticket 独立接收执行结果。
-/// 参数说明：`client` 为目标 Redis 客户端；`batch` 为同一窗口收集的命令。
+/// 参数说明：`client` 为目标 Redis 客户端；`batch` 为同一窗口收集的命令；`activity` 记录汇总结局。
 /// 返回：无；成功、命令错误或传输未知分别通过各 ticket 回执。
-async fn flush_batch(client: &Arc<RedisClient>, batch: Vec<BatchJob>) {
-    // AutoPipeline fire-and-forget:逐 ticket 结果已由 dispatch_jobs 回执,整体 Result 忽略。
-    let _ = dispatch_jobs(client, batch).await;
+async fn flush_batch(
+    client: &Arc<RedisClient>,
+    batch: Vec<BatchJob>,
+    activity: &crate::activity::Activity,
+) {
+    let count = batch.len();
+    let failed = dispatch_jobs(client, batch).await.is_err();
+    activity.finish(count, failed);
 }
 
 /// 业务作用：**统一的 cluster 感知派发**(显式 `PipelineSession::execute` 与

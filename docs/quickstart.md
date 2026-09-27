@@ -52,6 +52,19 @@ nasa = { git = "https://github.com/nasa-runtime/nasa-runtime-rust.git", features
 
 ## 应用入口
 
+没有 Web 入站也可以装配消费或出站能力：
+
+| 需求 | feature | 配置与使用边界 |
+| --- | --- | --- |
+| 普通 Stream / Proxy 消费 | `application,redis` | 声明 `"redis"`，Service UserHook 登记 handler，统一 Ready 后消费 |
+| 命名 AutoPipeline | `application,redis` | 声明 `"redis"`，配置 `redis_pipelines`，Service 与 Batch 均可使用 |
+| 纯出站 TCP 帧 Client | `application,ws-client` | 配置 `ws_clients`，不需 `"ws"` 或 `"web"`；不支持 ws/wss、TLS |
+| 隔离命令目录 | `application,hystrix` | 配置 `hystrix.enabled: true`，无需额外组件字符串 |
+
+Service 的 initializer 可以保存命名 Pipeline、Proxy 与 Client 句柄，但统一放行前的业务发送会
+被拒绝。Batch 在工作负载前开放所选 Pipeline 和 Client 发送，不接受长期消费或回调计划。
+具体 YAML、容量、认证材料与失败语义见 [命名能力配置](../napp/README.md#redis-streamproxyautopipeline)。
+
 ```rust
 mod controller;
 

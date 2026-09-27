@@ -8,17 +8,24 @@ use std::{any::Any, collections::HashMap, hash::Hash, sync::Arc};
 /// Stream 中一条记录的完整身份；不同 stream 的相同 entry id 不是同一记录。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecordIdentity {
+    /// Redis 中完整的物理 Stream 键名。
     pub stream: Arc<str>,
+    /// 该 Stream 内的 entry ID，须与 stream 一起标识记录。
     pub id: Arc<str>,
 }
 
 /// 一次业务调用持有的已解码消息与显式透传上下文。
 #[derive(Debug)]
 pub struct PartitionRecord<T> {
+    /// 消息的物理 Stream 与 entry ID。
     pub identity: RecordIdentity,
+    /// 信封中用于匹配消费计划的主题。
     pub topic: Arc<str>,
+    /// 信封中用于匹配消费计划的事件名。
     pub event: Arc<str>,
+    /// 按消费计划目标类型完成解码的业务正文。
     pub data: T,
+    /// 信封显式携带的透传上下文；缺省时为 None。
     pub passthrough: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
 }
 

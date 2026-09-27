@@ -20,12 +20,19 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DispatcherConfig {
+    /// 等待 worker 接收的通知数量上限。
     pub queue_capacity: usize,
+    /// 宿主同时执行的通知投递数量上限。
     pub max_in_flight: usize,
+    /// worker 开始投递后覆盖全部尝试与退避的总预算，单位毫秒，不含排队时间。
     pub delivery_timeout_ms: u64,
+    /// 停机后队列排空预算，单位毫秒，同时受宿主剩余期限约束。
     pub shutdown_drain_timeout_ms: u64,
+    /// 同一通知最多尝试次数，包含首次投递；重试还须有安全证据。
     pub max_attempts: usize,
+    /// 可安全重试时的初始退避，单位毫秒。
     pub retry_initial_backoff_ms: u64,
+    /// 指数退避的上限，单位毫秒；服务端要求的最小等待仍须满足。
     pub retry_max_backoff_ms: u64,
 }
 
@@ -109,8 +116,11 @@ impl std::error::Error for ConfigError {}
 #[repr(usize)]
 pub enum EventKind {
     #[default]
+    /// 数据库活跃时长达到慢 SQL 阈值。
     SlowSql,
+    /// 数据库操作返回显式执行错误。
     ExecutionError,
+    /// 获取数据库连接超过等待期限。
     AcquireTimeout,
 }
 
@@ -131,19 +141,27 @@ impl EventKind {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
+    /// 业务信息通知，无需按错误处理。
     Info,
     #[default]
+    /// 需要关注的业务告警。
     Warning,
+    /// 需要处理的执行失败。
     Error,
+    /// 业务认定需要紧急响应的严重告警。
     Critical,
 }
 
 /// 启动期冻结的通知来源身份；与指标出口使用同一进程标识。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NotificationIdentity {
+    /// 产生通知的稳定服务名。
     pub service: String,
+    /// 产生通知的进程实例身份。
     pub instance: String,
+    /// 可选部署环境身份。
     pub environment: Option<String>,
+    /// 可选部署集群身份。
     pub cluster: Option<String>,
 }
 
@@ -164,24 +182,43 @@ impl Severity {
 /// 通知输入；构造后所有文本均由 [`Notification::new`] 施加统一边界。
 #[derive(Clone, Default)]
 pub struct NotificationFields {
+    /// 通知事件标识，供业务渠道关联，不自动提供跨副本去重。
     pub id: String,
+    /// 触发本次通知的固定事件分类。
     pub event: EventKind,
+    /// 业务规则指定的严重程度。
     pub severity: Severity,
+    /// 事件发生时间，Unix epoch 毫秒。
     pub occurred_at_unix_ms: u64,
+    /// 产生通知的稳定服务名。
     pub service: String,
+    /// 产生通知的进程实例身份。
     pub instance: String,
+    /// 可选部署环境身份。
     pub environment: Option<String>,
+    /// 可选部署集群身份。
     pub cluster: Option<String>,
+    /// 产生事件的数据库驱动标识。
     pub driver: String,
+    /// 产生事件的数据源目录名称。
     pub datasource: String,
+    /// 触发事件的数据库或连接操作类别。
     pub operation: String,
+    /// 可选完整 Mapper 方法身份。
     pub method: Option<String>,
+    /// 连接获取事件的可选用途标识。
     pub purpose: Option<String>,
+    /// 事件关联的数据库活跃时长或连接等待时长，不含通知排队时间。
     pub duration: Duration,
+    /// 操作的稳定结果分类，不应写入原始错误文本。
     pub outcome: String,
+    /// 可选稳定错误分类，不包含数据库响应正文。
     pub error_kind: Option<String>,
+    /// 显式允许携带的 SQL 模板，不得包含绑定参数或凭据。
     pub prepared_sql: Option<String>,
+    /// 可选调用链标识，供渠道关联业务事件。
     pub trace_id: Option<String>,
+    /// 该操作是否同时命中慢 SQL 阈值，即使主通知事件为执行错误也保留此事实。
     pub slow: bool,
 }
 
@@ -275,12 +312,19 @@ pub struct NotifyReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum NotifyErrorKind {
+    /// 投递超过期限，不能仅凭超时认定远端未受理。
     Timeout,
+    /// 通知服务暂不可用。
     Unavailable,
+    /// 通知服务拒绝了超过限额的请求。
     RateLimited,
+    /// 通知服务明确拒绝受理。
     Rejected,
+    /// 通知服务认证失败。
     Authentication,
+    /// 请求不符合通知服务接口要求。
     InvalidRequest,
+    /// 其它稳定分类之外的投递失败。
     Other,
 }
 
@@ -304,14 +348,21 @@ impl NotifyErrorKind {
 /// 明确的重试证据；结果未知不得自行重发。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrySafety {
+    /// 缺少安全重试证据，禁止自动重发。
     Never,
-    Safe { retry_after: Option<Duration> },
+    /// 连接未发送或服务明确拒绝，并允许在宿主预算内重新尝试。
+    Safe {
+        /// 下游要求的最小等待；省略时使用宿主退避策略。
+        retry_after: Option<Duration>,
+    },
 }
 
 /// 脱敏错误，只描述稳定分类及重试证据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotifyError {
+    /// 不含凭据、URL 或响应正文的失败分类。
     pub kind: NotifyErrorKind,
+    /// 是否有明确证据允许重试，默认不允许。
     pub retry: RetrySafety,
 }
 

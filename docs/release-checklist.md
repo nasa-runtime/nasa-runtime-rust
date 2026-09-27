@@ -55,6 +55,12 @@
       部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
       使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] 普通 Stream、Proxy、AutoPipeline、原生 TCP Client 与 hystrix 的定位在根 README、组件 README、
+      门面、crate rustdoc 和 manifest 元数据中一致；独立 API 与 Application 受管入口分别说明。
+- [ ] Service 的消费、派生发送、Client 与宿主终端共用启动许可；关键本地任务、认证连接、健康证据
+      和启动预算复验持续保护到许可发布。公开 Ready 不被描述为远端送达或未来调用成功保证。
+- [ ] Batch 只开放支持的微批与出站发送，不接受长期消费或回调计划；微批参数字节边界、Proxy PEL
+      清理证据、Client 断连健康与 hystrix 旧命令拒绝语义均有明确说明。
 - [ ] Redis 分区消费的 source/group/stream 模式、源间独立性、固定域份额、全源业务键顺序、ACK
       不确定与停机失败语义在根 README、nadis、napart、门面、rustdoc 和 manifest 元数据中一致。
 - [ ] 分区消费的域数与总槽数按完整拓扑有界；每域整批预算充足，未持锁来源仍计入份额，解码权重

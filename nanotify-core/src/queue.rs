@@ -88,15 +88,25 @@ const OUTCOMES: [&str; 10] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum DeliveryOutcome {
+    /// 适配器确认下游受理，不证明最终收件。
     Accepted,
+    /// 投递超过期限，不能仅凭超时认定远端未受理。
     Timeout,
+    /// 通知服务暂不可用。
     Unavailable,
+    /// 通知服务拒绝了超过限额的请求。
     RateLimited,
+    /// 通知服务明确拒绝受理。
     Rejected,
+    /// 通知服务认证失败。
     Authentication,
+    /// 请求不符合通知服务接口要求。
     InvalidRequest,
+    /// 其它稳定分类之外的投递失败。
     Other,
+    /// 投递或其析构因 panic 展开退出。
     Panic,
+    /// 投递在宿主停机收口时被取消。
     Shutdown,
 }
 
@@ -259,9 +269,13 @@ pub struct AlertRoute {
 /// 非阻塞入队结果；不包含可以反向传播到业务调用的错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
+    /// 通知已进入本地有界队列，尚未确认下游受理。
     Enqueued,
+    /// 队列容量不足，新通知被丢弃。
     Full,
+    /// 通知生产权已关闭，新通知被拒绝。
     Stopping,
+    /// 进程默认通知实现尚未安装，本次通知不入队。
     Ignored,
 }
 
@@ -359,7 +373,9 @@ impl NotificationProducer {
 
 /// 消费端唯一拥有的待投递消息。
 pub struct Envelope {
+    /// 启动期冻结的 provider 目录索引。
     pub provider: usize,
+    /// 已施加文本边界、由 worker 独占投递责任的通知。
     pub notification: Notification,
     queued: bool,
     metrics: Arc<QueueMetrics>,

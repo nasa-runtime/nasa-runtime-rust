@@ -48,7 +48,9 @@ pub mod reason {
             feature = "config-watch",
             feature = "object-store",
             feature = "cache",
-            feature = "telemetry"
+            feature = "telemetry",
+            feature = "ws-client",
+            feature = "hystrix"
         )),
         allow(dead_code)
     )]
@@ -102,7 +104,9 @@ pub mod reason {
         feature = "object-store",
         feature = "web",
         feature = "ws",
-        feature = "telemetry"
+        feature = "telemetry",
+        feature = "ws-client",
+        feature = "hystrix"
     ))]
     pub const DEGRADED: &str = "degraded";
 }
@@ -305,6 +309,13 @@ pub struct ReadinessContributor {
 }
 
 impl ReadinessContributor {
+    /// 业务作用：在统一接流点复验已登记证据的新鲜度。
+    /// 参数说明：无。
+    /// 返回：当前证据仍为 Ready 时为 true，过期证据不会延长接流权威。
+    #[cfg(any(feature = "redis", feature = "ws-client", feature = "hystrix"))]
+    pub(crate) fn ready_now(&self) -> bool {
+        self.entry.lock().unwrap().effective(Instant::now()).0 == DependencyState::Ready
+    }
     /// 业务作用：发布有租约期限的就绪证据，期限到达后由读取端独立摘流。
     ///
     /// 参数说明：`deadline` 是整批依赖最早失效的单调时刻。

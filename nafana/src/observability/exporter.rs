@@ -143,7 +143,9 @@ impl LegacyMetricsSource for ExporterState {
 
 /// 一个 Application 的出口资源；只有显式启用时才会构造。
 pub struct Exporter {
+    /// 构造出口时采用的采样、认证与容量策略；共享实例不在运行中替换此配置。
     pub config: ObservabilityConfig,
+    /// 附加到各指标序列的固定进程身份。
     pub identity: Identity,
     hub: Arc<MetricHub>,
     state: Arc<ExporterState>,

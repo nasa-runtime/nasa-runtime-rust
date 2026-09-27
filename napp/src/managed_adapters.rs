@@ -65,6 +65,10 @@ pub(crate) fn validate(
         ("rest_clients", cfg!(feature = "rest")),
         ("redis_leaders", cfg!(feature = "redis")),
         ("redis_subscriptions", cfg!(feature = "redis")),
+        ("redis_streams", cfg!(feature = "redis")),
+        ("redis_proxies", cfg!(feature = "redis")),
+        ("redis_pipelines", cfg!(feature = "redis")),
+        ("ws_clients", cfg!(feature = "ws-client")),
         (
             "grouped_caches",
             cfg!(all(feature = "cache", feature = "redis")),
@@ -77,6 +81,17 @@ pub(crate) fn validate(
                 anyhow::anyhow!("capability feature is disabled: {section}"),
             ));
         }
+    }
+    if tree
+        .pointer("/hystrix/enabled")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && !cfg!(feature = "hystrix")
+    {
+        return Err(adapter_error(
+            "hystrix requires its feature",
+            anyhow::anyhow!("managed hystrix is unavailable"),
+        ));
     }
     crate::secret::validate_provider_plans(tree).map_err(|error| {
         adapter_error(
@@ -103,6 +118,9 @@ pub(crate) fn validate(
         || selected("grouped_caches")
         || selected("redis_leaders")
         || selected("redis_subscriptions")
+        || selected("redis_streams")
+        || selected("redis_proxies")
+        || selected("redis_pipelines")
         || tree
             .pointer("/redis/snowflake")
             .and_then(serde_json::Value::as_object)
@@ -135,14 +153,30 @@ pub(crate) fn validate(
                 plan.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
             }) {
                 let driver = plan.get("driver").and_then(serde_json::Value::as_str);
-                let supported = match (section, driver) {
-                    ("idempotency_stores", Some("mysql")) => cfg!(feature = "idempotency-mysql"),
-                    ("idempotency_stores", Some("pgsql")) => cfg!(feature = "idempotency-pgsql"),
-                    ("idempotency_stores", Some("redis")) => cfg!(feature = "idempotency-redis"),
-                    ("audit_sinks", Some("mysql")) => cfg!(feature = "audit-mysql"),
-                    ("audit_sinks", Some("pgsql")) => cfg!(feature = "audit-pgsql"),
-                    _ => false,
-                };
+                // 驱动名称与对应编译能力必须同时成立，配置存在不能代替 adapter 已编入。
+                let supported = [
+                    (
+                        "idempotency_stores",
+                        "mysql",
+                        cfg!(feature = "idempotency-mysql"),
+                    ),
+                    (
+                        "idempotency_stores",
+                        "pgsql",
+                        cfg!(feature = "idempotency-pgsql"),
+                    ),
+                    (
+                        "idempotency_stores",
+                        "redis",
+                        cfg!(feature = "idempotency-redis"),
+                    ),
+                    ("audit_sinks", "mysql", cfg!(feature = "audit-mysql")),
+                    ("audit_sinks", "pgsql", cfg!(feature = "audit-pgsql")),
+                ]
+                .into_iter()
+                .any(|(kind, backend, enabled)| {
+                    enabled && section == kind && driver == Some(backend)
+                });
                 if !supported
                     || !components.contains(&if driver == Some("redis") {
                         ComponentId::Redis
@@ -369,7 +403,27 @@ pub(crate) async fn prepare(
     crate::rest::prepare(context).await?;
     #[cfg(feature = "secret-http")]
     crate::tls_http::install(context)?;
-    Ok(object_monitor)
+    #[allow(unused_mut)]
+    let mut monitors = Vec::new();
+    if let Some(monitor) = object_monitor {
+        monitors.push(monitor);
+    }
+    #[cfg(feature = "ws-client")]
+    if let Some(monitor) = app.ws_clients().prepare(context).await? {
+        monitors.push(monitor);
+    }
+    #[cfg(feature = "hystrix")]
+    if let Some(monitor) = crate::hystrix_managed::prepare(context).await? {
+        monitors.push(monitor);
+    }
+    if monitors.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Box::pin(async move {
+            futures_util::future::try_join_all(monitors).await?;
+            Ok(())
+        })))
+    }
 }
 
 /// 业务作用：将内部原因归类为不包含凭据的标准装配错误。

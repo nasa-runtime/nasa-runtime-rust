@@ -123,6 +123,9 @@ impl nasa::application::Initialization for RoutesInitialization {
 不启用该项，`Err` 阻止 Ready。`kind = "one-shot"` 只执行有界初始化；`"hosted"` 仅允许 Service，
 可暂存 Ready 后才激活的长期任务和 readiness。Runner 在 `Prepare` 后严格执行全部 `before`、全部
 `initialize`、全部 `after`，三轮成功后才进入 `Seal` 与 `Ready`。
+Hosted 任务与组件终端、受管 Redis 消费和派生发送、出站 Client 共用启动许可；关键本地资源、
+健康证据和启动期限复验通过后才发布 Ready。initializer 可保存已装配的发送句柄，统一放行前调用
+会被拒绝；UserHook 中普通 `spawn_background` / `spawn_critical` 不隐式等待该许可。
 
 派生名称也是依赖、日志和指标 label 使用的稳定身份；实现类型重命名会改变该身份，需要跨发布保持
 连续性时应显式填写 `name`。initializer 失败、panic、启动超时或取消都会阻止入站能力开放，并进入

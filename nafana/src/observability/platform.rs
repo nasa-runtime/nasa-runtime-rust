@@ -15,18 +15,31 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlatformBindings {
+    /// Grafana 管理 API 地址，在应用配置未指定 endpoint 时使用。
     pub grafana_endpoint: Option<String>,
+    /// Grafana 管理令牌的 secret 引用，材料仅由控制面解析。
     pub grafana_token_secret: Option<String>,
+    /// 受管 Grafana datasource 使用的 Prometheus 查询地址。
     pub prometheus_url: Option<String>,
+    /// 返回各容器地址的服务 DNS 名称，用于逐副本发现。
     pub docker_dns: Option<String>,
+    /// controller 独占的 Prometheus 配置文件，不接管无 owner 标记的已有文件。
     pub prometheus_config: Option<PathBuf>,
+    /// Prometheus 受限生命周期 reload 地址，配置写入后请求重新加载。
     pub prometheus_reload_url: Option<String>,
+    /// Prometheus 可读取的 scrape Bearer token 文件路径。
     pub scrape_token_file: Option<String>,
+    /// Kubernetes PodMonitor 引用的 Secret 名称，token 存放于其同名键。
     pub scrape_token_secret: Option<String>,
+    /// Kubernetes API 地址，供 controller 管理授权命名空间内的 Lease 与 PodMonitor。
     pub kubernetes_api: Option<String>,
+    /// controller 使用的 Kubernetes ServiceAccount token 文件。
     pub kubernetes_token_file: Option<PathBuf>,
+    /// Kubernetes API 连接的信任 CA 文件。
     pub kubernetes_ca_file: Option<PathBuf>,
+    /// controller 获得资源读写授权的 Kubernetes 命名空间。
     pub namespace: Option<String>,
+    /// 非 Kubernetes controller 的排他锁文件；副本必须共享同一 inode。
     pub owner_lock_file: Option<PathBuf>,
 }
 

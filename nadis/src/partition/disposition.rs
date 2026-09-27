@@ -143,6 +143,7 @@ impl OwnerLease<'_> {
 /// - `expected`: 协议或状态机期望值。
 /// - `new_state`: 分区处置 marker 即将写入的新状态。
 /// - `lease`: 当前 owner lease 与 fencing 信息。
+///
 /// 返回：当前 owner 成功取得状态转换时返回递增版本；失权、状态冲突或协议错误拒绝转换。
 async fn claim_transition(
     client: &Arc<RedisClient>,
@@ -232,6 +233,7 @@ return 'OK'
 /// # 参数
 /// - `client`: 底层客户端或连接句柄。
 /// - `lease`: 当前 owner lease 与 fencing 信息。
+///
 /// 返回：持锁者和已启用的 fencing 凭据均匹配时成功，否则不授予管理副作用权限。
 async fn verify_owner_fenced(client: &Arc<RedisClient>, lease: &OwnerLease<'_>) -> Result<()> {
     let tag: String = redis::Script::new(VERIFY_OWNER_LUA)

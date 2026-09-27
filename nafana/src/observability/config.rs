@@ -3,10 +3,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 macro_rules! config {
-    ($name:ident { $($field:ident : $ty:ty = $value:expr),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident { $($(#[$field_meta:meta])* $field:ident : $ty:ty = $value:expr),* $(,)? }) => {
+        $(#[$meta])*
         #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
         #[serde(default, deny_unknown_fields)]
-        pub struct $name { $(pub $field: $ty),* }
+        pub struct $name { $($(#[$field_meta])* pub $field: $ty),* }
         impl Default for $name {
             /// 业务作用：为缺省及空配置子树提供一致的递归默认值。
             /// 参数说明：无。
@@ -17,164 +18,387 @@ macro_rules! config {
 }
 
 macro_rules! choices {
-    ($name:ident, $first:ident $(,$other:ident)* $(,)?) => {
+    ($(#[$meta:meta])* $name:ident, $(#[$first_meta:meta])* $first:ident $(,$(#[$other_meta:meta])* $other:ident)* $(,)?) => {
+        $(#[$meta])*
         #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
         #[serde(rename_all = "snake_case")]
-        pub enum $name { #[default] $first, $($other),* }
+        pub enum $name { $(#[$first_meta])* #[default] $first, $($(#[$other_meta])* $other),* }
     };
 }
-choices!(ExportMode, Scrape, RemoteWrite, Both);
-choices!(ListenerMode, Dedicated, Web);
-choices!(AuthMode, None, Bearer);
-choices!(ProvisioningMode, Disabled, Platform);
 choices!(
-    Discovery,
-    Auto,
-    KubernetesPod,
-    DockerDns,
-    Existing,
-    RemoteWrite
+    /// 指标对外传输方式；出口只有显式启用后才建立。
+    ExportMode,
+    /// 由 Prometheus 拉取指标。
+    Scrape,
+    /// 按配置周期主动推送样本。
+    RemoteWrite,
+    /// 同时开放抓取与主动推送，查询端须避免重复采集。
+    Both,
 );
-choices!(Scheme, Http, Https);
-choices!(DatasourceMode, Managed, Existing);
+choices!(
+    /// Prometheus 抓取入口的 listener 归属。
+    ListenerMode,
+    /// 使用出口独占的监听端口。
+    Dedicated,
+    /// 复用受管 Web listener 的指标路由。
+    Web,
+);
+choices!(
+    /// 指标抓取或推送使用的认证策略。
+    AuthMode,
+    /// 不添加 Bearer 认证，访问边界由部署网络承担。
+    None,
+    /// 从 secret 引用取得 Bearer token。
+    Bearer,
+);
+choices!(
+    /// 观测平台资源的装配职责。
+    ProvisioningMode,
+    /// 不创建或调和平台资源。
+    Disabled,
+    /// 由独立 controller 在平台授权范围内调和资源。
+    Platform,
+);
+choices!(
+    /// controller 为指标采集选择的主发现路径。
+    Discovery,
+    /// 推送专用出口使用 remote write，其余按 Kubernetes binding 或 Docker DNS 选择。
+    Auto,
+    /// 通过 PodMonitor 发现各 Pod 的指标端口。
+    KubernetesPod,
+    /// 通过逐容器 DNS 地址配置 Prometheus 抓取。
+    DockerDns,
+    /// 复用平台已有的抓取配置。
+    Existing,
+    /// 使用主动推送路径，不创建抓取发现资源。
+    RemoteWrite,
+);
+choices!(
+    /// Prometheus 访问抓取目标的协议。
+    Scheme,
+    /// 使用明文 HTTP，由部署网络提供隔离。
+    Http,
+    /// 使用 HTTPS，目标须具备相应 TLS 终止能力。
+    Https,
+);
+choices!(
+    /// Grafana datasource 的管理归属。
+    DatasourceMode,
+    /// controller 创建并调和自身拥有的 datasource。
+    Managed,
+    /// 按 UID 引用平台已有 datasource，不接管其配置。
+    Existing,
+);
 
-config!(ObservabilityConfig {
+config!(
+    /// 统一观测出口与独立平台 controller 的配置根，禁用时不建立出口。
+    ObservabilityConfig {
+    /// 是否建立统一观测出口；关闭时不创建出口资源。
     enabled: bool = false,
+    /// 跨出口一致的服务与实例身份。
     identity: IdentityConfig = IdentityConfig::default(),
+    /// Prometheus 传输与采集策略。
     prometheus: PrometheusConfig = PrometheusConfig::default(),
+    /// 独立控制面负责的平台资源装配计划。
     provisioning: ProvisioningConfig = ProvisioningConfig::default(),
 });
-config!(IdentityConfig {
-    service_name: String = String::new(), environment: String = String::new(),
-    cluster: String = String::new(), region: Option<String> = None,
-    zone: Option<String> = None, instance_id: String = String::new(),
+config!(
+    /// 各出口共用的服务与部署身份，启动时校验并固定指标标签。
+    IdentityConfig {
+    /// 稳定服务名；为空时按宿主提供的应用名称解析。
+    service_name: String = String::new(),
+    /// 部署环境身份，用于区分指标和平台资源。
+    environment: String = String::new(),
+    /// 部署集群身份，防止不同集群的同名服务混合。
+    cluster: String = String::new(),
+    /// 可选区域标签。
+    region: Option<String> = None,
+    /// 可选可用区标签。
+    zone: Option<String> = None,
+    /// 稳定实例身份；只有 local 环境允许使用宿主提供的本地缺省值。
+    instance_id: String = String::new(),
+    /// 可选业务制品版本标签。
     service_version: Option<String> = None,
 });
-config!(PrometheusConfig {
+config!(
+    /// 抓取与 remote write 的传输选择及各自资源边界。
+    PrometheusConfig {
+    /// 选择抓取、主动推送或同时使用两者。
     export_mode: ExportMode = ExportMode::Scrape,
+    /// 被动抓取的监听、认证和请求预算。
     scrape: ScrapeConfig = ScrapeConfig::default(),
+    /// 主动推送的目标、队列和排干预算。
     remote_write: RemoteWriteConfig = RemoteWriteConfig::default(),
 });
-config!(AuthConfig { mode: AuthMode = AuthMode::None, token: Option<String> = None });
-config!(ScrapeConfig {
+config!(
+    /// 认证方式与 secret 引用，不保存凭据明文。
+    AuthConfig {
+    /// 该出口是否要求 Bearer token。
+    mode: AuthMode = AuthMode::None,
+    /// Bearer token 的 secret:// 引用，实际材料由消费方解析。
+    token: Option<String> = None,
+});
+config!(
+    /// Prometheus 抓取路由、并发准入和单请求期限。
+    ScrapeConfig {
+    /// 选择独立端口或受管 Web 路由。
     listener: ListenerMode = ListenerMode::Dedicated,
-    bind: Option<String> = None, path: String = "/metrics".into(),
-    max_concurrent_requests: usize = 4, request_timeout_ms: u64 = 2000,
+    /// 显式监听地址；省略时由运行模式决定默认绑定范围。
+    bind: Option<String> = None,
+    /// 抓取路由的字面路径，不接受模板、查询参数或路径穿越。
+    path: String = "/metrics".into(),
+    /// 同时处理的抓取请求上限，超限拒绝准入。
+    max_concurrent_requests: usize = 4,
+    /// 单次网络请求的最长等待时间，单位毫秒。
+    request_timeout_ms: u64 = 2000,
+    /// 该出口的认证模式与凭据引用。
     auth: AuthConfig = AuthConfig::default(),
 });
-config!(RemoteWriteConfig {
-    endpoint: Option<String> = None, auth: AuthConfig = AuthConfig::default(),
-    interval_ms: u64 = 10_000, request_timeout_ms: u64 = 3000,
-    queue_capacity: usize = 8, max_batch_samples: usize = 5000,
-    retry_max_attempts: usize = 1, retry_backoff_ms: u64 = 500,
+config!(
+    /// 周期指标推送的有界队列、批量、重试和停机排干策略。
+    RemoteWriteConfig {
+    /// remote write 接收地址，启用推送时必须提供。
+    endpoint: Option<String> = None,
+    /// 该出口的认证模式与凭据引用。
+    auth: AuthConfig = AuthConfig::default(),
+    /// remote write 的采样和推送周期，单位毫秒。
+    interval_ms: u64 = 10_000,
+    /// 单次网络请求的最长等待时间，单位毫秒。
+    request_timeout_ms: u64 = 3000,
+    /// 等待 remote write 投递的批次数上限。
+    queue_capacity: usize = 8,
+    /// 每批允许的样本数，同时约束启动期静态容量校验。
+    max_batch_samples: usize = 5000,
+    /// 单批投递的最大尝试次数，包含首次发送。
+    retry_max_attempts: usize = 1,
+    /// 失败后再次尝试前的退避时间，单位毫秒。
+    retry_backoff_ms: u64 = 500,
+    /// 停机时继续投递队列的预算，单位毫秒。
     shutdown_drain_timeout_ms: u64 = 3000,
 });
-config!(ProvisioningConfig {
+config!(
+    /// 独立 controller 的调和周期、权威租约与平台资源计划。
+    ProvisioningConfig {
+    /// 关闭平台装配或交给独立 controller。
     mode: ProvisioningMode = ProvisioningMode::Disabled,
+    /// 调和失败时结束 controller；关闭此项则记录失败并等待下一轮。
     required: bool = false,
+    /// controller 调和平台资源的周期，单位毫秒。
     reconcile_interval_ms: u64 = 30_000,
+    /// 单次网络请求的最长等待时间，单位毫秒。
     request_timeout_ms: u64 = 3000,
+    /// 平台动作租约的目标有效期，必须覆盖调和与请求预算。
     lease_duration_ms: u64 = 120_000,
+    /// 平台授权的连接、凭据来源与资源位置，不交给业务副本。
     bindings: super::platform::PlatformBindings = super::platform::PlatformBindings::default(),
+    /// controller 为 Prometheus 生成的目标发现与抓取计划。
     prometheus: DiscoveryConfig = DiscoveryConfig::default(),
+    /// Grafana datasource、面板和告警的装配计划。
     grafana: GrafanaConfig = GrafanaConfig::default(),
 });
-config!(DiscoveryConfig {
+config!(
+    /// Prometheus 对目标实例的发现方式、协议和采集周期。
+    DiscoveryConfig {
+    /// 指标采集的主发现方式。
     discovery: Discovery = Discovery::Auto,
+    /// Prometheus 抓取任务名；空值使用按服务身份生成的名称。
     job_name: String = String::new(),
+    /// Prometheus 连接抓取目标时使用的协议。
     scheme: Scheme = Scheme::Http,
+    /// Prometheus 抓取目标的周期，单位毫秒。
     scrape_interval_ms: u64 = 15_000,
+    /// Prometheus 等待一次抓取的期限，不能短于出口自身的请求预算。
     scrape_timeout_ms: u64 = 10_000,
 });
-config!(GrafanaConfig {
-    endpoint: Option<String> = None, api_token: Option<String> = None,
-    organization_id: u32 = 1, folder: String = String::new(),
+config!(
+    /// Grafana 管理端点、资源位置、面板与告警计划。
+    GrafanaConfig {
+    /// Grafana 管理 API 地址，可由平台 binding 补充。
+    endpoint: Option<String> = None,
+    /// Grafana API token 的 secret:// 引用，仅由 controller 解析。
+    api_token: Option<String> = None,
+    /// Grafana 组织 ID，限定资源操作的组织范围。
+    organization_id: u32 = 1,
+    /// Grafana 面板和告警的目录名称；空值使用服务范围名称。
+    folder: String = String::new(),
+    /// Grafana 查询 datasource 的装配或引用策略。
     datasource: DatasourceConfig = DatasourceConfig::default(),
+    /// 选择要生成的观测面板。
     dashboards: DashboardConfig = DashboardConfig::default(),
+    /// 告警集合、窗口与评估周期。
     alert_rules: AlertRulesConfig = AlertRulesConfig::default(),
 });
-config!(DatasourceConfig {
-    mode: DatasourceMode = DatasourceMode::Managed, uid: String = String::new(),
+config!(
+    /// Grafana datasource 的归属、身份与 Prometheus 查询入口。
+    DatasourceConfig {
+    /// 管理自身 datasource 或只引用平台已有 UID。
+    mode: DatasourceMode = DatasourceMode::Managed,
+    /// 稳定 datasource UID；existing 模式要求显式指定。
+    uid: String = String::new(),
+    /// Grafana datasource 使用的 Prometheus 查询地址。
     prometheus_url: Option<String> = None,
 });
-config!(DashboardConfig {
+config!(
+    /// controller 创建的业务观测面板集合。
+    DashboardConfig {
+    /// 是否生成接口调用与隔离指标面板。
     interfaces: bool = true,
+    /// 是否生成 Mapper 逻辑调用和数据库操作面板。
     mapper: bool = true,
+    /// 是否生成连接池、连接等待与事务资源面板。
     datasource: bool = true,
+    /// 是否生成通知排队和 provider 投递面板。
     notifications: bool = true,
 });
-config!(RatioRule {
+config!(
+    /// 业务失败率告警的聚合窗口、比例阈值与持续时间。
+    RatioRule {
+    /// 是否生成业务失败率告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 触发规则的比例阈值，范围为 0 到 1。
     threshold_ratio: f64 = 0.02,
-    for_ms: u64 = 600_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 600_000,
 });
-config!(LatencyRule {
+config!(
+    /// 成功调用 P99 延迟告警的聚合窗口和毫秒阈值。
+    LatencyRule {
+    /// 是否生成成功调用 P99 延迟告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 触发规则的延迟阈值，单位毫秒。
     threshold_ms: u64 = 1000,
-    for_ms: u64 = 600_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 600_000,
 });
-config!(SaturationRule {
+config!(
+    /// 连接池使用率告警的比例阈值与持续时间。
+    SaturationRule {
+    /// 是否生成连接池使用率告警。
     enabled: bool = true,
+    /// 触发规则的比例阈值，范围为 0 到 1。
     threshold_ratio: f64 = 0.9,
-    for_ms: u64 = 300_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 300_000,
 });
-config!(CountRule {
+config!(
+    /// 连接获取超时告警的窗口内计数阈值。
+    CountRule {
+    /// 是否生成连接获取超时计数告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 窗口内触发规则所需的计数阈值。
     threshold_count: u64 = 1,
-    for_ms: u64 = 0
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 0,
 });
-config!(StreamRule {
+config!(
+    /// 流消费取消比例告警，低于最小调用量时不按比例触发。
+    StreamRule {
+    /// 是否生成流消费取消比例告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 触发规则的比例阈值，范围为 0 到 1。
     threshold_ratio: f64 = 0.05,
+    /// 计算取消比例前要求达到的窗口内调用量。
     minimum_calls: u64 = 20,
-    for_ms: u64 = 300_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 300_000,
 });
-config!(ProviderRule {
+config!(
+    /// 通知 provider 失败率告警，低于最小投递量时不按比例触发。
+    ProviderRule {
+    /// 是否生成通知 provider 失败率告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 触发规则的比例阈值，范围为 0 到 1。
     threshold_ratio: f64 = 0.10,
+    /// 计算失败比例前要求达到的窗口内投递量。
     minimum_deliveries: u64 = 10,
-    for_ms: u64 = 300_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 300_000,
 });
-config!(PresenceRule {
+config!(
+    /// 实例失联告警，期望实例集合必须来自外部平台。
+    PresenceRule {
+    /// 是否生成基于外部期望实例集合的失联告警。
     enabled: bool = true,
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
     for_ms: u64 = 120_000,
-    expected_instances_metric: String = "platform_expected_instance_info".into()
+    /// 平台提供的期望实例指标名，不接受 PromQL 或应用自报库存替代。
+    expected_instances_metric: String = "platform_expected_instance_info".into(),
 });
-config!(SlotRule {
+config!(
+    /// 事务连接槽等待的 P99 延迟告警。
+    SlotRule {
+    /// 是否生成事务连接槽等待告警。
     enabled: bool = true,
+    /// 聚合观测窗口，单位毫秒，至少覆盖两个告警评估周期。
     window_ms: u64 = 300_000,
+    /// 触发规则的延迟阈值，单位毫秒。
     threshold_ms: u64 = 250,
-    for_ms: u64 = 300_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 300_000,
 });
-config!(QueueRule {
+config!(
+    /// 通知队列占用告警的比例阈值与持续时间。
+    QueueRule {
+    /// 是否生成通知队列占用告警。
     enabled: bool = true,
+    /// 触发规则的比例阈值，范围为 0 到 1。
     threshold_ratio: f64 = 0.8,
-    for_ms: u64 = 300_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 300_000,
 });
-config!(CollisionRule {
+config!(
+    /// 重复实例身份告警，保留异常实例供平台定位。
+    CollisionRule {
+    /// 是否生成重复实例身份告警。
     enabled: bool = true,
-    for_ms: u64 = 60_000
+    /// 条件持续满足后才触发告警的等待时间，0 表示不追加持续时间。
+    for_ms: u64 = 60_000,
 });
-config!(AlertRulesConfig {
-    enabled: bool = true, evaluation_interval_ms: u64 = 60_000,
+config!(
+    /// 服务与实例告警的集中评估策略，不创建通知联系渠道。
+    AlertRulesConfig {
+    /// 是否为该服务生成告警规则集合。
+    enabled: bool = true,
+    /// 平台评估全部规则的周期，单位毫秒。
+    evaluation_interval_ms: u64 = 60_000,
+    /// 平台既有通知 policy 的路由标签，不创建联系渠道。
     notification_policy_ref: Option<String> = None,
-    error_rate: RatioRule = RatioRule::default(), p99: LatencyRule = LatencyRule::default(),
-    pool_saturation: SaturationRule = SaturationRule::default(), acquire_timeout: CountRule = CountRule::default(),
+    /// 逻辑调用失败率规则。
+    error_rate: RatioRule = RatioRule::default(),
+    /// 成功调用 P99 延迟规则。
+    p99: LatencyRule = LatencyRule::default(),
+    /// 连接池使用率规则。
+    pool_saturation: SaturationRule = SaturationRule::default(),
+    /// 连接获取超时计数规则。
+    acquire_timeout: CountRule = CountRule::default(),
+    /// 事务连接槽等待延迟规则。
     transaction_slot_wait: SlotRule = SlotRule::default(),
+    /// 流消费取消比例规则。
     stream_cancel_rate: StreamRule = StreamRule::default(),
+    /// 通知队列占用率规则。
     notification_queue: QueueRule = QueueRule::default(),
-    provider_failure_rate: ProviderRule = ProviderRule::default(), instance_down: PresenceRule = PresenceRule::default(),
+    /// 通知 provider 投递失败比例规则。
+    provider_failure_rate: ProviderRule = ProviderRule::default(),
+    /// 按外部期望实例集合判断失联的规则。
+    instance_down: PresenceRule = PresenceRule::default(),
+    /// 检测同一部署范围内实例身份重复的规则。
     identity_collision: CollisionRule = CollisionRule::default(),
 });
 
 /// 已冻结的进程身份，所有出口共用同一组 label。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
+    /// 已校验的服务、部署环境、集群与实例标签；全部出口使用同一身份。
     pub labels: BTreeMap<&'static str, String>,
 }
 

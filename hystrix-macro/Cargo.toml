@@ -5,12 +5,13 @@ name = "hystrix-macro"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "#[hystrix] 接口保护与 #[global_fallback] 终态降级属性宏"
+description = "#[hystrix] 隔离与降级属性宏，支持 Application 命令归属与跨实例缓存切换"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["hystrix", "macros", "isolation", "timeout", "fallback"]
+categories = ["asynchronous", "concurrency"]
 
 [lib]
 # ★ 这一行把本 crate 标记为"过程宏 crate"：它编译成编译器插件，

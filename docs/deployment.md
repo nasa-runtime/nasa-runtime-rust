@@ -73,10 +73,17 @@ SIGKILL、进程 abort、同步阻塞或直接丢弃 Runner 不能视为优雅�
 readiness 是负载均衡和滚动部署的接流条件。自行在 UserHook 中托管 HTTP 服务的项目不会自动获得
 这些端点，必须提供自己的管理入口或等价健康信号。
 
-Service 在所有 Ready 装配、initializer 任务工厂和最终静态检查成功后，发布生命周期 Ready 并统一
-放行受管终端任务。gRPC 绑定状态 `Bound` 只表示占有端口，不处理 health 或业务 RPC；Nacos 只在
+Service 在所有 Ready 装配、initializer 任务工厂和最终静态检查成功后，在关键领域的本地状态保护
+内复验任务责任、认证连接、健康证据与共享启动期限，再提交 Ready 与统一启动许可。公开 Ready 时
+受管终端、Redis 消费和派生发送入口、出站 Client 已获许可；这不保证未被观察到的远端故障不存在。
+gRPC 绑定状态 `Bound` 只表示占有端口，不处理 health 或业务 RPC；Nacos 只在
 统一放行后注册，gRPC 端点还须等待 Running。远端注册确认前动态 readiness 仍不可用，不能用
 生命周期 Ready、TCP connect 成功或单个组件 Ready 代替接流证据。
+
+`ws_clients.<name>.critical: true` 的连接断开或重连会使动态 readiness 为 NotReady，重新认证后恢复；
+可选连接断开为 Degraded。关键 Redis 派生任务、Client owner 或 hystrix 观察任务意外退出触发停机。
+健康包含协议检测、采样与证据过期时间，部署探针不应假设远端故障即时反映。
+命名 Redis 消费、微批、出站 Client 和 hystrix 配置冻结到启动，变化报告 `RestartRequired`。
 
 `server.port: 0` 的真实端口在 bind 后产生，可通过应用运行时的监听地址能力读取；需要固定服务端口的
 部署不应使用该设置。

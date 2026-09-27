@@ -5,12 +5,21 @@
 //!
 //! # 与受管治理面的分工
 //!
-//! 本 crate 是业务代码**显式包裹执行体**的独立工具，不并入 Application 受管治理，三层各管一段：
+//! 本 crate 支持独立 `Command`，也支持由 `ManagedRuntime` 持有目录、规则与集中周期观测。
+//! Application 可通过显式配置接管该 owner；业务仍负责选择需要隔离的执行体：
 //!
 //! - Web 限流（单进程令牌桶 + 分布式配额）管**入站配额**；
 //! - REST 发现客户端内建的 bulkhead/circuit 只对**传输级失败**（建连、超时、可分类 5xx）熔断；
 //! - hystrix `Command` 包裹**业务判定的失败**(语义错误、慢成功)与非 REST 出站依赖
 //!   (慢查询隔离、第三方 SDK)。
+//!
+//! # 受管命令的运行架构
+//!
+//! Prepare 将固定隔离规则、显式命令与静态属性描述安装到唯一 `ManagedRuntime`，统一周期观测。
+//! 属性宏只缓存带代次的弱引用；命令可用于后续初始化、业务调用与收尾。关闭先拒绝新调用，
+//! 等待在途业务、降级与观察任务退出，再撤销目录和全局引用。旧 Command 永久返回 503，下一实例
+//! 使用自己的 owner；取消关闭等待不转移退出责任。命名计划、规则与目录容量冻结到启动，变化要求重启。
+//! owner 存活不表示下游健康；本能力不提供错误率 Open/HalfOpen/Closed 状态机。
 //!
 //! # 反模式
 //!
@@ -33,7 +42,7 @@ pub use fallback::{
 // 限制当前进程的资源消耗，`isCircuitBreakerOpen` 恒为 false，短路计数恒为零。
 //
 // 显式 `Command` 与配置驱动的路由匹配共享同一执行合同：并发满载立即拒绝，不在组件内排队；
-// 每个已注册命令独立维护滚动窗口、当前并发和周期聚合日志；`hystrix_stream` 每秒输出快照。
+// 每个命令独立维护滚动窗口和当前并发；受管模式集中周期观测，独立模式按命令启动观测。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -50,6 +59,9 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use fallback::{execute_global_fallback, GlobalFallbackExecution};
+
+mod managed;
+pub use managed::{ManagedError, ManagedRuntime};
 
 /// 公开构造器保持非 fallible，因此把无实际意义的极端时长收敛到安全 deadline 上限。
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -377,6 +389,8 @@ impl Percentiles {
 /// `Command` 通常对应一个接口路由或一个配置匹配模式。它会自动注册到全局表,供 `/hystrix.stream`
 /// 输出 Dashboard 指标,同时也负责 CostTime 风格的周期延迟日志。
 pub struct Command {
+    owner: Option<std::sync::Weak<managed::ManagedState>>,
+    admitted: std::sync::atomic::AtomicBool,
     name: String,  // Dashboard 里那个圈的标题（HystrixCommand name）
     group: String, // 归类名（command group / threadPool 名，圈会按 group 分组）
     // 并发上限。None = 不限并发（不建信号量、永不 429），用于"只看监控"。Some(n) = bulkhead 容量 n。
@@ -476,20 +490,9 @@ impl Command {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    // 内部构造：是否计 TPS 由 tps_weight 决定
-    // 参数：
-    //   name           = Dashboard 圈标题
-    //   group          = 归类名
-    //   max_concurrent = 并发上限（信号量许可数）
-    //   timeout        = 单请求超时
-    //   tps_weight     = None 不计 TPS / Some(w) 每请求给全局 TPS +w
-    ///
-    /// # 参数
-    /// 业务作用：- `name`: 业务名称、字段名或配置名,用于定位目标对象。
-    /// - `group`: 消费组、服务分组或任务分组名称。
-    /// - `max_concurrent`: 熔断隔离允许的最大并发数。
-    /// - `timeout`: 等待或执行超时时间,用于控制阻塞边界。
-    /// - `tps_weight`: REST 事务权重,用于计算该命令对全局 TPS 的贡献。
+    /// 业务作用：统一构造隔离命令，将运行实例登记到当前受管代次或独立进程目录。
+    /// 参数说明：`name`、`group` 为固定身份；`max_concurrent`、`timeout` 为执行边界；`tps_weight` 为统计权重。
+    /// 返回：独立模式按原有方式归一化参数；受管模式身份、容量或边界不合法时返回只拒绝执行的命令。
     fn build(
         name: &str,
         group: &str,
@@ -507,7 +510,11 @@ impl Command {
         let timeout = timeout
             .filter(|duration| !duration.is_zero())
             .map(|duration| duration.min(MAX_COMMAND_TIMEOUT));
+        // 构造与 owner 安装/撤销串行，避免运行命令被登记到错误代次。
+        let owner = managed::lock_owner();
         let cmd = Arc::new(Self {
+            owner: owner.as_ref().map(Arc::downgrade),
+            admitted: std::sync::atomic::AtomicBool::new(true),
             name: name.to_string(),
             group: group.to_string(),
             max_concurrent,
@@ -525,27 +532,41 @@ impl Command {
             reject_fb: OnceLock::new(),    // 限流降级 fn 默认空，需要时由 set_reject_fn 补设
             timeout_fb: OnceLock::new(),   // 超时降级 fn 默认空，需要时由 set_timeout_fn 补设
         });
-        // 自动注册到全局表：clone 出一份 Arc 放进 REGISTRY，SSE 端点据此遍历上报
         {
             let mut table = lock_registry();
-            // 同 (group, name) 已存在:Dashboard 会画出两个同名圈、CostTime 也会有两行同名日志。
-            // 保持"各自独立统计"的既有行为(不合并),但必须让重名可见,否则排查时无从下手。
-            if table
+            if let Some(owner) = owner.as_ref() {
+                // 受管目录有界且同名唯一，旧代构造不能绕过关闭门禁创建新周期工作。
+                if !owner.is_open()
+                    || name.is_empty()
+                    || name.trim() != name
+                    || name.len() > 128
+                    || group.is_empty()
+                    || group.trim() != group
+                    || group.len() > 128
+                    || max_concurrent.is_some_and(|limit| limit > 65536)
+                    || timeout.is_some_and(|duration| duration > Duration::from_secs(3600))
+                    || table.len() >= owner.limit
+                    || table
+                        .iter()
+                        .any(|command| command.name == name && command.group == group)
+                {
+                    cmd.admitted.store(false, Ordering::Release);
+                    return cmd;
+                }
+            } else if table
                 .iter()
-                .any(|c| c.name == cmd.name && c.group == cmd.group)
+                .any(|command| command.name == name && command.group == group)
             {
-                tracing::warn!(
-                    group = %cmd.group,
-                    command = %cmd.name,
-                    "duplicate hystrix command name; dashboard will show separate circles with the same title"
-                );
+                tracing::warn!("duplicate standalone hystrix command identity");
             }
             table.push(cmd.clone());
         }
+        let standalone = owner.is_none();
+        drop(owner);
 
         // 每个命令的日志周期锚定创建时刻，避免全部路由同时集中输出。
         // 任务只持有 Weak，命令释放后自行退出；没有 Tokio runtime 时不启动任务。
-        if tokio::runtime::Handle::try_current().is_ok() {
+        if standalone && tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cmd);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(WINDOW_SECS));
@@ -888,6 +909,17 @@ impl Command {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Response>,
     {
+        // 关闭后的旧命令不能因下一代全局安装而复活；守卫覆盖业务和降级的完整执行。
+        if !self.admitted.load(Ordering::Acquire) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        let _owner_call = match &self.owner {
+            Some(owner) => match owner.upgrade().and_then(|owner| owner.enter().ok()) {
+                Some(guard) => Some(guard),
+                None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            },
+            None => None,
+        };
         // 注：不再在此 tps_hit。TPS 改为从下面记的 requestCount 派生（见 tps_rate），
         //   既和圈/QPS 同源、对得上，又免去热路径上抢全局 TPS 锁。tps_weight 仅作"是否计入 TPS"的标记。
 
@@ -1171,6 +1203,7 @@ struct IsolationCfg {
 
 /// 全局隔离表：Trie + context-path 前缀 + 「模式 → 已建 Command」缓存。
 struct IsolationTable {
+    owner: Option<std::sync::Weak<managed::ManagedState>>,
     // 前缀树：path → 隔离规则。matchit 是 axum 内部用的那个基数树匹配器
     trie: matchit::Router<IsolationCfg>,
     // context-path（如 "/rust-simple-mvc"），dispatch 匹配前从 path 剥掉，让 yml 模式写相对路径
@@ -1180,18 +1213,27 @@ struct IsolationTable {
 }
 
 // 全局隔离表，启动时 init 一次；没配 hystrix.isolation 则保持空（dispatch 全放行）
-static ISOLATION: OnceLock<IsolationTable> = OnceLock::new();
+static ISOLATION: OnceLock<Mutex<Option<Arc<IsolationTable>>>> = OnceLock::new();
 
-/// 业务作用：启动时调用一次：把 yml 的 hystrix.isolation 建成 Trie。
-/// 规则为空则不初始化 → dispatch 全部放行（= 配置驱动隔离未启用）。
-///
-/// # 参数
-/// - `rules`: 「模式 → 规则」表,通常来自配置里的 hystrix.isolation。
-/// - `context_path`: 服务 context-path;匹配前会从请求 path 剥掉。
+/// 业务作用：提供可按 owner 撤销的隔离表槽，独立安装仍保持一次性合同。
+/// 参数说明：无。
+/// 返回：进程级槽，读取方取得 Arc 后立即释放锁。
+fn isolation() -> &'static Mutex<Option<Arc<IsolationTable>>> {
+    ISOLATION.get_or_init(|| Mutex::new(None))
+}
+
+/// 业务作用：独立模式安装进程隔离规则，已有受管 owner 时保留其配置权。
+/// 参数说明：`rules` 为路由规则；`context_path` 为匹配时剥离的上下文前缀。
+/// 返回：首次合法配置安装生效；重复安装、受管冲突或非法模式保留原有警告行为。
 pub fn init_isolation(
     rules: &std::collections::HashMap<String, IsolationRule>,
     context_path: &str,
 ) {
+    let owner = managed::lock_owner();
+    if owner.is_some() {
+        tracing::warn!("managed hystrix owner rejects standalone isolation installation");
+        return;
+    }
     if rules.is_empty() {
         return;
     }
@@ -1217,11 +1259,17 @@ pub fn init_isolation(
     }
     // 去掉 context-path 末尾斜杠，得到 "/rust-simple-mvc"（context_path 为空则 ctx_prefix=""）
     let ctx = context_path.trim().trim_end_matches('/').to_string();
-    let _ = ISOLATION.set(IsolationTable {
+    let mut slot = isolation().lock().unwrap();
+    if slot.is_some() {
+        tracing::warn!("hystrix isolation already installed");
+        return;
+    }
+    *slot = Some(Arc::new(IsolationTable {
+        owner: None,
         trie,
         ctx_prefix: ctx,
         commands: dashmap::DashMap::new(),
-    });
+    }));
     tracing::info!(
         "hystrix zconf-driven isolation initialized ({} patterns)",
         rules.len()
@@ -1242,18 +1290,22 @@ fn normalize_pattern(pattern: &str) -> String {
     }
 }
 
-/// 业务作用：全局中间件（对标 HystrixDashboardFilter.doFilter）：拿请求 path 在 Trie 上匹配。
-///   命中 → 按"匹配到的模式"懒加载/复用 Command，套 bulkhead+超时+指标后执行；
-///   未命中 / 未初始化 → 直接放行（不影响硬编码路由和无需隔离的路由）。
-/// 用法见 main.rs：整个 app 套一层 from_fn(dispatch)。
-///
-/// # 参数
-/// - `req`: 本次进入全局中间件的 HTTP 请求。
-/// - `next`: 未命中隔离规则或执行通过时的 axum 放行句柄。
+/// 业务作用：按固定路由模板匹配隔离规则并复用命令，受管关闭期间拒绝新执行。
+/// 参数说明：`req` 为业务 HTTP 请求；`next` 为取得许可后执行的业务链路。
+/// 返回：未匹配时原样放行；命中时返回业务、降级或隔离响应，目录关闭／超限返回 503。
 pub async fn dispatch(req: Request, next: Next) -> Response {
     // 没配 hystrix.isolation → ISOLATION 未初始化 → 全部放行
-    let Some(table) = ISOLATION.get() else {
+    let table = isolation().lock().unwrap().clone();
+    let Some(table) = table else {
         return next.run(req).await;
+    };
+    // 路由表借用归入旧代责任，关闭后不得在下一代目录创建命令。
+    let _guard = match &table.owner {
+        Some(owner) => match owner.upgrade().and_then(|owner| owner.enter().ok()) {
+            Some(guard) => Some(guard),
+            None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
+        None => None,
     };
     // 剥掉 context-path 前缀，得相对路径再匹配（"/rust-simple-mvc/download/x" → "/download/x"）。
     // strip_prefix 失败（path 本就不带前缀，如 axum nest 已剥过）则原样用——两种情况都正确。
@@ -1279,31 +1331,31 @@ pub async fn dispatch(req: Request, next: Next) -> Response {
                 None => cfg.pattern.clone(),
             };
             // 按【真实路由】取/建独立 Command（computeIfAbsent）。clone 出 Arc 后立刻结束分段锁再 .await。
-            let cmd = table
-                .commands
-                .entry(route.clone())
-                .or_insert_with(|| {
-                    // 首次见到该路由才建 Command；建时自动注册进 REGISTRY → Dashboard/CostTime 看得到。
-                    // 参数(并发/超时/tps)来自通配匹配 cfg —— 同模式下各接口共用同一份参数值。
+            let cmd = match table.commands.entry(route.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
                     let c = match cfg.tps_weight {
-                        Some(w) => {
-                            let c = Command::with_tps(
-                                &route,
-                                "isolation",
-                                cfg.max_concurrent,
-                                cfg.timeout,
-                                w,
-                            );
-                            // 计 TPS 的命令，CostTime 日志尾巴带实时 tps
-                            c.set_extra(|_period_ms| format!("tps={:.0}/s", current_tps()));
-                            c
-                        }
+                        Some(w) => Command::with_tps(
+                            &route,
+                            "isolation",
+                            cfg.max_concurrent,
+                            cfg.timeout,
+                            w,
+                        ),
                         None => Command::new(&route, "isolation", cfg.max_concurrent, cfg.timeout),
                     };
-                    c.set_path(&route); // 显示真实路由（如 "/spot/kline"、"/download/{*rest}"）
+                    // 拒绝的候选不能存入路由缓存，否则失败名称仍会无界累积。
+                    if !c.admitted.load(Ordering::Acquire) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    if cfg.tps_weight.is_some() {
+                        c.set_extra(|_period_ms| format!("tps={:.0}/s", current_tps()));
+                    }
+                    c.set_path(&route);
+                    entry.insert(c.clone());
                     c
-                })
-                .clone();
+                }
+            };
             // 命中 → 套 bulkhead + 超时 + 指标执行（复用 ① 的 Command::run）
             cmd.run(req, next).await
         }
@@ -1321,6 +1373,7 @@ pub use hystrix_macro::{global_fallback, hystrix};
 #[doc(hidden)]
 pub mod __private {
     pub use crate::fallback::{CollectedGlobalFallback, HYSTRIX_COLLECTED_GLOBAL_FALLBACKS};
+    pub use crate::managed::{CollectedCommand, CommandSlot, COLLECTED_COMMANDS};
     pub use axum;
     pub use linkme;
 }

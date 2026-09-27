@@ -483,3 +483,31 @@ lifecycle_context!(BootstrapContext);
 lifecycle_context!(StartContext);
 lifecycle_context!(PrepareContext);
 lifecycle_context!(ReadyContext);
+
+#[cfg(feature = "hystrix")]
+impl PrepareContext<'_> {
+    /// 业务作用：让隔离命令在业务停机任务结束后才关闭，同时早于基础组件释放。
+    /// 参数说明：`action` 持有当前应用命令目录的完整收尾责任。
+    /// 返回：立即建立回滚责任；Service 插入业务资源门之后，Batch 保持正常准备逆序。
+    pub(crate) fn activate_after_business(&mut self, action: Box<dyn ShutdownAction>) {
+        let step = ActiveStep::Action {
+            component: self.component,
+            action: ShutdownActionCleanup::new(
+                action,
+                self.component,
+                "releasing business dependency",
+            ),
+        };
+        // Service 的业务停机任务需要继续调用 Command，不能由后准备的 owner 提前撤销准入。
+        if let Some(index) = self
+            .active
+            .steps
+            .iter()
+            .position(|step| matches!(step, ActiveStep::BusinessResources))
+        {
+            self.active.steps.insert(index + 1, step);
+        } else {
+            self.active.steps.push(step);
+        }
+    }
+}

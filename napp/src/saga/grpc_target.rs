@@ -141,15 +141,16 @@ struct ManagedGrpcSnapshot {
     completion: Option<usize>,
 }
 
+/// 发现解析的异步结果；成员身份与端点来自同一次受信发现。
+pub(super) type GrpcRoutesFuture<'a> =
+    Pin<Box<dyn Future<Output = ApplicationResult<Vec<(String, String)>>> + Send + 'a>>;
+
 /// 业务作用：让协议连接池只接受受信发现解析器产生的完整端点代次，避免自行解释业务配置。
 pub(super) trait GrpcDiscoveryResolver: Send + Sync {
     /// 业务作用：在请求原期限内取得同一次发现的成员身份代次与完整端点。
     /// 参数说明：`deadline` 是调用者原截止时刻。
     /// 返回：受信非空端点集合；空集或发现失败不能提供投递权威。
-    fn routes(
-        &self,
-        deadline: Instant,
-    ) -> Pin<Box<dyn Future<Output = ApplicationResult<Vec<(String, String)>>> + Send + '_>>;
+    fn routes(&self, deadline: Instant) -> GrpcRoutesFuture<'_>;
 }
 
 impl ManagedGrpcRefresh {

@@ -11,8 +11,10 @@ HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经
 慢 SQL 达到配置阈值后可经业务主动安装的 `Notify` 发送；关闭通知冷却即可逐条提交，框架不选择
 通知微服务协议或持有机器人连接。
 
-Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+Application 标准纳管 Redis Stream／Proxy／AutoPipeline、出站 TCP 帧客户端、hystrix 命令目录、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
 secret/TLS 与本地文件监听，把连接来源、启动屏障、配置应用状态和退出责任绑定到同一资源 owner。
+Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可；关键资源失效会阻止 Ready，
+停机必须等待实际任务与在途调用退出。隔离命令随 Application 实例重建，旧句柄永久失去准入。
 文件监听与密钥解析使用同一活跃消费者集合：仅由禁用计划引用的密钥文件及其无消费者 provider
 引导文件不建立观察；共享 ID 仍有活跃引用时继续解析和监听。候选新增的文件依赖必须先可观察，
 再发布配置；失败时保留旧视图及旧监听。
@@ -22,16 +24,20 @@ secret/TLS 与本地文件监听，把连接来源、启动屏障、配置应用
 ## 命名资源运行架构
 
 ```text
-配置与 feature 校验 → 来源启动与迁移 → Prepare 装配命名资源
-                                           ↓
-Service：UserHook 登记计划 → initializer → Ready 后取得句柄
-Batch：静态计划与初始化完成 → 工作负载取得句柄
+Service：配置与 feature 校验 → 来源启动 → UserHook 登记计划
+         → Prepare 迁移与命名资源装配 → initializer 取得句柄
+         → 关键资源、健康证据和启动期限复验 → Ready 与统一启动许可
+Batch：配置与静态计划校验 → 来源、迁移、资源与初始化完成 → 工作负载
 关闭：撤销准入 → 等待已接纳工作退出 → 释放 owner 与依赖
 ```
 
 Service 的 UserHook 不能提前取得尚未装配的标准 adapter；Batch 的工作负载无需 Web 即可使用
 幂等、审计和出站客户端。`source`/`redis_ref` 固定资源来源，错误引用不会猜测默认库。
 数据库持久 adapter 在迁移门禁之后只读校验 schema，不在业务请求中隐式建表。
+取得句柄与准许调用是两个阶段：Service 的 initializer 可以保存命名 Pipeline、Proxy 和 Client
+句柄，但它们在统一放行前拒绝业务发送；消费 handler 和 Client 业务回调同样等待启动许可。
+Batch 的 Pipeline 与发送 Client 在工作负载前开放，不等待 Service Ready，也不接受长期消费或回调计划。
+hystrix 在 Prepare 安装本代目录，可用于后续初始化与业务收尾；它的准入由命令 owner 管理。
 
 配置更新先准备材料与安全资源，再发布同代视图和真实应用状态。`Applied` 表示该目标已经采用
 对应配置；`RestartRequired` 和 `ApplyFailed` 保留最后成功版本，不因无关更新而消失。
@@ -99,8 +105,8 @@ initializer、listener、消费循环、readiness、关键任务和停机编排�
 
 ```text
 Service 配置装载 → Start 出站资源 → UserHook 提交计划 → Prepare / initializer 屏障
-         → Ready 装配与静态登记 → initializer 任务工厂构造 → 全表与预算复验
-         → 发布 Ready 并统一放行终端任务 → Running 监督关键任务
+         → Ready 装配与静态登记 → initializer 任务工厂构造 → 静态检查与关键本地权威复验
+         → 同次提交 Ready 与启动许可 → Running 监督关键任务与领域 owner
          → NotReady / 摘流 → 受监督任务与 initializer 收口
          → 业务停机任务 → 业务资源与更早启动的组件 → Stopped
 ```
@@ -113,11 +119,13 @@ Batch 先完成 Prepare，再执行静态 initializer，最后运行作为工作
 所有参与 Ready 的组件完成、initializer 暂存任务工厂全部构造成功后，统一执行 `validate_ready()`，
 其中 remote write 核对最终静态指标容量。任务所有权可以先登记进 Supervisor，但组件与 initializer
 主体共用一个关闭的执行屏障；全部检查通过并发布 Application Ready 后才统一放行。
+最终发布还在关键领域的本地状态保护内核对任务责任、Client 认证、健康新鲜度与启动期限，
+保护持续到共享许可发布；Redis 派生入口与 Client 因此不需要等待监控任务另行激活。
 检查失败、工厂异常、超时或中断时屏障保持关闭，主体未经 poll，由统一清理释放任务与反向关闭 action。
 同步复验必须短时、只读、非阻塞，不添加登记或外部副作用；panic 收敛到启动失败，每次返回后及最终
 放行前都复验共享 deadline。同步代码不能被异步 timeout 抢占，超时后返回也不会再发布 Ready。
 Batch 只让观测组件参与该屏障，在工作负载前放行，不发布 Service Ready，也不开放业务 listener。
-该屏障只约束组件交出的终端主体和 initializer 暂存任务，不会延迟 UserHook 中普通
+统一许可覆盖组件终端、initializer 暂存任务及上述受管领域入口，不会延迟 UserHook 中普通
 `spawn_background` / `spawn_critical`，也不能拦截业务自行派生的任务或 I/O。initializer 任务工厂
 只负责构造 future，不能在工厂执行期间开放入口；自管 listener 使用 `serve_when_ready`。
 
@@ -1650,3 +1658,177 @@ future、`panic=abort` 与同一次展开中的再次 panic 不在可抢占范�
 
 产品 crate 只包含运行时代码、业务使用说明与许可文件。MySQL、PostgreSQL、Redis、Nacos、Kafka、OTLP 等连接信息
 只从部署环境注入，不写入源码、示例或发布归档。
+
+## Redis Stream、Proxy、AutoPipeline
+
+门面启用 `application,redis` 并声明 `"redis"`，直接 napp 使用 `redis` feature。
+三类命名计划合计最多 64 个；`redis_ref` 缺省为 `default`，显式错误名称不会回退。
+Stream 与 Proxy 仅支持 Service，handler 在 UserHook 登记，Prepare 后创建的任务等待统一 Ready 才读取。
+每项 handler 目录为 1～256 个。配置的消费模式最终生效，handler builder 中的模式设置不会覆盖 YAML。
+
+Service 的派生 Redis 入口、出站 Client 和受管终端共用一次启动许可。公开状态成为 Ready 时，
+存活入口已经获得许可，首次业务调用无需等待健康监控再次激活。发布前在关键领域的本地状态保护内
+复验任务责任、认证连接、健康证据新鲜度与启动期限；已观察到的失效按启动失败清理，不放行业务。
+保护持续到许可发布完成，不覆盖尚未被本地观察到的远端故障，也不保证后续调用一定成功。
+
+```yaml
+redis_streams:
+  notices:
+    enabled: true
+    redis_ref: default
+    stream: notices
+    critical: false
+    config:
+      mode: { group: { group: billing, consumer: worker-a, start: history } }
+      batch_size: 100
+      block_ms: 500
+      idle_sleep_ms: 200
+      handler_timeout_ms: 30000
+      ack_policy: on_success
+redis_proxies:
+  orders:
+    enabled: true
+    redis_ref: default
+    stream: orders
+    group: processors
+    start_offset: new
+    config:
+      consumers: 1
+      handler_timeout_ms: 10000
+      reclaim_min_idle_ms: 30000
+      requeue_unregistered: true
+      drain_deadline_ms: 10000
+redis_pipelines:
+  writes:
+    enabled: true
+    redis_ref: default
+    window_ms: 1
+    max_batch: 1000
+    queue_capacity: 4096
+    max_command_bytes: 16384
+    max_batch_bytes: 1048576
+```
+
+Service 在 UserHook 登记消费 handler：
+
+```rust,ignore
+app.configure_redis_stream("notices", |subscriber| {
+    subscriber.on_typed::<Notice, _, _>("created", |notice| async move {
+        handle_notice(notice).await
+    })
+})?;
+app.configure_redis_proxy("orders", |proxy| {
+    proxy.register::<Order, _, _>("orders", "created", |order| async move {
+        handle_order(order).await
+    });
+})?;
+```
+
+initializer 可以取得并保存发送句柄；以下调用放在 Service 获准运行的业务任务或 Batch 工作负载中，
+放行前调用会被拒绝：
+
+```rust,ignore
+let writes = app.redis_pipeline("writes").await?;
+let reply: String = writes.execute(nasa::redis::RedisCommand::new("PING")).await?;
+```
+
+Service 的 `app.redis_proxy("orders").await` 返回同样受准入保护的发布句柄，
+`publish(topic, event, &data).await` 返回 XADD entry ID，不表示 consumer 已经处理该消息。
+
+普通 Stream 的 `on_success` 在 handler 失败时保留 PEL，但没有自动重投；Proxy 保留原有组竞争、
+回收和毒消息合同，业务 handler 必须幂等。两种格式不能共用同源同 stream/group；同一普通组消费者
+身份不能重复登记。关闭先停止全部计划，再按同一截止点并发等待；PEL 查询失败、格式不完整或任务
+被强制终止时保留 consumer，不以“查不到”推断无 pending。Stream、Proxy 和 AutoPipeline 的独立
+关闭 owner 持续等待真实退出，取消等待不会转移任务责任。
+`proxy_stop` 保留 Proxy 的任务终态与清理分类。合法 PEL 中仍有 pending 时保留 consumer，
+正常退出可报告 `Pending`；查询或删除失败、摘要不完整为 `Unavailable`，共用预算耗尽为 `Deadline`，
+后二者进入宿主次要停机失败，不能由任务归零推断清理成功。已发出删除后超时不证明 Redis 未执行。
+
+受管 AutoPipeline 必须给出非零 `max_command_bytes` 与 `max_batch_bytes`，上限分别为 16 MiB、
+64 MiB；队列与单批条数均为 1～65536，窗口不超过 60 秒。所有队列参数字节预算合计不超过 256 MiB。
+单批 B 是软上限，单命令 M 有限时正常合批和关闭排干均受 B＋M 保守参数字节上界约束；Cmd 容量、
+编码、当前批次、响应以及等待生产者的内存另计。关闭与队列预留共同裁决准入，旧句柄永久拒绝新调用。
+已接纳写入仍可能结果未知，框架不自动重放。`submit` 仅确认入队，具体命令需要回执时使用 `execute`。
+
+`redis_derived_observations()` 返回冻结名称、类别、任务运行／关闭状态及微批队列占用。
+其中 `activity` 分别报告 consumer、reclaim、flusher 存活数、排队参数字节、未完成工作次数、
+已结束工作次数、微批传输失败批次数与最近进展间隔。未发生有效读取或处理时进展为 None，空闲轮询
+可以形成读取证据；这些本地次数不等于远端 PEL 数、唯一消息数或业务成功数，强停后未完成责任仍保留。
+Service 健康默认不影响 Ready；`critical: true` 时影响 Ready 且后台任务意外退出触发停机。
+失败／恢复阈值均为 1，观测超过 15 秒过期，来源连接健康仍由 Redis 组件负责。
+
+## 纯出站 TCP 帧客户端
+
+门面启用 `application,ws-client`，直接 napp 开启 `ws-client`；无需声明 `"ws"` 或 `"web"`。
+本入口管理 naws 现有 TCP wire 协议，不接受 ws/wss URL，不提供 TLS、业务消息重发或远端送达保证。
+
+```yaml
+ws_clients:
+  upstream:
+    enabled: true
+    address: 127.0.0.1:19091
+    endpoint: /ws
+    token: secret://upstream_token
+    device_id: worker
+    version: "1.0"
+    connect_timeout_ms: 5000
+    auto_reconnect: true
+    reconnect_min_ms: 200
+    reconnect_max_ms: 5000
+    queue_capacity: 256
+    max_frame_bytes: 65536
+    critical: false
+```
+
+`token` 可省略；提供时必须使用 `secret://`，材料来自同一启动快照。仅被 disabled 计划引用的材料
+不解析。首连包含 TCP 建连与认证，共用一份超时；所有启用计划首连失败均拒绝启动。
+运行期重连由 `auto_reconnect` 控制，使用冻结的材料，每次重连都先等待旧 writer 与 heartbeat 退出。
+配置与材料变化报告 `RestartRequired`。
+
+Service UserHook 使用 `configure_ws_client_event(name, event, callback)` 登记同步非阻塞回调，
+每客户端最多 256 个事件。Ready 前控制帧照常处理，业务帧最多缓冲 64 条且正文合计不超过单帧配置；
+超限断开，不能以无界缓冲等待启动。回调 panic 被隔离并计数；`observation()` 分别给出连接状态、最近认证／PONG 间隔及固定失败类别。Batch 可发送消息，但不接受长期回调计划。
+客户端最多 64 个，队列 1～4096 条，单帧 body（含 type/mode）1～16 MiB，配置队列 body 预算合计
+不超过 256 MiB；帧头、当前写入和入站缓冲另计。连接超时 1～300000 ms，重连间隔 1～60000 ms。
+
+`app.ws_client(name).await` 只提供发送与观测权。`send`/`send_message` 返回 true 仅证明本地入队，
+断线或关闭可以丢弃尚未确认的数据；业务应使用明确确认与幂等协议。`active_tasks()` 与
+`ws_client_observations()` 提供 supervisor、writer、heartbeat 的实际任务数量。
+Service 每秒根据认证连接更新健康，失败／恢复阈值为 1，5 秒没有更新则证据过期。
+`critical` 缺省 false：断连或重连期间为 Degraded，仍可接流；设为 true 时为 NotReady，停止接流，
+重新认证成功后恢复 Ready。关键连接 owner 意外结束触发停机；准备后、Ready 发布前已失效则拒绝启动。
+健康反映本地已观察到的连接事实，存在协议检测与采样间隔。关闭与健康发布串行，晚到认证不能重新
+开放已关闭的句柄或恢复 Ready，旧句柄不能重连或重新发送。
+
+## hystrix 命令 owner
+
+门面组合 `application,hystrix`，直接 napp 使用 `hystrix` feature；没有 `"hystrix"` 组件字符串。
+仅 `hystrix.enabled: true` 安装规则和集中周期观测，缺省保留独立 API 合同。
+
+```yaml
+hystrix:
+  enabled: true
+  max_commands: 256
+  context_path: ""
+  isolation:
+    /orders/*: { max_concurrent: 16, timeout_ms: 800 }
+  commands:
+    settlement: { group: billing, max_concurrent: 8, timeout_ms: 500 }
+```
+
+Service 和 Batch 都在 Prepare 装配；`app.hystrix_command("settlement").await` 取得预装配显式命令。
+受管 Web 自动将 `hystrix::dispatch` 装在业务路由上，框架探针不经过规则；无需业务再次添加该层。
+静态 `#[hystrix]` 描述在 Ready 前建立本代命令；不持有旧代静态 Arc，下一应用实例按新 owner 重建。
+显式旧 Command 永久拒绝执行，返回 503；动态命令重名或超限也拒绝执行，不新增目录或周期任务。
+
+目录缺省 256，允许 1～4096；名称和 group 非空且不超过 128 字节，并发上限不超过 65536，超时不超过
+3600000 ms，0 保持“关闭该项保护”的原语义。规则格式错误、重复 owner、独立目录／隔离表已安装，
+或存在手工全局 fallback 时拒绝受管启动。静态收集的全局 fallback 函数可复用，运行资源不能通过
+手工进程 fallback 移交给此 owner。
+
+规则、目录计划和容量冻结到启动，变化报告 `RestartRequired`。Service 业务 graceful shutdown
+仍可调用命令，随后才关闭新调用、等待在途执行与集中周期任务退出，再撤销本代全局引用。
+等待方取消不解除该责任；上一代真实退出前再次安装会得到 owner 冲突。观察任务意外结束影响 Ready
+并触发停机，健康阈值为 1，5 秒过期。该能力不提供错误率熔断或自适应限流。
+执行器销毁会关闭旧代准入；只有周期任务、收尾任务和全部在途业务 future 都已释放，才撤销全局引用。
+这种退出保留失败结果；外部仍持有业务 future 时，下一代继续得到 owner 冲突。

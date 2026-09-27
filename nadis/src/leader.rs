@@ -67,6 +67,7 @@ impl Leader {
     /// - `lock`: 用于抢占 leader 互斥锁的分布式锁组件。
     /// - `key`: leader 选举使用的业务锁 key。
     /// - `period`: 竞选和检测周期,应小于锁 lease。
+    ///
     /// 返回：持有后台任务退出责任的句柄；竞选尚未成功时不授予领导权。
     pub fn elect(
         lock: Arc<DistributedLock>,

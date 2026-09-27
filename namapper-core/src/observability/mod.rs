@@ -16,11 +16,13 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 macro_rules! domain {
-    ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $label:literal),+ $(,)? }) => {
+        $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[repr(usize)]
-        pub enum $name { $($variant),+ }
+        pub enum $name { $($(#[$vmeta])* $variant),+ }
         impl $name {
+            /// 当前指标维度的完整固定词表，顺序与内部计数单元一致。
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
             /// 业务作用：返回固定词表中的公开标签，不从错误文本或参数派生。
             /// 参数说明：无。
@@ -29,16 +31,95 @@ macro_rules! domain {
         }
     };
 }
-domain!(CallPath { Cache => "cache", Database => "database", PreExecution => "pre_execution" });
-domain!(CallOutcome { Ok => "ok", NotFound => "not_found", Error => "error", Cancelled => "cancelled", Panic => "panic" });
-domain!(DbOutcome {
-    Ok => "ok", NotFound => "not_found", Constraint => "constraint", Database => "database",
-    Configuration => "configuration", InvalidArgument => "invalid_argument", Io => "io", Tls => "tls",
-    Protocol => "protocol", Encode => "encode", Decode => "decode", Schema => "schema", Driver => "driver",
-    Cancelled => "cancelled", Panic => "panic", Other => "other"
-});
-domain!(StreamOutcome { Completed => "completed", Error => "error", Cancelled => "cancelled", CancelledBeforePoll => "cancelled_before_poll", Panic => "panic" });
-domain!(Status { Success => "success", Failure => "failure", Cancelled => "cancelled" });
+domain!(
+    /// Mapper 调用实际到达的执行路径。
+    CallPath {
+        /// 从缓存取得结果，未进入数据库执行。
+        Cache => "cache",
+        /// 已进入数据库执行路径。
+        Database => "database",
+        /// 在数据库执行前结束的调用。
+        PreExecution => "pre_execution"
+    }
+);
+domain!(
+    /// Mapper 调用生命周期的终结原因。
+    CallOutcome {
+        /// 调用正常返回结果。
+        Ok => "ok",
+        /// 查询正常完成，但没有找到目标行。
+        NotFound => "not_found",
+        /// 调用以显式错误结束。
+        Error => "error",
+        /// Future 被丢弃，未取得最终结果。
+        Cancelled => "cancelled",
+        /// 调用因 panic 展开退出。
+        Panic => "panic"
+    }
+);
+domain!(
+    /// 数据库操作的固定结果分类，不使用错误原文作为指标标签。
+    DbOutcome {
+        /// 数据库操作正常完成。
+        Ok => "ok",
+        /// 查询完成但没有目标行；延迟统计归入成功。
+        NotFound => "not_found",
+        /// 操作违反数据库约束。
+        Constraint => "constraint",
+        /// 数据库返回其它执行错误。
+        Database => "database",
+        /// 连接或驱动配置不满足执行要求。
+        Configuration => "configuration",
+        /// 执行参数不符合接口要求。
+        InvalidArgument => "invalid_argument",
+        /// 数据库通信发生 I/O 错误。
+        Io => "io",
+        /// TLS 建连或会话处理失败。
+        Tls => "tls",
+        /// 驱动无法按数据库协议处理交互。
+        Protocol => "protocol",
+        /// 参数编码失败。
+        Encode => "encode",
+        /// 返回值解码失败。
+        Decode => "decode",
+        /// 行或列结构不符合查询映射要求。
+        Schema => "schema",
+        /// 驱动自身的执行错误。
+        Driver => "driver",
+        /// 操作被取消，未取得最终数据库结果。
+        Cancelled => "cancelled",
+        /// 操作因 panic 展开退出。
+        Panic => "panic",
+        /// 不属于已知分类的执行错误。
+        Other => "other"
+    }
+);
+domain!(
+    /// 查询流的终结原因，区分消费前取消与消费中取消。
+    StreamOutcome {
+        /// 查询流已被消费到结束。
+        Completed => "completed",
+        /// 查询流返回执行错误。
+        Error => "error",
+        /// 开始轮询后被丢弃，未消费到结束。
+        Cancelled => "cancelled",
+        /// 首次轮询前被丢弃。
+        CancelledBeforePoll => "cancelled_before_poll",
+        /// 查询流因 panic 展开退出。
+        Panic => "panic"
+    }
+);
+domain!(
+    /// 延迟直方图使用的固定结果维度。
+    Status {
+        /// 正常完成，包含未找到目标行。
+        Success => "success",
+        /// 显式错误或 panic 退出。
+        Failure => "failure",
+        /// 未取得最终结果的取消。
+        Cancelled => "cancelled"
+    }
+);
 
 impl DbOutcome {
     /// 业务作用：将详细数据库结果映射为低基数延迟分布状态。
@@ -64,12 +145,19 @@ impl DbOutcome {
 
 /// 宏生成的静态方法身份与进程生命周期单元；不会在旧 future 或 stream 存活期间释放。
 pub struct MapperMethodMeta {
+    /// 宏确定的完整方法身份，用于方法策略覆盖与指标关联。
     pub method: &'static str,
+    /// 声明该方法的 Mapper 身份。
     pub mapper: &'static str,
+    /// 该方法使用的数据库驱动标识。
     pub driver: &'static str,
+    /// 连接目录中的数据源名称。
     pub datasource: &'static str,
+    /// 宏确定的 SQL 操作类别。
     pub operation: &'static str,
+    /// 该方法的事务参与模式。
     pub tx_mode: &'static str,
+    /// 仅供受控诊断的 SQL 模板，不作为指标标签。
     pub sql_template: &'static str,
     cells: MethodCells,
     policy: OnceLock<EffectivePolicy>,
@@ -85,6 +173,7 @@ struct MethodAlerts {
     error_next: [AtomicU64; 16],
 }
 
+/// 链接期收集的 Mapper 方法身份，供启动期安装策略与注册观测源。
 #[linkme::distributed_slice]
 pub static MAPPER_METHOD_META: [&'static MapperMethodMeta];
 

@@ -7,6 +7,18 @@
 //! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL 事务、
 //! Inbox、Outbox、Saga、消息传输、缓存、跨副本业务配额、路由、调度、配置、发现和工具模块。
 //!
+//! # 消费、出站与隔离命令的受管入口
+//!
+//! `application,redis` 配合 Redis 组件提供命名 Stream、Proxy 与 AutoPipeline；
+//! `application,ws-client` 提供无需入站 listener 的原生 TCP Client。Service 的消费、发送与回调
+//! 和宿主终端共用启动许可，关键任务、认证连接与健康证据在本地状态保护内复验，公开 Ready 时
+//! 入口已获许可。此边界不保证远端送达或未来调用成功。Batch 支持 Pipeline 和 Client 发送，
+//! 不接受长期消费或回调计划；Client 不支持 ws/wss、TLS 或透明重发。
+//!
+//! `application,hystrix` 的显式配置安装本代命令目录、固定规则与集中周期观测，属性宏使用代次
+//! 感知的弱引用缓存。业务收尾后先关闭命令准入，再等待在途调用并撤销目录；旧 Command 返回 503。
+//! 这些资源的名称、容量与认证材料冻结到启动，变化报告 `RestartRequired`。
+//!
 //! # Redis 分区消费
 //!
 //! `redis` 提供 `PreparedPartition`、`PartitionRecord` 和 `RunningPartition`。Redis 租约与 PEL
@@ -465,8 +477,9 @@ pub mod partition {
 }
 
 /// NASA 长连接框架(TCP/WebSocket/socket.io + 集群 fan-out)。
+/// `ws-client` 提供纯出站 TCP Client；与 application 组合后由 ws_clients 命名配置装配。
 /// 子能力经 feature 透传:`ws-redis`(Redis Stream 集群)、`ws-socketio`(socket.io 兼容)。
-#[cfg(feature = "ws")]
+#[cfg(any(feature = "ws", feature = "ws-client"))]
 pub mod ws {
     pub use ws_impl::*;
 

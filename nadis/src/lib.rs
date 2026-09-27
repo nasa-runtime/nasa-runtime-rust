@@ -8,11 +8,25 @@
 //!
 //! 业务通常通过 `nasa::redis` 门面接入；本 crate 承载单点/集群 Redis 的类型化命令、
 //! 连接治理和分布式协作能力。
+//!
+//! # 普通消费与命令微批
+//!
+//! Stream、共享组 Proxy 与 AutoPipeline 各自持有可等待的关闭 owner，也可交给 Application
+//! 按命名计划管理。Service 的消费与发送入口和宿主终端共用启动许可，关键任务责任在发布前
+//! 受本地状态保护；Batch 仅支持命名 Pipeline。普通 Stream 组模式的 `on_success` 在 handler
+//! 失败时保留 PEL，不自动重投；Proxy 清理必须有完整 pending 证据，排干与清理共用截止点。
+//! 它们不提供分区消费的业务键顺序。
+//!
+//! 受管微批限制已接纳命令参数字节，单批软上限 B 与单命令上限 M 给出 B＋M 的保守边界，
+//! 不包含响应、编码和等待调用者的内存。未知写入结果不会自动重放；取消等待不等于任务已经退出。
+//! 本地处理次数与任务存活不证明远端 PEL、业务成功或 Redis 可达。
 // 核心模块分别拥有连接与拓扑、类型化命令、显式 pipeline、锁、分区消费和搜索边界。
 // 写出后断线统一归类为 ExecutionUnknown；Drop 只承担 best-effort，涉及权威释放时必须使用显式入口。
 
+mod activity;
 /// Redis 连接建立、拓扑识别和统一执行入口。
 pub mod client;
+pub use activity::RedisTaskObservation;
 /// Redis 值序列化包装类型。
 pub mod codec;
 /// 类型化 Redis 命令集合。
@@ -92,3 +106,6 @@ pub use stream::{
     StreamMode, StreamPublishItem, StreamStart, StreamSubscribeCfg, StreamSubscriber,
     StreamSubscription, StreamTypedEvent, STREAM_EVENT,
 };
+
+/// 自动微批调用使用的 Redis 命令与类型化响应转换合同。
+pub use redis::{Cmd as RedisCommand, FromRedisValue};

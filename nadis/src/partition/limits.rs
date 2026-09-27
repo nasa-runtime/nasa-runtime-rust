@@ -7,24 +7,41 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionLimits {
+    /// 同一发布 owner 可保留的发布票据与未回收发送任务上限。
     pub max_inflight_publishes: usize,
+    /// 所有在途发布共同占用的序列化正文预留上限，单位字节。
     pub max_inflight_publish_bytes: usize,
+    /// 全部消费组共享的非终态记录及读取预留上限。
     pub max_inflight_records: usize,
+    /// 消费侧线格式与解码对象的共享估算存活字节上限。
     pub max_inflight_payload_bytes: usize,
+    /// 同时持有读取预留的批次数上限。
     pub max_active_batches: usize,
+    /// 等待读取预算的请求数上限。
     pub max_read_waiters: usize,
     /// 单条原始 Envelope 的线格式上限；解码对象估算另外占用共享 payload byte 预算。
     pub max_record_bytes: usize,
+    /// 消费任务责任上限，参与整批记录准入容量计算。
     pub max_inflight_tasks: usize,
+    /// 后继处理责任上限，读取前随记录一并预留。
     pub max_continuations: usize,
+    /// 等待提交的责任上限，参与整批预留以避免执行后无处登记。
     pub max_pending_commits: usize,
+    /// 提交记录责任上限，参与共享记录容量计算。
     pub max_commit_records: usize,
+    /// 已确认提交后交给异步删除 owner 的记录数上限。
     pub max_async_delete_records: usize,
+    /// 重试责任票据上限，在初始读取时纳入最坏情况预留。
     pub max_retry_tickets: usize,
+    /// 同时保留的业务顺序键上限，参与共享记录容量计算。
     pub max_ordered_keys: usize,
+    /// 单个物理来源可登记的阻塞业务键上限。
     pub max_blocked_keys_per_source: usize,
+    /// 单个顺序键可保留的后继记录上限，同时约束整批准入。
     pub max_deferred_records_per_key: usize,
+    /// 等待顺序键前驱完成的记录总上限。
     pub max_deferred_records: usize,
+    /// 不可路由记录的责任上限，读取前即参与共享容量预留。
     pub max_unroutable_records: usize,
 }
 
@@ -120,12 +137,19 @@ pub enum PartitionExecutorScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionExecutorCfg {
+    /// 本地执行域按源、组或物理 Stream 划分的方式。
     pub scope: PartitionExecutorScope,
+    /// 整个 RedisPartition 实例允许创建的执行域总数上限。
     pub max_runners: usize,
+    /// 全部执行域的本地执行槽总数上限。
     pub max_total_partitions: usize,
+    /// 每个执行域的本地执行槽数，不改变 Redis 物理分区。
     pub partitions: usize,
+    /// 每个执行域内每种任务类型的队列容量。
     pub queue_capacity_per_type: usize,
+    /// 单个执行域内所有任务类型共享的在途任务容量。
     pub global_inflight: usize,
+    /// 单个执行域可保留的任务类型状态数量上限。
     pub max_type_states: usize,
 }
 

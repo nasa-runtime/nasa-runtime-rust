@@ -804,6 +804,17 @@ impl ApplicationComponent for WebComponent {
                     )
                 })?;
             }
+            #[cfg(feature = "hystrix")]
+            if application
+                .config()
+                .value()
+                .pointer("/hystrix/enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                // 只包裹业务路由，框架探针随后添加，避免隔离规则阻断就绪观测。
+                router = router.layer(from_fn(hystrix::dispatch));
+            }
             // configure_router 已封口并执行完成，此时安全 route 集合才完整。统一指标目录在同一
             // 线性化点冻结 route 注册并预留最坏序列，后续不能再扩张实际渲染面。
             #[cfg(any(feature = "web-auth", feature = "web-crypto"))]

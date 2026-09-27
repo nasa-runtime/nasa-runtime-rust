@@ -13,14 +13,22 @@ use std::{
 };
 use tokio::sync::{oneshot, Notify};
 
+/// 单一发布 owner 的当前责任与累计结果；XADD 成功不代表业务已消费。
 #[derive(Debug, Clone, Default)]
 pub struct PublisherSnapshot {
+    /// 已经登记但尚未终结的发布票据数。
     pub inflight: usize,
+    /// 在途发布占用的正文预留字节数，包含序列化前的最坏大小预留。
     pub payload_bytes: usize,
+    /// 已取得 XADD 成功响应的累计发布数。
     pub succeeded: u64,
+    /// 已登记但在发送前确定失败的累计发布数。
     pub failed_before_send: u64,
+    /// 交给发送监督后未取得确定结果的累计发布数，不能据此安全重发。
     pub outcome_unknown: u64,
+    /// 是否已关闭新发布准入，既有票据仍需完成排干。
     pub closed: bool,
+    /// 仍由发布 owner 持有、尚未完成 join 回收的发送任务数。
     pub unjoined_tasks: usize,
 }
 

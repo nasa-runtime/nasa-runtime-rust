@@ -9,6 +9,10 @@
 顺序覆盖 handler、ACK 和精确重试。ACK 结果不确定时保留提交责任，不重跑成功 handler。全部消费组
 受源级有界记录与正文总预算约束，隔离模式将预算分为固定域份额。正常停机超时可以继续等待同一个排干操作。
 
+普通 Stream、共享消费组 Proxy 与 AutoPipeline 可由 Application 按命名计划管理：统一放行消费和
+调用、限制微批参数字节、等待真实任务退出，并在缺少 PEL 证据时保留 consumer。业务无需另建消费
+或关闭 owner；具体配置与边界见[受管入口](#普通-streamproxy-与微批的受管入口)。
+
 Handler 通过 `JobContext::parameter::<T>()` 获取 JSON 参数，`T` 可以是包含集合、映射或嵌套结构的任意 `serde::DeserializeOwned` 类型；框架会先执行重复键、深度和节点预算校验。非 JSON 参数通过 `payload()` 读取原始字节并由业务按声明的 codec 解码，框架不会猜测 Protobuf 类型。
 
 业务项目通过门面开启 `redis`：
@@ -539,3 +543,46 @@ Cluster 使用注意：多 key 命令必须同 slot；普通业务 key 可使用
 默认组与隔离组的 resolved 分区总数最多 65536，配置 topic 总数最多 4096；这些边界限制单实例
 启动时的 task、channel 和扫描状态规模。隔离组覆盖的 poll、idle、持锁复核、handler 与 drain
 时长也使用相同上限，不能绕过全局配置保护。
+
+## 普通 Stream、Proxy 与微批的受管入口
+
+组合 `application,redis` 并声明 `"redis"` 后，`redis_streams`、`redis_proxies`、`redis_pipelines`
+提供命名计划。前两项在 Service UserHook 只登记 handler，Prepare 建立 owner，统一 Ready 后消费；
+AutoPipeline 也支持 Batch。具体 YAML 和 getter 见
+[napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redis-streamproxyautopipeline)。
+
+### 运行架构与责任边界
+
+```text
+命名配置 + handler 计划 → 受管 Redis 来源 → Prepare 建立领域 owner
+        → Ready 与共享启动许可 → 消费 / Proxy 发布 / 微批入队
+        → 关闭新工作 → 同一截止点排干与清理 → 归还 Redis 来源
+```
+
+普通 Stream 按显式读取模式处理记录；组模式的 `on_success` 在 handler 失败时保留 PEL，不自动重投。
+Proxy 以共享组竞争、回收和毒消息策略处理自己的信封格式；两者不能共用同源同 stream/group。
+AutoPipeline 合并命令传输，既不提供 Redis 事务，也不提供业务键有序消费。需要分区执行与业务键
+顺序时使用 `PreparedPartition` / `RunningPartition`。Service 的命名发送入口在放行前明确拒绝，
+Batch 仅装配 AutoPipeline，不创建长期 Stream 或 Proxy 消费计划。
+
+独立 `start()` 保持立即激活；需要准备屏障时使用 `start_suspended()` 后显式 `activate()`。
+多个入口共同开放时使用 `start_suspended_with_activation(token)`，仅由宿主取消共享 token 发布许可，
+不逐项调用 `activate()`。受管入口与宿主终端共用许可，公开 Ready 后首次调用无需等待监控激活。
+Stream、Proxy、AutoPipeline 的 `with_running` 在本地任务责任完整的保护内执行短小同步裁决，
+闭包不能阻塞或重入领域句柄；已退出的关键 owner 阻止 Ready 发布，不把本地存活等同远端可用。
+Stream 的 `begin_shutdown()` / `wait_closed()`、Proxy 的 `begin_shutdown_until()` / `wait_closed()`
+和 AutoPipeline 的 `shutdown_result()` 都保留真实退出证据，可在前一次等待被取消后再次等待。
+Proxy 强制关闭、查询失败或摘要不完整时保留 consumer/PEL；不把未知 pending 当作零。
+`ProxyStopReport.cleanup` 区分完整清理、合法 pending、证据不可用和预算耗尽，后两类在宿主中
+进入次要停机失败。删除回包超时保留结果未知。收尾 owner 被执行器销毁时，旧入口关闭，状态读取
+报告失败；Proxy 未取得全部 join 证据时保持 `terminated: false`，不会把任务取消冒充优雅退出。
+
+受管微批要求有限单条参数字节 M 和单批软上限 B，正常合批与排干均不超过 B＋M 的保守参数字节边界，
+每批同时受条数限制；独立 `MicroBatchCfg` 的零字节限制仍表示不限。队列上界只计算已接纳命令参数，
+不涵盖编码、响应、Cmd 预留容量及等待中的调用者。关闭拒绝新的入队，已接纳命令逐项返回执行结果或
+`ExecutionUnknown`，不会自动重放写入。`submit` 没有逐条回执需求时才适用。
+
+三个领域句柄的 `observation()` 返回本地任务数、处理进展与未完成责任；微批同时提供排队参数字节
+和传输失败批次数。`completed` 表示本地处理结束，包含 handler 失败及结果未知，不是业务成功计数。
+同一消息重投可形成多次处理，未完成次数不等于 PEL 大小。最近进展为 None 时尚无可验证的运行进展；
+有效空轮询不会被误判为消费失败。`barrier()` 只建立已入队工作的处理顺序，不汇总此前写入的错误。

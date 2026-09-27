@@ -792,7 +792,8 @@ let health = runtime.health();
 4. 调用 `try_register_all` 审计全部静态 route policy；
 5. 审计成功后再 bind/listen。
 
-完整逐字段 YML、环境变量映射和真实 Fore/Redis adapter 见 `rust-simple-mvc/README.md` 与 `rust-simple-mvc/zcf/application.yml`。
+YML 字段、环境变量映射和外部认证／重放 adapter 由宿主应用定义；`naweb` 接收已构造的运行时，
+不把特定业务项目的配置结构作为通用协议。
 
 ### 安全限制
 

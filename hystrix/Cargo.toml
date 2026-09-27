@@ -1,16 +1,16 @@
-# hystrix —— 熔断/隔离/监控运行时:Command/run_fn/Dashboard stream/配置驱动隔离 + re-export #[hystrix]
-# 业务项目优先依赖 nasa 门面并开启 hystrix feature；内部迁移可直接依赖 hystrix 包。
+# hystrix —— 隔离、超时、降级与周期观测；Command 可独立运行或由 Application 统一拥有。
+# 业务项目优先依赖 nasa 门面并开启 hystrix feature。
 [package]
 name = "hystrix"
 version = "1.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "接口级隔离、超时、降级和 Dashboard 监控门面"
+description = "接口级隔离、超时、降级与 Dashboard 指标；支持 Application 受管命令目录和有序关闭"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["isolation", "timeout", "fallback", "lifecycle", "metrics"]
+categories = ["asynchronous", "concurrency"]
 documentation = "https://docs.rs/hystrix"
 readme = "README.md"
 
@@ -29,3 +29,5 @@ async-stream = "0.3"
 tracing = "0.1"
 # linkme:收集业务 crate 内唯一的 #[global_fallback] 终态处理入口
 linkme = "0.3"
+
+tokio-util = { version = "0.7", features = ["rt"] }

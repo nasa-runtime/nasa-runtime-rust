@@ -750,13 +750,11 @@ impl ApplicationRunner {
                 {
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
-                if let Err(error) = self.application.mark_ready() {
+                if let Err(error) = self.application.mark_ready(startup_deadline) {
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
                         .await;
                 }
-                // 所有工厂构造、任务登记和预算复验成功后，先发布 Ready，再用同一个信号开放全部终端。
-                self.supervisor.release_startup_tasks();
 
                 match self.wait_for_service_terminal(&mut broker).await {
                     ServiceTerminal::Requested => {
@@ -882,6 +880,7 @@ impl ApplicationRunner {
     ///
     /// - `deadline`：整个异步启动共享的绝对截止时间。
     /// - `broker`：在组件 future 卡住时仍被并发轮询的信号控制面。
+    ///
     /// 返回：全部组件及阶段释放完成时成功；构造、轮询或析构展开、普通错误与启动中断交给统一回滚。
     async fn bootstrap_components(
         &mut self,
@@ -962,6 +961,7 @@ impl ApplicationRunner {
     ///
     /// - `deadline`：与前序阶段共享的绝对启动截止时间。
     /// - `broker`：持续观察启动中断信号的控制面。
+    ///
     /// 返回：全部组件及阶段释放完成时成功；构造、轮询或析构展开、普通错误与启动中断交给统一回滚。
     async fn start_components(
         &mut self,
@@ -1107,7 +1107,7 @@ impl ApplicationRunner {
                     if let Some(task) = result.map_err(StartupStop::Failure)? {
                         // 资源清理责任已经压栈；探测任务交给同一监督器，在统一屏障后运行并在释放资源前收割。
                         self.supervisor.spawn_component_critical(
-                            "object-store-health-monitor",
+                            "managed-outbound-health-monitor",
                             Box::pin(async move { task.await.map_err(anyhow::Error::from) }),
                         ).map_err(StartupStop::Failure)?;
                     }
@@ -1885,6 +1885,7 @@ impl ApplicationRunner {
     /// - `reason`：传递给资源和 action 的首次停机原因。
     /// - `failed`：首次终态是否为框架或关键任务失败。
     /// - `broker`：清理完成前持续观察强退信号，最终状态写入后才停止。
+    ///
     /// 返回：正常停止返回次要清理错误；批任务完成时组件释放异常返回主错误并发布 Failed。
     async fn finish(
         &mut self,

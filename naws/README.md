@@ -2,6 +2,10 @@
 
 `naws` 是通用长连接框架，覆盖 TCP/WebSocket/socket.io 兼容层、NASA wire codec、endpoint/handler 抽象、鉴权、背压、心跳、优雅关闭，以及可选的 Redis Stream 或 Kafka 集群 transport。它不包含业务逻辑，业务通过 endpoint 注册事件处理。
 
+原生 TCP `Client` 也可单独用于出站连接：Application 的 `ws-client` feature 按名称拥有首连认证、
+统一启动许可、重连健康和全部连接子任务的退出责任，无需入站 listener。Service 与 Batch 均可发送，
+协议与生命周期边界见[出站 Client](#原生-tcp-client-与-application)。
+
 业务项目通过门面开启 `ws`：
 
 ```toml
@@ -447,3 +451,46 @@ collected consumers，避免两个消费 owner 竞争同一来源。
 退出后才释放来源。端口已绑定不能作为业务就绪的依据。
 
 配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
+## 原生 TCP Client 与 Application
+
+`Client` 使用 NASA 原生 TCP 帧协议；WebSocket/socket.io 属于服务端能力，Client 不接受 ws/wss URL。
+门面组合 `application,ws-client` 后，以 `ws_clients.<name>` 显式启用，无需入站 listener。
+Service 在 UserHook 调用 `configure_ws_client_event`，框架完成首连认证并在 Ready 后放行业务回调；
+Batch 可取得 `app.ws_client(name).await` 发送句柄，不登记长期回调。
+Service 的发送、回调与宿主任务共用一次启动许可，公开 Ready 时无需再等待监控激活。
+关键连接在 Ready 发布前失去认证则拒绝启动；运行期断连或重连时为 NotReady，重新认证后恢复。
+可选连接断连时为 Degraded；关键 owner 退出触发停机。健康包含协议检测和周期采样间隔。
+配置、健康和容量见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#纯出站-tcp-帧客户端)。
+
+### 出站运行架构
+
+```text
+ws_clients + 同代认证材料 → Prepare 首连与 AUTH → 等待宿主启动许可
+        → Service 发送与回调 / Batch 发送
+        → 断连撤销连接事实 → 等待旧 writer、heartbeat → 重连与重新认证
+关闭 → 拒绝发送与重新连接 → 等待 supervisor、writer、heartbeat 全部退出
+```
+
+首连超时或认证失败拒绝启动；运行期重连不会重放业务消息。Ready 前的连接保护只覆盖本地已观察
+到的认证与任务事实，不承诺同步检测网络隔离。关闭与状态发布串行，晚到认证不能重新开放旧句柄。
+
+独立 Client 可使用 `capacity(queue_capacity, max_frame_bytes)` 与 `start_suspended()`；默认立即允许
+业务分发。暂停激活期间最多保留 64 条业务帧，合计正文不超过单帧限制，控制帧持续处理，超限断线。
+多个入口需要共同开放时可传入 `activation_barrier(token)`，token 的取消表示发布许可；仅由宿主
+取消该信号，不逐项调用 `activate()`。`with_authenticated_connection` 可在本地认证事实的保护范围
+内提交短小同步的宿主状态；闭包不能阻塞、重入客户端或执行业务，不证明远端此刻存活。
+`connect()` future 被丢弃或外层超时会取消首连；TCP 与 AUTH 使用同一连接超时。
+每次重连先等待旧 writer、heartbeat 退出，再发布新连接。无 PONG 超过两个心跳周期会关闭本连接；
+周期为服务端 timeout 的一半，至少 1 秒，未提供 timeout 时为 30 秒。
+
+`close()` 只请求关闭；`wait_closed()` / `close_and_wait()` 等待 supervisor、writer、heartbeat
+全部退出后才释放再次 connect 的门禁。`active_tasks()` 是任务存活数，`callback_failures()` 记录被隔离的
+回调 panic。回调必须同步且不阻塞；阻塞回调会延迟整个连接退出。
+执行器销毁时也由各任务 future 的释放守卫归还责任，收尾 owner 与连接任务全部释放后才清除
+会话并解除运行门禁；这类中断记录 `Disconnected`，不表示排队消息已经送达。
+`observation()` 分开给出认证、PONG 的最近间隔与固定失败类别，正常对端关闭、认证拒绝、读写、
+协议、心跳、容量和回调异常不会混成一个 connected 标志。初始没有 PONG 时保持 None，不能用认证
+成功替代心跳证据；历史失败保留到下一次失败，重新认证不会清除已有故障事实。
+`send_message()` 的帧限制含 type/mode，返回 true 仅表示本地有界队列接受；关闭、断线可丢弃排队消息，
+不保证远端收到或执行。认证 token 固定到本次配置，不支持自动轮换、透明重发或 TLS。

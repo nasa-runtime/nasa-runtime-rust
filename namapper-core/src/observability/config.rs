@@ -8,27 +8,34 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
+    /// 最细粒度的执行轨迹，适用于显式开启的语句输出。
     Trace,
+    /// 开发诊断信息，作为语句输出的默认级别。
     Debug,
+    /// 常规运行信息；具体事件仍校验允许的级别。
     Info,
+    /// 需要关注的延迟或运行异常。
     Warn,
+    /// 执行失败等需要处理的错误。
     Error,
 }
 
 macro_rules! policy {
-    ($name:ident, $patch:ident { $($field:ident: $ty:ty = $default:expr),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident, $(#[$pmeta:meta])* $patch:ident { $($(#[$fmeta:meta])* $field:ident: $ty:ty = $default:expr),* $(,)? }) => {
+        $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
         #[serde(default, deny_unknown_fields)]
-        pub struct $name { $(pub $field: $ty),* }
+        pub struct $name { $($(#[$fmeta])* pub $field: $ty),* }
         impl Default for $name {
             /// 业务作用：提供该策略稳定的递归缺省值。
             /// 参数说明：无。
             /// 返回：未显式配置时的完整策略，不沿用历史进程状态。
             fn default() -> Self { Self { $($field: $default),* } }
         }
+        $(#[$pmeta])*
         #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
         #[serde(default, deny_unknown_fields)]
-        pub struct $patch { $(#[serde(skip_serializing_if = "Option::is_none")] pub $field: Option<$ty>),* }
+        pub struct $patch { $($(#[$fmeta])* #[serde(skip_serializing_if = "Option::is_none")] pub $field: Option<$ty>),* }
         impl $name {
             /// 业务作用：仅覆盖显式叶子，空子树保持上层业务策略。
             /// 参数说明：`patch` 为下层声明的可选叶子。
@@ -39,23 +46,38 @@ macro_rules! policy {
 }
 
 policy!(
+    /// 显式 SQL 语句输出策略；参数输出需单独开启并限制大小。
     ConsolePolicy,
+    /// 数据源的语句输出覆盖；省略的字段继承全局策略。
     ConsolePatch {
+        /// 是否启用逐条语句输出。
         enabled: bool = false,
+        /// 逐条语句输出级别，仅接受 Debug 或 Trace。
         statement_level: LogLevel = LogLevel::Debug,
+        /// 是否输出绑定参数；生产环境应保持关闭。
         include_parameters: bool = false,
+        /// 每个参数可输出的最大字符数。
         max_parameter_chars: usize = 256,
+        /// 一条语句可输出的最大参数个数。
         max_parameters: usize = 64,
     }
 );
 policy!(
+    /// 慢 SQL 判定与日志策略，使用数据库客户端活跃时长。
     SlowPolicy,
+    /// 慢 SQL 策略的逐叶覆盖；省略字段继承上层值。
     SlowPatch {
+        /// 慢 SQL 阈值，单位毫秒，达到阈值即命中。
         threshold_ms: u64 = 1000,
+        /// 是否输出命中的慢 SQL 日志。
         log_enabled: bool = true,
+        /// 慢 SQL 日志级别，接受 Info、Warn 或 Error。
         log_level: LogLevel = LogLevel::Warn,
+        /// 同一方法连续慢 SQL 日志的最小间隔，单位毫秒；零表示不冷却。
         log_cooldown_ms: u64 = 0,
+        /// 是否在日志中附带 SQL 模板，不包含绑定参数。
         include_sql: bool = false,
+        /// 日志中 SQL 模板的最大字符数。
         max_sql_chars: usize = 2048,
     }
 );
@@ -70,48 +92,85 @@ impl SlowPolicy {
 }
 
 policy!(
+    /// 数据库执行失败的日志策略，不将未找到或取消视为执行错误。
     ErrorPolicy,
+    /// 执行错误日志的逐叶覆盖；省略字段继承上层值。
     ErrorPatch {
+        /// 是否输出数据库执行错误日志。
         log_enabled: bool = true,
+        /// 执行错误日志级别，仅接受 Warn 或 Error。
         log_level: LogLevel = LogLevel::Error,
+        /// 同一方法和错误分类的日志最小间隔，单位毫秒。
         log_cooldown_ms: u64 = 0,
+        /// 是否在错误日志中附带 SQL 模板，不包含绑定参数。
         include_sql: bool = false,
+        /// 是否输出驱动提供的数据库错误码。
         include_database_code: bool = true,
+        /// 错误日志中 SQL 模板的最大字符数。
         max_sql_chars: usize = 2048,
     }
 );
 policy!(
+    /// 连接获取或事务槽等待的延迟日志策略。
     WaitPolicy,
+    /// 等待日志的逐叶覆盖；省略字段继承上层值。
     WaitPatch {
+        /// 等待达到该毫秒数时命中延迟规则。
         threshold_ms: u64 = 250,
+        /// 是否输出等待超阈值日志。
         log_enabled: bool = false,
+        /// 等待日志级别，接受 Info 或 Warn。
         log_level: LogLevel = LogLevel::Warn,
+        /// 同一等待观测单元的日志最小间隔，单位毫秒。
         log_cooldown_ms: u64 = 60000,
     }
 );
 
-policy!(SqlAlertPolicy, SqlAlertPatch {
+policy!(
+    /// 慢 SQL 或执行错误的异步通知策略。
+    SqlAlertPolicy,
+    /// SQL 通知的逐叶覆盖；省略字段继承上层值。
+    SqlAlertPatch {
+    /// 是否向通知分发器投递命中事件。
     enabled: bool = false,
+    /// 已配置通知 provider 的引用名称；启用通知时必须能够解析。
     provider_ref: Option<String> = None,
+    /// 通知携带的业务严重度。
     severity: Severity = Severity::Warning,
+    /// 同一规则观测单元的通知最小间隔，单位毫秒。
     cooldown_ms: u64 = 60000,
+    /// 是否在通知中附带 SQL 模板，不包含绑定参数。
     include_sql: bool = false,
+    /// 通知中 SQL 模板的最大字符数。
     max_sql_chars: usize = 1024,
 });
-policy!(AcquireAlertPolicy, AcquireAlertPatch {
+policy!(
+    /// 连接获取超时的通知策略，可按用途限定触发范围。
+    AcquireAlertPolicy,
+    /// 连接超时通知的逐叶覆盖；省略字段继承上层值。
+    AcquireAlertPatch {
+    /// 是否投递连接获取超时通知。
     enabled: bool = false,
+    /// 已配置通知 provider 的引用名称。
     provider_ref: Option<String> = None,
+    /// 超时通知携带的业务严重度。
     severity: Severity = Severity::Error,
+    /// 连接超时通知的最小间隔，单位毫秒。
     cooldown_ms: u64 = 60000,
+    /// 允许触发通知的连接用途，默认只包含 mapper。
     purposes: Vec<String> = vec!["mapper".to_owned()],
 });
 
+/// 独立控制慢 SQL、执行错误和连接超时的通知；默认均关闭。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Alerts {
+    /// 慢 SQL 通知规则。
     pub slow_sql: SqlAlertPolicy,
     #[serde(deserialize_with = "deserialize_execution_alert")]
+    /// 数据库执行错误通知规则。
     pub execution_error: SqlAlertPolicy,
+    /// 连接获取超时通知规则。
     pub acquire_timeout: AcquireAlertPolicy,
 }
 
@@ -147,35 +206,53 @@ impl Default for Alerts {
     }
 }
 
+/// 数据源通知规则的逐叶覆盖，省略字段继承全局策略。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AlertsPatch {
+    /// 慢 SQL 通知规则。
     pub slow_sql: SqlAlertPatch,
+    /// 数据库执行错误通知规则。
     pub execution_error: SqlAlertPatch,
+    /// 连接获取超时通知规则。
     pub acquire_timeout: AcquireAlertPatch,
 }
+/// 方法级 SQL 通知覆盖，不改变数据源连接获取规则。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MethodAlertsPatch {
+    /// 慢 SQL 通知规则。
     pub slow_sql: SqlAlertPatch,
+    /// 数据库执行错误通知规则。
     pub execution_error: SqlAlertPatch,
 }
 
+/// 按数据源覆盖全局观测策略，空子树不重置已继承的值。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DatasourcePatch {
+    /// 逐条 SQL 语句输出策略，参数输出受独立开关和预算限制。
     pub console: ConsolePatch,
+    /// 按数据库活跃时长判定慢 SQL 的策略。
     pub slow_sql: SlowPatch,
+    /// 数据库执行错误的日志策略。
     pub execution_error: ErrorPatch,
+    /// 连接获取等待的日志策略。
     pub acquire_wait: WaitPatch,
+    /// 事务槽等待的日志策略。
     pub transaction_slot_wait: WaitPatch,
+    /// SQL 事件与连接超时的异步通知策略。
     pub alerts: AlertsPatch,
 }
+/// 按完整方法身份覆盖慢 SQL、执行错误及其通知策略。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MethodPatch {
+    /// 按数据库活跃时长判定慢 SQL 的策略。
     pub slow_sql: SlowPatch,
+    /// 数据库执行错误的日志策略。
     pub execution_error: ErrorPatch,
+    /// SQL 事件与连接超时的异步通知策略。
     pub alerts: MethodAlertsPatch,
 }
 
@@ -183,17 +260,25 @@ pub struct MethodPatch {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EffectivePolicy {
+    /// 逐条 SQL 语句输出策略，参数输出受独立开关和预算限制。
     pub console: ConsolePolicy,
+    /// 按数据库活跃时长判定慢 SQL 的策略。
     pub slow_sql: SlowPolicy,
+    /// 数据库执行错误的日志策略。
     pub execution_error: ErrorPolicy,
+    /// 连接获取等待的日志策略。
     pub acquire_wait: WaitPolicy,
+    /// 事务槽等待的日志策略。
     pub transaction_slot_wait: WaitPolicy,
+    /// SQL 事件与连接超时的异步通知策略。
     pub alerts: Alerts,
 }
 
+/// 附加 SQL 指标开关；基础调用次数和时长始终采集。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsPolicy {
+    /// 是否记录准确行数，启动后随观测策略冻结。
     pub record_rows: bool,
 }
 impl Default for MetricsPolicy {
@@ -209,21 +294,33 @@ impl Default for MetricsPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SqlConfig {
+    /// 全局 SQL 观测策略及数据源、方法覆盖。
     pub observability: ObservabilitySettings,
 }
 
+/// SQL 观测配置，按全局、数据源、方法顺序逐叶合并后冻结。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ObservabilitySettings {
+    /// 逐条 SQL 语句输出策略，参数输出受独立开关和预算限制。
     pub console: ConsolePolicy,
+    /// 行数等附加指标的采集策略。
     pub metrics: MetricsPolicy,
+    /// 按数据库活跃时长判定慢 SQL 的策略。
     pub slow_sql: SlowPolicy,
+    /// 数据库执行错误的日志策略。
     pub execution_error: ErrorPolicy,
+    /// 连接获取等待的日志策略。
     pub acquire_wait: WaitPolicy,
+    /// 事务槽等待的日志策略。
     pub transaction_slot_wait: WaitPolicy,
+    /// SQL 事件与连接超时的异步通知策略。
     pub alerts: Alerts,
+    /// 异步通知队列与投递资源预算。
     pub dispatcher: DispatcherConfig,
+    /// 以数据源目录名称为键的策略覆盖。
     pub datasource_overrides: BTreeMap<String, DatasourcePatch>,
+    /// 以完整静态方法身份为键的策略覆盖，优先于数据源策略。
     pub method_overrides: BTreeMap<String, MethodPatch>,
 }
 

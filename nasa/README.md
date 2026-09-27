@@ -16,10 +16,12 @@
 本 crate 属于独立开源项目，与美国国家航空航天局不存在隶属、赞助、认可或官方项目关系；完整
 声明随包交付于 `NOTICE`。
 
-Application 标准纳管 Redis 派生任务、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
+Application 标准纳管 Redis Stream／Proxy／AutoPipeline、出站 TCP 帧客户端、hystrix 命令目录、Mapper 缓存、命名幂等与审计、REST、对象存储、Schema Registry、
 secret/TLS 与本地文件监听。业务提供配置与 handler，框架负责接流前装配、健康监督、配置应用状态
 和停机，无需另建资源关闭流程；各能力的 feature、入口、配置和失败边界见
 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
+hystrix 命令目录随 Application 实例重建，业务收尾后排干，旧命令永久拒绝执行。
 
 ## 核心价值与门面架构
 
@@ -480,7 +482,7 @@ Batch 在工作负载前完成装配，不要求启动 Web。feature 名称以�
 | `saga-redis-stream-pgsql` | `nasa::saga::pgsql`、`nasa::application` | PostgreSQL Saga 的同一 Redis Streams 传输合同 |
 | `saga-grpc` | `nasa::saga`、`nasa::grpc`、`nasa::application` | 已包含 `grpc` 类型门面；generated command/result service、mTLS principal 绑定与封闭收据，入站计划复用 `"grpc"` listener，纯出站不启动 listener |
 | `saga-grpc-pgsql` | `nasa::saga::pgsql`、`nasa::grpc`、`nasa::application` | PostgreSQL Saga generated service 与同一受管 gRPC listener |
-| `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流 |
+| `hystrix` | `nasa::hystrix` | 并发隔离、超时和 Dashboard 流；与 `application` 组合可纳管固定规则、命名目录与属性命令 |
 | `grafana` | `nasa::grafana` | 接口隔离、Prometheus 指标和面板 |
 | `telemetry` | `nasa::application` | 受管 span 队列、OTLP/HTTP 导出和停机 flush |
 | `web` | `nasa::web` | 路由宏与 interceptor；和 `application` 组合并声明 `"web"` 时提供受管 HTTP/1/h2c listener |
@@ -497,6 +499,7 @@ Batch 在工作负载前完成装配，不要求启动 Web。feature 名称以�
 | `scheduling-cluster` | `nasa::scheduling` | Redis leader gate 和集群调度 |
 | `partition` | `nasa::partition`；与 `application` 组合时含 `PartitionApplicationPlan`、`app.partition()`、`app.partition_runner(name)`；与 `scheduling` 组合时连带开启 `#[Async(runner = .., spec = ..)]` 分区执行域形态 | 直接 Registry 支持运行期动态 Runner 并由业务显式停机；Application 模式冻结启动期计划，提供命名隔离、严格 FIFO 保序任务窃取、逐域健康与统一停机 |
 | `ws` | `nasa::ws` | TCP/WebSocket 长连接 |
+| `ws-client` | `nasa::ws`；与 `application` 组合时含命名发送句柄 | 原生 TCP 帧 Client，按 `ws_clients` 管理首连、启动许可、重连健康和退出；不启动入站 listener |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
 | `yml` | `nasa::yml` | 分层 YAML、overlay、环境变量和占位符 |
@@ -696,3 +699,19 @@ server:
 - `full` 不应设为默认；生产服务应选择实际使用的能力，避免扩大编译与安全边界。
 - 宏会识别门面被 Cargo 重命名的情况；业务无需直接依赖宏实现 crate。
 - 具体失败语义、配置默认值和资源上限以各组件 README 为准。
+
+## Stream、出站帧客户端与隔离命令
+
+| 使用范围 | 门面 feature | Application 声明与配置 |
+| --- | --- | --- |
+| 普通 Stream / Proxy / AutoPipeline | `application,redis` | 声明 `"redis"`；`redis_streams`、`redis_proxies`、`redis_pipelines` |
+| 纯出站原生 TCP 帧 Client | `application,ws-client` | 无需组件字符串；`ws_clients` |
+| 隔离规则、显式命令与属性命令目录 | `application,hystrix` | 无需组件字符串；`hystrix.enabled: true` |
+
+Stream 与 Proxy 在 Service UserHook 登记 handler；它们的消费、AutoPipeline 与纯出站 Client
+的准入与宿主终端共用一次启动许可。Ready 前在本地状态保护内复验关键 owner、认证连接、健康
+证据和启动期限，保护持续到许可发布完成。公开 Ready 表示入口已获许可，仍可能遇到远端故障。
+AutoPipeline 与纯出站 Client
+也支持 Batch。`ws-client` 不启动 WebSocket listener，不支持 ws/wss URL。hystrix 保留独立使用方式，
+显式受管时只安装一个全局 owner，命令缓存随应用实例切换，业务收尾结束后才撤销。
+详细字段、容量和失败语义见 [napp 配置](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#redis-streamproxyautopipeline)。

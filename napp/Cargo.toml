@@ -3,7 +3,7 @@ name = "napp"
 version = "1.0.3"
 edition.workspace = true
 rust-version.workspace = true
-description = "Managed named resources and configuration snapshots with gated activation, ordered shutdown, datasource-bound Saga, SQL observability and business notifications"
+description = "Application runtime for named resources, shared startup activation, health supervision, ordered shutdown, configuration snapshots and datasource-bound Saga"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -81,6 +81,9 @@ mapper-cache = ["redis", "dep:namapper-core", "namapper-core/redis-cache", "dep:
 mapper-cache-pgsql = ["redis", "dep:namapper-core", "namapper-core/redis-cache"]
 # ws：长连接服务（TCP/WebSocket）；鉴权与 endpoint 事件表由业务经 configure_ws 注入。
 ws = ["dep:naws"]
+# 纯出站 TCP 帧协议客户端，不要求入站 listener。
+ws-client = ["dep:naws"]
+hystrix = ["dep:hystrix"]
 ws-redis = ["ws", "redis", "naws/redis"]
 ws-kafka = ["ws", "kafka", "naws/kafka"]
 # nacos-discovery：分段生命周期（出站 runtime / 本实例注册 / 关闭后台任务）由 rest-discovery-nacos 提供。
@@ -99,6 +102,7 @@ audit-mysql = ["db", "dep:naaudit", "dep:naaudit-mysql", "dep:naoutbox-mysql", "
 audit-pgsql = ["db-pgsql", "dep:naaudit", "dep:naaudit-pgsql", "dep:naoutbox-pgsql", "dep:async-trait"]
 
 [dependencies]
+hystrix = { version = "1.0.2", optional = true }
 nasecret-vault = { version = "1.0.1", optional = true }
 nasecret-http = { version = "1.0.1", optional = true }
 naobject = { version = "1.0.1", optional = true }
