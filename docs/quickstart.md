@@ -1,7 +1,90 @@
 # 快速开始
 
+[中文](quickstart.md) | [English](quickstart.en.md)
+
 业务应用只依赖 `nasa` 门面，并按实际运行能力启用 feature。服务型项目使用
 `#[nasa::application]` 统一拥有配置、组件生命周期、信号和停机顺序。
+
+## 最小可运行服务
+
+需要 Rust 1.94 或更新工具链。下面的服务仅依赖 crates.io，不需要数据库、Redis、Nacos 或相邻源码目录。
+
+```bash
+cargo new nasa-hello --bin
+cd nasa-hello
+mkdir -p zcf
+```
+
+将 `Cargo.toml` 替换为：
+
+```toml
+[package]
+name = "nasa-hello"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+
+[dependencies]
+anyhow = "1"
+nasa = { version = "2.0.0", default-features = false, features = ["application", "web"] }
+```
+
+将 `src/main.rs` 替换为：
+
+```rust
+/// 业务作用：提供问候端点，展示受管 HTTP 路由。
+/// 参数说明：无。
+/// 返回：固定问候文本。
+#[nasa::web::get_mapping("/hello")]
+async fn hello() -> &'static str {
+    "Hello from nasa"
+}
+
+/// 业务作用：完成服务启动登记，由 Application 继续管理监听与停机。
+/// 参数说明：_app 是当前应用的受管上下文。
+/// 返回：登记成功，不表示服务已完成接流准备。
+#[nasa::application("web")]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
+    Ok(())
+}
+```
+
+创建 `zcf/application.yml`：
+
+```yaml
+application:
+  name: nasa-hello
+  mode: service
+  startup_timeout_ms: 30000
+  shutdown_timeout_ms: 15000
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  health: true
+```
+
+从项目根目录启动：
+
+```bash
+cargo run
+```
+
+在另一个终端访问：
+
+```bash
+curl --fail http://127.0.0.1:8080/readyz
+curl --fail http://127.0.0.1:8080/hello
+```
+
+就绪后 `/readyz` 返回 HTTP 200，`/hello` 返回 `Hello from nasa`。`/healthz` 表达进程存活，
+`/readyz` 表达接流条件；端口已绑定不代表就绪。若设置 `server.context_path`，三个端点都带该前缀。
+按一次 Ctrl+C 触发正常停机；Application 负责停止接流和排空。保留生成的 `Cargo.lock`，后续构建
+使用 `cargo build --locked` 固定依赖图。本例仅监听本机明文 HTTP，未配置认证，部署时需另行配置可信入口。
+
+`#[nasa::application]` 生成进程入口，不要叠加 `#[tokio::main]`。配置文件相对进程工作目录解析，
+必须存在；默认 feature 为空，启用能力需要同时选择相应 feature 和生命周期组件。
+以下数据库、Saga 和 Mapper 示例说明扩展接线，需要补齐各自的业务类型、凭据与部署资源。
 
 ## 开始前的边界
 

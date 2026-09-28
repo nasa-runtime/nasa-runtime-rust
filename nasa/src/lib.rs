@@ -1,4 +1,11 @@
-//! nasa-runtime-rust 的统一业务门面。
+//! 面向 Rust 服务端应用的受管生命周期与可靠业务执行门面。
+//!
+//! `nasa-runtime-rust` 将配置校验、资源装配、业务初始化、接流许可和有序停机纳入同一生命周期，
+//! 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复业务。应用按 feature 选择能力；
+//! 持久事实、事务提交和租约权威仍由所选数据库与消息系统承载。
+//! [中文指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.md) 与
+//! [English guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.en.md)
+//! 提供快速开始、架构和接入说明。
 //!
 //! 命名 REST、幂等 store、事务审计、对象存储、Schema Registry、TLS HTTP、缓存与 Redis 派生任务
 //! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature

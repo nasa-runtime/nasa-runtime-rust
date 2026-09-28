@@ -1,7 +1,13 @@
 # nasa
 
-`nasa` 是 `nasa-runtime-rust` 的唯一业务门面。应用只依赖本 crate，通过 feature 选择能力，再从
+[中文](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md) | [English](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.en.md)
+
+`nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
+应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+从 [最小服务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/quickstart.md#最小可运行服务)
+开始，或阅读 [架构说明](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/architecture.md)
+与 [接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md)。
 启用 `application` 后，业务初始化与优雅停机收尾进入同一生命周期：Ready 前执行初始化屏障，
 受监督任务结束后按优先级执行一次性收尾，最后释放业务资源。
 `redis` 提供业务键有序分区消费：不同 Redis 源独立执行，同源支持 `source`、`group`、`stream`

@@ -1,13 +1,40 @@
 # 贡献指南
 
-`nasa-runtime-rust` 是多 crate 工作区。业务应用优先依赖 `nasa` 门面，再按需开启 feature。内部 crate
+[中文](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md)
+
+`nasa-runtime-rust` 为 Rust 服务端应用提供受管生命周期与可靠业务执行，是多 crate 工作区。
+业务应用优先依赖 `nasa` 门面，再按需开启 feature。内部 crate
 保留给实现、宏展开和渐进迁移，公开示例优先展示门面用法。
 
 本地容器可以复现协议与故障语义，但不能代表候选硬件容量。生产峰值、副本拓扑、ACL、在线 DDL 和
 灾难恢复结论由目标环境负责人批准。
 
+## 参与入口
+
+从 [快速开始](docs/quickstart.md#最小可运行服务) 运行完整服务，再通过 [架构说明](docs/architecture.md)
+确定所关注能力的所有权和失败边界。配置、文档、协议和使用反馈都可以参与贡献。
+
+- 通过 [Issues](https://github.com/nasa-runtime/nasa-runtime-rust/issues) 描述公开使用场景、预期行为、
+  实际行为及最小必要配置；保留配置键，移除凭据、租户数据和私有部署地址。
+- 影响公共 API、配置或持久语义的改动先说明设计与兼容性，再通过面向 `master` 的 Pull Request 提交。
+- Pull Request 说明触发条件、最终行为、调用方影响与适用边界，并将改动集中在相关组件。
+- 安全敏感内容使用 [安全策略](SECURITY.md) 的私密入口，不在公开讨论中披露利用细节。
+
+工作区需要 Rust 1.94 或更新工具链。选择目标组件及应用实际使用的 feature 进行构建：
+
+```bash
+cargo check --manifest-path nasa/Cargo.toml --no-default-features --features application,web
+cargo fmt --all -- --check
+```
+
+完整工作区包含原生依赖；Kafka 等能力可能需要 C/C++ 工具链、CMake、pkg-config 和对应平台开发库。
+具体依赖与 feature 以组件 manifest 和 README 为准。独立应用的接入与升级见
+[接入与升级](docs/migration.md)。
+
 ## 文档规则
 
+- 项目定位、快速开始、架构、接入与贡献入口同时维护中文与英文；两种语言使用相同的 API、配置键、
+  feature、依赖版本和失败边界。尚未翻译的详细参考在英文入口明确标注语言。
 - 每个组件 crate 都维护独立 `README.md`，说明用途、依赖或 feature 接入、初始化、yml、正常用法和
   主要边界。
 - 根 README 只承担门面使用指南和组件索引；组件细节写入对应 README。

@@ -1,5 +1,7 @@
 # 安全策略
 
+[中文](SECURITY.md) | [English](SECURITY.en.md)
+
 ## 支持范围
 
 安全维护覆盖当前受保护分支上的全部组件。报告中请明确启用的 feature、部署边界和可达网络面。

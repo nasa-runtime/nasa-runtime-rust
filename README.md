@@ -1,6 +1,20 @@
 # nasa-runtime-rust
 
-NASA Rust 共享库是一组按特性组合的基础设施包。
+[中文](README.md) | [English](README.en.md)
+
+**面向 Rust 服务端应用的受管生命周期与可靠业务执行框架。**
+
+`nasa-runtime-rust` 将配置校验、资源装配、业务初始化、接流许可和有序停机纳入同一应用生命周期，
+并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
+使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
+
+| 从哪里开始 | 中文 | English |
+| --- | --- | --- |
+| 运行第一个 HTTP 服务 | [快速开始](docs/quickstart.md#最小可运行服务) | [Quickstart](docs/quickstart.en.md) |
+| 理解资源、顺序和一致性边界 | [架构说明](docs/architecture.md) | [Architecture](docs/architecture.en.md) |
+| 调整现有应用的依赖与接线 | [接入与升级](docs/migration.md) | [Integration and upgrades](docs/migration.en.md) |
+| 参与组件维护 | [贡献指南](CONTRIBUTING.md) | [Contributing](CONTRIBUTING.en.md) |
+
 **业务唯一入口是门面包 `nasa`**：业务项目只依赖 `nasa`，再按需开启 Saga、映射、事务、缓存、Redis、RedisJob、跨副本业务配额、WebSocket、配置、服务发现等特性。
 其余成员用于实现和宏展开,默认不建议业务项目直接依赖。
 Application 同时提供 Ready 前的业务初始化屏障和业务资源关闭前的有序异步收尾；业务不需要另建信号处理
@@ -25,6 +39,10 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
 
 ## 核心价值与运行架构
+
+项目围绕三个相互配合的能力组织：统一的应用生命周期、可恢复的事务与业务流程、受容量和顺序约束的
+消息执行。适合需要组合数据库、消息系统与服务入口的 Rust 后端；只需要单项能力时也可显式装配组件。
+应用层资源管理建立在 Tokio 和所选基础设施之上。项目不提供新的异步执行器、数据库或消息 broker。
 
 `nasa` 把配置收敛、依赖校验、组件启动、Ready 发布和反向停机统一为一个受管生命周期，让业务只选择
 需要的能力，同时保留各基础设施组件的真实事务、租约和故障边界。核心价值是让配置错误、资源缺失和
@@ -983,6 +1001,8 @@ HTTP/1/h2c listener。
 | 文档 | 用途 |
 | --- | --- |
 | [快速开始](docs/quickstart.md) | 业务应用如何依赖 `nasa`、选择特性、配置 yml 和编写最小示例。 |
+| [架构说明](docs/architecture.md) | 生命周期、事务消息、有序执行及安全边界。 |
+| [接入与升级](docs/migration.md) | 线上依赖、资源所有权、配置与持久数据的接入约束。 |
 | [部署指南](docs/deployment.md) | 应用模式构建、配置注入、容器信号、健康端点和接流条件。 |
 | [运维指南](docs/operations.md) | 运行状态、退出码、停机顺序、配置刷新和故障排查。 |
 | [Saga 生产指南](docs/saga-production.md) | Saga 事务边界、消息合同、恢复治理与生产准入条件。 |
