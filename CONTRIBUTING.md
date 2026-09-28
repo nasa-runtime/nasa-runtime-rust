@@ -20,12 +20,18 @@
 - Pull Request 说明触发条件、最终行为、调用方影响与适用边界，并将改动集中在相关组件。
 - 安全敏感内容使用 [安全策略](SECURITY.md) 的私密入口，不在公开讨论中披露利用细节。
 
-工作区需要 Rust 1.94 或更新工具链。选择目标组件及应用实际使用的 feature 进行构建：
+工作区需要 Rust 1.94 或更新工具链。选择目标组件及应用实际使用的 feature 进行构建，下面以
+Application 组件与 Web 门面为例：
 
 ```bash
+cargo check --manifest-path napp/Cargo.toml --no-default-features --features web
 cargo check --manifest-path nasa/Cargo.toml --no-default-features --features application,web
 cargo fmt --all -- --check
 ```
+
+工作区内部依赖使用 crates.io 版本。检查 `nasa` 会构建本地门面，但它使用的 `napp` 等实现仍来自
+registry；该命令不能代替对本地实现组件的检查。修改实现时使用该组件的 manifest；涉及跨组件接口时，
+还应在显式选择本地实现的消费应用中核对接线，并通过依赖图确认来源，避免把已发布组件的行为当作本地改动。
 
 完整工作区包含原生依赖；Kafka 等能力可能需要 C/C++ 工具链、CMake、pkg-config 和对应平台开发库。
 具体依赖与 feature 以组件 manifest 和 README 为准。独立应用的接入与升级见

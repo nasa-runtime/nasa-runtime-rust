@@ -27,12 +27,20 @@ Contributions can cover configuration, documentation, protocols and application 
 - Use the private channel in [Security](SECURITY.en.md) for sensitive findings; do not disclose exploit
   details in public discussions.
 
-The workspace requires Rust 1.94 or newer. Build the component and features relevant to the application:
+The workspace requires Rust 1.94 or newer. Build the component and features relevant to the application.
+For example, check the Application component and Web facade separately:
 
 ```bash
+cargo check --manifest-path napp/Cargo.toml --no-default-features --features web
 cargo check --manifest-path nasa/Cargo.toml --no-default-features --features application,web
 cargo fmt --all -- --check
 ```
+
+Internal workspace dependencies use crates.io versions. Checking `nasa` builds the local facade, but
+its `napp` and other implementation dependencies still come from the registry. That command does not
+replace checking a modified local implementation through its own manifest. For cross-component API
+changes, also check integration in a consumer that explicitly selects the local implementation and
+confirm dependency sources in its graph; published behavior is not evidence about the local change.
 
 The full workspace includes native dependencies. Capabilities such as Kafka may require a C/C++
 toolchain, CMake, pkg-config and platform development libraries. Consult the component manifest and
