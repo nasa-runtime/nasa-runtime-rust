@@ -89,7 +89,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 全工作区发布门禁固定使用 manifest 声明的编译器，避免滚动 stable 的新弃用项改变既有 MSRV 合同。
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
