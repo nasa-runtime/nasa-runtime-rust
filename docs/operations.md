@@ -279,6 +279,12 @@ Digest 尾部字段保守一并隐藏，因此需要保留的诊断信息应使�
 提交才能表示本地已受理；Ready 200 与业务 202 都不证明远端已完成。远端不可用或收据丢失时保留原
 事件身份，结合下列指标及远端实例状态确认恢复，不手工标记 dispatched 或删除 intent。
 
+参与方 command 路由缺席但存在已提交 result 时，先区分 command readiness 与结果恢复资格。共享
+Catalog、冻结 definition 或结果 producer 信任任一无效都会返回可重投裁决；发送端不得 ACK、改写
+event ID 或计入永久隔离。仅 route/健康缺席且结果证据仍有效时，原事件应继续收敛，但应用整体仍可
+保持 NotReady。安全材料发布期间的在途请求可能因 generation 变化回滚，等待新代确认后使用同一事件
+重投；不要通过清理 Inbox、gate 或 Outbox 消除积压。
+
 先查看 `nasaga_manual_intervention`、`nasaga_waiting_resolution`、`nasaga_due_timer`、
 `nasaga_conflict_total`、`napp_outbox_pending`、`napp_outbox_dead`、`napp_outbox_published_total`、
 `napp_outbox_failed_rounds_total`、`napp_outbox_retention_commit_uncertain_total`、

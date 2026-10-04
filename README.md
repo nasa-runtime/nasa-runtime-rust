@@ -23,6 +23,8 @@ Redis 分区消费把持久接管与本地执行分开：不同 Redis 源始终�
 `source`、`group`、`stream` 划分调度与容量；业务键顺序覆盖 handler、ACK 和精确重试。
 可靠 Saga client 将业务事实与发起意图放在同一数据库事务，并让 dispatcher 固定扫描该事务域；
 远端不可用或收据丢失时保留原事件，显式数据源冲突在 Ready 前拒绝。
+Saga 已提交结果使用独立于 command 路由的恢复资格：参与方处于保护态或暂时没有 command route 时，
+协调端仍可依据受信 Catalog、冻结定义与结果身份接收原事件，同时持续阻止新 Start、timer claim 和 Ready。
 Mapper 同时提供默认采集的 SQL 指标，区分逻辑方法、真实数据库执行、连接等待和流消费；业务通过
 同一份 YAML 配置开发 SQL/参数输出、慢操作与错误通知及指标出口，通知故障不影响业务事务。
 慢 SQL 以原始耗时达到或超过配置阈值为准；业务安装 `Notify`、启用告警并关闭通知冷却后，每次命中
@@ -402,6 +404,18 @@ client start-intent Outbox ──→ Orchestrator DB ── command Outbox
                                             └─ result ← participant 本地事务
 ```
 
+### 已提交结果恢复
+
+command capability 决定新业务能否路由，result 资格只决定已经由参与方本地事务提交的原结果能否继续
+收敛。动态 Catalog 必须覆盖全部在途实例的冻结定义，结果 producer 信任仍须有效，目录中的租户、
+workflow、定义版本和摘要集合必须与已发布 registry 一致；缺少 command route 或健康探测失败不会单独
+阻断结果，但也不会开放新 Start、管理操作、timer claim 或 Application Ready。
+
+每个结果请求冻结证据期限、撤销身份、安全配置发布代际和合同摘要。HTTP 的异步认证以及
+HTTP/gRPC/Kafka/Redis Streams 共用的状态事务持续复验同一资格；等待连接池或实例行锁不能借后来续期
+延长原请求。安全材料经历 A→B→A 后，单调发布代际保证旧资格仍然无效。失权时整笔结果事务回滚，
+原事件保持可重投且不消耗普通隔离预算；COMMIT 已经发出后仍由数据库收据或提交结果不明语义裁决。
+
 每次本地事务明确提交后，只发送按 driver、datasource_ref 与 lane 限定的轻量唤醒；统一 dispatcher
 仍按数据库中的最早持久前缀、claim、退避和收据规则投递，周期扫描只承担漏信号、跨进程写入和崩溃
 恢复。HTTP/gRPC 只有 Committed 或 Duplicate 允许 Outbox 前移，Kafka 需要 broker ACK，Redis Streams
@@ -753,7 +767,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.1", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。

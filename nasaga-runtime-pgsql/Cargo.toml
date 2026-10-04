@@ -1,9 +1,9 @@
 [package]
 name = "nasaga-runtime-pgsql"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "PostgreSQL durable Saga orchestration with datasource-bound transactions, outbox recovery, and authenticated transports"
+description = "PostgreSQL durable Saga orchestration with fenced execution and continuously authorized result recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -19,7 +19,7 @@ naoutbox-pgsql = { version = "2.0.0" }
 nasaga-backend = { version = "2.0.0" }
 nasaga-core = { version = "2.0.0" }
 nasaga-pgsql = { version = "2.0.0" }
-nasaga-runtime-core = { version = "2.0.0" }
+nasaga-runtime-core = { version = "2.0.1" }
 natelemetry = { version = "2.0.0" }
 natx-pgsql = { version = "2.0.0" }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }

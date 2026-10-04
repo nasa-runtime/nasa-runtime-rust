@@ -5,6 +5,8 @@
 timer、补偿、恢复和 fencing 状态机。
 Application 受管可靠 client 同样把业务事实、start-intent 和 dispatcher 绑定到一个 PostgreSQL
 事务域，远端暂不可用时由已提交事件承担恢复，不把本地已受理等同于流程完成。
+受管 Orchestrator 使用独立 Catalog 资格恢复已提交 result；command route 缺席不会单独阻断原事件，
+也不会因此开放新 Start、timer claim 或 Ready。
 
 共享核心保留 `SagaPayload` 的原始字节、媒体类型与 schema；PostgreSQL Catalog 支持完整 definition
 生命周期。`deprecated → retired` 必须确认实例、迟到结果所依赖的事实、保留 Outbox 与审计均无引用，
@@ -29,6 +31,16 @@ Application 受管可靠 client 同样把业务事实、start-intent 和 dispatc
 
 每个分支只在自身 datasource 内原子提交；不同服务通过耐久事件和明确收据衔接，不共享数据库事务。
 `napp` 拥有配置、角色装配、Ready、后台循环和停机，本 crate 不自行启动 listener 或持续轮询任务。
+
+## 已提交结果恢复
+
+受管 HTTP、gRPC、Kafka 与 Redis Streams 入口冻结同一次 Catalog 证据期限、撤销身份、安全发布
+generation 与合同摘要。共享 Catalog、在途实例冻结 definition 和 producer 信任必须继续有效；只有
+command route 或健康证据缺席时，原 result 仍可进入 PostgreSQL 状态事务，Application 不恢复业务
+Ready。异步等待、实例行锁取得后和事务交还前继续复验，watcher 后续续期不能延长原请求。
+失权回滚 result Inbox、journal、实例迁移、timer 与后续 command Outbox，原事件保持可重投；安全材料
+A→B→A 不恢复旧资格。COMMIT 发出后仍按 PostgreSQL 明确收据或提交结果不明处理。独立宿主需要调用
+authorized 结果 API 才取得该动态权限边界。
 
 ## 初始化与受管角色
 

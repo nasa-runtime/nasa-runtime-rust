@@ -68,6 +68,9 @@
 //! 事务内追加成功，外层事务提交后才可表示本地已受理；远端收据不明时保留原事件，Ready 不代表流程完成。
 //! Application 只负责资源所有权和启停顺序；Saga 的 CAS、Inbox/Outbox 与补偿正确性仍由
 //! 当前数据库对应的 `nasaga-runtime` 或 `nasaga-runtime-pgsql` 持久合同承担。
+//! 已提交 result 使用独立 Catalog 资格：command route 缺席不会单独阻断原事件，也不会开放新
+//! Start、timer claim 或 Ready。请求冻结期限、撤销身份、安全发布代际与合同摘要；受管
+//! HTTP、gRPC、Kafka 和 Redis Streams 在状态事务中持续复验同一次资格，失权完整回滚并保留重投。
 //!
 //! 数据库 YAML 中的 migration 段只定义执行策略。Service UserHook 通过
 //! `Application::configure_migrations` 登记业务嵌入的 migrator，DB Prepare 在 initializer 和入站

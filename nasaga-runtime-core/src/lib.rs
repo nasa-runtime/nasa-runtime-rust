@@ -3,6 +3,11 @@
 //! Orchestrator、Participant、timer、补偿、恢复与 fencing 裁决只在本 crate
 //! 保留一份，MySQL 与 PostgreSQL wrapper 只注入 [`nasaga_backend::SagaBackend`]。
 //! 数据库事实由各 backend 读取；transport、配额与管理动作指标全进程只计一次。
+//!
+//! [`Orchestrator::handle_authenticated_result_authorized_traced`] 让宿主把冻结的结果资格带入状态事务。
+//! 同一次资格在异步恢复、实例锁后及事务交还前持续复验；失权回滚完整事务并以
+//! [`SagaResultProcessingError::AuthorityUnavailable`] 保留原事件重投。宿主必须用不可复用的安全
+//! 发布代际识别 A→B→A，不能只比较当前材料摘要。COMMIT 已发出后的结局仍按 backend 收据裁决。
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -182,6 +187,8 @@ pub const SAGA_COMMAND_DEAD_LETTER_REASONS: &[&str] = &[
 pub enum SagaResultProcessingError {
     /// 实例处于 `PAUSED`，恢复后必须继续处理同一结果。
     Paused,
+    /// 本次结果操作的运行资格已经撤销或到期，须保留原事件等待重新准入。
+    AuthorityUnavailable,
     /// transport 认证出的 producer 无权为目标步骤作证。
     ProducerUnauthorized,
     /// envelope 自报身份、派生身份或编码不合法。
@@ -195,10 +202,10 @@ impl SagaResultProcessingError {
     ///
     /// 参数说明: 无。
     ///
-    /// 返回：暂停态返回 `None`；确定性协议错误返回脱敏原因码。
+    /// 返回：暂停或失权返回 `None`；确定性协议错误返回脱敏原因码。
     pub const fn dead_letter_reason(self) -> Option<&'static str> {
         match self {
-            Self::Paused => None,
+            Self::Paused | Self::AuthorityUnavailable => None,
             Self::ProducerUnauthorized => Some("saga_result_producer_unauthorized"),
             Self::IdentityInvalid => Some("saga_result_identity_invalid"),
             Self::ContractInvalid => Some("saga_result_contract_invalid"),
@@ -215,6 +222,7 @@ impl std::fmt::Display for SagaResultProcessingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Paused => "saga result processing deferred while instance is paused",
+            Self::AuthorityUnavailable => "saga result processing authority is unavailable",
             Self::ProducerUnauthorized => "saga result producer is unauthorized",
             Self::IdentityInvalid => "saga result identity is invalid",
             Self::ContractInvalid => "saga result contract is invalid",
@@ -335,7 +343,7 @@ impl ResultDeliveryPolicy {
     ///
     /// 参数说明：`error` 是完整错误链，`retry_attempt` 是从一开始的普通失败序号。
     ///
-    /// 返回：暂停和事务不确定持续保留，普通失败超预算后隔离。
+    /// 返回：暂停、失权和事务不确定持续保留，普通失败超预算后隔离。
     pub fn decide(self, error: &anyhow::Error, retry_attempt: u32) -> ResultDeliveryDisposition {
         let disposition = classify_result_delivery_error(error);
         if disposition == ResultDeliveryDisposition::Retry && retry_attempt > self.max_retries {
@@ -350,7 +358,7 @@ impl ResultDeliveryPolicy {
 ///
 /// 参数说明：`error` 是 Orchestrator 结果处理返回的完整错误链。
 ///
-/// 返回：暂停与事务关键阶段延后，确定性协议错误隔离，其它失败有界重试。
+/// 返回：暂停、失权与事务关键阶段延后，确定性协议错误隔离，其它失败有界重试。
 pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDisposition {
     if error.chain().any(|cause| {
         cause
@@ -362,7 +370,10 @@ pub fn classify_result_delivery_error(error: &anyhow::Error) -> ResultDeliveryDi
     let classified = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<SagaResultProcessingError>().copied());
-    if classified == Some(SagaResultProcessingError::Paused) {
+    if matches!(
+        classified,
+        Some(SagaResultProcessingError::Paused | SagaResultProcessingError::AuthorityUnavailable)
+    ) {
         ResultDeliveryDisposition::Defer
     } else if classified.is_some_and(|error| error.dead_letter_reason().is_some()) {
         ResultDeliveryDisposition::DeadLetter

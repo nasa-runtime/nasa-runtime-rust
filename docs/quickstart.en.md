@@ -27,7 +27,7 @@ rust-version = "1.94"
 
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.0", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
 ```
 
 Replace `src/main.rs` with the following. Source comments retain Chinese to follow the repository's
@@ -110,13 +110,13 @@ startup order; changing their order in the attribute does not change dependency 
 For MySQL transactions and mapping, extend the facade dependency to:
 
 ```toml
-nasa = { version = "2.0.0", features = ["application", "web", "tx", "mapper"] }
+nasa = { version = "2.0.1", features = ["application", "web", "tx", "mapper"] }
 ```
 
 For PostgreSQL:
 
 ```toml
-nasa = { version = "2.0.0", features = ["application", "web", "tx-pgsql", "mapper-pgsql"] }
+nasa = { version = "2.0.1", features = ["application", "web", "tx-pgsql", "mapper-pgsql"] }
 ```
 
 Declare `"db"` alongside `"web"` in the application attribute. Add a named datasource to the YAML,

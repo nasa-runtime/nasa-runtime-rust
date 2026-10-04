@@ -1,4 +1,4 @@
-//! Catalog 快照的本地执行资格；动态目录必须持有尚未到期的确认租约。
+//! Catalog 合同的本地资格；命令执行与结果接收分别持有有界、可撤销的确认期限。
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -12,15 +12,23 @@ enum Authority {
 pub(super) struct CatalogAuthority {
     state: Mutex<(Authority, Arc<()>)>,
     security_source: OnceLock<Arc<dyn CatalogSecurityEpoch>>,
-    security_epoch: Mutex<Option<String>>,
+    security_epoch: Mutex<Option<CatalogSecurityStamp>>,
+}
+
+/// 同一原子安全快照的发布代际与有效合同摘要；相同材料重新发布仍属于不同资格。
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct CatalogSecurityStamp {
+    pub(super) generation: u64,
+    pub(super) contract_digest: String,
 }
 
 /// 业务作用：让业务执行资格在配置原子发布或凭据窗口到期时立即失效，无需等待 watcher 调度。
 pub(super) trait CatalogSecurityEpoch: Send + Sync {
     /// 业务作用：取得当前安全材料与有效信任集合的不可逆身份。
     /// 参数说明：无。
-    /// 返回：完整材料有效时返回稳定摘要；材料缺失时返回空值，不能授予执行权。
-    fn epoch(&self) -> Option<String>;
+    /// 返回：从同一原子快照取得的单调发布代际及有效合同摘要；材料缺失时返回空值，不能授予执行权。
+    /// 发布代际不得因材料恢复旧值而复用，不能分别读取代际与材料后拼接资格。
+    fn epoch(&self) -> Option<CatalogSecurityStamp>;
 }
 
 /// 一次业务操作冻结的资格；续租不能延长该操作，撤销后也不能借新快照恢复旧操作。
@@ -28,7 +36,7 @@ pub(super) struct CatalogPermit<'a> {
     authority: &'a CatalogAuthority,
     epoch: Arc<()>,
     deadline: Option<Instant>,
-    security_epoch: Option<String>,
+    security_epoch: Option<CatalogSecurityStamp>,
 }
 
 impl CatalogPermit<'_> {
@@ -46,7 +54,7 @@ impl CatalogPermit<'_> {
             && Arc::ptr_eq(&state.1, &self.epoch)
             && self
                 .authority
-                .security_matches(self.security_epoch.as_deref())
+                .security_matches(self.security_epoch.as_ref())
             && match state.0 {
                 Authority::Static => true,
                 Authority::Unconfirmed => false,
@@ -79,16 +87,20 @@ impl CatalogAuthority {
             (Authority::Unconfirmed, Arc::new(()));
     }
 
-    /// 业务作用：把已完成 Catalog 确认的安全材料身份与租约一起发布，拒绝等待期间发生的凭据切换。
-    /// 参数说明：`deadline` 是数据库确认期限，`epoch` 是开始该轮校验时固定的安全合同摘要。
+    /// 业务作用：把已验证的安全材料身份与有效期限一起发布，拒绝等待期间发生的凭据切换。
+    /// 参数说明：`deadline` 是数据库确认或只读合同证据的截止时刻，`epoch` 是该轮校验固定的安全发布代际与合同摘要。
     /// 返回：期限有效且安全合同仍为当前值时开放；否则保持关闭。
-    pub(super) fn confirm_with_security(&self, deadline: Instant, epoch: Option<String>) -> bool {
+    pub(super) fn confirm_with_security(
+        &self,
+        deadline: Instant,
+        epoch: Option<CatalogSecurityStamp>,
+    ) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // 确认事务之后的探测和收敛等待也消耗租期，不能短暂发布已失效的资格。
-        if deadline <= Instant::now() || !self.security_matches(epoch.as_deref()) {
+        // 读取、确认和探测等待均消耗有效期，不能短暂发布已经失效的资格。
+        if deadline <= Instant::now() || !self.security_matches(epoch.as_ref()) {
             *state = (Authority::Unconfirmed, Arc::new(()));
             return false;
         }
@@ -108,14 +120,14 @@ impl CatalogAuthority {
     }
 
     /// 业务作用：比较操作固定的安全身份与当前材料，配置发布和旧凭据到期都不能延长旧执行权。
-    /// 参数说明：`epoch` 是 Catalog 确认时使用的安全摘要。
+    /// 参数说明：`epoch` 是 Catalog 确认时冻结的发布代际与有效安全摘要。
     /// 返回：无动态来源的静态计划或精确命中的动态材料返回 true，其余拒绝。
-    fn security_matches(&self, epoch: Option<&str>) -> bool {
+    fn security_matches(&self, epoch: Option<&CatalogSecurityStamp>) -> bool {
         match self.security_source.get() {
             None => epoch.is_none(),
             Some(source) => source
                 .epoch()
-                .as_deref()
+                .as_ref()
                 .is_some_and(|current| Some(current) == epoch),
         }
     }
@@ -147,7 +159,7 @@ impl CatalogAuthority {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         // 同代凭据必须在每次发放权限时仍然成立，watcher 暂停不能保留旧材料的运行权。
-        if !self.security_matches(security_epoch.as_deref()) {
+        if !self.security_matches(security_epoch.as_ref()) {
             return None;
         }
         Some(CatalogPermit {

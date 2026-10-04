@@ -6,6 +6,8 @@ HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
 直接取消 Runner 时，仍存活的受监督任务保留其依赖资源，直至任务 future 析构；受管可靠 Saga client
 则把业务事务、发起意图和 dispatcher 绑定同一数据源，在开放流量前拒绝显式配置冲突。
+受管 Saga Orchestrator 为已提交 result 保留独立 Catalog 资格：缺少 command route 时仍可收敛原事件，
+但不会开放新 Start、timer claim 或 Ready；安全发布代际变化会撤销等待中的旧事务资格。
 受管 Mapper 自动登记 SQL、连接与 Pool 指标，并按 YAML 装配开发 SQL/参数输出、离散通知与指标
 出口。所有可调参数有 YAML 入口，非必要项递归补齐默认值，观测故障与 SQL/事务结果隔离。
 慢 SQL 达到配置阈值后可经业务主动安装的 `Notify` 发送；关闭通知冷却即可逐条提交，框架不选择
@@ -146,7 +148,7 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ## 最小入口
 
 ```toml
-nasa = { version = "2.0.0", features = [
+nasa = { version = "2.0.1", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -359,7 +361,7 @@ UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "tx-pgsql"] }
+nasa = { version = "2.0.1", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 
@@ -897,6 +899,27 @@ definition key 只有在 owner、canonical artifact、digest 与 seal 全部相�
 开放，参与方租约自然到期或编排端重启后仍可续租；该入口始终保留身份、租户、workflow、地址政策和
 协议认证中的 replay 检查。缺少 route 的 command 保留在 Outbox，Catalog 监督循环在全部 route 恢复前
 保持业务摘流；成功登记本身不会开放新 start/claim。
+
+### 已提交结果恢复资格
+
+结果接收使用独立的 Catalog 合同资格：协调者持续复验共享目录、在途实例的冻结定义和结果身份信任。
+只有目录中的租户、workflow、定义版本及摘要集合与本地已发布 registry 一致时，command capability
+缺席或健康探测失败才不阻断已提交 result 的重投。定义集合变化必须先完成完整 registry 发布，不能
+通过结果恢复提前启用新定义。只读证据期限从目录读取前起算，为监督间隔的四倍，并限制在 5 至 60 秒；
+读取失败、定义不兼容、凭据变化、证据到期或停机均关闭相应结果资格。该资格不更新 Ready，也不授予
+新 Start、管理操作或 timer claim 的权限。
+HTTP、gRPC、Kafka 和 Redis Streams 的结果仍经过协议认证、步骤 owner、固定事件身份、实例冻结合同、
+Inbox 和原有推进事务。成功结果可能按状态机写入后续 command Outbox，缺少目标路由时继续等待投递；
+HALTED 仍进入人工介入，接收事实不会把参与方异常业务证据变成可用状态。
+每次结果准入冻结原证据期限、撤销代际、安全快照发布代际和有效合同摘要，HTTP 的异步认证及四种协议共用的状态事务持续复验同一次资格。
+安全发布代际与材料从同一个原子配置视图取得；材料从 A 切换到 B 再恢复 A，也不能恢复旧请求资格。发布采用单调
+`SecretSnapshot.generation`，不依赖 watcher 是否观察到中间状态。当前边界覆盖整个已发布安全快照：无关配置成功
+发布也会使旧资格失效，须由 watcher 按新代确认；无变化或失败候选不发布，不改变资格。该本地发布代际不写入跨副本
+publisher 合同摘要、定义摘要或 capability，材料相同的副本仍可按相同业务合同确认。
+连接池、Inbox 竞争、行锁和推进等待不能借 watcher 续期延长请求；生命周期停止或原资格失效时，Inbox、journal、
+实例、transition、timer 与 command Outbox 一起回滚，返回可重投结论且不消耗消息隔离预算。
+提交前最后一次校验发生在将事务体交还事务层时；已经发出的 COMMIT 仍以数据库收据裁决，不能把确认延迟当作确定回滚。
+
 definition deprecated 只关闭新实例准入；已提交 Start 的同摘要重放仍返回 Duplicate，不同摘要返回
 Conflict，运行中与终态实例均适用。重复请求继续接受认证、租户权限和事务执行资格检查，可靠 client
 可在首次回执丢失后凭 Duplicate 结清原 start-intent，不产生重复首步命令。
@@ -1331,7 +1354,7 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "grpc"] }
+nasa = { version = "2.0.1", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"

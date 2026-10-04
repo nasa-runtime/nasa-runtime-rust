@@ -35,7 +35,9 @@ The framework addresses three related needs:
   drain them before releasing their dependencies.
 - **Recoverable business workflows.** Keep business writes and messaging intent in one local
   transaction. Use durable Saga state, Inbox deduplication, Outbox delivery, explicit compensation
-  and fenced ownership to handle retries, uncertain outcomes and process restarts.
+  and fenced ownership to handle retries, uncertain outcomes and process restarts. A committed Saga
+  result can keep converging under separately verified Catalog evidence when command routing is
+  unavailable, without reopening new starts, timer claims or readiness.
 - **Ordered, bounded execution.** Keep per-key processing order through handler execution,
   acknowledgement and retry while making queue, payload and concurrency limits explicit.
 
@@ -96,7 +98,7 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.0", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,
@@ -131,6 +133,10 @@ Detailed operational references are currently in Chinese:
 
 - Transactions are local to one database and datasource. Saga provides recoverable eventual
   consistency, not cross-service ACID, physical exactly-once execution or isolation between workflows.
+- Managed Saga result handling freezes the Catalog deadline, revocation identity, security publication
+  generation and contract digest for each request. HTTP, gRPC, Kafka and Redis Streams revalidate that
+  same authority while the transaction is pending. Losing authority rolls back the whole result
+  transaction and preserves the event for retry; a security A→B→A cycle never revives old authority.
 - Message delivery can repeat. Business handlers need stable identities and appropriate idempotency.
   An uncertain acknowledgement must not be treated as proof that an effect did not occur.
 - Initializer failure prevents readiness but cannot undo facts already committed to an external

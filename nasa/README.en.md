@@ -10,6 +10,11 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+Managed Saga orchestration separates recovery of an already committed result from command routing.
+A protected participant can retry the original result under verified Catalog evidence without
+reopening starts, timer claims or readiness; the request remains bound to its original security
+publication generation and deadline throughout the database transaction.
+
 Start with the complete [HTTP quickstart](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/quickstart.en.md),
 then read [Architecture](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/architecture.en.md)
 and [Integration and upgrades](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.en.md).
@@ -43,7 +48,7 @@ executor. Independent component assembly remains possible, with ownership transf
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.0", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |
@@ -71,6 +76,11 @@ is currently in Chinese.
   mismatches fail instead of selecting a different source. A transaction stays within one datasource.
 - Reliable Saga clients write business facts and start intent in one transaction, and dispatch from
   that same datasource. An event ID does not prove commit or remote completion.
+- Managed result recovery requires the shared Catalog, frozen definitions and producer trust to
+  remain valid. HTTP, gRPC, Kafka and Redis Streams freeze and continuously revalidate the request's
+  deadline, revocation identity, security publication generation and contract digest. Loss of
+  authority rolls back the whole result transaction and preserves the event for retry; A→B→A does
+  not revive old authority.
 - Redis ordered consumption separates durable takeover from local runners. Sources are independent;
   same-key order within a plan covers handler, ACK and retry. An uncertain ACK is reconciled without
   rerunning a successful handler. Delivery remains at least once.

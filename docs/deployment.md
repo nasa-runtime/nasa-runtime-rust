@@ -165,6 +165,11 @@ generated service 登记到 `"grpc"` 组件的唯一 listener，纯出站 client
 模式或独立宿主时，调用方才自行提交计划并拥有 transport、Ready 和停机。发布和消费两端必须成对
 具备确认、重领、认证与 durable DLT/收据语义。
 
+Orchestrator 的 result 恢复资格与 command route 分离。滚动升级或参与方进入保护态期间，只要共享
+Catalog、在途实例冻结定义和结果身份信任仍然有效，已经提交的原 result 可以继续收敛；该路径不会
+恢复新 command、Start、timer claim 或 Ready。配置材料发布会递增本机安全代际，等待中的旧请求即使
+在 A→B→A 后看到相同字节也必须回滚并以原事件重投。部署不能通过延长 watcher 续期掩盖旧请求失权。
+
 Saga 采用 expand-first，部署顺序固定为：
 
 1. 按 Saga 与 Outbox 迁移清单扩展每个本地事务域，保存 DDL、行数、索引与校验事实。

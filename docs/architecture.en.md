@@ -85,6 +85,14 @@ transaction. Definition digests and identities are revalidated before claiming d
 Uncertain external effects require resolution or operator intervention. An unknown database commit
 outcome must not be converted into an ordinary retry.
 
+Committed results use Catalog authority that is separate from command routing. The shared Catalog,
+frozen definitions for in-flight instances and producer trust must remain valid. A missing command
+route may permit only the original result to converge; it does not reopen starts, timer claims,
+management operations or readiness. Each request freezes its evidence deadline, revocation identity,
+security publication generation and contract digest. Authority is revalidated across asynchronous
+polls, after the instance lock and before transaction handoff; loss rolls back the whole transaction
+and preserves the event for retry. A security A→B→A cycle cannot revive old authority.
+
 Fencing capabilities constrain timer claims, renewal and completion; a former owner cannot continue
 with expired authority. A reliable client writes business facts and start intent in the transaction
 selected by `saga.client.datasource_ref`, and its dispatcher scans that same source. An explicit

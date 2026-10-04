@@ -1031,11 +1031,38 @@ where
         receipt_trace: Option<&TraceContext>,
         now_ms: i64,
     ) -> anyhow::Result<HandleOutcome> {
+        self.handle_authenticated_result_authorized_traced(
+            envelope,
+            producer,
+            receipt_trace,
+            now_ms,
+            &|| Ok(()),
+        )
+        .await
+    }
+
+    /// 业务作用：在宿主冻结的资格下接收已认证结果，数据库等待期间失权时回滚全部推进事实。
+    ///
+    /// 参数说明：`envelope` 是原结果，`producer` 是认证身份，`receipt_trace` 是可选受信链路，
+    /// `now_ms` 是裁决时刻，`authorize` 同步复验同一次操作的期限、撤销代际和安全合同。
+    ///
+    /// 返回：资格持续有效且事务提交后才返回应用或重复收据；失权回滚，COMMIT 已发出后的不确定性保持原分类。
+    /// 加入已有同源事务时，调用方仍须在外层最终提交前复验自己的执行资格。
+    pub async fn handle_authenticated_result_authorized_traced(
+        &self,
+        envelope: &SagaResultEnvelope,
+        producer: &ServiceIdentity,
+        receipt_trace: Option<&TraceContext>,
+        now_ms: i64,
+        authorize: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<HandleOutcome> {
+        // 失效操作不能先占用 Inbox 身份，也不能读取新 registry 后借新的确认资格继续。
+        authorize()?;
         // producer 权限必须在 Inbox claim 之前复验，防止越权消息抢占 event id。
         self.verify_result_producer(envelope, producer)?;
         let _latency =
             crate::latency::LatencyGuard::new(crate::latency::LatencyStage::TransitionTransaction);
-        self.handle_verified_result(envelope, receipt_trace, now_ms)
+        self.handle_verified_result(envelope, receipt_trace, now_ms, authorize)
             .await
     }
 
@@ -1268,6 +1295,7 @@ where
     /// 参数说明：
     /// - `envelope`: 已通过 transport 层 producer 认证的结果 envelope。
     /// - `now_ms`: 当前时刻（epoch 毫秒）。
+    /// - `authorize`: 本次结果操作固定的执行资格，等待与提交前必须保持有效。
     ///
     /// 返回：推进成功返回 [`HandleOutcome::Applied`]（COMMIT 已确认，调用方可 ACK）；
     /// 重复事件返回 `Duplicate`（可 ACK）；身份复验失败、合同不匹配、矛盾 outcome 或
@@ -1277,6 +1305,7 @@ where
         envelope: &SagaResultEnvelope,
         receipt_trace: Option<&TraceContext>,
         now_ms: i64,
+        authorize: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
     ) -> anyhow::Result<HandleOutcome> {
         // 身份复验在任何持久化动作之前:伪造 envelope 不允许占用去重身份。
         let identity = envelope.verified_for_delivery()?;
@@ -1288,7 +1317,7 @@ where
             .map_err(|_| crate::SagaResultProcessingError::ContractInvalid)?;
         let registry = self.registry_snapshot();
 
-        let outcome = crate::transaction::run_for(&self.backend, async {
+        let outcome = crate::transaction::run_authorized_for(&self.backend, authorize, async {
             if matches!(
                 self.backend
                     .inbox()
@@ -1306,6 +1335,8 @@ where
                 .ok_or(crate::SagaResultProcessingError::ContractInvalid)?;
             verify_instance_contract(&instance, &identity)
                 .map_err(|_| crate::SagaResultProcessingError::ContractInvalid)?;
+            // 实例读取或前序 Inbox 竞争可能已经等待；任何 journal 与后续状态写入前复验原资格。
+            authorize()?;
             if !instance.control_state.allows_automatic_actions() {
                 // PAUSED 的核心语义是不发出任何自动动作；结果也不能先被 Inbox 吞掉再悬空。
                 // 类型化延后使同事务 Inbox claim 回滚且不消耗毒消息预算；恢复后再裁决。

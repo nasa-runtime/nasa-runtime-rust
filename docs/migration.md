@@ -2,7 +2,7 @@
 
 [中文](migration.md) | [English](migration.en.md)
 
-本文说明现有 Rust 应用如何采用当前 `nasa 2.0.0` 的依赖与运行合同。步骤取决于应用使用的能力，
+本文说明现有 Rust 应用如何采用当前 `nasa 2.0.1` 的依赖与运行合同。步骤取决于应用使用的能力，
 不能仅凭版本号推断 API、数据库结构、消息协议或配置兼容。最小新应用见 [快速开始](quickstart.md)。
 
 ## 固定依赖来源与能力
@@ -11,10 +11,10 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.0"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
+`version = "2.0.1"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
 移除指向本地 NASA 源码的 `path` 与 `[patch.crates-io]` 覆盖，保留原本需要的 feature。
 直接使用 `sqlx::FromRow` 或 `sqlx::migrate!` 的业务仍需声明对应直接依赖；门面不替业务隐式提供外部 crate 名称。
 

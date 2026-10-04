@@ -4,6 +4,8 @@
 adapter、管理与恢复入口、运行指标以及可选 transport connector。业务通过 `nasa` 门面启用。
 在 Application 受管模式下，可靠 client 的业务事实与 start-intent 在同一 MySQL 事务提交，
 dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两个独立边界。
+受管 Orchestrator 使用独立 Catalog 资格恢复已提交 result；command route 缺席不会单独阻断原事件，
+也不会因此开放新 Start、timer claim 或 Ready。
 
 共享核心保留 `SagaPayload` 的原始字节、媒体类型与 schema；MySQL Catalog 支持完整 definition
 生命周期。`deprecated → retired` 必须确认实例、迟到结果所依赖的事实、保留 Outbox 与审计均无引用，
@@ -19,7 +21,7 @@ dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["saga-runtime"] }
+nasa = { version = "2.0.1", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
 # gRPC generated service/client 与封闭收据：features = ["saga-grpc"]
@@ -71,6 +73,16 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 capability 以认证 owner、replica、workflow/version/step、endpoint、effective Saga path 与租约持久化，
 route generation 在 capability 行锁内由数据库分配并随登记收据返回，不依赖参与方墙上时钟；租约到期
 不删除 definition。napp 的 watcher 先发布完整 route 快照，再切换运行时 registry。
+
+## 已提交结果恢复
+
+受管 HTTP、gRPC、Kafka 与 Redis Streams 入口为每个 result 冻结 Catalog 证据期限、撤销身份、安全
+发布 generation 与合同摘要。共享 Catalog、在途实例冻结 definition 和 producer 信任必须继续有效；
+只有 command route 或健康证据缺席时，原事件仍可进入状态事务，但 Application 保持相应保护状态。
+认证等待、连接池和实例行锁之后继续复验同一资格，watcher 后续续期不能延长原请求。失权回滚 Inbox、
+journal、实例迁移、timer 与后续 command Outbox，并返回可重投裁决；安全材料 A→B→A 不恢复旧资格。
+COMMIT 发出后的结果仍按数据库收据或提交结果不明处理。独立宿主使用 authorized API 才取得该动态
+权限边界，普通结果 API 只适用于权限在外部保持静态的装配。
 
 managed 模式下，本 crate 提供注册、查询和生命周期存储入口，`napp` 拥有 HTTP/gRPC/Kafka/Redis
 Streams 的认证、RBAC、publisher、consumer、listener、readiness 与停机。start 在单个 MySQL 事务内

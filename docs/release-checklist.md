@@ -26,10 +26,24 @@
 - [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。
-- [ ] 根项目、全部组件、内部依赖与公开接入示例统一使用 `2.0.0`；
+- [ ] 根项目与当前发布计划使用 `2.0.1`；发生变化的 Saga core、数据库 runtime、Application runtime
+      与门面使用 `2.0.1`，其余已发布组件保持 `2.0.0`。根文档、本次组件文档与快速开始使用当前门面版本，
+      未重发组件中的 `2.0.0` 仍作为 Cargo 兼容范围下限；
       `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致。
       新版本必须高于 crates.io 最高已发布稳定版本（包含已撤回版本）；首次公开的组件也遵守统一计划。
       同版本只允许未撤回且归档内容等价的续传，不能复用撤回版本。
+
+当前上传批次按 registry 依赖拓扑固定为：
+
+| 顺序 | workflow 批次 | crate |
+| --- | --- | --- |
+| 1 | `runtime-core` | `nasaga-runtime-core@2.0.1` |
+| 2 | `database-runtimes` | `nasaga-runtime@2.0.1`、`nasaga-runtime-pgsql@2.0.1` |
+| 3 | `application-runtime` | `napp@2.0.1` |
+| 4 | `facade` | `nasa@2.0.1` |
+
+后续批次不得与前置批次同时启动；必须先确认前置版本已经能被无本地 patch 的独立 Cargo 项目解析。
+
 - [ ] 每个批次发布并回读后，在干净工作树运行 `prepare-next-release-batch.sh <completed-batch>`；只删除
       已上线 crate 的根级 `[patch.crates-io]` 本地覆盖，审阅并提交 `Cargo.toml` 与 `Cargo.lock` 后才启动
       下一批。
@@ -107,6 +121,10 @@
 - [ ] 所有活跃流程定义来自同一受信、不可变快照；Ready 前完成摘要和 descriptor 对齐。
 - [ ] command、result 与 DLT topic 的 owner、路由、consumer group 和默认拒绝 ACL 已批准。
 - [ ] ACK 只发生在 COMMIT 明确成功或 Inbox 明确重复之后；提交结果不确定时保留原消息。
+- [ ] 已提交 result 的恢复资格与 command 路由资格分离；只读 Catalog、冻结定义和 producer 信任有效时，
+      路由缺席不阻断原事件收敛，但不得开放新 Start、timer claim、管理操作或 Ready。
+- [ ] result 请求冻结原期限、撤销身份、安全发布代际与合同摘要，并在异步恢复、实例锁后及事务交还前
+      持续复验；A→B→A 不恢复旧资格，失权完整回滚且不消耗普通隔离预算。
 - [ ] 确定性拒绝先持久化 DLT，再推进源 offset 或 Outbox；DLT 不可达时同分区不前移。
 - [ ] 同一 `outbox_event` 表内全部事件类型都有唯一 publisher 路由；毒丸策略、整表停摆半径、积压与失败
       轮次告警已经批准，无法共享发布合同的领域使用独立事务数据库和独立 Outbox。

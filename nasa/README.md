@@ -14,6 +14,8 @@
 隔离；ACK 不确定保留提交责任，跨域同业务键仍等待前序确认或重试收口。
 可靠 Saga client 把业务事实、start-intent 与 dispatcher 固定到同一事务域，配置冲突在接流前失败；
 直接取消 Runner 也不会先释放仍存活任务所依赖的资源。
+受管 Orchestrator 将已提交 result 的恢复资格与 command 路由分开，允许保护态参与方重投原事件，
+同时持续关闭新 Start、timer claim 和 Ready；在途事务始终受原安全发布代际与期限约束。
 与 `mapper`/`mapper-pgsql` 组合时，Application 自动装配 SQL 原子指标、受控日志、有界通知和指标
 出口，业务通过同一份 YAML 配置；参数默认不输出，通知故障不会改变 SQL 与事务结果。
 业务通过 `nasa::application::notifications::init(Arc<dyn Notify>)` 安装进程通知实现；没有实现就忽略，
@@ -124,7 +126,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = [
+nasa = { version = "2.0.1", features = [
     "application",
     "tx",
     "mapper",
@@ -225,6 +227,14 @@ Ready；未设置该字段时不影响 client 的数据源绑定。
 该能力不建立跨库事务，不把 Ready 当作流程完成证明；运行中应同时关注 `napp_outbox_pending`、
 `napp_outbox_published_total`、`napp_outbox_dead` 和远端实例查询。完整配置见
 [client 发起等级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#client-发起等级)。
+
+### 已提交 Saga result
+
+结果恢复只接受原参与方本地事务已经提交的事件，不能代替参与方证明业务事实。受管入口要求共享
+Catalog 覆盖在途实例的冻结 definition，并继续核对 producer 信任、事件身份、Inbox 和状态机合同。
+command route 暂缺时可以保持原结果收敛，但不会开放新业务入口。请求冻结截止时刻、撤销身份、安全
+发布 generation 与合同摘要；HTTP、gRPC、Kafka 和 Redis Streams 在实例锁等待及事务交还前持续复验。
+失权完整回滚且保留原事件重投，安全材料经历 A→B→A 也不会恢复旧资格。
 
 ## Redis 分区消费门面
 
@@ -410,7 +420,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "grpc"] }
+nasa = { version = "2.0.1", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"

@@ -1396,6 +1396,7 @@ struct ManagedDefinitionActivationContract {
     publisher_contract_digest: String,
     result_backend_digest: Option<String>,
     trusted_result_contracts: BTreeMap<String, BTreeSet<String>>,
+    security_generation: u64,
     security: Option<Arc<ManagedDefinitionActivationSecurity>>,
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     grpc_credential: Option<Arc<ManagedGrpcCredentialMaterial>>,
@@ -1416,8 +1417,8 @@ struct ManagedDefinitionActivationSecurity {
 impl catalog_authority::CatalogSecurityEpoch for ManagedDefinitionActivationContract {
     /// 业务作用：把当前 publisher 和结果验签集合绑定为 Catalog 操作可复验的安全身份。
     /// 参数说明：无。
-    /// 返回：当前完整合同的稳定摘要；材料不能准备时拒绝产生权威身份。
-    fn epoch(&self) -> Option<String> {
+    /// 返回：同一原子快照的发布代际与完整合同摘要；材料不能准备时拒绝产生权威身份。
+    fn epoch(&self) -> Option<catalog_authority::CatalogSecurityStamp> {
         let current = self.current().ok()?;
         let mut digest = Sha256::new();
         digest.update(current.publisher_contract_digest.as_bytes());
@@ -1425,13 +1426,14 @@ impl catalog_authority::CatalogSecurityEpoch for ManagedDefinitionActivationCont
             &mut digest,
             &serde_json::to_value(&current.trusted_result_contracts).ok()?,
         );
-        Some(
-            digest
+        Some(catalog_authority::CatalogSecurityStamp {
+            generation: current.security_generation,
+            contract_digest: digest
                 .finalize()
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect(),
-        )
+        })
     }
 }
 
@@ -1446,6 +1448,8 @@ impl ManagedDefinitionActivationContract {
         let snapshot = source.state.current();
         let mut current = self.clone();
         current.security = None;
+        // 发布代际与材料取自同一个 ConfigView 中的安全快照；材料往返变化也不能恢复旧操作资格。
+        current.security_generation = snapshot.secrets.generation();
         let mut digest = source.publisher_seed.clone();
         for reference in &source.publisher_refs {
             let material = snapshot
@@ -1609,11 +1613,18 @@ impl nasaga_runtime::SagaResultHandler for ManagedGrpcResultHandler {
         receipt_trace: Option<&nasaga_runtime::TraceContext>,
         now_ms: i64,
     ) -> anyhow::Result<nasaga_runtime::HandleOutcome> {
-        self.state.ensure_ready().map_err(anyhow::Error::new)?;
+        let permit = self.state.result_permit()?;
         self.state
             .managed_orchestrator()
             .ok_or_else(|| anyhow::anyhow!("managed Saga gRPC result role is unavailable"))?
-            .handle_result(envelope, producer, receipt_trace, now_ms)
+            .handle_result(
+                envelope,
+                producer,
+                receipt_trace,
+                now_ms,
+                &self.state,
+                &permit,
+            )
             .await
     }
 }
@@ -1683,11 +1694,18 @@ impl nasaga_runtime::SagaResultHandler for ManagedRedisResultHandler {
         receipt_trace: Option<&nasaga_runtime::TraceContext>,
         now_ms: i64,
     ) -> anyhow::Result<nasaga_runtime::HandleOutcome> {
-        self.state.ensure_ready().map_err(anyhow::Error::new)?;
+        let permit = self.state.result_permit()?;
         self.state
             .managed_orchestrator()
             .ok_or_else(|| anyhow::anyhow!("managed Saga Redis result role is unavailable"))?
-            .handle_result(envelope, producer, receipt_trace, now_ms)
+            .handle_result(
+                envelope,
+                producer,
+                receipt_trace,
+                now_ms,
+                &self.state,
+                &permit,
+            )
             .await
     }
 }
@@ -3209,12 +3227,10 @@ impl nafka::SingleConsumer for ManagedKafkaResultConsumer {
             // 探针只证明 participant 对独占 result topic 拥有 broker 写权限，不进入业务状态机。
             return record.ack();
         }
-        if self.state.ensure_ready().is_err() {
-            // Catalog generation 尚未成为本副本可服务状态时保留结果，避免旧 definition 推进新实例。
-            return Err(nafka::NafkaError::HandlerDeferred(
-                "saga_runtime_not_ready".into(),
-            ));
-        }
+        let permit = self.state.result_permit().map_err(|_| {
+            // 定义或身份信任尚未确认时保留结果，不消耗消息隔离预算。
+            nafka::NafkaError::HandlerDeferred("saga_runtime_not_ready".into())
+        })?;
         let encoded_owner = record
             .ctx
             .topic
@@ -3246,6 +3262,8 @@ impl nafka::SingleConsumer for ManagedKafkaResultConsumer {
                 &producer,
                 record.ctx.trace_context().as_ref(),
                 now_ms,
+                &self.state,
+                &permit,
             )
             .await;
         match result {
@@ -4185,6 +4203,8 @@ impl SagaOrchestratorApi {
     /// - `producer`: 凭据绑定的参与方身份。
     /// - `trace`: 可选收据链路上下文。
     /// - `now_ms`: 当前 Unix 毫秒。
+    /// - `state`: 提供生命周期门禁，停机后不得继续推进。
+    /// - `permit`: 入站时冻结的结果资格，等待期间续期不能延长该次操作。
     ///
     /// 返回：本地事务已提交时返回应用或重复结论；其它错误不得返回成功收据。
     async fn handle_result(
@@ -4193,18 +4213,31 @@ impl SagaOrchestratorApi {
         producer: &nasaga_runtime::ServiceIdentity,
         trace: Option<&nasaga_runtime::TraceContext>,
         now_ms: i64,
+        state: &SagaRuntimeState,
+        permit: &catalog_authority::CatalogPermit<'_>,
     ) -> anyhow::Result<nasaga_runtime::HandleOutcome> {
+        let authorize = || -> anyhow::Result<()> {
+            // 同一 permit 贯穿数据库等待和提交裁决；新快照不能复活已撤销或到期的旧请求。
+            if state.ensure_running().is_err() || !permit.is_valid() {
+                return Err(nasaga_runtime::SagaResultProcessingError::AuthorityUnavailable.into());
+            }
+            Ok(())
+        };
         match self {
             #[cfg(feature = "saga")]
             Self::MySql(runtime) => {
                 runtime
-                    .handle_authenticated_result_traced(envelope, producer, trace, now_ms)
+                    .handle_authenticated_result_authorized_traced(
+                        envelope, producer, trace, now_ms, &authorize,
+                    )
                     .await
             }
             #[cfg(feature = "saga-pgsql")]
             Self::PostgreSql(runtime) => {
                 runtime
-                    .handle_authenticated_result_traced(envelope, producer, trace, now_ms)
+                    .handle_authenticated_result_authorized_traced(
+                        envelope, producer, trace, now_ms, &authorize,
+                    )
                     .await
             }
         }
@@ -4673,6 +4706,7 @@ struct ManagedCatalogWatchPlan {
     interval_ms: u64,
     generation: u64,
     snapshot_digest: String,
+    result_registry: DefinitionRegistry,
     service_identity: nasaga_runtime::ServiceIdentity,
     replica_identity: String,
     runtime: SagaOrchestratorApi,
@@ -5810,6 +5844,7 @@ pub(crate) struct SagaRuntimeState {
     sealed: AtomicBool,
     lifecycle: AtomicU8,
     catalog_authority: catalog_authority::CatalogAuthority,
+    result_authority: catalog_authority::CatalogAuthority,
     security: OnceLock<Arc<security::SagaSecurityState>>,
     orchestrator: OnceLock<SagaOrchestratorApi>,
     participants: OnceLock<Arc<BTreeMap<String, ManagedParticipant>>>,
@@ -5833,6 +5868,7 @@ impl SagaRuntimeState {
             sealed: AtomicBool::new(false),
             lifecycle: AtomicU8::new(0),
             catalog_authority: catalog_authority::CatalogAuthority::new(),
+            result_authority: catalog_authority::CatalogAuthority::new(),
             security: OnceLock::new(),
             orchestrator: OnceLock::new(),
             participants: OnceLock::new(),
@@ -6023,6 +6059,21 @@ impl SagaRuntimeState {
         }
     }
 
+    /// 业务作用：为单次结果请求冻结定义与身份信任资格，避免等待期间借续期或重新确认恢复旧操作。
+    /// 参数说明：无。
+    /// 返回：运行中且结果合同有效时返回原期限与撤销代际；其它情况返回须保留原事件的延后分类。
+    fn result_permit(
+        &self,
+    ) -> Result<catalog_authority::CatalogPermit<'_>, nasaga_runtime::SagaResultProcessingError>
+    {
+        self.ensure_running()
+            .map_err(|_| nasaga_runtime::SagaResultProcessingError::AuthorityUnavailable)?;
+        // 结果资格独立于 command 路由，仍须由实际状态事务持续复验，不能只保留入口布尔值。
+        self.result_authority
+            .permit()
+            .ok_or(nasaga_runtime::SagaResultProcessingError::AuthorityUnavailable)
+    }
+
     /// 业务作用：在共享 Catalog 变化或确认失败时关闭本副本的新请求与推进资格。
     /// 参数说明：无。
     /// 返回：资格立即关闭，直到完整快照获得有效确认。
@@ -6037,6 +6088,7 @@ impl SagaRuntimeState {
     /// 返回：无；Release 发布保证后续能力读取观察到停机态。
     fn stop(&self) {
         self.lifecycle.store(2, Ordering::Release);
+        self.result_authority.revoke();
     }
 }
 
@@ -8616,9 +8668,10 @@ async fn managed_http_result(
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
     let state = application.saga_runtime();
-    if state.ensure_ready().is_err() {
-        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
+    let permit = match state.result_permit() {
+        Ok(permit) => permit,
+        Err(_) => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
     let Some(server) = state.http_server() else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
@@ -8634,8 +8687,8 @@ async fn managed_http_result(
         Ok(producer) => producer,
         Err(status) => return status.into_response(),
     };
-    // 共享 replay claim 可能等待数据库；认证完成后复验当前资格，旧入口检查不能跨越等待生效。
-    if state.ensure_ready().is_err() {
+    // 共享 replay claim 可能等待数据库；认证后复验同一次资格，不能借等待期间的新确认重新准入。
+    if state.ensure_running().is_err() || !permit.is_valid() {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let envelope: nasaga_runtime::SagaResultEnvelope = match serde_json::from_slice(&body) {
@@ -8662,6 +8715,8 @@ async fn managed_http_result(
             &producer,
             managed_http_trace(&headers).as_ref(),
             now_ms,
+            &state,
+            &permit,
         )
         .await
     {
@@ -10476,6 +10531,7 @@ fn managed_definition_activation_contract(
         redis_key_tag: managed_activation_redis_key_tag(settings, transport),
         address_policy,
         publisher_contract_digest: String::new(),
+        security_generation: 0,
         security: Some(security),
         result_backend_digest,
         trusted_result_contracts,
@@ -10487,6 +10543,7 @@ fn managed_definition_activation_contract(
     let current = contract.current()?;
     contract.publisher_contract_digest = current.publisher_contract_digest;
     contract.trusted_result_contracts = current.trusted_result_contracts;
+    contract.security_generation = current.security_generation;
     Ok(contract)
 }
 
@@ -11220,6 +11277,7 @@ async fn build_managed_orchestrator_plan(
             interval_ms: settings.definition_catalog.watch_interval_ms.unwrap_or(500),
             generation: catalog_snapshot.generation,
             snapshot_digest: catalog_snapshot.snapshot_digest,
+            result_registry: catalog_snapshot.registry.clone(),
             service_identity: definition_publisher.clone(),
             replica_identity: settings.replica_identity.clone().ok_or_else(|| {
                 saga_error(
@@ -13188,6 +13246,7 @@ impl ApplicationComponent for SagaComponent {
             }));
             if catalog_watch.is_some() {
                 state.revoke_catalog_authority();
+                state.result_authority.revoke();
             }
             let orchestrator = state.publish(plan)?;
             #[cfg(feature = "web")]
@@ -14466,8 +14525,8 @@ async fn post_managed_capability(
 
 /// 业务作用：持续装载共享 Catalog，并按“先 route、后 registry”的顺序发布完整 generation。
 ///
-/// 新 definition 在 route 可用前不会进入 start 快照；deprecated definition 仍保留在 registry，
-/// 因而旧实例的 timer、结果与补偿不会因新 generation 中断。
+/// 新 definition 在 route 可用前不会进入 start 快照；deprecated definition 仍保留在 registry。
+/// 结果接收可独立复验已发布定义，但不能替代 command 路由与副本确认对执行资格的约束。
 ///
 /// 参数说明：`application` 提供停机状态，`watch` 是冻结控制面计划，`contributor` 控制摘流。
 ///
@@ -14482,6 +14541,10 @@ async fn run_catalog_watch_loop(
         .saga_runtime()
         .catalog_authority
         .bind_security(Arc::new(activation_source.clone()))
+        || !application
+            .saga_runtime()
+            .result_authority
+            .bind_security(Arc::new(activation_source.clone()))
     {
         return Err(saga_error(
             ApplicationPhase::Running,
@@ -14493,6 +14556,7 @@ async fn run_catalog_watch_loop(
             ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
                 // 退役写入可能等待数据库，先撤销本地资格，停机不能继续依赖尚未完成的外部动作。
                 application.saga_runtime().revoke_catalog_authority();
+                application.saga_runtime().result_authority.revoke();
                 contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
                 retire_managed_catalog_replica(&watch).await;
                 return Ok(());
@@ -14504,11 +14568,14 @@ async fn run_catalog_watch_loop(
             ApplicationState::Ready => {}
         }
         let next_activation = activation_source.current()?;
-        if next_activation.publisher_contract_digest != watch.activation.publisher_contract_digest
+        if next_activation.security_generation != watch.activation.security_generation
+            || next_activation.publisher_contract_digest
+                != watch.activation.publisher_contract_digest
             || next_activation.trusted_result_contracts != watch.activation.trusted_result_contracts
         {
-            // 凭据发布已改变运行合同，旧 Catalog 确认不能授权新材料，必须先摘流再取得同代确认。
+            // 新发布代际即使恢复相同材料也不能沿用旧确认；先摘流，再根据本代快照重新确认。
             application.saga_runtime().revoke_catalog_authority();
+            application.saga_runtime().result_authority.revoke();
             contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());
         }
         watch.activation = next_activation;
@@ -14516,6 +14583,9 @@ async fn run_catalog_watch_loop(
         // candidate 在参与方能力尚未齐全时不能激活，但能力注册本身会推进 Catalog generation。
         // 即使本轮激活被拒绝，也必须继续装载并确认新代，否则副本租约会停在旧代，后续永远
         // 无法证明能力所在 generation 已被全部 Ready 副本接受。
+        let result_deadline = Instant::now()
+            + Duration::from_millis(watch.interval_ms.saturating_mul(4).clamp(5_000, 60_000));
+        let mut result_evidence_valid = false;
         let loaded = load_managed_dynamic_catalog(
             watch.driver,
             &watch.datasource,
@@ -14558,6 +14628,42 @@ async fn run_catalog_watch_loop(
                         &snapshot.registry,
                         ApplicationPhase::Running,
                     )?;
+                    // 仅 capability 变化不能阻断已提交结果。定义集合必须与已发布 registry 完全一致，
+                    // 不能借结果恢复提前发布尚未经过 route 与副本确认的新 definition。
+                    result_evidence_valid = watch
+                        .result_registry
+                        .definitions_with_tenants()
+                        .map(|(tenant, definition)| {
+                            (
+                                tenant,
+                                definition.name(),
+                                definition.version(),
+                                definition.digest(),
+                            )
+                        })
+                        .eq(snapshot.registry.definitions_with_tenants().map(
+                            |(tenant, definition)| {
+                                (
+                                    tenant,
+                                    definition.name(),
+                                    definition.version(),
+                                    definition.digest(),
+                                )
+                            },
+                        ));
+                    if result_evidence_valid {
+                        // 期限从本轮读取前起算，数据库等待不会延长旧证据；凭据变化仍在每次入口即时复验。
+                        application
+                            .saga_runtime()
+                            .result_authority
+                            .confirm_with_security(
+                                result_deadline,
+                                catalog_authority::CatalogSecurityEpoch::epoch(&watch.activation),
+                            );
+                    } else {
+                        // 定义有增减或摘要变化时，旧结果资格不能沿用；等待完整 registry 安全发布后再开放。
+                        application.saga_runtime().result_authority.revoke();
+                    }
                     #[cfg(feature = "web")]
                     if let Some(routing) = watch.http_routing.as_ref() {
                         let authenticator = watch.http_authenticator.as_ref().ok_or_else(|| {
@@ -14699,8 +14805,10 @@ async fn run_catalog_watch_loop(
                     if activate_managed_validated_candidate(&watch, &snapshot).await? {
                         // 激活会原子推进 Catalog generation，旧快照不得再发布为权威运行态。
                         application.saga_runtime().revoke_catalog_authority();
+                        application.saga_runtime().result_authority.revoke();
                         return Ok(None);
                     }
+                    watch.result_registry = snapshot.registry.clone();
                     watch.runtime.replace_registry(snapshot.registry);
                     watch.generation = snapshot.generation;
                     watch.snapshot_digest = snapshot.snapshot_digest;
@@ -14713,6 +14821,14 @@ async fn run_catalog_watch_loop(
         };
         match (publication, applied) {
             (Ok(()), Ok(Some(deadline))) => {
+                // 完整 registry 已发布后才允许新增定义接收结果，结果资格不延长读取前固定的期限。
+                application
+                    .saga_runtime()
+                    .result_authority
+                    .confirm_with_security(
+                        result_deadline,
+                        catalog_authority::CatalogSecurityEpoch::epoch(&watch.activation),
+                    );
                 // registry 已经发布；只有完整确认仍在租期内才同时开放业务门禁和探针。
                 if application
                     .saga_runtime()
@@ -14741,6 +14857,10 @@ async fn run_catalog_watch_loop(
                 tracing::warn!(error = %error, "Saga Catalog 本地定义发布未完成");
             }
             (_, Err(error)) => {
+                if !result_evidence_valid {
+                    // Catalog 读取、在途合同或结果身份验证失败时没有独立证据，必须同时关闭结果入口。
+                    application.saga_runtime().result_authority.revoke();
+                }
                 // 无法确认新快照时立即关闭资格，保留旧数据只用于下一轮完整复验。
                 application.saga_runtime().revoke_catalog_authority();
                 contributor.observe(DependencyState::NotReady, reason::NOT_READY, Instant::now());

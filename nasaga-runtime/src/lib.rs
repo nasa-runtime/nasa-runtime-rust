@@ -13,6 +13,11 @@
 //! result Outbox。两端通过至少一次 transport 连接，`effect_id` 跨重投稳定，重复由 Inbox 和
 //! 目标业务幂等键吸收。进程崩溃后由数据库事实恢复，不依赖内存队列续跑。
 //!
+//! 受管结果入口把独立 Catalog 资格传入共享状态机。command route 缺席时，已经提交的原 result
+//! 仍可在共享 Catalog、冻结 definition 与 producer 信任有效的前提下收敛，但新 Start、timer claim
+//! 和 Ready 保持关闭。请求冻结期限、撤销身份、安全发布代际与合同摘要；等待实例锁后失权会回滚
+//! 整笔事务并保留原事件重投，A→B→A 不恢复旧资格。
+//!
 //! Kafka 与 Redis Streams feature 提供完整消费裁决；HTTP 入口提供认证/重放构件；gRPC feature
 //! 提供框架 generated command/result client/server、mTLS leaf principal 绑定与封闭收据。Application
 //! 入站计划把 service 自动登记进唯一 `nagrpc` registry；独立宿主仍显式拥有 listener、deadline 与

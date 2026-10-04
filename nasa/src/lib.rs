@@ -58,6 +58,10 @@
 //! dispatcher 固定扫描同一数据源。显式 `outbox.datasource_ref` 与之冲突时在 Ready 前拒绝；
 //! 省略该字段或只配置轮询预算不改变绑定。`enqueue_start` 返回事件身份不等于外层事务已提交，
 //! 本地已受理也不等于远端流程完成；收据不明时保留原事件继续投递。
+//! 已提交 result 的恢复资格与 command 路由分离：共享 Catalog、在途实例冻结定义和 producer
+//! 信任有效时，保护态参与方仍可重投原事件，但新 Start、timer claim 与 Ready 保持关闭。
+//! 每个请求冻结期限、撤销身份、安全发布代际和合同摘要，并在状态事务中持续复验；失权完整回滚，
+//! A→B→A 不恢复旧资格。COMMIT 已发出后的结局仍由数据库收据或提交结果不明语义裁决。
 //!
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功

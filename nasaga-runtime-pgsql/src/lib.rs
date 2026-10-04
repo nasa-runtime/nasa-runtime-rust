@@ -12,6 +12,11 @@
 //! 受管可靠 client 的业务事实、start-intent 与 dispatcher 固定使用 `saga.client.datasource_ref`；
 //! 显式 `outbox.datasource_ref` 冲突时在 Ready 前拒绝，省略该字段不改变扫描目标。事务内追加返回的
 //! 事件身份不是外层提交证明；本地已受理后，远端不可用或收据丢失仍保留原事件重投，不宣称流程已完成。
+//!
+//! 受管结果入口把独立 Catalog 资格传入共享状态机。command route 缺席时，已经提交的原 result
+//! 仍可在共享 Catalog、冻结 definition 与 producer 信任有效的前提下收敛，但新 Start、timer claim
+//! 和 Ready 保持关闭。请求冻结期限、撤销身份、安全发布代际与合同摘要；等待实例锁后失权会回滚
+//! 整笔 PostgreSQL 事务并保留原事件重投，A→B→A 不恢复旧资格。
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

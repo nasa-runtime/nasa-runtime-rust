@@ -51,7 +51,7 @@ trap cleanup EXIT
 
 response_file="$query_root/response.json"
 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-  --user-agent "nasa-runtime-release/2.0.0" "https://crates.io/api/v1/crates/${crate_name}")"
+  --user-agent "nasa-runtime-release/2.0.1" "https://crates.io/api/v1/crates/${crate_name}")"
 case "$http_code" in
   200)
     # 已撤回的稳定版本仍占用版本号，必须参与最高版本计算；不能仅依赖排除撤回版本的摘要字段。

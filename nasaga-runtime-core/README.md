@@ -3,6 +3,8 @@
 `nasaga-runtime-core` 是 MySQL 与 PostgreSQL Saga 包装共同使用的唯一运行状态机。Orchestrator、
 Participant、definition registry、durable timer、恢复、补偿、管理动作、认证 envelope 与投递裁决都在
 本 crate 实现；数据库包装只提供 `SagaBackend`，不会复制一份按后端分叉的流程逻辑。
+结果恢复 API 支持宿主冻结并持续复验同一次动态资格，使已经提交的参与方事件在 command 路由缺席时
+仍能收敛，同时保持新业务入口关闭。
 
 ## 运行不变量
 
@@ -22,6 +24,15 @@ Participant、definition registry、durable timer、恢复、补偿、管理动�
 撤销与生命周期约束封装在检查中。若加入调用方已有事务，最终提交仍由外层事务负责，外层必须保留自己的
 提交门禁。COMMIT 发出后的成功或结果不明继续按数据库事务语义返回，不因资格随后到期而改称确定回滚。
 不需要额外资格约束的独立宿主可以继续使用 `start_saga` 或 `start_saga_traced`。
+
+## 结果恢复事务资格
+
+`Orchestrator::handle_authenticated_result_authorized_traced` 为结果接收提供相同的事务资格边界。宿主先冻结本次结果
+资格，包含不可逆安全发布代际与合同摘要，再通过 `authorize` 复验原期限、撤销代际、安全材料和生命周期。
+仅比较当前材料内容无法识别 A→B→A，不能作为权限复验依据。认证和 Inbox claim 之前、事务每次恢复执行时、
+实例读取之后及交还提交裁决前均检查。失权回滚整笔结果事务；`SagaResultProcessingError::AuthorityUnavailable` 属于
+持续保留原事件的 Defer，不进入有界隔离预算。已有结果 API 继续适用于不依赖外部动态执行资格的宿主，业务事实能否
+支持成功、拒绝或屏障仍由参与方在提交与发送前证明，协调端不能替代跨数据库的业务证据核验。
 
 ## Definition Catalog 合同
 

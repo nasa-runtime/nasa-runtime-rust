@@ -167,6 +167,25 @@ Registry 的参数、权限、不存在、业务前置条件与摘要/操作身�
 数据库断连、超时和事务结果不明统一返回 HTTP 503 或 gRPC `UNAVAILABLE`。发布器和 capability 续租器
 只能对后一类失败保留原请求重试，不能把暂时性存储故障记成不可重试的 definition 冲突。
 
+## 已提交结果恢复与事务资格
+
+command capability 用于新业务路由；结果恢复资格只允许协调端接收参与方已经在本地事务中提交的原
+result。共享 Catalog 必须成功读取并覆盖全部非终态实例的冻结 definition，结果身份信任必须覆盖
+registry 中的全部步骤 owner，目录中的租户、workflow、定义版本与 digest 集合必须和本机已发布
+registry 一致。满足这些条件时，command route 缺席或健康探测失败不阻断原结果；该资格不开放新
+Start、query、管理操作、timer claim 或 Ready，也不把 HALTED 改写为成功。
+
+只读证据的期限从 Catalog 读取前开始消耗。每次准入冻结原截止时刻、显式撤销身份、安全快照发布代际
+与合同摘要；HTTP 在异步验签后复验，四种受管 transport 在结果事务的每次异步恢复、实例锁取得后及
+事务体交还提交层前复验同一资格。watcher 后续确认只能服务新请求，不能延长原请求或恢复已撤销资格。
+安全配置从 A 发布到 B 再发布相同字节的 A 时，单调 generation 已经变化，旧资格仍然失效。
+
+失权使用普通数据库回滚边界，不能留下 Inbox、attempt、transition、timer、实例状态或后续 command
+Outbox 的部分事实。`AuthorityUnavailable` 是可重投裁决，不消耗普通失败隔离预算，也不进入永久 DLT。
+最后一次复验发生在事务体交还提交层时；COMMIT 已经发出后仍以数据库明确收据或提交结果不明处理，
+不能把响应时刻的资格变化解释为确定回滚。独立宿主若调用不带 authorized 后缀的结果 API，必须自行
+承担动态权限边界；受管 Application 的 HTTP、gRPC、Kafka 与 Redis Streams 全部使用 authorized 路径。
+
 ## HTTP 路由与安全
 
 全部 Saga HTTP 路由复用 Application Web listener。saga.http.base_path 是 context 内唯一子路径，默认

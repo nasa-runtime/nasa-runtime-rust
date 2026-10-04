@@ -73,6 +73,11 @@ Saga Orchestrator 在同一事务中提交 Inbox、实例 CAS、journal、timer 
 在另一同源事务中提交 Inbox、gate、业务事实与 result Outbox。定义摘要和身份在占用去重键前复验。
 无法确认的外部效果进入 resolve 或人工介入，数据库提交不明不能直接改为普通重试。
 
+已提交 result 使用独立于 command 路由的 Catalog 资格。共享目录、在途实例冻结定义和 producer 信任
+仍须完整，缺少 command route 时只允许原结果收敛，不开放新 Start、timer claim、管理操作或 Ready。
+请求冻结证据期限、撤销身份、安全发布代际与合同摘要，并在异步恢复、实例锁后和事务交还前持续复验；
+失权完整回滚，原事件保持可重投。安全材料即使经历 A→B→A，旧资格也不会恢复。
+
 timer 领取、续租和完成由 fencing capability 约束，旧 owner 不能沿用失效权威推进。
 可靠 client 的业务写与 start-intent 使用 `saga.client.datasource_ref` 对应事务，dispatcher 固定扫描
 同一来源；显式 Outbox 来源冲突在接流前拒绝。事务内取得事件 ID 不证明外层提交，更不证明远端流程完成。
