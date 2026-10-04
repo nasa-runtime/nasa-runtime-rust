@@ -89,7 +89,6 @@ keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
-nasaga-runtime-core = { path = "nasaga-runtime-core" }
 nasaga-runtime = { path = "nasaga-runtime" }
 nasaga-runtime-pgsql = { path = "nasaga-runtime-pgsql" }
 napp = { path = "napp" }
