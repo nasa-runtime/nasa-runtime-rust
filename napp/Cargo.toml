@@ -114,7 +114,7 @@ base64 = { version = "0.22", optional = true }
 axum = { version = "0.8", optional = true }
 hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["service", "tokio"], optional = true }
-config-boot = { path = "../config-boot", version = "2.0.1", optional = true }
+config-boot = { version = "2.0.1", optional = true }
 futures = { version = "0.3", optional = true }
 futures-util = "0.3"
 http-body = { version = "1", optional = true }

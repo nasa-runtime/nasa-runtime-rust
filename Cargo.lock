@@ -657,9 +657,7 @@ dependencies = [
 
 [[package]]
 name = "config-boot"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9b03c3a1ea29be9deefde79882429977d4973bab3a21717505d7bc1a8ced80e"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -673,6 +671,8 @@ dependencies = [
 [[package]]
 name = "config-boot"
 version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21b797d40f44dbeb629003393acf7ec6fd9230fa972debbdcf5bcd16632f4bcd"
 dependencies = [
  "anyhow",
  "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2496,7 +2496,7 @@ version = "2.0.0"
 dependencies = [
  "axum",
  "chrono",
- "config-boot 2.0.0",
+ "config-boot 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "dashmap",
  "linkme",
  "matchit",
@@ -2527,7 +2527,7 @@ checksum = "f8e8de148b786060a104ee424f7e2c3c4d11663c5716c06d7927d95390f2cae4"
 dependencies = [
  "axum",
  "chrono",
- "config-boot 2.0.0",
+ "config-boot 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "dashmap",
  "linkme",
  "matchit",
@@ -3407,7 +3407,7 @@ dependencies = [
  "axum",
  "base64",
  "cacheable 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "config-boot 2.0.1",
+ "config-boot 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "futures-util",
  "hex",
@@ -3514,7 +3514,7 @@ version = "2.0.2"
 dependencies = [
  "async-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "cacheable 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "config-boot 2.0.1",
+ "config-boot 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "hystrix 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hystrix-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naaudit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
