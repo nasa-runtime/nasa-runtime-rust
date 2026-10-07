@@ -662,7 +662,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9b03c3a1ea29be9deefde79882429977d4973bab3a21717505d7bc1a8ced80e"
 dependencies = [
  "anyhow",
- "naml 2.0.0",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
@@ -675,7 +675,7 @@ name = "config-boot"
 version = "2.0.1"
 dependencies = [
  "anyhow",
- "naml 2.0.1",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
@@ -2502,7 +2502,7 @@ dependencies = [
  "matchit",
  "nafana-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nametrics-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naml 2.0.0",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost",
@@ -2533,7 +2533,7 @@ dependencies = [
  "matchit",
  "nafana-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nametrics-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naml 2.0.0",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost",
  "reqwest",
@@ -3151,21 +3151,27 @@ dependencies = [
 
 [[package]]
 name = "naml"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83b7e49e606b4867da47efc1928e8d0592675f470f4770ee025697faac8917f5"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "config",
+ "libc",
  "nabase 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "notify",
  "serde",
  "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.9",
+ "toml",
  "tracing",
+ "yaml-rust2",
 ]
 
 [[package]]
 name = "naml"
 version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ccc82026da94e53f7e830cd7f0ab7a9fee0e3c5339ab6375597cac4554d6a0"
 dependencies = [
  "anyhow",
  "config",
@@ -3436,7 +3442,7 @@ dependencies = [
  "namigrate 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naml 2.0.1",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanotify-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3491,6 +3497,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "napp-macro"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8b3c6e58e89413fd29c305d381273ecaf11c249dbaa5b042d3fbace546c47b2"
+dependencies = [
+ "macro-support 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "nasa"
 version = "2.0.2"
 dependencies = [
@@ -3523,7 +3541,7 @@ dependencies = [
  "namapper-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namapper-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "namigrate-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naml 2.0.1",
+ "naml 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nanum 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naobject 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3533,7 +3551,7 @@ dependencies = [
  "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napp",
- "napp-macro",
+ "napp-macro 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
