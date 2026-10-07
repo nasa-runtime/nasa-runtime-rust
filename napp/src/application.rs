@@ -227,6 +227,7 @@ pub(crate) struct ApplicationInner {
     /// OTLP 指标出口的进程级统计；只在显式配置指标端点时发布。
     #[cfg(feature = "telemetry")]
     otlp_metrics_state: OnceLock<std::sync::Arc<crate::telemetry::OtlpMetricsState>>,
+    strict_source: OnceLock<Arc<crate::config_source::StrictSource>>,
     web_addr: OnceLock<SocketAddr>,
     /// Web 组件一次写入、能力句柄只读访问的运行时元数据和请求计数器。
     #[cfg(feature = "web")]
@@ -412,6 +413,7 @@ impl Application {
                 telemetry_exporter: OnceLock::new(),
                 #[cfg(feature = "telemetry")]
                 otlp_metrics_state: OnceLock::new(),
+                strict_source: OnceLock::new(),
                 web_addr: OnceLock::new(),
                 #[cfg(feature = "web")]
                 web_runtime: Arc::new(crate::web_handle::WebRuntimeState::new()),
@@ -553,6 +555,16 @@ impl Application {
     /// 本方法无参数；返回值可跨 await 保持一致。
     pub fn config_view(&self) -> Arc<ConfigView> {
         self.inner.config.load()
+    }
+
+    /// 业务作用：区分来源观察进度与期望快照版本，允许同值来源变化独立被观测。
+    /// 参数说明：无。
+    /// 返回：严格加载入口已经受理的来源序号与规模，兼容入口或远端首拉前为空。
+    pub fn config_observation(&self) -> Option<crate::ConfigObservation> {
+        self.inner
+            .strict_source
+            .get()
+            .and_then(|source| source.observation())
     }
 
     /// 业务作用：获取与当前 config 同 generation 的 secret 快照。
@@ -3898,6 +3910,30 @@ impl Application {
     /// 返回：释放任务时收集的次要错误；重复调用安全，任务 future 在同步锁释放后逐项隔离析构。
     pub(crate) fn close_shutdown_tasks(&self) -> Vec<ApplicationError> {
         self.inner.shutdown_tasks.close()
+    }
+
+    /// 业务作用：在组件构造前登记本应用的固定配置来源。
+    /// 参数说明：`source` 是 preflight 创建的唯一读取权威。
+    /// 返回：首次登记成功；重复登记返回错误。
+    pub(crate) fn set_strict_source(
+        &self,
+        source: Arc<crate::config_source::StrictSource>,
+    ) -> ApplicationResult<()> {
+        self.inner.strict_source.set(source).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Config,
+                ApplicationPhase::Bootstrap,
+                "strict source already installed",
+            )
+        })
+    }
+
+    /// 业务作用：让启动和重载共享来源快照，避免重读真实进程环境。
+    /// 参数说明：无。
+    /// 返回：显式严格装配时存在来源 owner。
+    #[cfg(any(feature = "config-watch", feature = "nacos-config"))]
+    pub(crate) fn strict_source(&self) -> Option<Arc<crate::config_source::StrictSource>> {
+        self.inner.strict_source.get().cloned()
     }
 
     /// 业务作用：返回 Runner 和组件使用的资源注册表。

@@ -1,4 +1,9 @@
 //! NASA 应用生命周期运行时核心。
+//!
+//! 严格配置可由 `ApplicationSpec::with_config_loader` 在 preflight 前显式选择，固定环境和来源权限。
+//! naml 负责嵌套默认值、有序文件模式和字段解释；宿主负责材料、观察集、配置视图及组件应用状态。
+//! 同值来源变化可推进 `Application::config_observation`，不增加业务配置版本，也不表示组件重试成功。
+//!
 //! Redis Stream、Proxy、AutoPipeline、出站 TCP 帧客户端和 hystrix 可由命名配置接入，
 //! 框架负责准备、业务激活、健康观测以及关闭后的真实退出等待。
 //!
@@ -310,6 +315,8 @@ pub use natelemetry::TraceContext;
 #[cfg(feature = "web")]
 pub use trace::trace_context;
 
+mod config_source;
+pub use config_source::ConfigObservation;
 #[cfg(feature = "nacos-config")]
 mod nacos_config;
 #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]

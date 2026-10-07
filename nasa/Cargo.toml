@@ -4,10 +4,10 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Rust server framework for managed lifecycles and reliable execution with continuously authorized durable Saga recovery"
+description = "Rust server framework for strict configuration, managed lifecycles and reliable execution with authorized durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -266,8 +266,8 @@ full-pgsql = [
 
 [dependencies]
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "2.0.1", optional = true }
-application_macro = { package = "napp-macro", version = "2.0.0", optional = true }
+application_impl = { package = "napp", path = "../napp", version = "2.0.2", optional = true }
+application_macro = { package = "napp-macro", path = "../napp-macro", version = "2.0.1", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
 grafana_impl = { package = "nafana", version = "2.0.0", optional = true }
@@ -317,8 +317,8 @@ crypto_impl = { package = "ncrypto", version = "2.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "2.0.0", optional = true }
 log_impl = { package = "nalog", version = "2.0.0", optional = true }
 base_impl = { package = "nabase", version = "2.0.0", optional = true }
-yml_impl = { package = "naml", version = "2.0.0", optional = true }
-config_boot_impl = { package = "config-boot", version = "2.0.0", optional = true }
+yml_impl = { package = "naml", path = "../naml", version = "2.0.1", optional = true }
+config_boot_impl = { package = "config-boot", path = "../config-boot", version = "2.0.1", optional = true }
 image_impl = { package = "naimg", version = "2.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "2.0.0", optional = true }
 nacos_impl = { package = "nanacos", version = "2.0.0", optional = true, default-features = false }

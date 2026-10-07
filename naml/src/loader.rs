@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::de::DeserializeOwned;
 
-use crate::placeholder::{resolve_placeholders, resolve_placeholders_preserving_unresolved};
+use crate::placeholder::resolve_with_environment;
 use crate::source::{read_local_source, resolve_local_sources};
 use crate::YmlLocalSources;
 
@@ -60,7 +60,7 @@ impl ConfigFormat {
 /// ⚠️【optional ≠ 可以吞格式错】:`required`/`optional` 只表达「源是否可缺」。
 ///   一份【已经拉取/读取成功、内容在手】的配置若格式错,应 `required=true` 让它 fail-fast——门面层
 ///   (config-boot)对「已 present 的文档」正是设 `required=true`,不因源 optional 就静默吞掉格式错。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct YmlOverlay {
     /// 便于日志/排查的名字(如 dataId `tidb.yml`),不参与合并。
     pub name: String,
@@ -89,6 +89,19 @@ impl<T> LoadedYml<T> {
     /// 返回：本轮加载得到的强类型值。
     pub fn into_value(self) -> T {
         self.value
+    }
+}
+
+impl std::fmt::Debug for YmlOverlay {
+    /// 业务作用：默认诊断仅展示格式、必需性与大小，避免来源名称和正文暴露。
+    /// 参数说明：`f` 是格式化目标。
+    /// 返回：不含原始配置材料的摘要。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("YmlOverlay")
+            .field("format", &self.format)
+            .field("required", &self.required)
+            .field("bytes", &self.content.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -359,6 +372,20 @@ impl YmlLoader {
         overlays: &[YmlOverlay],
         env_override: Option<&config::Map<String, String>>,
     ) -> anyhow::Result<(serde_json::Value, YmlLocalSources)> {
+        let environment = match env_override {
+            Some(values) => crate::strict::EnvironmentSnapshot::from_compatible_pairs(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            ),
+            None => crate::strict::EnvironmentSnapshot::capture_compatible(),
+        };
+        let fixed_environment: config::Map<String, String> = environment
+            .values
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let env_override = Some(&fixed_environment);
         let sources = resolve_local_sources(
             &self.base_file,
             &self.profile_env,
@@ -440,10 +467,12 @@ impl YmlLoader {
         // 默认解析 ${...};需要保留运行期 DSL 变量的调用方可显式关闭。
         // 解析失败(未命中且无默认值 / 循环引用)即 fail-fast:所有 load 入口经此传播 Err,
         // 应用启动入口 `?` 后进程启动失败退出。
-        if self.resolve_placeholders && self.preserve_unresolved_placeholders {
-            resolve_placeholders_preserving_unresolved(&mut tree)?;
-        } else if self.resolve_placeholders {
-            resolve_placeholders(&mut tree)?;
+        if self.resolve_placeholders {
+            resolve_with_environment(
+                &mut tree,
+                self.preserve_unresolved_placeholders,
+                &environment,
+            )?;
         }
         Ok((tree, sources))
     }

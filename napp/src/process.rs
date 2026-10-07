@@ -62,6 +62,14 @@ where
         .startup_timeout(preflight.startup_timeout)
         .shutdown_timeout(preflight.shutdown_timeout)
         .with_process_signals();
+    runner = match runner.with_strict_source(preflight.source) {
+        Ok(runner) => runner,
+        Err(error) => {
+            report_preflight(&error);
+            runtime.shutdown_background();
+            return ExitCode::FAILURE;
+        }
+    };
     // 逐个声明组件构造运行对象；声明了却未编译/未支持的组件必须 fail-fast，
     // 不允许“通过宏校验但运行期静默无视”，避免装配配置在运行期失效。
     for component in spec.components() {

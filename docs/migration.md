@@ -2,7 +2,7 @@
 
 [中文](migration.md) | [English](migration.en.md)
 
-本文说明现有 Rust 应用如何采用当前 `nasa 2.0.1` 的依赖与运行合同。步骤取决于应用使用的能力，
+本文说明现有 Rust 应用如何采用当前 `nasa 2.0.2` 的依赖与运行合同。步骤取决于应用使用的能力，
 不能仅凭版本号推断 API、数据库结构、消息协议或配置兼容。最小新应用见 [快速开始](quickstart.md)。
 
 ## 固定依赖来源与能力
@@ -11,10 +11,10 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.1"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
+`version = "2.0.2"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
 移除指向本地 NASA 源码的 `path` 与 `[patch.crates-io]` 覆盖，保留原本需要的 feature。
 直接使用 `sqlx::FromRow` 或 `sqlx::migrate!` 的业务仍需声明对应直接依赖；门面不替业务隐式提供外部 crate 名称。
 
@@ -53,6 +53,31 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 - 连接来源与其它冻结字段变化需要重启；读取新配置不证明热应用完成。
 
 字段、默认值和准入条件以 [Application 合同](../napp/README.md) 为准。
+
+## 选择严格配置装配
+
+`YmlLoader` 保留既有主文件、profile、overlay 和环境处理范围，不自动执行 `yml.imports`。
+需要有序通配符导入及来源解释时，显式选择 `nasa::yml::strict::ConfigLoader`；Application 使用
+`#[nasa::application(..., config = configuration)]`，工厂在 preflight 前返回严格加载器。
+不能等到业务 Hook 才设置来源策略。示例见[门面配置入口](../nasa/README.md#严格配置装配)。
+
+| 核对项 | 调用方需要采取的动作 |
+| --- | --- |
+| 文件与声明 | 严格 map import 显式设置布尔 `optional`；确认主路径、profile、导入目录和允许根，删除文档重复键及含糊字面键 |
+| 合并顺序 | 主文件 → profile → 有序 imports → 环境覆盖；配置中心适配器把 `nacos.imports` 放在 `yml.imports` 前 |
+| 通配符覆盖 | 每组按完整文件名自然排序，数字 `2`、`02`、`10` 依次加载；后文件覆盖前文件，不跨组重排 |
+| 类型 | 严格环境覆盖、环境回退和默认文本先保留 String；通过 `bind`、`ConfigSnapshot::deserialize/section` 绑定目标类型，原生 JSON 消费者显式提供文档标量或受信 `ValueHint::Scalar` |
+| 默认空白 | 兼容入口在求值前裁剪默认源码两侧空白，严格入口保留；引用取得的值不受这项裁剪影响 |
+| 环境别名 | `${aa.bb.cc}`、`${aa-bb-cc}`、`${AA_BB_CC}` 仍可回退到 `AA_BB_CC`；确切树值和原样环境名优先，空值仍命中 |
+| 嵌套和字面量 | `${LOG_PATH:/usr/local/logs/${application.name}}` 支持嵌套默认；字面 `${name}` 写作 `$${name}`，环境正文不递归执行 |
+| 失败语义 | 严格模式拒绝坏格式、非法结构、路径冲突、必需来源缺失、来源变化与超限；保留未命中模式不能放过非法表达式 |
+| 运行期变化 | 固定环境、profile、imports、模式、连接与信任根需要重启；仅在已有模式内增删文件不改变权限 |
+
+纯内存 `load_documents` 不执行文档内 imports；硬超时读取进程可以把取得的文档交给它，再由宿主
+校验和发布。严格文件入口不能作为恶意本地文件系统操作的隔离沙箱，也不能硬终止内核等待。
+
+热更新同时检查来源观察序号、配置快照版本和组件状态。`ApplyFailed` 不因无关或同值重读自动清除，
+同值候选可能被去重；资源条件恢复后可重启重新装配。详见[运维指南](operations.md#配置刷新)。
 
 ## 核对持久状态与重试
 

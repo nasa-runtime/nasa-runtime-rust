@@ -26,29 +26,18 @@
 - [ ] crate README 不引用归档外部的 `../docs` 等本地相对路径；归档必须独立提供 README 承诺的入口。
 - [ ] 前置 crate 已能从 registry 解析；下游 manifest 已删除指向其公开版本的 `path`，锁文件已按纯线上
       依赖重新生成。
-- [ ] 根项目与当前发布计划使用 `2.0.1`；发生变化的 Saga core、数据库 runtime、Application runtime
-      与门面使用 `2.0.1`，其余已发布组件保持 `2.0.0`。根文档、本次组件文档与快速开始使用当前门面版本，
-      未重发组件中的 `2.0.0` 仍作为 Cargo 兼容范围下限；
-      `release-crates.sh --versioned-plan` 中每个 `crate@version` 与 manifest 完全一致。
-      新版本必须高于 crates.io 最高已发布稳定版本（包含已撤回版本）；首次公开的组件也遵守统一计划。
-      同版本只允许未撤回且归档内容等价的续传，不能复用撤回版本。
-
-当前上传批次按 registry 依赖拓扑固定为：
-
-| 顺序 | workflow 批次 | crate |
-| --- | --- | --- |
-| 1 | `runtime-core` | `nasaga-runtime-core@2.0.1` |
-| 2 | `database-runtimes` | `nasaga-runtime@2.0.1`、`nasaga-runtime-pgsql@2.0.1` |
-| 3 | `application-runtime` | `napp@2.0.1` |
-| 4 | `facade` | `nasa@2.0.1` |
-
-后续批次不得与前置批次同时启动；必须先确认前置版本已经能被无本地 patch 的独立 Cargo 项目解析。
-
-- [ ] 每个批次发布并回读后，在干净工作树运行 `prepare-next-release-batch.sh <completed-batch>`；只删除
-      已上线 crate 的根级 `[patch.crates-io]` 本地覆盖，审阅并提交 `Cargo.toml` 与 `Cargo.lock` 后才启动
-      下一批。
-- [ ] 下一批 workflow 已通过 `verify-release-transition.sh`，确认所有前置 crate 都不再使用根级 path
-      patch；`cargo package --locked` 在该状态下从 registry 解析前置版本和 feature。
+- [ ] 根工作区版本与门面版本一致；每个改动组件按批准的目标版本更新，直接依赖下限、根文档、
+      组件示例和锁文件同步。独立组件可以采用不同补丁号，无关组件不因文档整理而变更版本。
+- [ ] 上传计划中每个 `crate@version` 与 manifest 一致，计划只包含本次需要上传的组件；根据实际
+      依赖关系先上传前置组件，确认 registry 已能解析其版本和 feature，再处理下游。
+      新版本必须高于 crates.io 最高已发布稳定版本（包含已撤回版本）；同版本只允许未撤回且归档
+      内容等价的续传，不能复用撤回版本。
+- [ ] 上传前重新核对 workflow 目标分支、版本门禁和依赖阶段；不能沿用与当前组件集合不一致的
+      旧计划。`release-crates.sh --versioned-plan` 是自动化上传所使用的精确清单。
+- [ ] 前置组件上线后逐项移除下游直接 `path` 依赖及根级 `[patch.crates-io]` 覆盖，保留明确版本
+      和 feature，更新锁文件。只删除根 patch 不能证明直接 path 已解除。
+- [ ] 上传前在无本地覆盖的依赖图执行 `cargo package --locked`；同时确认候选内容、registry
+      前置依赖及远端提交一致。本地多包候选归档编译不能替代 registry 解析检查。
 - [ ] 默认流程严格按“完成提交 → 推送目标分支 → 远端 CI 全绿 → 核对远端提交 SHA → 获得明确上传授权
       → 上传 registry → 回读 registry 元数据与 README”推进；本地 dry-run 或归档通过不构成上传授权。
 - [ ] 公开版本不可原地替换；归档遗漏或文档合同不完整时停止当前批次，以新的补丁版本承载后续内容，
@@ -56,6 +45,10 @@
 
 ## 组件边界
 
+- [ ] 严格配置的默认分支空白、环境别名与空值、自然排序及覆盖顺序、类型绑定、来源预算和观察
+      语义在 naml、配置中心、Application、宏及门面文档中一致；兼容入口不会隐式扩大读取范围。
+- [ ] 区分来源观察序号、业务配置版本和组件应用状态；同值候选不保证重试失败资源，事件合并与
+      周期补读不被描述为端到端生效期限，内存入口不执行文档中的文件读取声明。
 - [ ] feature 单独开启与常用组合都能编译，门面路径在依赖改名后仍正确。
 - [ ] 对每个最终可执行制品检查实际进入依赖图的 transaction、Mapper core/adapter、Inbox/Outbox core
       与 adapter、幂等 store、Saga backend/runtime 和 `nafka`；每个包只能解析出一个 package ID 和一个

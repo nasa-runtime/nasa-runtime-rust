@@ -37,8 +37,19 @@ application:
 - `startup_timeout_ms` 是组件、业务 Hook、initializer、最终检查和延后服务注册共享的启动期限。
 - `shutdown_timeout_ms` 是全部反向清理共享的总预算。
 
-配置优先级从低到高为主文件、显式 profile、远端 overlay 和 `APP__...` 环境覆盖。凭据只通过部署
+配置优先级从低到高为主文件、显式 profile、有序本地/远端 overlay 和 `APP__...` 环境覆盖。凭据只通过部署
 平台的 secret 注入能力提供，不写入配置文件、镜像层、命令历史或普通日志。
+
+严格工厂支持通过 `base_file` 显式选择主路径，并在创建时固定绝对路径及环境。目录型部署可以声明
+`yml.imports: [{file: /etc/conf/*.yml, optional: false}]`；路径通配只作用于文件名，按自然顺序后项
+覆盖前项。必需模式零匹配拒绝启动；可选模式可以为空，但观察仍覆盖其目录或最近存在的祖先。
+推荐挂载整个配置目录，让新增、删除和原子替换对进程可见；先写不匹配模式的临时文件再 rename。
+imports 文档不能改写来源清单或 provider 信任根。
+
+声明日志组件时，`log.path: ${LOG_PATH:/usr/local/logs/${application.name}}` 支持嵌套默认路径；
+部署应为应用 UID 提供可写目录挂载。`LOG_PATH` 显式为空会保留空值，可用于关闭文件日志。
+严格加载器固定环境快照，后续文件热更新不会重新捕获进程环境；环境与来源权限改变后需重启。
+监听开关、观察序号与生效边界见[配置刷新](operations.md#配置刷新)。
 
 ## 容器与进程监督
 

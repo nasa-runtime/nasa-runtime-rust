@@ -6,9 +6,13 @@
 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md) 与
 [运维指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/operations.md)。
 
+`config = configuration` 在同步 preflight 前登记严格配置工厂，让有序文件导入、嵌套默认值和来源观察
+进入同一启动与重载流程。工厂决定加载策略，业务 `app` Hook 继续负责业务资源和任务登记。
+
 宏把业务的异步 `main` 改写为统一进程入口：
 
 - 生成静态 `ApplicationSpec`（组件声明顺序、编译期缺省应用名）并调用 `napp::run`，真实 `main` 返回 `std::process::ExitCode`。
+- 可选 `config = function_path` 生成配置工厂登记；属性只接受一个函数路径，不接受闭包、调用表达式或重复的 `config`。
 - 声明 `"web"` 时在 crate 根自动生成 `mvc_router!(nasa::Application)` 收集端，并把业务 crate 内 nominal 的路由项投影为运行时稳定的 `RouteMeta`；业务不得再手写 `mvc_router!`（会因 `crate::__mvc` 重复定义编译失败）。
 - 业务 `main` 变成启动 Hook：零参数或接收一个 `Application`，返回 `anyhow::Result<()>`；成功返回后资源封存，运行由 Runner 接管。
 - 完整 `Initialization` trait impl 可被登记为静态 initializer，与 Service 启动 Hook 动态登记项合并
@@ -62,7 +66,7 @@ Saga 的 managed 角色与 datasource 由运行时读取最终配置，宏不推
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "log", "redis", "cache", "web"] }
+nasa = { version = "2.0.2", features = ["application", "log", "redis", "cache", "web"] }
 ```
 
 ```rust
@@ -140,3 +144,15 @@ Hosted 任务与组件终端、受管 Redis 消费和派生发送、出站 Clien
 - Hook 返回成功后资源登记入口封口，运行期不能继续修改组件图。
 - feature 缺失、重复组件、未知组件和非法组合都在编译期拒绝。
 - initializer 依赖缺失、重复名称、条件禁用后仍被依赖或依赖环由运行时在调用工厂前拒绝。
+
+## 启动前配置工厂
+
+属性允许 `#[nasa::application("log", "web", config = configuration)]`。`configuration` 是无参数函数，返回 `nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>`；由同步 preflight 调用，不能在业务 `app` Hook 中补设。手动入口使用 `ApplicationSpec::with_config_loader(configuration)`，二者执行同一流程。没有工厂时保留兼容加载范围。
+
+工厂只构造加载器及受信策略，不创建另一套 runtime 或监听循环。失败会阻止继续启动。
+门面 feature 使用 `application,yml`，需要文件事件时加 `yml-watch`；使用上例中的日志和 Web
+组件时再开 `log,web`。没有新的 `"config"` 或 `"yml-watch"` 组件字符串。
+
+严格工厂固定环境、目录、profile 和读取权限。本地 imports 按声明与自然文件名顺序合并；Nacos 首拉前仅求值 application、来源、连接和信任依赖，业务占位符在完整装配后解析。日志文件输出等待最终配置。默认文本通过 `ConfigSnapshot::deserialize/section` 及应用的配置绑定入口按目标类型受检转换；直接消费原生 JSON 类型的组件需原生标量或受信路径提示。
+
+启用 `yml-watch` 并设置 `config_watch.enabled: true` 时，实际来源及模式目录参与观察；相同值也对账新来源。固定模式允许文件增删和替换，imports、模式或信任根变化拒绝候选并要求重启。来源、材料或整帧校验失败保留旧态；组件应用仍分别记录 Applied、ApplyFailed、RestartRequired，不提供所有组件一起回滚的事务。详见[naml 配置合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)。

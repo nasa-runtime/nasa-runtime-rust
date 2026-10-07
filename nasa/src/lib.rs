@@ -3,6 +3,8 @@
 //! `nasa-runtime-rust` 将配置校验、资源装配、业务初始化、接流许可和有序停机纳入同一生命周期，
 //! 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复业务。应用按 feature 选择能力；
 //! 持久事实、事务提交和租约权威仍由所选数据库与消息系统承载。
+//! `yml` 提供嵌套默认值、自然排序的本地导入和可解释配置候选；启动前的严格工厂使来源权限、
+//! 目录观察和配置应用进入同一宿主。来源序号、期望快照与组件实际状态保持独立，不承诺统一回滚。
 //! [中文指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.md) 与
 //! [English guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.en.md)
 //! 提供快速开始、架构和接入说明。
@@ -588,7 +590,7 @@ pub mod base {
     pub use base_impl::*;
 }
 
-/// 通用分层 YAML 配置加载器(crate = `yml`)。
+/// 分层配置、嵌套表达式与本地来源装配(crate = `naml`)。
 /// `nasa = { features = ["yml"] }` → `use nasa::yml::{YmlLoader, YmlOverlay};`
 /// `nasa = { features = ["yml-watch"] }` → `use nasa::yml::watch::YmlWatcher;`
 /// 本地主配置 `zcf/application.yml` + profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。
@@ -596,20 +598,27 @@ pub mod base {
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load()?;                       // 纯本地
 ///   let cfg: AppConfig = nasa::yml::YmlLoader::standard().load_with_overlays(&ovs)?;     // 叠加 Nacos 多配置
 ///
-/// watcher 只报告精确来源变化，候选校验、运行态资源准备和配置发布仍由应用负责。
-/// 边界:**不连接 Nacos、不存全局、不热替换、不认识业务 AppConfig**;`import` 只产出中性
-/// `YmlImport`(File/Nacos 描述),「按 import 调 Nacos 拉取拼 overlay」的胶水在门面/app 侧(yml 零 Nacos 依赖)。
+/// `strict::ConfigLoader` 提供严格文档、固定环境快照、受限读取、嵌套默认值、来源追踪与强类型绑定，
+/// 并自动装配本地 imports；单目录 `*`、`?` 按文件名自然顺序展开，后文件覆盖前文件。
+/// `YmlLoader` 保留兼容语义，不自动执行 imports；其 import 解析入口仅返回中性来源描述。
+/// `yml-watch` 同时提供精确文件观察与 `strict::ConfigWatcher`，后者观察匹配集合和缺失目录，
+/// 返回变化、重扫或后端异常信号。候选校验、运行态资源准备和配置发布仍由应用负责。
+/// naml 不连接 Nacos、不存全局运行态、不安装业务配置；远端装配由 config-boot 承担。
 #[cfg(feature = "yml")]
 pub mod yml {
     pub use yml_impl::*;
 
-    /// yml × nacos 组合胶水(crate = `config-boot`)。共享 `NacosBootstrap` 引导配置取代各 app 手写的 NacosConfig。
+    /// 本地与 Nacos 有序装配(crate = `config-boot`)。共享 `NacosBootstrap` 提供连接与来源声明。
+    /// `strict::prepare/load/assemble` 分别处理引导、首拉和完整包装配，业务表达式在最终树上求值；
+    /// 兼容入口继续提供 overlay。来源权限与运行态发布由调用方管理。
     /// `nasa = { features = ["config-boot"] }` → app 引导
     ///   `let boot: BootstrapConfig = nasa::yml::nacos::load_bootstrap_checked(&loader())?;  // load_tree+旧字段守卫+反序列化`
     ///   `let imports = nasa::yml::nacos::resolve_imports(&loader().load_tree()?, loader().base_file_dir(), &boot.nacos)?;`
     ///   `let client = nasa::yml::nacos::connect_config_client(&boot.nacos).await?;`
     ///   `let ovs = nasa::yml::nacos::resolve_ordered_overlays_for_bootstrap(&client, &imports, &boot.nacos).await?;`
     /// 热刷新:`nacos_refs_for_bootstrap` → `watch_many_channel` → bundle → `assemble_overlays_from_bundle_for_bootstrap` → `load_with_overlays`。
+    /// 严格入口 `strict::prepare` 只求值引导依赖，`strict::load` 装配本地与 Nacos 文档；
+    /// 运行期可通过 `strict::assemble` 按同一来源计划组合远端 bundle，最终绑定和预算复用 naml。
     /// yml 对 Nacos 零认知、nacos 对 yml 零认知;「按 import 拉取拼 overlay + file_extension 格式解析 + 旧字段守卫」只在这层。
     #[cfg(feature = "config-boot")]
     pub mod nacos {

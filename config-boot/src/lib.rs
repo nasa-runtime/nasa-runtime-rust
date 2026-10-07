@@ -1,11 +1,16 @@
-//! 配置引导装配层。
+//! 本地与 Nacos 的有序配置装配和分阶段引导。
 //!
-//! 负责把本地分层配置、远端配置引用和配置中心裸文本拼装成有序 overlay，
-//! 供业务在启动期一次性加载完整配置。
+//! [`strict::prepare`] 先求值连接所需的引导依赖，固定来源顺序；[`strict::load`] 首拉远端文本，
+//! [`strict::assemble`] 接收已有完整包。最终复用 naml 的自然排序文件导入、嵌套表达式、
+//! 来源校验与目标类型绑定，返回完整候选。兼容入口继续返回有序 overlay。
+//!
+//! `nacos.imports` 位于 `yml.imports` 之前，远端身份、格式和包顺序必须与声明一致。
+//! 可选缺失不能掩盖网络、鉴权或内容错误；Nacos data ID 不做文件通配符展开。
+//! 本组件不发布应用视图，不持有 secret 或组件关闭权；准备、观察和发布由宿主负责。
 // ============================================================================
 // config-boot —— yml 配置加载 × nacos 配置中心的【引导胶水】。
 //
-// 经门面 `nasa::naml::nacos` 暴露。分工:
+// 经门面 `nasa::yml::nacos` 暴露。分工:
 //   · yml   只认本地文件 + overlay + 占位符(零 Nacos 认知);
 //   · nacos 只认 data_id/group/裸文本(零 yml 认知,file_extension 只随文档透传、不解释);
 //   本 crate 在两者之上做:import→ConfigRef 映射、**file_extension 格式解析(优先级 + 缺省默认 yaml)**、
@@ -22,6 +27,8 @@
 // 热刷新:watch_many_channel 推来 ConfigBundle(含 source.file_extension)→ assemble_overlays_from_bundle → load_with_overlays。
 // ============================================================================
 #![forbid(unsafe_code)]
+
+pub mod strict;
 
 use std::path::Path;
 

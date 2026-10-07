@@ -50,6 +50,7 @@ impl Default for ApplicationSettings {
 
 /// 同步配置读取和校验形成的 runtime 唯一输入。
 pub(crate) struct Preflight {
+    pub(crate) source: Option<Arc<crate::config_source::StrictSource>>,
     pub(crate) info: ApplicationInfo,
     pub(crate) worker_threads: Option<usize>,
     pub(crate) startup_timeout: Duration,
@@ -69,6 +70,17 @@ impl Preflight {
     ///
     /// - `spec`：提供组件声明和编译期缺省名的静态应用描述。
     pub(crate) fn load_standard(spec: &ApplicationSpec) -> ApplicationResult<Self> {
+        if let Some(factory) = spec.config_loader {
+            let loader =
+                factory().map_err(|_| settings_error("strict configuration factory rejected"))?;
+            let profile = loader
+                .selected_profile()
+                .map_err(|_| settings_error("invalid strict profile"))?;
+            let (source, tree) = crate::config_source::StrictSource::start(loader, spec)?;
+            let mut preflight = Self::from_tree(spec, tree, profile)?;
+            preflight.source = Some(source);
+            return Ok(preflight);
+        }
         Self::load(spec, &YmlLoader::standard(), standard_profile())
     }
 
@@ -94,12 +106,25 @@ impl Preflight {
                 error,
             )
         })?;
+        Self::from_tree(spec, tree, profile)
+    }
+
+    /// 业务作用：将完整本地配置或受限引导投影转换为 runtime 启动参数。
+    /// 参数说明：`spec` 固定组件；`tree` 不含等待远端的业务表达式；`profile` 是固定选择。
+    /// 返回：参数与安全约束通过后形成初始化输入。
+    fn from_tree(
+        spec: &ApplicationSpec,
+        tree: Value,
+        profile: Option<String>,
+    ) -> ApplicationResult<Self> {
+        spec.validate()?;
+        spec.validate_runtime_bindings()?;
         let pinned_application = tree.get("application").cloned();
         let settings_value = pinned_application
             .clone()
             .unwrap_or_else(|| Value::Object(Default::default()));
         let settings: ApplicationSettings =
-            serde_json::from_value(settings_value).map_err(|error| {
+            naml::strict::bind(settings_value).map_err(|error| {
                 ApplicationError::with_source(
                     ComponentId::Config,
                     ApplicationPhase::Bootstrap,
@@ -172,6 +197,7 @@ impl Preflight {
             })?;
 
         Ok(Self {
+            source: None,
             info,
             worker_threads: settings.worker_threads,
             startup_timeout: Duration::from_millis(settings.startup_timeout_ms),

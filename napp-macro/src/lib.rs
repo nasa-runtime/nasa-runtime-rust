@@ -7,6 +7,10 @@
 //!
 //! 生成的 UserHook 可通过 Application 登记一次性业务停机 future，不需要额外属性或组件字符串。
 //! 宏不创建第二个信号或关闭 owner；任务顺序、共享预算、失败报告与取消后的所有权释放由运行时负责。
+//!
+//! `config = function_path` 登记无参数的同步严格配置工厂，在 preflight 前固定来源与读取策略。
+//! 工厂返回 `naml::strict::Result<naml::strict::ConfigLoader>`；不接受在业务 Hook 中改变来源权限。
+//! 未声明工厂时保留兼容加载范围，宏本身不读取配置正文或解释文件模式。
 
 use std::collections::HashSet;
 
@@ -23,7 +27,8 @@ use syn::{
 ///
 /// # 支持的组件字符串
 ///
-/// `attr` 可以为空；非空时只接受下面 17 个区分大小写的精确字符串，不支持别名：
+/// `attr` 可以为空；组件只接受下面 17 个区分大小写的精确字符串，不支持别名。
+/// 还可提供一次 `config = function_path`，登记无参数同步严格配置工厂；不接受调用表达式或闭包：
 ///
 /// - `"log"`：启用两阶段日志。Bootstrap 先建立早期控制台日志，最终配置就绪后再安装文件日志，
 ///   并支持运行期日志级别热更新；需要 `nasa` 的 `log` feature。
@@ -166,17 +171,18 @@ use syn::{
 /// ```
 ///
 /// 参数说明：
-/// - `attr`：按任意书写顺序声明的零个或多个受支持组件字符串。
+/// - `attr`：按任意书写顺序声明的组件字符串，以及可选的 `config = function_path` 严格配置工厂。
 /// - `item`：零参数或接收一个 `Application` 的异步主函数。
 ///
 /// 返回：入口合法时生成同步进程入口、规范组件描述和业务启动 Hook；合同非法时生成定位到调用处的
 /// 编译错误。
 #[proc_macro_attribute]
 pub fn application(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let components =
-        parse_macro_input!(attr with Punctuated::<LitStr, Token![,]>::parse_terminated);
+    let arguments = parse_macro_input!(attr with Punctuated::<Expr, Token![,]>::parse_terminated);
     let function = parse_macro_input!(item as ItemFn);
-    match expand_application(components.into_iter().collect(), function) {
+    let result = parse_application_arguments(arguments)
+        .and_then(|(components, config)| expand_application(components, function, config));
+    match result {
         Ok(expanded) => expanded.into(),
         Err(error) => error.to_compile_error().into(),
     }
@@ -1374,11 +1380,13 @@ fn validate_initializer_name(name: &LitStr, field: &str) -> syn::Result<()> {
 /// 参数说明：
 /// - `components`：属性中按源码顺序出现的组件字面量。
 /// - `function`：已经解析的业务异步主函数。
+/// - `config`：可选的严格配置工厂路径，在同步 preflight 中执行。
 ///
 /// 返回：入口合同与组件声明合法时返回完整展开；路径、签名或组件非法时返回定位明确的宏错误。
 fn expand_application(
     components: Vec<LitStr>,
     mut function: ItemFn,
+    config: Option<Path>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     validate_function(&function)?;
     let component_names = validate_components(&components)?;
@@ -1462,6 +1470,7 @@ fn expand_application(
     } else {
         quote! {}
     };
+    let spec_config = config.map(|factory| quote!(.with_config_loader(#factory)));
     let spec_web = if has_web {
         quote!(
             .with_web_route_meta(__nasa_route_meta)
@@ -1512,7 +1521,8 @@ fn expand_application(
                     #(#runtime::ComponentId::#component_variants),*
                 ])
                 .with_default_name(env!("CARGO_PKG_NAME"))
-                #spec_web,
+                #spec_web
+                #spec_config,
                 __nasa_require_user_hook(#hook),
             )
         }
@@ -1787,4 +1797,47 @@ fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
             "component name was not validated",
         )),
     }
+}
+
+/// 业务作用：同时接受组件声明和启动前配置工厂，拒绝未知或重复策略参数。
+/// 参数说明：`arguments` 是宏属性中的表达式列表。
+/// 返回：组件字符串与可选工厂路径；业务表达式不会在宏中执行。
+fn parse_application_arguments(
+    arguments: Punctuated<Expr, Token![,]>,
+) -> syn::Result<(Vec<LitStr>, Option<Path>)> {
+    let mut components = Vec::new();
+    let mut config = None;
+    for argument in arguments {
+        match argument {
+            Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(name),
+                ..
+            }) => components.push(name),
+            Expr::Assign(assign) if matches!(assign.left.as_ref(), Expr::Path(path) if path.path.is_ident("config")) =>
+            {
+                if config.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        assign,
+                        "configuration factory may only be specified once",
+                    ));
+                }
+                match *assign.right {
+                    Expr::Path(path) => config = Some(path.path),
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            other,
+                            "config requires a function path",
+                        ))
+                    }
+                }
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "expected a component string or config = function_path",
+                ))
+            }
+        }
+    }
+    Ok((components, config))
 }

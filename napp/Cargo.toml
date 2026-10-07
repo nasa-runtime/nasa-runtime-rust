@@ -1,9 +1,9 @@
 [package]
 name = "napp"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Application runtime for managed lifecycles, named resources and continuously authorized durable Saga recovery"
+description = "Application runtime for strict configuration, managed lifecycles, named resources and authorized durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -114,14 +114,14 @@ base64 = { version = "0.22", optional = true }
 axum = { version = "0.8", optional = true }
 hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["service", "tokio"], optional = true }
-config-boot = { version = "2.0.0", optional = true }
+config-boot = { path = "../config-boot", version = "2.0.1", optional = true }
 futures = { version = "0.3", optional = true }
 futures-util = "0.3"
 http-body = { version = "1", optional = true }
 linkme = "0.3"
 naweb = { version = "2.0.0", optional = true }
 matchit = { version = "0.8", optional = true }
-naml = { version = "2.0.0" }
+naml = { path = "../naml", version = "2.0.1" }
 nametrics-core = { version = "2.0.0" }
 nanotify-core = { version = "2.0.0", optional = true }
 nafana = { version = "2.0.0", optional = true }

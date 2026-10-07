@@ -106,7 +106,7 @@ impl ConfigSnapshot {
     ///
     /// 本方法无显式参数；类型 `T` 决定校验和返回结构。
     pub fn deserialize<T: DeserializeOwned>(&self) -> ApplicationResult<T> {
-        serde_json::from_value((*self.value).clone()).map_err(|error| {
+        naml::strict::bind((*self.value).clone()).map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Config,
                 ApplicationPhase::Running,
@@ -135,7 +135,7 @@ impl ConfigSnapshot {
                 )
             })?;
         }
-        serde_json::from_value(current.clone()).map_err(|error| {
+        naml::strict::bind(current.clone()).map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Config,
                 ApplicationPhase::Running,

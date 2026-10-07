@@ -98,6 +98,10 @@ impl CandidatePublisher {
             result = prepare => result?,
         };
         let secret_changes = prepared.secrets.changed_ids(current.secrets());
+        // 材料准备可能等待外部 I/O；同值候选也必须先复验来源才能切换观察记录。
+        if let Some(source) = self.application.strict_source() {
+            source.revalidate()?;
+        }
         if crate::secret::candidate_fingerprint(&merged) == current.candidate_fingerprint()
             && secret_changes.is_empty()
         {
@@ -133,6 +137,10 @@ impl CandidatePublisher {
             }
         }
         let fixed_material_changes = prepared.secrets.changed_ids(self.initial.secrets());
+        // 组件预备资源仍在发布锁外；已知来源变化时丢弃整批预备资源并保持旧视图。
+        if let Some(source) = self.application.strict_source() {
+            source.revalidate()?;
+        }
         let version =
             self.application
                 .publish_prepared_config(current_version, prepared, cancel, || {

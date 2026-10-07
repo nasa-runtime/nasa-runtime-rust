@@ -11,17 +11,17 @@ fi
 # 返回：已知批次输出空格分隔的 `crate@version`；未知批次返回非零状态。
 release_items() {
   case "$1" in
-    runtime-core)
-      printf '%s\n' "nasaga-runtime-core@2.0.1"
+    configuration-core)
+      printf '%s\n' "naml@2.0.1 napp-macro@2.0.1"
       ;;
-    database-runtimes)
-      printf '%s\n' "nasaga-runtime@2.0.1 nasaga-runtime-pgsql@2.0.1"
+    configuration-bootstrap)
+      printf '%s\n' "config-boot@2.0.1"
       ;;
     application-runtime)
-      printf '%s\n' "napp@2.0.1"
+      printf '%s\n' "napp@2.0.2"
       ;;
     facade)
-      printf '%s\n' "nasa@2.0.1"
+      printf '%s\n' "nasa@2.0.2"
       ;;
     *)
       echo "未知发布批次: $1" >&2
@@ -35,9 +35,11 @@ release_items() {
 # 返回：已知批次输出空格分隔的 crate 名；未知批次返回非零状态。
 release_crates() {
   local item
+  local items
   local crate_names=()
 
-  for item in $(release_items "$1"); do
+  items="$(release_items "$1")" || return 1
+  for item in $items; do
     crate_names+=("${item%@*}")
   done
   printf '%s\n' "${crate_names[*]}"
@@ -48,8 +50,8 @@ release_crates() {
 # 返回：逐行输出批次标识与单调递增的拓扑阶段。
 release_stages() {
   cat <<'PLAN'
-runtime-core 1
-database-runtimes 2
+configuration-core 1
+configuration-bootstrap 2
 application-runtime 3
 facade 4
 PLAN

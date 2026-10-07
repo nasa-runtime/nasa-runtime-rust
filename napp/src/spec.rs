@@ -106,6 +106,7 @@ pub type WebRouterFactory = fn(WebBuildContext) -> ApplicationResult<axum::Route
 #[derive(Debug, Clone, Copy)]
 pub struct ApplicationSpec {
     components: &'static [ComponentId],
+    pub(crate) config_loader: Option<fn() -> naml::strict::Result<naml::strict::ConfigLoader>>,
     default_name: &'static str,
     #[cfg(feature = "web")]
     web_route_meta: Option<WebRouteMetaFactory>,
@@ -122,12 +123,24 @@ impl ApplicationSpec {
     pub const fn new(components: &'static [ComponentId]) -> Self {
         Self {
             components,
+            config_loader: None,
             default_name: "application",
             #[cfg(feature = "web")]
             web_route_meta: None,
             #[cfg(feature = "web")]
             web_factory: None,
         }
+    }
+
+    /// 业务作用：在 preflight 前选择严格来源装配，并固定随后重载使用的环境与权限。
+    /// 参数说明：`factory` 构造受信加载器；不能在业务 Hook 中补设此策略。
+    /// 返回：使用显式严格入口的静态描述，未设置时保持兼容加载边界。
+    pub const fn with_config_loader(
+        mut self,
+        factory: fn() -> naml::strict::Result<naml::strict::ConfigLoader>,
+    ) -> Self {
+        self.config_loader = Some(factory);
+        self
     }
 
     /// 业务作用：设置配置未声明名称时使用的编译期缺省名。

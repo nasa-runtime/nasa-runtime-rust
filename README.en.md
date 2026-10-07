@@ -10,6 +10,10 @@ Saga and ordered message processing support recoverable business workflows. Appl
 capabilities through Cargo features and use their databases and message systems to hold durable facts.
 Each component keeps explicit resource, transaction and failure boundaries.
 
+Configuration assembly supports nested defaults, naturally ordered filename imports and bounded,
+explainable candidates. Source observations remain separate from component application state; rejected
+candidates preserve the current view. See [Strict configuration assembly](#strict-configuration-assembly).
+
 Applications use the **`nasa` facade** as their entry point. The workspace contains implementation
 and macro crates; applications normally select facade features rather than assemble those crates
 individually. The framework builds on Tokio and existing infrastructure. It does not provide a new
@@ -98,18 +102,64 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,
 startup command and HTTP requests. It uses crates.io dependencies and does not require a local
 checkout of this workspace or any database, Redis or Nacos service.
 
+## Strict configuration assembly
+
+`nasa::yml::strict` combines a base file, profile, ordered imports and a fixed environment snapshot
+into one bounded candidate. It supports nested defaults, filename globs, target-type binding and
+field provenance. Select it before preflight with
+`#[nasa::application("log", "web", config = configuration)]` or
+`ApplicationSpec::with_config_loader`; see the [configuration factory](napp/README.md#启动前配置工厂)
+for its signature. Existing `YmlLoader` calls retain their file-reading scope and do not execute imports.
+
+```yaml
+application:
+  name: notification-service
+log:
+  path: ${LOG_PATH:/usr/local/logs/${application.name}}
+yml:
+  imports:
+    - file: /etc/conf/telegram*.yml
+      optional: false
+    - file: /config/*.yml
+      optional: true
+config_watch:
+  enabled: true
+```
+
+Each pattern supports `*` and `?` in the filename only. Files use natural order:
+`config-2.yml`, `config-02.yml`, then `config-10.yml`; later values override earlier ones.
+Separate pattern groups, exact files and remote documents retain their declared positions.
+Environment overlays apply last. A required pattern with no matches fails; optional absence keeps
+its observation target. Invalid content, duplicate identities or changing sources reject the candidate.
+
+`${aa.bb.cc}`, `${aa-bb-cc}` and `${AA_BB_CC}` can all fall back to `AA_BB_CC`.
+Exact tree paths and raw environment names take precedence; an empty environment value counts as a hit.
+Only the selected default branch is evaluated, and environment text is not recursively expanded.
+Strict environment/default values stay strings until checked target-type binding, preserving text such
+as `001234`. Default whitespace, literal keys and document validation differ from compatibility loading;
+follow the [integration guidance](docs/migration.en.md#select-strict-configuration-assembly).
+
+With `application,yml-watch` and the switch above, Service mode observes sources and pattern directories.
+Events and a 15-second reconciliation interval feed the same candidate flow; the interval is not an
+end-to-end application deadline. Rejection retains the current view. Equal values still reconcile
+changed sources. Snapshot versions, `app.config_observation()` revisions and component
+`Applied` / `ApplyFailed` / `RestartRequired` states represent separate facts. There is no cross-component
+rollback transaction. Frozen imports, environment, connections and trust roots require restart.
+See the detailed [naml contract](naml/README.md) and [configuration adapter](config-boot/README.md).
+
 ## Configuration and operations
 
 Application reads `zcf/application.yml` relative to the process working directory. The file must
 exist, even if its content is `{}`. Configuration precedence is the base file, explicit profile,
-remote overlay, then `APP__...` environment overrides. Credentials belong in the deployment
+ordered local/remote overlays, then `APP__...` environment overrides. Strict imports use the order
+described above; compatibility loading keeps its existing reading scope. Credentials belong in the deployment
 environment or a secret provider.
 
 Named datasources and clients establish explicit resource identities. An unknown resource reference

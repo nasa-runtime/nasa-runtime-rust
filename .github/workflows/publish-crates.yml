@@ -8,12 +8,12 @@ on:
         required: true
         type: choice
         options:
-          - runtime-core
-          - database-runtimes
+          - configuration-core
+          - configuration-bootstrap
           - application-runtime
           - facade
       confirm:
-        description: "输入 publish-<batch>，例如 publish-runtime-core"
+        description: "输入 publish-<batch>，例如 publish-configuration-core"
         required: true
         type: string
 
@@ -39,8 +39,8 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            runtime-core|database-runtimes|application-runtime|facade)
-              expected_ref="refs/heads/release/2.0.1"
+            configuration-core|configuration-bootstrap|application-runtime|facade)
+              expected_ref="refs/heads/release/2.0.2"
               expected_confirm="publish-${RELEASE_BATCH}"
               ;;
             *)
@@ -79,17 +79,7 @@ jobs:
         run: |
           release_crates="$(.github/scripts/release-crates.sh "$RELEASE_BATCH")"
           echo "RELEASE_CRATES=$release_crates" >> "$GITHUB_ENV"
-      - name: verify registry dependency policy
-        shell: bash
-        run: |
-          while IFS=$'\t' read -r owner dependency dependency_path; do
-            echo "$owner 仍通过 path 引用 $dependency: $dependency_path" >&2
-            exit 1
-          done < <(
-            cargo metadata --locked --no-deps --format-version 1 |
-              jq -r '.packages[] as $owner | $owner.dependencies[] | select(.path != null) | [$owner.name, .name, .path] | @tsv'
-          )
-      - name: verify previous batches use registry
+      - name: verify batch registry dependency policy
         env:
           RELEASE_BATCH: ${{ inputs.batch }}
         run: .github/scripts/verify-release-transition.sh "$RELEASE_BATCH"
@@ -207,7 +197,7 @@ jobs:
             fi
             mkdir -p "$local_dir" "$remote_dir"
             curl --fail --silent --show-error --location \
-              --user-agent "nasa-runtime-release/2.0.1" \
+              --user-agent "nasa-runtime-release/2.0.2" \
               --output "$remote_archive" \
               "https://crates.io/api/v1/crates/${crate_name}/${version}/download"
             actual_remote_checksum="$(sha256sum "$remote_archive" | awk '{print $1}')"
@@ -248,7 +238,7 @@ jobs:
             response_file="$RUNNER_TEMP/${crate_name}-${version}.json"
             version_url="https://crates.io/api/v1/crates/${crate_name}/${version}"
             http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-              --user-agent "nasa-runtime-release/2.0.1" "$version_url")"
+              --user-agent "nasa-runtime-release/2.0.2" "$version_url")"
 
             case "$http_code" in
               200)
@@ -277,7 +267,7 @@ jobs:
             while true; do
               if (( publish_attempt > 1 )); then
                 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                  --user-agent "nasa-runtime-release/2.0.1" "$version_url")"
+                  --user-agent "nasa-runtime-release/2.0.2" "$version_url")"
                 if [[ "$http_code" == "200" ]]; then
                   remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
                   if [[ "$remote_checksum" != "$local_checksum" ]]; then
@@ -331,7 +321,7 @@ jobs:
             published=false
             for _ in {1..30}; do
               http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                --user-agent "nasa-runtime-release/2.0.1" "$version_url")"
+                --user-agent "nasa-runtime-release/2.0.2" "$version_url")"
               if [[ "$http_code" == "200" ]]; then
                 published=true
                 break

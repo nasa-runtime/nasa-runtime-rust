@@ -5,6 +5,8 @@
 `nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
 应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+`yml` 提供嵌套默认值、有序通配符导入和可解释的配置候选；严格工厂把来源权限、观察与
+运行时应用状态纳入同一宿主。见[严格配置装配](#严格配置装配)。
 从 [最小服务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/quickstart.md#最小可运行服务)
 开始，或阅读 [架构说明](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/architecture.md)
 与 [接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md)。
@@ -126,7 +128,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = [
+nasa = { version = "2.0.2", features = [
     "application",
     "tx",
     "mapper",
@@ -420,7 +422,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = ["application", "grpc"] }
+nasa = { version = "2.0.2", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"
@@ -458,6 +460,45 @@ Batch 在工作负载前完成装配，不要求启动 Web。feature 名称以�
 
 停机由所属 owner 撤销准入并等待在途工作，旧受管句柄不能重新开放。诊断快照不发起后端探测；
 构造成功也不等于远端健康。各能力的健康策略、容量、事务与取消边界仍按组件合同执行。
+
+## 严格配置装配
+
+`yml` 导出 `nasa::yml::strict`，提供有界内存/文件装配、嵌套默认值、自然排序的文件名通配符、
+固定环境、目标类型绑定及字段来源。与 Application 组合时用启动前工厂选择，业务 Hook 无需自行
+重复读取配置。下面的入口需要 `application,yml,log,web`，需要本地热更新时再启用 `yml-watch`：
+
+```rust
+/// 业务作用：在应用启动前固定配置来源与读取策略。
+/// 参数说明：无。
+/// 返回：标准严格加载器；环境或策略非法时拒绝启动。
+fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader> {
+    nasa::yml::strict::ConfigLoader::standard()
+}
+
+/// 业务作用：将应用启动和停机交给统一生命周期。
+/// 参数说明：`_app` 是供业务登记资源与任务的受管应用。
+/// 返回：登记完成后由运行时继续准备资源，未通过门禁时不开放服务。
+#[nasa::application("log", "web", config = configuration)]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
+    Ok(())
+}
+```
+
+`yml.imports` 支持 `/etc/conf/telegram*.yml`、`/config/*.yml`；每组按文件名自然顺序合并，
+后面的文件覆盖前面，同组 `2` 先于 `02` 再到 `10`。不同声明保持原位置；只支持文件名 `*`、`?`，
+不递归目录。map import 必须显式填写 `optional`；必需零匹配、坏格式或读取变化拒绝候选。
+
+`${LOG_PATH:/usr/local/logs/${application.name}}` 支持嵌套默认值，空环境值仍命中。
+`${aa.bb.cc}`、`${aa-bb-cc}`、`${AA_BB_CC}` 均可回退到 `AA_BB_CC`；确切树值和原样环境名优先。
+严格入口按目标类型绑定，兼容入口仍保留原有标量与空白语义，`YmlLoader` 不自动执行 imports。
+
+启用 `config_watch.enabled: true` 的 Service 对实际来源与模式目录进行事件观察和周期补读；
+同值来源变化也更新 `app.config_observation()`，不等同于业务快照升级。权限、来源或材料失败保留
+旧视图；`Applied`、`ApplyFailed`、`RestartRequired` 记录各组件真实结果。固定的 imports、连接和
+信任根变化需重启；同值补读不保证重试失败的资源安装，也不提供跨组件统一回滚。
+详见[配置合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)、
+[配置中心](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/config-boot/README.md)与
+[接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#选择严格配置装配)。
 
 ## Feature 总表
 

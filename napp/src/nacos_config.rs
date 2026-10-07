@@ -121,61 +121,85 @@ impl ApplicationComponent for NacosConfigComponent {
                 return Ok(());
             }
 
-            let loader = YmlLoader::standard();
-            let local_tree = loader.load_tree().map_err(|error| {
-                nacos_error_src(
-                    ApplicationPhase::Bootstrap,
-                    "cannot reload local config tree",
-                    error,
-                )
-            })?;
-            // 二次读取必须与同步预读逐字节一致：否则 runtime 已按 A 创建、ConfigStore 却会记录 B。
-            if local_tree.get("application") != self.pinned_application.as_ref() {
-                return Err(ApplicationError::new(
-                    ComponentId::NacosConfig,
-                    ApplicationPhase::Bootstrap,
-                    "local `application.*` changed between preflight and bootstrap; \
+            let strict_source = context.application().strict_source();
+            let (local_tree, imports, merged, client) = if let Some(source) = &strict_source {
+                let plan = source.prepare(true)?;
+                let imports = plan.imports().to_vec();
+                let local_tree = context.application().config().value().clone();
+                let client = connect_config_client(&boot).await.map_err(|_| {
+                    nacos_error(
+                        ApplicationPhase::Bootstrap,
+                        "cannot connect strict config source",
+                    )
+                })?;
+                let loaded = config_boot::strict::load(plan, &client, &boot)
+                    .await
+                    .map_err(|_| {
+                        nacos_error(
+                            ApplicationPhase::Bootstrap,
+                            "strict remote configuration rejected",
+                        )
+                    })?;
+                (local_tree, imports, source.accept(loaded), client)
+            } else {
+                let loader = YmlLoader::standard();
+                let local_tree = loader.load_tree().map_err(|error| {
+                    nacos_error_src(
+                        ApplicationPhase::Bootstrap,
+                        "cannot reload local config tree",
+                        error,
+                    )
+                })?;
+                // 二次读取必须与同步预读逐字节一致：否则 runtime 已按 A 创建、ConfigStore 却会记录 B。
+                if local_tree.get("application") != self.pinned_application.as_ref() {
+                    return Err(ApplicationError::new(
+                        ComponentId::NacosConfig,
+                        ApplicationPhase::Bootstrap,
+                        "local `application.*` changed between preflight and bootstrap; \
                      restart the process instead of running with two different bootstrap values",
-                ));
-            }
-            let base_dir = loader.base_file_dir().to_path_buf();
-            let imports = resolve_imports(&local_tree, &base_dir, &boot).map_err(|error| {
-                nacos_error_src(
-                    ApplicationPhase::Bootstrap,
-                    "cannot resolve nacos imports",
-                    error,
-                )
-            })?;
-            validate_imports_enabled(&boot, &imports).map_err(|error| {
-                nacos_error_src(
-                    ApplicationPhase::Bootstrap,
-                    "invalid nacos import declaration",
-                    error,
-                )
-            })?;
-            let client = connect_config_client(&boot).await.map_err(|error| {
+                    ));
+                }
+                let base_dir = loader.base_file_dir().to_path_buf();
+                let imports = resolve_imports(&local_tree, &base_dir, &boot).map_err(|error| {
+                    nacos_error_src(
+                        ApplicationPhase::Bootstrap,
+                        "cannot resolve nacos imports",
+                        error,
+                    )
+                })?;
+                validate_imports_enabled(&boot, &imports).map_err(|error| {
+                    nacos_error_src(
+                        ApplicationPhase::Bootstrap,
+                        "invalid nacos import declaration",
+                        error,
+                    )
+                })?;
+                let client = connect_config_client(&boot).await.map_err(|error| {
                 nacos_error_src(
                     ApplicationPhase::Bootstrap,
                     "cannot connect nacos config center (enable nasa feature `nacos-sdk` for the real backend, or set nacos.enabled=false)",
                     error,
                 )
             })?;
-            let overlays = resolve_ordered_overlays_for_bootstrap(&client, &imports, &boot)
-                .await
-                .map_err(|error| {
+                let overlays = resolve_ordered_overlays_for_bootstrap(&client, &imports, &boot)
+                    .await
+                    .map_err(|error| {
+                        nacos_error_src(
+                            ApplicationPhase::Bootstrap,
+                            "cannot pull nacos overlays",
+                            error,
+                        )
+                    })?;
+                let merged = loader.load_tree_with_overlays(&overlays).map_err(|error| {
                     nacos_error_src(
                         ApplicationPhase::Bootstrap,
-                        "cannot pull nacos overlays",
+                        "cannot merge nacos overlays",
                         error,
                     )
                 })?;
-            let merged = loader.load_tree_with_overlays(&overlays).map_err(|error| {
-                nacos_error_src(
-                    ApplicationPhase::Bootstrap,
-                    "cannot merge nacos overlays",
-                    error,
-                )
-            })?;
+
+                (local_tree, imports, merged, client)
+            };
 
             // 连接配置中心之前必须已有独立 provider 信任根；远端 overlay 不能补造其自身认证的前置依赖。
             if merged.get("secret_providers") != local_tree.get("secret_providers") {
@@ -205,6 +229,9 @@ impl ApplicationComponent for NacosConfigComponent {
                 .application()
                 .set_bootstrap_config(merged, nacos_sources(&imports, &boot))
                 .await?;
+            if let Some(source) = context.application().strict_source() {
+                source.commit_observation();
+            }
             let client = Arc::new(client);
             if !context
                 .application()
@@ -323,6 +350,7 @@ impl ApplicationComponent for NacosConfigComponent {
             );
             let driver = WatchDriver {
                 receiver,
+                source: context.application().strict_source(),
                 client: Arc::clone(&client),
                 refs,
 
@@ -332,6 +360,7 @@ impl ApplicationComponent for NacosConfigComponent {
                 #[cfg(feature = "config-watch")]
                 local: crate::config_watch::LocalWatch::new(
                     context.application().config().value(),
+                    context.application().strict_source(),
                 )?,
                 readiness: contributor,
                 cancel: cancel.clone(),
@@ -400,6 +429,7 @@ impl ShutdownAction for NacosWatchShutdown {
 
 /// 一次 watch 循环运行所需的全部拥有状态。
 struct WatchDriver {
+    source: Option<Arc<crate::config_source::StrictSource>>,
     receiver: watch::Receiver<ConfigBundle>,
     /// 主动 freshness 探针与漏事件补拉使用的同一个受管 client。
     client: Arc<NacosConfigClient>,
@@ -560,27 +590,38 @@ impl WatchDriver {
     ///
     /// - `bundle`：本轮全量重拉的逐文档原文。
     async fn reload_once(&mut self, bundle: &ConfigBundle) -> ApplicationResult<Option<u64>> {
-        let overlays = config_boot::assemble_overlays_from_bundle_for_bootstrap(
-            &self.imports,
-            bundle,
-            &self.boot,
-        )
-        .await
-        .map_err(|error| {
-            nacos_error_src(
-                ApplicationPhase::Running,
-                "cannot assemble nacos overlays",
-                error,
+        let merged = if let Some(source) = &self.source {
+            let plan = source.prepare(false)?;
+            let loaded = config_boot::strict::assemble(plan, bundle, &self.boot).map_err(|_| {
+                nacos_error(
+                    ApplicationPhase::Running,
+                    "strict configuration candidate rejected",
+                )
+            })?;
+            source.accept(loaded)
+        } else {
+            let overlays = config_boot::assemble_overlays_from_bundle_for_bootstrap(
+                &self.imports,
+                bundle,
+                &self.boot,
             )
-        })?;
-        let loader = YmlLoader::standard();
-        let merged = loader.load_tree_with_overlays(&overlays).map_err(|error| {
-            nacos_error_src(
-                ApplicationPhase::Running,
-                "cannot merge nacos overlays",
-                error,
-            )
-        })?;
+            .await
+            .map_err(|error| {
+                nacos_error_src(
+                    ApplicationPhase::Running,
+                    "cannot assemble nacos overlays",
+                    error,
+                )
+            })?;
+            let loader = YmlLoader::standard();
+            loader.load_tree_with_overlays(&overlays).map_err(|error| {
+                nacos_error_src(
+                    ApplicationPhase::Running,
+                    "cannot merge nacos overlays",
+                    error,
+                )
+            })?
+        };
         #[cfg(feature = "config-watch")]
         let watch = self.local.prepare(&merged)?;
         let published = self
@@ -593,6 +634,9 @@ impl WatchDriver {
             .await?;
         #[cfg(feature = "config-watch")]
         self.local.install(watch, published.is_some());
+        if let Some(source) = &self.source {
+            source.commit_observation();
+        }
         Ok(published)
     }
 }
@@ -605,7 +649,7 @@ impl WatchDriver {
 fn read_nacos_bootstrap(application: &Application) -> ApplicationResult<NacosBootstrap> {
     let snapshot = application.config();
     if snapshot.value().get("nacos").is_none() {
-        return serde_json::from_value(Value::Object(Default::default())).map_err(|error| {
+        return naml::strict::bind(Value::Object(Default::default())).map_err(|error| {
             nacos_error_src(
                 ApplicationPhase::Bootstrap,
                 "cannot construct default nacos bootstrap",
@@ -676,7 +720,7 @@ pub(crate) fn validate_nacos_section(
     let Some(section) = tree.get("nacos") else {
         return Ok(());
     };
-    serde_json::from_value::<NacosBootstrap>(section.clone())
+    naml::strict::bind::<NacosBootstrap>(section.clone())
         .map(|_| ())
         .map_err(|error| nacos_error_src(phase, "invalid `nacos` configuration section", error))
 }

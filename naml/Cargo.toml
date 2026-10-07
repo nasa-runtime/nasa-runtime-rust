@@ -2,10 +2,11 @@
 # 远端配置由调用方作为内存 overlay 提供；本 crate 不连接配置中心，也不发布业务配置。
 [package]
 name = "naml"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "通用分层配置加载器，支持来源追踪、有界读取与可选精确文件 watcher"
+description = "分层配置加载器，支持嵌套表达式、自然排序导入、来源追踪、有界读取与目录观察"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -29,3 +30,10 @@ config = { version = "0.15", default-features = false, features = ["yaml", "json
 anyhow = "1"
 tracing = "0.1"
 notify = { version = "8.2", optional = true }
+yaml-rust2 = "0.11"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
+serde_path_to_error = "0.1"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

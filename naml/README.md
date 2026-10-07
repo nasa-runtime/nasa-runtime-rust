@@ -1,247 +1,196 @@
 # naml
 
-`naml` 是通用分层配置加载器与本地配置变化观察组件。它把主配置、profile、内存 overlay 和环境变量按固定优先级合并，解析 `${...}` 占位符后反序列化成业务强类型配置；tracked 入口同时返回本轮实际来源，避免加载、指纹和 watcher 各自猜测 profile 路径。
+`naml` 将文件、内存文档和环境变量装配成可绑定的配置候选，支持嵌套 `${...}` 默认值、有序本地导入与文件名通配符。严格入口同时返回字段来源、依赖关系、值指纹和目录观察计划，使加载、解释与观察使用同一轮来源事实。
 
-本地文件可设置单文件读取上限，读取与上限判定使用同一文件句柄。可选 `watch` feature 监听精确目标的父目录，既能观察临时文件加原子 rename，又不会让同目录日志或无关文件触发配置事件。
+它不连接配置中心、不读取 secret provider、不发布应用运行态。Nacos 文本由 `config-boot` 提供；监听事件只表示需要重读。业务校验、资源准备、发布和各组件应用结果由宿主负责。
 
-`naml` 不连接 Nacos，也不持有或发布应用的活动配置。watcher 只报告变化；候选校验、运行态资源准备、原子发布、回滚和审计由应用负责。Nacos 拉取与 overlay 组装由 `config-boot` / `nanacos` 完成。
+## 装配架构与职责
 
-直接使用加载能力：
+```text
+固定环境、主路径与 LoadPolicy
+  → 读取主文件和 profile → 校验并冻结有序来源计划
+  → 本地精确文件 / 自然排序的 glob 组 / 调用方提供的远端文档
+  → 按声明顺序合并 → APP__ 覆盖 → 求值嵌套表达式 → 按目标类型绑定
+  → LoadedConfig：配置值、来源解释、指纹和观察计划
+```
+
+来源计划决定允许读取什么，完整合并后的树决定业务表达式引用什么。需要配置中心时，
+`prepare` 先提供来源与连接所需的引导值，`finish` 在远端文本齐全后求值业务树；不会因被后续来源
+覆盖的业务占位符尚未命中而提前中止首拉。来源身份、读取预算或表达式校验失败时不返回部分候选。
+
+`LoadedConfig` 是一次装配结果。宿主先完成业务校验、材料准备和观察集准备，再决定是否发布；
+文件事件和指纹都不代表业务资源已经应用配置。内存文档入口完全由调用方供给材料，不根据其中的
+`yml.imports` 自动扩大读取权限。
+
+## 安装与入口选择
 
 ```toml
 [dependencies]
-naml = "2.0.0"
+naml = { version = "2.0.1", features = ["watch"] }
 ```
 
-需要文件变化观察时显式开启 `watch` feature：
+默认 feature 不包含文件监听。同步解析与装配不需要 Tokio 或 Nacos SDK。
 
-```toml
-[dependencies]
-naml = { version = "2.0.0", features = ["watch"] }
-```
+| 入口 | 文件与解析合同 |
+| --- | --- |
+| `YmlLoader` | 保留主文件、profile、有序 overlay、环境覆盖；不会自动执行 `yml.imports`。 |
+| `strict::ConfigLoader` | 显式严格文档、环境快照、类型绑定、预算和本地 imports 装配。 |
+| `ConfigLoader::memory` / `load_documents` | 只使用已取得的文档和环境；不会根据文档名称、imports 或 profile 自行打开文件。 |
+| `prepare` / `PreparedLoad::bootstrap` / `finish` | 先解析来源与必要引导依赖，取得远端文本后再求值最终业务树。 |
 
-## 运行架构与顺序不变量
+旧入口的整值环境回退和默认值保留标量推断；严格入口默认保留文本，再按目标字段类型绑定。两者均支持嵌套默认值、真实依赖环检测、字面量保护和失败时不修改输入。旧原地入口保留点号/方括号字面键，点分名称冲突仍按对象遍历顺序采用后遇到的标量。例如 `{"aa":{"bb":"nested"},"aa.bb":"literal","copy":"${aa.bb}"}` 按此顺序遍历时，`copy` 得到 `literal`，原字段均保留。严格入口则拒绝这些含糊键名。非法表达式在两类入口都被拒绝，保留未命中引用不放过非法结构。严格新入口不能通过更换类型名后不经配置迁移就视为完全兼容。
 
-加载流程分为四步：先解析主文件与活动 profile 的确定来源，再按“主文件 < profile < 内存 overlay < 环境变量”的固定优先级做叶子级深合并，随后解析 `${...}` 占位符，最后反序列化为业务类型。`load_tracked` 在返回业务值的同时返回这一轮实际来源，使指纹、归档和 watcher 使用同一来源事实。
+兼容入口也固定一次环境映射，但不套用严格快照的全环境数量或字节限制；无关环境项不会仅因总量使普通配置失败，实际配置及表达式展开仍受预算约束。严格 `EnvironmentSnapshot::capture/from_pairs` 保留独立限额。兼容进程快照忽略不可解码项，严格快照在实际访问非法值时报告编码错误。
 
-watcher 与加载流程相互独立。它以非递归方式观察精确目标的父目录，把底层事件分类为 `Base`、`Profile` 或 `Dependency`；应用收到事件后重新加载和校验候选配置，只有候选可用时才准备资源并发布。成功加载后可调用 `reconcile` 更新来源与附加依赖。
+| 调用方需要核对的行为 | 兼容入口 | 严格入口 |
+| --- | --- | --- |
+| 默认值边缘空白 | 求值前裁剪默认源码两侧空白，包含内嵌和嵌套分支 | 保留默认源码空白 |
+| 环境与默认文本 | 整值沿用标量推断，内嵌保留文本；空环境值仍命中 | 默认保留 String，绑定到目标字段时受检转换 |
+| 键名与冲突 | 保留既有字面键及点分索引覆盖规则 | 拒绝含糊路径和归一化环境覆盖冲突 |
+| 文件格式与来源 | 沿用 `YmlLoader` 的兼容范围 | 重复键、非法格式、必需来源缺失和读取变化均拒绝候选 |
+| imports | 由调用方显式解析并提供 overlay | 文件加载器执行固定来源计划；内存入口不自动执行 |
 
-`reconcile` 先挂载全部新增目录，再一次发布新的精确目标，最后撤销失效目录。新增目录监听失败时旧目标和旧观察保持有效；撤销旧目录失败只留下被精确过滤的额外观察，不会把旧文件重新认作配置来源。符号链接路径同时保留声明节点与当前真实来源，因此 Kubernetes ConfigMap 换代、文件链接替换和真实文件修改都能进入同一重新加载流程。
+完整迁移步骤见[接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#选择严格配置装配)。
 
-`naml` 不提供候选配置去抖、业务校验、运行态资源准备、原子配置发布或回滚。应用必须在自身配置发布边界内完成这些动作，不能把收到文件事件等同于新配置已经生效。
-
-## 本地文件加载
+## 严格文件装配
 
 ```rust
-use naml::YmlLoader;
+use naml::strict::ConfigLoader;
 
 #[derive(serde::Deserialize)]
-struct AppConfig {
-    server: ServerConfig,
-}
-
+struct Server { host: String, port: u16 }
 #[derive(serde::Deserialize)]
-struct ServerConfig {
-    port: u16,
-}
+struct Settings { server: Server }
 
-fn load() -> anyhow::Result<AppConfig> {
-    YmlLoader::standard()
-        .base_file("config/application.yml")
-        .max_file_bytes(16 * 1024 * 1024)
-        .load()
-}
+let loader = ConfigLoader::standard()?;
+let loaded = loader.load()?;
+let settings: Settings = loaded.bind()?;
+let report = loaded.report();
 ```
 
-## 来源追踪
-
-需要计算配置指纹、归档或建立热更新 watcher 时，使用 tracked 入口，不要在应用里重复推导 profile：
-
-```rust
-use naml::YmlLoader;
-
-let loader = YmlLoader::standard()
-    .base_file("config/application.yml")
-    .profile_file_pattern("config/application-{profile}")
-    .max_file_bytes(16 * 1024 * 1024);
-
-let loaded = loader.load_tracked::<AppConfig>()?;
-for path in loaded.sources.loaded_files() {
-    println!("loaded {}", path.display());
-}
-let config = loaded.value;
-```
-
-`loaded_files()` 只包含本轮实际读取的主文件和活动 profile；`watch_files()` 还包含当前 profile 可能在未来创建的格式候选。
-
-## 文件变化观察
-
-启用 `watch` feature 后，可以把 naml 来源与应用自己的证书、策略或 schema 文件放进同一个精确 watcher：
-
-```rust
-use naml::watch::YmlWatcher;
-use naml::YmlLoader;
-
-let loader = YmlLoader::standard().base_file("config/application.yml");
-let sources = loader.local_sources()?;
-let dependencies = vec!["config/server.pem".into()];
-let (event_sender, event_receiver) = std::sync::mpsc::channel();
-let mut watcher = YmlWatcher::new(&sources, &dependencies, move |event| {
-    let _ = event_sender.send(event);
-})?;
-
-// 应用自己的去抖工作线程消费事件，再执行候选解析、校验和原子发布。
-let event = event_receiver.recv()?;
-println!("configuration source changed: {:?}", event.kind);
-
-// 成功解析新配置后再对账依赖；新增目录监听失败时旧目标仍保持有效。
-let next_sources = loader.local_sources()?;
-let next_dependencies = vec!["config/rotated/server.pem".into()];
-watcher.reconcile(&next_sources, &next_dependencies)?;
-```
-
-底层文件系统可能为一次写入报告多个事件，因此 handler 应执行去抖和内容去重。`YmlWatcher` 不自动调用 loader，也不替应用发布配置。
-
-## profile 配置
-
-适合 `application.yml` + `application-dev.yml` 这种场景，后者覆盖前者。`base_file` 只修改主文件；
-主文件不在默认 `zcf/` 目录时，还必须同步设置 profile pattern。
-
-profile pattern 指向的精确文件如果已经存在，文件必须带 `yaml`、`yml`、`json` 或 `toml` 扩展名；
-缺少扩展名或格式不受支持时加载失败，不会静默回落到其它候选。
-
-```rust
-# 启动进程前设置：APP_PROFILE=dev
-
-let cfg: AppConfig = naml::YmlLoader::standard()
-    .base_file("config/application.yml")
-    .profile_file_pattern("config/application-{profile}")
-    .load()?;
-```
-
-## overlay 配置
-
-适合把 Nacos 或内存配置插入到本地配置之后继续合并。
-
-```rust
-use naml::{ConfigFormat, YmlLoader, YmlOverlay};
-
-let remote = YmlOverlay::required(
-    "nacos:app.yml",
-    "server:\n  port: 18080\n",
-    ConfigFormat::Yaml,
-);
-
-let cfg: AppConfig = YmlLoader::standard()
-    .base_file("config/application.yml")
-    .load_with_overlays(&[remote])?;
-```
-
-## import 解析
-
-`naml` 只把 import 解析成中性描述，不拉远端。
-
-```rust
-let loader = naml::YmlLoader::standard().base_file("config/bootstrap.yml");
-let tree = loader.load_tree()?;
-let imports: Vec<naml::YmlImport> =
-    naml::parse_imports_from_tree(&tree, loader.base_file_dir());
-```
-
-`YmlImport::File` 由本地文件加载，`YmlImport::Nacos` 交给 `config-boot` 转成 `nanacos::ConfigRef`。
-
-## 边界
-
-- 支持 yaml/json/toml 三种格式。
-- 合并是叶子级深合并，后加载的 overlay 覆盖前面的同名叶子。
-- `${...}` 占位符解析在最终树上执行。
-- `max_file_bytes` 分别约束主文件和活动 profile，不约束调用方提供的内存 overlay。
-- 本地文本与底层 `config` 文件源保持一致：移除 UTF-8 BOM，非法 UTF-8 字节替换为 U+FFFD 后再解析。
-- 默认不引入 `notify`；只有显式开启 `watch` feature 才编译文件观察能力。
-- 不做热替换策略；热刷新由应用收到文件事件或新 overlay 后重新调用 loader。
-
-## 观测与失败语义
-
-- watcher handler 收到来源类别和命中的事件路径；一次写入可能产生多个底层事件，组件不承诺恰好一次，应用应按内容指纹去抖。
-- watcher 后端异常、增量监听回退异常和旧目录撤销异常通过 `tracing` 记录；组件不内置指标、日志订阅器或告警系统。
-- 主文件缺失、读取失败、超过 `max_file_bytes`、格式不受支持、必需 overlay 无效或强类型反序列化失败时，加载不返回部分配置。
-- 精确 profile 路径已存在但缺少受支持扩展名时失败闭合；不存在的 profile 仍是可选来源，其格式候选会进入 watcher 目标。
-- watcher 初始化无法观察任一必需目录时整体失败；`reconcile` 无法观察新增目录时返回错误并保留旧目标。
-
-## YML 配置与使用
-
-`naml` 没有固定业务根节点，它会把应用自己的 yml 反序列化成任意 `serde::Deserialize` 结构。默认本地文件是 `zcf/application.yml`；只有显式设置 `APP_PROFILE` 时才加载 `application-{profile}.yml`；环境变量 `APP__A__B` 会覆盖 `a.b`。
-
-完整示例：
+默认主文件为 `zcf/application.yml`。加载器创建时固定环境及绝对路径；同一实例重载不重新捕获进程环境。自定义主路径和 profile 模板分别通过 `base_file`、`profile_pattern` 指定。配置改变使用新候选，不修改上一次结果。
 
 ```yaml
+application:
+  name: notification-service
+log:
+  path: ${LOG_PATH:/usr/local/logs/${application.name}}
 server:
-  host: 0.0.0.0
-  port: 8080
-
-mysql:
-  url: ${APP_MYSQL_URL}
-  max_connections: 16
-
-redis:
-  url: ${APP_REDIS_URL}
-  namespace: order-service
-  profile: production
-
+  host: 127.0.0.1
+  port: ${PORT:8080}
 yml:
   imports:
     - file: common.yml
       optional: false
-    - nacos: order.yml
-      group: DEFAULT_GROUP
+    - file: /etc/conf/telegram*.yml
+      optional: false
+    - file: /config/*.yml
       optional: true
-      file_extension: yaml
 ```
 
-字段说明：
+顺序固定为主文件、活动 profile、按声明顺序展开的导入、环境覆盖。映射深合并，数组整体替换，null 保留为显式值；空映射不清空已有子树。相对导入路径基于主文件目录，不能含 `..`，不会执行 shell、`~` 或变量命令替换。
 
-| 键 | 说明 |
-| --- | --- |
-| `APP_PROFILE` | 环境变量；非空时额外加载 `application-{profile}.yml`。 |
-| `APP__X__Y` | 环境变量覆盖 `x.y`，优先级最高。 |
-| `yml.imports[].file` | 本地 overlay 文件路径；相对路径按主配置文件目录解析。 |
-| `yml.imports[].nacos` | 远端配置 data id 字符串；只被解析为中性 import，不在本 crate 内拉取。 |
-| `optional` | `false` 表示源缺失或内容为空即启动失败；`true` 表示缺失可跳过。 |
-| `file_extension` | 覆盖内容格式，可选 `yaml`/`yml`/`json`/`toml`。 |
+严格 map 导入必须显式声明布尔 `optional`，file 与 nacos 互斥，未知字段拒绝。字符串形式保留 `file:`、`optional:file:`、`nacos:`、`optional:nacos:` 语义。`optional` 只允许来源缺失：已经取得的空白、坏编码、坏格式、错误文件类型、超限及身份变化均拒绝整轮。
 
-启动代码：
+本地 file 声明不接受冒号协议地址；字符串形式先移除 `file:` 标记，再与 map 形式执行相同校验。精确文件和模式的扩展名都在声明阶段校验，只允许 YAML/YML、JSON、TOML；无扩展名按 YAML 处理。`optional: true`、文件不存在或模式零匹配均不会放过不支持的扩展名。
+
+导入文件不能声明 `yml`、`nacos` 或 `secret_providers` 控制段；不递归执行导入。独立本地 `load()` 遇到必需 Nacos 来源会失败，应由 `config-boot::strict` 提供远端文本。
+
+## 通配符与覆盖顺序
+
+只支持确定目录内文件名部分的 `*`、`?`，完整模式路径最多 4096 字节。`?` 匹配一个 Unicode 标量值，`*` 不跨目录；拒绝 `**`、目录通配、字符组、大括号扩展与模式元字符转义。前导点文件只在模式显式以点开头时匹配。`*.yml` 会匹配 `draft.tmp.yml`，因此临时文件应使用不匹配的后缀再 rename。
+
+每条模式独立按完整文件名自然排序：连续 ASCII 数字段比较数值，等值时短数字段在前，其余部分比较原始 UTF-8 字节，不折叠大小写、locale 或 Unicode 组合形式。例如 `config-1.yml`、`config-2.yml`、`config-02.yml`、`config-10.yml` 依次加载，后者覆盖前者。多个模式组与精确文件保持声明位置，不重新全局排序。
+
+必需模式零匹配失败，可选模式零匹配保留目录观察需求。目录枚举遇到非 UTF-8 名称拒绝；匹配到目录、FIFO 或其它非普通文件也拒绝。按真实身份去重，Unix 下包括硬链接；来源链接切换、读取前后身份/内容或匹配集合改变时，不返回旧候选。
+
+`FilePattern::expand_names` 允许具有独立隔离读取者的应用复用同一匹配和排序规则，不必把文件系统读取移回业务线程。
+
+## 表达式、字面量和类型
+
+查找顺序为确切配置路径、原样环境名称、规范化环境名称、默认值。当前字段自引用只跳过树候选。规范化把点号和连字符换成下划线并转 ASCII 大写，因此 `${aa.bb.cc}`、`${aa-bb-cc}`、`${AA_BB_CC}` 都能命中 `AA_BB_CC`；确切树值或原样环境键仍优先。空环境值也属于命中。
+
+- `${LOG_PATH:/usr/local/logs/${application.name}}`：支持默认分支嵌套；环境已设置时不访问默认分支依赖，也不留下多余右括号。
+- `${A:${B:}}`：空默认值合法；`${URL:https://example.invalid/a:b}` 的后续冒号是正文。
+- `$${name}`：得到字面 `${name}`；环境原文和受保护字符串中的表达式不会再次执行。反斜线没有另设转义语义。
+- `${servers[0].host}`：支持数组元素只读引用。拒绝对象、数组、null 在标量位置复制，区分缺失与显式 null。
+- key 两侧空白被去除；严格默认文本保留空白。兼容入口在求值前去除默认分支源码两侧空白，整值、内嵌和嵌套分支使用同一规则；引号内空白、引用取得的树值及环境原值不会因此裁剪。
+- 嵌套默认分支只有一个引用时沿用该引用已确定的类型；内嵌表达式不会因进入默认分支而启用整值标量推断。
+- 未采用默认分支仍必须结构合法，但不触发环境或字段访问；`${${NAME}}` 等动态 key 不支持。
+
+`LoadPolicy.placeholders=false` 原样保留文本；`preserve_unresolved=true` 仅保留结构合法的未命中引用。路径提示 `Literal` 保护子树，较具体路径的 `Resolve` 可以恢复解析。非法语法、循环和超限不会被保留模式吞掉。
+
+严格树 API 中环境覆盖、环境回退与默认文本默认是 String，树标量引用保留原类型。`LoadedConfig::bind`、`bind_at` 和 `strict::bind` 根据目标 `u16`、bool、String 等受检转换：端口 `"9090"` 可绑定 u16，密码 `"001234"` 保持原文。整数越界、非有限浮点与非法布尔文本失败，错误不包含原值。动态 Value、Serde 的无标签中间表示仍保留文本；直接要求原生 JSON 数值的消费者需要原生文档标量或受信 `ValueHint::Scalar`。`String` 提示要求文本，`Json` 提示显式解析有界 JSON 值。
+
+## 内存文档与环境策略
 
 ```rust
-#[derive(serde::Deserialize)]
-struct AppConfig {
-    server: ServerConfig,
-}
+use naml::{ConfigFormat, strict::{ConfigLoader, EnvironmentSnapshot, SourceDocument}};
 
-#[derive(serde::Deserialize)]
-struct ServerConfig {
-    host: String,
-    port: u16,
-}
-
-let cfg: AppConfig = naml::YmlLoader::standard().load()?;
+let environment = EnvironmentSnapshot::from_pairs([
+    ("PASSWORD".to_owned(), "001234".to_owned()),
+    ("APP__SERVER__PORT".to_owned(), "9090".to_owned()),
+])?;
+let document = SourceDocument::new("application", ConfigFormat::Yaml,
+    "server:\n  port: ${PORT:8080}\npassword: ${PASSWORD}\n");
+let loaded = ConfigLoader::memory(environment).load_documents(&[document])?;
 ```
 
-`naml` 只负责读本地、合并 overlay、解析占位符和反序列化。涉及 Nacos 的拉取、watch 和 overlay 重组时，应用应组合 `config-boot` 与 `nanacos`。
+`environment_overlay` 与 `environment_fallback` 独立控制 `APP__` 结构覆盖和 `${...}` 回退；`allow_overlay`、`allow_fallback` 分别约束允许名称。快照查询不会回到真实环境，非法编码值在被访问时拒绝。空前缀分隔符表示单下划线前缀和平面键。
 
-## Application 接入
+默认环境值是文本；`structured_environment=true` 显式允许 JSON 对象/数组及数字索引。覆盖现有数组元素必须在范围内，不创建稀疏数组；同层重复、大小写归一碰撞和父子路径冲突均拒绝。对象数字键与数组索引是不同路径身份。
 
-门面开启 `application,yml-watch`，配置 `config_watch.enabled: true`；直接依赖 `napp` 时对应
-`config-watch` feature。Application 持有本地观察 owner，最多跟踪 128 个配置与材料依赖，事件
-合并和固定周期补读进入统一候选流程。Batch 拒绝启用持续监听。
+## 文档与预算
 
-```text
-本地文件事件或周期补读 → 重建本地配置并保留有效远端 overlay → 准备候选材料与观察集
-                                                                       ↓
-                                                     发布视图 → 撤销旧观察
+严格入口接受 YAML/YML、JSON、TOML，一来源一映射文档，要求 UTF-8，可有 BOM。显式 `{}` 合法；仅注释、空白、null/数组根、多文档流、重复键和非字符串 YAML 键拒绝。YAML 支持普通锚点及有界别名复制，拒绝 merge key 与未知 tag。引号保护的 `"<<"` 是普通键。严格键名不接受点号、方括号、空键或控制字符，避免路径歧义；使用嵌套映射表达层级。
+
+`ProfileSelection` 可指定名称、使用环境或显式关闭。严格 profile 默认缺失报错、多个候选报歧义；依次探测精确路径及 toml/json/yaml/yml，策略可显式放宽。名称拒绝路径分隔符、`..` 和控制字符。无扩展名严格文件按 YAML 解析。
+
+默认 `LoadLimits`：单来源 4 MiB，总输入 32 MiB，声明 128，模式 64，来源 128，每模式匹配 64，目录枚举 4096，深度 64，节点 100000，单文本 1 MiB，累计表达式展开 16 MiB，输出及解析文本 32 MiB，依赖访问 200000，观察目录 256。别名复制、被覆盖来源及环境都计入相应预算。环境快照另外限制 4096 项、2 MiB。加载器策略来自调用方，导入文档不能提高限制。
+
+读取、解析和求值在可检查边界响应取消标记；同步库不能硬终止内核文件系统等待。需要硬期限的宿主应使用可终止读取进程，再通过内存文档入口装配。`allowed_roots` 限制符号链接解析后的真实来源与观察祖先，但不提供针对恶意本地重命名竞争的文件系统沙箱。
+
+## 来源解释与观察
+
+`LoadedConfig` 提供有序 `sources`（类别、声明索引、组内次序）、字段 `origins` 覆盖记录、字段依赖、环境访问关系、环境覆盖位置与确切变量名 `environment_origins`，以及 `report()` 规模摘要。绑定错误包含字段路径；解析器可用时提供来源 ID 与行列；依赖环保留闭环路径。默认 Debug/Display 不回显正文、环境值、来源路径或摘要。显式访问名称、路径、环境名与指纹时，调用方负责展示权限，不应直接写公开日志或指标。
+
+值 `fingerprint()` 用于候选值去重；`source_fingerprint()` 包含有序文档身份和观察目标，`watch.fingerprint()` 包含来源身份、匹配集合、缺失候选和观察目标。两者必须分开，即使值未变化也要对账新来源。
+
+```rust
+use naml::strict::{ConfigLoader, ConfigWatcher};
+let loader = ConfigLoader::standard()?;
+let loaded = loader.load()?;
+let mut watcher = ConfigWatcher::new(&loaded.watch, loader.load_policy().clone(), |_| {
+    // 只向宿主发合并唤醒信号，重读和业务发布在宿主任务中执行。
+})?;
+let next = loader.load()?;
+watcher.reconcile(&next.watch)?;
+let health = watcher.health();
 ```
 
-没有 Nacos 时仍可独立运行。材料解析与监听使用同一活跃消费者集合：禁用计划的独占密钥及无
-消费者的 provider 引导文件不读取、不监听；共享 ID 仍有活跃引用时继续保留。新增观察先准备，
-视图发布后再撤旧观察；坏候选保持有效监听，由有预算的周期补读发现尚未就绪的新材料。
+回调使用预计算别名和相同文件名匹配器，不执行文件读取或 canonicalize。缺失目录观察最近可用祖先，逐级出现后重建观察。事件不保证恰好一次；`Rescan`、`BackendError` 和健康状态要求宿主补读或重建。新目录全部挂载后才切换目标，旧观察撤销失败保留并记录，后续对账继续清退。宿主仍需要周期补读；后端故障后应重建 watcher。
 
-配置与完整生命周期边界见 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+## Application 与配置中心
+
+```rust,ignore
+/// 业务作用：在 preflight 前固定配置权限和环境。
+/// 参数说明：无。
+/// 返回：标准严格来源加载器。
+fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader> {
+    nasa::yml::strict::ConfigLoader::standard()
+}
+
+/// 业务作用：将业务初始化登记到统一生命周期。
+/// 参数说明：`app` 是受管应用。
+/// 返回：登记成功后继续启动。
+#[nasa::application("log", "web", config = configuration)]
+async fn main(app: nasa::Application) -> anyhow::Result<()> { Ok(()) }
+```
+
+手动入口使用 `ApplicationSpec::with_config_loader(configuration)`，与宏共享 preflight。不指定工厂时保留兼容文件读取范围。`config-boot::strict::prepare/load/assemble` 将 `nacos.imports` 放在 `yml.imports` 前，校验归一后的远端身份、必需文档、顺序与格式；首拉前只求值必要引导依赖。
+
+宿主冻结主路径、profile、环境、imports、模式、连接与信任根。运行期只允许固定模式的匹配集合和业务正文变化；来源权限变化拒绝候选并要求重启。启用 `application,yml-watch` 和 `config_watch.enabled: true` 后，本地事件与 15 秒周期补读进入同一候选流程，Batch 拒绝持续监听。来源失败保留旧视图和观察；值相同仍更新来源观察。视图发布与全部组件应用成功不同，组件分别记录 Applied、ApplyFailed、RestartRequired，不承诺跨组件统一回滚。
+
+`app.config_observation()` 提供独立的来源观察序号和规模摘要。候选拒绝时不推进；相同值的来源重命名或远端正文变化仍可推进观察序号，不伪装成业务配置版本。
+
+组件状态为 `ApplyFailed` 时，同值补读可能被值指纹去重，并不保证再次安装失败目标。确认资源条件恢复后应重启应用重新装配；`RestartRequired` 同样通过重启生效。来源解析失败则保留当前视图，并继续事件观察与周期补读。

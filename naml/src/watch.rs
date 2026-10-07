@@ -31,10 +31,10 @@ pub struct YmlWatchEvent {
 
 #[derive(Clone, Debug)]
 /// 业务作用：汇总一个配置目标的逻辑路径、真实别名和观察目录，使符号链接换代仍可精确归因。
-struct WatchPathIdentity {
-    logical: PathBuf,
-    aliases: HashSet<PathBuf>,
-    directories: HashSet<PathBuf>,
+pub(crate) struct WatchPathIdentity {
+    pub(crate) logical: PathBuf,
+    pub(crate) aliases: HashSet<PathBuf>,
+    pub(crate) directories: HashSet<PathBuf>,
 }
 
 impl WatchPathIdentity {
@@ -43,7 +43,7 @@ impl WatchPathIdentity {
     /// 参数说明：`path` 是 loader 来源、应用依赖或 notify 事件路径。
     ///
     /// 返回：稳定逻辑路径、全部等价别名，以及必须观察的逻辑和真实父目录。
-    fn new(path: &Path) -> Self {
+    pub(crate) fn new(path: &Path) -> Self {
         let logical = absolute_watch_path(path);
         let mut aliases = HashSet::new();
         let mut visited = HashSet::new();

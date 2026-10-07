@@ -339,6 +339,19 @@ fn release_cancelled_step(application: &Application, step: ActiveStep) {
 }
 
 impl ApplicationRunner {
+    /// 业务作用：把同步引导权威移交给后续组件，业务 Hook 无权替换。
+    /// 参数说明：`source` 是可选严格配置来源。
+    /// 返回：登记完成的 runner 或来源冲突错误。
+    pub(crate) fn with_strict_source(
+        self,
+        source: Option<Arc<crate::config_source::StrictSource>>,
+    ) -> ApplicationResult<Self> {
+        if let Some(source) = source {
+            self.application.set_strict_source(source)?;
+        }
+        Ok(self)
+    }
+
     /// 业务作用：将未排干消费器的整段依赖所有权延迟到实际退出后释放。
     /// 参数说明：`cleanup` 为尚未执行清理的动作、资源和组件集合。
     /// 返回：同步关闭外部借用；所有来源和受管任务都释放守卫后才析构依赖，不声明异步清理成功。

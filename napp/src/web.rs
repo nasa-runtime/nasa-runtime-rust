@@ -2098,7 +2098,7 @@ pub(crate) fn validate_server_section(
     tree: &serde_json::Value,
     phase: ApplicationPhase,
 ) -> ApplicationResult<()> {
-    let root: WebConfigRoot = serde_json::from_value(tree.clone()).map_err(|error| {
+    let root: WebConfigRoot = naml::strict::bind(tree.clone()).map_err(|error| {
         ApplicationError::with_source(
             ComponentId::Web,
             phase,

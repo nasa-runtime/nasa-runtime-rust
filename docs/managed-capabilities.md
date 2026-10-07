@@ -31,7 +31,7 @@
 | Schema Registry | `kafka-schema-registry`；无需声明 Kafka 消费组件 | `schema_registries.<name>` | `schema_registry(name)` |
 | 外部 secret | `secret-vault` | `secret_providers` 与 provider fragment | 同代 `ConfigView::secrets()` |
 | TLS HTTP | `secret-http` | `http_clients.<name>` | `http_client(name)` |
-| 本地 watch | `yml-watch` | `config_watch.enabled: true` | 复用配置视图订阅与 reload 状态 |
+| 严格配置与本地 watch | `yml` / `yml-watch` | 启动前 `config` 工厂；监听另设 `config_watch.enabled: true` | `config_view()`、`config_observation()` 与逐组件应用状态 |
 | WS Redis/Kafka 集群 | `ws-redis` / `ws-kafka`；来源组件与 `"ws"` | `configure_ws_redis` / `configure_ws_kafka` | `ws()` |
 | Web 认证/加密 | `web-auth` / `web-crypto`；`"web"` | 既有路由安全计划 | 受管 Web 路由 |
 | 集群调度 | `scheduling-cluster`；`"redis","scheduling"` | 既有调度计划 | `scheduling()` |
@@ -54,6 +54,10 @@ Batch 先装配所选资源，再进入工作负载。
 组件状态记录期望配置和最后成功版本；`RestartRequired`、`ApplyFailed` 不会被无关更新清除。
 恢复到实际生效配置可以解除重启要求。相同 fingerprint 且材料未变的候选不会隐含触发重试。
 业务操作应固定一次 `app.config_view()`，从中同时读取配置和凭据，避免两次独立加载跨代。
+
+严格工厂使来源计划、字段解释和观察来自同一轮装配；未选择工厂的兼容入口保持原有读取范围。
+固定模式内文件按自然顺序合并，来源失败不发布部分树；同值来源变化仍更新观察序号及目录目标，
+不增加业务配置版本。环境、imports、模式、连接和信任根在启动时固定，运行期候选不能扩大权限。
 
 Saga 结果事务把安全快照 generation 与合同摘要一起冻结。成功发布任何新安全快照都会使旧请求资格
 失效，即使材料随后恢复为相同字节；watcher 只能基于新代重新确认后续请求。失败或无变化候选不发布，
@@ -80,7 +84,8 @@ secrets:
 
 provider 还支持 `openbao_kv2`。bootstrap token 只能来自独立 env/file，不从该 provider 自身获取。
 远端材料在首个消费者之前异步准备，总预算 15 秒；单 provider 默认 3 秒，可配置至 10 秒，响应上限最大 1 MiB。
-本地监听有 owner，最多监听 128 个配置/secret/引导材料路径，采用合并事件与周期补读。
+本地监听有 owner，兼容配置及 secret/引导材料路径上限为 128；严格来源目录另受 `LoadLimits`
+的观察目录预算限制，默认 256。事件使用固定 100 ms 窗口合并，另每 15 秒补读，不代表生效期限。
 候选监听集准备成功后才切换当前配置，切换完成后撤销旧监听集。Batch 拒绝启用持续文件监听。
 材料解析与文件观察使用同一活跃消费者集合：禁用计划的独占密钥及无消费者 provider 的引导文件
 不读取、不监听；共享 ID 仍有活跃引用时继续保留。观察范围不能因无效候选而替换成不可用的新集合。

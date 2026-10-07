@@ -294,7 +294,7 @@ pub(crate) fn validate_log_section(tree: &Value, phase: ApplicationPhase) -> App
     let Some(section) = tree.get("log") else {
         return Ok(());
     };
-    serde_json::from_value::<LogConfig>(section.clone())
+    naml::strict::bind::<LogConfig>(section.clone())
         .map(|_| ())
         .map_err(|error| {
             ApplicationError::with_source(
@@ -344,7 +344,7 @@ fn optional_log_config(
     let Some(section) = tree.get("log") else {
         return Ok(None);
     };
-    serde_json::from_value(section.clone())
+    naml::strict::bind(section.clone())
         .map(Some)
         .map_err(|error| {
             ApplicationError::with_source(
@@ -365,7 +365,7 @@ fn optional_log_config(
 fn log_config_or_default(tree: &Value, phase: ApplicationPhase) -> ApplicationResult<LogConfig> {
     match optional_log_config(tree, phase)? {
         Some(cfg) => Ok(cfg),
-        None => serde_json::from_value(Value::Object(Default::default())).map_err(|error| {
+        None => naml::strict::bind(Value::Object(Default::default())).map_err(|error| {
             ApplicationError::with_source(
                 ComponentId::Log,
                 phase,

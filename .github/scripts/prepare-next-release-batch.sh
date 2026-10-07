@@ -10,7 +10,7 @@ completed_batch="$1"
 cargo_bin="${2:-cargo}"
 repository_root="$(cd "$(dirname "$0")/../.." && pwd)"
 release_script="$repository_root/.github/scripts/release-crates.sh"
-completed_crates="$($release_script "$completed_batch")"
+completed_crates="$("$release_script" "$completed_batch")"
 if [[ -z "$completed_crates" ]]; then
   echo "未知或空发布批次: $completed_batch" >&2
   exit 1
@@ -23,6 +23,8 @@ fi
 transition_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/prepare-release-${completed_batch}.XXXXXX")"
 crate_names_file="$transition_root/crates.txt"
 next_manifest="$transition_root/Cargo.toml"
+metadata_file="$transition_root/metadata.json"
+direct_paths_file="$transition_root/direct-paths.tsv"
 
 # 业务作用：只清理本次批间转换生成的 crate 清单和候选 manifest。
 # 参数说明：无。
@@ -33,6 +35,25 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# 本工具仅转换根 patch；直接依赖可能继承 workspace 或 target 配置，必须先明确修改所属声明。
+# 在任何 manifest 写入前拒绝这些声明，避免只解除 patch 就把混合来源误报成 registry。
+"$cargo_bin" metadata --locked --no-deps --format-version 1 \
+  --manifest-path "$repository_root/Cargo.toml" > "$metadata_file"
+jq -r --arg completed "$completed_crates" '
+  ($completed | split(" ")) as $names
+  | .packages[] as $owner
+  | $owner.dependencies[]
+  | select(.path != null)
+  | . as $dependency
+  | select(($names | index($dependency.name)) != null)
+  | [$owner.manifest_path, (.rename // .name), .path] | @tsv
+' "$metadata_file" > "$direct_paths_file"
+if [[ -s "$direct_paths_file" ]]; then
+  cat "$direct_paths_file" >&2
+  echo "请先确认前置版本可从 registry 解析，再移除以上直接 path，保留版本、feature 及其它依赖属性并提交" >&2
+  exit 1
+fi
 
 for crate_name in $completed_crates; do
   "$repository_root/.github/scripts/verify-registry-resolution.sh" "$crate_name" "$cargo_bin"

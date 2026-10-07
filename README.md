@@ -8,6 +8,9 @@
 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
 使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
 
+配置装配支持嵌套默认值和自然排序的文件名导入，固定环境与来源权限后生成可解释候选；
+来源观察和组件应用状态分开记录，错误候选保留当前可用视图。详见[严格配置装配](#严格配置装配)。
+
 | 从哪里开始 | 中文 | English |
 | --- | --- | --- |
 | 运行第一个 HTTP 服务 | [快速开始](docs/quickstart.md#最小可运行服务) | [Quickstart](docs/quickstart.en.md) |
@@ -767,12 +770,53 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.2", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。
 Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
 `nasa::image` 等。
+
+## 严格配置装配
+
+`nasa::yml::strict` 把主文件、profile、有序 imports 和固定环境快照装配成完整候选，支持
+嵌套默认值、文件名通配符、目标类型绑定、字段来源解释与有界读取。通过启动前的
+`#[nasa::application("log", "web", config = configuration)]` 显式选择严格工厂；
+手动入口使用 `ApplicationSpec::with_config_loader`。工厂签名与完整入口见
+[Application 配置工厂](napp/README.md#启动前配置工厂)。
+
+```yaml
+application:
+  name: notification-service
+log:
+  path: ${LOG_PATH:/usr/local/logs/${application.name}}
+yml:
+  imports:
+    - file: /etc/conf/telegram*.yml
+      optional: false
+    - file: /config/*.yml
+      optional: true
+config_watch:
+  enabled: true
+```
+
+本地文件名支持 `*`、`?`，不递归进入子目录。每条模式按完整文件名自然排序：
+`config-2.yml` 先于 `config-02.yml`，再到 `config-10.yml`；后者覆盖前者。
+不同模式组、精确文件及远端文档仍保持声明位置，环境覆盖最后应用。必需模式零匹配失败，
+可选缺失仍保留观察；坏格式、重复身份或读取期间的来源变化均拒绝候选。
+
+`${aa.bb.cc}`、`${aa-bb-cc}`、`${AA_BB_CC}` 都能回退到环境 `AA_BB_CC`，确切树值和原样环境名优先，
+空环境值仍属于命中。嵌套默认分支只在未命中时求值；环境原文不会再次解析。
+严格环境与默认文本保留 String，再按目标字段受检绑定，避免密码 `001234` 被误作数值。
+兼容 `YmlLoader` 保留原有加载范围，不自动执行 imports；默认值源码空白与字面键等差异需按
+[接入说明](docs/migration.md#选择严格配置装配)显式迁移。
+
+启用 `application,yml-watch` 与上面的开关后，Service 观察实际来源和模式目录；事件合并与
+15 秒周期补读进入同一候选流程，周期不是端到端生效期限。来源、权限和材料失败保留旧视图；
+同值来源变化仍更新观察信息。配置快照版本、`app.config_observation()` 的来源序号、组件的
+`Applied` / `ApplyFailed` / `RestartRequired` 分别表示不同事实，不承诺所有组件统一回滚。
+冻结的 imports、环境、连接与信任根变化需要重启。完整边界见 [naml](naml/README.md)、
+[配置中心装配](config-boot/README.md) 和[运维](docs/operations.md#配置刷新)。
 
 ## YML 配置总览
 
@@ -906,7 +950,7 @@ HTTP/1/h2c listener。
 | [nasa](nasa/README.md) | 门面包 | 统一导出所有业务能力 | 不直接读取 yml，按组件配置 |
 | [napp](napp/README.md) | `application` / `rate-limit` | `#[nasa::application]` 生命周期编排，以及显式装配的跨副本 Redis 业务配额 | `application.*` 及各组件配置根；配额参数由业务构造 |
 | [napp-macro](napp-macro/README.md) | `application` | `#[nasa::application(...)]` 属性宏与编译期校验 | 由 `napp` 运行时读取 |
-| [naml](naml/README.md) | `yml` / `yml-watch` | 分层配置、来源追踪、精确文件观察与本地/Nacos import 中性描述 | `yml.*`、业务自定义根节点 |
+| [naml](naml/README.md) | `yml` / `yml-watch` | 嵌套表达式、自然排序导入、有界候选、字段来源与目录观察 | `yml.*`、业务自定义根节点 |
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
 | [nanacos](nanacos/README.md) | `nacos` / `nacos-sdk` | Nacos 配置、注册、发现、监听 | `nacos.*` |
 | [nadisc](nadisc/README.md) | `discovery` | 服务发现抽象、实例过滤、watch 契约 | `discovery.*` |

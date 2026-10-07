@@ -4,6 +4,8 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+启动前可显式选择严格配置工厂：嵌套默认值、自然排序的文件导入、来源解释与目录观察共同进入
+候选流程，来源权限固定到启动。来源观察序号与组件应用状态分开记录，失败候选保留现有服务视图。
 直接取消 Runner 时，仍存活的受监督任务保留其依赖资源，直至任务 future 析构；受管可靠 Saga client
 则把业务事务、发起意图和 dispatcher 绑定同一数据源，在开放流量前拒绝显式配置冲突。
 受管 Saga Orchestrator 为已提交 result 保留独立 Catalog 资格：缺少 command route 时仍可收敛原事件，
@@ -148,7 +150,7 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ## 最小入口
 
 ```toml
-nasa = { version = "2.0.1", features = [
+nasa = { version = "2.0.2", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -361,7 +363,7 @@ UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = ["application", "tx-pgsql"] }
+nasa = { version = "2.0.2", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 
@@ -1354,7 +1356,7 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = ["application", "grpc"] }
+nasa = { version = "2.0.2", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"
@@ -1871,3 +1873,55 @@ Service 和 Batch 都在 Prepare 装配；`app.hystrix_command("settlement").awa
 并触发停机，健康阈值为 1，5 秒过期。该能力不提供错误率熔断或自适应限流。
 执行器销毁会关闭旧代准入；只有周期任务、收尾任务和全部在途业务 future 都已释放，才撤销全局引用。
 这种退出保留失败结果；外部仍持有业务 future 时，下一代继续得到 owner 冲突。
+
+## 启动前配置工厂
+
+属性允许 `#[nasa::application("log", "web", config = configuration)]`。`configuration` 是无参数函数，返回 `nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>`；由同步 preflight 调用，不能在业务 `app` Hook 中补设。手动入口使用 `ApplicationSpec::with_config_loader(configuration)`，二者执行同一流程。没有工厂时保留兼容加载范围。
+
+```rust
+/// 业务作用：在启动期选择严格来源装配，固定本轮进程的读取策略。
+/// 参数说明：无。
+/// 返回：加载器构造成功后继续 preflight；非法环境或路径拒绝启动。
+fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader> {
+    nasa::yml::strict::ConfigLoader::standard()
+}
+
+/// 业务作用：让统一生命周期接管资源准备、接流和停机。
+/// 参数说明：`_app` 供业务登记计划与受监督任务。
+/// 返回：登记成功后继续启动；门禁失败时不开放服务。
+#[nasa::application("log", "web", config = configuration)]
+async fn main(_app: nasa::Application) -> anyhow::Result<()> {
+    Ok(())
+}
+```
+
+| 场景 | 门面 feature 与声明 |
+| --- | --- |
+| 严格本地来源 | `application,yml` 与 `config = configuration`；示例还需 `log,web` |
+| 本地持续观察 | 再启用 `yml-watch` 与 `config_watch.enabled: true`，仅 Service |
+| 远端配置 | 再启用 `nacos-config,nacos-sdk` 并声明 `"nacos-config"` |
+| 直接依赖 napp | 通过 `ApplicationSpec::with_config_loader` 登记；观察为 `config-watch`，真实远端为 `nacos-config-sdk` |
+
+```text
+工厂固定策略 → preflight 读取主文件/profile 与引导依赖
+           → 配置中心首拉（如有） → 按原计划合并、求值和类型绑定
+           → 候选校验、材料与观察集准备 → 发布视图与组件状态
+文件事件 / 远端完整包 / 周期补读 → 复验来源权限 → 同一候选流程
+```
+
+严格工厂固定环境、目录、profile 和读取权限。本地 imports 按声明与自然文件名顺序合并；Nacos 首拉前仅求值 application、来源、连接和信任依赖，业务占位符在完整装配后解析。日志文件输出等待最终配置。默认文本通过 `ConfigSnapshot::deserialize/section` 及应用的配置绑定入口按目标类型受检转换；直接消费原生 JSON 类型的组件需原生标量或受信路径提示。
+
+每条 glob 保持声明位置，组内后文件覆盖前文件。`${LOG_PATH:/usr/local/logs/${application.name}}`
+在环境缺失时使用嵌套默认值；显式空环境值不触发回退。别名 `${aa.bb.cc}`、`${aa-bb-cc}`、
+`${AA_BB_CC}` 可命中同一大写环境名称，确切树值和原样环境键优先。
+
+启用 `yml-watch` 并设置 `config_watch.enabled: true` 时，实际来源及模式目录参与观察；相同值也对账新来源。固定模式允许文件增删和替换，imports、模式或信任根变化拒绝候选并要求重启。来源、材料或整帧校验失败保留旧态；组件应用仍分别记录 Applied、ApplyFailed、RestartRequired，不提供所有组件一起回滚的事务。详见[naml 配置合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)。
+
+组件状态为 `ApplyFailed` 时，同值补读可能被值指纹去重，并不保证再次安装失败目标。确认资源条件恢复后应重启应用重新装配；`RestartRequired` 同样通过重启生效。来源解析失败则保留当前视图，并继续事件观察与周期补读。
+
+`app.config_observation()` 返回严格来源独立的观察序号和规模摘要，不含路径或原值。来源受理后才更新；同值来源变化可推进此序号，快照版本和 Applied 状态仍单独记录。
+
+本地事件使用固定 100 ms 窗口合并，并每 15 秒补读；这些间隔不等于生效延迟上界，读取、材料准备、
+组件安装及执行器调度仍需时间。同步文件系统调用无法被异步期限强制打断，需要硬期限的来源读取
+应由调用方使用可终止进程取得文本后再装配。观察异常应同时检查来源状态和各组件状态，不能仅看
+配置版本递增。严格候选不自动重新捕获进程环境，环境与来源权限调整后需重启。

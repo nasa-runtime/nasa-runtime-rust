@@ -122,6 +122,26 @@ A standalone `napart` runner provides local execution without message persistenc
 
 ## Configuration, identity and observability
 
+Strict configuration is selected through a factory before preflight. Three owners have separate roles:
+`naml` produces bounded candidates and provenance, `config-boot` supplies Nacos text matching the declared
+plan, and `napp` owns material preparation, observation and runtime publication. Business expressions
+are evaluated after merging the base file, profile, ordered imports and environment overlays; only
+required bootstrap dependencies are evaluated before the first remote fetch. Each filename glob uses
+natural order with later files overriding earlier ones; separate declarations keep their positions.
+
+Source permissions are fixed at startup: environment snapshots, imports, patterns, connections and
+provider trust roots cannot be expanded by a runtime candidate. Files within a fixed pattern can appear,
+disappear or change. Source identities are revalidated around reading and publication. Memory-only
+loading uses caller-supplied documents without opening imports. Nested defaults evaluate the selected
+branch while preserving empty-environment hits and environment-name aliases.
+
+Source observation, desired configuration and component application are separate states. Equal values
+still reconcile source changes and can advance the `config_observation` revision without advancing the
+business configuration version. Rejection preserves the current view and observation. Published views
+can contain distinct `Applied`, `ApplyFailed` and `RestartRequired` component states; there is no
+cross-component rollback transaction. See [naml](../naml/README.md) and the
+[integration guidance](migration.en.md#select-strict-configuration-assembly).
+
 Named resources bind to explicit sources. Unknown names or a driver mismatch do not fall back to a
 default connection. Configuration candidates are prepared before publication; a rejected candidate
 preserves the previous view. Reading new YAML does not prove resources adopted it. Inspect application

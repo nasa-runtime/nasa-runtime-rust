@@ -3,7 +3,7 @@
 [中文](migration.md) | [English](migration.en.md)
 
 This guide explains how an existing Rust application adopts the dependency and runtime contracts
-of `nasa 2.0.1`. The steps depend on the capabilities in use. A version number alone cannot establish
+of `nasa 2.0.2`. The steps depend on the capabilities in use. A version number alone cannot establish
 API, schema, message or configuration compatibility. For a new application, start with the
 [quickstart](quickstart.en.md).
 
@@ -13,10 +13,10 @@ Prefer selecting capabilities through the facade:
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.1"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
+`version = "2.0.2"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
 versions. When adopting registry components, remove `path` dependencies and `[patch.crates-io]`
 overrides pointing to local NASA sources while preserving required features. An application using
 `sqlx::FromRow` or `sqlx::migrate!` still declares the appropriate direct dependency; the facade does
@@ -66,6 +66,35 @@ Copied external client handles do not acquire the revocation guarantees of manag
 
 The detailed [Application contract](../napp/README.md), currently in Chinese, defines fields, defaults
 and admission conditions.
+
+## Select strict configuration assembly
+
+`YmlLoader` retains its base-file, profile, overlay and environment scope; it does not execute
+`yml.imports`. Choose `nasa::yml::strict::ConfigLoader` explicitly for ordered filename imports and
+provenance. With Application, use `#[nasa::application(..., config = configuration)]`; the factory
+returns the strict loader before preflight. Source policies cannot be supplied later in the business
+hook. See the [facade entry](../nasa/README.en.md#strict-configuration-assembly).
+
+| Check | Application responsibility |
+| --- | --- |
+| Files and declarations | Set a boolean `optional` on strict map imports; establish base/profile paths, import directories and allowed roots; remove duplicate document keys and ambiguous literal keys |
+| Merge order | Base → profile → ordered imports → environment overlays; the Nacos adapter places `nacos.imports` before `yml.imports` |
+| Glob precedence | Natural full-filename order within each group: numeric runs `2`, `02`, `10`; later files override earlier ones without reordering separate groups |
+| Types | Strict environment overlays, fallback and default text remain strings until `bind` or `ConfigSnapshot::deserialize/section`; native JSON consumers need document scalars or trusted `ValueHint::Scalar` |
+| Default whitespace | Compatibility loading trims the default source text before evaluation; strict loading retains it; this trimming does not strip values obtained through references |
+| Environment aliases | `${aa.bb.cc}`, `${aa-bb-cc}` and `${AA_BB_CC}` can still fall back to `AA_BB_CC`; exact tree and raw environment names win, including empty values |
+| Nested defaults and literals | `${LOG_PATH:/usr/local/logs/${application.name}}` nests defaults; `$${name}` produces literal `${name}`; environment text is not recursively evaluated |
+| Failure behavior | Invalid documents, syntax, path conflicts, missing required sources, changing sources and exceeded limits reject the candidate; preserving unresolved references does not accept malformed syntax |
+| Runtime changes | Environment, profiles, imports, patterns, connections and trust roots require restart; adding or removing files inside a fixed pattern does not expand permissions |
+
+Memory-only `load_documents` does not execute imports. A terminable reader process can supply documents
+when hard read deadlines are needed; the host still validates and publishes the result. Strict file
+loading is not a sandbox against malicious filesystem races and cannot forcibly interrupt kernel waits.
+
+For reloads, inspect source observation revisions, snapshot versions and component state separately.
+`ApplyFailed` is not cleared by unrelated or equal-value reads; equal candidates can be deduplicated.
+Restart to assemble resources again after their conditions recover. The detailed
+[operations reference](operations.md#配置刷新) is in Chinese.
 
 ## Check durable state and retry semantics
 

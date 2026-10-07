@@ -10,6 +10,10 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+The `yml` feature provides nested defaults, ordered filename imports and explainable configuration
+candidates. A strict factory connects fixed source permissions, observation and application state
+to the same host. See [Strict configuration assembly](#strict-configuration-assembly).
+
 Managed Saga orchestration separates recovery of an already committed result from command routing.
 A protected participant can retry the original result under verified Catalog evidence without
 reopening starts, timer claims or readiness; the request remains bound to its original security
@@ -48,7 +52,7 @@ executor. Independent component assembly remains possible, with ownership transf
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.1", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |
@@ -69,6 +73,35 @@ For example, declare `"db"` for managed database resources. Declaring `"saga"` i
 and Outbox, while transport remains explicit. `mapper`, `hystrix` and `grafana` are not component strings.
 The [complete feature matrix](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md#feature-总表)
 is currently in Chinese.
+
+## Strict configuration assembly
+
+The `yml` feature exports `nasa::yml::strict`: bounded file or memory loading, nested defaults,
+natural-order filename globs, a fixed environment snapshot, target-type binding and field provenance.
+With Application, declare `config = configuration` before preflight. The synchronous, zero-argument
+factory returns `nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>`; the standard constructor is
+`ConfigLoader::standard()`. Manual entry points use `ApplicationSpec::with_config_loader`.
+The [complete factory example](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md#严格配置装配)
+uses `application,yml,log,web`; local observation additionally needs `yml-watch`.
+
+`yml.imports` accepts `/etc/conf/telegram*.yml` or `/config/*.yml`. Each group uses natural filename
+order (`2`, `02`, `10`), with later files overriding earlier ones. Declarations retain their positions.
+Only filename `*` and `?` are supported, without directory recursion. Map imports require explicit
+`optional`; required zero matches, invalid content or source changes reject the candidate.
+
+`${LOG_PATH:/usr/local/logs/${application.name}}` supports nested defaults. Empty environment values
+still count as hits. `${aa.bb.cc}`, `${aa-bb-cc}` and `${AA_BB_CC}` can fall back to `AA_BB_CC`, after
+exact tree and raw environment names. Strict values bind to the requested type; compatibility loading
+retains its scalar and whitespace rules. `YmlLoader` does not automatically execute imports.
+
+Service mode with `config_watch.enabled: true` observes actual sources and pattern directories and
+performs periodic reconciliation. Equal-value source changes can advance `app.config_observation()`
+without changing the business snapshot version. Rejection preserves the current view; component
+`Applied`, `ApplyFailed` and `RestartRequired` states remain distinct. Frozen imports, connections and
+trust roots require restart. Equal-value reads do not guarantee retrying failed resource installation,
+and there is no cross-component rollback transaction. See the
+[configuration contract](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)
+and [integration guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.en.md#select-strict-configuration-assembly).
 
 ## Resource and workflow contracts
 

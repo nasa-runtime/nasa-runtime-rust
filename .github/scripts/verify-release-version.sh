@@ -33,8 +33,9 @@ workspace_version="$(awk '
   /^\[/ { in_package = 0 }
   in_package && /^version[[:space:]]*=/ { gsub(/["[:space:]]/, "", $0); sub(/^version=/, "", $0); print }
 ' "$repository_root/Cargo.toml")"
-if [[ "$version" != "$plan_version" || "$version" != "$workspace_version" ]]; then
-  echo "$crate_name 版本必须与根项目及发布计划一致: crate=$version, workspace=$workspace_version, plan=$plan_version" >&2
+facade_version="$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "nasa") | .version')"
+if [[ "$version" != "$plan_version" || "$workspace_version" != "$facade_version" ]]; then
+  echo "$crate_name 必须符合自身发布计划，根版本必须等于门面版本: crate=$version, plan=$plan_version, workspace=$workspace_version, facade=$facade_version" >&2
   exit 1
 fi
 
@@ -51,7 +52,7 @@ trap cleanup EXIT
 
 response_file="$query_root/response.json"
 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-  --user-agent "nasa-runtime-release/2.0.1" "https://crates.io/api/v1/crates/${crate_name}")"
+  --user-agent "nasa-runtime-release/2.0.2" "https://crates.io/api/v1/crates/${crate_name}")"
 case "$http_code" in
   200)
     # 已撤回的稳定版本仍占用版本号，必须参与最高版本计算；不能仅依赖排除撤回版本的摘要字段。

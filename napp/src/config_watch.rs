@@ -15,33 +15,47 @@ use tokio_util::sync::CancellationToken;
 /// 文件事件使用单个合并信号；每次候选最多持有新旧两套观察集合。
 pub(crate) struct LocalWatch {
     pub(crate) signal: Arc<Notify>,
-    watcher: Option<YmlWatcher>,
+    watcher: Option<LocalObserver>,
+    source: Option<Arc<crate::config_source::StrictSource>>,
+}
+
+pub(crate) struct LocalObserver {
+    _legacy: Option<YmlWatcher>,
+    _strict: Option<naml::strict::ConfigWatcher>,
+    fingerprint: Option<[u8; 32]>,
+}
+
+pub(crate) enum PreparedObserver {
+    Replace(Option<Box<LocalObserver>>),
+    Unchanged,
 }
 
 impl LocalWatch {
     /// 业务作用：建立无任务的文件观察 owner，未显式启用时不创建操作系统 watcher。
-    /// 参数说明：`raw` 为原始合并树，秘密声明尚未被脱敏。
+    /// 参数说明：`raw` 为原始合并树，秘密声明尚未被脱敏；`source` 固定显式严格来源。
     /// 返回：已启用时建立当前依赖观察；目录挂载失败阻止启动。
-    pub(crate) fn new(raw: &Value) -> ApplicationResult<Self> {
+    pub(crate) fn new(
+        raw: &Value,
+        source: Option<Arc<crate::config_source::StrictSource>>,
+    ) -> ApplicationResult<Self> {
         let signal = Arc::new(Notify::new());
         let mut owner = Self {
             signal,
             watcher: None,
+            source,
         };
-        owner.watcher = owner.prepare(raw)?;
+        let prepared = owner.prepare(raw)?;
+        owner.install(prepared, false);
         Ok(owner)
     }
 
     /// 业务作用：在候选安装前建立独立的观察集合，失败不撤销当前有效监听。
     /// 参数说明：`raw` 为待解析材料所属候选。
-    /// 返回：至多包含 128 个活跃文件依赖的新 watcher；未启用时为空，任一活跃目录不可观察时拒绝候选。
-    pub(crate) fn prepare(&self, raw: &Value) -> ApplicationResult<Option<YmlWatcher>> {
+    /// 返回：至多追加 128 个材料依赖的新 watcher；严格来源另受共享目录预算约束，任一活跃目录不可观察时拒绝候选。
+    pub(crate) fn prepare(&self, raw: &Value) -> ApplicationResult<PreparedObserver> {
         if !enabled(raw)? {
-            return Ok(None);
+            return Ok(PreparedObserver::Replace(None));
         }
-        let sources = YmlLoader::standard()
-            .local_sources()
-            .map_err(|_| error("cannot resolve local configuration sources"))?;
         let specs = crate::secret::active_specs(raw)
             .map_err(|_| error("invalid secret file declarations"))?;
         let mut paths = std::collections::BTreeSet::new();
@@ -80,20 +94,75 @@ impl LocalWatch {
             return Err(error("configuration watch dependency count exceeds 128"));
         }
         let signal = self.signal.clone();
+        if let Some(source) = &self.source {
+            let mut plan = source.watch_plan();
+            plan.dependencies.extend(paths);
+            let fingerprint = plan.fingerprint();
+            if self.watcher.as_ref().is_some_and(|current| {
+                current.fingerprint == Some(fingerprint)
+                    && current
+                        ._strict
+                        .as_ref()
+                        .is_some_and(|watcher| watcher.health().backend_ok)
+            }) {
+                // 来源身份和目录集合均未变化时复用现有观察，避免补读不断重建操作系统资源。
+                plan.revalidate(source.loader.load_policy()).map_err(|_| {
+                    error("strict configuration sources changed before publication")
+                })?;
+                return Ok(PreparedObserver::Unchanged);
+            }
+            let mut policy = source.loader.load_policy().clone();
+            if let Some(current) = self
+                .watcher
+                .as_ref()
+                .and_then(|observer| observer._strict.as_ref())
+            {
+                // 独立新旧 watcher 同时存在，重复目录也占两份后端资源，先扣除仍有效的旧观察预算。
+                policy.limits.watch_directories = policy
+                    .limits
+                    .watch_directories
+                    .saturating_sub(current.health().watched_directories);
+            }
+            let watcher =
+                naml::strict::ConfigWatcher::new(&plan, policy, move |_| signal.notify_one())
+                    .map_err(|_| error("cannot observe strict configuration sources"))?;
+            // 观察安装可能等待后端；提交之前再次验证来源，拒绝已知发生变化的候选。
+            plan.revalidate(source.loader.load_policy())
+                .map_err(|_| error("strict configuration sources changed before publication"))?;
+            return Ok(PreparedObserver::Replace(Some(Box::new(LocalObserver {
+                _legacy: None,
+                _strict: Some(watcher),
+                fingerprint: Some(fingerprint),
+            }))));
+        }
+        let sources = YmlLoader::standard()
+            .local_sources()
+            .map_err(|_| error("cannot resolve local configuration sources"))?;
         YmlWatcher::new(
             &sources,
             &paths.into_iter().collect::<Vec<_>>(),
             move |_| signal.notify_one(),
         )
-        .map(Some)
+        .map(|watcher| {
+            PreparedObserver::Replace(Some(Box::new(LocalObserver {
+                _legacy: Some(watcher),
+                _strict: None,
+                fingerprint: None,
+            })))
+        })
         .map_err(|_| error("cannot observe configuration dependencies"))
     }
 
     /// 业务作用：在发布完成后替换有效观察集合，旧集合始终保留到新候选可用。
     /// 参数说明：`next` 为安装前已建立的观察；`published` 表示有新视图发布。
     /// 返回：旧 watcher 在发布锁外释放；发布后补一次重读覆盖准备期间的材料变化。
-    pub(crate) fn install(&mut self, next: Option<YmlWatcher>, published: bool) {
-        self.watcher = next;
+    pub(crate) fn install(&mut self, next: PreparedObserver, published: bool) {
+        if let PreparedObserver::Replace(next) = next {
+            self.watcher = next.map(|watcher| *watcher);
+        }
+        if let Some(source) = &self.source {
+            source.commit_observation();
+        }
         if published {
             self.signal.notify_one();
         }
@@ -113,7 +182,7 @@ struct WatchSettings {
 pub(crate) fn enabled(tree: &Value) -> ApplicationResult<bool> {
     tree.get("config_watch")
         .map(|value| {
-            serde_json::from_value::<WatchSettings>(value.clone())
+            naml::strict::bind::<WatchSettings>(value.clone())
                 .map(|settings| settings.enabled)
                 .map_err(|_| error("invalid config_watch declaration"))
         })
@@ -191,10 +260,15 @@ impl ApplicationComponent for LocalConfigComponent {
             let Some(health) = self.health.take() else {
                 return Ok(());
             };
-            let raw = YmlLoader::standard()
-                .load_tree()
-                .map_err(|_| error("cannot read initial watched configuration"))?;
-            let watcher = LocalWatch::new(&raw)?;
+            let source = context.application().strict_source();
+            let raw = if source.is_some() {
+                context.application().config().value().clone()
+            } else {
+                YmlLoader::standard()
+                    .load_tree()
+                    .map_err(|_| error("cannot read initial watched configuration"))?
+            };
+            let watcher = LocalWatch::new(&raw, source)?;
             let app = context.application().clone();
             let publisher = crate::config_reload::CandidatePublisher::new(
                 app.clone(),
@@ -244,9 +318,13 @@ async fn run(
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
         let result = async {
-            let raw = YmlLoader::standard()
-                .load_tree()
-                .map_err(|_| error("cannot read watched configuration"))?;
+            let raw = if let Some(source) = app.strict_source() {
+                source.load_local()?
+            } else {
+                YmlLoader::standard()
+                    .load_tree()
+                    .map_err(|_| error("cannot read watched configuration"))?
+            };
             let prepared_watch = watcher.prepare(&raw)?;
             let published = publisher.publish(raw, Vec::new(), &cancel).await?;
             watcher.install(prepared_watch, published.is_some());
