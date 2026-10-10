@@ -1,4 +1,5 @@
 //! tonic gRPC 的受管 service、运行时边界与独立 listener 生命周期。
+//! 具名连接选择与 REST qualifier 共用目录；默认 primary，未知名称不跨环境回退。
 //!
 //! # 核心价值与运行架构
 //!
@@ -11,9 +12,14 @@
 //!
 //! listener 在 bind 前冻结 service/method 目录、TLS 与容量；运行期按连接、RPC、stream 和消息分别
 //! 执行有界准入，并以固定原因和结局导出观测事实。停机先停止新准入，再发送 HTTP/2 GOAWAY 并在
-//! `drain_timeout` 内等待已接纳调用。它不提供 service mesh、客户端负载均衡或业务授权模型。
+//! `drain_timeout` 内等待已接纳调用。它不提供 service mesh 或业务授权模型。
+//! `discovery` feature 为生成客户端提供具名服务发现、有限连接池和轮询选址；在实际 HTTP/2
+//! 提交处复验实例资格，四种 RPC 的请求和响应正文共用 owner 与总期限，不自动重放业务请求。
 
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "discovery")]
+pub mod discovery;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

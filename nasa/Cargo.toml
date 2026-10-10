@@ -7,12 +7,12 @@ name = "nasa"
 version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Rust server framework for strict configuration, managed lifecycles and reliable execution with authorized durable Saga recovery"
+description = "Rust server framework for managed lifecycles, multi-registry discovery and reliable execution with durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "saga", "grpc", "lifecycle", "observability"]
+keywords = ["runtime", "saga", "grpc", "lifecycle", "discovery"]
 categories.workspace = true
 
 [features]
@@ -165,6 +165,11 @@ config-boot = ["yml", "nacos", "dep:config_boot_impl", "application_impl?/nacos-
 # 服务发现 provider-neutral 命名空间(crate = discovery):中性类型 Instance + DiscoveryClient/ServiceRegistry 抽象。
 # 无具体注册中心 SDK 依赖;后端(nacos/eureka...)实现这些接口,上层 RestDiscovery 面向抽象。
 discovery = ["dep:discovery_impl"]
+grpc-discovery = ["grpc", "discovery-runtime", "grpc_impl/discovery", "application_impl?/grpc-discovery"]
+discovery-runtime = ["discovery", "dep:discovery_runtime_impl", "application_impl?/discovery-runtime"]
+discovery-nacos = ["discovery-runtime", "discovery_runtime_impl/nacos", "application_impl?/discovery-nacos"]
+discovery-consul = ["discovery-runtime", "discovery_runtime_impl/consul", "application_impl?/discovery-consul"]
+discovery-kubernetes = ["discovery-runtime", "discovery_runtime_impl/kubernetes", "application_impl?/discovery-kubernetes"]
 
 # Nacos 后端(crate = nacos):配置中心(nasa::config::nacos)+ 注册中心(nasa::discovery::nacos)。
 # 两层(同 ws/ws-redis 透传纪律):
@@ -265,9 +270,10 @@ full-pgsql = [
 ]
 
 [dependencies]
+discovery_runtime_impl = { package = "nadisc-runtime", path = "../nadisc-runtime", version = "1.0.0", optional = true }
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "2.0.2", optional = true }
-application_macro = { package = "napp-macro", version = "2.0.1", optional = true }
+application_impl = { package = "napp", path = "../napp", version = "2.0.2", optional = true }
+application_macro = { package = "napp-macro", path = "../napp-macro", version = "2.0.1", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
 grafana_impl = { package = "nafana", version = "2.0.0", optional = true }
@@ -300,7 +306,7 @@ saga_core_impl = { package = "nasaga-core", version = "2.0.0", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.1", optional = true }
 saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.1", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "2.0.0", optional = true }
-grpc_impl = { package = "nagrpc", version = "2.0.0", optional = true }
+grpc_impl = { package = "nagrpc", path = "../nagrpc", version = "2.0.0", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "2.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "2.0.0", optional = true }
 async_macro = { package = "async-macro", version = "2.0.0", optional = true }
@@ -320,8 +326,8 @@ base_impl = { package = "nabase", version = "2.0.0", optional = true }
 yml_impl = { package = "naml", version = "2.0.1", optional = true }
 config_boot_impl = { package = "config-boot", version = "2.0.1", optional = true }
 image_impl = { package = "naimg", version = "2.0.0", optional = true }
-discovery_impl = { package = "nadisc", version = "2.0.0", optional = true }
+discovery_impl = { package = "nadisc", path = "../nadisc", version = "2.0.0", optional = true }
 nacos_impl = { package = "nanacos", version = "2.0.0", optional = true, default-features = false }
-rest_discovery_impl = { package = "rest-discovery", version = "2.0.0", optional = true }
-rest_client_macro = { package = "rest-client-macro", version = "2.0.0", optional = true }
+rest_discovery_impl = { package = "rest-discovery", path = "../rest-discovery", version = "2.0.0", optional = true }
+rest_client_macro = { package = "rest-client-macro", path = "../rest-client-macro", version = "2.0.0", optional = true }
 rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "2.0.0", optional = true, default-features = false }

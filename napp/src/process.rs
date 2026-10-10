@@ -143,6 +143,7 @@ fn build_component(
         ComponentId::Ws => build_ws_component(),
         ComponentId::Scheduling => build_scheduling_component(),
         ComponentId::NacosDiscovery => build_nacos_discovery_component(),
+        ComponentId::Discovery => build_managed_discovery_component(),
         ComponentId::Application
         | ComponentId::SqlObservability
         | ComponentId::Observability
@@ -569,4 +570,21 @@ fn build_runtime(worker_threads: Option<usize>) -> Result<Runtime, ApplicationEr
             error,
         )
     })
+}
+
+/// 业务作用：构造中性的多注册中心生命周期组件。
+/// 参数说明：无。
+/// 返回：编入对应 feature 时构造组件，否则在产生副作用前拒绝。
+fn build_managed_discovery_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
+    #[cfg(feature = "discovery-runtime")]
+    {
+        Ok(Box::new(crate::managed_discovery::DiscoveryComponent::new()))
+    }
+    #[cfg(not(feature = "discovery-runtime"))]
+    {
+        Err(feature_missing_error(
+            ComponentId::Discovery,
+            "discovery-runtime",
+        ))
+    }
 }

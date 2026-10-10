@@ -1,6 +1,10 @@
 //! Nacos 配置中心与注册中心适配层。
+//! 公共 owner 用 qualifier 选择独立连接，primary 为默认名称；显式注册清单控制发布范围。
 //!
 //! 本 crate 只处理连接、鉴权、配置文本读取/监听和实例注册发现，不绑定具体业务配置结构。
+//! `managed` feature 提供独立 Nacos 3 HTTP adapter；发现使用 client API，注册核对服务范围的 admin 详情及完整实例列表。
+//! HTTP 同服务端点的写入身份不因 cluster 改变；首次注册拒绝覆盖其他 cluster 的既有记录，发现仍保留 cluster 筛选。
+//! `nadisc-runtime` 管理其具名连接、心跳与关闭；与 `nacos` feature 的 SDK 配置和兼容命名入口分别持有连接及认证状态。
 // ============================================================================
 // nacos —— Nacos 配置中心 + 注册中心的【传输/机制】层(抽自各业务 app,机制写一次复用)
 //
@@ -20,12 +24,14 @@
 //   开 → 走真实 nacos-sdk(默认含 config/naming/auth-by-http)。
 //
 // 保活:NacosConfigClient / NacosDiscoveryClient / WatchGuard / RegistrationGuard / SubscribeGuard 都要被 main 持有到进程结束;
-//   一旦 drop:client→断连;watch guard→best-effort 注销监听;registration guard→best-effort deregister;
+//   SDK client 释放引用不保证其内部任务已经结束；watch guard→best-effort 注销监听;registration guard→best-effort deregister;
 //   subscribe guard→best-effort 取消订阅。优雅停机推荐对 RegistrationGuard 显式 `deregister().await` 再停服务。
 // ============================================================================
 
 mod client;
 mod config;
+#[cfg(feature = "managed")]
+pub mod managed;
 mod naming;
 
 // 服务实例中性类型来自 discovery crate(provider-neutral);此处 re-export 方便直接依赖 nacos 的用户。

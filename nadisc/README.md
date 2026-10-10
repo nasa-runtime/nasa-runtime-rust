@@ -34,6 +34,19 @@ assert!(is_traffic_instance(&inst));
 
 流量过滤规则：实例必须启用、健康、权重大于 0、IP 非空且无首尾空白、端口非 0。
 
+## 受管观察与发送许可
+
+`nadisc::managed` 定义 provider 能力、完整快照、证据等级、稳定错误类别、注册事实和实际传输提交许可。它不创建宿主生命周期；多连接与清理由 [nadisc-runtime](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md) 持有。现有 `DiscoveryClient` 实现保持兼容，新增准入方法具有默认行为；需要动态撤权的客户端必须在实际发送处调用受管句柄的准入方法，不能仅复制 IP 列表。
+
+`IncompleteSnapshot` 表示本轮分页、解码或传输未完成，`CapacityExceeded` 表示容量拒绝；两者不发布部分候选，普通读取仅可沿用配置宽限内的完整旧证据，严格读取失败。`InvalidSnapshot` 表示已确认候选或对象身份非法，与权限撤销、身份冲突一样立即撤销旧证据，不能借宽限继续发送。
+
+provider 实例身份与地址不同：Consul 使用节点及 Service ID，Kubernetes 保留 Service/目标对象 UID。明确空集合、授权拒绝和不完整快照分别表达，错误不能伪装成健康空列表。
+
+`DiscoveryError` 保留稳定的 `code` 和静态 `reason`；配置错误可通过 `config_path` 定位到具体连接或注册字段。路径只包含字段与已校验名称，不包含配置值、认证材料或远端响应正文。
+
+`ManagedProvider::supports_idempotent_renewal` 默认返回 false。只有可对已确认注册身份重复相同健康 payload、且不重建身份或覆盖管理属性的 adapter 才能声明此能力。它允许 owner 协调响应丢失后的续约，不代表旧请求已终止，也不授权重放首次注册或相反写入。
+
+
 ## 流量过滤规则
 
 `is_traffic_instance` 拒绝以下任一情况:`enabled=false`、`healthy=false`、weight ≤0 / NaN / ∞、IP 为空或带首尾空白、`port == 0`。负载均衡应只消费过滤后的实例。
@@ -42,54 +55,17 @@ assert!(is_traffic_instance(&inst));
 
 `ServiceWatch` 的 drop 取消订阅由各后端 guard 的 `Drop` 实现 best-effort 保证(异步注销无法在 Drop 中等待);需要确定性清理时显式 `unsubscribe().await`。`WatchOptions::poll_interval` 不允许为零(`validate()` 拒绝)。
 
-## YML 配置与使用
+## 配置归属
 
-`nadisc` 是抽象层，不连接具体注册中心，因此没有自己的固定 yml 根节点。后端组件可以把实例和 watch 选项映射到本 crate 的中性类型。
+本 crate 定义中性类型与 provider 合同，不读取应用配置。使用多注册中心时，由
+`nadisc-runtime::assembly::DiscoveryConfig` 解析 `discovery.connections` 和 `registrations`，
+napp 负责把完成占位符解析的配置交给该组件；不要把中性 `Instance` 字段当成独立配置根。
 
-推荐配置示例：
+连接通过 `qualifier` 选择，默认连接名为 `primary`。Static/DNS 在公共 runtime 中分别使用
+`static.services` 与 `dns.services`；Nacos、Consul、Kubernetes 由各自 adapter 提供配置。
+普通 `DiscoveryClient` 接口不拥有多连接目录，也不替调用方执行注册或关闭。
 
-```yaml
-discovery:
-  watch:
-    poll_interval_ms: 5000
-  instance:
-    ip: 127.0.0.1
-    port: 8080
-    enabled: true
-    healthy: true
-    weight: 1.0
-    metadata:
-      zone: local
-```
-
-字段说明：
-
-| 键 | 默认值 | 说明 |
-| --- | --- | --- |
-| `watch.poll_interval_ms` | `5000` | 后端 watch 的轮询兜底间隔，可映射为 `WatchOptions::with_poll_interval`。 |
-| `instance.ip` | 必填 | 注册或过滤时使用的实例 IP。 |
-| `instance.port` | 必填 | 实例端口，0 不可承载流量。 |
-| `instance.enabled` | `true` | 是否启用实例。 |
-| `instance.healthy` | `true` | 实例健康状态。 |
-| `instance.weight` | `1.0` | 负载均衡权重，必须大于 0 才承载流量。 |
-| `instance.metadata` | `{}` | 透传给后端或负载均衡策略的元数据。 |
-
-代码映射：
-
-```rust
-let inst = nasa::discovery::Instance::new(
-    &cfg.discovery.instance.ip,
-    cfg.discovery.instance.port,
-)
-    .with_weight(cfg.discovery.instance.weight);
-
-let opts = nasa::discovery::WatchOptions::new()
-    .with_poll_interval(std::time::Duration::from_millis(
-        cfg.discovery.watch.poll_interval_ms,
-    ));
-```
-
-如果业务已经使用 `nanacos` 或 `rest-discovery-nacos`，优先使用它们的配置结构，不需要单独定义 `discovery:`。
+[完整配置与调用示例](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
 
 ## 主要边界
 

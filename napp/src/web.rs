@@ -630,8 +630,27 @@ impl ApplicationComponent for WebComponent {
             #[cfg(not(feature = "observability"))]
             let metrics_path = config.health.then(|| "/metrics".to_owned());
             let mut routes = (self.route_meta)();
-            validate_routes(&mut routes, config.health, metrics_path.as_deref())?;
-            let route_manifest = build_route_manifest(&routes, config.health);
+            #[cfg(feature = "discovery-runtime")]
+            let discovery_probe = crate::managed_discovery::probe_enabled(context.application());
+            #[cfg(not(feature = "discovery-runtime"))]
+            let discovery_probe = false;
+            validate_routes(
+                &mut routes,
+                config.health,
+                metrics_path.as_deref(),
+                discovery_probe,
+            )?;
+            let route_manifest = build_route_manifest(&routes, config.health, discovery_probe);
+            if discovery_probe
+                && routes.iter().any(|route| {
+                    router_boundary::intersects_reserved(route.path, "/discovery/eligible")
+                })
+            {
+                return Err(web_error(
+                    ApplicationPhase::Ready,
+                    "business route intersects discovery eligibility prefix",
+                ));
+            }
 
             let application = context.application().clone();
             #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
@@ -645,6 +664,9 @@ impl ApplicationComponent for WebComponent {
                 // Saga 整段分派优先于子路由；已启用的框架入口必须先证明不被遮蔽，才能绑定 listener。
                 {
                     let mut framework_paths = Vec::new();
+                    if discovery_probe {
+                        framework_paths.push("/discovery/eligible/{registration}");
+                    }
                     if config.health {
                         framework_paths.extend(["/healthz", "/readyz"]);
                     }
@@ -744,10 +766,19 @@ impl ApplicationComponent for WebComponent {
             for registration in application.take_router_transforms() {
                 let scope = registration.scope;
                 // 原始 Router 不提供可枚举路由合同，无法证明整个保留前缀的互斥性，必须拒绝接流。
-                if reserved.is_some() && scope.is_none() {
-                    return Err(web_error(ApplicationPhase::Ready, "Saga HTTP requires configure_router_scoped; unscoped Router transformations cannot prove reserved-prefix isolation"));
+                if (reserved.is_some() || discovery_probe) && scope.is_none() {
+                    return Err(web_error(ApplicationPhase::Ready, "reserved framework endpoints require configure_router_scoped; unscoped Router transformations cannot prove prefix isolation"));
                 }
                 if let Some(prefix) = scope.as_deref() {
+                    if discovery_probe
+                        && (router_boundary::intersects_reserved(prefix, "/discovery/eligible")
+                            || router_boundary::under_prefix("/discovery/eligible", prefix))
+                    {
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            "business router scope intersects discovery eligibility prefix",
+                        ));
+                    }
                     // 父级业务 scope 同样可能吞入 Saga 前缀，必须同时检查两个方向的包含关系。
                     if reserved.is_some_and(|reserved| {
                         router_boundary::intersects_reserved(prefix, reserved)
@@ -840,6 +871,25 @@ impl ApplicationComponent for WebComponent {
                         }
                     },
                 )?;
+            }
+            #[cfg(feature = "discovery-runtime")]
+            if discovery_probe {
+                // 独立资格探针不读取远端贡献，也不进入业务状态码与鉴权包装。
+                router = match catch_unwind(AssertUnwindSafe(move || {
+                    router.route(
+                        "/discovery/eligible/{registration}",
+                        get(discovery_eligibility),
+                    )
+                })) {
+                    Ok(router) => router,
+                    Err(payload) => {
+                        std::mem::forget(payload);
+                        return Err(web_error(
+                            ApplicationPhase::Ready,
+                            "custom route conflicts with discovery eligibility probe",
+                        ));
+                    }
+                };
             }
             if config.health {
                 // 探针在业务定制之后挂载，因此不被 configure_router 里的全局 layer 覆盖。
@@ -987,6 +1037,11 @@ impl ApplicationComponent for WebComponent {
                     unmatched_exempt.insert(format!(
                         "{} {exempt_prefix}{}",
                         contract.method, contract.path
+                    ));
+                }
+                if discovery_probe {
+                    unmatched_exempt.insert(format!(
+                        "GET {exempt_prefix}/discovery/eligible/{{registration}}"
                     ));
                 }
                 if config.health {
@@ -1410,17 +1465,24 @@ impl Drop for WebMappingMonitorShutdown {
 /// - `routes`：业务二进制投影出的全部静态路由元数据。
 /// - `health_enabled`：是否需要为存活和就绪探针保留完整路径。
 /// - `metrics_path`：当前确实启用的指标路径，不存在时不占用业务地址。
+/// - `discovery_probe`：是否为注册资格探针保留框架路径。
 ///
 /// 返回：全部业务路由与启用的框架地址互斥时成功，否则在绑定 listener 前拒绝。
 fn validate_routes(
     routes: &mut [RouteMeta],
     health_enabled: bool,
     metrics_path: Option<&str>,
+    discovery_probe: bool,
 ) -> ApplicationResult<()> {
     routes.sort_by_key(|route| (route.path, route.method, route.handler));
     let mut path_tree = matchit::Router::new();
     let mut exact = HashMap::<&'static str, HashMap<&'static str, &'static str>>::new();
 
+    if discovery_probe {
+        path_tree
+            .insert("/discovery/eligible/{registration}", "discovery-probe")
+            .map_err(|_| web_error(ApplicationPhase::Ready, "cannot reserve discovery probe"))?;
+    }
     if health_enabled {
         for path in ["/healthz", "/readyz"] {
             path_tree
@@ -1445,6 +1507,7 @@ fn validate_routes(
     for route in routes.iter().copied() {
         validate_route_path(&route)?;
         if (health_enabled && matches!(route.path, "/healthz" | "/readyz"))
+            || (discovery_probe && route.path == "/discovery/eligible/{registration}")
             || metrics_path == Some(route.path)
         {
             return Err(web_error(
@@ -1491,7 +1554,14 @@ fn validate_routes(
 ///
 /// - `routes`：已经按路径、方法和处理器稳定排序的业务路由元数据。
 /// - `health_enabled`：是否把存活和就绪探针加入清单。
-fn build_route_manifest(routes: &[RouteMeta], health_enabled: bool) -> Arc<[RouteInfo]> {
+/// - `discovery_probe`：是否把独立注册资格探针加入清单。
+///
+/// 返回：业务与启用的框架探针组成的不可变路由清单。
+fn build_route_manifest(
+    routes: &[RouteMeta],
+    health_enabled: bool,
+    discovery_probe: bool,
+) -> Arc<[RouteInfo]> {
     let mut manifest = routes
         .iter()
         .copied()
@@ -1502,6 +1572,13 @@ fn build_route_manifest(routes: &[RouteMeta], health_enabled: bool) -> Arc<[Rout
             RouteInfo::runtime("GET", "/healthz", "napp::web::liveness"),
             RouteInfo::runtime("GET", "/readyz", "napp::web::readiness"),
         ]);
+    }
+    if discovery_probe {
+        manifest.push(RouteInfo::runtime(
+            "GET",
+            "/discovery/eligible/{registration}",
+            "napp::web::discovery_eligibility",
+        ));
     }
     manifest.sort_by_key(|route| (route.path(), route.method(), route.handler()));
     Arc::from(manifest)
@@ -2264,4 +2341,21 @@ fn audit_authz_coverage(
         );
     }
     Ok(())
+}
+
+/// 业务作用：向注册中心健康检查提供独立本地业务资格，避免整体 readiness 的远端反馈循环。
+/// 参数说明：`application` 是同一宿主，`registration` 指向冻结的注册目标。
+/// 返回：本地仍可接流为 HTTP 200，其余为 HTTP 503，不访问网络且不输出目标内容。
+#[cfg(feature = "discovery-runtime")]
+async fn discovery_eligibility(
+    State(application): State<Application>,
+    axum::extract::Path(registration): axum::extract::Path<String>,
+) -> StatusCode {
+    if application.state() == crate::ApplicationState::Ready
+        && application.discovery_runtime().qualified(&registration)
+    {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }

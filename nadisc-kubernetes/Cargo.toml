@@ -1,0 +1,25 @@
+[package]
+name = "nadisc-kubernetes"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Kubernetes Service 与 EndpointSlice 只读发现、就绪过滤及有界观察"
+keywords = ["kubernetes", "discovery", "endpointslice", "microservices"]
+categories.workspace = true
+readme = "README.md"
+include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[dependencies]
+nadisc = { version = "2.0.0", path = "../nadisc", features = ["http"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+base64 = "0.22"
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

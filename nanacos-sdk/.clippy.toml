@@ -1,0 +1,9 @@
+type-complexity-threshold = 500
+disallowed-methods = [
+    "std::env::set_var",
+    "std::env::remove_var",
+    "std::thread::sleep",
+    "std::result::Result::unwrap",
+    "std::option::Option::unwrap",
+]
+disallowed-types = ["std::time::Instant"]

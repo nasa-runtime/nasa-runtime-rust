@@ -51,7 +51,7 @@ rest_metrics! {
     explicit_service  => "档1 显式 service 调用次数",
     lb_scheme         => "档2 lb:// 调用次数",
     heuristic_hit     => "档3 裸 http 启发式命中索引(走 LB)次数",
-    external          => "档3 外部直连(未命中/启发式关)次数",
+    external          => "外部直连计划次数，包含显式外部地址与通用 URL 分流",
     no_instance       => "内部服务无可用实例(NoAvailableInstance)次数",
     discovery_failure => "discover/watch 发现失败次数",
     watch_fallback    => "watch 不可用、降级 discover+TTL 次数(请求线程实际走 TTL 时计)",

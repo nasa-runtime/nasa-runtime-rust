@@ -62,6 +62,32 @@ Batch mode prepares resources and static initializers before the workload, activ
 resources, and cleans up after the workload. It does not publish Service readiness or accept consumer
 and callback plans that require a long-running service.
 
+## Named registries and dynamic calls
+
+One `nadisc-runtime` owner manages named connections, explicit registration plans, shared observations
+and shutdown in two stages. Standalone hosts and napp use the same implementation. Each connection
+isolates credentials, scope, evidence and failures; each registration declares its reachable address
+and mapped port. Nacos, Consul, Kubernetes and Static/DNS retain their own health contracts.
+Kubernetes discovery is read-only and does not create Pods or Services.
+
+`qualifier` selects a connection; `service` selects an alias within it. The default connection is
+`primary`, with no implicit selection by map order or connection count. REST Mapping methods
+override a trait qualifier. A complete `url` uses the default HTTP client without registry lookup
+and cannot carry a qualifier. These routes share transport ownership while retaining different
+target resolution. See the [configuration guide](discovery.md).
+
+REST and gRPC revalidate the current instance, complete snapshot, permission and evidence deadline
+at submission. A complete empty snapshot withdraws old candidates. Network failures permit ordinary
+calls to retain facts only within bounded evidence validity; strict calls require current evidence.
+Unknown registration outcomes retain unresolved responsibility. Administrative disablement or
+deletion does not trigger registration again when local eligibility recovers.
+
+Independent eligibility probes exclude their own registration result to avoid a health-check cycle.
+Saga may use a separate recovery registration for capability renewal and committed results while
+business readiness is closed. Authentication, catalog trust and transaction gates still apply.
+Shutdown withdraws registrations before application draining and closes outbound observation and
+transport resources afterwards, under a shared deadline.
+
 ## Transactions, messages and Saga
 
 ```text

@@ -1,24 +1,24 @@
 # ============================================================================
 # rest-client-macro：声明式 HTTP 客户端宏。
 #
-#   #[rest_client] 读 trait → 生成 {Trait}Client + new(rest) + #[async_trait] impl;
+#   #[rest_client] 读 trait → 生成 {Trait}Client、new(rest)、with_clients(rest) 和异步实现；
 #   方法属性 #[GetMapping]/#[PostMapping]/#[PutMapping]/#[PatchMapping]/#[DeleteMapping] 提供 HTTP 元数据;
 #   参数 inert attr #[PathVariable]/#[RequestParam]/#[RequestHeader]/#[RequestHeaders]/#[RequestBody]/#[FormBody]
 #   只由 #[rest_client] 消费，不导出成独立 proc macro，因为 Rust attr 宏不能作用于函数参数。
 #
-# service 模式生成 self.rest.service_request(service, method, path)(档1 直连,**不生成字符串 URL**);
-# url 模式生成 self.rest.request(method, url)(普通外部)。运行时复杂逻辑收敛到 rest-discovery 的 __private。
+# service 模式先按 qualifier 选择客户端，再生成 service_request，不拼接字符串 URL；
+# url 模式使用默认客户端 external_request，保持原 HTTP(S) 目标。运行时复杂逻辑收敛到 rest-discovery 的 __private。
 # ============================================================================
 [package]
 name = "rest-client-macro"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "声明式 HTTP 客户端宏(#[rest_client] + #[GetMapping/PostMapping/PutMapping/PatchMapping/DeleteMapping])"
+description = "声明式 HTTP 客户端宏，支持 qualifier 多注册中心选择、参数绑定与公网 URL 调用"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["http", "rest", "discovery", "proc-macro", "microservices"]
 categories.workspace = true
 
 [lib]

@@ -72,6 +72,10 @@ members = [
     "naml",
     "config-boot",
     "nadisc",
+    "nadisc-runtime",
+    "nadisc-consul",
+    "nadisc-kubernetes",
+    "nanacos-sdk",
     "nanacos",
     "rest-discovery",
     "rest-client-macro",
@@ -87,3 +91,9 @@ repository = "https://github.com/nasa-runtime/nasa-runtime-rust"
 homepage = "https://github.com/nasa-runtime/nasa-runtime-rust"
 keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
+
+[patch.crates-io]
+nagrpc = { path = "nagrpc" }
+nadisc = { path = "nadisc" }
+nanacos = { path = "nanacos" }
+rest-discovery = { path = "rest-discovery" }

@@ -74,6 +74,16 @@ impl CandidatePublisher {
             ApplicationPhase::Running,
         )?;
         crate::managed_adapters::validate(&merged, &self.components)?;
+        // owner 冻结连接身份、注册目标和发送策略；拒绝整帧以避免新配置视图配上仍在运行的旧客户端。
+        if self.components.contains(&ComponentId::Discovery)
+            && merged.get("discovery") != self.initial.snapshot().value().get("discovery")
+        {
+            return Err(crate::ApplicationError::new(
+                ComponentId::Discovery,
+                ApplicationPhase::Running,
+                "discovery configuration changes require application restart",
+            ));
+        }
         // 命名 HTTP 资源在启动时冻结；只允许已有名称的材料与参数按同一视图轮换。
         if enabled_names(merged.get("http_clients"))
             != enabled_names(self.initial.snapshot().value().get("http_clients"))

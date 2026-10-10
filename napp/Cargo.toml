@@ -3,12 +3,12 @@ name = "napp"
 version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Application runtime for strict configuration, managed lifecycles, named resources and authorized durable Saga recovery"
+description = "Application runtime for strict configuration, managed lifecycles, multi-registry discovery and durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "lifecycle", "observability", "graceful-shutdown", "saga"]
+keywords = ["runtime", "lifecycle", "discovery", "graceful-shutdown", "saga"]
 categories.workspace = true
 
 [features]
@@ -89,6 +89,11 @@ ws-kafka = ["ws", "kafka", "naws/kafka"]
 # nacos-discovery：分段生命周期（出站 runtime / 本实例注册 / 关闭后台任务）由 rest-discovery-nacos 提供。
 nacos-discovery = ["dep:rest-discovery-nacos"]
 rest = ["dep:rest-discovery", "dep:nadisc"]
+grpc-discovery = ["grpc", "discovery-runtime", "nagrpc/discovery"]
+discovery-runtime = ["dep:nadisc-runtime", "dep:nadisc", "nagrpc?/discovery"]
+discovery-nacos = ["discovery-runtime", "nadisc-runtime/nacos"]
+discovery-consul = ["discovery-runtime", "nadisc-runtime/consul"]
+discovery-kubernetes = ["discovery-runtime", "nadisc-runtime/kubernetes"]
 # 真实注册中心后端；门面依赖会统一底层包的能力开关，直连 napp 时也可显式启用。
 nacos-discovery-sdk = ["nacos-discovery", "rest-discovery-nacos/nacos-sdk"]
 scheduling = ["dep:nasched"]
@@ -102,6 +107,7 @@ audit-mysql = ["db", "dep:naaudit", "dep:naaudit-mysql", "dep:naoutbox-mysql", "
 audit-pgsql = ["db-pgsql", "dep:naaudit", "dep:naaudit-pgsql", "dep:naoutbox-pgsql", "dep:async-trait"]
 
 [dependencies]
+nadisc-runtime = { path = "../nadisc-runtime", version = "1.0.0", optional = true }
 hystrix = { version = "2.0.0", optional = true }
 nasecret-vault = { version = "2.0.0", optional = true }
 nasecret-http = { version = "2.0.0", optional = true }
@@ -131,7 +137,7 @@ naidempotency = { version = "2.0.0" }
 naauthz = { version = "2.0.0" }
 natelemetry = { version = "2.0.0" }
 napart = { version = "2.0.0", optional = true }
-nagrpc = { version = "2.0.0", optional = true }
+nagrpc = { path = "../nagrpc", version = "2.0.0", optional = true }
 ncrypto = { version = "2.0.0", optional = true }
 hex = { version = "0.4", optional = true }
 # authentication 中间件依赖:JWT 验签 + JWKS 生命周期(仅 web 特性拉入,避免非 web 构建引入 ncrypto)。
@@ -166,8 +172,8 @@ nanacos = { version = "2.0.0", optional = true, default-features = false }
 nasched = { version = "2.0.0", optional = true }
 naws = { version = "2.0.0", optional = true, default-features = false }
 rest-discovery-nacos = { version = "2.0.0", optional = true, default-features = false }
-rest-discovery = { version = "2.0.0", optional = true }
-nadisc = { version = "2.0.0", optional = true }
+rest-discovery = { path = "../rest-discovery", version = "2.0.0", optional = true }
+nadisc = { path = "../nadisc", version = "2.0.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

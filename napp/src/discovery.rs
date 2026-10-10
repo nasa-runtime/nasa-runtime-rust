@@ -170,6 +170,7 @@ impl ApplicationComponent for NacosDiscoveryComponent {
                     application,
                     &registration_bind_ip(application),
                     port,
+                    None,
                 )? {
                     info = info.with_metadata(key, value);
                 }

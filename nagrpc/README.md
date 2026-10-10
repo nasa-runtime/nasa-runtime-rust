@@ -6,6 +6,7 @@
 `tonic`、`prost`、codec 或 build crate 的版本。
 socket 绑定与接流授权分离：受管启动先完成 `Bound` 装配，待所有初始化与最终检查成功后统一激活；
 端口可连接不代表 RPC 已开放，注册发现前还须确认 listener 已运行。
+`discovery` 还为生成客户端提供多注册中心选址、实例提交复验和有界连接/流生命周期。
 
 ```toml
 [dependencies]
@@ -14,6 +15,28 @@ nasa = { version = "2.0.0", features = ["application", "grpc"] }
 [build-dependencies]
 nagrpc-build = "2.0.0"
 ```
+
+## 动态发现调用器
+
+`discovery` feature 提供 `discovery::DiscoveryGrpcService`，可直接传给生成客户端的 `Client::new(service)`。它使用 `nadisc-runtime::DiscoveryHandle` 绑定明确连接和服务，支持 unary、客户端流、服务端流及双向流。连接、容量预约与双向正文归同一个 discovery owner；克隆共享池，不复制 `poll_ready` 的容量预约。
+
+默认总调用预算五秒、128 个并发、16 个连接、30 秒空闲回收、五分钟连接年龄、单帧八 MiB。`with_budget` 在 `poll_ready` 前绑定上游预算，发现、排队、握手、响应头和正文共用较短期限。`grpc-timeout` 取调用方更短值；不读正文、Ready 后不 call、取消或 owner 关闭也会释放受管容量。
+
+连接池只在读取或发布内存状态时持锁，TCP、TLS、HTTP/2 握手在锁外进行。相同完整端点身份共享一次建连，不同端点独立拨号；停滞握手不会阻塞已有健康连接。拨号有独立信号量，已发布连接与在途建连合计不超过 `max_connections`；容量不足时拒绝新拨号。同端点等待者保留各自原预算，发起者取消会结束该次握手并唤醒等待者。
+
+建连失败按 `initial_connect_backoff`（默认 100 毫秒）到 `max_connect_backoff`（默认 5 秒）指数退避，加入 50%～100% 抖动。失败或取消结束后开始计算该次退避；成功握手只有在原预算和当前发现资格仍有效时才发布连接。退避条目与池容量一致，实例撤销且无在途建连后可清除，不自动重试已提交的业务 RPC。
+
+每次 RPC 都在 HTTP/2 `send_request` 前复验当前实例，复用连接不保留永久发送权。已提交流不会迁移到新实例；本组件不自动重放 RPC。实例 metadata 需完整声明 `nasa.grpc.protocol`、`port`、`authority`、`tls_mode`。TLS 候选还必须符合调用方 `allowed_authorities` 与显式信任根；`mutual_tls` 接收完整 CA、客户端证书和私钥。
+
+DNS/Kubernetes 无协议 metadata 时，使用 `DiscoveryClientOptions.protocol = Some(DiscoveryProtocol { authority, tls_mode })`，其中 `DiscoveryTlsMode` 为 `Disabled`、`Server` 或 `Mutual`；端口来自发现实例。显式绑定与 metadata 不允许混用。`for_instance` 绑定业务层已认证的完整候选并强制严格证据，`with_admission` 可在实际提交点复验凭据等同步业务资格；闭包不得等待或重入 owner。
+
+Application 通过 `app.discovery()?.grpc(Some("business"), "orders", options)` 选择具名连接与
+服务别名，再注入生成客户端。`None` 使用 `primary` 或兼容配置的显式默认引用；未知连接、
+空实例或失权都不跨环境回退。这里的连接选择与 REST 的 qualifier 相同，REST Mapping
+属性不参与 gRPC 方法生成。门面需启用 `grpc-discovery` 和对应 provider feature。
+
+旧 `grpc_endpoint()` 和自行管理的 Channel 保留一次性选址合同。[公共 owner 与配置](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md)。
+
 
 ## 核心价值
 
@@ -31,7 +54,7 @@ reflection、每个 generated service 的消息上限、TLS、listener、readine
 | 决定方法授权和容量策略 | 在 handler 前执行身份、并发和速率门禁 |
 | 独立模式下持有唯一 handle | Application 模式的绑定、监督、摘流、排空和反向停机 |
 
-`nagrpc` 不替业务设计 proto，也不替代 service mesh、API gateway、Schema Registry、客户端负载均衡或
+`nagrpc` 不替业务设计 proto，也不替代 service mesh、API gateway、Schema Registry 或跨环境自动容灾，也不推断
 业务权限模型。它解决的是同一进程内 gRPC transport 与 generated service 的一致装配和唯一生命周期。
 
 ## 最小业务接入

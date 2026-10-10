@@ -267,6 +267,8 @@ pub(crate) struct ApplicationInner {
     /// 服务发现会话的弱引用发布状态。
     #[cfg(feature = "nacos-discovery")]
     nacos_discovery_runtime: Arc<crate::capabilities::NacosDiscoveryRuntimeState>,
+    #[cfg(feature = "discovery-runtime")]
+    discovery_runtime: Arc<crate::managed_discovery::RuntimeState>,
     /// 调度器启动结果和可选选主对象的只读发布状态。
     #[cfg(feature = "scheduling")]
     scheduling_runtime: Arc<crate::capabilities::SchedulingRuntimeState>,
@@ -435,6 +437,8 @@ impl Application {
                 log_runtime: Arc::new(crate::capabilities::LogRuntimeState::new()),
                 #[cfg(feature = "nacos-config")]
                 nacos_config_runtime: Arc::new(crate::capabilities::NacosConfigRuntimeState::new()),
+                #[cfg(feature = "discovery-runtime")]
+                discovery_runtime: Arc::new(crate::managed_discovery::RuntimeState::new()),
                 #[cfg(feature = "nacos-discovery")]
                 nacos_discovery_runtime: Arc::new(
                     crate::capabilities::NacosDiscoveryRuntimeState::new(),
@@ -4314,6 +4318,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
         ComponentId::Web => 6,
         ComponentId::Ws => 7,
         ComponentId::NacosDiscovery => 8,
+        ComponentId::Discovery => 24,
         ComponentId::Scheduling => 9,
         ComponentId::Resources => 10,
         ComponentId::Supervisor => 11,
@@ -4336,7 +4341,7 @@ const fn component_bit_offset(component: ComponentId) -> u32 {
 /// 新增 `ComponentId` 变体时必须同步扩充 `component_bit_offset` 的 match(exhaustive,漏写
 /// 直接编译失败)与下面的 `ALL` 列表;偏移重复或越界会在编译期报错,不会退化成运行期误判。
 const _: () = {
-    const ALL: [ComponentId; 24] = [
+    const ALL: [ComponentId; 25] = [
         ComponentId::Application,
         ComponentId::Config,
         ComponentId::Log,
@@ -4347,6 +4352,7 @@ const _: () = {
         ComponentId::Web,
         ComponentId::Ws,
         ComponentId::NacosDiscovery,
+        ComponentId::Discovery,
         ComponentId::Scheduling,
         ComponentId::Resources,
         ComponentId::Supervisor,
@@ -4379,3 +4385,34 @@ const _: () = {
         i += 1;
     }
 };
+
+#[cfg(feature = "discovery-runtime")]
+impl Application {
+    /// 业务作用：取得受管多注册中心目录，业务句柄只有发现和查询权。
+    /// 参数说明：无。
+    /// 返回：组件已声明且资源仍开放时返回目录，否则返回生命周期错误。
+    pub fn discovery(&self) -> ApplicationResult<crate::managed_discovery::DiscoveryDirectory> {
+        self.inner.discovery_runtime.directory()
+    }
+
+    /// 业务作用：将自定义 listener 和其独立本地资格登记到注册计划解析目录。
+    /// 参数说明：`name` 是配置引用名，`endpoint` 是已绑定端点，`eligibility` 不得依赖远端注册结果。
+    /// 返回：初始化期且名称唯一时登记；Ready 封存后拒绝新增。
+    pub fn configure_discovery_endpoint(
+        &self,
+        name: &str,
+        endpoint: nadisc_runtime::assembly::ListenerEndpoint,
+        eligibility: nadisc_runtime::Eligibility,
+    ) -> ApplicationResult<()> {
+        self.inner
+            .discovery_runtime
+            .endpoint(name, endpoint, eligibility)
+    }
+
+    /// 业务作用：供生命周期组件读取同一受管装配状态。
+    /// 参数说明：无。
+    /// 返回：内部状态不通过此方法向业务暴露关闭权限。
+    pub(crate) fn discovery_runtime(&self) -> Arc<crate::managed_discovery::RuntimeState> {
+        self.inner.discovery_runtime.clone()
+    }
+}

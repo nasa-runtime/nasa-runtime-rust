@@ -1,17 +1,20 @@
 //! 声明式 HTTP 客户端过程宏。
+//! 具名集合以 primary 为默认连接，方法 qualifier 覆盖 trait；未知名称拒绝提交。
+//! 完整 HTTP(S) url 使用默认 HTTP 客户端直连，不经过服务名启发式，不接受或继承 qualifier。
+//! 宏字符串不展开 YML 占位符。
 //!
-//! `#[rest_client]` 基于 trait 生成可注入 `RestDiscovery` 的客户端实现，
-//! 方法级 mapping 注解决定 HTTP 方法、路径和参数绑定方式。
+//! `#[rest_client]` 基于 trait 生成可注入单客户端或具名客户端集合的实现，
+//! trait 与方法的 qualifier 选择注册中心连接，方法级 mapping 决定 HTTP 方法、路径和参数绑定。
 // ============================================================================
 // rest-client-macro —— 声明式 HTTP 客户端宏。
 //
-//   #[rest_client] 读完整 trait → 生成 {Trait}Client + new(rest) + #[async_trait] impl;
+//   #[rest_client] 读完整 trait → 生成 {Trait}Client、new(rest)、with_clients(rest) 和异步实现；
 //   方法属性 #[GetMapping]/#[PostMapping]/#[PutMapping]/#[PatchMapping]/#[DeleteMapping] 提供 HTTP 元数据,被 #[rest_client] 消费删除;
 //   参数 inert attr(#[PathVariable]/#[RequestParam]/#[RequestHeader]/#[RequestHeaders]/#[QueryMap]/#[RequestBody]/#[FormBody])
-//   只在 #[rest_client] 内有效、由它解析并从输出删除(不导出成独立 proc macro, 第8条)。
+//   只在 #[rest_client] 内有效、由它解析并从输出删除，不导出成独立 proc macro。
 //
-//   service 模式 → self.rest.service_request(service, Method::X, path)(档1 直连,**不生成字符串 URL**);
-//   url 模式     → self.rest.request(Method::X, url)(普通外部)。复杂逻辑收敛到 rest-discovery 的 __private。
+//   service 模式先按 qualifier 选择客户端，再调用 service_request；不生成字符串 URL。
+//   url 模式使用默认客户端 external_request。复杂逻辑收敛到 rest-discovery 的 __private。
 // ============================================================================
 
 use proc_macro::TokenStream;
@@ -26,12 +29,9 @@ use syn::{
 
 // ── 入口宏 ──
 
-/// 业务作用: trait 级生成器:读 trait → 生成 client struct + `new(rest)` + `#[async_trait] impl`。
-///
-/// # 参数
-///
-/// - `attr`: `#[rest_client(...)]` 括号内的配置 token stream；当前保留给扩展。
-/// - `item`: 被注解的 trait 定义 token stream。
+/// 业务作用：为 trait 生成支持单客户端及 qualifier 集合注入的异步 REST 实现。
+/// 参数说明：`attr` 包含服务、qualifier、路径及类型配置；`item` 为被注解的 trait。
+/// 返回：保留 trait 的客户端实现；非法配置生成编译错误，不产生网络副作用。
 #[proc_macro_attribute]
 pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     match rest_client_impl(attr.into(), item.into()) {
@@ -112,15 +112,15 @@ fn rest_root() -> TokenStream2 {
 #[derive(Default)]
 struct TraitArgs {
     service: Option<String>,
+    qualifier: Option<String>,
     context_path: Option<String>,
     scheme: Option<String>,
     client: Option<Ident>,
 }
 
-/// 业务作用: 解析 trait 级客户端属性，形成服务名、路径前缀、scheme 与生成类型配置。
-///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 业务作用：解析 trait 的服务别名、默认 qualifier、路径、scheme 与生成类型配置。
+/// 参数说明：`attr` 是客户端属性的 token stream。
+/// 返回：合法的 trait 配置；未知属性或非法 qualifier 生成编译错误。
 fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
     let mut a = TraitArgs::default();
     if attr.is_empty() {
@@ -134,6 +134,7 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
             .unwrap_or_default();
         match key.as_str() {
             "service" => a.service = Some(meta.value()?.parse::<LitStr>()?.value()),
+            "qualifier" => parse_qualifier(&meta, &mut a.qualifier)?,
             "context_path" => a.context_path = Some(meta.value()?.parse::<LitStr>()?.value()),
             "scheme" => a.scheme = Some(meta.value()?.parse::<LitStr>()?.value()),
             "client" => {
@@ -154,6 +155,35 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
     Ok(a)
 }
 
+/// 业务作用：校验具名注册中心选择的字面量，拒绝重复或不可解析的 qualifier。
+/// 参数说明：`meta` 是当前属性，`slot` 保存当前层级唯一的 qualifier。
+/// 返回：合法连接名写入 slot；重复、空值、非法字符或非字符串值生成编译错误。
+fn parse_qualifier(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    slot: &mut Option<String>,
+) -> syn::Result<()> {
+    if slot.is_some() {
+        return Err(meta.error("qualifier 不能重复声明"));
+    }
+    let value = meta.value()?.parse::<LitStr>()?;
+    let name = value.value();
+    let bytes = name.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 64
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(syn::Error::new(
+            value.span(),
+            "qualifier 必须是有效的具名连接名称",
+        ));
+    }
+    *slot = Some(name);
+    Ok(())
+}
+
 // ── 方法映射属性 ──
 
 /// 保存单个接口方法的映射参数；用于生成请求路径、方法和媒体类型。
@@ -161,6 +191,7 @@ fn parse_trait_args(attr: TokenStream2) -> syn::Result<TraitArgs> {
 struct MappingArgs {
     path: Option<String>,
     service: Option<String>,
+    qualifier: Option<String>,
     context_path: Option<String>,
     url: Option<String>,
     scheme: Option<String>,
@@ -189,10 +220,9 @@ fn http_method_of(attr: &Attribute) -> Option<Ident> {
     Some(format_ident!("{m}"))
 }
 
-/// 业务作用: 解析方法级 mapping 属性，形成路径、服务、媒体类型、解包和固定 header 配置。
-///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
+/// 业务作用：解析方法的路径、服务、qualifier、媒体类型、解包与固定 header 配置。
+/// 参数说明：`attr` 是方法上的 HTTP mapping 属性。
+/// 返回：供跨字段校验的配置；未知属性、非法字面量或重复 qualifier 生成编译错误。
 fn parse_mapping_attr(attr: &Attribute) -> syn::Result<MappingArgs> {
     let mut a = MappingArgs::default();
     match &attr.meta {
@@ -217,6 +247,7 @@ fn parse_mapping_attr(attr: &Attribute) -> syn::Result<MappingArgs> {
                         a.path = Some(meta.value()?.parse::<LitStr>()?.value())
                     }
                     "service" => a.service = Some(meta.value()?.parse::<LitStr>()?.value()),
+                    "qualifier" => parse_qualifier(&meta, &mut a.qualifier)?,
                     "context_path" => {
                         a.context_path = Some(meta.value()?.parse::<LitStr>()?.value())
                     }
@@ -664,11 +695,9 @@ const FORBIDDEN_HEADERS: &[&str] = &[
 
 // ── 主流程 ──
 
-/// 业务作用: 生成 REST 客户端实现；用于把 trait 方法转换为请求构造代码。
-///
-/// # 参数
-/// - `attr`: 属性宏括号内的 token stream。
-/// - `item`: 被宏处理的 Rust item token stream。
+/// 业务作用：生成 REST 客户端及两种注入入口，使所有方法共享宿主提供的连接集合。
+/// 参数说明：`attr` 为 trait 级配置；`item` 为包含 mapping 方法的 trait。
+/// 返回：客户端和异步方法实现；非法 trait 或方法配置返回带源码位置的错误。
 fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let trait_args = parse_trait_args(attr)?;
     let mut item_trait: ItemTrait = syn::parse2(item)
@@ -699,12 +728,21 @@ fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<Token
         #item_trait
 
         #vis struct #client_ident {
-            rest: ::std::sync::Arc<#rest_ty>,
+            rest: ::std::sync::Arc<#root::RestClientSet>,
         }
 
         impl #client_ident {
-            /// 构造入口:调用方传入共享 `RestDiscoveryClient`,便于在应用启动时统一装配。
+            /// 业务作用：注入单个默认 REST 客户端，保留未声明 qualifier 的调用方式。
+            /// 参数说明：`rest` 是宿主共享和关闭的客户端，不推断具名连接身份。
+            /// 返回：客户端实现；方法若显式要求 qualifier，调用时因缺少具名绑定而失败。
             #vis fn new(rest: ::std::sync::Arc<#rest_ty>) -> Self {
+                Self { rest: ::std::sync::Arc::new(#root::RestClientSet::from_client(rest)) }
+            }
+
+            /// 业务作用：注入具名 REST 客户端集合，按 trait 与方法的 qualifier 选择注册中心。
+            /// 参数说明：`rest` 是宿主已冻结的连接集合和可选默认引用。
+            /// 返回：共享同一集合的客户端实现；未知 qualifier 或缺默认项在请求提交前失败。
+            #vis fn with_clients(rest: ::std::sync::Arc<#root::RestClientSet>) -> Self {
                 Self { rest }
             }
         }
@@ -716,12 +754,9 @@ fn rest_client_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<Token
     })
 }
 
-/// 业务作用: 生成单个远程方法实现；用于处理路径、参数、请求体和响应解析。
-///
-/// # 参数
-/// - `m`: trait 中待展开的远程调用方法声明。
-/// - `trait_args`: rest client 或 mapper trait 级配置参数。
-/// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
+/// 业务作用：校验远程方法的选择规则、路径、参数和响应合同，再生成请求实现。
+/// 参数说明：`m` 为待展开的方法；`trait_args` 为继承的配置；`root` 为运行时 crate 路径。
+/// 返回：消费 mapping 属性后的方法实现；无效请求配置或 URL 与 qualifier 混用时拒绝。
 fn gen_method(
     m: &mut TraitItemFn,
     trait_args: &TraitArgs,
@@ -785,6 +820,13 @@ fn gen_method(
     // - url 模式是外部直连,不允许再带 service/context_path/path/scheme。
     // - service 模式必须生成 service_request,不能拼成 http://service/... 让运行时再猜。
     let url_mode = mapping.url.is_some();
+    if url_mode && (mapping.qualifier.is_some() || trait_args.qualifier.is_some()) {
+        // 固定地址不经过服务发现，不能悄悄忽略注册中心选择造成错误的隔离预期。
+        return Err(syn::Error::new(
+            m.sig.span(),
+            "url 模式不能配置或继承 qualifier",
+        ));
+    }
     if url_mode
         && (mapping.service.is_some()
             || mapping.context_path.is_some()
@@ -1074,18 +1116,20 @@ fn gen_method(
     Ok(quote! { #(#attrs)* #sig { #body } })
 }
 
-/// 业务作用: 生成请求体构造代码；用于按注解和参数类型选择序列化方式。
+/// 业务作用：生成先选择 qualifier、再构造请求并解析响应的调用代码。
 ///
-/// # 参数
+/// 参数说明：
 /// - `mapping`: HTTP 映射属性解析结果。
-/// - `trait_args`: rest client 或 mapper trait 级配置参数。
+/// - `trait_args`: 客户端 trait 的默认选择与请求配置。
 /// - `http`: 当前方法对应的 HTTP verb。
-/// - `url_mode`: URL 构造模式,决定直连 URL、服务发现 URL 或 trait base_url 的拼接方式。
-/// - `template`: 路径、URL 或缓存 key 模板。
-/// - `params`: 已解析的函数参数或宏参数列表。
+/// - `url_mode`: 是否使用固定外部 URL；否则通过绑定服务选择实例。
+/// - `template`: 路径或 URL 模板。
+/// - `params`: 已解析的方法参数绑定。
 /// - `ret_ty`: 生成客户端调用代码时使用的返回类型。
 /// - `ret_unit`: 返回类型是否为单元类型。
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
+///
+/// 返回：请求和响应处理代码；不支持的协议或响应形态返回编译错误，未知 qualifier 在运行期提交前失败。
 #[allow(clippy::too_many_arguments)]
 fn gen_body(
     mapping: &MappingArgs,
@@ -1099,6 +1143,10 @@ fn gen_body(
     root: &TokenStream2,
 ) -> syn::Result<TokenStream2> {
     let method_tok = quote!(#root::reqwest::Method::#http);
+    let qualifier = match mapping.qualifier.as_ref().or(trait_args.qualifier.as_ref()) {
+        Some(qualifier) => quote!(::core::option::Option::Some(#qualifier)),
+        None => quote!(::core::option::Option::None),
+    };
 
     // path 变量列表会传给运行时 helper 做 percent-encode,避免宏展开里复制复杂转义逻辑。
     let pv: Vec<TokenStream2> = params
@@ -1233,12 +1281,12 @@ fn gen_body(
     };
 
     // builder 起点:
-    // - url 模式:模板替换后直接 request。
+    // - url 模式:模板替换后显式外部调用，防止注入的启发式客户端改写目标。
     // - service 模式:context_path + path 归一化后走 service_request,保持显式内部调用语义。
     let start = if url_mode {
         quote! {
             let __url = #root::__private::replace_path_variables(#template, &[ #(#pv),* ])?;
-            let #mut_tok __req = self.rest.request(#method_tok, __url);
+            let #mut_tok __req = __rest.external_request(#method_tok, __url);
         }
     } else {
         let service = mapping
@@ -1254,7 +1302,7 @@ fn gen_body(
         quote! {
             let __pv = #root::__private::replace_path_variables(#template, &[ #(#pv),* ])?;
             let __path = #root::__private::join_path(#ctx, &__pv);
-            let #mut_tok __req = self.rest.service_request(#service, #method_tok, __path);
+            let #mut_tok __req = __rest.service_request(#service, #method_tok, __path);
         }
     };
 
@@ -1283,6 +1331,8 @@ fn gen_body(
     };
 
     Ok(quote! {
+        // 必须先解析具名连接；选择失败时不能构造请求或跨注册中心回退。
+        let __rest = self.rest.client(#qualifier)?;
         #start
         #(#pre)*
         #(#binds)*

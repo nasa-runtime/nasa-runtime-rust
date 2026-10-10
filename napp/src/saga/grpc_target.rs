@@ -35,6 +35,8 @@ pub(super) struct ManagedGrpcChannel {
     next: Arc<AtomicUsize>,
     timeout: Duration,
     discovery: Option<Arc<ManagedGrpcRefresh>>,
+    #[cfg(feature = "discovery-runtime")]
+    managed: Option<Arc<super::discovery::ManagedSagaGrpc>>,
 }
 
 impl ManagedGrpcChannel {
@@ -47,6 +49,8 @@ impl ManagedGrpcChannel {
             next: Arc::new(AtomicUsize::new(0)),
             timeout,
             discovery: None,
+            #[cfg(feature = "discovery-runtime")]
+            managed: None,
         }
     }
 }
@@ -72,6 +76,10 @@ impl Service<http::Request<Body>> for ManagedGrpcChannel {
             Err(error) => return Box::pin(async move { Err(error) }),
         };
         let deadline = Instant::now() + timeout;
+        #[cfg(feature = "discovery-runtime")]
+        if let Some(managed) = self.managed.clone() {
+            return Box::pin(async move { managed.call(request, deadline).await });
+        }
         let active = Arc::clone(&self.active);
         let next = Arc::clone(&self.next);
         let discovery = self.discovery.clone();
@@ -120,6 +128,23 @@ impl Service<http::Request<Body>> for ManagedGrpcChannel {
                 })
             }))
         })
+    }
+}
+
+/// 业务作用：让通用 owner 同时接管 Saga 发现、连接和双向正文，保留精确业务身份门禁。
+/// 参数说明：`managed` 固定发现与凭据来源，`timeout` 限制完整 RPC。
+/// 返回：可直接供全部 Saga generated client 使用的统一目标。
+#[cfg(feature = "discovery-runtime")]
+pub(super) fn build_owner_grpc_target(
+    managed: super::discovery::ManagedSagaGrpc,
+    timeout: Duration,
+) -> ManagedGrpcTarget {
+    let mut channel = ManagedGrpcChannel::new(None, timeout);
+    channel.managed = Some(Arc::new(managed));
+    ManagedGrpcTarget {
+        channel,
+        timeout,
+        replicas: None,
     }
 }
 

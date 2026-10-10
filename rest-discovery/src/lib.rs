@@ -1,4 +1,6 @@
 //! 带服务发现和客户端负载均衡的 HTTP client。
+//! [`RestClientSet`] 共享具名客户端，默认选择 primary，显式未知 qualifier 不回退。
+//! 受管发现每次提交复验证据；external_request 与 URL Mapping 显式直连，不受服务名启发式影响。
 //!
 //! 面向 `nadisc::DiscoveryClient` 抽象工作，支持 `lb://service/path`、显式服务请求和外部 URL 直连。
 // ============================================================================
@@ -6,7 +8,8 @@
 //
 // 设计边界(实现基准)
 //   · 只面向 `nadisc::DiscoveryClient` 抽象做 LB + URL 重写,**绝不依赖 nacos crate**。
-//     后端由调用方在 main 里 connect 后装成 `Arc<dyn DiscoveryClient>` 注入(换 eureka/consul 本 crate 不动)。
+//     后端由调用方在 main 里 connect 后装成 `Arc<dyn DiscoveryClient>` 注入。
+//   · external_request(method, url) 显式 HTTP(S) 外部调用，不查服务名索引。
 //   · 三档识别:
 //       档1 service_request(service, method, path)  → 显式内部直连(不查索引、不外部 fallback)
 //       档2 lb://service/path                        → 显式内部直连
@@ -17,7 +20,7 @@
 //   · 负载均衡:round-robin,每服务计数器随机起种,避免冷启动请求集中打到同一实例。
 //   · 装配:手动装配为默认(`Arc::new(XxxClient::new(RestDiscovery::get()))`);不引 DI 容器 / linkme 注册表。
 //
-// 全局门面:`RestDiscovery`(经 nasa 重导出为 `nasa::nadisc::RestDiscovery`)。
+// 全局门面:`RestDiscovery`(经 nasa 重导出为 `nasa::discovery::RestDiscovery`)。
 //   main: RestDiscovery::init_with_discovery(Arc::new(nacos_client), opts).await?;  // 或 init_external_only
 //   任意位置: RestDiscovery::get().request(Method::GET, "lb://svc/path").send().await?;
 // ============================================================================
@@ -33,6 +36,7 @@ mod instances;
 mod lb;
 mod metrics;
 mod options;
+mod qualified;
 mod resilience;
 mod runtime;
 
@@ -51,9 +55,12 @@ pub use crate::options::{
     RestHeuristicOptions, RestHttpOptions, RestResilienceOptions, RestWatchOptions, RetryOptions,
     SchemePolicy, ServiceMatchMode, StartupPolicy, UnknownHostPolicy,
 };
+pub use crate::qualified::RestClientSet;
 pub use crate::runtime::RemoteRuntime;
 pub use nabudget::RequestBudget;
+mod response;
 pub use natelemetry::{SpanRecorder, TraceContext};
+pub use response::ManagedResponse;
 
 // 便利重导出:业务写 `lb://...` 调用需要 `reqwest::Method`,经此免去单独依赖 reqwest 的写法。
 pub use reqwest::{self, Method, StatusCode};

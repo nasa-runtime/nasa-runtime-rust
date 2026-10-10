@@ -277,6 +277,7 @@ impl ApplicationSpec {
                         | ComponentId::Web
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
+                        | ComponentId::Discovery
                         | ComponentId::Scheduling
                         | ComponentId::Partition
                         | ComponentId::Grpc
@@ -312,6 +313,7 @@ impl ApplicationSpec {
                         | ComponentId::Web
                         | ComponentId::Ws
                         | ComponentId::NacosDiscovery
+                        | ComponentId::Discovery
                         | ComponentId::Scheduling
                         | ComponentId::Partition
                         | ComponentId::Grpc
@@ -368,6 +370,27 @@ pub(crate) fn validate_component_order(components: &[ComponentId]) -> Applicatio
         ));
     }
 
+    if components.contains(&ComponentId::Discovery)
+        && components.contains(&ComponentId::NacosDiscovery)
+    {
+        return Err(spec_error(
+            "discovery and nacos-discovery cannot own registration in the same application",
+        ));
+    }
+    for dependency in [
+        ComponentId::NacosConfig,
+        ComponentId::Telemetry,
+        ComponentId::Saga,
+        ComponentId::Outbox,
+        ComponentId::Web,
+        ComponentId::Ws,
+        ComponentId::Grpc,
+        ComponentId::Kafka,
+        ComponentId::RedisJob,
+        ComponentId::Partition,
+    ] {
+        ensure_before_if_both(components, dependency, ComponentId::Discovery)?;
+    }
     ensure_before_if_both(components, ComponentId::NacosConfig, ComponentId::Db)?;
     ensure_before_if_both(components, ComponentId::SqlObservability, ComponentId::Db)?;
     ensure_before_if_both(components, ComponentId::Observability, ComponentId::Web)?;

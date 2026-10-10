@@ -99,6 +99,30 @@ pub(crate) struct InstanceSource {
 }
 
 impl InstanceSource {
+    /// 业务作用：识别已经由公共 owner 管理有效期的观察源。
+    /// 参数说明：无。
+    /// 返回：受管源要求每个 attempt 重新选址并复验发送许可。
+    pub(crate) fn managed(&self) -> bool {
+        self.discovery.requires_admission()
+    }
+
+    /// 业务作用：在实例有效性保护范围内提交实际 HTTP 传输。
+    /// 参数说明：`service` 与 `instance` 是本次候选，`submit` 只能同步提交。
+    /// 返回：路由已撤销时直接报告发现失败，不记为业务实例传输故障。
+    pub(crate) fn submit(
+        &self,
+        service: &str,
+        instance: &Instance,
+        submit: &mut dyn FnMut(),
+    ) -> Result<()> {
+        self.discovery
+            .submit_if_current(service, instance, submit)
+            .map_err(|source| RestDiscoveryError::DiscoveryFailed {
+                service: service.into(),
+                source,
+            })
+    }
+
     /// 业务作用：构造新实例；用于集中初始化内部字段和默认状态。
     pub(crate) fn new(
         discovery: Arc<dyn DiscoveryClient>,
@@ -124,6 +148,18 @@ impl InstanceSource {
     /// 就换一个全新 entry 重来。init 完成后复查 `removed`,杜绝 init-in-flight 的 orphan task。
     pub(crate) async fn instances(&self, service: &str) -> Result<Arc<Vec<Instance>>> {
         let _call = self.background.enter()?;
+        if self.discovery.requires_admission() {
+            // 受管源已经合并观察并维护证据期限，不能再叠加 REST 缓存宽限。
+            return self
+                .discovery
+                .discover(service)
+                .await
+                .map(Arc::new)
+                .map_err(|source| RestDiscoveryError::DiscoveryFailed {
+                    service: service.into(),
+                    source,
+                });
+        }
         loop {
             let entry = self.background.with_open(|| {
                 if let Some(entry) = self.watch_states.get(service) {

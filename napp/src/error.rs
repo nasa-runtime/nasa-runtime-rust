@@ -43,6 +43,7 @@ pub enum ComponentId {
     Ws,
     /// Nacos 服务注册与发现。
     NacosDiscovery,
+    Discovery,
     /// 异步任务和定时调度。
     Scheduling,
     /// 受管业务资源注册表。
@@ -82,6 +83,7 @@ impl fmt::Display for ComponentId {
             Self::Web => "web",
             Self::Ws => "ws",
             Self::NacosDiscovery => "nacos-discovery",
+            Self::Discovery => "discovery",
             Self::Scheduling => "scheduling",
             Self::Resources => "resources",
             Self::Supervisor => "supervisor",

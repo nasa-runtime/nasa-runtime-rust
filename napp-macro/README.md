@@ -21,11 +21,12 @@
 编译期校验（与运行期同口径，先在宏上失败）：
 
 - 组件白名单：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、
-  `kafka`、`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`；未知或
+  `kafka`、`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`discovery`、`scheduling`；未知或
   重复组件拒绝。
 - 业务可按任意顺序书写；宏固定规范为 `log -> nacos-config -> telemetry -> db -> redis ->
   cache -> partition -> saga -> kafka -> outbox -> redis-job -> grpc -> auth -> web -> ws ->
-  nacos-discovery -> scheduling`。
+  nacos-discovery/discovery -> scheduling`。
+- `discovery` 使用具名多连接公共 owner，与旧 `nacos-discovery` 互斥；必需注册确认完成后才完成启动。
 - `saga` 隐式加入 DB 与 Outbox；独立 `outbox` 隐式加入 DB。Inbox 是事务内原语，没有组件字符串；
   `redis-job` 隐式加入 Redis；Kafka 或其它 transport 不由 Saga 推断。
 - 隐式依赖只补齐缺项；显式同时声明 `saga`、`db`、`outbox` 与只声明 `saga` 生成同一组件图。
@@ -61,6 +62,14 @@
 Saga 的 managed 角色与 datasource 由运行时读取最终配置，宏不推断默认库。可靠 client 的 append
 和 dispatcher 使用同一 `saga.client.datasource_ref`；显式 `outbox.datasource_ref` 冲突在 Ready 前
 拒绝。宏只生成组件图，不能绕过运行期同源门禁。
+
+## 多注册中心声明
+
+`#[nasa::application("web", "discovery")]` 使用公共多连接生命周期，连接参数来自
+`discovery.connections`，注册目标来自 `discovery.registrations`。默认连接名为 `primary`；
+REST 接口上的 `qualifier` 由 `rest-client` 宏读取，Application 宏不额外接收注册中心名。
+业务取得 `app.discovery()?.rest_clients()?` 后注入生成客户端，共享原连接与关闭责任。
+多 Nacos、内部调用与外部 URL 的完整示例见[调用指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
 
 ## 使用示例
 

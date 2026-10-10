@@ -93,6 +93,10 @@ The configuration file is resolved relative to the process working directory and
 
 ## Features, components and configuration
 
+For internal services across named registries and internet API calls from the same application, see
+the [multi-registry and declarative HTTP guide](discovery.md) (Chinese). Registry selection uses
+`qualifier` with default `primary`; complete URL methods use the default HTTP client without a registry lookup.
+
 These three choices have distinct roles:
 
 | Choice | Purpose | Example |

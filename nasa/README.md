@@ -5,6 +5,9 @@
 `nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
 应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
+并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
+
 `yml` 提供嵌套默认值、有序通配符导入和可解释的配置候选；严格工厂把来源权限、观察与
 运行时应用状态纳入同一宿主。见[严格配置装配](#严格配置装配)。
 从 [最小服务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/quickstart.md#最小可运行服务)
@@ -32,6 +35,27 @@ secret/TLS 与本地文件监听。业务提供配置与 handler，框架负责�
 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
 Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 hystrix 命令目录随 Application 实例重建，业务收尾后排干，旧命令永久拒绝执行。
+
+## 多注册中心与共享发现生命周期
+
+任意 Rust 微服务都可以使用 `nadisc-runtime` 管理多个独立注册中心，不依赖 Saga 或数据库。具名连接隔离凭据、服务作用域、发现证据和故障；显式注册清单决定当前服务发布到哪些环境。Static/DNS 为地址来源，Nacos、Consul 和 Kubernetes 分别保留各自健康与权限边界。
+
+独立宿主持有唯一 `DiscoveryOwner`；使用 napp 时由 `#[nasa::application("web", "discovery")]` 接管 prepare、启动确认、资格探针、注册摘流、业务排空和最终关闭。启用 `discovery-runtime`，按需增加 `discovery-nacos`、`discovery-consul`、`discovery-kubernetes`；REST 请求构建器使用 `rest-discovery`，声明式 Mapping 使用 `rest-client`，动态 gRPC 使用 `grpc-discovery`。旧 `nacos-discovery` 入口仍可使用，新旧配置根节点不能同时声明。
+
+旧单 Nacos 接口使用派生组件 `nanacos-sdk` 维护兼容传输；控制流丢失即撤销连接健康，再由既有 SDK 状态机重连。新 owner 的 HTTP adapter 独立工作，不叠加 SDK 注册监督。
+
+`app.discovery()?.client(Some("business"))` 选择发现环境；`rest(Some("business"))` 返回该环境的共享 HTTP 客户端，默认 REST 门面使用 `primary`；兼容配置的显式默认引用优先。生成的 gRPC 客户端可注入受管 `DiscoveryGrpcService`。完整空集、权限撤销、期限耗尽与关闭会拒绝新提交；已经提交的请求仍须按业务幂等与结果不明语义处理。
+
+注册中心选择统一使用 `qualifier`：默认连接固定命名为 `primary`，注册目标及 Saga 目标使用 `qualifier`，无需额外默认配置字段。REST 的五种 Mapping 支持 `qualifier = "business"`，方法级值覆盖 trait 默认；通过 `Client::with_clients(app.discovery()?.rest_clients()?)` 注入共享集合。未标注时选择 `primary`；缺少 primary 时只允许显式具名选择，未知名称不会采用默认连接。未标注 qualifier 的原 `Client::new(selected_client)` 用法保持可用；旧 `connection_ref` 作为 `qualifier` 的别名兼容读取，旧 `default_connection` 则保留显式默认引用语义。
+
+`#[GetMapping(url = "https://dns.google/resolve")]` 使用默认 HTTP 客户端访问公网，不查询 Nacos。
+`url` 模式不能配置或继承 `qualifier`；宏不读取 YML 占位符。完整配置、内部服务及 Google API
+示例见[调用指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
+
+多个注册目标分别设置可达 IP 与映射端口，不能把容器监听地址当成宿主地址。Saga 可另外选择基础设施连接，并为续租与已提交结果设置独立恢复目标；恢复资格不授予新业务的目录执行权。
+
+[完整配置、架构、手动接入与停机合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md) · [Consul](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-consul/README.md) · [Kubernetes](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-kubernetes/README.md)
+
 
 ## 核心价值与门面架构
 
@@ -62,7 +86,7 @@ participant 或 client；managed 模式支持 HTTP、gRPC、Kafka 与 Redis Stre
 完整合同见
 [napp Saga 受管模式](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#saga-受管模式)。
 
-Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与 schema 合同，以及 Nacos
+Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与 schema 合同，以及具名连接的
 协调侧服务发现。HTTP HMAC 与 gRPC mTLS 可通过完整配置快照热轮换；definition 退休保留实例、
 消息与审计引用门禁。部署、轮换与观测配置见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
@@ -196,7 +220,7 @@ qualifier；不同 datasource 之间不构成一个事务。source 集合、endp
 
 `application` feature 提供声明式入口。组件字符串可以任意书写；宏会拒绝未知项与重复项，再按唯一规范顺序
 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job -> grpc -> auth -> web -> ws ->
-nacos-discovery -> scheduling` 启动，并严格反序停机。
+nacos-discovery/discovery -> scheduling` 启动，并严格反序停机。
 
 ```rust
 #[nasa::application("web", "cache", "redis", "log")]
@@ -569,6 +593,8 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 | `nacos` / `nacos-sdk` | `nasa::config::nacos`、`nasa::discovery::nacos` | API 层与真实传输层 |
 | `rest-discovery` | `nasa::discovery::rest` | 服务发现 REST 负载均衡 |
 | `rest-discovery-nacos` / `nacos-discovery` | `nasa::discovery` | 注册发现装配与应用组件桥 |
+| `discovery-runtime` / `discovery-nacos` / `discovery-consul` / `discovery-kubernetes` | `nasa::discovery::runtime`、`app.discovery()` | 中性 owner 与具名多后端装配 |
+| `grpc-discovery` | `nasa::grpc::discovery` | 逐请求资格门禁、有限连接池与受管正文 |
 | `rest-client` / `rest-client-nacos` | `nasa::discovery::rest` | 声明式 REST client |
 | `base` | `nasa::base`、`nasa::date` | `nabase` 的完整能力：响应、日期时间、容量、ID、字符串、环境变量和翻译抽象 |
 | `crypto` / `numeric` / `image` | 对应同名模块 | 密码、精确数值和图片工具 |

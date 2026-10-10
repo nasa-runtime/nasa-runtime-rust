@@ -10,6 +10,10 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+Named Nacos, Consul, Kubernetes and Static/DNS connections isolate registry credentials, evidence
+and failures. Select internal calls with `qualifier`, use complete URLs for internet APIs, and keep
+registration and shutdown under one owner. The default connection name is lowercase `primary`.
+
 The `yml` feature provides nested defaults, ordered filename imports and explainable configuration
 candidates. A strict factory connects fixed source permissions, observation and application state
 to the same host. See [Strict configuration assembly](#strict-configuration-assembly).
@@ -26,6 +30,28 @@ and [Integration and upgrades](https://github.com/nasa-runtime/nasa-runtime-rust
 This is an independent open-source project with no affiliation, sponsorship, endorsement or official
 relationship with the United States National Aeronautics and Space Administration. The archive includes
 the complete statement in `NOTICE`.
+
+## Multiple registries and shared discovery ownership
+
+`nadisc-runtime` gives any Rust microservice named, isolated registry connections and an explicit registration lifecycle, without requiring Saga or a database. Connections isolate credentials, service scopes, observations and failures. Adding a connection does not register the application automatically.
+
+A standalone host owns one `DiscoveryOwner`. With napp, `#[nasa::application("web", "discovery")]` manages preparation, startup confirmation, local eligibility, registration withdrawal, application draining and final shutdown. Enable `discovery-runtime` and the required `discovery-nacos`, `discovery-consul` or `discovery-kubernetes` features. Static/DNS remain address sources; each backend retains its own health and permission semantics.
+
+Legacy single-Nacos APIs use the derived `nanacos-sdk` transport. Loss of its control stream invalidates connection health before the existing SDK state machine reconnects. The new owner uses an independent HTTP adapter and does not add SDK registration supervision.
+
+REST clients are selected through `app.discovery()?.rest(Some("business"))`; the default facade uses `primary`, unless a legacy explicit default reference is configured. `grpc-discovery` supplies a managed transport for generated gRPC clients. Empty snapshots, revoked permissions, expired evidence and shutdown prevent new submissions. Already submitted requests still require application authentication, idempotency and uncertain-result handling.
+
+Registry selection uses `qualifier`: the default connection is named `primary`, and registration or Saga targets specify `qualifier`, without an additional default configuration field. All five REST Mapping attributes accept `qualifier = "business"`; a method overrides its trait default. Inject the shared set with `Client::with_clients(app.discovery()?.rest_clients()?)`. Calls without a qualifier select `primary`; a directory without it supports explicit named calls only. Unknown names never fall back to another connection. Existing `Client::new(selected_client)` calls remain available for methods without an explicit qualifier; `connection_ref` remains an alias for `qualifier`, while legacy `default_connection` keeps its explicit default override semantics.
+
+`rest-client` enables all five Mapping macros; `rest-discovery` supplies the request builder.
+`#[GetMapping(url = "https://dns.google/resolve")]` uses the default HTTP client without registry
+lookup. URL methods cannot declare or inherit a qualifier, and macro strings do not expand YAML
+placeholders. See the [configuration and internal/public API examples](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md) (Chinese).
+
+Each registration has its own reachable IP and mapped port. Saga can select an infrastructure connection independently and use a separate recovery registration for capability renewal and committed results. Recovery eligibility does not authorize new workflow execution. Existing single-Nacos configuration remains available; declaring both configuration roots is rejected.
+
+[Architecture, configuration and lifecycle](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md) · [Consul](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-consul/README.md) · [Kubernetes](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-kubernetes/README.md)
+
 
 ## Core value and facade architecture
 

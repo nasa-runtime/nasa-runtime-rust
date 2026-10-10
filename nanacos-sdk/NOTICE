@@ -1,0 +1,11 @@
+nanacos-sdk contains code derived from nacos-sdk 0.8.3.
+Upstream: https://github.com/nacos-group/nacos-sdk-rust
+Original package: https://crates.io/crates/nacos-sdk/0.8.3
+Original authors: nacos-group, CheirshCai, onewe, and contributors.
+Original license: Apache License, Version 2.0.
+
+This derived component is maintained as part of nasa-runtime-rust.
+The gRPC connection implementation changes control-stream failure handling
+so a failed stream invalidates the active connection. Package identity and
+distribution entry points differ from the upstream package.
+Original source license notices are retained.

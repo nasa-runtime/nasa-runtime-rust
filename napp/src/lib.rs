@@ -1,8 +1,14 @@
 //! NASA 应用生命周期运行时核心。
+//! 发现连接的默认名称为 primary，REST Mapping 与注册清单统一通过 qualifier 选择。
+//! 完整 URL 使用默认 HTTP 客户端直连，发现配置变化拒绝整份热更新候选并保留原视图。
 //!
 //! 严格配置可由 `ApplicationSpec::with_config_loader` 在 preflight 前显式选择，固定环境和来源权限。
 //! naml 负责嵌套默认值、有序文件模式和字段解释；宿主负责材料、观察集、配置视图及组件应用状态。
 //! 同值来源变化可推进 `Application::config_observation`，不增加业务配置版本，也不表示组件重试成功。
+//!
+//! `discovery` 组件管理具名 Nacos、Consul、Kubernetes 与 Static/DNS 连接，统一接管准备、
+//! 注册确认、独立本地资格、共享观察、摘流与关闭。具名 REST 和动态 gRPC 客户端在提交时复验
+//! 实例与证据；跨环境注册可以发布不同地址。旧 `nacos-discovery` 与新配置互斥。
 //!
 //! Redis Stream、Proxy、AutoPipeline、出站 TCP 帧客户端和 hystrix 可由命名配置接入，
 //! 框架负责准备、业务激活、健康观测以及关闭后的真实退出等待。
@@ -188,6 +194,8 @@ mod inbox;
 mod initialization;
 #[cfg(feature = "kafka")]
 mod kafka;
+#[cfg(feature = "discovery-runtime")]
+pub mod managed_discovery;
 #[cfg(any(feature = "inbox", feature = "inbox-pgsql"))]
 pub use inbox::{InboxRetentionPlan, InboxRetentionSnapshot};
 #[cfg(feature = "log")]
@@ -441,6 +449,10 @@ pub use web_handle::{RouteInfo, WebHandle, WebMetricsSnapshot, WebReadinessState
 /// 每个子模块只在对应运行能力编入时存在。属性展开代码引用其中的常量，缺失能力会直接形成
 /// 指向组件名的编译错误，不会把问题延后到进程启动阶段。
 pub mod components {
+    #[cfg(feature = "discovery-runtime")]
+    pub mod discovery {
+        pub const FEATURE_CHECK: () = ();
+    }
     /// 日志组件的编译期能力探测点。
     #[cfg(feature = "log")]
     pub mod log {

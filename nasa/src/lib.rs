@@ -1,10 +1,15 @@
 //! 面向 Rust 服务端应用的受管生命周期与可靠业务执行门面。
+//! 多注册中心默认连接为 primary；rest-client 的 Mapping 通过 qualifier 选择内部环境。
+//! 完整 URL 使用默认 HTTP 客户端直连公网，不配置 qualifier，也不由宏解析 YML 地址占位符。
 //!
 //! `nasa-runtime-rust` 将配置校验、资源装配、业务初始化、接流许可和有序停机纳入同一生命周期，
 //! 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复业务。应用按 feature 选择能力；
 //! 持久事实、事务提交和租约权威仍由所选数据库与消息系统承载。
 //! `yml` 提供嵌套默认值、自然排序的本地导入和可解释配置候选；启动前的严格工厂使来源权限、
 //! 目录观察和配置应用进入同一宿主。来源序号、期望快照与组件实际状态保持独立，不承诺统一回滚。
+//! `discovery-runtime` 提供具名连接、跨环境注册和可撤销的动态调用；可按需选择 Nacos、Consul、
+//! Kubernetes 或 Static/DNS。同一公共 owner 支持独立宿主与 Application，连接之间隔离凭据和故障。
+//! 完整空集、权限撤销和证据到期会阻止新提交；已提交业务仍需要认证、幂等与结果不明处理。
 //! [中文指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.md) 与
 //! [English guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/README.en.md)
 //! 提供快速开始、架构和接入说明。
@@ -635,7 +640,7 @@ pub mod image {
 }
 
 /// 服务发现/注册(provider-neutral)：中性类型 + 各后端子模块。
-/// `Instance` 与具体注册中心无关,后端复用;后端按需开 feature:`nasa::discovery::nacos`(以后可加 `::eureka`)。
+/// `Instance` 与后端无关；`runtime` 提供具名多注册中心 owner，`nacos` 保留兼容 SDK 入口。
 /// `nasa = { features = ["nacos-sdk"] }` → `use nasa::discovery::{Instance, nacos::{NacosDiscoveryClient, NacosProps}};`
 ///   `client.register(...)`(drop best-effort deregister;优雅停机显式 deregister)/ `discover`(健康,LB 用)/ `discover_all`(全部,管理诊断)/
 ///   `subscribe_channel`(LB 推荐:discover 轮询兜底,可靠反映"删到空";`subscribe_channel_with_options` 配 `SubscribeOptions` 调轮询间隔)/
@@ -644,10 +649,12 @@ pub mod image {
 ///   优先级:app 配置 / env → `NacosProps.discovery_ip` → 调用方传入的 `Instance.ip`。
 #[cfg(feature = "discovery")]
 pub mod discovery {
+    #[cfg(feature = "discovery-runtime")]
+    pub use discovery_runtime_impl as runtime;
     // provider-neutral 中性类型 + 流量过滤规则 + 抽象接口(业务/RestDiscovery 面向这些,不绑定后端)。
     pub use discovery_impl::{
-        is_traffic_instance, DiscoveryClient, DnsDiscovery, DnsService, Instance, Registration,
-        ServiceRegistry, ServiceWatch, ServiceWatchGuard, StaticDiscovery, WatchOptions,
+        DiscoveryClient, DnsDiscovery, DnsService, Instance, Registration, ServiceRegistry,
+        ServiceWatch, ServiceWatchGuard, StaticDiscovery, WatchOptions, is_traffic_instance,
     };
 
     /// Nacos 注册中心后端(独立 `NacosDiscoveryClient`,只建命名服务)。**只给机制**(注册/心跳/优雅下线/发现/订阅),不认识业务类型。
@@ -675,9 +682,9 @@ pub mod discovery {
     /// `disc`(`DiscoveryHandle`)由 main 持有到进程结束;优雅停机【先】`disc.deregister().await` 摘流、【再】drain HTTP。
     #[cfg(feature = "rest-discovery-nacos")]
     pub use rest_discovery_nacos_impl::{
-        init_from_config, init_from_config_with_load_balancer, AppRegistrationInfo,
-        DiscoveryConfig, DiscoveryHandle, HttpConfig, NacosConnConfig, ProviderKind,
-        RegistrationConfig, RestConfig, RetryConfig, WatchConfig,
+        AppRegistrationInfo, DiscoveryConfig, DiscoveryHandle, HttpConfig, NacosConnConfig,
+        ProviderKind, RegistrationConfig, RestConfig, RetryConfig, WatchConfig, init_from_config,
+        init_from_config_with_load_balancer,
     };
 
     /// `rest-discovery` 的底层类型(client / builder / 选项 / LB)。手动装配时用:
@@ -687,13 +694,13 @@ pub mod discovery {
         #[doc(hidden)]
         pub use rest_discovery_impl::__private;
         pub use rest_discovery_impl::{
-            reqwest, HeuristicHttpMode, InstanceScheme, LbStrategy, LoadBalancer, Method,
-            NoInstancePolicy, RemoteRuntime, RequestBudget, RestDiscoveryClient,
-            RestDiscoveryError, RestDiscoveryOptions, RestHeuristicOptions, RestHttpOptions,
-            RestMetrics, RestMetricsSnapshot, RestRequestBuilder, RestResilienceOptions,
-            RestWatchOptions, RetryOptions, RoundRobinLoadBalancer, SchemePolicy, ServiceMatchMode,
-            SpanRecorder, StartupPolicy, StatusCode, TraceContext, UnknownHostPolicy,
-            WeightedRoundRobinLoadBalancer,
+            HeuristicHttpMode, InstanceScheme, LbStrategy, LoadBalancer, Method, NoInstancePolicy,
+            RemoteRuntime, RequestBudget, RestClientSet, RestDiscoveryClient, RestDiscoveryError,
+            RestDiscoveryOptions, RestHeuristicOptions, RestHttpOptions, RestMetrics,
+            RestMetricsSnapshot, RestRequestBuilder, RestResilienceOptions, RestWatchOptions,
+            RetryOptions, RoundRobinLoadBalancer, SchemePolicy, ServiceMatchMode, SpanRecorder,
+            StartupPolicy, StatusCode, TraceContext, UnknownHostPolicy,
+            WeightedRoundRobinLoadBalancer, reqwest,
         };
 
         /// 声明式 REST 客户端宏(crate = `rest-client-macro`)。
@@ -702,7 +709,7 @@ pub mod discovery {
         /// 无需 import,由 `#[rest_client]` 消费。
         #[cfg(feature = "rest-client")]
         pub use rest_client_macro::{
-            rest_client, DeleteMapping, GetMapping, PatchMapping, PostMapping, PutMapping,
+            DeleteMapping, GetMapping, PatchMapping, PostMapping, PutMapping, rest_client,
         };
     }
 }

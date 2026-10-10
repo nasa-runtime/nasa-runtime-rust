@@ -329,6 +329,21 @@ impl RestDiscoveryClient {
         )
     }
 
+    /// 业务作用：按完整 HTTP(S) 地址发起外部调用，不使用服务名索引或注册中心选址。
+    /// 参数说明：`method` 为 HTTP 方法；`url` 为外部 HTTP(S) 地址，可包含 query。
+    /// 返回：共享本客户端连接池、请求期限和关闭门禁的构建器；发送时拒绝非法地址与其他协议。
+    pub fn external_request(
+        self: &Arc<Self>,
+        method: Method,
+        url: impl AsRef<str>,
+    ) -> RestRequestBuilder {
+        RestRequestBuilder::new(
+            self.clone(),
+            method,
+            BuilderInput::ExternalUrl(url.as_ref().to_string()),
+        )
+    }
+
     /// 业务作用：读取 get 数据；用于查询当前缓存、配置或远端状态。
     ///
     ///
@@ -413,13 +428,10 @@ impl RestDiscoveryClient {
 
     // ── 解析与选址(send 时调用) ──
 
-    /// 业务作用：把 builder 输入解析成请求计划(分类 + 路径/query 构建 + 分流 metrics)。**不选实例**——
-    /// 选址留给 [`send_internal`](Self::send_internal) 的重试循环。
-    ///
-    /// # 参数
-    /// - `input`: 宏或解析器收到的原始输入。
-    /// - `scheme_override`: 调用方显式指定的 HTTP scheme 覆盖值。
-    /// - `query_parts`: URL query 片段集合。
+    /// 业务作用：解析请求类别、路径和 query；内部实例选择留给 send_internal 的重试循环。
+    /// 参数说明：`input` 标明内部服务、通用 URL 或外部地址；`scheme_override` 仅覆盖显式内部协议；
+    /// `query_parts` 为追加的编码 query 片段。
+    /// 返回：内部候选计划或完整外部地址；非法目标直接失败，显式外部地址不读取发现状态。
     fn resolve_plan(
         &self,
         input: &BuilderInput,
@@ -427,6 +439,18 @@ impl RestDiscoveryClient {
         query_parts: &[String],
     ) -> Result<RequestPlan> {
         match input {
+            BuilderInput::ExternalUrl(raw) => {
+                let url = append_external_query(raw, query_parts)?;
+                // 显式外部地址不能被同名注册服务接管，也不能借 lb 协议进入内部发现路径。
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return Err(RestDiscoveryError::InvalidUrl {
+                        url: raw.clone(),
+                        reason: "外部请求只接受带 host 的 http/https 地址".into(),
+                    });
+                }
+                self.metrics.external();
+                Ok(RequestPlan::External(url))
+            }
             // 档1:显式 service。
             BuilderInput::Service { service, path } => {
                 classify::validate_service(service).map_err(|reason| {
@@ -598,7 +622,7 @@ impl RestDiscoveryClient {
                 }
                 error
             })?;
-        let circuit = self
+        let mut circuit = self
             .resilience
             .begin_circuit(service, &self.options.resilience)
             .map_err(|error| {
@@ -607,29 +631,8 @@ impl RestDiscoveryClient {
                 }
                 error
             })?;
-        // 一次请求只取一份实例快照。GET/HEAD 的传输错误重试只在这份快照里换未试过的实例;
-        // mark_transport_error 打开的 discover+TTL 窗口服务于后续请求,避免同一次请求在错误路径反复拉注册中心。
+        // 旧 provider 保留请求内快照语义；受管源在每次 attempt 读取共享事实且不另起后端轮询。
         let snapshot = source.instances(service).await?;
-        // provider 通常已经过滤健康实例,这里仍统一调用 `is_traffic_instance` 做最后防线:
-        // disabled、非健康、权重非法、地址为空等实例不能进入负载均衡器。
-        let now = Instant::now();
-        let avail: Vec<&Instance> = snapshot
-            .iter()
-            .filter(|instance| is_traffic_instance(instance))
-            .filter(|instance| {
-                let ejected = self.resilience.is_ejected(service, instance, now);
-                if ejected {
-                    self.metrics.outlier_ejected_skipped();
-                }
-                !ejected
-            })
-            .collect();
-        if avail.is_empty() {
-            self.metrics.no_instance();
-            return Err(RestDiscoveryError::NoAvailableInstance {
-                service: service.to_string(),
-            });
-        }
 
         // 仅 GET/HEAD + 开启重试时多尝试;其余 method 恒 1 次。
         // 带 body 或业务副作用的方法默认不自动重放,把幂等性判断留给调用方。
@@ -642,9 +645,37 @@ impl RestDiscoveryClient {
             1
         };
 
-        let mut tried = vec![false; avail.len()];
+        let mut attempted = std::collections::HashSet::new();
         let mut last_err: Option<reqwest::Error> = None;
         for attempt in 0..max_attempts {
+            // 退避后重读当前证据，已撤销的旧路由不能进入下一次重试。
+            let current = if attempt != 0 && source.managed() {
+                source.instances(service).await?
+            } else {
+                snapshot.clone()
+            };
+            let now = Instant::now();
+            let avail: Vec<&Instance> = current
+                .iter()
+                .filter(|instance| is_traffic_instance(instance))
+                .filter(|instance| {
+                    let ejected = self.resilience.is_ejected(service, instance, now);
+                    if ejected {
+                        self.metrics.outlier_ejected_skipped();
+                    }
+                    !ejected
+                })
+                .collect();
+            if avail.is_empty() {
+                self.metrics.no_instance();
+                return Err(RestDiscoveryError::NoAvailableInstance {
+                    service: service.into(),
+                });
+            }
+            let mut tried: Vec<_> = avail
+                .iter()
+                .map(|instance| attempted.contains(&(instance.ip.clone(), instance.port)))
+                .collect();
             // 每轮优先尊重负载均衡器选择,但如果它选到已失败实例,就线性找下一个未试实例。
             // 这样既保留正常分布,又避免一次请求内反复打同一个坏实例。
             let idx = match self.pick_untried(service, &avail, &tried) {
@@ -653,6 +684,7 @@ impl RestDiscoveryClient {
             };
             tried[idx] = true;
             let inst = avail[idx];
+            attempted.insert((inst.ip.clone(), inst.port));
             let url = build_instance_url(scheme, &inst.ip, inst.port, path, query)?;
             tracing::debug!(service, ip = %inst.ip, port = inst.port, attempt, "rest-discovery: 选中实例");
             let attempt_timeout =
@@ -668,7 +700,27 @@ impl RestDiscoveryClient {
                     original_host,
                 },
             );
-            match req.send().await {
+            let mut sending = std::pin::pin!(req.send());
+            let mut submitted = false;
+            let result = std::future::poll_fn(|cx| {
+                use std::future::Future;
+                if submitted {
+                    return sending.as_mut().poll(cx).map(Ok);
+                }
+                let mut result = std::task::Poll::Pending;
+                let admission = source.submit(service, inst, &mut || {
+                    // 只有通过发现门禁并开始 transport 的请求才提供业务熔断证据。
+                    circuit.mark_submitted();
+                    submitted = true;
+                    result = sending.as_mut().poll(cx);
+                });
+                match admission {
+                    Ok(()) => result.map(Ok),
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            })
+            .await?;
+            match result {
                 Ok(resp) => {
                     let can_retry_status = self.options.retry.retry_get_head_on_retryable_status
                         && is_retryable_status(resp.status())
@@ -709,10 +761,7 @@ impl RestDiscoveryClient {
                 }
                 Err(e) => {
                     let transport = is_retryable_transport(&e);
-                    // 传输错误(连接/超时)→ 触发该 service 快速刷新/恢复,不等下一轮 poll。
-                    // 语义边界:「快速刷新/恢复」开的是 discover+TTL 降级窗口,作用于【后续请求】
-                    // (下一个请求即走刷新后的 discover 快照),**不是**本次请求立即重新 discover;本次请求只在最初
-                    // `avail` 快照里换「未试过的实例」重试(见上方 `avail`:整条请求复用同一份快照,不在重试内重取 instances)。
+                    // 传输失败只影响业务实例统计；受管证据仍由公共 owner 独立复验。
                     if transport {
                         source.mark_transport_error(service);
                     }
@@ -929,11 +978,12 @@ async fn index_refresh_loop(
     }
 }
 
-/// builder 的输入:要么显式 service(档1),要么字符串 URL(档2/3)。
+/// builder 的输入：显式内部服务、遵循启发式策略的通用 URL，或保持原目标的外部 HTTP(S) 地址。
 #[derive(Debug, Clone)]
 enum BuilderInput {
     Service { service: String, path: String },
     Url(String),
+    ExternalUrl(String),
 }
 
 /// `resolve_plan` 的结果:内部服务(待选实例)或已定的外部 URL。
@@ -1295,6 +1345,20 @@ impl RestRequestBuilder {
     pub async fn send(mut self) -> Result<reqwest::Response> {
         let background = self.client.background.clone();
         let _call = background.enter()?;
+        if self
+            .client
+            .source
+            .as_ref()
+            .is_some_and(|source| source.managed())
+        {
+            let maximum = self.timeout.unwrap_or(self.client.options.http.timeout);
+            self.budget = Some(
+                self.budget
+                    .as_ref()
+                    .map(|budget| budget.child(maximum))
+                    .unwrap_or_else(|| RequestBudget::from_now(maximum)),
+            );
+        }
         if let Some(budget) = &self.budget {
             budget.check()?;
         }
@@ -1343,6 +1407,23 @@ impl RestRequestBuilder {
             let _ = span.finish(status);
         }
         result
+    }
+
+    /// 业务作用：将响应头及后续流式正文纳入同一次受管请求期限与停机排空。
+    /// 参数说明：无。
+    /// 返回：有界流式响应；正文未被主动读取时仍响应截止时间和运行时关闭。
+    pub async fn send_managed(mut self) -> Result<crate::ManagedResponse> {
+        let maximum = self.timeout.unwrap_or(self.client.options.http.timeout);
+        let budget = self
+            .budget
+            .as_ref()
+            .map(|parent| parent.child(maximum))
+            .unwrap_or_else(|| RequestBudget::from_now(maximum));
+        self.budget = Some(budget.clone());
+        let background = self.client.background.clone();
+        let permit = background.reserve_response()?;
+        let response = self.send().await?;
+        crate::ManagedResponse::new(response, background, budget, permit)
     }
 
     /// 业务作用：已由 [`Self::send`] 施加绝对 deadline/cancellation 后执行解析、发现与发送。

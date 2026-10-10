@@ -1,0 +1,123 @@
+use serde::{Deserialize, Serialize};
+use tracing::error;
+
+use crate::api::naming::ServiceInstance;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceInfo {
+    pub name: String,
+
+    pub group_name: String,
+
+    pub clusters: String,
+
+    pub cache_millis: i64,
+
+    pub last_ref_time: i64,
+
+    pub checksum: String,
+
+    // < 3.0
+    #[serde(rename = "allIPs")]
+    pub all_ips: Option<bool>,
+
+    // >=3.0
+    #[serde(rename = "allIps")]
+    pub all_ips_3x: Option<bool>,
+
+    pub reach_protection_threshold: bool,
+
+    pub hosts: Option<Vec<ServiceInstance>>,
+}
+
+const SERVICE_INFO_SEPARATOR: &str = "@@";
+impl ServiceInfo {
+    pub fn ip_count(&self) -> i32 {
+        match self.hosts.as_ref() {
+            Some(h) => h.len() as i32,
+            None => 0,
+        }
+    }
+
+    fn is_all_ips(&self) -> bool {
+        if let Some(item) = self.all_ips {
+            item
+        } else {
+            self.all_ips_3x.unwrap_or(false)
+        }
+    }
+
+    pub fn validate(&self) -> bool {
+        if self.is_all_ips() {
+            return true;
+        }
+
+        let Some(hosts) = self.hosts.as_ref() else {
+            return false;
+        };
+
+        for host in hosts {
+            if !host.healthy {
+                continue;
+            }
+
+            if host.weight > 0 as f64 {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn get_grouped_service_name(service_name: &str, group_name: &str) -> String {
+        if !group_name.is_empty() && !service_name.contains(SERVICE_INFO_SEPARATOR) {
+            let service_name = format!("{}{}{}", group_name, SERVICE_INFO_SEPARATOR, service_name);
+            return service_name;
+        }
+        service_name.to_string()
+    }
+
+    pub fn hosts_to_json(&self) -> String {
+        let Some(hosts) = self.hosts.as_ref() else {
+            return "".to_owned();
+        };
+        serde_json::to_string(hosts).unwrap_or_else(|e| {
+            error!("hosts to json failed. {e:?}");
+            "".to_owned()
+        })
+    }
+
+    pub fn get_key(name: &str, clusters: &str) -> String {
+        if !clusters.is_empty() {
+            let key = format!("{}{}{}", name, SERVICE_INFO_SEPARATOR, clusters);
+            return key;
+        }
+
+        name.to_string()
+    }
+
+    /// Get service key without clusters, aligned with Java client's getKeyWithoutClusters().
+    /// Used for listener registry subscription/unsubscription to ensure notifications
+    /// work correctly regardless of cluster information in server push messages.
+    pub fn get_key_without_clusters(service_name: &str, group_name: &str) -> String {
+        Self::get_grouped_service_name(service_name, group_name)
+    }
+}
+
+impl Default for ServiceInfo {
+    fn default() -> Self {
+        Self {
+            name: Default::default(),
+            group_name: Default::default(),
+            clusters: Default::default(),
+            cache_millis: 1000,
+            last_ref_time: 0,
+            checksum: Default::default(),
+            all_ips: Some(false),
+            all_ips_3x: Some(false),
+            reach_protection_threshold: false,
+            hosts: Default::default(),
+        }
+    }
+}

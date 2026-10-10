@@ -122,7 +122,7 @@ impl GrpcTlsMode {
     /// 参数说明: 无。
     ///
     /// 返回：仅可能为 `disabled`、`server` 或 `mutual` 的稳定文本。
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     fn discovery_value(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -1126,14 +1126,14 @@ struct GrpcPublishedRuntime {
     tls_certificate_expiry_timestamp: Option<u64>,
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     tls_source: Option<Arc<crate::saga::security::ManagedGrpcTlsSource>>,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     tls_mode: GrpcTlsMode,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     authority: Option<String>,
 }
 
 /// 服务发现注册阶段读取的已发布 gRPC endpoint 事实。
-#[cfg(feature = "nacos-discovery")]
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
 pub(crate) struct GrpcEndpointRegistration {
     /// listener 实际绑定的端口，包含 `port=0` 的内核分配结果。
     pub(crate) port: u16,
@@ -1263,7 +1263,7 @@ impl GrpcRuntimeState {
             Arc<crate::saga::security::ManagedGrpcTlsSource>,
         >,
     ) -> ApplicationResult<()> {
-        #[cfg(not(feature = "nacos-discovery"))]
+        #[cfg(not(any(feature = "nacos-discovery", feature = "discovery-runtime")))]
         let _ = (tls_mode, authority);
         self.published
             .set(GrpcPublishedRuntime {
@@ -1271,9 +1271,9 @@ impl GrpcRuntimeState {
                 tls_certificate_expiry_timestamp,
                 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
                 tls_source,
-                #[cfg(feature = "nacos-discovery")]
+                #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
                 tls_mode,
-                #[cfg(feature = "nacos-discovery")]
+                #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
                 authority,
             })
             .map_err(|_| {
@@ -1315,7 +1315,7 @@ impl GrpcRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：预绑定观察面存在时返回固定协议事实；尚未绑定时返回 None，本投影本身不证明可接流。
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     pub(crate) fn endpoint_registration(&self) -> Option<GrpcEndpointRegistration> {
         self.published.get().map(|published| {
             let address = published.observer.local_addr();

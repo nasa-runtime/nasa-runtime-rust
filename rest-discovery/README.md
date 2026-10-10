@@ -1,6 +1,6 @@
 # rest-discovery
 
-`rest-discovery` 是带服务发现和客户端负载均衡的 HTTP 客户端。它只依赖 provider-neutral 的 `nadisc::DiscoveryClient` 抽象，不依赖 Nacos；Nacos 装配在 `rest-discovery-nacos`。
+`rest-discovery` 是带服务发现和客户端负载均衡的 HTTP 客户端。它只依赖 provider-neutral 的 `nadisc::DiscoveryClient` 抽象，不依赖 Nacos。多注册中心由 `nadisc-runtime` 与 napp 装配；`rest-discovery-nacos` 保留单 Nacos 接入。
 与 `application` 组合时，`rest_clients` 可装配 external、static、dns 或 custom 来源，统一拥有
 服务 watch、请求准入与退出等待；普通出站调用无需启动注册中心或入站 Web。
 
@@ -10,6 +10,29 @@
 [dependencies]
 nasa = { version = "2.0.0", features = ["rest-discovery"] }
 ```
+
+## 具名连接与完整响应生命周期
+
+`nadisc-runtime::DiscoveryHandle` 可作为 `DiscoveryClient` 注入；napp 的 `discovery` 组件为每个连接构造独立共享客户端，并把 `primary`（或兼容配置的显式默认引用）装入原 `RestDiscovery` 门面。声明式客户端通过 `Client::with_clients(app.discovery()?.rest_clients()?)` 和 trait/方法的 `qualifier = "business"` 选择连接。`RestClientSet::new(clients, None)` 支持独立宿主注入具名客户端，以 `primary` 为默认项（第二个参数仅兼容宿主的显式默认引用）；集合最多 256 项，共享原客户端与生命周期，不创建额外连接池。未知 qualifier、缺少 primary 时的未标注调用在提交前失败，被选连接故障不会跨环境回退。未使用 qualifier 的既有代码继续通过 `Client::new(selected_client)` 注入单客户端。每连接的 HTTP 预算、负载均衡和 GET/HEAD 重试策略见 [公共配置](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md)。
+
+受管发现直接读取 owner 的共享证据，不叠加 REST 旧缓存；每次实际提交前重新验证候选，包含重试和 keep-alive。发现失权不会当作某个实例的网络失败。未提交给 transport 的发现失败、空集合或准入拒绝不累计业务熔断失败；半开探针仍会释放占位，恢复后的请求可以继续尝试。成功空集或明确撤权不接受 stale 宽限，也不回退到另一环境。
+
+原 `send() -> reqwest::Response` 保持签名，响应体由调用方释放。`send_managed()` 返回 `ManagedResponse`，可读取 `status`、`headers` 和逐块 `chunk()`；总期限从调用入口计时，延续到 EOF、错误或 Drop。即使不读取正文，到期或客户端关闭仍终止受管 I/O。默认最多 256 个未完成受管响应，单块上限八 MiB，容量不足在提交请求前拒绝。
+
+独立宿主须在应用排空后显式关闭 REST 客户端和 discovery owner；napp 自动完成二者。已经交给 reqwest 的请求仍可能到达远端，撤销发现许可不等于撤回远端副作用。
+
+
+## 公网 URL 与具名注册中心
+
+napp 的具名发现装配关闭 HTTP 服务名启发式，完整 `https://...` 直接访问外部地址，
+`service_request` 与 `lb://` 才使用所选连接的发现证据。`rest-client` 的 URL Mapping
+通过 `external_request` 复用注入的默认 HTTP 客户端，不接受 qualifier；即使注入启发式客户端，
+也不会按同名服务改写地址。它仍遵守请求期限和客户端关闭。
+宏地址是字符串常量，运行期外部地址使用 `.external_request(Method::GET, configured_url)`。
+
+`discovery.connections` 与 `rest_clients` 是两个配置目录：前者提供公共 owner 的注册发现，
+后者提供普通 external/static/dns/custom HTTP 计划。不会把 `rest_clients` 中的名字自动加入
+`app.discovery()?.rest_clients()`。完整示例见[调用指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
 
 ## 全局初始化
 
@@ -75,7 +98,7 @@ let text = RestDiscovery::get()
 
 ```rust
 let bytes = RestDiscovery::get()
-    .get("https://example.com/file.bin")
+    .external_request(Method::GET, "https://example.com/file.bin")
     .send_bytes()
     .await?;
 ```
@@ -128,7 +151,8 @@ let opts = RestDiscoveryOptions::new()
 
 - `service_request(service, method, path)`: 显式内部服务调用。
 - `lb://service/path`: 显式内部服务调用。
-- `http(s)://host/path`: 默认普通外部 HTTP；启用 heuristic 后，host 命中服务索引才走内部 LB。
+- `request` / `get` 等通用入口的 `http(s)://host/path`: 默认普通外部 HTTP；启用 heuristic 后，host 命中服务索引才走内部 LB。
+- `external_request(method, url)` / URL Mapping: 只接受 HTTP(S) 外部地址，不执行启发式选址；其他协议在发送前失败。
 
 ## 声明式客户端
 
@@ -137,7 +161,10 @@ let opts = RestDiscoveryOptions::new()
 ```rust ignore
 #[rest_client_macro::rest_client(service = "order-service")]
 trait OrderApi {
-    #[rest_client_macro::GetMapping("/api/orders/{id}")]
+    /// 业务作用：通过订单服务读取指定订单。
+    /// 参数说明：id 为订单标识。
+    /// 返回：订单对象；发现、请求或解码失败时返回错误。
+    #[GetMapping("/api/orders/{id}")]
     async fn get(&self, #[PathVariable("id")] id: i64) -> anyhow::Result<OrderDto>;
 }
 ```

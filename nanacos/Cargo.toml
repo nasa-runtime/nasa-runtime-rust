@@ -9,11 +9,11 @@ name = "nanacos"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Nacos 配置中心 + 注册中心传输门面(NacosConfigClient / NacosDiscoveryClient)"
+description = "Nacos 配置与注册发现门面，支持独立具名连接和受管 HTTP 注册生命周期"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["nacos", "discovery", "configuration", "microservices"]
 categories.workspace = true
 
 
@@ -21,7 +21,7 @@ categories.workspace = true
 name = "nanacos"
 [dependencies]
 # 服务实例中性类型(provider-neutral);naming 的 register/discover/subscribe 用它,与 eureka 等后端共享。
-nadisc = { package = "nadisc", version = "2.0.0" }
+nadisc = { package = "nadisc", version = "2.0.0", path = "../nadisc" }
 anyhow = "1"
 tracing = "0.1"
 # 实现 discovery 的 provider-neutral 接口(DiscoveryClient/ServiceRegistry/...,对象安全)。
@@ -29,9 +29,12 @@ async-trait = "0.1"
 # Drop best-effort spawn(rt);watch/subscribe channel 需 sync;subscribe_channel 轮询兜底需 time(interval)+ macros(select!)。
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # 真实传输实现;feature 关时不编进 binary，由 `nacos` feature 控制。
-nacos-sdk = { version = "0.8", optional = true }
+nacos-sdk = { package = "nanacos-sdk", version = "1.0.0", path = "../nanacos-sdk", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
 # 关 feature:不编 nacos-sdk,connect/fetch/... 直接 bail 提示重编译(防"以为开了 Nacos 实际没生效")。
 # 开 feature:走真实 nacos-sdk(默认含 config/naming/auth-by-http)。
 nacos = ["dep:nacos-sdk"]
+managed = ["nadisc/http", "dep:serde", "dep:serde_json"]

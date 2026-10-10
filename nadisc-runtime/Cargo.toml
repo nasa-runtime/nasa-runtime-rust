@@ -1,0 +1,33 @@
+[package]
+name = "nadisc-runtime"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "多注册中心具名连接、共享发现证据与多目标注册生命周期"
+keywords = ["discovery", "microservices", "lifecycle", "async"]
+categories.workspace = true
+readme = "README.md"
+include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[dependencies]
+nadisc = { version = "2.0.0", path = "../nadisc", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1"
+nanacos = { version = "2.0.0", path = "../nanacos", optional = true, default-features = false, features = ["managed"] }
+nadisc-consul = { version = "1.0.0", path = "../nadisc-consul", optional = true }
+nadisc-kubernetes = { version = "1.0.0", path = "../nadisc-kubernetes", optional = true }
+
+[features]
+default = []
+nacos = ["dep:nanacos"]
+consul = ["dep:nadisc-consul"]
+kubernetes = ["dep:nadisc-kubernetes"]

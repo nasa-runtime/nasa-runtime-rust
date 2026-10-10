@@ -14,7 +14,7 @@ mod discovery;
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 use discovery::managed_grpc_discovery_target;
 use discovery::managed_http_discovery_target;
-#[cfg(feature = "nacos-discovery")]
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
 pub(crate) use discovery::registration_metadata as discovery_registration_metadata;
 #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
 mod grpc_target;
@@ -431,6 +431,8 @@ struct ManagedHttpTarget {
     signed_path: String,
     authenticator: nasaga_runtime::SagaHttpMessageAuthenticator,
     discovery: Option<Arc<discovery::ManagedSagaDiscovery>>,
+    #[cfg(feature = "discovery-runtime")]
+    admission: Option<Arc<discovery::SagaAdmission>>,
     timeout: Duration,
 }
 
@@ -1085,7 +1087,7 @@ impl SagaRemoteHttpClient {
                 )
             })?;
         let resolved_path = format!("{}{suffix}", target.signed_path);
-        let mut resolved_url = target.url;
+        let mut resolved_url = target.url.clone();
         resolved_url.set_path(&resolved_path);
         resolved_url.set_query(url.query());
         let signed_path = resolved_path.as_str();
@@ -1108,17 +1110,18 @@ impl SagaRemoteHttpClient {
         })?;
         let nonce = nasaga_runtime::SagaHttpMessageAuthenticator::issue_nonce();
         let signature = self.http_signature(signed_path, timestamp_ms, &nonce, &body);
-        let response = self
-            .client
-            .request(method, resolved_url)
-            .timeout(remaining)
-            .header("content-type", "application/json")
-            .header("x-saga-producer", self.producer.as_str())
-            .header("x-saga-timestamp", timestamp_ms.to_string())
-            .header("x-saga-nonce", nonce)
-            .header("x-saga-signature", signature)
-            .body(body)
-            .send()
+        let response = target
+            .send(
+                self.client
+                    .request(method, resolved_url)
+                    .timeout(remaining)
+                    .header("content-type", "application/json")
+                    .header("x-saga-producer", self.producer.as_str())
+                    .header("x-saga-timestamp", timestamp_ms.to_string())
+                    .header("x-saga-nonce", nonce)
+                    .header("x-saga-signature", signature)
+                    .body(body),
+            )
             .await
             .map_err(|error| {
                 saga_source_error(
@@ -3418,9 +3421,8 @@ impl OutboxPublisher for ManagedHttpPublisher {
         if let Some(traceparent) = event.traceparent.as_deref() {
             request = request.header("traceparent", traceparent);
         }
-        let response = request
-            .body(event.payload.clone())
-            .send()
+        let response = target
+            .send(request.body(event.payload.clone()))
             .await
             .map_err(|_| OutboxPublishError::transient("Saga HTTP delivery is uncertain"))?;
         let status = response.status();
@@ -5840,6 +5842,8 @@ impl SagaHandle {
 
 /// 业务作用：保存 Saga 计划、生命周期门禁和 Ready 后发布的只读运行时能力。
 pub(crate) struct SagaRuntimeState {
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+    discovery_incarnation: OnceLock<String>,
     pending: Mutex<Option<SagaApplicationPlan>>,
     sealed: AtomicBool,
     lifecycle: AtomicU8,
@@ -5864,6 +5868,8 @@ impl SagaRuntimeState {
     /// 返回：生命周期处于 configuring 的新状态。
     pub(crate) fn new() -> Self {
         Self {
+            #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+            discovery_incarnation: OnceLock::new(),
             pending: Mutex::new(None),
             sealed: AtomicBool::new(false),
             lifecycle: AtomicU8::new(0),
@@ -6028,7 +6034,7 @@ impl SagaRuntimeState {
     /// 参数说明: 无。
     ///
     /// 返回：运行期间允许继续认证和持久登记；启动未完成或停机时拒绝，不授予业务快照执行权。
-    fn ensure_running(&self) -> ApplicationResult<()> {
+    pub(crate) fn ensure_running(&self) -> ApplicationResult<()> {
         match self.lifecycle.load(Ordering::Acquire) {
             1 => Ok(()),
             2 => Err(saga_error(
@@ -7683,10 +7689,10 @@ async fn probe_managed_candidate_grpc_routes(
     #[cfg(not(any(feature = "saga-grpc", feature = "saga-grpc-pgsql")))]
     {
         let _ = (snapshot, artifact);
-        return Err(saga_error(
+        Err(saga_error(
             phase,
             "managed Saga gRPC candidate probe is unavailable",
-        ));
+        ))
     }
     #[cfg(any(feature = "saga-grpc", feature = "saga-grpc-pgsql"))]
     {
@@ -8014,6 +8020,8 @@ fn managed_http_target(
         signed_path,
         authenticator,
         discovery: None,
+        #[cfg(feature = "discovery-runtime")]
+        admission: None,
         timeout: Duration::from_secs(5),
     })
 }
@@ -8066,6 +8074,8 @@ fn managed_http_capability_target(
         signed_path,
         authenticator,
         discovery: None,
+        #[cfg(feature = "discovery-runtime")]
+        admission: None,
         timeout: Duration::from_secs(5),
     })
 }
@@ -13914,16 +13924,18 @@ async fn post_managed_http_definition(
         target
             .authenticator
             .sign(producer, &target.signed_path, timestamp_ms, &nonce, &body);
-    let response = client
-        .post(target.url.clone())
-        .timeout(remaining)
-        .header("content-type", "application/json")
-        .header("x-saga-producer", producer.as_str())
-        .header("x-saga-timestamp", timestamp_ms.to_string())
-        .header("x-saga-nonce", nonce)
-        .header("x-saga-signature", signature)
-        .body(body)
-        .send()
+    let response = target
+        .send(
+            client
+                .post(target.url.clone())
+                .timeout(remaining)
+                .header("content-type", "application/json")
+                .header("x-saga-producer", producer.as_str())
+                .header("x-saga-timestamp", timestamp_ms.to_string())
+                .header("x-saga-nonce", nonce)
+                .header("x-saga-signature", signature)
+                .body(body),
+        )
         .await
         .map_err(|error| {
             saga_source_error(
@@ -14488,17 +14500,18 @@ async fn post_managed_capability(
         &nonce,
         &body,
     );
-    let response = plan
-        .client
-        .post(target.url.clone())
-        .timeout(remaining)
-        .header("content-type", "application/json")
-        .header("x-saga-producer", plan.producer.as_str())
-        .header("x-saga-timestamp", timestamp_ms.to_string())
-        .header("x-saga-nonce", nonce)
-        .header("x-saga-signature", signature)
-        .body(body)
-        .send()
+    let response = target
+        .send(
+            plan.client
+                .post(target.url.clone())
+                .timeout(remaining)
+                .header("content-type", "application/json")
+                .header("x-saga-producer", plan.producer.as_str())
+                .header("x-saga-timestamp", timestamp_ms.to_string())
+                .header("x-saga-nonce", nonce)
+                .header("x-saga-signature", signature)
+                .body(body),
+        )
         .await
         .map_err(|error| {
             saga_source_error(
@@ -15576,6 +15589,8 @@ pub(crate) fn validate_saga_section(
         None => return Ok(()),
     };
     validate_settings(&settings, phase)?;
+    #[cfg(feature = "discovery-runtime")]
+    discovery::validate_bindings(tree, &settings, phase)?;
     validate_reliable_client_outbox_binding(tree, &settings, phase)
 }
 

@@ -26,7 +26,8 @@
 | 幂等 store | `idempotency-mysql`、`idempotency-pgsql` 或 `idempotency-redis`；对应 `"db"`/`"redis"` | `idempotency_stores.<name>` | `idempotency_store_named(name)` |
 | 事务审计 | `audit` 或 `audit-pgsql`；`"db"` | `audit_sinks.<name>` | `audit_sink(name)` |
 | 普通 REST 出站 | `rest-discovery`；无需发现组件 | `rest_clients.<name>` | `rest_client(name)` |
-| Nacos REST 发现 | `nacos-discovery`；`"nacos-discovery"` | `rest_discovery` | `nacos_discovery()` 的 client |
+| 多注册中心发现与注册 | `discovery-runtime` 加所需 provider feature；`"discovery"` | `discovery.connections`、`discovery.registrations` | `discovery()?.client/rest/grpc`，声明式客户端注入 `rest_clients()` |
+| 单 Nacos REST 兼容入口 | `nacos-discovery`；`"nacos-discovery"` | `rest_discovery` | `nacos_discovery()` 的 client |
 | 对象存储 | `object-store`；无需额外组件 | `object_stores.<name>` | `object_store(name)` |
 | Schema Registry | `kafka-schema-registry`；无需声明 Kafka 消费组件 | `schema_registries.<name>` | `schema_registry(name)` |
 | 外部 secret | `secret-vault` | `secret_providers` 与 provider fragment | 同代 `ConfigView::secrets()` |
@@ -36,7 +37,12 @@
 | Web 认证/加密 | `web-auth` / `web-crypto`；`"web"` | 既有路由安全计划 | 受管 Web 路由 |
 | 集群调度 | `scheduling-cluster`；`"redis","scheduling"` | 既有调度计划 | `scheduling()` |
 
-命名集合通常最多 64 个；secret provider 最多 16 个，secret 最多 256 个。名称在启动时冻结，
+多注册中心以 `primary` 为默认连接，使用 `qualifier` 精确选择；Mapping 宏另外启用 `rest-client`。
+公网 URL 不查询注册中心，`rest_clients` 普通出站目录不会自动合并到发现连接目录。
+完整配置、内部调用和 Google API 示例见[调用指南](discovery.md)。
+
+命名集合通常最多 64 个；secret provider 最多 16 个，secret 最多 256 个。发现连接默认上限 16、
+注册默认上限 64，可在公共 runtime 的硬上限内调整。名称在启动时冻结，
 不支持热应用的资源参数或凭据变化会保留实际资源并报告 `RestartRequired`。
 无 Web 的 Service 和 Batch 可以使用持久 store、审计、REST、对象和 TLS HTTP client。
 Service 的 UserHook 只登记计划；标准资源在 Prepare 装配，供 initializer、Ready 后业务取得。

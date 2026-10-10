@@ -1,20 +1,28 @@
 //! 服务发现 provider-neutral 中性类型、规则与接口。
+//! qualifier 与 primary 默认选择由公共 owner 管理；本层不维护应用连接目录。
 //!
-//! 这里只放**与具体注册中心无关**的数据类型与规则,让 `nacos` / 以后 `eureka` 等后端 crate 复用同一份 [`Instance`]
-//! 与同一套[流量过滤规则](is_traffic_instance)(而彼此不依赖)。
+//! Nacos、Consul、Kubernetes 和 Static/DNS 复用同一份 [`Instance`] 与
+//! [流量过滤规则](is_traffic_instance)，各后端之间不互相依赖。
 //!
 //! [`DiscoveryClient`] / [`ServiceRegistry`] 等抽象也定义在这里,后端 crate 各自实现;`RestDiscovery` 等上层只面向本 crate,
 //! 不绑定 `NacosDiscoveryClient` 之类具体后端类型。
+//! [`managed`] 定义完整观察、注册所有权、写入许可和后端关闭合同；生命周期调度由独立的
+//! `nadisc-runtime` owner 承担，不在本 crate 中创建全局运行时。
 
 use std::collections::HashMap;
 
+#[cfg(feature = "http")]
+pub mod http;
+pub mod managed;
 mod providers;
 
 pub use providers::{DnsDiscovery, DnsService, StaticDiscovery};
 
 /// 一个服务实例(注册/发现的中性表示;不绑定任何后端 SDK 类型)。
-/// `PartialEq` 便于缓存/差异计算(无 `Eq`:`weight` 是 `f64`)。serde 暂不加(YAGNI;需要 admin/快照序列化时再上 optional feature)。
+/// `PartialEq` 用于比较完整实例属性；可选 `serde` feature 用于类型化配置。
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 #[non_exhaustive]
 pub struct Instance {
     /// 实例 IP 或可直连主机地址。
@@ -178,6 +186,26 @@ pub fn is_traffic_instance(inst: &Instance) -> bool {
 /// 客户端负载均衡(RestDiscovery)持 `Arc<dyn DiscoveryClient>`,不绑定具体后端。
 #[async_trait::async_trait]
 pub trait DiscoveryClient: Send + Sync + 'static {
+    /// 业务作用：声明调用方是否必须在每次传输提交前复验受管路由。
+    /// 参数说明：无。
+    /// 返回：旧独立 provider 默认不提供这一附加保证；受管句柄返回 true。
+    fn requires_admission(&self) -> bool {
+        false
+    }
+
+    /// 业务作用：在发现资格保护范围内向传输层提交一次请求，防止排队后使用已撤销端点。
+    /// 参数说明：`service` 与 `instance` 标识候选；`submit` 只能同步提交，不得阻塞或重入发现接口。
+    /// 返回：受管实现拒绝失效候选且不执行回调；旧 provider 保持原调用行为。
+    fn submit_if_current(
+        &self,
+        _service: &str,
+        _instance: &Instance,
+        submit: &mut dyn FnMut(),
+    ) -> anyhow::Result<()> {
+        submit();
+        Ok(())
+    }
+
     /// 业务作用：列出全部服务名(去重)。
     async fn list_services(&self) -> anyhow::Result<Vec<String>>;
 

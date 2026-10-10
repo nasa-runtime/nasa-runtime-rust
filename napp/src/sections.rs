@@ -41,6 +41,7 @@ const RESERVED_SECTIONS: &[(&str, ComponentId)] = &[
     ("server", ComponentId::Web),
     ("ws", ComponentId::Ws),
     ("rest_discovery", ComponentId::NacosDiscovery),
+    ("discovery", ComponentId::Discovery),
     ("scheduling", ComponentId::Scheduling),
 ];
 
@@ -81,10 +82,24 @@ pub(crate) fn validate_declared_sections(
     tree: &Value,
     phase: ApplicationPhase,
 ) -> ApplicationResult<()> {
+    // 两种入口都拥有注册生命周期；即使其中一段禁用，也不能以另一段静默覆盖迁移意图。
+    if (components.contains(&ComponentId::Discovery)
+        || components.contains(&ComponentId::NacosDiscovery))
+        && tree.get("discovery").is_some()
+        && tree.get("rest_discovery").is_some()
+    {
+        return Err(crate::ApplicationError::new(
+            ComponentId::Discovery,
+            phase,
+            "discovery and rest_discovery configuration roots are mutually exclusive",
+        ));
+    }
     // 最小核心构建不含任何段校验器；显式借用让同一函数在该裁剪组合下仍保持无告警编译。
     let _ = (tree, phase);
     for component in components {
         match component {
+            #[cfg(feature = "discovery-runtime")]
+            ComponentId::Discovery => crate::managed_discovery::validate_section(tree, phase)?,
             #[cfg(feature = "web")]
             ComponentId::Web => crate::web::validate_server_section(tree, phase)?,
             #[cfg(feature = "log")]

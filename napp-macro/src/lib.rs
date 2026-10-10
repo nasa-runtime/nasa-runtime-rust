@@ -1,4 +1,5 @@
 //! 应用入口与业务 initializer 属性宏。
+//! discovery 声明公共多注册中心生命周期；连接 qualifier 由运行期目录及 REST Mapping 解释。
 //!
 //! `#[application]` 在业务二进制内生成静态组件描述、路由收集工厂和同步进程入口；
 //! `#[initializer]` 把完整 `Initialization` trait impl 登记到同一二进制的静态集合。运行时会把
@@ -141,9 +142,9 @@ use syn::{
 ///
 /// **业务侧不需要按启动顺序书写组件字符串**：宏接受任意顺序,内部按唯一的规范启动顺序
 /// （`CANONICAL_COMPONENT_ORDER`：log → nacos-config → telemetry → db → redis → cache →
-/// partition → saga → kafka → outbox → redis-job → grpc → auth → web → ws → nacos-discovery → scheduling）自动规范化后再生成组件列表。因此
+/// partition → saga → kafka → outbox → redis-job → grpc → auth → web → ws → nacos-discovery/discovery → scheduling）自动规范化后再生成组件列表。因此
 /// `#[application("web", "log", "kafka")]` 与 `#[application("log", "kafka", "web")]` 完全等价,
-/// 都按 log → kafka → web 启动、严格反序停机。宏仍会拒绝未知组件名和重复声明。
+/// 都按 log → kafka → web 启动、严格反序停机。宏拒绝未知组件名、重复声明，以及同时声明新旧发现组件。
 ///
 /// 示例（任意顺序均可，等价于规范顺序）：
 ///
@@ -1673,7 +1674,7 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
 ///
 /// 该数组既是合法组件白名单，也是唯一的规范启动顺序：配置先于资源，DB 先于 Saga/Outbox，
 /// transport 先于业务入口。新增组件时必须按依赖与反向停机关系插入。
-const CANONICAL_COMPONENT_ORDER: [&str; 17] = [
+const CANONICAL_COMPONENT_ORDER: [&str; 18] = [
     "log",
     "nacos-config",
     "telemetry",
@@ -1690,10 +1691,11 @@ const CANONICAL_COMPONENT_ORDER: [&str; 17] = [
     "web",
     "ws",
     "nacos-discovery",
+    "discovery",
     "scheduling",
 ];
 
-/// 业务作用：校验组件名称与重复项，并按规范启动顺序排序返回，确保书写顺序不改变生命周期。
+/// 业务作用：校验组件名称、重复项与互斥资源所有权，并按规范启动顺序排序返回。
 ///
 /// 业务侧无需按启动顺序书写 `#[application(...)]`:本函数接受任意顺序,拒绝未知名称和重复项,
 /// 然后按 [`CANONICAL_COMPONENT_ORDER`] 排序。运行时因此始终收到规范顺序的组件列表。
@@ -1701,7 +1703,7 @@ const CANONICAL_COMPONENT_ORDER: [&str; 17] = [
 /// 参数说明：
 /// - `components`：属性中以任意顺序提供的字符串字面量。
 ///
-/// 返回：名称全部合法且唯一时返回规范顺序；未知名称或重复声明返回定位到属性项的错误。
+/// 返回：名称合法、唯一且所有权不冲突时返回规范顺序；否则返回定位到属性项的错误。
 fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
     let mut seen = HashSet::new();
     let mut names = Vec::with_capacity(components.len());
@@ -1720,6 +1722,16 @@ fn validate_components(components: &[LitStr]) -> syn::Result<Vec<String>> {
             ));
         }
         names.push(name);
+    }
+    // 新旧发现组件都持有注册生命周期，必须在展开 feature 入口前拒绝双 owner，避免配置路径决定副作用。
+    if seen.contains("discovery") && seen.contains("nacos-discovery") {
+        return Err(syn::Error::new_spanned(
+            components
+                .iter()
+                .find(|component| component.value() == "discovery")
+                .expect("discovery component was recorded"),
+            "discovery and nacos-discovery cannot own registration in the same application",
+        ));
     }
     // Saga 的本地闭环必然包含同 driver 的 Inbox 与 Outbox；Inbox 没有独立生命周期，DB 与 Outbox
     // 只在缺失时补入。业务显式写出依赖仍收敛为同一组件图，不应误判重复。
@@ -1768,6 +1780,7 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
         "web" => "Web",
         "ws" => "Ws",
         "nacos-discovery" => "NacosDiscovery",
+        "discovery" => "Discovery",
         "scheduling" => "Scheduling",
         _ => {
             return Err(syn::Error::new(
@@ -1788,7 +1801,9 @@ fn component_variant(name: &str) -> syn::Result<syn::Ident> {
 fn component_feature_module(name: &str) -> syn::Result<syn::Ident> {
     match name {
         "log" | "db" | "redis" | "telemetry" | "cache" | "partition" | "grpc" | "saga"
-        | "kafka" | "outbox" | "auth" | "web" | "ws" | "scheduling" => Ok(format_ident!("{name}")),
+        | "kafka" | "outbox" | "auth" | "web" | "ws" | "scheduling" | "discovery" => {
+            Ok(format_ident!("{name}"))
+        }
         "redis-job" => Ok(format_ident!("redis_job")),
         "nacos-config" => Ok(format_ident!("nacos_config")),
         "nacos-discovery" => Ok(format_ident!("nacos_discovery")),

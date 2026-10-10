@@ -13,6 +13,15 @@ pub type Result<T> = std::result::Result<T, RestDiscoveryError>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RestDiscoveryError {
+    /// 显式 qualifier 没有绑定客户端，不能回落到默认环境。
+    #[error("unknown REST qualifier: {qualifier}")]
+    UnknownQualifier { qualifier: String },
+    /// 未声明 qualifier 的调用没有可用的显式默认引用。
+    #[error("REST default qualifier is not configured")]
+    MissingDefaultQualifier,
+    /// 受管正文数量或单段数据超过有限容量。
+    #[error("managed response capacity exceeded")]
+    ResponseCapacity,
     /// 当前实例已经永久关闭，旧句柄不能登记新的工作。
     #[error("REST runtime is closed")]
     RuntimeClosed,
@@ -65,7 +74,7 @@ pub enum RestDiscoveryError {
         reason: String,
     },
 
-    /// 裸 http(s) 启发式模式下 host 不在服务名索引(仅 `UnknownHostPolicy::Error` 时返回;第三阶段才用)。
+    /// HTTP(S) 启发式模式下 host 未命中服务名索引，仅 `UnknownHostPolicy::Error` 时返回。
     #[error("未知服务 host {host}(不在服务名索引)")]
     UnknownServiceHost {
         /// 未命中服务名索引的 host。

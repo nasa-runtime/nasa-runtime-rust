@@ -54,6 +54,25 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 
 字段、默认值和准入条件以 [Application 合同](../napp/README.md) 为准。
 
+## 接入多注册中心
+
+单 Nacos 的 `nacos-discovery` 组件与 `rest_discovery` 根继续可用。采用多连接时，启用所需
+`discovery-nacos`、`discovery-consul`、`discovery-kubernetes` feature，组件改为 `discovery`，
+删除旧根并配置 `discovery.connections`；新旧根不能并存，即使其中一个 disabled。
+Nacos 的受管 HTTP adapter 要求 Nacos 3，不能把 SDK 的服务端兼容范围套用到此入口。
+
+- 默认连接直接命名为小写 `primary`；其他连接通过 `qualifier` 精确选择。
+- 注册清单与 Saga 目标使用 `qualifier`；`connection_ref` 仅为兼容别名，不能同时声明。
+- 旧 `default_connection` 保留显式默认引用语义且优先于 `primary`；新配置无需此字段。
+- Mapping 使用 `Client::with_clients(app.discovery()?.rest_clients()?)` 注入集合；方法值覆盖 trait。
+  `Client::new(selected_client)` 继续支持没有 qualifier 的接口，不自动建立具名身份。
+- 对互联网 API 使用完整 `url`，不配置或继承 qualifier；动态地址使用运行期请求构建器。
+- 每个注册目标分别配置外部可达 IP 与映射端口；增加连接不会自动发布自身。
+
+连接配置冻结在 owner 周期内，变更后重启；napp 对 `discovery` 变化拒绝整份热更新候选。
+完整 YAML、内部接口与 Google API 代码见[调用指南](discovery.md)。
+
+
 ## 选择严格配置装配
 
 `YmlLoader` 保留既有主文件、profile、overlay 和环境处理范围，不自动执行 `yml.imports`。

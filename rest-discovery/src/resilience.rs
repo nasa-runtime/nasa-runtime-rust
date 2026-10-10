@@ -112,7 +112,7 @@ impl ResilienceRuntime {
             }
         };
         let now = Instant::now();
-        {
+        let half_open = {
             let mut current = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -123,12 +123,17 @@ impl ResilienceRuntime {
                     });
                 }
                 current.half_open_in_flight = true;
+                true
+            } else {
+                false
             }
-        }
+        };
         Ok(CircuitAttempt {
             state,
             threshold: options.circuit_failure_threshold,
             open_duration: options.circuit_open_duration,
+            submitted: false,
+            half_open,
             completed: false,
         })
     }
@@ -198,27 +203,55 @@ impl ResilienceRuntime {
 
 /// 一个逻辑请求对服务熔断器的完成凭证。
 ///
-/// 请求 future 被取消时 Drop 按失败处理，避免 half-open permit 永久卡住。
+/// 已提交请求被取消时按失败处理；发现或准入拒绝仅释放 half-open 占位。
 pub(crate) struct CircuitAttempt {
     state: Arc<Mutex<CircuitState>>,
     threshold: u32,
     open_duration: Duration,
+    submitted: bool,
+    half_open: bool,
     completed: bool,
 }
 
 impl CircuitAttempt {
-    /// 业务作用：用一次逻辑请求的最终结果结算熔断状态，并阻止 Drop 重复记失败。
+    /// 业务作用：记录逻辑请求已进入 transport，允许后续失败或取消影响业务熔断。
+    /// 参数说明：无。
+    /// 返回：后续发现撤权不会抹去已经提交过业务请求的事实。
+    pub(crate) fn mark_submitted(&mut self) {
+        self.submitted = true;
+    }
+
+    /// 业务作用：仅用已提交业务请求的最终结果结算熔断状态，并阻止 Drop 重复计数。
+    /// 参数说明：`success` 表示已提交请求是否取得成功的业务传输结果。
+    /// 返回：未提交时只归还 half-open 占位，不延长打开窗口或清零失败记录。
     pub(crate) fn complete(mut self, success: bool) {
-        update_circuit(&self.state, self.threshold, self.open_duration, success);
+        self.settle(success);
         self.completed = true;
+    }
+
+    /// 业务作用：区分业务传输结果与发现、准入阶段终止，避免注册中心故障污染业务熔断。
+    /// 参数说明：`success` 是已经提交请求的最终结果。
+    /// 返回：所有路径均释放 half-open 占位，只有已提交请求更新成功或失败统计。
+    fn settle(&self, success: bool) {
+        if self.submitted {
+            update_circuit(&self.state, self.threshold, self.open_duration, success);
+        } else if self.half_open {
+            // 没有业务传输就没有实例失败证据；仍须归还探针占位，让恢复后的请求可以重新尝试。
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .half_open_in_flight = false;
+        }
     }
 }
 
 impl Drop for CircuitAttempt {
-    /// 业务作用：请求被取消或提前返回时按失败结算，尤其要释放 half-open 单探针占位。
+    /// 业务作用：请求取消或提前返回时归还探针占位，仅已提交业务的调用按失败结算。
+    /// 参数说明：无。
+    /// 返回：发现失败不影响业务失败统计，已提交请求的取消仍触发失败策略。
     fn drop(&mut self) {
         if !self.completed {
-            update_circuit(&self.state, self.threshold, self.open_duration, false);
+            self.settle(false);
         }
     }
 }

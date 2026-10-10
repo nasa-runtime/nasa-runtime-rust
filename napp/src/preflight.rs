@@ -70,6 +70,19 @@ impl Preflight {
     ///
     /// - `spec`：提供组件声明和编译期缺省名的静态应用描述。
     pub(crate) fn load_standard(spec: &ApplicationSpec) -> ApplicationResult<Self> {
+        #[cfg(feature = "discovery-runtime")]
+        if spec.config_loader.is_none() && spec.components().contains(&ComponentId::Discovery) {
+            // 多连接名称具有权限含义，必须在原始来源阶段拒绝重复键，不能依赖已覆盖的 Value 检查。
+            let loader = naml::strict::ConfigLoader::standard()
+                .map_err(|_| settings_error("strict discovery configuration rejected"))?;
+            let profile = loader
+                .selected_profile()
+                .map_err(|_| settings_error("invalid strict profile"))?;
+            let (source, tree) = crate::config_source::StrictSource::start(loader, spec)?;
+            let mut preflight = Self::from_tree(spec, tree, profile)?;
+            preflight.source = Some(source);
+            return Ok(preflight);
+        }
         if let Some(factory) = spec.config_loader {
             let loader =
                 factory().map_err(|_| settings_error("strict configuration factory rejected"))?;
@@ -144,7 +157,8 @@ impl Preflight {
             if spec.components().contains(&ComponentId::Grpc) {
                 let minimum = crate::grpc::minimum_shutdown_timeout(
                     &tree,
-                    spec.components().contains(&ComponentId::NacosDiscovery),
+                    spec.components().contains(&ComponentId::NacosDiscovery)
+                        || spec.components().contains(&ComponentId::Discovery),
                 )?;
                 if shutdown_timeout_explicit && resolved < minimum {
                     return Err(settings_error(format!(

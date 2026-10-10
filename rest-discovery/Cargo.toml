@@ -1,22 +1,23 @@
 # rest-discovery —— 带服务发现与客户端负载均衡的 HTTP 客户端。
 #
-# 只面向 `discovery::DiscoveryClient` 抽象做客户端负载均衡 + URL 重写;**绝不依赖 nacos crate**
-# (换 eureka/consul 时本 crate 不动)。后端由调用方在 main 里 connect 后装成 `Arc<dyn DiscoveryClient>` 注入。
+# 只面向 `nadisc::DiscoveryClient` 抽象做客户端负载均衡与 URL 重写，不依赖具体注册中心。
+# 后端由调用方连接后装成 `Arc<dyn DiscoveryClient>` 注入。
+# external_request 与 URL Mapping 显式 HTTP(S) 直连，不按服务名启发式改写目标。
 #
 # 三档识别：
 #   档1 service_request(service, method, path) / 声明式客户端 service= → 显式内部直连
 #   档2 lb://service/path                                            → 显式内部直连
-#   档3 http(s)://host/path  → 默认普通外部 HTTP;`heuristic_http=Enabled` 时命中服务名索引(ServiceNameIndex)才走 LB(已实现)
+#   档3 通用入口的 http(s)://host/path → 默认普通外部 HTTP;`heuristic_http=Enabled` 时命中服务名索引(ServiceNameIndex)才走 LB
 [package]
 name = "rest-discovery"
 version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "带服务发现、负载均衡、共享请求预算和有界后台任务的 HTTP client，支持独立与 Application 受管装配"
+description = "HTTP client with named registry selection, public URLs, shared request budgets and managed response lifecycles"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["http", "discovery", "load-balancing", "lifecycle", "async"]
 categories.workspace = true
 
 
@@ -29,7 +30,7 @@ live-nacos = ["dep:nanacos", "nanacos/nacos"]
 
 [dependencies]
 # 只依赖 provider-neutral 抽象(Instance / DiscoveryClient / is_traffic_instance / WatchOptions / ServiceWatch)。
-nadisc = { package = "nadisc", version = "2.0.0" }
+nadisc = { package = "nadisc", version = "2.0.0", path = "../nadisc" }
 nabudget = { version = "2.0.0" }
 natelemetry = { version = "2.0.0" }
 # 已核实:workspace 树里 reqwest 0.12 走 rustls(从不 native-tls/openssl)。关 default-tls,只挂 rustls。

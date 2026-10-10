@@ -4,7 +4,8 @@
 Inbox 幂等、持久状态机和显式补偿组成的可恢复事实链。它不提供跨服务 ACID、物理 exactly-once，
 也不替业务解决多个并发 Saga 对同一资源的竞争。
 
-协调侧 client、result 与 Registry 支持固定地址或受信 Nacos 服务发现，逐实例绑定身份、端点和有效路径。
+协调侧 client、result 与 Registry 支持固定地址或受信服务发现，逐实例绑定身份、端点和有效路径。
+具名连接可以独立选择基础设施环境，不要求业务微服务与协调者共用默认注册中心。
 HTTP HMAC 与 gRPC mTLS 随配置视图原子轮换，并保留有界的旧凭据重叠窗口。definition 提供
 candidate→active→deprecated→retired 生命周期，退休前在数据库事务中检查保留引用。start 支持
 原始 bytes 与显式 schema，HTTP/gRPC 共用业务校验、幂等摘要、权限、分页和管理事务。
@@ -317,6 +318,7 @@ datasource_ref。
 saga:
   discovery:
     checkout:
+      qualifier: infrastructure
       service: checkout-coordinator
       service_identity: checkout-orchestrator
       address_policy_ref: coordinator-addresses
@@ -328,11 +330,30 @@ saga:
         grpc_hosts: [coordinator.internal]
 ~~~
 
-使用逻辑引用时启用 `nacos-discovery` 组件与实际 provider。协调者在 listener 建立后发布框架保留的
+使用具名连接时启用 `discovery` 组件及相应 provider feature，并在 `discovery.connections` 声明
+`infrastructure` 和服务别名绑定；新多连接模式省略 qualifier 时采用 owner 默认项 `primary`
+或兼容配置的显式默认引用。`connection_ref` 保留为兼容别名，不能与 `qualifier` 同时声明。旧单 Nacos 应用仍可省略 `qualifier`，继续使用
+`nacos-discovery`；新旧配置根节点不能同时声明。完整连接及注册配置见
+[公共发现运行时](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md)。
+
+协调者在 listener 建立后发布框架保留的
 `nasa.saga.identity`、`role`、`incarnation`、`generation` 以及协议端点；HTTP 同时发布实际
 `origin` 和包含 `server.context_path` 的 `base_path`。每次投递只组合一个实例的同代字段，签名覆盖
 选中实例的实际路径。非健康、禁用、身份不符或地址越界的成员不参与投递；没有合法成员时保留原事件重试。
 发现、连接和收据读取共享调用期限；端口与路径变化后原客户端可重新选择合法成员。
+
+具名 gRPC 传输每次最多并发探测 16 个轮换候选，探测上限为剩余期限的 75%；首个 Serving 成员
+承接一次业务 RPC，其余探测立即取消。实际发送点再次检查实例、证据和凭据，不自动重发已提交的业务 RPC。
+HTTP 同样在实际发送前复验，单次响应正文上限为 4 MiB；超过期限或容量均不能当作成功收据。
+
+多环境注册的每个目标独立指定该环境可达的 IP、映射端口和协议。相同后端查询内，同一个进程代次
+不能发布互相矛盾的地址投影；启动预检会拒绝这类计划，避免接收方拼接不一致的身份与端点。
+
+普通业务注册使用 `eligibility_ref: web` 或 `grpc`。capability 续租、Registry 同步和已提交 result
+使用独立服务别名与 `eligibility_ref: saga-recovery` 注册，或使用固定受信 URL。恢复资格只要求
+Saga 运行且应用未停机，不依赖 capability Catalog 的业务 Ready；请求仍需通过认证、信任期限及
+事务门禁。不能用整体 `/readyz` 摘除恢复入口，否则 capability 到期后无法完成续租。恢复入口
+不开放新 Start、timer claim 或普通 command 的执行资格。
 
 ## 安全材料轮换
 

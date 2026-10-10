@@ -77,6 +77,7 @@ pub mod reason {
         feature = "grpc",
         feature = "nacos-config",
         feature = "nacos-discovery",
+        feature = "discovery-runtime",
         feature = "web"
     ))]
     pub const NOT_READY: &str = "not_ready";
@@ -321,7 +322,11 @@ impl ReadinessContributor {
     /// 参数说明：`deadline` 是整批依赖最早失效的单调时刻。
     ///
     /// 返回：原子发布 Ready 与期限；已到期的证据立即按 NotReady 处理。
-    #[cfg(any(feature = "saga", feature = "saga-pgsql"))]
+    #[cfg(any(
+        feature = "saga",
+        feature = "saga-pgsql",
+        feature = "discovery-runtime"
+    ))]
     pub(crate) fn observe_ready_until(&self, deadline: Instant) {
         let mut entry = self
             .entry

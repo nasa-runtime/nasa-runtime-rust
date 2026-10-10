@@ -1,5 +1,9 @@
 # rest-discovery-nacos
 
+本组件保留单 Nacos 的 `rest_discovery` 配置和 `nacos-discovery` 生命周期。
+多注册中心使用 `discovery.connections`、`primary` 与 `qualifier`，由公共 owner 负责资源，
+两种配置根不能并存，即使其中一个 disabled。见[多连接接入](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
+
 `rest-discovery-nacos` 是 `rest-discovery` 与 `nanacos` 的装配层。它把强类型 `DiscoveryConfig` 映射成 Nacos 连接、可选实例注册、`RestDiscoveryOptions`，并安装全局 `RestDiscovery`。
 
 `rest-discovery` 本体保持 provider-neutral，不直接依赖 Nacos。
@@ -127,7 +131,7 @@ let handle =
 
 ## 完整 YML 配置
 
-生产推荐把服务发现独立放在 `rest_discovery:` 根节点，不和配置中心 `nacos:` 混用。完整形状如下：
+使用本组件的单 Nacos 模式时，把服务发现独立放在 `rest_discovery:` 根节点，不和配置中心 `nacos:` 混用。完整形状如下：
 
 ```yaml
 rest_discovery:

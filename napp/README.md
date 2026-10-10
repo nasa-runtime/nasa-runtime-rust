@@ -4,6 +4,7 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+`discovery` 组件还统一托管多注册中心与 qualifier 选址，保持连接证据隔离及停机顺序。
 启动前可显式选择严格配置工厂：嵌套默认值、自然排序的文件导入、来源解释与目录观察共同进入
 候选流程，来源权限固定到启动。来源观察序号与组件应用状态分开记录，失败候选保留现有服务视图。
 直接取消 Runner 时，仍存活的受监督任务保留其依赖资源，直至任务 future 析构；受管可靠 Saga client
@@ -24,6 +25,25 @@ Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可；
 再发布配置；失败时保留旧视图及旧监听。
 业务提交配置与 handler，框架负责启动门禁、健康和停机；各能力的 feature、入口、配置和失败边界见
 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
+
+## 多注册中心与共享发现生命周期
+
+任意 Rust 微服务都可以使用 `nadisc-runtime` 管理多个独立注册中心，不依赖 Saga 或数据库。具名连接隔离凭据、服务作用域、发现证据和故障；显式注册清单决定当前服务发布到哪些环境。Static/DNS 为地址来源，Nacos、Consul 和 Kubernetes 分别保留各自健康与权限边界。
+
+独立宿主持有唯一 `DiscoveryOwner`；使用 napp 时由 `#[nasa::application("web", "discovery")]` 接管 prepare、启动确认、资格探针、注册摘流、业务排空和最终关闭。启用 `discovery-runtime`，按需增加 `discovery-nacos`、`discovery-consul`、`discovery-kubernetes`；REST 请求构建器使用 `rest-discovery`，声明式 Mapping 使用 `rest-client`，动态 gRPC 使用 `grpc-discovery`。旧 `nacos-discovery` 入口仍可使用，新旧配置根节点不能同时声明。
+
+`app.discovery()?.client(Some("business"))` 选择发现环境；`rest(Some("business"))` 返回该环境的共享 HTTP 客户端，默认 REST 门面使用 `primary`；兼容配置的显式默认引用优先。生成的 gRPC 客户端可注入受管 `DiscoveryGrpcService`。完整空集、权限撤销、期限耗尽与关闭会拒绝新提交；已经提交的请求仍须按业务幂等与结果不明语义处理。
+
+连接选择统一称为 `qualifier`。默认连接固定命名为 `primary`，无需额外默认字段；注册目标及 Saga 目标使用 `qualifier`。旧 `default_connection` 保留显式默认引用的兼容，旧 `connection_ref` 是 `qualifier` 的别名，这两个键不能同时声明。REST 声明式客户端以 `Client::with_clients(app.discovery()?.rest_clients()?)` 共享已装配的客户端，并在五种 Mapping 或 trait 上声明 `qualifier = "business"`；方法值覆盖 trait 默认。未声明时选择 `primary`；缺少 primary 时仅具名调用可用，未知名称或目标连接故障不会回退到其他连接。
+
+`#[GetMapping(url = "https://dns.google/resolve")]` 使用默认 HTTP 客户端访问公网，不查询 Nacos。
+`url` 模式不能配置或继承 `qualifier`；宏不读取 YML 占位符。完整配置、内部服务及 Google API
+示例见[调用指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
+
+多个注册目标分别设置可达 IP 与映射端口，不能把容器监听地址当成宿主地址。Saga 可另外选择基础设施连接，并为续租与已提交结果设置独立恢复目标；恢复资格不授予新业务的目录执行权。
+
+[完整配置、架构、手动接入与停机合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md) · [Consul](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-consul/README.md) · [Kubernetes](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-kubernetes/README.md)
+
 
 ## 命名资源运行架构
 
@@ -195,6 +215,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"web"` | `web`；需要端点安全时使用 `web-security` | `server` | 自动收集端点、HTTP/1/h2c 监听、探针与排空；定制经 `configure_router` | `app.web()` |
 | `"ws"` | `ws` | `ws` | TCP/WebSocket 长连接监听与排空；鉴权和 endpoint 经 `configure_ws` 注入 | `app.ws()` |
 | `"nacos-discovery"` | `nacos-discovery`；真实 provider 再加 `nacos-sdk` | `rest_discovery` | Start 装出站客户端、Ready 冻结注册计划、统一放行后注册、停机先摘流后关客户端 | `app.nacos_discovery()` |
+| `"discovery"` | `discovery-runtime`；按需启用 provider feature | `discovery` | 独立 owner、启动确认、本地资格、共享发现、摘流与有界关闭 | `app.discovery()` |
 | `"scheduling"` | `scheduling`；选主模式使用 `scheduling-cluster` | `scheduling` | Ready 末尾启动已收集任务；选主模式复用已声明的 Redis 客户端 | `app.scheduling()` |
 
 只用部分能力时只填写需要的字符串。例如纯 Web 应用写 `#[nasa::application("web")]`；本地配置的
@@ -215,7 +236,7 @@ MySQL 或 PostgreSQL Mapper 缓存不新增组件字符串。配置 `mapper_cach
 字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
 
 规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job ->
-grpc -> auth -> web -> ws -> nacos-discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
+grpc -> auth -> web -> ws -> nacos-discovery/discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
 `auth` 缺少 `web` 会被拒绝，`cache.redis_ref` 指向受管 Redis 时还必须声明 `"redis"`。
 
 ## YAML 创建单源与多源
@@ -1063,7 +1084,7 @@ HTTP、gRPC、Kafka 与 Redis Streams command/result 数据面均由 `napp` 按�
 `.DLT` 时使用 `saga.results.{owner}.DLT`。Redis Streams 使用同槽 stream、consumer group、
 XAUTOCLAIM、HMAC keyring、XADD 收据和原子 DLT+XACK。
 
-动态 gRPC command 路由保留同一步骤的多个合法 replica endpoint；每个目标都独立验证地址政策、
+基于 capability 的动态 gRPC command 路由保留同一步骤的多个合法 replica endpoint；每个目标都独立验证地址政策、
 mTLS 和 deadline。health 逐成员并发检查，共享一轮绝对期限；只有明确 Serving 的成员参与轮询
 分流，业务直接复用该成员完成探测的 channel。单个 NotServing、连接失败或超时不否定其它成员的健康证据，全部不服务时关闭新投递并拒绝
 发布该步骤。后续 Catalog 轮次重新复验成员集合；恢复成员通过检查后才能重新参与投递。
@@ -1077,7 +1098,10 @@ mTLS 和 deadline。health 逐成员并发检查，共享一轮绝对期限；�
 DeadlineExceeded，不把迟到或不完整的收据当作成功确认。每次连接建立也独立受配置上限约束。
 投递结果不明时仍保留相同 Outbox event，参与方副本必须共享其角色要求的持久幂等与业务事实。
 面向 Orchestrator 的 client、result 和 Registry `discovery_ref` 支持固定地址或 `saga.discovery` 中的
-受信 Nacos 服务引用，每次调用绑定同一实例的身份、origin、有效路径和代次。没有合法目标时保留原事件重试。
+受信服务引用，每次调用绑定同一实例的身份、origin、有效路径和代次。旧入口使用 Nacos；新入口通过
+`qualifier` 选择具名连接，旧 `connection_ref` 作为兼容别名保留，没有合法目标时保留原事件重试。
+具名连接的 gRPC 传输每次最多并发探测 16 个轮换候选，占用不超过剩余请求预算的 75%；首个 Serving
+成员用于一次业务提交，其余探测立即取消。提交前复验凭据和注册事实，不重放已提交的 RPC。
 HTTP HMAC 和 gRPC mTLS 随配置视图一次发布，`saga.credential_overlap_ms` 指定旧材料接受窗口；入站、
 出站、capability 续租和 Catalog 执行资格共同读取当前安全合同，非法候选保留上一份有效配置。动态 principal
 使用 `secret://certificate_ref`，既有连接在每个 RPC 上也要复验；静态 `sha256:...` 保持固定身份。
@@ -1215,7 +1239,7 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
 5. `container.consumers`：存在属性或动态 consumer 时使用 `collected`；纯 producer 服务必须显式写
    `disabled`，并按需设置 `producer_probe_topic`。
 6. Cargo feature 与组件顺序：启用 `application + kafka`，并把 `"kafka"` 放在 db/redis 之后、
-   web/ws/nacos-discovery/scheduling 之前。
+   web/ws/nacos-discovery/discovery/scheduling 之前。
 
 安全协议、用户名、密码、证书路径和原生 properties 仍使用 `KafkaConfig` 对应字段；这些值不要写进示例、
 日志或管理端点。运行期配置变更只报告 `RestartRequired`，必须通过应用重启生效。
@@ -1555,7 +1579,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 ## 生命周期要点
 
 - `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写只记 `RestartRequired`。
-- `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
+- `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
 - 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
@@ -1563,7 +1587,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 - 组件 Bootstrap、Start、Prepare、Ready 的方法调用和 future 轮询发生单次展开式 panic 时，按组件与当前阶段报告固定错误，并沿 active stack 执行异步回滚。组件与 initializer 的启动 future、initializer 实例、暂存终端任务和任务工厂均在接管时建立释放保护；完成、超时、取消、信号或部分移交失败时，析构展开不越过回滚边界。实例从运行时登记或静态工厂产出起保持保护，拓扑排序只借用元数据；三轮结束及失败出口逐项释放实例后才清理其依赖。已有失败或停止原因保持不变，次要释放异常单独报告；成功结果后的释放异常阻止启动。异常 payload 的析构在独立边界处理，不输出正文。同步阻塞、`panic=abort` 与同一次展开中的再次 panic 无法安全抢占。
 - `ApplicationComponent` 对象从登记起受析构隔离保护，在清理栈和资源收口后逐项释放；尚未退出的受管任务保留组件所有权直到实际退出。批任务完成时的组件释放异常返回稳定的 Stopping 错误；已有主失败、信号或主动停止原因保持不变，释放异常进入次要清理报告。直接取消及延迟释放路径仅同步告警，不追改已交付结果。
 
-- 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化或依赖材料变化如实记 `RestartRequired`，保留最后实际生效版本。材料依赖识别完整合法的 `secret://id` 与既有裸 ID 引用，file/env/provider 内容改变即使配置树不变也参与判断；材料恢复到实际使用值后可重新记 `Applied`。命名 HTTP 客户端材料随视图发布，初始及后续成功版本记在 `Managed("http_clients")`；准备失败保留旧视图，名称集合变化拒绝整帧。`app.config_view()` 保证快照与状态表同版本。
+- 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化或依赖材料变化如实记 `RestartRequired`，保留最后实际生效版本。中性 `discovery` 的连接身份、注册目标与策略随 owner 冻结，该配置段变化直接拒绝整帧并保留原视图与客户端，须重启后生效。材料依赖识别完整合法的 `secret://id` 与既有裸 ID 引用，file/env/provider 内容改变即使配置树不变也参与判断；材料恢复到实际使用值后可重新记 `Applied`。命名 HTTP 客户端材料随视图发布，初始及后续成功版本记在 `Managed("http_clients")`；准备失败保留旧视图，名称集合变化拒绝整帧。`app.config_view()` 保证快照与状态表同版本。
 - 错误报告有界展开错误链并统一脱敏（URI userinfo、常见敏感键）；敏感键比较忽略不可见格式控制并识别 ASCII 字母数字兼容字形，替换坐标保持原文。兼容标点不产生新的值结束边界；这不是任意视觉混淆字符检测。进程级 panic hook 只写受控 location marker，不读 payload。
 
 ## 业务扩展点

@@ -15,7 +15,7 @@ use crate::error::{RestDiscoveryError, Result};
 /// 也会在不同平台上变成 panic。365 天保留长周期服务的余量，同时给所有 deadline 运算确定边界。
 const MAX_RUNTIME_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-/// 服务名匹配大小写策略(仅档3启发式索引用;第三阶段才生效)。
+/// 服务名匹配大小写策略，仅对 HTTP(S) 启发式服务名索引生效。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServiceMatchMode {
     /// 忽略大小写(按 ASCII lowercase 归一化)。
@@ -25,13 +25,13 @@ pub enum ServiceMatchMode {
     CaseSensitive,
 }
 
-/// 裸 http(s) 启发式识别开关。第一阶段默认 `Disabled`:裸 http(s) 全部当外部直连。
+/// 通用 URL 入口的 HTTP(S) 启发式识别开关，默认 `Disabled`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeuristicHttpMode {
     /// 不维护服务名索引;裸 http(s) 全部普通 HTTP。
     #[default]
     Disabled,
-    /// 维护服务名索引;裸 http(s) host 命中索引才走 LB(第三阶段实现)。
+    /// 维护服务名索引；通用 URL 入口的 HTTP(S) host 命中索引时走 LB，不影响显式外部调用。
     Enabled,
 }
 
@@ -67,7 +67,7 @@ impl InstanceScheme {
     }
 }
 
-/// 裸 http(s) host 不在服务名索引时的策略(第三阶段才生效)。
+/// 通用 URL 入口启用启发式时，HTTP(S) host 未命中服务名索引的处理策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnknownHostPolicy {
     /// 直接走普通 HTTP 外部调用。

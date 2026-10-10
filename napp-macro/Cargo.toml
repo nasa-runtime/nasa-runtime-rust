@@ -3,12 +3,12 @@ name = "napp-macro"
 version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "NASA application macros for strict configuration factories, managed lifecycles and ordered initializers"
+description = "NASA application macros for managed lifecycles, multi-registry discovery and ordered initializers"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["runtime", "lifecycle", "initializer", "microservices", "async"]
+keywords = ["runtime", "lifecycle", "initializer", "discovery", "async"]
 categories.workspace = true
 
 [lib]

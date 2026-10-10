@@ -2,35 +2,54 @@
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
+#[cfg(all(
+    feature = "discovery-runtime",
+    any(feature = "saga-grpc", feature = "saga-grpc-pgsql")
+))]
+mod grpc;
+#[cfg(all(
+    feature = "discovery-runtime",
+    any(feature = "saga-grpc", feature = "saga-grpc-pgsql")
+))]
+pub(super) use grpc::ManagedSagaGrpc;
 
 /// 业务作用：把逻辑发现引用限定到受信服务、长期身份和地址政策。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SagaDiscoveryTargetSettings {
     service: String,
+    #[serde(default)]
+    #[cfg_attr(
+        not(any(feature = "nacos-discovery", feature = "discovery-runtime")),
+        allow(dead_code)
+    )]
+    #[serde(rename = "qualifier", alias = "connection_ref")]
+    connection_ref: Option<String>,
     service_identity: String,
     address_policy_ref: String,
 }
 
 /// 业务作用：保存单一实例同代发布的全部线上路由字段，禁止跨实例拼接路径。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) struct SagaDiscoveredRoute {
     incarnation: String,
     generation: u64,
     pub(super) base: String,
+    #[cfg(feature = "discovery-runtime")]
+    gate: Option<Arc<SagaAdmission>>,
 }
 
 /// 业务作用：在每次投递前读取受信发现快照，并阻止同一实例的代次回退或同代内容漂移。
 pub(super) struct ManagedSagaDiscovery {
-    #[cfg(feature = "nacos-discovery")]
-    handle: crate::capabilities::NacosDiscoveryHandle,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+    source: SagaSource,
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     target: SagaDiscoveryTargetSettings,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     policy: SagaAddressPolicySettings,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     protocol: SagaClientProtocol,
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     seen: tokio::sync::Mutex<BTreeMap<String, SagaDiscoveredRoute>>,
     next: AtomicUsize,
 }
@@ -105,10 +124,10 @@ impl ManagedSagaDiscovery {
             },
             ApplicationPhase::Ready,
         )?;
-        #[cfg(feature = "nacos-discovery")]
+        #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
         {
             Ok(Some(Arc::new(Self {
-                handle: application.nacos_discovery()?,
+                source: SagaSource::new(application, target.connection_ref.as_deref())?,
                 target,
                 policy,
                 protocol,
@@ -116,12 +135,12 @@ impl ManagedSagaDiscovery {
                 next: AtomicUsize::new(0),
             })))
         }
-        #[cfg(not(feature = "nacos-discovery"))]
+        #[cfg(not(any(feature = "nacos-discovery", feature = "discovery-runtime")))]
         {
             let _ = (application, target, policy);
             Err(saga_error(
                 ApplicationPhase::Ready,
-                "Saga service discovery requires nacos-discovery",
+                "Saga service discovery requires a managed discovery component",
             ))
         }
     }
@@ -133,7 +152,7 @@ impl ManagedSagaDiscovery {
         &self,
         deadline: tokio::time::Instant,
     ) -> ApplicationResult<Vec<SagaDiscoveredRoute>> {
-        #[cfg(not(feature = "nacos-discovery"))]
+        #[cfg(not(any(feature = "nacos-discovery", feature = "discovery-runtime")))]
         {
             let _ = deadline;
             Err(saga_error(
@@ -141,12 +160,15 @@ impl ManagedSagaDiscovery {
                 "Saga discovery is unavailable",
             ))
         }
-        #[cfg(feature = "nacos-discovery")]
+        #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
         {
             tokio::time::timeout_at(deadline, async {
                 // 串行查询与发布，避免先发起的旧查询在新快照之后覆盖观察到的代次。
                 let mut seen = self.seen.lock().await;
-                let instances = self.handle.saga_instances(&self.target.service).await?;
+                let instances = self
+                    .source
+                    .instances(&self.target.service, deadline)
+                    .await?;
                 if instances.len() > 4096 {
                     return Err(saga_error(
                         ApplicationPhase::Running,
@@ -155,12 +177,17 @@ impl ManagedSagaDiscovery {
                 }
                 let mut routes = BTreeMap::new();
                 for instance in instances {
-                    if !instance.healthy || !instance.enabled {
+                    if !instance.healthy {
                         continue;
                     }
-                    let Some(route) = self.parse_route(&instance.metadata) else {
+                    #[allow(unused_mut)]
+                    let Some(mut route) = self.parse_route(&instance.metadata) else {
                         continue;
                     };
+                    #[cfg(feature = "discovery-runtime")]
+                    {
+                        route.gate = instance.gate;
+                    }
                     for previous in seen
                         .get(&route.incarnation)
                         .into_iter()
@@ -195,7 +222,7 @@ impl ManagedSagaDiscovery {
     /// 业务作用：把一个实例的 provider 元数据校验为受信协议端点和有效路径。
     /// 参数说明：`metadata` 必须来自同一注册实例，不能从服务级默认值补齐安全字段。
     /// 返回：身份、地址范围、代次与规范路径均合法时返回路由；其它实例不进入候选集合。
-    #[cfg(feature = "nacos-discovery")]
+    #[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
     fn parse_route(
         &self,
         metadata: &std::collections::HashMap<String, String>,
@@ -265,6 +292,8 @@ impl ManagedSagaDiscovery {
             incarnation,
             generation,
             base: url.to_string().trim_end_matches('/').to_owned(),
+            #[cfg(feature = "discovery-runtime")]
+            gate: None,
         })
     }
 }
@@ -289,7 +318,13 @@ impl ManagedHttpTarget {
                     "Saga discovery operation is invalid",
                 )
             })?;
-        let resolved = managed_http_target(&selected.base, operation, self.authenticator.clone())?;
+        let mut resolved =
+            managed_http_target(&selected.base, operation, self.authenticator.clone())?;
+        resolved.timeout = self.timeout;
+        #[cfg(feature = "discovery-runtime")]
+        {
+            resolved.admission = selected.gate.clone();
+        }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(saga_error(
@@ -375,23 +410,33 @@ pub(super) fn managed_grpc_discovery_target(
         reference,
         SagaClientProtocol::Grpc,
     )? {
-        Some(discovery) => Ok(grpc_target::build_discovered_grpc_target(
-            discovery,
-            timeout,
-            credential.clone(),
-        )),
+        Some(discovery) => {
+            #[cfg(feature = "discovery-runtime")]
+            if matches!(discovery.source, SagaSource::Managed(_)) {
+                return Ok(grpc_target::build_owner_grpc_target(
+                    ManagedSagaGrpc::new(discovery, timeout, credential.clone()),
+                    timeout,
+                ));
+            }
+            Ok(grpc_target::build_discovered_grpc_target(
+                discovery,
+                timeout,
+                credential.clone(),
+            ))
+        }
         None => build_managed_grpc_target(reference, timeout, credential),
     }
 }
 
 /// 业务作用：只在受管 listener 已建立后公布本协调实例的实际端点和有效 Saga 路径。
-/// 参数说明：`application` 提供当前角色与 listener，`host` 和 `port` 来自本次实际服务注册。
+/// 参数说明：`application` 提供当前角色与 listener，`host` 和 `port` 来自本次实际服务注册，`protocol` 在新模式限定对应 listener 的协议。
 /// 返回：协调角色的框架元数据；其它角色返回空，实际路径或端点不可用时拒绝注册。
-#[cfg(feature = "nacos-discovery")]
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
 pub(crate) fn registration_metadata(
     application: &Application,
     host: &str,
     port: u16,
+    protocol: Option<&str>,
 ) -> ApplicationResult<BTreeMap<String, String>> {
     if application.config().value().get("saga").is_none() {
         return Ok(BTreeMap::new());
@@ -416,7 +461,11 @@ pub(crate) fn registration_metadata(
         ("nasa.saga.role".into(), "orchestrator".into()),
         (
             "nasa.saga.incarnation".into(),
-            nasaga_runtime::SagaHttpMessageAuthenticator::issue_nonce(),
+            application
+                .saga_runtime()
+                .discovery_incarnation
+                .get_or_init(nasaga_runtime::SagaHttpMessageAuthenticator::issue_nonce)
+                .clone(),
         ),
         ("nasa.saga.generation".into(), "1".into()),
     ]);
@@ -426,12 +475,13 @@ pub(crate) fn registration_metadata(
         host.to_owned()
     };
     #[cfg(feature = "web")]
-    if settings.api.http.enabled
-        || settings
-            .transport
-            .command_result
-            .as_ref()
-            .is_some_and(|value| value.kind == Some(SagaTransportKind::Http))
+    if protocol != Some("grpc")
+        && (settings.api.http.enabled
+            || settings
+                .transport
+                .command_result
+                .as_ref()
+                .is_some_and(|value| value.kind == Some(SagaTransportKind::Http)))
     {
         let web = application.web()?;
         let path = format!(
@@ -448,12 +498,197 @@ pub(crate) fn registration_metadata(
     }
     #[cfg(feature = "grpc")]
     if let Some(endpoint) = application.grpc_runtime().endpoint_registration() {
-        if endpoint.tls_mode == "mutual" {
+        if protocol != Some("http") && endpoint.tls_mode == "mutual" {
             values.insert(
                 "nasa.saga.grpc.origin".into(),
-                format!("https://{host}:{}", endpoint.port),
+                format!(
+                    "https://{host}:{}",
+                    if protocol == Some("grpc") {
+                        port
+                    } else {
+                        endpoint.port
+                    }
+                ),
             );
         }
     }
     Ok(values)
+}
+
+mod http;
+
+/// 业务作用：在任何组件连接网络之前拒绝具名 Saga 目标中的跨环境或未绑定服务引用。
+/// 参数说明：`tree` 是同一完整配置，`settings` 包含 Saga 目标，`phase` 保留原校验阶段。
+/// 返回：旧模式保留原入口；新模式所有目标必须属于启用的连接目录。
+#[cfg(feature = "discovery-runtime")]
+pub(super) fn validate_bindings(
+    tree: &serde_json::Value,
+    settings: &SagaSettings,
+    phase: ApplicationPhase,
+) -> ApplicationResult<()> {
+    let Some(value) = tree.get("discovery") else {
+        if settings
+            .discovery
+            .values()
+            .any(|target| target.connection_ref.is_some())
+        {
+            return Err(saga_error(
+                phase,
+                "named Saga discovery requires discovery configuration",
+            ));
+        }
+        return Ok(());
+    };
+    let config: nadisc_runtime::assembly::DiscoveryConfig =
+        serde_json::from_value(value.clone())
+            .map_err(|_| saga_error(phase, "invalid Saga discovery connection directory"))?;
+    for target in settings.discovery.values() {
+        let name = target
+            .connection_ref
+            .as_ref()
+            .or(config.default_connection.as_ref())
+            .or_else(|| {
+                config
+                    .connections
+                    .get_key_value("primary")
+                    .map(|(name, _)| name)
+            });
+        let connection = name.and_then(|name| config.connections.get(name));
+        if !config.enabled
+            || !connection.is_some_and(|connection| connection.has_service(&target.service))
+        {
+            return Err(saga_error(
+                phase,
+                "Saga discovery connection or service binding is unavailable",
+            ));
+        }
+        if !settings
+            .transport
+            .address_policies
+            .contains_key(&target.address_policy_ref)
+        {
+            return Err(saga_error(
+                phase,
+                "Saga discovery address policy is unknown",
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl PartialEq for SagaDiscoveredRoute {
+    /// 业务作用：比较同一 incarnation 的线上路由投影，不让本地观察句柄参与协议代次判定。
+    /// 参数说明：`other` 是另一份完整路由事实。
+    /// 返回：身份、代次、地址和路径全部相同才相等。
+    fn eq(&self, other: &Self) -> bool {
+        self.incarnation == other.incarnation
+            && self.generation == other.generation
+            && self.base == other.base
+    }
+}
+
+#[cfg(feature = "discovery-runtime")]
+pub(super) struct SagaAdmission {
+    observation: nadisc_runtime::Observation,
+    instance: nadisc::Instance,
+    handle: nadisc_runtime::DiscoveryHandle,
+}
+
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+enum SagaSource {
+    #[cfg(feature = "nacos-discovery")]
+    Legacy(crate::capabilities::NacosDiscoveryHandle),
+    #[cfg(feature = "discovery-runtime")]
+    Managed(nadisc_runtime::DiscoveryHandle),
+}
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+struct SagaCandidate {
+    healthy: bool,
+    metadata: std::collections::HashMap<String, String>,
+    #[cfg(feature = "discovery-runtime")]
+    gate: Option<Arc<SagaAdmission>>,
+}
+#[cfg(any(feature = "nacos-discovery", feature = "discovery-runtime"))]
+impl SagaSource {
+    /// 业务作用：从唯一装配权威选择明确连接，未知引用不得回退到旧环境。
+    /// 参数说明：`application` 提供受管能力，`connection` 为空时才允许采用已有兼容默认入口。
+    /// 返回：新目录或旧单 Nacos 句柄；新模式中的任何选择错误直接拒绝。
+    fn new(application: &Application, connection: Option<&str>) -> ApplicationResult<Self> {
+        #[cfg(feature = "discovery-runtime")]
+        if application.config().value().get("discovery").is_some() {
+            return Ok(Self::Managed(application.discovery()?.client(connection)?));
+        }
+        if connection.is_some() {
+            return Err(saga_error(
+                ApplicationPhase::Ready,
+                "named Saga discovery requires discovery component",
+            ));
+        }
+        #[cfg(feature = "nacos-discovery")]
+        {
+            Ok(Self::Legacy(application.nacos_discovery()?))
+        }
+        #[cfg(not(feature = "nacos-discovery"))]
+        {
+            Err(saga_error(
+                ApplicationPhase::Ready,
+                "Saga discovery component is unavailable",
+            ))
+        }
+    }
+
+    /// 业务作用：保留完整当前实例事实，为新模式绑定同一候选的实际发送许可。
+    /// 参数说明：`service` 为精确服务别名，`deadline` 延续原调用预算。
+    /// 返回：严格证据对应的候选；权限或观察失败不沿用宽限缓存。
+    async fn instances(
+        &self,
+        service: &str,
+        deadline: tokio::time::Instant,
+    ) -> ApplicationResult<Vec<SagaCandidate>> {
+        match self {
+            #[cfg(feature = "nacos-discovery")]
+            Self::Legacy(handle) => {
+                let _ = deadline;
+                Ok(handle
+                    .saga_instances(service)
+                    .await?
+                    .into_iter()
+                    .map(|instance| SagaCandidate {
+                        healthy: instance.healthy && instance.enabled && instance.weight > 0.0,
+                        metadata: instance.metadata,
+                        #[cfg(feature = "discovery-runtime")]
+                        gate: None,
+                    })
+                    .collect())
+            }
+            #[cfg(feature = "discovery-runtime")]
+            Self::Managed(handle) => {
+                let observation = handle.observe(service, deadline).await.map_err(|_| {
+                    saga_error(
+                        ApplicationPhase::Running,
+                        "Saga discovery observation unavailable",
+                    )
+                })?;
+                let snapshot = observation.snapshot(true).map_err(|_| {
+                    saga_error(
+                        ApplicationPhase::Running,
+                        "Saga discovery evidence is not current",
+                    )
+                })?;
+                Ok(snapshot
+                    .instances()
+                    .iter()
+                    .map(|instance| SagaCandidate {
+                        healthy: nadisc::is_traffic_instance(instance),
+                        metadata: instance.metadata.clone(),
+                        gate: Some(Arc::new(SagaAdmission {
+                            observation: observation.clone(),
+                            instance: instance.clone(),
+                            handle: handle.clone(),
+                        })),
+                    })
+                    .collect())
+            }
+        }
+    }
 }

@@ -769,6 +769,14 @@ impl ApplicationRunner {
                         .await;
                 }
 
+                #[cfg(feature = "discovery-runtime")]
+                if let Err(stop) = self
+                    .confirm_discovery_startup(startup_deadline, &mut broker)
+                    .await
+                {
+                    return self.handle_startup_stop(stop, &mut broker).await;
+                }
+
                 match self.wait_for_service_terminal(&mut broker).await {
                     ServiceTerminal::Requested => {
                         self.application.set_terminal(TerminalIntent::ServiceStop);
@@ -1594,6 +1602,38 @@ impl ApplicationRunner {
             }
         }
         result
+    }
+
+    /// 业务作用：监听器放行后等待远端注册确认，同时继续处理停机和关键任务失败。
+    /// 参数说明：`deadline` 是原始启动截止点，`broker` 是同一进程信号源。
+    /// 返回：必需注册真实确认才完成启动，不为网络注册另开预算。
+    #[cfg(feature = "discovery-runtime")]
+    async fn confirm_discovery_startup(
+        &mut self,
+        deadline: Instant,
+        broker: &mut SignalBroker,
+    ) -> Result<(), StartupStop> {
+        let runtime = self.application.discovery_runtime();
+        let mut confirmation = runtime.startup.subscribe();
+        let cancellation = self.application.cancellation_token();
+        loop {
+            startup_remaining(deadline, ApplicationPhase::Ready)?;
+            if *confirmation.borrow() {
+                return Ok(());
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(StartupStop::Requested),
+                signal = broker.next() => return Err(signal_to_startup_stop(signal)),
+                completion = self.supervisor.join_next(), if self.supervisor.has_tasks() => {
+                    if let Some(completion) = completion { classify_startup_completion(completion)?; }
+                }
+                _ = tokio::time::sleep_until(deadline) => { startup_remaining(deadline, ApplicationPhase::Ready)?; }
+                result = confirmation.changed() => {
+                    if result.is_err() { return Err(StartupStop::Failure(runner_error(ApplicationPhase::Ready, "discovery startup confirmation closed"))); }
+                }
+            }
+        }
     }
 
     /// 业务作用：在全部任务工厂构造后复验最终静态条件、预算、取消及既有任务失败，保护唯一启动发布点。

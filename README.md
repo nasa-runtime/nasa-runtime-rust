@@ -8,6 +8,9 @@
 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
 使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
 
+通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
+并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
+
 配置装配支持嵌套默认值和自然排序的文件名导入，固定环境与来源权限后生成可解释候选；
 来源观察和组件应用状态分开记录，错误候选保留当前可用视图。详见[严格配置装配](#严格配置装配)。
 
@@ -42,6 +45,27 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 [受管能力合同](docs/managed-capabilities.md)。
 其中，Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
+
+## 多注册中心与共享发现生命周期
+
+任意 Rust 微服务都可以使用 `nadisc-runtime` 管理多个独立注册中心，不依赖 Saga 或数据库。具名连接隔离凭据、服务作用域、发现证据和故障；显式注册清单决定当前服务发布到哪些环境。Static/DNS 为地址来源，Nacos、Consul 和 Kubernetes 分别保留各自健康与权限边界。
+
+独立宿主持有唯一 `DiscoveryOwner`；使用 napp 时由 `#[nasa::application("web", "discovery")]` 接管 prepare、启动确认、资格探针、注册摘流、业务排空和最终关闭。启用 `discovery-runtime`，按需增加 `discovery-nacos`、`discovery-consul`、`discovery-kubernetes`；REST 请求构建器使用 `rest-discovery`，声明式 Mapping 使用 `rest-client`，动态 gRPC 使用 `grpc-discovery`。旧 `nacos-discovery` 入口仍可使用，新旧配置根节点不能同时声明。
+
+旧单 Nacos 接口使用派生组件 `nanacos-sdk` 维护兼容传输；控制流丢失即撤销连接健康，再由既有 SDK 状态机重连。新 owner 的 HTTP adapter 独立工作，不叠加 SDK 注册监督。
+
+`app.discovery()?.client(Some("business"))` 选择发现环境；`rest(Some("business"))` 返回该环境的共享 HTTP 客户端，默认 REST 门面使用 `primary`；兼容配置的显式默认引用优先。生成的 gRPC 客户端可注入受管 `DiscoveryGrpcService`。完整空集、权限撤销、期限耗尽与关闭会拒绝新提交；已经提交的请求仍须按业务幂等与结果不明语义处理。
+
+选择注册中心统一使用 `qualifier`，默认连接命名为 `primary`，无需额外默认配置字段。五种 REST Mapping 都支持 `qualifier = "business"`；方法级值覆盖 trait 默认，通过 `Client::with_clients(app.discovery()?.rest_clients()?)` 注入共享集合。未指定时选 primary，缺少 primary 或显式名称不存在时不会猜选其他环境；旧单客户端注入继续可用。
+
+`#[GetMapping(url = "https://dns.google/resolve")]` 使用默认 HTTP 客户端访问公网，不查询 Nacos。
+`url` 模式不能配置或继承 `qualifier`；宏不读取 YML 占位符。完整配置、内部服务及 Google API
+示例见[调用指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/discovery.md)。
+
+多个注册目标分别设置可达 IP 与映射端口，不能把容器监听地址当成宿主地址。Saga 可另外选择基础设施连接，并为续租与已提交结果设置独立恢复目标；恢复资格不授予新业务的目录执行权。
+
+[完整配置、架构、手动接入与停机合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-runtime/README.md) · [Consul](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-consul/README.md) · [Kubernetes](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nadisc-kubernetes/README.md)
+
 
 ## 核心价值与运行架构
 
@@ -461,7 +485,7 @@ Kafka Schema Registry、对象存储、gRPC listener 和受管 Web listener 已�
 | --- | --- | --- | --- |
 | [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | 独立 client，或 Application 按 `schema_registries.<name>` 装配的命名资源；无需声明 Kafka 消费组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
 | [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；可独立构造，或由 Application 按 `object_stores.<name>` 托管 | multipart、流式/range/list、STS 刷新、对象版本治理 |
-| [gRPC listener](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、观测与有预算排空 | 独立 handle，或在 Ready 阶段交给 Application `"grpc"` 组件托管 | proto 业务语义、service mesh、客户端负载均衡 |
+| [gRPC](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、具名发现调用、观测与有预算排空 | 独立 handle，或交给 Application 的 listener 与 discovery owner 托管 | proto 业务语义、service mesh、业务授权 |
 | [Web listener](napp/README.md#web-http-listener-受管模式) | 确定的 HTTP/1/h2c 选择、连接与 stream 上界、协议观测和有预算排空 | Application `"web"` 组件独占明文 TCP listener 与路由服务图 | TLS 终止、h2c Upgrade 协商、服务间协议选择 |
 
 独立模式由业务显式构造 `ConfluentSchemaRegistry` 或 `S3ObjectStore` 并持有实例。受管模式分别开启
@@ -561,7 +585,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 ```
 
 可声明组件：`log`、`nacos-config`、`telemetry`、`db`、`redis`、`cache`、`partition`、`saga`、`kafka`、
-`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
+`outbox`、`redis-job`、`grpc`、`auth`、`web`、`ws`、`nacos-discovery`、`discovery`、`scheduling`。宏接受任意书写顺序，并按规范顺序
 启动、严格反序停机；声明了但特性未编入时会在编译期能力探测处失败。`saga` 会隐式加入 `db` 与
 `outbox`，业务入口无需重复声明这两个组件；为兼容显式依赖，三者同时写出也合法且语义相同。
 `hystrix`、`grafana`、`mapper` 是门面 feature 或函数级能力，**不是**可声明组件。
@@ -954,6 +978,9 @@ HTTP/1/h2c listener。
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
 | [nanacos](nanacos/README.md) | `nacos` / `nacos-sdk` | Nacos 配置、注册、发现、监听 | `nacos.*` |
 | [nadisc](nadisc/README.md) | `discovery` | 服务发现抽象、实例过滤、watch 契约 | `discovery.*` |
+| [nadisc-runtime](nadisc-runtime/README.md) | `discovery-runtime` | 任意 Rust 微服务的多注册中心 owner、共享观察、注册生命周期与有界停机 | `discovery.*` |
+| [nadisc-consul](nadisc-consul/README.md) | `discovery-consul` | 固定 agent 注册、HTTP/TTL 检查与一致性健康发现 | `discovery.connections.*.consul` |
+| [nadisc-kubernetes](nadisc-kubernetes/README.md) | `discovery-kubernetes` | Service/EndpointSlice 联合证据与只读发现 | `discovery.connections.*.kubernetes` |
 | [rest-discovery](rest-discovery/README.md) | `rest-discovery` | `lb://service` REST 负载均衡调用 | `rest.*` |
 | [rest-discovery-nacos](rest-discovery-nacos/README.md) | `rest-discovery-nacos` | Nacos 注册发现和 REST 负载均衡组合 | `rest_discovery.*`、`nacos.*` |
 | [rest-client-macro](rest-client-macro/README.md) | `rest-client` | 声明式 REST 客户端宏 | `rest_clients.*` |

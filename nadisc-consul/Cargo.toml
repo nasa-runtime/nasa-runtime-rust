@@ -1,0 +1,21 @@
+[package]
+name = "nadisc-consul"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Consul 作用域发现、实例所有权与 HTTP/TTL 健康注册适配"
+keywords = ["consul", "discovery", "microservices", "health"]
+categories.workspace = true
+readme = "README.md"
+include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[dependencies]
+nadisc = { version = "2.0.0", path = "../nadisc", features = ["http"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tokio = { version = "1", features = ["sync"] }

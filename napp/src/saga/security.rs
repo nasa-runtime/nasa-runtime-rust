@@ -35,6 +35,7 @@ pub(super) struct SagaSecurityState {
     initial: Mutex<Arc<SagaSecuritySnapshot>>,
     #[cfg(any(
         feature = "nacos-config",
+        feature = "config-watch",
         feature = "saga-grpc",
         feature = "saga-grpc-pgsql"
     ))]
@@ -74,6 +75,7 @@ impl SagaSecurityState {
                 })),
                 #[cfg(any(
                     feature = "nacos-config",
+                    feature = "config-watch",
                     feature = "saga-grpc",
                     feature = "saga-grpc-pgsql"
                 ))]
@@ -124,11 +126,9 @@ impl SagaSecurityState {
                 })?;
             let mut http = initial.http.clone();
             http.insert(reference.to_owned(), Arc::new(credentials));
-            *initial = Arc::new(SagaSecuritySnapshot {
-                secrets: initial.secrets.clone(),
-                http,
-                ..(**initial).clone()
-            });
+            let mut next = (**initial).clone();
+            next.http = http;
+            *initial = Arc::new(next);
         }
         drop(initial);
         nasaga_runtime::SagaHttpMessageAuthenticator::from_source(

@@ -12,6 +12,7 @@ pub(crate) struct BackgroundOwner {
     closed: Mutex<bool>,
     cancel: CancellationToken,
     tasks: TaskTracker,
+    response_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl BackgroundOwner {
@@ -23,6 +24,7 @@ impl BackgroundOwner {
             closed: Mutex::new(false),
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
+            response_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(256)),
         }
     }
 
@@ -45,6 +47,18 @@ impl BackgroundOwner {
     /// 返回：调用完成或被丢弃时归还的登记；关闭后拒绝。
     pub(crate) fn enter(&self) -> Result<TaskTrackerToken> {
         self.with_open(|| Ok(self.tasks.token()))
+    }
+
+    /// 业务作用：在发送受管流式请求前预约正文容量，未读响应不能无限增加后台任务。
+    /// 参数说明：无。
+    /// 返回：每运行时最多二百五十六个正文，额度不足立即拒绝，不创建无界等待队列。
+    pub(crate) fn reserve_response(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        self.with_open(|| {
+            self.response_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| RestDiscoveryError::ResponseCapacity)
+        })
     }
 
     /// 业务作用：在登记责任后启动受当前运行时取消约束的后台任务。

@@ -67,6 +67,26 @@ Copied external client handles do not acquire the revocation guarantees of manag
 The detailed [Application contract](../napp/README.md), currently in Chinese, defines fields, defaults
 and admission conditions.
 
+## Adopt multiple registries
+
+The single-Nacos `nacos-discovery` component and `rest_discovery` root remain available. For named
+connections, enable the required `discovery-nacos`, `discovery-consul` or `discovery-kubernetes`
+features, declare `discovery`, remove the old root and configure `discovery.connections`. Both roots
+are rejected together even when one is disabled. The managed Nacos HTTP adapter requires Nacos 3;
+the compatibility SDK's server support does not establish HTTP adapter compatibility.
+
+- Name the default connection lowercase `primary`; use `qualifier` for other exact names.
+- Registrations and Saga targets use `qualifier`. The `connection_ref` alias cannot appear alongside it.
+- Legacy `default_connection` remains an explicit override ahead of `primary`; new configuration needs no such field.
+- Inject Mapping clients with `Client::with_clients(app.discovery()?.rest_clients()?)`; method qualifiers
+  override the trait. `Client::new(selected_client)` supports methods without qualifiers only.
+- Internet APIs use a complete `url` without a declared or inherited qualifier. Dynamic addresses use the request builder.
+- Declare each registration's reachable IP and mapped port. Adding a connection does not register the application.
+
+Connection configuration is frozen for the owner lifecycle. napp rejects an entire reload candidate
+that changes `discovery`; restart to apply it. See the [configuration and API examples](discovery.md) (Chinese).
+
+
 ## Select strict configuration assembly
 
 `YmlLoader` retains its base-file, profile, overlay and environment scope; it does not execute
