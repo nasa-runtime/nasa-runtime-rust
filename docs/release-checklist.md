@@ -64,6 +64,10 @@
       部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
       使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。
 - [ ] Redis、Kafka、WebSocket 和后台任务具有队列、并发、超时或批量上限。
+- [ ] Kafka 的多数据源、独立 lane、当前代次安全提交、同集群事务与有限任务恢复，在根 README、
+      Java/Rust 组件、宏、门面及受管文档中一致；事务提交与普通交付、目标确认与 checkpoint 不混为同一成功时刻。
+- [ ] Kafka 组名、事件、null/空字节、header 与持久格式保留共同身份；文档说明原生客户端无法精确保留的输入边界，
+      不承诺自动改名、位点复制或跨资源原子性。broker 内部 listener、事务日志副本/ISR 与稳定事务身份有明确前置条件。
 - [ ] 普通 Stream、Proxy、AutoPipeline、原生 TCP Client 与 hystrix 的定位在根 README、组件 README、
       门面、crate rustdoc 和 manifest 元数据中一致；独立 API 与 Application 受管入口分别说明。
 - [ ] Service 的消费、派生发送、Client 与宿主终端共用启动许可；关键本地任务、认证连接、健康证据

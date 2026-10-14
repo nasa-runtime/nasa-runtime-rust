@@ -8,7 +8,7 @@
 pub enum ProducerQueue {
     /// `fire()` 的 delivery observer permit 已耗尽，消息尚未交给 librdkafka。
     DeliveryObserver,
-    /// librdkafka 本地 native producer queue 已满，消息未入队。
+    /// 框架发送条数/字节额度或 librdkafka 本地队列已满，消息未入队。
     Native,
 }
 
@@ -27,8 +27,26 @@ impl std::fmt::Display for ProducerQueue {
 /// variant 划分原则:调用方"下一步该做什么"不同就必须是不同 variant——
 /// 例如 [`NafkaError::OutcomeUnknown`] 表示发布结果未知、禁止盲目重试，
 /// [`NafkaError::Publish`] 表示确定失败、可按业务策略重试，两者绝不能合并。
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum NafkaError {
+    /// 本地能力视图或 broker ACL 明确拒绝操作；只有所需两层权限都成立才能执行。
+    #[error("Kafka authorization rejected")]
+    Authorization,
+    /// 管理修改已经交给原生客户端，但等待期内没有确定结果；重新操作前须读取真实资源状态。
+    #[error("管理操作结果未知: {operation}")]
+    AdminOutcomeUnknown {
+        /// 固定操作名，不携带原生配置正文。
+        operation: &'static str,
+    },
+    /// 管理准入已经关闭，但已接纳查询/修改或原生资源销毁仍未实际结束；再次 shutdown 继续等待同一责任。
+    #[error("Kafka Admin 仍在关闭: resource_holders={resource_holders}")]
+    AdminShutdownTimeout {
+        /// 最近观测到的原生资源借用数，不含关闭线程；为零时仍可能在执行原生销毁。
+        resource_holders: usize,
+    },
+    /// 当前组件feature或原生构建不具备请求能力；固定能力名不携带配置原值。
+    #[error("当前 Kafka 构建不支持 {0}")]
+    UnsupportedCapability(&'static str),
     /// 配置无效:connect/validate 阶段 fail-fast,携带首个违反项的说明。
     #[error("Kafka 配置无效: {0}")]
     Config(String),
@@ -69,7 +87,7 @@ pub enum NafkaError {
         closed: usize,
     },
 
-    /// 发布确定失败(编码失败、入队被拒且未发出、broker 明确拒绝)。
+    /// 编码、准入或 broker 报告发布失败；业务重发仍须遵守幂等和顺序约束。
     #[error("发布失败 lane={lane} topic={topic}: {message}")]
     Publish {
         /// 发生失败的 producer lane。
@@ -118,6 +136,10 @@ pub enum NafkaError {
     #[error("consumer 控制命令超时且确认未执行 command_id={0}")]
     ControlNotApplied(u64),
 
+    /// 冻结的分区归属已失效；旧命令确定未执行，不能自动套用到新 owner。
+    #[error("consumer 控制目标归属已改变 command_id={0}")]
+    ControlOwnerChanged(u64),
+
     /// 控制命令结果未知(owner 已开始执行):必须用 position/assignment 等读 API 核对后再决策。
     #[error("consumer 控制命令结果未知,需查询实际状态 command_id={0}")]
     ControlOutcomeUnknown(u64),
@@ -158,7 +180,7 @@ pub enum NafkaError {
         message: String,
     },
 
-    /// assignment 分区数超过 max_assignment_partitions:内存上限保护,group 置 Crashed。
+    /// 全组 assignment 分区数超过上限；固定创建直接拒绝，订阅 owner 进入 Crashed。
     #[error("assignment 分区数超限 group={group} actual={actual} max={max}")]
     AssignmentTooLarge {
         /// 超限的 group.id。
@@ -176,9 +198,11 @@ pub enum NafkaError {
         groups: Vec<String>,
         /// 每个未就绪 group 在 deadline 时的最后健康快照。
         last_health: Vec<crate::health::GroupHealth>,
+        /// 与健康同次采样的要求及稳定未满足原因。
+        readiness: Vec<crate::health::ReadyStatus>,
     },
 
-    /// TopicContract 校验失败(topic 缺失/分区数不符/配置漂移/无权限)。
+    /// 已取得的 topic 分区、副本或配置证据不满足声明；权限与查询失败保留独立错误。
     #[error("topic 契约校验失败: {0}")]
     TopicContract(String),
 
@@ -197,6 +221,33 @@ pub enum NafkaError {
         groups: Vec<String>,
         /// 仍未排空的 producer lane。
         producer_lanes: Vec<String>,
+    },
+
+    /// owner 已退出，但旧分配的死信任务尚未归还实际责任；重复停止继续等待。
+    #[error("死信关闭超时，活动任务={active_tasks}，保留记录={retained_records}，保留字节={retained_bytes}")]
+    DltShutdownTimeout {
+        /// 尚未退出的实际异步任务，包括旧分配失权后的发送。
+        active_tasks: usize,
+        /// 尚未释放原文信封的记录数。
+        retained_records: usize,
+        /// 尚未释放的完整信封字节。
+        retained_bytes: usize,
+    },
+
+    /// Kafka 业务资源已退出，但指标用户回调未归还执行线程；源保持关闭中，可再次等待。
+    #[error("指标出口关闭超时，仍在执行的回调数={active}")]
+    MetricsShutdownTimeout {
+        /// 尚未返回的用户回调数；线程收尾期间可为零。
+        active: usize,
+    },
+
+    /// 回放已关闭新准入但实际处理尚未退出；保留其依赖的发布能力与独占 lease，允许再次等待。
+    #[error("回放关闭超时，未退出 tasks={tasks:?},未退出 groups={groups:?}")]
+    ReplayShutdownTimeout {
+        /// 仍有实际处理、存储或资源关闭责任的任务。
+        tasks: Vec<String>,
+        /// 同一停止预算内仍未退出的在线 consumer group。
+        groups: Vec<String>,
     },
 
     /// connect 时当前线程不在 tokio runtime 内:poll 线程派发依赖 Handle,必须 fail-fast。

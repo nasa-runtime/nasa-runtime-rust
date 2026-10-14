@@ -1,16 +1,14 @@
-//! 指标域迁移到统一 `nametrics_core::MetricHub`。
+//! 各领域指标连接统一 `nametrics_core::MetricHub`。
 //!
-//! `napp` 持有唯一进程级 `MetricHub`;各领域按 顺序逐个把记录接到它上面。
+//! `napp` 持有进程级 `MetricHub`，在启动时登记领域指标的名称、类型、单位与标签。
 //!
-//! - **nafka**(消除应用手工 sink):nafka 通过 `MetricsSink`(by-name)上报,
+//! - **nafka**: 通过有界异步 `MetricsSink` 上报,
 //!   [`NafkaMetricSinkAdapter`] 把它桥接到 hub(by-descriptor),启动期用
-//!   [`register_nafka_descriptors`] 做冲突审计。nafka 是**原生**域(记录直接进 hub cells)。
+//!   [`register_nafka_descriptors`] 检查定义冲突；`source` 标签保留不同数据源的独立序列。
 //! - **naweb**(安全端点指标):naweb 自持 `SecurityMetrics` registry，
 //!   [`NawebMetricsSource`] 把它包成 `LegacyMetricsSource`——descriptor 并入统一 catalog，结构化
 //!   快照同时供 Prometheus 与 OTLP 使用。这样一次 `hub.render_prometheus()` 同时得到 nafka
 //!   (原生)+ naweb(兼容源)。
-//!
-//! nafana 迁移属 nasa 门面层增量(napp 不依赖 nafana,强接会倒置分层),此处不做。
 
 #[cfg(any(feature = "kafka", feature = "web-auth", feature = "web-crypto"))]
 use std::sync::Arc;
@@ -24,124 +22,72 @@ use nametrics_core::{MetricDescriptor, MetricHub, MetricKind};
 
 // ───────────────────────────── nafka 域(原生) ─────────────────────────────
 
+/// 从运行时固定目录建立后端定义，避免新增运行样本被门面静默丢弃。
 #[cfg(feature = "kafka")]
-macro_rules! nafka_counter {
-    ($ident:ident, $name:literal, $help:literal, $labels:expr) => {
-        static $ident: MetricDescriptor = MetricDescriptor {
-            name: $name,
-            help: $help,
-            unit: "",
-            kind: MetricKind::Counter,
-            label_names: $labels,
-            histogram_bounds: &[],
-        };
-    };
-}
-
-#[cfg(feature = "kafka")]
-macro_rules! nafka_gauge {
-    ($ident:ident, $name:literal, $help:literal, $unit:literal, $labels:expr) => {
-        static $ident: MetricDescriptor = MetricDescriptor {
-            name: $name,
-            help: $help,
-            unit: $unit,
-            kind: MetricKind::Gauge,
-            label_names: $labels,
-            histogram_bounds: &[],
-        };
-    };
-}
-
-#[cfg(feature = "kafka")]
-nafka_counter!(
-    GROUP_READY_TOTAL,
-    "group_ready_total",
-    "consumer group 达成就绪条件的次数",
-    &["group"]
-);
-#[cfg(feature = "kafka")]
-nafka_counter!(
-    GROUP_READY_TIMEOUT_TOTAL,
-    "group_ready_timeout_total",
-    "consumer group 在就绪窗口内未满足条件而超时的次数",
-    &["group"]
-);
-#[cfg(feature = "kafka")]
-nafka_gauge!(
-    GROUP_READY,
-    "group_ready",
-    "consumer group 当前是否就绪(1/0)",
-    "",
-    &["group"]
-);
-#[cfg(feature = "kafka")]
-nafka_gauge!(
-    GROUP_READY_WAIT_MILLIS,
-    "group_ready_wait_millis",
-    "consumer group 达成就绪所等待的毫秒数",
-    "milliseconds",
-    &["group"]
-);
-#[cfg(feature = "kafka")]
-nafka_counter!(
-    PUBLISHED_TOTAL,
-    "published_total",
-    "producer 成功发布的消息数",
-    &["lane", "topic"]
-);
-#[cfg(feature = "kafka")]
-nafka_counter!(
-    PUBLISH_FAILED_TOTAL,
-    "publish_failed_total",
-    "producer 发布失败的消息数",
-    &["lane", "topic"]
-);
-
-/// nafka 全部指标的静态 descriptor manifest。
-#[cfg(feature = "kafka")]
-static NAFKA_DESCRIPTORS: [&MetricDescriptor; 6] = [
-    &GROUP_READY_TOTAL,
-    &GROUP_READY_TIMEOUT_TOTAL,
-    &GROUP_READY,
-    &GROUP_READY_WAIT_MILLIS,
-    &PUBLISHED_TOTAL,
-    &PUBLISH_FAILED_TOTAL,
-];
+static NAFKA_DESCRIPTORS: std::sync::LazyLock<Vec<MetricDescriptor>> =
+    std::sync::LazyLock::new(|| {
+        nafka::METRIC_CATALOG
+            .iter()
+            .map(|definition| MetricDescriptor {
+                name: definition.name,
+                help: definition.description,
+                unit: definition.unit,
+                kind: match definition.kind {
+                    nafka::MetricKind::Counter => MetricKind::Counter,
+                    nafka::MetricKind::Gauge => MetricKind::Gauge,
+                },
+                label_names: definition.labels,
+                histogram_bounds: &[],
+            })
+            .collect()
+    });
 
 /// 业务作用：启动期把 nafka 的 descriptor 注册进 hub 并做冲突审计。
+/// 参数说明：hub 为受管应用的进程级指标目录。
+/// 返回：全部登记成功或遇到第一个定义冲突；调用方须在开放业务前处理失败。
 ///
 /// # 错误
 ///
 /// 任一 nafka descriptor 与已注册项冲突时返回首个 [`MetricConflict`]。
 #[cfg(feature = "kafka")]
 pub fn register_nafka_descriptors(hub: &MetricHub) -> Result<(), MetricConflict> {
-    for descriptor in NAFKA_DESCRIPTORS {
+    for descriptor in NAFKA_DESCRIPTORS.iter() {
         hub.register(descriptor)?;
     }
     Ok(())
 }
 
 /// 业务作用：按 name 查找 nafka descriptor。
+/// 参数说明：name 为 runtime 发出的固定逻辑指标名。
+/// 返回：已声明定义；未知名称不创建动态 family。
 #[cfg(feature = "kafka")]
 fn nafka_descriptor(name: &str) -> Option<&'static MetricDescriptor> {
     NAFKA_DESCRIPTORS
         .iter()
-        .copied()
         .find(|descriptor| descriptor.name == name)
 }
 
-/// 业务作用：按 `descriptor.label_names` 顺序,从 nafka 的 (key, value) 对里提取 label 值;缺失用空串。
+/// 业务作用：按目录顺序提取完整且唯一的标签，避免缺失源身份造成不同数据源合流。
+/// 参数说明：descriptor 为固定定义；labels 为异步出口携带的完整标签集。
+/// 返回：标签形状正确时返回有序值；缺失、重复或多余标签均拒绝当前样本。
 #[cfg(feature = "kafka")]
-fn label_values(descriptor: &MetricDescriptor, labels: &[(&'static str, &str)]) -> Vec<String> {
+fn label_values(
+    descriptor: &MetricDescriptor,
+    labels: &[(&'static str, &str)],
+) -> Option<Vec<String>> {
+    if labels.len() != descriptor.label_names.len() {
+        return None;
+    }
     descriptor
         .label_names
         .iter()
         .map(|name| {
-            labels
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| (*value).to_owned())
-                .unwrap_or_default()
+            let mut values = labels.iter().filter(|(key, _)| key == name);
+            let (_, value) = values.next()?;
+            if values.next().is_some() {
+                return None;
+            }
+            Some((*value).to_owned())
         })
         .collect()
 }
@@ -158,6 +104,8 @@ pub struct NafkaMetricSinkAdapter {
 #[cfg(feature = "kafka")]
 impl NafkaMetricSinkAdapter {
     /// 业务作用：用给定的进程级 hub 创建适配器。
+    /// 参数说明：hub 为已经登记 nafka 定义的应用指标目录。
+    /// 返回：共享该目录的适配器，不自行创建后台线程。
     pub fn new(hub: Arc<MetricHub>) -> Self {
         Self { hub }
     }
@@ -166,23 +114,37 @@ impl NafkaMetricSinkAdapter {
 #[cfg(feature = "kafka")]
 impl nafka::MetricsSink for NafkaMetricSinkAdapter {
     /// 业务作用：将 nafka counter 名称映射到静态 descriptor，并按声明顺序记录 labels。
+    /// 参数说明：name 为固定名称；delta 为非负增量；labels 为包含 source 的完整标签。
+    /// 返回：已知 counter 且标签有效时累计；其它样本忽略，不影响消息交付。
     fn counter(&self, name: &'static str, delta: u64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
         let Some(descriptor) = nafka_descriptor(name) else {
             return;
         };
-        let values = label_values(descriptor, labels);
+        if descriptor.kind != MetricKind::Counter {
+            return;
+        }
+        let Some(values) = label_values(descriptor, labels) else {
+            return;
+        };
         let refs: Vec<&str> = values.iter().map(String::as_str).collect();
         self.hub.counter(descriptor, delta, &refs);
     }
 
     /// 业务作用：将 nafka gauge 名称映射到静态 descriptor，并把整数值写入统一 hub。
+    /// 参数说明：name 为固定名称；value 为瞬时值；labels 为包含 source 的完整标签。
+    /// 返回：已知 gauge 且标签有效时更新；其它样本忽略，不影响消息交付。
     fn gauge(&self, name: &'static str, value: i64, labels: nafka::MetricLabels<'_>) {
         use nametrics_core::MetricRecorder;
         let Some(descriptor) = nafka_descriptor(name) else {
             return;
         };
-        let values = label_values(descriptor, labels);
+        if descriptor.kind != MetricKind::Gauge {
+            return;
+        }
+        let Some(values) = label_values(descriptor, labels) else {
+            return;
+        };
         let refs: Vec<&str> = values.iter().map(String::as_str).collect();
         self.hub.gauge(descriptor, value as f64, &refs);
     }

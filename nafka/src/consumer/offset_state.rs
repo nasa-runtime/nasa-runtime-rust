@@ -93,6 +93,8 @@ pub(crate) enum AckSource {
 /// 单条记录被安全跳过(可越过提交)的原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SkipReason {
+    /// 调用方显式配置放弃无效输入，不代表已经交付业务或 DLT。
+    InvalidRecord,
     /// 无匹配 route 且 unmatched_policy=Skip。
     UnmatchedRoute,
     /// typed route 上的 tombstone(空 payload)默认跳过。
@@ -105,9 +107,7 @@ pub(crate) enum SkipReason {
 
 /// 单条已观察记录的处理结果;`is_safe` 决定它是否可被提交越过。
 ///
-/// 说明:协议合同的 `Failed(FailureUnit)` 里 FailureUnit(失败单元是单条还是连续 run)
-/// 属重投层(retry.rs)概念,frontier 计算并不需要它,故此处 `Failed` 只保留"不安全"这一位,
-/// 失败单元归属由 retry.rs 管理,不在本纯状态机内耦合。
+/// 单条或连续批的失败范围由 owner 的重投状态管理；安全前沿只需要知道该坐标是否可被提交越过。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordOutcome {
     /// 已确认(自动成功 / 手动确认)。
@@ -380,6 +380,35 @@ pub(crate) struct GroupOffsetState {
 }
 
 impl GroupOffsetState {
+    /// 业务作用：识别维护回退后重复取到的已安全输入，避免再次调用业务或重复登记进度。
+    /// 参数说明：tp、offset 为原始消息坐标；assignment_epoch 为当前派发权威。
+    /// 返回：broker 已确认覆盖，或同一代次已登记安全结果时为 true；失败、未知和失效证据仍须重投。
+    pub(crate) fn already_safe(&self, tp: &Tp, assignment_epoch: u64, offset: i64) -> bool {
+        let Some(state) = self.partitions.get(tp) else {
+            return false;
+        };
+        if state.last_confirmed.is_some_and(|next| offset < next) {
+            return true;
+        }
+        state.in_flight.as_ref().is_some_and(|progress| {
+            progress.assignment_epoch == assignment_epoch
+                && progress
+                    .observed
+                    .binary_search_by_key(&offset, |item| item.offset)
+                    .is_ok_and(|index| progress.observed[index].outcome.is_safe())
+        })
+    }
+
+    /// 业务作用：读取 broker 已确认的边界，用于裁剪压缩空洞中残留的本地完成证据。
+    ///
+    /// 参数说明：`tp` 为当前 assignment 的分区身份。
+    /// 返回：已由 broker 确认的 next-offset；没有确认历史时为 None。
+    pub(crate) fn confirmed_offset(&self, tp: &Tp) -> Option<i64> {
+        self.partitions
+            .get(tp)
+            .and_then(PartitionOffsetState::last_confirmed)
+    }
+
     /// 业务作用：构造带双层容量上限的 group 状态。
     ///
     /// # 参数
@@ -603,9 +632,26 @@ impl GroupOffsetState {
         self.observed_total = 0;
     }
 
+    /// 业务作用：人工定位为一个分区建立独立的新读取坐标，保留其它分区责任。
+    /// 参数说明：tp 为显式定位目标。
+    /// 返回：目标的旧 baseline 与本地观察被释放；其它分区安全前沿不变。
+    pub(crate) fn clear_partition(&mut self, tp: &Tp) {
+        self.partitions.remove(tp);
+        self.recount();
+    }
+
     /// 业务作用：返回当前未裁剪结果总数，作为按记录数触发 commit 的计量值。
     pub(crate) fn observed_total(&self) -> usize {
         self.observed_total
+    }
+
+    /// 业务作用：定位前检查目标是否仍承担未提交的本地消费责任。
+    /// 参数说明：tp 为显式控制目标。
+    /// 返回：还有观察记录时为 true；不能因其它分区已经提交而解除本目标门禁。
+    pub(crate) fn has_partition_observations(&self, tp: &Tp) -> bool {
+        self.partitions
+            .get(tp)
+            .is_some_and(|state| state.observed_len() != 0)
     }
 
     /// 业务作用：判断 group outcome permit 是否至少释放出一个位置。

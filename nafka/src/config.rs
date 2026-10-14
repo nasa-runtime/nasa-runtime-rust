@@ -31,6 +31,7 @@ pub const KAFKA_CONFIG_FIELDS: &[&str] = &[
 /// 配置应用顺序(后者优先):common 透传 → 端级透传 → 强类型字段 → 框架不变量;
 /// 框架不变量(enable.auto.commit=false 等)不可被任何透传覆盖,validate 直接拒绝。
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     /// 本 Kafka 客户端实例名:多集群/多 KafkaProxy 时区分 linkme 收集项归属,
     /// 并参与 client.id 派生。默认 "default"。
@@ -38,7 +39,7 @@ pub struct KafkaConfig {
     pub client_name: String,
     /// 集群地址,逗号分隔,必填非空。
     pub bootstrap_servers: String,
-    /// 默认消费 group:consumer 声明 GroupSpec::Default 时回退此值;两者皆空在 start() fail-fast。
+    /// 默认消费组；None 或空串表示未指定，其它值须满足共同组身份边界。GroupSpec::Default 在启动前解析实际组。
     #[serde(default)]
     pub group_id: Option<String>,
     /// client.id 前缀;最终 client.id = 前缀 + client_name + lane 名/端角色 稳定派生。
@@ -74,9 +75,9 @@ fn default_client_name() -> String {
 /// 每个命名 lane 是独立的原生 producer/队列/admission/observer(物理隔离),
 /// 实现不得为省连接把多个 lane 合并回同一个原生 producer。
 #[derive(Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProducerConfig {
-    /// ack 策略("0"/"1"/"all");默认 "1"。需要副本级持久性的场景显式配 "all"。
+    /// ack 策略("0"/"1"/"all");默认 "all"，由 broker 的 ISR 与最小副本配置决定确认范围。
     pub acks: String,
     /// 发送失败重试次数；默认值必须显式设为 3，避免继承底层库的 i32::MAX 而静默偏离。
     pub retries: u32,
@@ -101,15 +102,15 @@ pub struct ProducerConfig {
     pub partitioner: String,
     /// 压缩算法(none/gzip/snappy/lz4/zstd;zstd 需开同名 feature)。
     pub compression: String,
-    /// 幂等 producer 开关；开启时 validate 校验 acks/retries/in-flight 约束。
+    /// 幂等 producer 默认开启；validate 校验 acks/retries/in-flight 约束，不提供外部副作用去重。
     pub enable_idempotence: bool,
     /// 单连接最大并行在途请求数；默认 1，在启用重试时锁住同分区发送顺序。
     pub max_in_flight_requests_per_connection: u32,
-    /// fire() 的 delivery 观察队列容量:先预留后入队,防"已发送却不可观察"窗口。
+    /// send/fire 共用的 delivery 观察容量；先预留后入队，调用方停止等待不释放真实交付责任。
     pub fire_observer_capacity: usize,
-    /// 原生入队队列的最大消息数；队满时退避重试至 publish 超时，避免无限阻塞。
+    /// 每lane框架发送责任与原生队列的消息上限；默认10000，满时按发布期限等待或拒绝。
     pub queue_buffering_max_messages: usize,
-    /// 原生入队队列的最大 KiB 数;socket lane 必须显式配置而非继承 1 GiB 通用默认。
+    /// 每lane框架发送责任与原生队列的KiB上限；按 key、payload、全部头名和头值计费，默认65536；不包含原生压缩和连接开销。
     pub queue_buffering_max_kbytes: usize,
     /// 命名 lane 覆盖表;键为 lane 名("default" 保留,不得出现在此表)。
     pub lanes: BTreeMap<String, ProducerLaneOverride>,
@@ -118,10 +119,12 @@ pub struct ProducerConfig {
 }
 
 impl Default for ProducerConfig {
-    /// 业务作用：返回兼容基线且受框架上限约束的 default lane 配置。
+    /// 业务作用：返回可靠发送与有界责任的默认lane配置。
+    /// 参数说明：无。
+    /// 返回：独立配置值，默认10000条与65536KiB；不会建立原生连接。
     fn default() -> Self {
         Self {
-            acks: "1".into(),
+            acks: "all".into(),
             retries: 3,
             retry_backoff_ms: 100,
             linger_ms: 5,
@@ -133,11 +136,11 @@ impl Default for ProducerConfig {
             stalled_rebuild_cooldown_ms: 60_000,
             partitioner: "murmur2_random".into(),
             compression: "none".into(),
-            enable_idempotence: false,
+            enable_idempotence: true,
             max_in_flight_requests_per_connection: 1,
             fire_observer_capacity: 10_000,
-            queue_buffering_max_messages: 100_000,
-            queue_buffering_max_kbytes: 1_048_576,
+            queue_buffering_max_messages: 10_000,
+            queue_buffering_max_kbytes: 65_536,
             lanes: BTreeMap::new(),
             properties: BTreeMap::new(),
         }
@@ -148,12 +151,14 @@ impl Default for ProducerConfig {
 ///
 /// 只开放 producer 相关字段:lane 是发布侧物理隔离概念,不承载 consumer/admin 语义。
 #[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProducerLaneOverride {
     /// 覆盖 ack 策略;socket control lane 生产环境强制 "all"。
     pub acks: Option<String>,
     /// 覆盖重试次数。
     pub retries: Option<u32>,
+    /// 覆盖原生发送失败的重试退避毫秒；零表示不主动延迟重试。
+    pub retry_backoff_ms: Option<u64>,
     /// 覆盖攒批等待毫秒。
     pub linger_ms: Option<u64>,
     /// 覆盖单批字节上限。
@@ -176,9 +181,9 @@ pub struct ProducerLaneOverride {
     pub max_in_flight_requests_per_connection: Option<u32>,
     /// 覆盖 fire 观察队列容量。
     pub fire_observer_capacity: Option<usize>,
-    /// 覆盖原生队列最大消息数。
+    /// 覆盖框架发送责任与原生队列最大消息数。
     pub queue_buffering_max_messages: Option<usize>,
-    /// 覆盖原生队列最大 KiB。
+    /// 覆盖框架完整原文字节与原生队列最大 KiB。
     pub queue_buffering_max_kbytes: Option<usize>,
     /// 只作用于本 lane 的原生键透传。
     pub properties: BTreeMap<String, String>,
@@ -186,13 +191,17 @@ pub struct ProducerLaneOverride {
 
 /// consumer 配置:group 会话/拉取参数 + assignment 规模上限。
 #[derive(Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConsumerConfig {
+    /// 每个订阅组的 owner 槽数，默认一；固定 assign 始终单槽。
+    pub concurrency: usize,
+    /// 按最终 group.id 覆盖槽数；未列出的组使用 concurrency。
+    pub group_concurrency: BTreeMap<String, usize>,
     /// 会话超时毫秒:超过未心跳被踢出 group。
     pub session_timeout_ms: u64,
     /// 心跳间隔毫秒;validate 要求 < session_timeout_ms。
     pub heartbeat_interval_ms: u64,
-    /// 两次 poll 最大间隔毫秒:组内 handler 累计耗时的容量预算上限。
+    /// 两次 native poll 最大间隔毫秒；typed handler 隔离执行，不以此限制业务总时长。
     pub max_poll_interval_ms: u64,
     /// 无提交位点时的起始策略(latest/earliest/none);广播 group 每次启动都命中此值。
     pub auto_offset_reset: String,
@@ -202,8 +211,8 @@ pub struct ConsumerConfig {
     pub fetch_wait_max_ms: u64,
     /// 单分区单次 fetch 最大字节。
     pub max_partition_fetch_bytes: usize,
-    /// 单 group 可接受的最大 assignment 分区数:超过即 Crashed/AssignmentTooLarge,
-    /// 防止意外订阅巨型 topic 导致 per-partition 状态内存放大。
+    /// 全组全部 owner 当前分配的不同分区数量上限；空闲槽不预留份额。
+    /// 固定范围在创建 owner 前拒绝；订阅分配超限时该 owner 进入 Crashed/AssignmentTooLarge。
     pub max_assignment_partitions: usize,
     /// 只透传给 consumer 的原生键。
     pub properties: BTreeMap<String, String>,
@@ -211,8 +220,12 @@ pub struct ConsumerConfig {
 
 impl Default for ConsumerConfig {
     /// 业务作用：返回兼容基线的 group 会话、拉取与 assignment 上限配置。
+    /// 参数说明：无。
+    /// 返回：单槽默认配置；命名组可显式覆盖并发度。
     fn default() -> Self {
         Self {
+            concurrency: 1,
+            group_concurrency: BTreeMap::new(),
             session_timeout_ms: 30_000,
             heartbeat_interval_ms: 10_000,
             max_poll_interval_ms: 300_000,
@@ -228,7 +241,7 @@ impl Default for ConsumerConfig {
 
 /// admin 配置:topic 管理与元数据查询的超时链。
 #[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     /// admin 单请求超时毫秒;None 回退 default_api_timeout_ms → publish_timeout_ms。
     pub request_timeout_ms: Option<u64>,
@@ -321,6 +334,7 @@ impl fmt::Debug for ProducerLaneOverride {
             .debug_struct("ProducerLaneOverride")
             .field("acks", &self.acks)
             .field("retries", &self.retries)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
             .field("linger_ms", &self.linger_ms)
             .field("batch_size", &self.batch_size)
             .field("request_timeout_ms", &self.request_timeout_ms)
@@ -359,6 +373,8 @@ impl fmt::Debug for ConsumerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ConsumerConfig")
+            .field("concurrency", &self.concurrency)
+            .field("group_concurrency", &self.group_concurrency)
             .field("session_timeout_ms", &self.session_timeout_ms)
             .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
             .field("max_poll_interval_ms", &self.max_poll_interval_ms)
@@ -401,25 +417,59 @@ pub enum UnmatchedPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvalidRecordPolicy {
+    /// 显式放弃无效输入并推进连续水位，不写 DLT；只用于业务接受丢弃的场景。
+    Skip,
     /// 直接进 DLT(默认);要求 DLT 后缀非空,仍受 dead_letter_required 约束。
     DeadLetter,
     /// 暂停分区等待人工处理。
     Halt,
 }
 
+/// typed 消费对 Kafka null value 的处置；空字节和 JSON null 仍交给业务 codec。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TombstonePolicy {
+    /// 不调用业务并推进连续水位，适用于不处理删除语义的消费组。
+    Skip,
+    /// 通过类型的 decode_tombstone 交付；不接受 null 的类型按无效载荷处置。
+    Deliver,
+    /// 原样转入 DLT，确认后才允许提交来源记录。
+    DeadLetter,
+    /// 保留未提交输入并暂停分区，等待显式处置。
+    Halt,
+}
+
 /// 框架行为配置:聚批/重试/DLT/commit 批量/关停等,全部为 nafka 自有语义(非透传键)。
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BehaviorConfig {
     /// 单个逻辑 poll 批的最大记录数(客户端聚批,替代原生缺失的 max.poll.records)。
     pub max_batch_records: usize,
     /// 单个逻辑 poll 批的最大保留字节(RawRecord::retained_bytes 口径)。
     pub max_batch_bytes: usize,
-    /// 单条记录的最大保留字节:超限不复制不提交,分区置 Halt(OversizeRecord)。
+    /// 每 group 同时占用的业务 worker 上限；超时不提前归还实际调用名额。
+    pub max_in_flight_handlers: usize,
+    /// 全组原文及框架副本预留上限，按原始输入字节和的八倍计费；另约束各槽按原文加诊断余量计费的完成证据。
+    pub max_group_pending_bytes: usize,
+    /// 本组件进程内普通消费输入的总记录边界；所有源必须声明相同值。
+    pub max_process_pending_records: usize,
+    /// 本组件进程内普通消费原文及副本预留字节边界，不代表 native 队列或进程 RSS 上限。
+    pub max_process_pending_bytes: usize,
+    /// 同一源全部普通消费组保留的输入记录总量。
+    pub max_source_pending_records: usize,
+    /// 同一源全部普通消费组的原文及副本预留，按原始 key、payload 与有序头字节和的八倍计费。
+    pub max_source_pending_bytes: usize,
+    /// 单条 key、payload 与完整头的原始字节上限；发布超限在 native 准入前拒绝，普通消费超限不复制不提交并置 Halt(OversizeRecord)。
     pub max_record_bytes: usize,
-    /// 每分区 in-flight outcome 上限;validate 要求 >= commit_batch_records + max_batch_records。
+    /// 同一分区尚未退出的输入与单槽 outcome 上限；validate 要求 >= commit_batch_records + max_batch_records。
     pub max_progress_records: usize,
-    /// 每 group in-flight outcome 总上限(跨分区 permit 池);validate 要求 >= max_progress_records。
+    /// 同一分区跨 owner 的输入原文及副本预留字节边界，失权后的存活批继续计费。
+    pub max_partition_pending_bytes: usize,
+    /// 同一分区同一原始 key 的输入记录上限，null key 使用独立后备域。
+    pub max_key_pending_records: usize,
+    /// 同一分区同一原始 key 的输入原文及副本预留字节上限。
+    pub max_key_pending_bytes: usize,
+    /// 全组输入责任记录总上限；全部 owner 共享，同时约束单槽进度及按键完成证据。
     pub max_group_progress_records: usize,
     /// 正常流量的 commit 时间触发毫秒；安全水位逐条推进，broker commit 按数量或时间批量提交。
     pub commit_interval_ms: u64,
@@ -441,9 +491,10 @@ pub struct BehaviorConfig {
     pub consume_retry_backoff_ms: u64,
     /// revoke 窗口内同步 commit 的超时毫秒;validate 要求 < session_timeout_ms。
     pub rebalance_commit_timeout_ms: u64,
-    /// 单个失败单元的最大消费尝试次数;0 = 无限重试不进 DLT。
+    /// 单个失败单元的普通消费尝试上限；0 不因次数耗尽进入 DLT，显式死信裁决和无效记录策略仍独立生效。
     pub max_consume_attempts: u32,
-    /// attempt 状态表硬上限:打满说明状态泄漏或毒消息洪峰,group 置 Degraded。
+    /// 全组逐记录失败次数元数据上限，包含普通失败、延期与缺失确认。
+    /// 整批新增失败原子准入，容量不足时保护失败分区；成功、失权或明确定位后归还。
     pub max_retry_entries: usize,
     /// DLT topic 后缀;空串 = 禁用 DLT 转发。
     pub dead_letter_topic_suffix: String,
@@ -453,31 +504,36 @@ pub struct BehaviorConfig {
     pub dead_letter_required: bool,
     /// DLT 整条 pipeline 保留的 envelope 数量上限，覆盖 queue、in-flight、completion 与 retry。
     pub dlt_queue_capacity: usize,
-    /// DLT 全 pipeline 保留 payload 字节上限;validate 要求 >= max(max_batch_bytes, max_record_bytes)。
+    /// DLT 全 pipeline 的信封保守预留上限，包含原文和来源证据；validate 要求 >= max(max_batch_bytes, max_record_bytes)。
     pub dlt_queue_max_bytes: usize,
     /// DLT 并行投递上限。
     pub dlt_max_in_flight: usize,
     /// DLT 失败外层重试的初始退避毫秒。
     pub dlt_retry_initial_ms: u64,
-    /// DLT 失败外层重试的封顶退避毫秒。
+    /// DLT 指数退避基准的封顶毫秒；实际等待另含约正负百分之十的稳定抖动。
     pub dlt_retry_max_ms: u64,
-    /// DLT 连续失败达到该次数后 group 置 Degraded 持续告警(仍按封顶间隔重试)。
+    /// 同一 DLT 连续失败达到此次数后保留分区降级原因，确认或失权前不被其它分区成功清除。
     pub dlt_degraded_after_attempts: u32,
     /// 无匹配 route 消息的策略。
     pub unmatched_policy: UnmatchedPolicy,
     /// 确定无效记录的策略。
     pub invalid_record_policy: InvalidRecordPolicy,
+    /// typed 路由对 null value 的处置；借用路线仍由原始字节处理器明确裁决。
+    pub tombstone_policy: TombstonePolicy,
+    /// 拒绝 event/codec/mode 的重复声明；false 只兼容最后值，仍拒绝 null 和非法 UTF-8。
+    pub strict_headers: bool,
     /// 连续解码失败达到该次数后把分区 Halt，防止"解码器坏了"被当成"每条记录都无效"。
     ///
     /// `invalid_record_policy` 默认是 DeadLetter，判据对"畸形单条 payload"成立；但对
     /// 「新解码器对**所有**记录都失败」同样成立，于是整个 topic 会以满速排进
     /// `<topic>.DLT`、offset 一路前进、group 还是 Running——等发现时数据已经搬完了。
     /// 该阈值把这种整体性故障从"静默排干"拉回"停下待人工"。任一次解码成功即清零，
-    /// 因此零星坏消息永远不会累积到阈值。`None` = 关闭该保护（保持旧行为）。
+    /// 因此零星坏消息永远不会累积到阈值。`None`或`Some(0)`关闭该保护。
     pub decode_failure_halt_streak: Option<u64>,
-    /// 单次 handler 调用的超时毫秒;None = 不限时。仅协作式取消,应明显小于 max_poll_interval_ms。
+    /// 单次typed执行从worker准入起的总超时毫秒，包含自定义解码与业务；None或Some(0)不限时。
+    /// 到期撤销确认权，不再开启后继解码或 handler；实际调用退出后才释放名额。
     pub handler_timeout_ms: Option<u64>,
-    /// 每 group 控制命令队列容量(有界,满即 CommandQueueFull)。
+    /// 每个 owner 控制命令队列容量；多槽分别计费，满即 CommandQueueFull。
     pub command_queue_capacity: usize,
     /// 控制命令的调用端等待超时毫秒。
     pub control_timeout_ms: u64,
@@ -491,12 +547,24 @@ pub struct BehaviorConfig {
 
 impl Default for BehaviorConfig {
     /// 业务作用：返回批量、提交、重试、DLT 与关闭行为的安全基线。
+    ///
+    /// 参数说明：无。
+    /// 返回：独立配置值；默认严格路由头、可靠 DLT 和有界业务责任，不启动后台资源。
     fn default() -> Self {
         Self {
             max_batch_records: 500,
             max_batch_bytes: 16 * 1024 * 1024,
+            max_in_flight_handlers: 64,
+            max_group_pending_bytes: 64 * 1024 * 1024,
+            max_process_pending_records: 1_048_576,
+            max_process_pending_bytes: 1024 * 1024 * 1024,
+            max_source_pending_records: 262_144,
+            max_source_pending_bytes: 256 * 1024 * 1024,
             max_record_bytes: 16 * 1024 * 1024,
             max_progress_records: 2048,
+            max_partition_pending_bytes: 64 * 1024 * 1024,
+            max_key_pending_records: 1024,
+            max_key_pending_bytes: 16 * 1024 * 1024,
             max_group_progress_records: 65_536,
             commit_interval_ms: 1000,
             commit_batch_records: 1000,
@@ -514,13 +582,15 @@ impl Default for BehaviorConfig {
             dlt_producer_lane: "default".into(),
             dead_letter_required: true,
             dlt_queue_capacity: 1024,
-            dlt_queue_max_bytes: 256 * 1024 * 1024,
+            dlt_queue_max_bytes: 64 * 1024 * 1024,
             dlt_max_in_flight: 16,
             dlt_retry_initial_ms: 1000,
             dlt_retry_max_ms: 60_000,
             dlt_degraded_after_attempts: 10,
             unmatched_policy: UnmatchedPolicy::Skip,
             invalid_record_policy: InvalidRecordPolicy::DeadLetter,
+            tombstone_policy: TombstonePolicy::Skip,
+            strict_headers: true,
             decode_failure_halt_streak: Some(1000),
             handler_timeout_ms: None,
             command_queue_capacity: 1024,
@@ -534,7 +604,7 @@ impl Default for BehaviorConfig {
 
 /// 安全配置;Debug 手写打码,凭据字段永不进日志。
 #[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
     /// 安全协议(PLAINTEXT/SSL/SASL_PLAINTEXT/SASL_SSL);含 SSL 时要求编译开启 feature `tls`。
     pub protocol: Option<String>,
@@ -601,14 +671,40 @@ const FORBIDDEN_PRODUCER_RAW_KEYS: [&[&str]; 4] = [
 ];
 
 impl KafkaConfig {
-    /// 业务作用：启动期全量校验:任何一条不满足立即返回 [`NafkaError::Config`],绝不带病启动。
+    /// 业务作用：供容器和业务入口校验实际消费组的共同输入域，确保组名能原样用于消费、管理查询和 DLT 证据。
     ///
-    /// 校验清单与协议合同一一对应;与运行环境相关的少数项(幂等参数与底层库约束的
-    /// 交叉校验)在构建 producer 时补齐；缺席只会放宽本应拒绝的配置，不产生隐式副作用。
+    /// 参数说明：`group` 为已经解析的实际组名，不接受表示“未指定默认组”的空值。
+    /// 返回：组名为 1 至 1024 个 UTF-8 字节、非纯空白、不含 NUL 且首尾不含 U+0000–0020 时成功；
+    /// 否则返回 Config，不裁剪或改写输入，也不创建客户端资源。
+    /// 纯空白使用与事件相同的固定字符集合，NEL、NBSP、FIGURE SPACE 和 NARROW NBSP 不属于该集合。
+    pub fn validate_group_id(group: &str) -> Result<()> {
+        crate::wire::validate_group(group)
+    }
+
+    /// 业务作用：在建立连接前验证源与全部lane的有效配置，拒绝破坏顺序、身份或容量的声明。
+    /// 原生运行环境的额外限制仍会在客户端构造时检查，静态校验成功不证明broker可访问。
     ///
-    /// # 错误
-    /// 首个违反项以 `Config(说明)` 返回;说明含字段名与实际值,便于运维直接定位。
+    /// 参数说明：无。
+    /// 返回：静态配置满足不变量且能力可用时成功；声明非法为Config，缺少构建能力为UnsupportedCapability，不创建连接或后台资源。
     pub fn validate(&self) -> Result<()> {
+        if !(1..=64).contains(&self.consumer.concurrency)
+            || self
+                .consumer
+                .group_concurrency
+                .iter()
+                .any(|(_, count)| !(1..=64).contains(count))
+        {
+            return Err(cfg_err(
+                "consumer concurrency 与 group_concurrency 的并发数必须为 1..=64",
+            ));
+        }
+        // 默认组和按组容量覆盖必须在创建 native 配置或资源前使用同一个精确身份合同。
+        if let Some(group) = self.group_id.as_deref().filter(|group| !group.is_empty()) {
+            crate::wire::validate_group(group)?;
+        }
+        for group in self.consumer.group_concurrency.keys() {
+            crate::wire::validate_group(group)?;
+        }
         // -- 基础字段 --
         if self.bootstrap_servers.trim().is_empty() {
             return Err(cfg_err("bootstrap_servers 不能为空"));
@@ -617,6 +713,11 @@ impl KafkaConfig {
 
         // -- producer 时序关系:delivery 必须覆盖一次请求 + 攒批等待,否则必然先超时 --
         let p = &self.producer;
+        // 所有已声明lane在资源创建前使用同一有效配置校验，避免未使用通道隐藏非法发送合同。
+        crate::rd::config::effective_producer_lane(self, "default")?;
+        for lane in p.lanes.keys() {
+            crate::rd::config::effective_producer_lane(self, lane)?;
+        }
         for (field, millis) in [
             ("producer.retry_backoff_ms", p.retry_backoff_ms),
             ("producer.linger_ms", p.linger_ms),
@@ -663,6 +764,14 @@ impl KafkaConfig {
                 validate_millis_upper_bound(field, millis)?;
             }
         }
+        let admin_api = self
+            .admin
+            .default_api_timeout_ms
+            .unwrap_or(self.behavior.publish_timeout_ms);
+        let admin_request = self.admin.request_timeout_ms.unwrap_or(admin_api);
+        if admin_request > admin_api {
+            return Err(cfg_err("admin请求时限不能超过API总预算"));
+        }
         let minimum_delivery_timeout = p
             .request_timeout_ms
             .checked_add(p.linger_ms)
@@ -675,6 +784,7 @@ impl KafkaConfig {
         }
         if p.stalled_rebuild_after_ms == 0
             || p.stalled_rebuild_min_failures == 0
+            || p.stalled_rebuild_min_failures > i32::MAX as u32
             || p.stalled_rebuild_cooldown_ms == 0
             || p.max_in_flight_requests_per_connection == 0
         {
@@ -689,6 +799,22 @@ impl KafkaConfig {
 
         // -- consumer 时序关系 --
         let c = &self.consumer;
+        if c.session_timeout_ms == 0
+            || c.heartbeat_interval_ms == 0
+            || c.max_poll_interval_ms == 0
+            || c.max_partition_fetch_bytes == 0
+            || c.max_partition_fetch_bytes > i32::MAX as usize
+            || c.fetch_min_bytes > i32::MAX as usize
+        {
+            return Err(cfg_err(
+                "consumer会话、心跳与最大poll时限必须为正，fetch字节必须在原生有符号整数范围内",
+            ));
+        }
+        if !matches!(c.auto_offset_reset.as_str(), "earliest" | "latest" | "none") {
+            return Err(cfg_err(
+                "consumer.auto_offset_reset必须为earliest/latest/none",
+            ));
+        }
         if c.heartbeat_interval_ms >= c.session_timeout_ms {
             return Err(cfg_err(
                 "consumer.heartbeat_interval_ms 必须 < session_timeout_ms",
@@ -732,11 +858,52 @@ impl KafkaConfig {
         if let Some(millis) = b.handler_timeout_ms {
             validate_millis_upper_bound("behavior.handler_timeout_ms", millis)?;
         }
+        for (name, value) in [
+            ("behavior.max_retry_entries", b.max_retry_entries),
+            (
+                "consumer.max_assignment_partitions",
+                c.max_assignment_partitions,
+            ),
+        ] {
+            if value > i32::MAX as usize {
+                return Err(cfg_err(&format!("{name} 超过共同整数上限")));
+            }
+        }
         for (name, v) in [
             ("behavior.max_batch_records", b.max_batch_records),
+            (
+                "behavior.max_process_pending_records",
+                b.max_process_pending_records,
+            ),
+            (
+                "behavior.max_process_pending_bytes",
+                b.max_process_pending_bytes,
+            ),
+            (
+                "behavior.max_source_pending_records",
+                b.max_source_pending_records,
+            ),
+            (
+                "behavior.max_source_pending_bytes",
+                b.max_source_pending_bytes,
+            ),
+            ("behavior.max_in_flight_handlers", b.max_in_flight_handlers),
+            (
+                "behavior.max_group_pending_bytes",
+                b.max_group_pending_bytes,
+            ),
             ("behavior.max_batch_bytes", b.max_batch_bytes),
             ("behavior.max_record_bytes", b.max_record_bytes),
             ("behavior.max_progress_records", b.max_progress_records),
+            (
+                "behavior.max_partition_pending_bytes",
+                b.max_partition_pending_bytes,
+            ),
+            (
+                "behavior.max_key_pending_records",
+                b.max_key_pending_records,
+            ),
+            ("behavior.max_key_pending_bytes", b.max_key_pending_bytes),
             (
                 "behavior.max_group_progress_records",
                 b.max_group_progress_records,
@@ -767,6 +934,10 @@ impl KafkaConfig {
         }
         for (name, v) in [
             ("behavior.commit_interval_ms", b.commit_interval_ms),
+            (
+                "behavior.consume_retry_backoff_ms",
+                b.consume_retry_backoff_ms,
+            ),
             ("behavior.poll_timeout_ms", b.poll_timeout_ms),
             ("behavior.control_timeout_ms", b.control_timeout_ms),
             ("behavior.shutdown_timeout_ms", b.shutdown_timeout_ms),
@@ -793,6 +964,17 @@ impl KafkaConfig {
         if b.commit_interval_ms >= c.max_poll_interval_ms {
             return Err(cfg_err(
                 "behavior.commit_interval_ms 必须 < consumer.max_poll_interval_ms",
+            ));
+        }
+        // 乱序结果必须给最早空洞保留一个最大记录额度，否则失败 key 会被后继成功挤死。
+        let key_pending_floor = b
+            .max_record_bytes
+            .checked_add(2048)
+            .and_then(|bytes| bytes.checked_mul(2))
+            .ok_or_else(|| cfg_err("max_record_bytes 超过按键完成预算的可表示范围"))?;
+        if b.max_group_pending_bytes < key_pending_floor {
+            return Err(cfg_err(
+                "behavior.max_group_pending_bytes 必须 >= 2 * (max_record_bytes + 2048)",
             ));
         }
         // commit 触发点前必须还能原子接纳一个最大连续 run,否则 progress 上限会卡死正常流量。
@@ -854,24 +1036,18 @@ impl KafkaConfig {
                 "behavior.dlt_retry_initial_ms 必须 <= dlt_retry_max_ms",
             ));
         }
-        if let Some(ht) = b.handler_timeout_ms {
-            if ht == 0 {
-                return Err(cfg_err("behavior.handler_timeout_ms 若配置必须 > 0"));
-            }
-            // handler 超时预算必须明显小于两次 poll 的最大间隔:否则单条卡死的 handler 就能
-            // 耗光整个 poll 预算,成员被协调器踢出并触发 rebalance,而框架侧只看到一次 handler
-            // timeout,运维很难把"被踢出组"归因到该配置。这里把"明显小于"固化为 2 倍余量,
-            // 让误配在启动期就失败而不是运行期才暴露。
-            if ht.saturating_mul(2) > c.max_poll_interval_ms {
-                return Err(cfg_err(&format!(
-                    "behavior.handler_timeout_ms({ht}) 必须明显小于 consumer.max_poll_interval_ms({}): 要求 handler_timeout_ms * 2 <= max_poll_interval_ms",
-                    c.max_poll_interval_ms
-                )));
-            }
-        }
         if !b.dead_letter_required {
             // 显式可用性优先:允许,但必须在启动日志留下高可见痕迹。
-            tracing::warn!("dead_letter_required=false: 显式 availability-first, DLT 不可达时坏消息将被跳过丢弃");
+            tracing::warn!(
+                "dead_letter_required=false: 显式 availability-first, DLT 不可达时坏消息将被跳过丢弃"
+            );
+        }
+        if matches!(b.tombstone_policy, TombstonePolicy::DeadLetter)
+            && b.dead_letter_topic_suffix.trim().is_empty()
+        {
+            return Err(cfg_err(
+                "tombstone_policy=dead_letter 要求 dead_letter_topic_suffix 非空",
+            ));
         }
         if matches!(b.invalid_record_policy, InvalidRecordPolicy::DeadLetter)
             && b.dead_letter_topic_suffix.trim().is_empty()
@@ -922,6 +1098,7 @@ impl KafkaConfig {
                 )));
             }
             for (field, millis) in [
+                ("retry_backoff_ms", ov.retry_backoff_ms),
                 ("linger_ms", ov.linger_ms),
                 ("request_timeout_ms", ov.request_timeout_ms),
                 ("delivery_timeout_ms", ov.delivery_timeout_ms),
@@ -953,40 +1130,8 @@ impl KafkaConfig {
         forbid_reserved_raw(&c.properties, "consumer.properties")?;
         forbid_reserved_raw(&self.admin.properties, "admin.properties")?;
 
-        // -- 安全协议与编译 feature 匹配 --
-        if let Some(proto) = &self.security.protocol {
-            let mechanism = self
-                .security
-                .sasl_mechanism
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_uppercase();
-            let needs_tls =
-                proto.to_ascii_uppercase().contains("SSL") || mechanism.starts_with("SCRAM-");
-            if needs_tls && cfg!(not(feature = "tls")) {
-                return Err(cfg_err(&format!(
-                    "security.protocol={proto} 需要编译 feature `tls`(内嵌静态 TLS), 当前未开启"
-                )));
-            }
-        }
-        let has_ssl_material = self.security.ssl_ca_location.is_some()
-            || self.security.ssl_certificate_location.is_some()
-            || self.security.ssl_key_location.is_some()
-            || self.security.ssl_key_password.is_some();
-        if has_ssl_material
-            && !self
-                .security
-                .protocol
-                .as_deref()
-                .is_some_and(|value| value.to_ascii_uppercase().contains("SSL"))
-        {
-            return Err(cfg_err(
-                "SSL 证书或私钥字段要求 security.protocol 显式包含 SSL",
-            ));
-        }
-        // enable_idempotence=true 与 acks/retries/max.in.flight 的交叉约束在组装原生
-        // producer 配置时校验(需要与底层库约束逐项对照);此处不做即"更宽松",
-        // 不会产生额外副作用，但底层构建阶段仍会收紧配置。
+        // 在创建资源前检查实际启用的原生能力，raw字段也不能越过相同门禁。
+        crate::capabilities::validate(self)?;
         Ok(())
     }
 }

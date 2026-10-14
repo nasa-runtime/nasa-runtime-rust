@@ -26,6 +26,8 @@ use crate::{KafkaProxy, KafkaProxyInner};
 pub struct ProducerLane {
     /// 每个配置 lane 唯一的共享内部资源域。
     inner: Arc<ProducerLaneInner>,
+    /// 仅约束本导出视图的额外准入域，内部收尾 lane 不继承宿主业务边界。
+    scopes: Vec<crate::KafkaAccessScope>,
 }
 
 /// 单个物理 producer lane 的只读累计与瞬时容量快照。
@@ -35,15 +37,15 @@ pub struct ProducerLaneStats {
     pub lane: String,
     /// 已取得准入、尚未完成 delivery 的请求数。
     pub active_requests: usize,
-    /// fire delivery observer 的固定容量。
+    /// send 与 fire 共用的 delivery observer 固定容量。
     pub observer_capacity: usize,
-    /// 当前正在等待 delivery 的 fire observer 数量。
+    /// 当前正在等待 delivery 的 observer 数量。
     pub observer_in_use: usize,
     /// 已成功同步入 native queue 并登记 observer 的 fire 次数。
     pub fire_admitted: u64,
     /// 因 observer permit 已满而在写入 native queue 前拒绝的次数。
     pub observer_full: u64,
-    /// 底层 producer 同步返回本地 native queue 满的次数。
+    /// 框架原始字节/条数额度或底层 native queue 满的次数。
     pub native_queue_full: u64,
     /// 除 native queue 满以外的同步入队失败次数。
     pub enqueue_failed: u64,
@@ -56,6 +58,10 @@ pub struct ProducerLaneStats {
     pub terminal_fatal: bool,
     /// 非 fatal 但连续无成功 delivery 时切换 generation 的累计次数。
     pub native_stalled_restarted: u64,
+    /// 当前仍存活的原生客户端数，包含旧代次和实际析构尚未结束的资源。
+    pub live_native: usize,
+    /// 当前代次连续终态交付失败数，成功或代次替换后归零。
+    pub consecutive_failures: u32,
     /// send 与 fire 合计收到 broker delivery success 的次数。
     pub delivery_succeeded: u64,
     /// send 与 fire 合计收到失败、超时或观察通道中断的次数。
@@ -73,16 +79,19 @@ struct ProducerLaneInner {
 }
 
 impl ProducerLane {
-    /// 业务作用：构造一个已配置 lane 的轻量句柄。
-    ///
-    /// # 参数
-    ///
-    /// - `name`: 已通过配置校验的 lane 名。
-    /// - `runtime`: 所属运行时共享状态。
+    /// 业务作用：为配置中的 lane 创建独立原生 producer、队列和交付观察资源。
+    /// 参数说明：name 为已校验并冻结的 lane 名；runtime 提供源配置、异步执行和指标出口。
+    /// 返回：持有独立资源的通道；配置或原生构造失败时返回错误。原生后台线程可开始连接 broker，返回成功不证明 broker 可用。
     pub(crate) fn new(name: impl Into<Arc<str>>, runtime: &Arc<KafkaProxyInner>) -> Result<Self> {
         let name = name.into();
-        let client = ProducerClient::create(&runtime.config, &name, runtime.runtime.clone())?;
+        let client = ProducerClient::create(
+            &runtime.config,
+            &name,
+            runtime.runtime.clone(),
+            runtime.metrics.clone(),
+        )?;
         Ok(Self {
+            scopes: Vec::new(),
             inner: Arc::new(ProducerLaneInner {
                 name,
                 runtime: Arc::downgrade(runtime),
@@ -96,9 +105,23 @@ impl ProducerLane {
         &self.inner.name
     }
 
+    /// 业务作用：将宿主的永久准入边界附加到 lane 及后续 builder 克隆。
+    /// 参数说明：scope 为宿主在最终清理时关闭的准入域。
+    /// 返回：保留既有全部边界的视图；关闭不取消已准入交付，也不取得底层资源关闭权。
+    pub fn with_access_scope(mut self, scope: &crate::KafkaAccessScope) -> Self {
+        scope.attach(&mut self.scopes);
+        self
+    }
+
     /// 业务作用：返回当前物理 lane 的容量与累计结果快照。
     pub fn stats(&self) -> ProducerLaneStats {
         self.inner.client.stats()
+    }
+    /// 业务作用：读取当前交付责任和终态未知累计量，不触发 flush 或恢复。
+    /// 参数说明：无。
+    /// 返回：关闭诊断所需纯数据，不授予重新开放准入的权力。
+    pub(crate) fn close_report(&self) -> crate::CloseLane {
+        self.inner.client.close_report()
     }
 
     /// 业务作用：创建类型化发布 builder。
@@ -120,7 +143,9 @@ impl ProducerLane {
     /// # 参数
     ///
     /// - `topic`: 目标 topic。
-    /// - `key`: tombstone 必需的字符串 key。
+    /// - `key`: tombstone 必需的字符串 key，允许空字符串并保留为零长度字节键。
+    ///
+    /// 返回：尚未准入的删除事件，value 固定为 Kafka null。
     pub fn tombstone<'a>(&'a self, topic: &'a str, key: &'a str) -> TombstoneBuilder<'a> {
         TombstoneBuilder::new(self.clone(), topic, key)
     }
@@ -131,15 +156,29 @@ impl ProducerLane {
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 借用到同步入底层队列为止的原始字节。
+    ///
+    /// 返回：尚未准入的 raw builder，空 slice 仍是零长度 value。
     pub fn publish_raw<'a>(&'a self, topic: &'a str, payload: &'a [u8]) -> RawPublishBuilder<'a> {
+        RawPublishBuilder::new(self.clone(), topic, Some(payload))
+    }
+
+    /// 业务作用：在固定 lane 保留原始可空 value，不施加显式删除 API 的字符串键约束。
+    /// 参数说明：topic 为目标；payload 的 None 为 Kafka null，Some 空 slice 为零长度 value。
+    /// 返回：尚未准入的 raw builder，可独立选择缺失、空字节或任意二进制 key。
+    pub fn publish_raw_nullable<'a>(
+        &'a self,
+        topic: &'a str,
+        payload: Option<&'a [u8]>,
+    ) -> RawPublishBuilder<'a> {
         RawPublishBuilder::new(self.clone(), topic, payload)
     }
 
-    /// 业务作用：在统一 deadline 内排空本 lane 的投递观察与底层队列。
+    /// 业务作用：在统一deadline内等待调用时已准入的交付责任，不等待随后新发送。
     ///
     /// # 错误
     ///
     /// 排空超时或底层客户端失败时返回带 lane 归因的错误。
+    /// 参数说明：无。返回：冻结责任全部成功时成功；确定失败、交付未知与仍未退出分别返回对应错误。
     pub async fn flush(&self) -> Result<()> {
         let runtime = self
             .inner
@@ -148,7 +187,8 @@ impl ProducerLane {
             .ok_or_else(|| NafkaError::Lifecycle("所属 Kafka 运行时已释放".into()))?;
         let deadline =
             Instant::now() + Duration::from_millis(runtime.config.behavior.shutdown_timeout_ms);
-        self.inner.client.flush_until(deadline).await
+        let barrier = self.inner.client.capture_barrier();
+        self.inner.client.await_barrier(barrier, deadline).await
     }
 
     /// 业务作用：检查所属运行时是否仍允许取得外部发布资格。
@@ -156,7 +196,12 @@ impl ProducerLane {
     /// # 错误
     ///
     /// 运行时已释放或进入关闭阶段时返回生命周期错误。
+    /// 参数说明：无。
+    /// 返回：所属源与全部附加宿主域允许发布时通过；任一关闭边界拒绝新准入。
     fn ensure_publish_open(&self) -> Result<()> {
+        for scope in &self.scopes {
+            scope.ensure_open()?;
+        }
         let runtime = self
             .inner
             .runtime
@@ -165,7 +210,8 @@ impl ProducerLane {
         runtime.ensure_publish_open()
     }
 
-    /// 业务作用：克隆 Application-owned 只写记录器；运行时释放或未启用 telemetry 时返回 `None`。
+    /// 业务作用：借用应用的只写追踪入口，保持 exporter 生命周期归属不变。
+    /// 参数说明：无。返回：记录器副本；源已释放或未启用遥测时为 None。
     fn span_recorder(&self) -> Option<SpanRecorder> {
         self.inner
             .runtime
@@ -173,16 +219,17 @@ impl ProducerLane {
             .and_then(|runtime| runtime.span_recorder.clone())
     }
 
-    /// 业务作用：把已经完成编码和校验的记录交给本 lane 并等待 delivery。
-    ///
-    /// # 参数
-    ///
-    /// - `record`: 借用到同步入队完成的底层隔离记录。
-    ///
-    /// # 错误
-    ///
-    /// 准入、同步入队、投递或超时失败时返回错误。
-    async fn send_record(&self, record: OutboundRecord<'_>) -> Result<Delivery> {
+    /// 业务作用：将已编码记录交给本 lane，并等待真实交付结果。
+    /// 参数说明：record 借用至同步入队完成；deadline 为编码前冻结的总期限；trace 随实际原生责任收口。
+    /// 返回：broker 交付坐标或发布错误；调用方超时、取消后，独立观察者仍持有已入队记录的交付责任。
+    async fn send_record(
+        &self,
+        record: OutboundRecord<'_>,
+        deadline: Instant,
+        trace: Option<SpanGuard>,
+    ) -> Result<Delivery> {
+        // 编码期间宿主可能已退出；准入前复验，避免旧 builder 在关闭后开始交付。
+        self.ensure_publish_open()?;
         let runtime = self
             .inner
             .runtime
@@ -198,29 +245,27 @@ impl ProducerLane {
             event = %event,
             key_present
         );
-        let result = self.inner.client.send(record, false).instrument(span).await;
-        let labels = [
-            ("lane", self.inner.name.as_ref()),
-            ("topic", topic.as_str()),
-        ];
-        match &result {
-            Ok(_) => runtime.counter("published_total", 1, &labels),
-            Err(_) => runtime.counter("publish_failed_total", 1, &labels),
-        }
+        let result = self
+            .inner
+            .client
+            .send_traced(record, deadline, trace)
+            .instrument(span)
+            .await;
         self.report_queue_pressure(runtime.as_ref(), &[("lane", self.inner.name.as_ref())]);
         result
     }
 
-    /// 业务作用：把已经完成编码和校验的记录同步入队并登记异步观察。
-    ///
-    /// # 参数
-    ///
-    /// - `record`: 借用到同步入队完成的底层隔离记录。
-    ///
-    /// # 错误
-    ///
-    /// 观察槽、准入或同步入队失败时返回错误。
-    fn fire_record(&self, record: OutboundRecord<'_>) -> Result<()> {
+    /// 业务作用：将已编码记录同步入队，并移交给独立交付观察者。
+    /// 参数说明：record 借用至同步入队完成；deadline 为编码前冻结的总期限；trace 随实际原生责任收口。
+    /// 返回：观察额度已保留且同步入队成功；准入、期限或入队失败返回错误。成功不表示 broker 已交付，最终结果由观察者记录。
+    fn fire_record(
+        &self,
+        record: OutboundRecord<'_>,
+        deadline: Instant,
+        trace: Option<SpanGuard>,
+    ) -> Result<()> {
+        // 编码期间宿主可能已退出；同步入队也必须继承导出视图的永久边界。
+        self.ensure_publish_open()?;
         let runtime = self
             .inner
             .runtime
@@ -236,39 +281,24 @@ impl ProducerLane {
             event = %event,
             key_present
         );
-        let result = span.in_scope(|| self.inner.client.fire(record, false));
-        let labels = [
-            ("lane", self.inner.name.as_ref()),
-            ("topic", topic.as_str()),
-        ];
-        match &result {
-            Ok(()) => runtime.counter("published_total", 1, &labels),
-            Err(_) => runtime.counter("publish_failed_total", 1, &labels),
-        }
+        let result = span.in_scope(|| {
+            self.inner
+                .client
+                .fire_traced(record, deadline, false, trace)
+        });
         self.report_queue_pressure(runtime.as_ref(), &[("lane", self.inner.name.as_ref())]);
         result
     }
 
-    /// 业务作用：上报本 lane 的队列压力：`utilization` 是**百分比**（0-100），另附绝对在途数。
-    ///
-    /// 要的是 utilization；只发绝对值时运维无法判断"离满还有多远"，
-    /// 而 observer 容量是 per-lane 可配的。两条路径（send/fire）都必须发，
-    /// 否则高频的 fire 路径完全没有压力观测。
-    ///
-    /// utilization 的分母只能是 fire observer 容量，分子也只能是它的占用：
-    /// 这是 lane 上唯一有界的资源。`active` 含 fire 路径，二者相加即重复计数
-    /// （见 `QueuePressure`），故 `active` 只作绝对值发布，不参与比例。
-    ///
-    /// # 参数
-    ///
-    /// - `runtime`: 指标出口。
-    /// - `labels`: 已构造的 lane 标签（不含 topic：这是 lane 级量，带 topic 会让
-    ///   同一 lane 在 N 个 topic 上产生 N 条同值序列，`sum by (lane)` 直接翻 N 倍）。
+    /// 业务作用：报告本 lane 的观察额度占用百分比及实际在途责任数。
+    /// 参数说明：runtime 为源级异步指标出口；labels 仅携带 lane 身份，不加 topic，以免同一占用在多个序列中重复计数。
+    /// 返回：提交百分比及在途数样本，不等待用户后端；send 与 fire 共用观察额度，取消等待不释放该额度。
+    /// active 表示实际责任，不能与 observer 数相加；两者读取时间不同，不构成原子快照。
     fn report_queue_pressure(&self, runtime: &KafkaProxyInner, labels: crate::MetricLabels<'_>) {
         // 走无锁取数：本函数在每条消息（含高频 fire 路径）上都会执行。
         let pressure = self.inner.client.queue_pressure();
         let capacity = pressure.observer_capacity.max(1);
-        // 先除后乘避免 in_use 极大时的乘法溢出（saturating 会把比例压成 100 以上的假值）。
+        // 先将占用限制到已校验的固定容量，再换算为百分比，避免并发取样显示超过百分之百。
         let percent = (pressure.observer_in_use.min(capacity) * 100) / capacity;
         runtime.gauge(
             "producer_lane_queue_utilization",
@@ -305,14 +335,15 @@ impl ProducerLane {
         self.inner.client.flush_until(deadline).await
     }
 
-    /// 业务作用：在排空成功后永久关闭本 lane 的全部入口。
-    pub(crate) fn close(&self) {
-        self.inner.client.close();
+    /// 业务作用：关闭全部发布准入，并等待真实回执及原生线程和连接释放。
+    /// 参数说明：deadline 为总停机截止时刻。返回：全部代次释放后成功，超时保留责任供下次继续。
+    pub(crate) async fn close_until(&self, deadline: Instant) -> Result<()> {
+        self.inner.client.close_until(deadline).await
     }
 
-    /// 业务作用：发布框架内部 raw 记录，允许携带已经由框架构造的保留 headers。
+    /// 业务作用：为普通 DLT 发布框架原文并等待实际交付，保留并发与信封责任直至原生终态。
     ///
-    /// # 参数
+    /// # 参数说明
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 可空原始 payload。
@@ -320,9 +351,8 @@ impl ProducerLane {
     /// - `headers`: 已完成框架校验的有序 headers。
     /// - `timestamp`: 可选原始 broker 时间戳。
     ///
-    /// # 错误
-    ///
-    /// 内部准入、入队、投递或超时失败时返回错误。
+    /// 返回：原生实际交付坐标或错误；入队等待有界，入队后的业务等待期限不能提前结束 DLT 责任。
+    /// 调用方必须持续驱动该 future；停止和失权只关闭下一次发送准入。
     pub(crate) async fn send_internal_raw(
         &self,
         topic: &str,
@@ -331,20 +361,25 @@ impl ProducerLane {
         headers: &KafkaHeaders,
         timestamp: Option<i64>,
     ) -> Result<Delivery> {
+        // DLT worker 持有信封和并行凭证；不能以调用方等待超时替代实际发送退出。
         self.inner
             .client
-            .send(
-                OutboundRecord {
-                    topic,
-                    payload,
-                    key,
-                    partition: None,
-                    timestamp,
-                    headers,
-                },
-                true,
-            )
+            .send_actual(OutboundRecord {
+                topic,
+                payload,
+                key,
+                partition: None,
+                timestamp,
+                headers,
+            })
             .await
+    }
+
+    /// 业务作用：只向框架转发 worker 开放固定分区、无额外线路头的实际交付等待。
+    /// 参数说明：record 为已经完成目的身份、schema 和来源证据校验的原文记录。
+    /// 返回：真实 native 终态；调用方必须保持同步责任直到完成，不得附加超时或取消。
+    pub(crate) async fn send_transfer(&self, record: OutboundRecord<'_>) -> Result<Delivery> {
+        self.inner.client.send_actual(record).await
     }
 }
 
@@ -365,8 +400,10 @@ fn outbound_event(headers: &KafkaHeaders) -> &str {
 struct BuilderFields {
     /// 业务事件名。
     event: Option<String>,
-    /// 可选字符串 key。
-    key: Option<String>,
+    /// 原始 key 字节，未设置时为 null，空 Vec 保留显式空 key。
+    key: Option<Vec<u8>>,
+    /// 首次 key setter 是否使用字节入口，混用文本和字节入口时拒绝发送。
+    key_is_bytes: Option<bool>,
     /// 可选固定分区。
     partition: Option<i32>,
     /// 可选毫秒时间戳。
@@ -382,6 +419,24 @@ struct BuilderFields {
 }
 
 impl BuilderFields {
+    /// 业务作用：冻结 key 的输入方式，防止二进制身份被后续字符串入口静默替换。
+    ///
+    /// 参数说明：`key` 为拥有型原始字节；`is_bytes` 区分原始字节和 UTF-8 文本入口。
+    /// 返回：同入口覆盖原值；跨入口混用记录配置错误，在交给 producer 前拒绝发送。
+    fn set_key(&mut self, key: Vec<u8>, is_bytes: bool) {
+        // 两种入口代表不同的 key 身份声明，不能用后一次赋值掩盖冲突并写入另一分区。
+        if self
+            .key_is_bytes
+            .is_some_and(|previous| previous != is_bytes)
+        {
+            self.invalid
+                .get_or_insert_with(|| "key 与 key_bytes 不能混用".into());
+            return;
+        }
+        self.key_is_bytes = Some(is_bytes);
+        self.key = Some(key);
+    }
+
     /// 业务作用：写入一个业务 header，并记录保留名误用。
     ///
     /// # 参数
@@ -389,9 +444,9 @@ impl BuilderFields {
     /// - `name`: 大小写敏感的 header 名。
     /// - `value`: 可空 header 值。
     fn push_header(&mut self, name: &str, value: Option<&[u8]>) {
-        if name.contains('\0') {
+        if name.is_empty() || name.contains('\0') {
             self.invalid
-                .get_or_insert_with(|| "header 名禁止包含 NUL".into());
+                .get_or_insert_with(|| "header 名必须非空且不含 NUL".into());
             return;
         }
         if is_reserved_header(name) {
@@ -514,7 +569,16 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     ///
     /// - `key`: 用于分区和业务去重的 key。
     pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.fields.key = Some(key.into());
+        self.fields.set_key(key.into().into_bytes(), false);
+        self
+    }
+
+    /// 业务作用：使用完整字节 key 发布类型化消息，避免跨语言转发改变分区身份。
+    ///
+    /// 参数说明：`key` 为原始 key；空字节仍是显式 key，区别于未设置的 null。
+    /// 返回：持有 key 副本的 builder；不校验 UTF-8，也不改变 payload codec。
+    pub fn key_bytes(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.fields.set_key(key.into(), true);
         self
     }
 
@@ -588,7 +652,10 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     /// # 错误
     ///
     /// 编码、准入、入队、投递或超时失败时返回错误；超时会区分结果未知。
+    /// 参数说明：无。
+    /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
     pub async fn send(self) -> Result<Delivery> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
         let recorder = self.lane.span_recorder();
@@ -598,18 +665,19 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
         let payload = self.payload.encode()?;
         let result = self
             .lane
-            .send_record(OutboundRecord {
-                topic: self.topic,
-                payload: Some(&payload),
-                key: self.fields.key.as_deref().map(str::as_bytes),
-                partition: self.fields.partition,
-                timestamp: self.fields.timestamp,
-                headers: &headers,
-            })
+            .send_record(
+                OutboundRecord {
+                    topic: self.topic,
+                    payload: Some(&payload),
+                    key: self.fields.key.as_deref(),
+                    partition: self.fields.partition,
+                    timestamp: self.fields.timestamp,
+                    headers: &headers,
+                },
+                deadline,
+                span,
+            )
             .await;
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
         result
     }
 
@@ -618,7 +686,10 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
     /// # 错误
     ///
     /// 只有观察槽位预留成功且消息同步入队后才返回成功。
+    /// 参数说明：无。
+    /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
     pub fn fire(self) -> Result<()> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
         let recorder = self.lane.span_recorder();
@@ -626,17 +697,18 @@ impl<'a, T: EncodePayload> PublishBuilder<'a, T> {
             .fields
             .finish_headers_with_span(Some(T::CODEC), recorder.as_ref())?;
         let payload = self.payload.encode()?;
-        let result = self.lane.fire_record(OutboundRecord {
-            topic: self.topic,
-            payload: Some(&payload),
-            key: self.fields.key.as_deref().map(str::as_bytes),
-            partition: self.fields.partition,
-            timestamp: self.fields.timestamp,
-            headers: &headers,
-        });
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
+        let result = self.lane.fire_record(
+            OutboundRecord {
+                topic: self.topic,
+                payload: Some(&payload),
+                key: self.fields.key.as_deref(),
+                partition: self.fields.partition,
+                timestamp: self.fields.timestamp,
+                headers: &headers,
+            },
+            deadline,
+            span,
+        );
         result
     }
 }
@@ -647,8 +719,8 @@ pub struct RawPublishBuilder<'a> {
     lane: ProducerLane,
     /// 目标 topic。
     topic: &'a str,
-    /// 原始 payload；空 slice 与 tombstone 语义不同。
-    payload: &'a [u8],
+    /// 原始 payload；None 与 Some 空 slice 分别保留 Kafka null 和零长度 value。
+    payload: Option<&'a [u8]>,
     /// 发布元数据。
     fields: BuilderFields,
 }
@@ -660,8 +732,10 @@ impl<'a> RawPublishBuilder<'a> {
     ///
     /// - `lane`: 固定发布 lane。
     /// - `topic`: 目标 topic。
-    /// - `payload`: 原始 payload。
-    fn new(lane: ProducerLane, topic: &'a str, payload: &'a [u8]) -> Self {
+    /// - `payload`: 原始可空 payload，None 不转换为空 slice。
+    ///
+    /// 返回：尚未准入的原文发布声明，key 默认缺失。
+    fn new(lane: ProducerLane, topic: &'a str, payload: Option<&'a [u8]>) -> Self {
         Self {
             lane,
             topic,
@@ -686,7 +760,16 @@ impl<'a> RawPublishBuilder<'a> {
     ///
     /// - `key`: 用于分区和业务去重的 key。
     pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.fields.key = Some(key.into());
+        self.fields.set_key(key.into().into_bytes(), false);
+        self
+    }
+
+    /// 业务作用：保留原始字节消息的 key 身份，用于二进制路由和受管转发。
+    ///
+    /// 参数说明：`key` 为原始 key，允许非 UTF-8 与空字节。
+    /// 返回：持有 key 副本的 builder；未调用 key 入口时保留 null。
+    pub fn key_bytes(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.fields.set_key(key.into(), true);
         self
     }
 
@@ -732,7 +815,10 @@ impl<'a> RawPublishBuilder<'a> {
     /// # 错误
     ///
     /// 准入、入队、投递或超时失败时返回错误。
+    /// 参数说明：无。
+    /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
     pub async fn send(self) -> Result<Delivery> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
         let recorder = self.lane.span_recorder();
@@ -741,18 +827,19 @@ impl<'a> RawPublishBuilder<'a> {
             .finish_headers_with_span(None, recorder.as_ref())?;
         let result = self
             .lane
-            .send_record(OutboundRecord {
-                topic: self.topic,
-                payload: Some(self.payload),
-                key: self.fields.key.as_deref().map(str::as_bytes),
-                partition: self.fields.partition,
-                timestamp: self.fields.timestamp,
-                headers: &headers,
-            })
+            .send_record(
+                OutboundRecord {
+                    topic: self.topic,
+                    payload: self.payload,
+                    key: self.fields.key.as_deref(),
+                    partition: self.fields.partition,
+                    timestamp: self.fields.timestamp,
+                    headers: &headers,
+                },
+                deadline,
+                span,
+            )
             .await;
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
         result
     }
 
@@ -761,24 +848,28 @@ impl<'a> RawPublishBuilder<'a> {
     /// # 错误
     ///
     /// 观察槽位不足、准入或同步入队失败时返回错误。
+    /// 参数说明：无。
+    /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
     pub fn fire(self) -> Result<()> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
         let recorder = self.lane.span_recorder();
         let (headers, span) = self
             .fields
             .finish_headers_with_span(None, recorder.as_ref())?;
-        let result = self.lane.fire_record(OutboundRecord {
-            topic: self.topic,
-            payload: Some(self.payload),
-            key: self.fields.key.as_deref().map(str::as_bytes),
-            partition: self.fields.partition,
-            timestamp: self.fields.timestamp,
-            headers: &headers,
-        });
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
+        let result = self.lane.fire_record(
+            OutboundRecord {
+                topic: self.topic,
+                payload: self.payload,
+                key: self.fields.key.as_deref(),
+                partition: self.fields.partition,
+                timestamp: self.fields.timestamp,
+                headers: &headers,
+            },
+            deadline,
+            span,
+        );
         result
     }
 }
@@ -789,7 +880,7 @@ pub struct TombstoneBuilder<'a> {
     lane: ProducerLane,
     /// 目标 topic。
     topic: &'a str,
-    /// tombstone 必需的 key。
+    /// tombstone 必需的 key；空字符串是有效的零长度字节身份。
     key: &'a str,
     /// 发布元数据。
     fields: BuilderFields,
@@ -802,7 +893,9 @@ impl<'a> TombstoneBuilder<'a> {
     ///
     /// - `lane`: 固定发布 lane。
     /// - `topic`: 目标 topic。
-    /// - `key`: 非空消息 key。
+    /// - `key`: 消息 key，允许空字符串，与缺失 key 不同。
+    ///
+    /// 返回：尚未准入的删除事件，value 固定为 Kafka null。
     fn new(lane: ProducerLane, topic: &'a str, key: &'a str) -> Self {
         Self {
             lane,
@@ -843,35 +936,32 @@ impl<'a> TombstoneBuilder<'a> {
     ///
     /// # 错误
     ///
-    /// key 为空、准入、入队、投递或超时失败时返回错误。
+    /// 目标声明、准入、入队、投递或超时失败时返回错误。
+    /// 参数说明：无。
+    /// 返回：实际交付结果；同步编码与准入共用总预算，native 接管前超期不会发送，接管后的等待超时保留独立观察责任。
     pub async fn send(self) -> Result<Delivery> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
-        if self.key.is_empty() {
-            return Err(NafkaError::Publish {
-                lane: self.lane.name().into(),
-                topic: self.topic.into(),
-                message: "tombstone key 不能为空".into(),
-            });
-        }
         let recorder = self.lane.span_recorder();
         let (headers, span) = self
             .fields
             .finish_headers_with_span(None, recorder.as_ref())?;
         let result = self
             .lane
-            .send_record(OutboundRecord {
-                topic: self.topic,
-                payload: None,
-                key: Some(self.key.as_bytes()),
-                partition: self.fields.partition,
-                timestamp: self.fields.timestamp,
-                headers: &headers,
-            })
+            .send_record(
+                OutboundRecord {
+                    topic: self.topic,
+                    payload: None,
+                    key: Some(self.key.as_bytes()),
+                    partition: self.fields.partition,
+                    timestamp: self.fields.timestamp,
+                    headers: &headers,
+                },
+                deadline,
+                span,
+            )
             .await;
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
         result
     }
 
@@ -879,32 +969,29 @@ impl<'a> TombstoneBuilder<'a> {
     ///
     /// # 错误
     ///
-    /// key 为空、观察槽位不足或同步入队失败时返回错误。
+    /// 目标声明无效、观察槽位不足或同步入队失败时返回错误。
+    /// 参数说明：无。
+    /// 返回：同步编码及原生准入成功；编码耗尽总预算时拒绝，成功不等于 broker 确认。
     pub fn fire(self) -> Result<()> {
+        let deadline = self.lane.inner.client.publish_deadline();
         self.lane.ensure_publish_open()?;
         validate_destination(self.topic, &self.fields)?;
-        if self.key.is_empty() {
-            return Err(NafkaError::Publish {
-                lane: self.lane.name().into(),
-                topic: self.topic.into(),
-                message: "tombstone key 不能为空".into(),
-            });
-        }
         let recorder = self.lane.span_recorder();
         let (headers, span) = self
             .fields
             .finish_headers_with_span(None, recorder.as_ref())?;
-        let result = self.lane.fire_record(OutboundRecord {
-            topic: self.topic,
-            payload: None,
-            key: Some(self.key.as_bytes()),
-            partition: self.fields.partition,
-            timestamp: self.fields.timestamp,
-            headers: &headers,
-        });
-        if let Some(span) = span {
-            let _ = span.finish(None);
-        }
+        let result = self.lane.fire_record(
+            OutboundRecord {
+                topic: self.topic,
+                payload: None,
+                key: Some(self.key.as_bytes()),
+                partition: self.fields.partition,
+                timestamp: self.fields.timestamp,
+                headers: &headers,
+            },
+            deadline,
+            span,
+        );
         result
     }
 }
@@ -1003,7 +1090,9 @@ impl KafkaProxy {
     /// # 参数
     ///
     /// - `topic`: 目标 topic。
-    /// - `key`: tombstone 必需 key。
+    /// - `key`: tombstone 必需 key，允许空字符串并保留为零长度字节键。
+    ///
+    /// 返回：尚未准入的删除事件，value 固定为 Kafka null。
     pub fn tombstone<'a>(&'a self, topic: &'a str, key: &'a str) -> TombstoneBuilder<'a> {
         TombstoneBuilder::new(self.default_lane(), topic, key)
     }
@@ -1014,7 +1103,20 @@ impl KafkaProxy {
     ///
     /// - `topic`: 目标 topic。
     /// - `payload`: 原始 payload。
+    ///
+    /// 返回：尚未准入的 raw builder，空 slice 仍是零长度 value。
     pub fn publish_raw<'a>(&'a self, topic: &'a str, payload: &'a [u8]) -> RawPublishBuilder<'a> {
+        RawPublishBuilder::new(self.default_lane(), topic, Some(payload))
+    }
+
+    /// 业务作用：在 default lane 发布原始可空 value，保留 null 与空字节的区别。
+    /// 参数说明：topic 为目标；payload 的 None 表示 Kafka null，Some 保留原文字节。
+    /// 返回：尚未准入的 raw builder，未设置 key 时保持缺失键，不要求删除键。
+    pub fn publish_raw_nullable<'a>(
+        &'a self,
+        topic: &'a str,
+        payload: Option<&'a [u8]>,
+    ) -> RawPublishBuilder<'a> {
         RawPublishBuilder::new(self.default_lane(), topic, payload)
     }
 
@@ -1050,18 +1152,19 @@ impl KafkaProxy {
                         delivered,
                         failed_index,
                         source,
-                    })
+                    });
                 }
             }
         }
         Ok(delivered)
     }
 
-    /// 业务作用：并发排空全部已配置 lane，并共享同一个总 deadline。
+    /// 业务作用：先冻结全部lane的发布责任，再用同一总期限并发等待各屏障。
     ///
     /// # 错误
     ///
     /// 任一 lane 未排空时返回带 lane 归因的错误。
+    /// 参数说明：无。返回：全部冻结责任成功时成功；待退出优先报告期限耗尽，已退出的未知交付不降为确定失败。
     pub async fn flush(&self) -> Result<()> {
         let deadline =
             Instant::now() + Duration::from_millis(self.inner.config.behavior.shutdown_timeout_ms);
@@ -1070,22 +1173,46 @@ impl KafkaProxy {
             .producer_lanes
             .get()
             .expect("connect 必须冻结 producer lane 表");
-        let results =
-            futures::future::join_all(lanes.values().map(|lane| lane.flush_until(deadline))).await;
-        let mut failed = Vec::new();
+        // 所有lane都在第一次等待前取快照，慢lane不能把另一lane后来准入的发送纳入屏障。
+        let barriers: Vec<_> = lanes
+            .values()
+            .map(|lane| (&lane.inner.client, lane.inner.client.capture_barrier()))
+            .collect();
+        let results = futures::future::join_all(
+            barriers
+                .into_iter()
+                .map(|(client, barrier)| client.await_barrier(barrier, deadline)),
+        )
+        .await;
+        let mut pending = Vec::new();
+        let mut unknown = None;
+        let mut failed = None;
         for (lane, result) in lanes.keys().zip(results) {
             if let Err(error) = result {
                 tracing::error!(lane, error = %error, "producer lane 排空失败");
-                failed.push(lane.clone());
+                match error {
+                    NafkaError::ShutdownTimeout { .. } => pending.push(lane.clone()),
+                    error @ NafkaError::OutcomeUnknown { .. } => {
+                        if unknown.is_none() {
+                            unknown = Some(error);
+                        }
+                    }
+                    error => {
+                        if failed.is_none() {
+                            failed = Some(error);
+                        }
+                    }
+                }
             }
         }
-        if failed.is_empty() {
-            Ok(())
-        } else {
+        if !pending.is_empty() {
             Err(NafkaError::ShutdownTimeout {
                 groups: Vec::new(),
-                producer_lanes: failed,
+                producer_lanes: pending,
             })
+        } else {
+            // 已退出但远端结果未知仍保留独立错误类别，不能以一个确定失败覆盖其重发风险。
+            unknown.or(failed).map_or(Ok(()), Err)
         }
     }
 
@@ -1111,11 +1238,17 @@ impl KafkaProxy {
 /// # 错误
 ///
 /// topic、event 或 partition 非法时返回确定失败。
+/// 返回：声明满足共同线路合同；非法声明以 Config 拒绝，不进入 native 准入。
 fn validate_destination(topic: &str, fields: &BuilderFields) -> Result<()> {
     if topic.trim().is_empty() {
         return Err(NafkaError::Config("publish topic 不能为空".into()));
     }
-    if fields.event.as_deref().is_some_and(str::is_empty) {
+    // 所有 builder 共用注册与消费的空白定义，不能发送无法形成合法路由的事件。
+    if fields
+        .event
+        .as_deref()
+        .is_some_and(crate::wire::is_blank_event)
+    {
         return Err(NafkaError::Config("publish event 不能为空".into()));
     }
     if fields.partition.is_some_and(|partition| partition < 0) {

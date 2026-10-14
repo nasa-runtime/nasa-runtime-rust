@@ -2,8 +2,8 @@
 
 业务通过 `nasa` 门面选择 feature，通过组件声明、命名配置和启动期计划把资源交给 `napp`。
 框架负责依赖绑定、启动门禁、资源登记、健康与退出等待；业务提供 handler、领域策略和显式配置。
-默认 feature 为空，启用 feature 不等于建立连接。以下命名配置只有 `enabled: true` 才读取所需凭据、
-装配资源；显式选择却缺 feature、未知 provider 或错误来源会拒绝启动。
+默认 feature 为空，启用 feature 不等于建立连接。带 `enabled` 开关的命名计划仅在启用后读取所需凭据、
+装配资源；Kafka 来源由组件声明及 `kafka` / `kafkas` 配置创建。显式选择却缺 feature、未知 provider 或错误来源会拒绝启动。
 
 ## 装配与取得入口
 
@@ -11,6 +11,7 @@
 
 | 能力 | feature 与组件 | 配置或计划 | 业务取得入口 |
 | --- | --- | --- | --- |
+| Kafka 命名源与事件运行时 | `kafka`；`"kafka"` | 互斥的 `kafka` / `kafkas.<name>`；宏及 `configure_kafka` 登记 | `default_kafka()` / `kafka(name)`，事务与有限任务使用明确计划 |
 | RedisPartition | `redis`；`"redis"` | `redis.partition` 或每源对应段，`configure_redis_partition` 登记 handler | `redis_partition(source)` |
 | 独立 Redis 竞选 | `redis`；`"redis"` | `redis_leaders.<name>` | `redis_leader(name)` |
 | Redis Pub/Sub | `redis`；`"redis"` | `redis_subscriptions.<name>`，`configure_redis_subscription` | 启动期登记 handler |
@@ -48,6 +49,14 @@
 Service 的 UserHook 只登记计划；标准资源在 Prepare 装配，供 initializer、Ready 后业务取得。
 Batch 先装配所选资源，再进入工作负载。
 普通 Stream、Proxy、RedisPartition、独立 Leader/Subscription、WS 入站消费要求 Service；Batch 在工作负载前拒绝这些计划。
+
+## Kafka 业务权限与任务责任
+
+每源业务句柄绑定固定 client，普通组共用 registry 和实际 owner，发布 lane 独立拥有交付额度。`admin()` 默认只读，管理写入须由该源 `container.admin_write` 授权并通过 broker ACL；句柄不返回原始 proxy 或整源关闭权。
+
+事务及 Replay/Transfer/DLT 回投经同一受管句柄登记，分别返回可观察当前 Ready、业务结局和实际排干的任务句柄。跨源有限任务登记真实目标依赖，任一端关闭都保留实际在途责任；跨集群转发不获得 Kafka 原子事务。事务计划或默认/覆盖组非法时在开放业务前拒绝，不把名称裁剪为另一个组。
+
+来源配置变化报告 `RestartRequired`；两段停机先停止消费与有限任务，保留业务收尾所需发布资源，最终再关闭准入并等待实际退出。超时和宿主终态不能代替资源关闭结果。完整合同见 [Kafka 受管模式](../napp/README.md#kafka-受管模式)。
 
 ## 配置准备与原子发布
 

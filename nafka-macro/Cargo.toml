@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+keywords = ["kafka", "consumer", "macros", "messaging", "async"]
 categories.workspace = true
-description = "NASA Kafka 消费者属性宏：编译期签名校验与静态 descriptor 收集"
+description = "Kafka 消费者属性宏：类型化路由、共同身份门禁、确认模式与静态 descriptor 收集"
 
 [lib]
 proc-macro = true

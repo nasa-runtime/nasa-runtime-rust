@@ -116,9 +116,10 @@ struct OwnerConsumerContext {
     owner_consumer: OnceLock<Weak<BaseConsumer<OwnerConsumerContext>>>,
     /// 每个 consumer 最多允许一个超时后仍在收尾的 revoke commit。
     pre_commit_in_flight: AtomicBool,
-    /// librdkafka 后台线程 broker 级错误(ALL_BROKERS_DOWN/认证/SSL 等)的最新一条
-    /// callback 只做分类与单槽覆盖写,由 `GroupHealth` 读侧合并进 `last_error`,不进 owner 控制流。
+    /// librdkafka 后台线程最近的固定错误码，供 `GroupHealth` 读侧合并；永久错误另存会话邮箱。
     global_error: Arc<Mutex<Option<String>>>,
+    /// 当前原生会话首个永久连接错误；不能被随后出现的断连通知覆盖。
+    terminal_fatal: Mutex<Option<String>>,
 }
 
 impl OwnerConsumerContext {
@@ -138,6 +139,7 @@ impl OwnerConsumerContext {
             owner_consumer: OnceLock::new(),
             pre_commit_in_flight: AtomicBool::new(false),
             global_error,
+            terminal_fatal: Mutex::new(None),
         }
     }
 
@@ -207,26 +209,26 @@ impl OwnerConsumerContext {
 }
 
 impl ClientContext for OwnerConsumerContext {
-    /// 业务作用：把 librdkafka 后台线程的 broker 级错误写入单槽,供 `GroupHealth.last_error` 读侧合并。
-    ///
-    /// 只收 ALL_BROKERS_DOWN 与认证/授权/SSL 类(其余 per-broker transport 抖动过滤——重连期噪声大且
-    /// 会被聚合成 ALL_BROKERS_DOWN);覆盖写保留最新一条。文本含 broker host:port(与 安全 endpoint
-    /// 同口径,不含凭据),可经 `last_error` 对外展示。
-    ///
-    /// # 参数
-    ///
-    /// - `error`: librdkafka 上报的客户端级错误。
-    /// - `reason`: librdkafka 附带的人类可读原因。
-    fn error(&self, error: KafkaError, reason: &str) {
-        if error
-            .rdkafka_error_code()
-            .is_some_and(is_global_health_code)
-        {
+    /// 业务作用：保留永久连接失败的停止证据，并向健康单槽报告固定原生错误码。
+    /// 参数说明：error 为客户端级错误，_reason 为可能含认证服务文本的原生描述，不对外传播。
+    /// 返回：只写有界邮箱；owner 下一次 poll 复验永久证据后关闭消费准入，不在回调线程重建或停止资源。
+    fn error(&self, error: KafkaError, _reason: &str) {
+        if let Some(code) = error.rdkafka_error_code() {
+            let detail = format!("Kafka connection error: {code:?}");
+            // 认证与证书错误不能通过重连取得新权限；保留首个永久原因直到整代会话退出。
+            if is_fatal_code(code) {
+                self.terminal_fatal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_or_insert(detail.clone());
+            }
+            if !is_global_health_code(code) {
+                return;
+            }
             *self
                 .global_error
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(format!("{error}: {reason}"));
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(detail);
         }
     }
 }
@@ -294,14 +296,25 @@ impl ConsumerContext for OwnerConsumerContext {
     }
 
     /// 业务作用：默认 assign/unassign 完成后发布事实，避免用启动前的空 assignment 冒充已 join。
-    fn post_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+    fn post_rebalance(&self, consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         match rebalance {
-            Rebalance::Assign(partitions) => self.publish(
-                RdRebalanceKind::Assigned,
-                elements_to_tps(partitions),
-                None,
-                BTreeMap::new(),
-            ),
+            Rebalance::Assign(_) => {
+                // cooperative callback 只列新增分区，owner 的容量与权限必须基于完整实际 assignment。
+                match consumer.assignment() {
+                    Ok(partitions) => self.publish(
+                        RdRebalanceKind::Assigned,
+                        elements_to_tps(&partitions),
+                        None,
+                        BTreeMap::new(),
+                    ),
+                    Err(error) => self.publish(
+                        RdRebalanceKind::Error,
+                        Vec::new(),
+                        Some(error.to_string()),
+                        BTreeMap::new(),
+                    ),
+                }
+            }
             Rebalance::Revoke(partitions) => {
                 let result = self
                     .pre_rebalance
@@ -433,6 +446,8 @@ pub(crate) struct ConsumerClient {
     metrics: Arc<dyn MetricsSink>,
     /// 最终 group id，仅用作低基数指标标签。
     group: Arc<str>,
+    /// 固定分配跨会话保留的绝对恢复坐标；订阅消费保持为空，由组协议决定恢复位置。
+    fixed_offsets: Arc<Mutex<BTreeMap<Tp, i64>>>,
 }
 
 impl ConsumerClient {
@@ -444,15 +459,18 @@ impl ConsumerClient {
     /// - `group`: 最终 group.id。
     /// - `metrics`: 后端无关指标出口。
     /// - `global_error`: 与 supervisor 共享的 broker 级错误单槽。
+    /// - `fixed_offsets`: owner 生命周期内的固定分配恢复坐标，只接纳成功定位或确认提交。
     ///
     /// # 错误
     ///
     /// 原生配置或 consumer 构造失败时返回错误。
+    /// 返回：绑定同一 owner 恢复账本的本地会话；构造成功本身不发布 Ready 或推进坐标。
     pub(crate) fn create(
         config: &KafkaConfig,
         group: &str,
         metrics: Arc<dyn MetricsSink>,
         global_error: Arc<Mutex<Option<String>>>,
+        fixed_offsets: Arc<Mutex<BTreeMap<Tp, i64>>>,
     ) -> Result<Self> {
         let consumer = consumer_config(config, group)?
             .create_with_context::<_, BaseConsumer<OwnerConsumerContext>>(
@@ -461,7 +479,12 @@ impl ConsumerClient {
                     global_error,
                 ),
             )
-            .map_err(|error| NafkaError::Broker(format!("consumer 构造失败: {error}")))?;
+            .map_err(|error| {
+                NafkaError::Config(format!(
+                    "consumer 构造失败: {}",
+                    super::config::redact(&error)
+                ))
+            })?;
         let consumer = Arc::new(consumer);
         consumer
             .context()
@@ -471,6 +494,7 @@ impl ConsumerClient {
             timeout: Duration::from_millis(config.behavior.control_timeout_ms),
             metrics,
             group: Arc::from(group),
+            fixed_offsets,
         })
     }
 
@@ -509,22 +533,52 @@ impl ConsumerClient {
         self.consumer.unsubscribe();
     }
 
-    /// 业务作用：固定 assign 分区并解析起始位点。
+    /// 业务作用：首次固定分配解析绝对起点，后续会话沿用确认提交或显式定位留下的恢复坐标。
     ///
     /// # 参数
     ///
     /// - `starts`: 每个固定分区的起始策略。
     /// - `auto_offset_reset`: Committed 无历史位点时的回退策略。
     ///
-    /// # 错误
+    /// # 返回
     ///
-    /// 时间戳解析、列表构造或 assign 失败时返回错误。
+    /// 全部分区定位成功才发布恢复坐标；解析、assign 失败或恢复范围已被保留期删除时拒绝接流量。
     pub(crate) fn assign(
         &self,
         starts: &BTreeMap<Tp, StartOffset>,
         auto_offset_reset: &str,
     ) -> Result<()> {
         let resolution_deadline = Instant::now() + self.timeout;
+        let recovery = self
+            .fixed_offsets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let recovered_starts;
+        let starts = if recovery.is_empty() {
+            starts
+        } else {
+            if recovery.len() != starts.len() || starts.keys().any(|tp| !recovery.contains_key(tp))
+            {
+                return Err(NafkaError::Lifecycle("固定分配恢复范围不完整".into()));
+            }
+            // 已取得责任的坐标不能重新解释成 Earliest/Latest；保留期缺口必须保持关闭。
+            for (tp, offset) in &recovery {
+                let low = self.absolute_watermark(tp, false, resolution_deadline)?;
+                let high = self.absolute_watermark(tp, true, resolution_deadline)?;
+                if !matches!((low, high), (Offset::Offset(low), Offset::Offset(high)) if *offset >= low && *offset <= high)
+                {
+                    return Err(NafkaError::Lifecycle(
+                        "固定分配恢复坐标超出 broker 保留范围".into(),
+                    ));
+                }
+            }
+            recovered_starts = recovery
+                .into_iter()
+                .map(|(tp, offset)| (tp, StartOffset::Offset(offset)))
+                .collect();
+            &recovered_starts
+        };
         let mut direct = TopicPartitionList::with_capacity(starts.len());
         let mut timestamps = TopicPartitionList::with_capacity(starts.len());
         let mut committed_query = TopicPartitionList::with_capacity(starts.len());
@@ -585,12 +639,12 @@ impl ConsumerClient {
                                 "分区 {}:{} 没有 committed offset，且 auto.offset.reset=none",
                                 element.topic(),
                                 element.partition()
-                            )))
+                            )));
                         }
                         other => {
                             return Err(NafkaError::Config(format!(
                                 "未知 auto_offset_reset: {other}"
-                            )))
+                            )));
                         }
                     },
                 };
@@ -618,6 +672,19 @@ impl ConsumerClient {
                     .map_err(broker_error)?;
             }
         }
+        let resolved: BTreeMap<Tp, i64> = direct
+            .elements()
+            .iter()
+            .filter_map(|element| match element.offset() {
+                Offset::Offset(offset) if offset >= 0 => {
+                    Some((Tp::new(element.topic(), element.partition()), offset))
+                }
+                _ => None,
+            })
+            .collect();
+        if resolved.len() != starts.len() {
+            return Err(NafkaError::Lifecycle("固定分配未取得完整绝对起点".into()));
+        }
         self.consumer.assign(&direct).map_err(broker_error)?;
         let results = self
             .consumer
@@ -626,6 +693,11 @@ impl ConsumerClient {
         for element in results.elements() {
             element.error().map_err(broker_error)?;
         }
+        // 原生分配与定位全部成功后才发布初始责任，防止下一次恢复跨过未完成初始化。
+        *self
+            .fixed_offsets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = resolved;
         Ok(())
     }
 
@@ -672,7 +744,29 @@ impl ConsumerClient {
         &self,
         timeout: Duration,
     ) -> std::result::Result<Option<RdMessage<'_>>, RdPollError> {
-        match self.consumer.poll(timeout) {
+        // 全局错误可能只经 callback 上报；在取记录前后都复验，避免在已知失去认证后交出业务输入。
+        if let Some(error) = self
+            .consumer
+            .context()
+            .terminal_fatal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Err(RdPollError::Fatal(error));
+        }
+        let result = self.consumer.poll(timeout);
+        if let Some(error) = self
+            .consumer
+            .context()
+            .terminal_fatal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Err(RdPollError::Fatal(error));
+        }
+        match result {
             Some(Ok(message)) => Ok(Some(RdMessage { inner: message })),
             Some(Err(KafkaError::PartitionEOF(_))) => Ok(None),
             Some(Err(error)) => Err(classify_poll_error(error)),
@@ -686,9 +780,9 @@ impl ConsumerClient {
     ///
     /// - `values`: 非空分区安全前沿表。
     ///
-    /// # 错误
+    /// # 返回
     ///
-    /// 列表构造或同步 commit 失败时返回错误。
+    /// broker 确认后更新固定分配恢复点；列表构造或同步 commit 失败时保留旧恢复边界。
     pub(crate) fn commit_offsets(&self, values: &BTreeMap<Tp, i64>) -> Result<()> {
         if values.is_empty() {
             return Ok(());
@@ -701,7 +795,36 @@ impl ConsumerClient {
         }
         self.consumer
             .commit(&offsets, CommitMode::Sync)
-            .map_err(broker_error)
+            .map_err(broker_error)?;
+        // broker 确认先于本地恢复点推进；超时或未知交付保留旧坐标，允许安全重投。
+        for (tp, offset) in values {
+            self.remember_fixed_offset(tp, *offset);
+        }
+        Ok(())
+    }
+
+    /// 业务作用：推进已存在的固定分区恢复坐标，不为订阅分区建立本地权威。
+    /// 参数说明：tp 为已分配分区，offset 为确认提交或成功显式定位的绝对坐标。
+    /// 返回：后续会话从该坐标继续；非固定分区不产生状态变化。
+    fn remember_fixed_offset(&self, tp: &Tp, offset: i64) {
+        let mut positions = self
+            .fixed_offsets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(position) = positions.get_mut(tp) {
+            *position = offset;
+        }
+    }
+
+    /// 业务作用：执行显式定位并逐分区保存已生效的恢复坐标。
+    /// 参数说明：offsets 为通过控制门禁的目标表。
+    /// 返回：全部定位成功时完成；部分失败保留已生效前缀，内部重读不调用此入口。
+    pub(crate) fn seek_control_offsets(&self, offsets: &BTreeMap<Tp, i64>) -> Result<()> {
+        for (tp, offset) in offsets {
+            let resolved = self.seek_one(tp, Offset::Offset(*offset))?;
+            self.remember_fixed_offset(tp, resolved);
+        }
+        Ok(())
     }
 
     /// 业务作用：主循环取走最近一次实际 rebalance callback 结果。
@@ -819,12 +942,12 @@ impl ConsumerClient {
                     return Err(NafkaError::Broker(format!(
                         "分区 {}:{} 没有 committed offset，且 auto.offset.reset=none",
                         tp.topic, tp.partition
-                    )))
+                    )));
                 }
                 (None, other) => {
                     return Err(NafkaError::Config(format!(
                         "未知 auto_offset_reset: {other}"
-                    )))
+                    )));
                 }
             };
             targets
@@ -858,17 +981,14 @@ impl ConsumerClient {
         Ok(targets)
     }
 
-    /// 业务作用：恢复指定分区；空列表表示当前 assignment。
-    ///
-    /// # 参数
-    ///
-    /// - `tps`: 目标分区。
-    ///
-    /// # 错误
-    ///
-    /// assignment 查询或底层恢复失败时返回错误。
+    /// 业务作用：只恢复已经通过暂停原因门禁的显式分区，空列表没有副作用。
+    /// 参数说明：tps 为可恢复范围；全组意图须由上层先解析 assignment。
+    /// 返回：实际请求恢复的分区；native 拒绝时返回错误，不扩大到其它保护分区。
     pub(crate) fn resume(&self, tps: &[Tp]) -> Result<Vec<Tp>> {
-        let targets = self.targets_or_assignment(tps)?;
+        if tps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let targets = tps.to_vec();
         self.consumer
             .resume(&tps_to_list(&targets))
             .map_err(broker_error)?;
@@ -936,6 +1056,7 @@ impl ConsumerClient {
     /// # 错误
     ///
     /// 传入 Committed 或任一 seek 失败时返回错误。
+    /// 返回：成功目标更新固定分配恢复坐标；部分失败保留已经生效的目标，不声称批量原子。
     pub(crate) fn seek_special(&self, tps: &[Tp], offset: StartOffset) -> Result<()> {
         if matches!(offset, StartOffset::Committed) {
             return Err(NafkaError::Config(
@@ -944,7 +1065,8 @@ impl ConsumerClient {
         }
         let native = start_offset(offset);
         for tp in tps {
-            self.seek_one(tp, native)?;
+            let resolved = self.seek_one(tp, native)?;
+            self.remember_fixed_offset(tp, resolved);
         }
         Ok(())
     }
@@ -966,6 +1088,7 @@ impl ConsumerClient {
     /// # 错误
     ///
     /// committed 查询失败、`none` 模式遇到无提交，或任一 seek 失败时返回错误。
+    /// 返回：成功定位的固定分区保存绝对恢复点，无提交历史的拒绝发生在任何定位前。
     pub(crate) fn seek_to_committed(&self, tps: &[Tp], auto_offset_reset: &str) -> Result<()> {
         if tps.is_empty() {
             return Ok(());
@@ -978,6 +1101,18 @@ impl ConsumerClient {
             .consumer
             .committed_offsets(query, Timeout::After(self.timeout))
             .map_err(broker_error)?;
+        // 显式定位的缺席证据必须在任何分区移动前裁决，不能先移动前缀再声称整批未执行。
+        if auto_offset_reset == "none"
+            && tps.iter().any(|tp| {
+                committed
+                    .find_partition(&tp.topic, tp.partition)
+                    .is_none_or(
+                        |element| !matches!(element.offset(), Offset::Offset(value) if value >= 0),
+                    )
+            })
+        {
+            return Err(NafkaError::ControlNotApplied(0));
+        }
         for tp in tps {
             let stored = committed
                 .find_partition(&tp.topic, tp.partition)
@@ -993,15 +1128,16 @@ impl ConsumerClient {
                     return Err(NafkaError::Broker(format!(
                         "分区 {}:{} 没有 committed offset，且 auto.offset.reset=none",
                         tp.topic, tp.partition
-                    )))
+                    )));
                 }
                 (None, other) => {
                     return Err(NafkaError::Config(format!(
                         "未知 auto_offset_reset: {other}"
-                    )))
+                    )));
                 }
             };
-            self.seek_one(tp, target)?;
+            let resolved = self.seek_one(tp, target)?;
+            self.remember_fixed_offset(tp, resolved);
         }
         Ok(())
     }
@@ -1015,6 +1151,7 @@ impl ConsumerClient {
     /// # 错误
     ///
     /// broker 查询或任一 seek 失败时返回错误。
+    /// 返回：成功目标保存解析后的固定恢复坐标；以后重建不重新解释时间戳。
     pub(crate) fn seek_times(&self, times: &BTreeMap<Tp, i64>) -> Result<()> {
         let mut query = TopicPartitionList::with_capacity(times.len());
         for (tp, timestamp) in times {
@@ -1032,7 +1169,8 @@ impl ConsumerClient {
                 Offset::Offset(value) if value >= 0 => Offset::Offset(value),
                 _ => Offset::End,
             };
-            self.seek_one(&tp, offset)?;
+            let resolved = self.seek_one(&tp, offset)?;
+            self.remember_fixed_offset(&tp, resolved);
         }
         Ok(())
     }
@@ -1059,17 +1197,21 @@ impl ConsumerClient {
         }
     }
 
-    /// 业务作用：seek 单分区。
-    ///
-    /// # 参数
-    ///
-    /// - `tp`: 目标分区。
-    /// - `offset`: 底层 offset 表达。
-    ///
-    /// # 错误
-    ///
-    /// 底层 seek 失败时返回错误。
-    fn seek_one(&self, tp: &Tp, offset: Offset) -> Result<()> {
+    /// 业务作用：冻结特殊边界为绝对坐标后定位，防止暂停期间的 latest 在稍后 fetch 时重新求值。
+    /// 参数说明：tp 为目标；offset 为绝对坐标或 Beginning/End。
+    /// 返回：native 接受的绝对坐标；边界查询或定位失败返回错误。
+    fn seek_one(&self, tp: &Tp, offset: Offset) -> Result<i64> {
+        // 控制成功回执必须对应此刻查询的边界，不能让随后生产的输入被迟到求值的 End 越过。
+        let offset = match offset {
+            Offset::Beginning => {
+                self.absolute_watermark(tp, false, Instant::now() + self.timeout)?
+            }
+            Offset::End => self.absolute_watermark(tp, true, Instant::now() + self.timeout)?,
+            other => other,
+        };
+        let Offset::Offset(resolved) = offset else {
+            return Err(NafkaError::Lifecycle("定位未解析为绝对坐标".into()));
+        };
         self.consumer
             .seek(
                 &tp.topic,
@@ -1077,7 +1219,8 @@ impl ConsumerClient {
                 offset,
                 Timeout::After(self.timeout),
             )
-            .map_err(broker_error)
+            .map_err(broker_error)?;
+        Ok(resolved)
     }
 }
 
@@ -1279,6 +1422,7 @@ fn is_fatal_code(code: RDKafkaErrorCode) -> bool {
         code,
         RDKafkaErrorCode::InvalidArgument
             | RDKafkaErrorCode::Authentication
+            | RDKafkaErrorCode::SSL
             | RDKafkaErrorCode::Fatal
             | RDKafkaErrorCode::Fenced
             | RDKafkaErrorCode::UnsupportedFeature

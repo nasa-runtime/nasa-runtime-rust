@@ -2627,61 +2627,28 @@ dependencies = [
  "base64",
  "futures",
  "linkme",
- "nafka-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka-macro",
  "nametrics-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naws-proto 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rdkafka",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "nafka"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "625eb45bd91256e533b0ec24e29aa25894c647ef660dae777c90973f94421492"
-dependencies = [
- "async-trait",
- "base64",
- "futures",
- "linkme",
- "nafka-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nametrics-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "naws-proto 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "rdkafka",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
+ "url",
  "zeroize",
 ]
 
 [[package]]
 name = "nafka-macro"
 version = "2.0.0"
-dependencies = [
- "macro-support 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "nafka-macro"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e8af297cdb293de397888a59ae8f089571daa360ee5aafb9cb58993907cb04e"
 dependencies = [
  "macro-support 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
@@ -3472,7 +3439,7 @@ dependencies = [
  "nadisc",
  "nadisc-runtime",
  "nafana 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "nagrpc",
  "naidempotency 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3561,7 +3528,7 @@ dependencies = [
  "nadisc-runtime",
  "nafana 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nafana-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "nagrpc",
  "naidempotency 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naidempotency-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3794,7 +3761,7 @@ dependencies = [
  "hmac 0.12.1",
  "linkme",
  "nadis 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "nagrpc",
  "nagrpc-build 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3825,7 +3792,7 @@ dependencies = [
  "hmac 0.12.1",
  "linkme",
  "nadis 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "nagrpc",
  "nagrpc-build 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nainbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4247,7 +4214,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "naws-proto 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde_json",
@@ -4270,7 +4237,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
- "nafka 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nafka",
  "naws-proto 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "redis",
  "serde_json",

@@ -7,7 +7,7 @@ name = "nasa"
 version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Rust server framework for managed lifecycles, multi-registry discovery and reliable execution with durable Saga recovery"
+description = "Rust server framework for managed lifecycles, multi-registry discovery, multi-source Kafka and reliable execution with durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -117,6 +117,7 @@ kafka-schema-registry = ["kafka", "secret", "kafka_impl/schema-registry", "appli
 kafka-tls = ["kafka", "kafka_impl/tls"]
 kafka-gssapi = ["kafka", "kafka_impl/gssapi"]
 kafka-zstd = ["kafka", "kafka_impl/zstd"]
+kafka-mysql-checkpoint = ["kafka", "kafka_impl/mysql-checkpoint", "application_impl?/kafka-mysql-checkpoint"]
 
 # 弱依赖桥：同时启用 application 时，把 napp 的 redis 组件编入。
 redis = ["dep:redis_impl", "application_impl?/redis"]
@@ -239,6 +240,7 @@ full = [
     "ws-socketio",
     "kafka",
     "kafka-schema-registry",
+    "kafka-mysql-checkpoint",
     "redis-derive",
     "crypto",
     "numeric",

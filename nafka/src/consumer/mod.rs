@@ -6,17 +6,21 @@ mod passthrough;
 pub(crate) mod registry;
 
 pub(crate) mod assign;
+pub(crate) mod capacity;
 pub(crate) mod control;
 pub(crate) mod dlt;
+pub(crate) mod group;
+pub(crate) mod metadata_capacity;
 pub(crate) mod offset_state;
 pub(crate) mod poll_task;
 pub(crate) mod retry;
+pub(crate) mod source_capacity;
 pub(crate) mod supervisor;
+pub(crate) mod worker;
 
 use crate::error::Result;
 use crate::types::{KafkaHeaders, Tp};
 use crate::wire::DecodePayload;
-use crate::HEADER_TRACEPARENT;
 
 pub use ack::AckToken;
 pub use passthrough::{
@@ -34,10 +38,17 @@ use ack::RecordAck;
 pub enum GroupSpec {
     /// 使用顶层配置的默认 group id。
     Default,
-    /// 使用显式 group id。
+    /// 使用原文 group id；须非纯空白、无 NUL 且为1至1024个 UTF-8 字节，首尾不含 U+0000–0020，有效原文不裁剪。
     Named(String),
     /// 为本进程实例派生独占广播 group。
     Broadcast(String),
+    /// 使用共同身份编码派生广播组；既有 Broadcast 保留原组算法，迁移必须显式选择。
+    StableBroadcast {
+        /// 明确业务作用域，不使用 handler 路径。
+        scope: String,
+        /// 稳定实例身份；None 沿用 behavior.broadcast_instance_id、环境变量或进程临时身份。
+        instance_id: Option<String>,
+    },
 }
 
 /// route 级确认模式；两种模式都由 owner 统一提交连续安全水位。
@@ -50,9 +61,27 @@ pub enum AckMode {
     Manual,
 }
 
+/// 消费执行的顺序域；提交始终受分区连续安全前缀约束。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// 分区内按实际交付顺序串行执行，支持单条和连续批次。
+    #[default]
+    PartitionOrdered,
+    /// 同分区的不同 key 可并发，同 key 串行；null key 是分区屏障，仅支持单条。
+    KeyOrdered,
+}
+
 /// 拥有型消费上下文；可安全跨异步 handler 持有。
 #[derive(Clone, Debug)]
 pub struct ConsumeCtx {
+    /// 原始 Kafka value 是否为 null；与解码得到的 JSON null 或空字节明确区分。
+    pub tombstone: bool,
+    /// 稳定逻辑源名，对应 KafkaConfig.client_name，不代表物理 cluster ID。
+    pub source_id: String,
+    /// 实际消费组，默认组和广播组均已经解析。
+    pub group: String,
+    /// 本次派发的分区权威代次；旧代次不能确认新分配。
+    pub assignment_epoch: u64,
     /// topic 名。
     pub topic: String,
     /// 分区号。
@@ -71,8 +100,10 @@ pub struct ConsumeCtx {
     pub retry_attempt: u32,
     /// broker 消息时间戳毫秒；缺失时由内部约定值表达。
     pub timestamp: i64,
-    /// UTF-8 key；非 UTF-8 key 在 typed 路由前处理阶段拒绝。
+    /// UTF-8 key 便利视图；null 或非 UTF-8 key 返回 None，顺序域以 raw_key 为准。
     pub key: Option<String>,
+    /// 原始可空 key 字节，保留非 UTF-8 key 与 null/空字节的差异。
+    pub raw_key: Option<Vec<u8>>,
     /// 保序且允许同名重复的消息 headers。
     pub headers: KafkaHeaders,
     /// 从透传 header 解析得到的 JSON Map；解析失败时为空。
@@ -85,13 +116,10 @@ impl ConsumeCtx {
         Tp::new(self.topic.clone(), self.partition)
     }
 
-    /// 业务作用：解析 producer 写入的 W3C trace context；缺失、非 UTF-8 或非法值返回 `None`。
+    /// 业务作用：解析唯一规范的W3C上下文，观测头错误不会使合法业务消息失效。
+    /// 参数说明：无。返回：缺失、重复、非UTF-8或非法值均为None；有效值不作为授权证据。
     pub fn trace_context(&self) -> Option<natelemetry::TraceContext> {
-        self.headers
-            .last(HEADER_TRACEPARENT)
-            .and_then(|header| header.value.as_deref())
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .and_then(natelemetry::TraceContext::parse_traceparent)
+        crate::extract_trace_context(&self.headers).ok().flatten()
     }
 }
 
@@ -189,6 +217,14 @@ pub trait SingleConsumer: Send + Sync + 'static {
         AckMode::Auto
     }
 
+    /// 业务作用：冻结单条路由的执行顺序域，同组所有路由必须一致。
+    ///
+    /// 参数说明：无。
+    /// 返回：默认分区串行；按键并发须显式返回 `ExecutionMode::KeyOrdered`。
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::PartitionOrdered
+    }
+
     /// 业务作用：处理单条记录。
     ///
     /// # 参数
@@ -225,6 +261,14 @@ pub trait BatchConsumer: Send + Sync + 'static {
     /// 业务作用：返回 route 级确认模式。
     fn ack_mode(&self) -> AckMode {
         AckMode::Auto
+    }
+
+    /// 业务作用：声明批路由的执行顺序域，在注册时拒绝与单条按键责任不兼容的组合。
+    ///
+    /// 参数说明：无。
+    /// 返回：默认分区串行；返回 `KeyOrdered` 会导致注册失败。
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::PartitionOrdered
     }
 
     /// 业务作用：处理同一 route 的连续记录 run。

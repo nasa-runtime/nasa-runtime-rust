@@ -10,6 +10,10 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+The `kafka` feature exposes a multi-source event runtime with Java `nasa-kafka` wire and recovery
+contracts, isolated producer lanes, bounded ordered consumption, same-cluster transactions and durable
+tasks. See [Kafka facade](#kafka-facade).
+
 Named Nacos, Consul, Kubernetes and Static/DNS connections isolate registry credentials, evidence
 and failures. Select internal calls with `qualifier`, use complete URLs for internet APIs, and keep
 registration and shutdown under one owner. The default connection name is lowercase `primary`.
@@ -30,6 +34,30 @@ and [Integration and upgrades](https://github.com/nasa-runtime/nasa-runtime-rust
 This is an independent open-source project with no affiliation, sponsorship, endorsement or official
 relationship with the United States National Aeronautics and Space Administration. The archive includes
 the complete statement in `NOTICE`.
+
+## Kafka facade
+
+Use `nasa::kafka` for source configuration, `KafkaProxy`, producer lanes, consumer traits/macros,
+transaction/replay/transfer/DLT plans, checkpoints and diagnostics. With `application,kafka`, obtain
+source-bound `KafkaHandle` values through `app.default_kafka()` or `app.kafka(name)`; the `kafka` and
+`kafkas` configuration roots are mutually exclusive and explicit names never fall back.
+
+Each source owns its native resources. Consumption owners commit only the safe prefix under current
+assignment authority, while lanes retain delivery responsibility until actual completion. Transactions
+atomically commit complete input offsets and approved outputs within one Kafka cluster. Unknown commits
+stop new work and require the stable identity for recovery. Finite tasks persist checkpoints after
+processing or destination confirmation, so cross-resource duplicates remain possible.
+
+Java/Rust interoperability preserves valid group names, event identities, null/empty bytes, ordered
+headers and durable formats. Recovery also requires matching physical resources and compatible plans.
+External database, HTTP and socket effects are outside the Kafka transaction. Managed Admin views are
+read-only by default; writes require explicit permission per source. Readiness, health, metrics and
+close reports distinguish admission from actual responsibility.
+
+Optional features provide MySQL shared checkpoints (`kafka-mysql-checkpoint`), Confluent Registry
+support (`kafka-schema-registry`) and native TLS/GSSAPI/Zstd capabilities. See the
+[component contract](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md) and
+[managed lifecycle](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#kafka-受管模式).
 
 ## Multiple registries and shared discovery ownership
 
@@ -133,6 +161,20 @@ and [integration guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/m
 
 - Named MySQL/PostgreSQL, Redis and Kafka resources come from final YAML. Unknown names and driver
   mismatches fail instead of selecting a different source. A transaction stays within one datasource.
+- Kafka named sources isolate physical clients, delivery budgets and lifecycle; producer lanes reserve
+  separate capacity within each source. Typed consumers provide partition ordering or per-key concurrency
+  under process, source, group, partition and key input budgets. These budgets do not cap total RSS or
+  arbitrary application allocations. See the [Kafka core contracts](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#核心价值与边界).
+- Kafka subscription groups support multiple owner slots through `consumer.concurrency` and
+  `consumer.group_concurrency`. Health aggregates all slots; `group_slots_health` exposes each slot.
+  `group_readiness` explains unmet requirements using the current health snapshot; exact partitions
+  are supported, and waits for multiple groups recheck every group within one deadline.
+  Fixed assignments remain single-slot, and controls across slots are not atomic. See the
+  [Kafka capacity and ownership contract](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#组内多消费者).
+- Kafka finite replay and single-destination transfer freeze source ranges and physical resource
+  identities. Transfer confirms actual destination delivery before persisting the source checkpoint;
+  cancellation retains ownership until in-flight work exits. Stable origin IDs identify duplicates.
+  The file backend supports local POSIX recovery; cross-resource atomicity is not provided.
 - Reliable Saga clients write business facts and start intent in one transaction, and dispatch from
   that same datasource. An event ID does not prove commit or remote completion.
 - Managed result recovery requires the shared Catalog, frozen definitions and producer trust to

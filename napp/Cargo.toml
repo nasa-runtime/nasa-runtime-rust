@@ -3,7 +3,7 @@ name = "napp"
 version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "Application runtime for strict configuration, managed lifecycles, multi-registry discovery and durable Saga recovery"
+description = "Application runtime for strict configuration, managed lifecycles, multi-registry discovery, multi-source Kafka and durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -48,6 +48,7 @@ cache = ["dep:cacheable", "dep:async-trait"]
 # Kafka：受管 producer/consumer、broker Ready、动态健康和两段停机由 napp 编排。
 kafka = ["dep:futures", "dep:nafka"]
 kafka-schema-registry = ["kafka", "nafka/schema-registry-metrics", "dep:async-trait"]
+kafka-mysql-checkpoint = ["kafka", "nafka/mysql-checkpoint"]
 # Outbox：在 UserHook 接收发布端，Ready 后按 datasource driver 监督 dispatcher；可脱离 Saga 独立使用。
 outbox = ["db", "dep:naoutbox-core", "dep:naoutbox-mysql", "dep:async-trait"]
 outbox-pgsql = ["db-pgsql", "dep:naoutbox-core", "dep:naoutbox-pgsql", "dep:async-trait"]

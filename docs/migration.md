@@ -54,6 +54,14 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 
 字段、默认值和准入条件以 [Application 合同](../napp/README.md) 为准。
 
+## Kafka 身份与交付合同
+
+普通组与事务组共同支持1至1024个 UTF-8 字节、无NUL、非共同纯空白且首尾不含U+0000–0020的实际名称；合法原文不裁剪、不归一化。宏省略group才表示沿用默认，显式空字符串不是实际组。旧组超出支持域时必须使用可处理原身份的客户端或显式规划迁移，不能自动截短或复制 committed offset。
+
+配置转换使用 `nasa::kafka::inspect_legacy_config` 生成候选及人工决策项，不修改原配置或broker。按来源核对发布可靠性、consumer并发、输入预算、错误策略、Admin写权限和Ready条件；组、资源名、广播身份或事务部署身份的变更都可能改变持久责任。
+
+Java/Rust互通须保持event、key、tombstone、有序header及编码含义。有限任务接续还须复验完整计划、物理资源和checkpoint；Kafka事务只覆盖同集群完整输入位点与批准输出，普通lane和外部数据库写入不自动加入。详见 [共同合同](../nafka/README.md#java-与-rust-的共同合同)。
+
 ## 接入多注册中心
 
 单 Nacos 的 `nacos-discovery` 组件与 `rest_discovery` 根继续可用。采用多连接时，启用所需

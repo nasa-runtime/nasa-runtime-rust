@@ -67,6 +67,24 @@ Copied external client handles do not acquire the revocation guarantees of manag
 The detailed [Application contract](../napp/README.md), currently in Chinese, defines fields, defaults
 and admission conditions.
 
+## Preserve Kafka identity and delivery contracts
+
+Ordinary and transaction groups share an exact-name domain: 1–1024 UTF-8 bytes, no NUL, not entirely
+within the documented whitespace set, and no U+0000–0020 at either edge. Valid names are never trimmed
+or normalized. An omitted macro group selects the default; an explicit empty group is invalid.
+Existing groups outside the domain require a compatible client or an explicit migration, not automatic
+renaming or copied committed offsets.
+
+`nasa::kafka::inspect_legacy_config` returns a candidate and decisions without changing configuration
+or broker state. Recheck source identity, delivery reliability, consumer concurrency, budgets, failure
+policies, Admin permissions and readiness. Changing a group, broadcast identity or transaction
+deployment identity can change durable responsibility.
+
+Java/Rust interoperability preserves event names, keys, tombstones, ordered headers and codecs.
+Task recovery additionally requires matching physical resources, compatible plans and checkpoints.
+Kafka transactions cover complete input offsets and approved outputs in one cluster; ordinary lanes
+and database writes do not join implicitly. See the [shared contract](../nafka/README.md#java-与-rust-的共同合同).
+
 ## Adopt multiple registries
 
 The single-Nacos `nacos-discovery` component and `rest_discovery` root remain available. For named

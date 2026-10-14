@@ -33,6 +33,14 @@
 //! 感知的弱引用缓存。业务收尾后先关闭命令准入，再等待在途调用并撤销目录；旧 Command 返回 503。
 //! 这些资源的名称、容量与认证材料冻结到启动，变化报告 `RestartRequired`。
 //!
+//! # Kafka 多数据源事件运行时
+//!
+//! `kafka` 通过 `nasa::kafka` 提供与 Java nasa-kafka 对应的线路、身份与恢复合同。
+//! 命名来源和 producer lane 隔离资源与额度，普通消费按当前分配代次推进连续安全前缀。
+//! 同集群事务原子提交完整输入位点和批准输出；未知结果使用稳定身份恢复，不覆盖外部数据库。
+//! 有限回放、单目标转发与 DLT 回投在处理或目标确认后持久推进 checkpoint，跨资源可能重复。
+//! `application,kafka` 将这些能力纳入源绑定业务句柄、当前 Ready、健康、指标与两段停机。
+//!
 //! # Redis 分区消费
 //!
 //! `redis` 提供 `PreparedPartition`、`PartitionRecord` 和 `RunningPartition`。Redis 租约与 PEL
@@ -253,7 +261,7 @@ pub mod cache {
     // `CacheBackend`/`ClusterConnectionBackend`:L2 后端窄接口,让 `CacheLayer` 与具体 Redis 连接
     // 类型解耦,编排层可传入复用受管 Redis 的 adapter。
     pub use cache_impl::cache::{
-        field, CacheBackend, CacheLayer, ClusterConnectionBackend, GroupedCache, SEP,
+        CacheBackend, CacheLayer, ClusterConnectionBackend, GroupedCache, SEP, field,
     };
 }
 
@@ -300,8 +308,8 @@ pub mod inbox {
 #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
 pub mod outbox {
     pub use outbox_core_impl::{
-        dispatch_in_order, DispatchReport, InMemoryOutbox, OutboxEvent, OutboxPublishError,
-        OutboxPublisher, OutboxWriter,
+        DispatchReport, InMemoryOutbox, OutboxEvent, OutboxPublishError, OutboxPublisher,
+        OutboxWriter, dispatch_in_order,
     };
     #[cfg(feature = "outbox")]
     pub use outbox_mysql_impl::{MySqlOutbox, OutboxStoreError};
@@ -411,18 +419,17 @@ pub use nasaga_macro::saga_workflow;
 #[cfg(feature = "grpc")]
 pub mod grpc {
     pub use grpc_impl::{
-        async_trait, call_with_budget, health, include_proto, propagate_deadline_from,
-        propagate_request_budget, reflection, Certificate, Channel, ClientTlsConfig, Code,
-        Deadline, DeadlineSource, Endpoint, GrpcMessageLimits, GrpcMethodDescriptor,
-        GrpcMethodPolicy, GrpcMethodType, GrpcRpcMethodSnapshot, GrpcRpcOutcome,
-        GrpcRpcRejectionReason, GrpcServerConfig, GrpcServerError, GrpcServerHandle,
-        GrpcServerObserver, GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity, Identity,
-        ManagedGrpcService, ManagedService, PeerIdentity, Request, Response, ServerPlan, Status,
-        Streaming,
+        Certificate, Channel, ClientTlsConfig, Code, Deadline, DeadlineSource, Endpoint,
+        GrpcMessageLimits, GrpcMethodDescriptor, GrpcMethodPolicy, GrpcMethodType,
+        GrpcRpcMethodSnapshot, GrpcRpcOutcome, GrpcRpcRejectionReason, GrpcServerConfig,
+        GrpcServerError, GrpcServerHandle, GrpcServerObserver, GrpcServerSnapshot, GrpcServerState,
+        GrpcTlsIdentity, Identity, ManagedGrpcService, ManagedService, PeerIdentity, Request,
+        Response, ServerPlan, Status, Streaming, async_trait, call_with_budget, health,
+        include_proto, propagate_deadline_from, propagate_request_budget, reflection,
     };
 
     #[doc(hidden)]
-    pub use grpc_impl::{codegen, GrpcServicePolicy, CODEGEN_ABI};
+    pub use grpc_impl::{CODEGEN_ABI, GrpcServicePolicy, codegen};
 
     #[cfg(all(feature = "application", feature = "rest-discovery-nacos"))]
     pub use application_impl::{GrpcDiscoveredEndpoint, GrpcDiscoveredTlsMode};
@@ -438,7 +445,7 @@ pub mod oauth {
 /// 入口名称强调运行时任务而非系统线程，避免调用方误判调度和取消边界。
 #[cfg(feature = "scheduling")]
 pub mod scheduling {
-    pub use async_macro::{scheduled, Async, EnableAsync, EnableScheduling};
+    pub use async_macro::{Async, EnableAsync, EnableScheduling, scheduled};
     pub use scheduling_impl::*;
 }
 
@@ -513,12 +520,32 @@ pub mod ws {
     }
 }
 
-/// Kafka 发布、消费组、手动确认、管理端与同步借用式少拷贝入口。
+/// 与 Java nasa-kafka 共享线路、身份与恢复合同的多数据源 Kafka 事件运行时。
+///
+/// 命名 KafkaProxy 支持同进程多集群，受管应用通过 `kafkas.<name>` 与 `app.kafka(name)` 选择固定来源；
+/// 每源 producer lane 独立原生客户端和交付额度。输入责任受进程、源、组、分区与 key 的共同上限约束，
+/// 这些额度不等同于整个进程 RSS 上限，未知交付和仍活动的调用不会因等待取消而提前释放。
+/// consumer.concurrency 与 group_concurrency 配置稳定消费槽；group_health 聚合全组，
+/// group_slots_health 提供各槽观测。固定 assign 保持单槽，跨槽控制不具有原子性。
+/// TransactionPlan 与 transact 提供同集群完整输入、批准输出和组位点的专属事务，
+/// 稳定部署身份用于 fencing 与崩溃接续，提交结果未知时停止该 owner 的新工作。
+/// 普通消费按当前 assignment 的连续安全前缀提交；事务则要求完整输入责任和批准输出共同提交。
+/// 组名保留合法 UTF-8 原文，计划预检及执行复验不能把非法身份变成另一个实际组。
+/// Ready、健康、交付状态、指标与关闭报告分别呈现资源证据和未完成责任，取消等待不证明实际退出。
+/// ReplayPlan 提供 LSO 冻结范围、外部 topic 代次和共同持久编码；显式 replay 返回 ReplayHandle，
+/// 按同步处理成功、持久 checkpoint、进度发布的顺序推进。文件后端仅承诺 POSIX 本地单机恢复，
+/// TransferPlan 与 transfer 提供受双方生命周期约束的单目标转发，固定目的身份、分区和schema策略，
+/// 目标真实确认后推进checkpoint；事件ID和有界路径用于重复识别，不承诺跨资源原子提交。
+/// DltReplayPlan 与 replay_dlt 提供显式来源过滤、次数限制和可靠原文隔离，
+/// 保留稳定事件ID；目标确认先于checkpoint，未知交付不能当作隔离成功。
+/// `kafka-mysql-checkpoint` 提供单主 MySQL 共享进度；会话锁与完整快照 CAS 支持跨语言接管，
+/// 失权后停止推进，已在途 Kafka 副作用仍可能重复，外部须保证故障切换时旧主失去写权限。
 ///
 /// `kafka-schema-registry` 额外开放 Confluent envelope、schema ID 白名单、有界正负缓存和显式
 /// 兼容性/注册控制面。独立 Registry client 由业务持有；配合 `application` 时，
 /// `schema_registries.<name>` 在 Prepare 装配命名资源，使用 `Application::schema_registry` 获取，
 /// 由宿主登记指标、关闭新调用并等待在途调用，无需声明 Kafka 消费组件。构造不证明远端 readiness。
+/// Registry 支持独立私有 CA 与 mTLS，限制 HTTP 并发和查询等待；取消等待不提前释放实际请求责任。
 #[cfg(feature = "kafka")]
 pub mod kafka {
     pub use kafka_impl::*;

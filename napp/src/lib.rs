@@ -13,6 +13,16 @@
 //! Redis Stream、Proxy、AutoPipeline、出站 TCP 帧客户端和 hystrix 可由命名配置接入，
 //! 框架负责准备、业务激活、健康观测以及关闭后的真实退出等待。
 //!
+//! # Kafka 多源与任务生命周期
+//!
+//! `kafka` / `kafkas` 将命名来源、consumer registry 与独立 producer lane 纳入同一宿主。
+//! 源绑定业务句柄不暴露整源关闭权，Admin 默认只读；当前 Ready 与健康监督使用真实资源证据。
+//! 事务和有限任务沿用 nafka 的 Java/Rust 共同身份与持久合同，额外服从 Application 准入和停止期限。
+//! 停机先停止消费与有限任务，保留业务收尾所需发布资源，再关闭新发布并等待实际退出；
+//! 资源关闭报告与业务任务结局独立，超时不会把仍在途的责任标为成功。
+//!
+//! # 资源装配与初始化
+//!
 //! 命名 REST、幂等 store、事务审计、对象存储、Schema Registry、TLS HTTP、缓存与 Redis 派生任务
 //! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature
 //! 为空，未选择的能力不建连。可用入口随对应 feature 导出，持久提交与租约仍由各自后端裁决。

@@ -4,19 +4,30 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures::FutureExt;
 
 use crate::consumer::ack::{AckIdentity, ManualAckSet, RecordAck};
-use crate::consumer::{AckMode, BatchConsumer, ConsumeCtx, GroupSpec, KafkaRecord, SingleConsumer};
+use crate::consumer::{
+    AckMode, BatchConsumer, ConsumeCtx, ExecutionMode, GroupSpec, KafkaRecord, SingleConsumer,
+};
 use crate::error::{NafkaError, Result};
 use crate::wire::{DecodePayload, PayloadCodec};
 
-/// owner 从底层借用消息物化出的有界拥有型记录。
+/// owner 与执行线程共享的原始输入，克隆只增加引用，不复制 payload、key 或 headers。
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct RawRecord {
+    inner: Arc<RawRecordData>,
+}
+
+/// 已物化且在派发期间冻结的原始记录内容。
+#[doc(hidden)]
+pub struct RawRecordData {
+    /// 实际原文引用持有的责任；账本撤销本身不能归还仍被执行方使用的额度。
+    input_permit: Arc<crate::consumer::capacity::RecordPermit>,
     /// 原始可空 payload；`None` 表示 tombstone。
     pub payload: Option<Vec<u8>>,
     /// 已解析的拥有型上下文。
@@ -26,10 +37,46 @@ pub struct RawRecord {
 }
 
 impl RawRecord {
+    /// 业务作用：接管已经准入的原文字节，使裁决方与执行方共享同一份内容。
+    /// 参数说明：payload 为可空正文；ctx 为来源上下文；assignment_epoch 为物化时的分配权威；input_permit 为物化前取得的输入责任。
+    /// 返回：独占初始引用；派发后克隆不再增加原文字节副本。
+    pub(crate) fn new(
+        payload: Option<Vec<u8>>,
+        ctx: ConsumeCtx,
+        assignment_epoch: u64,
+        input_permit: Arc<crate::consumer::capacity::RecordPermit>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RawRecordData {
+                payload,
+                ctx,
+                assignment_epoch,
+                input_permit,
+            }),
+        }
+    }
+
+    /// 业务作用：将输入额度随实际调用延续到业务结束，避免主循环作废旧分配时提前释放。
+    /// 参数说明：无。
+    /// 返回：同一原始输入凭证的引用，不重复计费，也不增加确认权限。
+    pub(crate) fn input_permit(&self) -> Arc<crate::consumer::capacity::RecordPermit> {
+        Arc::clone(&self.inner.input_permit)
+    }
+
+    /// 业务作用：仅在独占原始记录时发布可信投递次数，防止更改已交给业务线程的输入。
+    /// 参数说明：无。
+    /// 返回：独占内容；仍有执行方引用时拒绝隐式复制或更改共同上下文。
+    pub(crate) fn exclusive(&mut self) -> &mut RawRecordData {
+        Arc::get_mut(&mut self.inner).expect("可信投递次数只能在派发前更新")
+    }
+
     /// 业务作用：返回本记录保留的主要字节数，供容量 permit 计量。
+    ///
+    /// 参数说明：无。
+    /// 返回：payload、原始 key 和有序 header 的字节总量，不把非 UTF-8 key 当作空键。
     pub fn retained_bytes(&self) -> usize {
         self.payload.as_ref().map_or(0, Vec::len)
-            + self.ctx.key.as_ref().map_or(0, String::len)
+            + self.ctx.raw_key.as_ref().map_or(0, Vec::len)
             + self
                 .ctx
                 .headers
@@ -39,9 +86,24 @@ impl RawRecord {
     }
 }
 
+impl std::ops::Deref for RawRecord {
+    type Target = RawRecordData;
+
+    /// 业务作用：读取共享且在派发期间冻结的原文与来源上下文。
+    /// 参数说明：无。
+    /// 返回：绑定当前引用生命周期的只读内容，不创建字节副本。
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 /// 已完成 codec 解码但尚未恢复具体业务类型的记录。
 #[doc(hidden)]
 pub struct ErasedRecord {
+    /// 由并发 owner 控制的实时确认许可，业务不能通过消费上下文重新授权。
+    pub(crate) authority: Option<Arc<AtomicBool>>,
+    /// 源停止先于控制邮箱执行时，仍须同步撤销手动确认。
+    pub(crate) stopping: Option<Arc<AtomicBool>>,
     /// 具体业务值。
     pub value: Box<dyn Any + Send>,
     /// 消费上下文。
@@ -52,7 +114,13 @@ pub struct ErasedRecord {
 
 /// 一次 handler run 的框架结果。
 #[doc(hidden)]
+#[derive(Clone)]
 pub enum InvocationOutcome {
+    /// 本次业务未执行，指定 offset 的解码失败由 owner 按输入顺序治理。
+    DecodeFailed {
+        /// 非空失败集合；每个条目保留同分区真实 offset 和有界原因。
+        failures: Vec<(i64, String)>,
+    },
     /// handler 返回成功；自动模式确认全部，手动模式只确认连续前缀。
     Completed {
         /// 从 run 首条开始可进入安全水位的记录数。
@@ -96,6 +164,8 @@ pub struct ConsumerMeta {
     pub group: GroupSpec,
     /// route 级确认模式。
     pub ack_mode: AckMode,
+    /// 注册时冻结的顺序域；同组不能混合不同执行模式。
+    pub execution_mode: ExecutionMode,
     /// handler 的单条或批量调用形态。
     pub shape: ConsumerShape,
     /// 消息 codec。
@@ -167,7 +237,7 @@ struct BatchAdapter<C> {
 
 /// 业务作用：将公开单条消费者实例擦除为内部 trait object。
 ///
-/// # 参数
+/// # 参数说明
 ///
 /// - `consumer`: 已完成业务依赖注入的消费者实例。
 ///
@@ -203,15 +273,9 @@ pub fn erase_batch<C: BatchConsumer>(consumer: C) -> Result<Arc<dyn ErasedConsum
     }))
 }
 
-/// 业务作用：冻结单条消费者元数据。
-///
-/// # 参数
-///
-/// - `consumer`: 待读取一次元数据的消费者。
-///
-/// # 错误
-///
-/// 元数据非法时返回注册错误。
+/// 业务作用：在登记时读取一次单条消费者声明，防止运行中改变路由身份。
+/// 参数说明：consumer 为待冻结元数据的消费者实例。
+/// 返回：完整冻结声明；组身份非法时为 Config，其它非法元数据为 Registry。
 fn single_meta<C: SingleConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     build_meta(
         consumer.id(),
@@ -219,21 +283,16 @@ fn single_meta<C: SingleConsumer>(consumer: &C) -> Result<ConsumerMeta> {
         consumer.event(),
         consumer.group(),
         consumer.ack_mode(),
+        consumer.execution_mode(),
         ConsumerShape::Single,
         C::Message::CODEC,
         std::any::type_name::<C>(),
     )
 }
 
-/// 业务作用：冻结批消费者元数据。
-///
-/// # 参数
-///
-/// - `consumer`: 待读取一次元数据的消费者。
-///
-/// # 错误
-///
-/// 元数据非法时返回注册错误。
+/// 业务作用：在登记时读取一次批消费者声明，并拒绝无法表达批次责任的按键模式。
+/// 参数说明：consumer 为待冻结元数据的消费者实例。
+/// 返回：完整冻结声明；组身份非法时为 Config，其它非法元数据或按键批模式为 Registry。
 fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
     build_meta(
         consumer.id(),
@@ -241,31 +300,20 @@ fn batch_meta<C: BatchConsumer>(consumer: &C) -> Result<ConsumerMeta> {
         consumer.event(),
         consumer.group(),
         consumer.ack_mode(),
+        consumer.execution_mode(),
         ConsumerShape::Batch,
         C::Message::CODEC,
         std::any::type_name::<C>(),
     )
 }
 
-/// 业务作用：拒绝带首尾空白的元数据值。
+/// 业务作用：在手写和宏声明共用的注册入口拒绝身份字段的首尾空白。
 ///
-/// 校验点必须在 `build_meta`：宏面的 `deny_padded` 只覆盖 `#[kafka_consumer]`，
-/// 而 `ConsumerRegistry::register` / `register_batch` 与手写 `impl SingleConsumer`
-/// 是同等的公开入口，走的正是这里。如果只做 `trim().is_empty()` 判空却保存未 trim 的值，
-/// `event: " created "` 会在运行期与 header 永不匹配，
-/// `GroupSpec::Named(" g ")` 则直接换成另一个 group.id（孤儿 offset + 按 reset 重置）。
+/// consumer id、broadcast scope 与 topic 参与身份比较或资源选择，
+/// 不得通过静默裁剪改写调用方声明。event 与普通 group 另行校验各自的精确文本边界，有效身份保留原文。
 ///
-/// 刻意报错而非静默 trim：静默 trim 会与用户写下的意图不符，且掩盖上游拼接错误。
-///
-/// # 参数
-///
-/// - `id`: 所属 consumer id，用于定位。
-/// - `value`: 待校验的值。
-/// - `field`: 出错时提示的字段名。
-///
-/// # 错误
-///
-/// 值带首尾空白时返回注册错误。
+/// 参数说明：id 为所属 consumer，value 为待校验的身份值，field 为诊断中的字段名。
+/// 返回：无首尾空白时通过，否则返回注册错误，不发布消费路由。
 fn deny_padded(id: &str, value: &str, field: &str) -> Result<()> {
     if value != value.trim() {
         return Err(NafkaError::Registry(format!(
@@ -285,9 +333,12 @@ fn deny_padded(id: &str, value: &str, field: &str) -> Result<()> {
 /// - `event`: 事件名。
 /// - `group`: group 规则。
 /// - `ack_mode`: route 确认模式。
+/// - `execution_mode`: 同组一致的执行顺序域。
 /// - `shape`: handler 的单条或批量调用形态。
 /// - `codec`: 消息 codec。
 /// - `source`: 来源诊断位置。
+///
+/// 返回：合法元数据的冻结副本；组身份非法时为 Config，其它非法声明或按键批模式为 Registry。
 ///
 /// # 错误
 ///
@@ -299,24 +350,35 @@ fn build_meta(
     event: String,
     group: GroupSpec,
     ack_mode: AckMode,
+    execution_mode: ExecutionMode,
     shape: ConsumerShape,
     codec: PayloadCodec,
     source: &'static str,
 ) -> Result<ConsumerMeta> {
+    // 批次确认无法表达不同 key 的独立失败责任，必须在开放消费路由之前拒绝。
+    if execution_mode == ExecutionMode::KeyOrdered && shape == ConsumerShape::Batch {
+        return Err(NafkaError::Registry(
+            "KEY_ORDERED 不支持 batch consumer".into(),
+        ));
+    }
     if id.trim().is_empty() {
         return Err(NafkaError::Registry("consumer id 不能为空".into()));
     }
     deny_padded(id, id, "id")?;
-    if event.trim().is_empty() {
+    if crate::wire::is_blank_event(&event) {
         return Err(NafkaError::Registry(format!(
             "consumer `{id}` event 不能为空"
         )));
     }
-    deny_padded(id, &event, "event")?;
+    // event 是精确线路身份；非空白原文可含边缘空格，注册时不得裁剪或收窄发布合同。
     match &group {
         GroupSpec::Default => {}
-        GroupSpec::Named(value) => deny_padded(id, value, "group")?,
+        GroupSpec::Named(value) => crate::wire::validate_group(value)?,
         GroupSpec::Broadcast(value) => deny_padded(id, value, "broadcast scope")?,
+        GroupSpec::StableBroadcast { scope, instance_id } => {
+            // 共同编码独立验证精确原文，不沿用旧广播净化或裁剪规则。
+            crate::broadcast_group(scope, instance_id.as_deref().unwrap_or("pending"))?;
+        }
     }
     if topics.is_empty() {
         return Err(NafkaError::Registry(format!(
@@ -344,6 +406,7 @@ fn build_meta(
         event,
         group,
         ack_mode,
+        execution_mode,
         shape,
         codec,
         source,
@@ -371,6 +434,9 @@ impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
     /// 业务作用：调用一次且只含一条记录的单条 handler run。
     ///
     /// - `records`: dispatcher 提供的单记录向量。
+    ///
+    /// 参数说明：records 携带已解码值、来源身份和 owner 的实时确认许可。
+    /// 返回：回调期受管的业务 future；成功仍须服从 Manual Ack 和有效权威门禁。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
         Box::pin(async move {
             if records.len() != 1 {
@@ -384,7 +450,12 @@ impl<C: SingleConsumer> ErasedConsumer for SingleAdapter<C> {
             let ack_set = manual_ack_set(
                 self.meta.ack_mode,
                 invocation_id,
-                [(&erased.ctx, erased.assignment_epoch)],
+                [(
+                    &erased.ctx,
+                    erased.assignment_epoch,
+                    erased.authority.clone(),
+                    erased.stopping.clone(),
+                )],
             );
             let ack = record_ack(self.meta.ack_mode, ack_set.as_ref(), 0);
             let value = match erased.value.downcast::<C::Message>() {
@@ -428,6 +499,9 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
     /// 业务作用：恢复连续 run 的业务类型并调用一次批 handler。
     ///
     /// - `records`: 同 route、同分区且 offset 连续的记录。
+    ///
+    /// 参数说明：records 为按交付顺序排列的连续 run 及其确认许可。
+    /// 返回：整个调用成功时仅确认有效连续前缀，错误或取消封存本次全部 token。
     fn invoke<'a>(&'a self, records: Vec<ErasedRecord>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let total = records.len();
@@ -435,9 +509,14 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
             let ack_set = manual_ack_set(
                 self.meta.ack_mode,
                 invocation_id,
-                records
-                    .iter()
-                    .map(|record| (&record.ctx, record.assignment_epoch)),
+                records.iter().map(|record| {
+                    (
+                        &record.ctx,
+                        record.assignment_epoch,
+                        record.authority.clone(),
+                        record.stopping.clone(),
+                    )
+                }),
             );
             let mut typed = Vec::with_capacity(total);
             for (index, erased) in records.into_iter().enumerate() {
@@ -464,63 +543,63 @@ impl<C: BatchConsumer> ErasedConsumer for BatchAdapter<C> {
     }
 }
 
-/// 业务作用：将原始 payload 解码为具体消息类型。
-///
-/// # 参数
-///
-/// - `raw`: 原始拥有型记录。
-///
-/// # 错误
-///
-/// tombstone 或 codec 解码失败时返回错误。
+/// 业务作用：按业务类型解码拥有型记录，并保留 Kafka null 与普通正文的区别。
+/// 参数说明：raw 为保留原始 null 身份的记录。
+/// 返回：业务消息值；类型不接受 tombstone 或 codec 解码失败时返回错误。
 fn decode_record<T: DecodePayload>(raw: &RawRecord) -> Result<ErasedRecord> {
-    let payload = raw.payload.as_deref().ok_or(NafkaError::MissingPayload)?;
-    // 解码跑在 owner 线程上，且在每次调用的 catch_unwind **之外**：这里 panic 会一路穿到
-    // 会话级 catch_unwind 把 group 打成 Crashed，而 offset 从未推进 —— operator restart 后
-    // 同一条记录再次 panic，形成永久毒消息循环。
-    //
-    // handler 的 panic 早已被接住并按重试/DLT 处置；解码同样是在处理外部字节，
-    // 必须享有同等待遇：panic 归一成"确定无效记录"，交给 invalid_record_policy。
-    // 触发面既包括业务自定义解码器的缺陷，也包括第三方 codec 对畸形 payload 的越界访问。
-    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| T::decode(payload)))
-        .map_err(|_payload| {
-            // **刻意丢弃 panic payload 文本**：该错误会进 `GroupHealth.last_error`(公开 API,
-            // 不截断)与 DLT reason header。而解码器常写成 `from_slice::<T>(p).unwrap()`,
-            // serde 的 panic 文本里**嵌着出错的输入片段**(`invalid type: string "sk-live-…"`),
-            // 转交原始错误会泄露凭据；napp/src/panic_hook.rs 同样拒绝读取 payload。
-            // 定位靠固定字面量 + 具体消息类型名(编译期常量,不含任何记录内容)。
-            NafkaError::Codec(format!(
-                "payload 解码 panic(内容已抑制,类型 {})",
-                std::any::type_name::<T>()
-            ))
-        })?;
+    // codec 在有界业务线程中处理外部字节；panic 归为本条解码失败，由 owner 按输入顺序
+    // 应用 invalid_record_policy 与连续失败保护，不能越过尚未接管的前缀改变分区状态。
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match raw.payload.as_deref() {
+            Some(payload) => T::decode(payload),
+            None => T::decode_tombstone(),
+        }
+    }))
+    .map_err(|_payload| {
+        // **刻意丢弃 panic payload 文本**：该错误会进 `GroupHealth.last_error`(公开 API,
+        // 不截断)与 DLT reason header。而解码器常写成 `from_slice::<T>(p).unwrap()`,
+        // serde 的 panic 文本里**嵌着出错的输入片段**(`invalid type: string "sk-live-…"`),
+        // 转交原始错误会泄露凭据；napp/src/panic_hook.rs 同样拒绝读取 payload。
+        // 定位靠固定字面量 + 具体消息类型名(编译期常量,不含任何记录内容)。
+        NafkaError::Codec(format!(
+            "payload 解码 panic(内容已抑制,类型 {})",
+            std::any::type_name::<T>()
+        ))
+    })?;
     let value = decoded?;
     Ok(ErasedRecord {
+        authority: None,
+        stopping: None,
         value: Box::new(value),
         ctx: raw.ctx.clone(),
         assignment_epoch: raw.assignment_epoch,
     })
 }
 
-/// 业务作用：按确认模式创建本次 run 的手动确认槽。
-///
-/// # 参数
-///
-/// - `mode`: route 确认模式。
-/// - `invocation_id`: 本次 handler 调用 id。
-/// - `contexts`: 与输入顺序一致的记录上下文和 assignment epoch。
+/// 业务作用：按确认模式为本次调用建立受 owner 权威约束的临时确认槽。
+/// 参数说明：mode 为确认模式；invocation_id 为本次调用身份；contexts 按输入顺序携带坐标、分配代次、实时权威与源停止门。
+/// 返回：Manual 模式的确认集合；Auto 模式不创建确认槽，旧调用不能确认后来分配的输入。
 fn manual_ack_set<'a>(
     mode: AckMode,
     invocation_id: u64,
-    contexts: impl IntoIterator<Item = (&'a ConsumeCtx, u64)>,
+    contexts: impl IntoIterator<
+        Item = (
+            &'a ConsumeCtx,
+            u64,
+            Option<Arc<AtomicBool>>,
+            Option<Arc<AtomicBool>>,
+        ),
+    >,
 ) -> Option<ManualAckSet> {
     (mode == AckMode::Manual).then(|| {
         ManualAckSet::new(
             contexts
                 .into_iter()
-                .map(|(ctx, assignment_epoch)| AckIdentity {
+                .map(|(ctx, assignment_epoch, authority, stopping)| AckIdentity {
                     invocation_id,
                     assignment_epoch,
+                    authority,
+                    stopping,
                     topic: ctx.topic.clone(),
                     partition: ctx.partition,
                     offset: ctx.offset,

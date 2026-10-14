@@ -121,6 +121,13 @@ pub struct BorrowedKafkaRecord<'a> {
 }
 
 impl<'a> BorrowedKafkaRecord<'a> {
+    /// 业务作用：在借用调用内解析唯一规范trace，返回的固定身份不持有原文。
+    /// 参数说明：无。返回：缺失或非法观测为空，不改变业务处置结果。
+    pub fn trace_context(&self) -> Option<natelemetry::TraceContext> {
+        crate::trace::extract_fields(self.headers.iter().map(|h| (h.name, h.value)))
+            .ok()
+            .flatten()
+    }
     /// 业务作用：由 owner callback 构造借用消息。
     ///
     /// # 参数

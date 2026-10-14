@@ -152,6 +152,27 @@ Redis 客户端释放前收口，停机期限不足不能宣告消费责任已�
 配置示例与容量算法见 [nadis](../nadis/README.md#执行域与消费架构) 和
 [分区消费说明](../nadis/docs/partition.md#容量与配置)。
 
+## Kafka 来源与事务前置条件
+
+门面启用 `application,kafka` 并声明 `"kafka"` 组件；按需增加 `kafka-tls`、`kafka-gssapi`、`kafka-zstd`、`kafka-schema-registry` 或 `kafka-mysql-checkpoint`。TLS/SASL 身份按源冻结，编译支持不等于 broker 认证或 ACL 已满足。GSSAPI 还依赖目标系统认证栈。
+
+Kafka 原生客户端默认从源码静态构建，需要 C/C++ 编译工具链和 make；TLS 的内嵌 OpenSSL 构建还需要 Perl，GSSAPI 需要目标系统的 Cyrus SASL/Kerberos 开发与运行库。静态链接 librdkafka 不表示可忽略目标系统 ABI、CA 和认证材料。`KafkaProxy::connect` 会创建原生 producer 与后台线程，后台可开始连接；构造成功不替代后续 metadata、消费分配或事务 Ready 证据。
+
+单源使用 `kafka`，多源使用 `kafkas.<name>`，两根互斥。client 名与宏声明、Hook 注册、业务句柄及 Ready 要求精确对应；来源变化需要完整重建，不能热替换 broker、凭据或 group。多个名称指向同一物理集群也不自动成为跨源原子事务。
+
+| 部署条件 | 不满足时的行为 |
+| --- | --- |
+| bootstrap 与 advertised listener 对实际客户端可达 | metadata、加入消费组或交付不能完成，不能只看端口连通 |
+| broker 内部 listener 在 broker 网络可达 | 事务协调器标记可能无法写入，稳定身份初始化或恢复保持未就绪 |
+| `transaction.state.log.replication.factor` 与 `transaction.state.log.min.isr` 满足可用副本条件 | `__transaction_state` 不能建立或写入，普通收发成功仍不能证明事务可用 |
+| 事务 `application/slot/owner` 来自稳定部署身份 | 恢复换随机身份不能接续旧事务，同时活动槽共用身份会发生 fencing |
+| 下游使用 `read_committed` | 其它隔离级别可能看见未提交输出，不属于事务可见性保证 |
+| checkpoint 存储满足独占与持久条件 | 有限任务不得据内存进度继续；MySQL 故障切换须确保旧主失去写权限 |
+
+按组配置必要的 Ready 条件；Joined 允许已加入但没有分区的备用槽，强制分区覆盖需使用 AssignedTopics 或 AssignedPartitions。事务任务另有自己的 `await_ready`，源级 Ready 不替代任务的分配证据。输入、发布和有限任务预算各自计费，不把它们相加当成整个进程内存上限。
+
+生产拓扑中的事务日志副本与ISR应按可用性需求配置，不能照搬单节点示例降低保障。完整字段与限制见 [nafka](../nafka/README.md) 和 [napp Kafka 配置](../napp/README.md#kafka-受管模式)。
+
 ## 部署顺序
 
 1. 使用锁文件在受控依赖源中完成构建。

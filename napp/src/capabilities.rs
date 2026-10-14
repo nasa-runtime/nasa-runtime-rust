@@ -1,7 +1,5 @@
 #[cfg(feature = "kafka")]
 use std::collections::BTreeMap;
-#[cfg(any(feature = "log", feature = "scheduling"))]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "log",
     feature = "kafka",
@@ -11,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
     feature = "scheduling"
 ))]
 use std::sync::Arc;
+#[cfg(any(feature = "log", feature = "scheduling"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "nacos-config",
     feature = "ws",
@@ -22,6 +22,7 @@ use std::sync::{OnceLock, Weak};
 #[cfg(feature = "ws")]
 use std::net::SocketAddr;
 
+use crate::ApplicationState;
 #[cfg(any(
     feature = "log",
     feature = "kafka",
@@ -31,7 +32,6 @@ use std::net::SocketAddr;
     feature = "scheduling"
 ))]
 use crate::state::StateCell;
-use crate::ApplicationState;
 #[cfg(any(
     feature = "kafka",
     feature = "nacos-config",
@@ -146,6 +146,10 @@ pub(crate) struct KafkaClientCapability {
     client_name: Arc<str>,
     /// 仅组件和 shutdown action 可克隆的原始运行时句柄。
     proxy: nafka::KafkaProxy,
+    /// 最终清理无论成功或耗尽预算都撤销已导出句柄的新准入。
+    access_scope: nafka::KafkaAccessScope,
+    /// 宿主按 client 显式授权的管理写能力；普通 admin 视图始终只读。
+    admin_write: bool,
     /// 动态就绪聚合项；更新顺序为先写快照、后发布该原子结论。
     contributor: crate::readiness::ReadinessContributor,
     /// 供管理面读取的最近一次脱敏快照。
@@ -166,6 +170,8 @@ impl KafkaClientCapability {
     /// - `proxy`：Start 已完成本地构造、尚未启动 consumer 的原始运行时。
     /// - `contributor`：Application readiness registry 为本 client 分配的独占贡献句柄。
     /// - `metrics`：Start 时注入 proxy 的内部可替换指标桥。
+    /// - `access_scope`：与最终清理 action 共享的单向业务准入域。
+    /// - `admin_write`：是否允许业务显式取得管理写视图，仍需 broker ACL 授权。
     /// - `_ws_consumer_owner`：WS 子能力是否可独占本 client 的消费登记。
     ///
     /// # 返回
@@ -176,6 +182,8 @@ impl KafkaClientCapability {
         proxy: nafka::KafkaProxy,
         contributor: crate::readiness::ReadinessContributor,
         metrics: Arc<crate::kafka::KafkaMetricsBridge>,
+        access_scope: nafka::KafkaAccessScope,
+        admin_write: bool,
         _ws_consumer_owner: bool,
     ) -> Self {
         Self {
@@ -186,6 +194,8 @@ impl KafkaClientCapability {
             }),
             client_name,
             proxy,
+            access_scope,
+            admin_write,
             contributor,
             metrics,
             #[cfg(feature = "ws-kafka")]
@@ -319,6 +329,15 @@ impl KafkaHandle {
         self.capability.client_name()
     }
 
+    /// 业务作用：在受管应用中分别观察Kafka构建支持、配置启用和真实组就绪，不授予管理写权限。
+    /// 参数说明：无。返回：不含凭据的只读快照；停止后仍可诊断，空组表不表示Ready。
+    pub fn capabilities(&self) -> ApplicationResult<nafka::KafkaCapabilities> {
+        self.capability
+            .proxy
+            .capabilities()
+            .map_err(|error| self.operation_error("capabilities query", error))
+    }
+
     /// 业务作用：向同一组件内的受管协议适配器暴露 Kafka 已冻结的 DLT 后缀。
     ///
     /// 参数说明: 无。
@@ -348,18 +367,57 @@ impl KafkaHandle {
     ///
     /// 参数说明：无。
     ///
-    /// 返回：Starting/Ready/Draining/Closed/Failed 之一，不暴露 nafka 内部状态机。
+    /// 返回：Starting/Ready/Draining/Closed/Failed 之一；宿主已停但资源尚未退出时为 Failed，不能据宿主退出声称 Closed。
     pub fn lifecycle(&self) -> ComponentLifecycleState {
-        ComponentLifecycleState::from(self.application_state.load())
+        let state = ComponentLifecycleState::from(self.application_state.load());
+        // Application 的首次退出原因与资源清理结果独立；未完成的 Kafka 责任不能伪装成关闭成功。
+        if state == ComponentLifecycleState::Closed && !self.capability.proxy.is_closed() {
+            ComponentLifecycleState::Failed
+        } else {
+            state
+        }
+    }
+
+    /// 业务作用：在宿主已结束最终清理后继续等待未退出的 Kafka 责任，不能用于停止活跃源。
+    /// 参数说明：deadline 为本次等待和资源收尾共用的绝对截止时刻。
+    /// 返回：实际资源全部退出后成功；宿主尚未交还最终清理权时拒绝，超时保留责任且不重开业务准入。
+    pub async fn await_closed(&self, deadline: std::time::Instant) -> ApplicationResult<()> {
+        // 只接续已经授权且结束的宿主清理；业务持有句柄不能提前关闭仍在运行的整个源。
+        if !matches!(
+            self.application_state.load(),
+            ApplicationState::Stopped | ApplicationState::Failed
+        ) || !self.capability.access_scope.is_closed()
+        {
+            return Err(self.operation_error(
+                "await resource closure",
+                nafka::NafkaError::Lifecycle("Application 最终清理尚未结束".into()),
+            ));
+        }
+        if self.capability.proxy.is_closed() {
+            return Ok(());
+        }
+        self.capability
+            .proxy
+            .shutdown_until(deadline)
+            .await
+            .map_err(|error| self.operation_error("await resource closure", error))
     }
 
     /// 业务作用：返回最近一次 Ready 门禁或运行期 monitor 发布的健康快照。
     ///
     /// # 返回
     ///
-    /// 返回拥有型脱敏副本；producer-only client 的 groups 为空。
+    /// 返回拥有型脱敏副本；producer-only client 的 groups 为空，退出阶段强制撤销 ready，不把历史采样当作流量许可。
     pub fn readiness(&self) -> KafkaReadinessSnapshot {
-        self.capability.readiness()
+        let mut snapshot = self.capability.readiness();
+        // monitor 或 consumer 清理 action 可能已停止采样；宿主退出事实优先于最后一次健康结论。
+        if matches!(
+            self.application_state.load(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            snapshot.ready = false;
+        }
+        snapshot
     }
 
     /// 业务作用：获取一个无关闭权的 producer lane。
@@ -380,24 +438,121 @@ impl KafkaHandle {
         self.capability
             .proxy
             .producer_lane(name)
+            .map(|lane| lane.with_access_scope(&self.capability.access_scope))
             .map_err(|error| self.operation_error("producer lane access", error))
     }
 
-    /// 业务作用：获取受管 client 的 admin 句柄(topic metadata 查询、按需建 topic 等)。
-    ///
-    /// 只读探测(list/exists/partitions)与显式 `create_if_absent` 都经它;不交出 client 关闭权。业务在
-    /// UserHook 取得后即可用,真实 broker 往返(如建 topic)需在 broker 连接后(Ready)执行。
-    ///
-    /// # 返回
-    ///
-    /// Starting 或 Ready 阶段返回 admin 句柄。
-    ///
-    /// # 错误
-    ///
-    /// Application 已进入 Draining/终态时返回 Kafka 组件错误。
+    /// 业务作用：获取受管 client 的只读管理视图，供 metadata、位点观测和 topic 合同核验。
+    /// 参数说明：无。
+    /// 返回：Starting/Ready 时提供无管理写权、无关闭权的视图；克隆保持限制，已取得视图可用于 graceful shutdown 尾部查询，最终清理后永久拒绝。
     pub fn admin(&self) -> ApplicationResult<nafka::KafkaAdmin> {
         self.ensure_operation_open("admin access", true)?;
-        Ok(self.capability.proxy.admin())
+        Ok(self
+            .capability
+            .proxy
+            .admin()
+            .with_access_scope(&self.capability.access_scope)
+            .read_only())
+    }
+
+    /// 业务作用：在宿主显式授权的 client 上取得管理写视图，不授予整源关闭权。
+    /// 参数说明：无；权限来自冻结的 container.admin_write 配置。
+    /// 返回：Starting/Ready 且显式授权时返回同源管理视图，未授权为 Authorization；实际操作仍受 broker ACL 和最终清理门约束。
+    pub fn administration(&self) -> ApplicationResult<nafka::KafkaAdmin> {
+        self.ensure_operation_open("administration access", true)?;
+        // 业务不能通过普通 getter 将只读能力提升为写能力；配置授权与 broker ACL 必须同时成立。
+        if !self.capability.admin_write {
+            return Err(self.operation_error("administration access",
+                nafka::NafkaError::Authorization));
+        }
+        Ok(self.capability.proxy.admin().with_access_scope(&self.capability.access_scope))
+    }
+
+    /// 业务作用：在容器来源上登记独立回放任务，关闭责任仍归 Application 所有。
+    /// 参数说明：plan 为冻结合同，store 为持久后端，identity 为当前资源证明，processor 为同步成功合同。
+    /// 返回：Starting/Ready 时允许登记；Draining 后拒绝新任务，已登记任务由两段停机真实排干。
+    pub fn replay(
+        &self,
+        plan: nafka::ReplayPlan,
+        store: Arc<dyn nafka::CheckpointStore>,
+        identity: Arc<dyn nafka::ReplayIdentityProvider>,
+        processor: Arc<dyn nafka::ReplayProcessor>,
+    ) -> ApplicationResult<nafka::ReplayHandle> {
+        self.ensure_operation_open("replay execution", true)?;
+        self.capability
+            .proxy
+            .replay(plan, store, identity, processor)
+            .map_err(|error| self.operation_error("replay execution", error))
+    }
+
+    /// 业务作用：在两个受管 Kafka 来源间登记有限转发，由双方停机共同排干实际交付。
+    /// 参数说明：plan 为固定合同，destination 为目标能力，store 为独占持久后端，source_identity/destination_identity 为当前目录，registries 为可选明确绑定。
+    /// 返回：双方 Starting/Ready 才接受新任务；进入 Draining 后拒绝，已登记责任继续收尾。
+    pub fn transfer(
+        &self,
+        plan: nafka::TransferPlan,
+        destination: &KafkaHandle,
+        store: Arc<dyn nafka::CheckpointStore>,
+        source_identity: Arc<dyn nafka::ReplayIdentityProvider>,
+        destination_identity: Arc<dyn nafka::ReplayIdentityProvider>,
+        registries: Option<nafka::TransferRegistries>,
+    ) -> ApplicationResult<nafka::TransferHandle> {
+        self.ensure_operation_open("transfer execution", true)?;
+        destination.ensure_operation_open("transfer destination", true)?;
+        self.capability
+            .proxy
+            .transfer(
+                plan,
+                &destination.capability.proxy,
+                store,
+                source_identity,
+                destination_identity,
+                registries,
+            )
+            .map_err(|error| self.operation_error("transfer execution", error))
+    }
+
+    /// 业务作用：在两个受管 Kafka 来源间登记有限DLT回投，由双方停机共同排干实际交付。
+    /// 参数说明：plan 为固定来源过滤、回投与隔离合同，destination 为目标能力，store 为独占持久后端，source_identity/destination_identity 为当前目录，registries 为可选明确绑定。
+    /// 返回：双方 Starting/Ready 才接受新任务；进入 Draining 后拒绝，已登记责任继续收尾。
+    pub fn replay_dlt(
+        &self,
+        plan: nafka::DltReplayPlan,
+        destination: &KafkaHandle,
+        store: Arc<dyn nafka::CheckpointStore>,
+        source_identity: Arc<dyn nafka::ReplayIdentityProvider>,
+        destination_identity: Arc<dyn nafka::ReplayIdentityProvider>,
+        registries: Option<nafka::TransferRegistries>,
+    ) -> ApplicationResult<nafka::DltReplayHandle> {
+        self.ensure_operation_open("DLT replay execution", true)?;
+        destination.ensure_operation_open("DLT replay destination", true)?;
+        self.capability
+            .proxy
+            .replay_dlt(
+                plan,
+                &destination.capability.proxy,
+                store,
+                source_identity,
+                destination_identity,
+                registries,
+            )
+            .map_err(|error| self.operation_error("DLT replay execution", error))
+    }
+
+    /// 业务作用：在受管来源启动专属同集群消费、输出与位点原子事务。
+    /// 参数说明：plan 为稳定部署身份和完整白名单，processor 为同步有界整批处理。
+    /// 返回：Starting/Ready 才接受新任务，事务回调和原生提交全部纳入两段停机。
+    pub async fn transact(
+        &self,
+        plan: nafka::TransactionPlan,
+        processor: Arc<dyn nafka::TransactionProcessor>,
+    ) -> ApplicationResult<nafka::TransactionHandle> {
+        self.ensure_operation_open("transaction execution", true)?;
+        self.capability
+            .proxy
+            .transact(plan, processor)
+            .await
+            .map_err(|error| self.operation_error("transaction execution", error))
     }
 
     /// 业务作用：查询一个 resolved group 的当前健康快照。
@@ -421,6 +576,56 @@ impl KafkaHandle {
             .await
             .map_err(|error| self.operation_error("group health query", error))
     }
+
+    /// 业务作用：在容器准入边界内解释当前组的接流量条件。
+    /// 参数说明：group 为当前源组名，requirement 为分配要求。
+    /// 返回：同次观测的要求、原因和健康；容器未 Ready、已停止、未知组或非法条件拒绝。
+    pub async fn group_readiness(
+        &self,
+        group: &str,
+        requirement: nafka::ReadyRequirement,
+    ) -> ApplicationResult<nafka::ReadyStatus> {
+        // 诊断入口不授予新运行权威，仍须遵守受管容器的生命周期。
+        self.ensure_operation_open("group readiness query", false)?;
+        self.capability
+            .proxy
+            .group_readiness(group, requirement)
+            .await
+            .map_err(|error| self.operation_error("group readiness query", error))
+    }
+
+    /// 业务作用：查询受管消费组各 owner 槽的独立健康，定位被组聚合状态覆盖的容量与归属差异。
+    /// 参数说明：group 为 Ready 阶段解析出的最终 group id。
+    /// 返回：按稳定槽号排序的快照；容器未 Ready、停机或组不存在时拒绝。
+    pub async fn group_slots_health(
+        &self,
+        group: &str,
+    ) -> ApplicationResult<Vec<nafka::GroupHealth>> {
+        // 受管观察仍受容器准入约束，不能由外部句柄越过未 Ready 或已 Draining 的边界。
+        self.ensure_operation_open("group slots health query", false)?;
+        self.capability
+            .proxy
+            .group_slots_health(group)
+            .await
+            .map_err(|error| self.operation_error("group slots health query", error))
+    }
+
+    /// 业务作用：观察受管 Kafka 指标出口的丢弃、失败和实际活动责任。
+    /// 参数说明：无。
+    /// 返回：当前源的进程内快照；容器未 Ready 或已进入 Draining 时拒绝，不绕过受管准入。
+    pub fn metrics_export_stats(&self) -> ApplicationResult<nafka::MetricsExportStats> {
+        // 观测句柄仍服从容器权威，不能借诊断入口重新开放关闭中的资源。
+        self.ensure_operation_open("metrics export stats query", false)?;
+        Ok(self.capability.proxy.metrics_export_stats())
+    }
+
+    /// 业务作用：开放停机期间及之后的只读责任诊断，不授予活跃宿主整源关闭权。
+    /// 参数说明：无。
+    /// 返回：源实际资源与未确认输入的独立快照；查询不重建原生资源，也不经过业务准入。
+    pub fn close_report(&self) -> nafka::CloseReport { self.capability.proxy.close_report() }
+    /// 业务作用：让宿主采样该源的剩余责任；已停止的业务句柄仍可取得关闭证据。
+    /// 参数说明：无。返回：关闭快照；异步指标可能丢弃，不授予停止或管理写权限。
+    pub fn sample_metrics(&self) -> nafka::CloseReport { self.capability.proxy.sample_metrics() }
 
     /// 业务作用：查询一个 resolved group 的当前 assignment。
     ///
@@ -631,6 +836,22 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("group pause", error))
     }
 
+    /// 业务作用：在受管 Ready 门禁内提交逐分区控制，并保留部分执行证据。
+    /// 参数说明：group 为本源最终组名；actions 为非空显式目标与操作。
+    /// 返回：独立报告；容器未开放、声明非法或组缺席时返回受管错误，不绕过生命周期。
+    pub async fn control_partitions(
+        &self,
+        group: &str,
+        actions: std::collections::BTreeMap<nafka::Tp, nafka::PartitionControl>,
+    ) -> ApplicationResult<nafka::ControlReport> {
+        self.ensure_operation_open("partition control", false)?;
+        self.capability
+            .proxy
+            .control_partitions(group, actions)
+            .await
+            .map_err(|error| self.operation_error("partition control", error))
+    }
+
     /// 业务作用：移除给定分区的业务暂停原因。
     ///
     /// # 参数
@@ -785,6 +1006,43 @@ impl KafkaHandle {
             .map_err(|error| self.operation_error("topic partition metadata query", error))
     }
 
+    /// 业务作用：在受管源上读取明确隔离级别的位置证据，不扩大写入或关闭权限。
+    /// 参数说明：group 为可选组，tps 为明确分区，isolation 为读取隔离，timestamp_millis 为可选时间，timeout 为全部步骤共享预算。
+    /// 返回：Starting/Ready 时提供逐字段观测；进入排空后拒绝新查询，已经接纳的实际查询仍受源关闭追踪。
+    pub async fn observe_offsets(
+        &self,
+        group: Option<&str>,
+        tps: Vec<nafka::Tp>,
+        isolation: nafka::OffsetIsolation,
+        timestamp_millis: Option<i64>,
+        timeout: std::time::Duration,
+    ) -> ApplicationResult<nafka::OffsetObservation> {
+        self.ensure_operation_open("offset observation", true)?;
+        self.capability
+            .proxy
+            .admin()
+            .observe_offsets(group, tps, isolation, timestamp_millis, timeout)
+            .await
+            .map_err(|error| self.operation_error("offset observation", error))
+    }
+
+    /// 业务作用：在应用初始化或就绪阶段只读核对 topic 声明，不自动更改 broker 资源。
+    /// 参数说明：spec 为分区、副本和配置子集，timeout 为整轮查询预算。
+    /// 返回：匹配时提供实际描述；漂移或查询失败保留原因，应用排空后拒绝新核验。
+    pub async fn verify_topic(
+        &self,
+        spec: nafka::TopicSpec,
+        timeout: std::time::Duration,
+    ) -> ApplicationResult<nafka::TopicDescription> {
+        self.ensure_operation_open("topic contract verification", true)?;
+        self.capability
+            .proxy
+            .admin()
+            .verify_topic(spec, timeout)
+            .await
+            .map_err(|error| self.operation_error("topic contract verification", error))
+    }
+
     /// 业务作用：显式重建一个允许人工恢复的 consumer group。
     ///
     /// # 参数
@@ -852,7 +1110,7 @@ impl KafkaHandle {
     fn operation_error(
         &self,
         operation: &'static str,
-        error: nafka::NafkaError,
+        error: impl Into<anyhow::Error>,
     ) -> ApplicationError {
         let state = self.application_state.load();
         let phase = match state {

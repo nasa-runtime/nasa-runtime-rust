@@ -174,45 +174,27 @@ impl ConsumerRegistryBuilder {
         }
     }
 
-    /// 业务作用：注册有状态单条消费者实例。
-    ///
-    /// # 参数
-    ///
-    /// - `consumer`: 已完成依赖注入的实例。
-    ///
-    /// # 错误
-    ///
-    /// 元数据非法或 handler id 重复时返回注册错误。
+    /// 业务作用：登记有状态单条消费者并冻结其路由声明。
+    /// 参数说明：consumer 为已完成业务依赖注入的实例。
+    /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法或 handler id 重复时为 Registry。
     pub fn register<C: SingleConsumer>(mut self, consumer: C) -> Result<Self> {
         let erased = erase_single(consumer)?;
         self.push_typed(erased)?;
         Ok(self)
     }
 
-    /// 业务作用：注册有状态批消费者实例。
-    ///
-    /// # 参数
-    ///
-    /// - `consumer`: 已完成依赖注入的实例。
-    ///
-    /// # 错误
-    ///
-    /// 元数据非法或 handler id 重复时返回注册错误。
+    /// 业务作用：登记有状态批消费者并冻结其路由声明。
+    /// 参数说明：consumer 为已完成业务依赖注入的实例。
+    /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法、按键批模式或 handler id 重复时为 Registry。
     pub fn register_batch<C: BatchConsumer>(mut self, consumer: C) -> Result<Self> {
         let erased = erase_batch(consumer)?;
         self.push_typed(erased)?;
         Ok(self)
     }
 
-    /// 业务作用：注册同步借用式少拷贝消费者。
-    ///
-    /// # 参数
-    ///
-    /// - `consumer`: 已完成本地路由和 outbox 注入的同步 handler。
-    ///
-    /// # 错误
-    ///
-    /// 元数据非法或 handler id 重复时返回注册错误。
+    /// 业务作用：登记在 poll 栈内同步借用原文的少拷贝消费者。
+    /// 参数说明：consumer 为已完成本地路由和 outbox 注入的同步 handler。
+    /// 返回：持有冻结路由的注册器；组身份不满足共同边界时为 Config，其它元数据非法或 handler id 重复时为 Registry。
     pub fn register_passthrough<C: PassthroughConsumer>(mut self, consumer: C) -> Result<Self> {
         let meta = passthrough_meta(&consumer)?;
         self.ensure_unique_id(meta.id)?;
@@ -383,6 +365,15 @@ impl ConsumerRegistryBuilder {
             }
         }
         let startup_gate = Arc::new(StartupGate::new());
+        // 事务与普通 owner 不能竞争同一组的提交；生命周期门覆盖双方完整登记过程。
+        if plans
+            .keys()
+            .any(|group| self.proxy.inner.transactions.contains(group))
+        {
+            return Err(NafkaError::Lifecycle(
+                "consumer group 已由事务 owner 占用".into(),
+            ));
+        }
         let mut started = BTreeMap::new();
         let mut startup_results = Vec::new();
         for (group, plan) in plans {
@@ -390,7 +381,9 @@ impl ConsumerRegistryBuilder {
                 Arc::clone(&self.proxy.inner),
                 plan,
                 Arc::clone(&startup_gate),
-            ) {
+            )
+            .await
+            {
                 Ok((handle, startup_result)) => {
                     startup_results.push((group.clone(), startup_result));
                     started.insert(group, handle);
@@ -529,19 +522,24 @@ impl ConsumerRegistryBuilder {
     }
 }
 
-/// 业务作用：保证同一个 resolved group 只采用一种消息所有权模型。
-///
-/// typed route 会把记录物化后进入异步回调，passthrough route 则只能在 poll 栈内借用；二者混合会让
-/// owner 无法在不复制或重排的前提下维持 broker 交付顺序，因此启动时必须拒绝。
-///
-/// # 参数
-///
-/// - `plan`: 已合并完 route 的 group 计划。
-///
-/// # 错误
-///
-/// 同时存在 typed 与 passthrough route 时返回注册错误。
+/// 业务作用：在开放消费前拒绝同组混合消息所有权模型或执行顺序域。
+/// 参数说明：plan 为已合并全部路由的组计划。
+/// 返回：全部路由所有权和顺序域一致时成功，否则返回 Registry。
+/// typed 路由将记录物化后交给业务执行资源，passthrough 只能在 poll 栈内借用；混用无法维持同组的既定交付责任。
 fn ensure_group_route_kind(plan: &GroupPlan) -> Result<()> {
+    // 顺序域属于整个分区，不能让不同事件在同一个 key 上绕过彼此的串行约束。
+    if let Some(first) = plan.typed.first() {
+        if plan
+            .typed
+            .iter()
+            .any(|route| route.meta().execution_mode != first.meta().execution_mode)
+        {
+            return Err(NafkaError::Registry(format!(
+                "group `{}` 不能混合 execution mode",
+                plan.group
+            )));
+        }
+    }
     if !plan.typed.is_empty() && !plan.passthrough.is_empty() {
         Err(NafkaError::Registry(format!(
             "group `{}` 不能混合 typed 与 passthrough consumer",
@@ -552,17 +550,9 @@ fn ensure_group_route_kind(plan: &GroupPlan) -> Result<()> {
     }
 }
 
-/// 业务作用：解析 route 的最终 group.id。
-///
-/// # 参数
-///
-/// - `config`: 冻结顶层配置。
-/// - `spec`: route 的 group 规则。
-/// - `instance`: 本进程广播实例标识。
-///
-/// # 错误
-///
-/// Default 无回退 group、Named/Broadcast 为空或最终长度超限时返回注册错误。
+/// 业务作用：将默认、命名或广播声明解析为实际消费与提交使用的组身份。
+/// 参数说明：config 为冻结源配置；spec 为路由的组规则；instance 为进程广播实例身份。
+/// 返回：通过共同边界校验的原文组名；默认组缺失或最终身份非法时为 Config，旧广播声明非法时为 Registry。
 fn resolve_group(
     config: &crate::config::KafkaConfig,
     spec: &GroupSpec,
@@ -570,9 +560,15 @@ fn resolve_group(
 ) -> Result<String> {
     let group = match spec {
         GroupSpec::Default => config.group_id.clone().ok_or_else(|| {
-            NafkaError::Registry("GroupSpec::Default 无法解析: config.group_id 未配置".into())
+            NafkaError::Config("GroupSpec::Default 无法解析: config.group_id 未配置".into())
         })?,
         GroupSpec::Named(group) => group.clone(),
+        GroupSpec::StableBroadcast { scope, instance_id } => crate::broadcast_group(
+            scope,
+            &instance_id
+                .clone()
+                .unwrap_or_else(|| broadcast_identity_instance(config)),
+        )?,
         GroupSpec::Broadcast(scope) => {
             if scope.trim().is_empty() {
                 return Err(NafkaError::Registry("Broadcast scope 不能为空".into()));
@@ -594,15 +590,8 @@ fn resolve_group(
             )
         }
     };
-    if group.trim().is_empty() {
-        return Err(NafkaError::Registry("最终 group.id 不能为空".into()));
-    }
-    if group.len() > 255 {
-        return Err(NafkaError::Registry(format!(
-            "最终 group.id 长度超限: {} > 255",
-            group.len()
-        )));
-    }
+    // Default、Named 与派生组在 owner 规划之前收敛到同一身份边界，不截短或另取名称。
+    crate::wire::validate_group(&group)?;
     Ok(group)
 }
 
@@ -612,8 +601,25 @@ fn resolve_group(
 ///
 /// - `config`: 冻结顶层配置。
 fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
+    broadcast_identity_instance(config)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .take(96)
+        .collect()
+}
+
+/// 业务作用：取得未经净化的广播实例声明，供共同编码保留完整身份。
+/// 参数说明：config 为冻结配置，配置优先于环境变量，缺省使用本进程临时身份。
+/// 返回：精确身份原文；最终身份是否合法由所选组算法在建组前验证。
+fn broadcast_identity_instance(config: &crate::config::KafkaConfig) -> String {
     static PROCESS_INSTANCE: OnceLock<String> = OnceLock::new();
-    let raw = config
+    config
         .behavior
         .broadcast_instance_id
         .clone()
@@ -627,17 +633,7 @@ fn broadcast_instance(config: &crate::config::KafkaConfig) -> String {
                     format!("{}-{nanos:x}", std::process::id())
                 })
                 .clone()
-        });
-    raw.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '-'
-            }
         })
-        .take(96)
-        .collect()
 }
 
 /// 业务作用：固定 FNV-1a 64 位哈希，保证广播 group 派生在协议演进期间可复现。
@@ -772,11 +768,17 @@ impl ConsumerRuntime {
 /// # 错误
 ///
 /// id、event、topic 为空或 topic 重复时返回注册错误。
+/// 返回：满足共同事件与命名组合同且 topic 不重复的元数据；组非法为 Config，其它元数据非法为 Registry，拒绝时不登记消费路由。
 fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughMeta> {
+    // 借用式入口也先冻结并验证命名组，不能比 typed 注册更晚接纳无效消费责任。
+    let group = consumer.group();
+    if let GroupSpec::Named(value) = &group {
+        crate::wire::validate_group(value)?;
+    }
     let id = consumer.id();
     let event = consumer.event();
     let mut topics = consumer.topics();
-    if id.trim().is_empty() || event.trim().is_empty() || topics.is_empty() {
+    if id.trim().is_empty() || crate::wire::is_blank_event(&event) || topics.is_empty() {
         return Err(NafkaError::Registry(format!(
             "passthrough consumer `{id}` 元数据为空"
         )));
@@ -798,7 +800,7 @@ fn passthrough_meta<C: PassthroughConsumer>(consumer: &C) -> Result<PassthroughM
         id,
         topics,
         event,
-        group: consumer.group(),
+        group,
         ack_mode: consumer.ack_mode(),
     })
 }

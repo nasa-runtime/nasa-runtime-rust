@@ -10,6 +10,10 @@ Saga and ordered message processing support recoverable business workflows. Appl
 capabilities through Cargo features and use their databases and message systems to hold durable facts.
 Each component keeps explicit resource, transaction and failure boundaries.
 
+Kafka provides a multi-source event runtime with shared Java `nasa-kafka` wire and recovery contracts:
+isolated sources and producer lanes, bounded ordered consumption, same-cluster transactions, and durable
+replay, transfer and DLT replay. See [Kafka event runtime](#kafka-event-runtime).
+
 Named Nacos, Consul, Kubernetes and Static/DNS connections isolate registry credentials, evidence
 and failures. Select internal calls with `qualifier`, use complete URLs for internet APIs, and keep
 registration and shutdown under one owner. The default connection name is lowercase `primary`.
@@ -33,6 +37,32 @@ async executor, database or message broker.
 > This is an independent open-source project. It is not affiliated with, sponsored by, endorsed by,
 > or an official project of the United States National Aeronautics and Space Administration. It does
 > not use the agency's insignia, logotype, seal or other official visual identifiers. See [NOTICE](NOTICE).
+
+## Kafka event runtime
+
+Enable `kafka` and use `nasa::kafka`. Managed applications also enable `application`, declare the
+`"kafka"` component, and configure either `kafka` or `kafkas.<name>`. `app.kafka(name)` returns a source-bound
+handle; an unknown explicit name never selects another source. Java and Rust share event bytes, group
+identities, stable transaction IDs and durable task formats, while API syntax remains language-specific.
+
+Each source owns independent producer lanes and consumption owners. A lane tracks actual delivery;
+each consumption owner polls its consumer and commits only the safe prefix under its current assignment.
+Partition ordering and per-key concurrency share process, source, group, partition and key responsibility
+budgets. These limits do not cap total process memory, CPU or broker load.
+
+Same-cluster transactions atomically commit the complete input offsets and approved outputs through a
+dedicated producer. An unknown commit protects the owner and requires recovery with the same stable
+identity. Finite replay, single-destination transfer and DLT replay persist checkpoints only after
+processing or destination confirmation; duplicates remain possible. Database, HTTP, socket and
+cross-cluster effects do not become part of the Kafka transaction.
+
+Current readiness, group/slot health, delivery state, a fixed metric catalog and close reports expose
+actual responsibility. Admin handles are read-only by default; writes require source-specific permission
+and broker ACLs. Transaction operation also requires reachable inter-broker listeners and sufficient
+transaction-state replication and ISR. Cancelling a wait never proves that in-flight work has exited.
+
+See the [component architecture](nafka/README.md), [managed lifecycle](napp/README.md#kafka-受管模式),
+[consumer macro](nafka-macro/README.md) and [deployment requirements](docs/deployment.md#kafka-来源与事务前置条件).
 
 ## Multiple registries and shared discovery ownership
 
@@ -110,7 +140,7 @@ different purposes; for example, `mapper` is a feature, while `"db"` selects dat
 | Durable Saga | `application,saga-runtime` or `application,saga-runtime-pgsql` | Durable state, Inbox/Outbox, compensation and explicit handling of unknown outcomes |
 | Redis and ordered consumption | `application,redis` | Redis ownership and pending entries remain separate from local execution |
 | Named local partition runners | `application,partition` | In-process ordering and bounded execution; no durable queue |
-| Kafka | `application,kafka` | Broker connectivity, supervised consumption and producer shutdown |
+| Kafka | `application,kafka` | Named sources and lanes, bounded ordered consumption, same-cluster atomic processing, durable replay, recoverable transfer, DLT replay and actual resource drain |
 | Transactional messaging | `inbox,outbox` or `inbox-pgsql,outbox-pgsql` | Business facts and delivery intent must share the same datasource |
 | SQL observability | `application,mapper` or `application,mapper-pgsql` | Automatic metrics; bounded notifications cannot change transaction results |
 | Secrets and outbound TLS | `secret,secret-http` | Explicit credential references and configuration application state |

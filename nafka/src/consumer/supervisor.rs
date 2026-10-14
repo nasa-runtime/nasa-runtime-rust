@@ -1,5 +1,7 @@
 //! group owner 句柄、控制命令 fencing 与健康快照共享域。
 
+pub(crate) use super::group::GroupHandle;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,7 +15,6 @@ use crate::consumer::registry::RegisteredPassthrough;
 use crate::error::{NafkaError, Result};
 use crate::health::{GroupHealth, GroupState};
 use crate::types::Tp;
-use crate::KafkaProxyInner;
 
 /// 命令仍在队列中，允许调用端超时取消。
 const COMMAND_QUEUED: u8 = 0;
@@ -23,6 +24,22 @@ const COMMAND_EXECUTING: u8 = 1;
 const COMMAND_CANCELLED: u8 = 2;
 /// owner 已完成执行。
 const COMMAND_COMPLETED: u8 = 3;
+
+/// 等待者离开后撤销仍未认领的命令，原生执行已经开始时保留 owner 收口责任。
+struct CommandCancellation(Arc<AtomicU8>);
+impl Drop for CommandCancellation {
+    /// 业务作用：调用 future 被取消时阻止排队命令迟到生效。
+    /// 参数说明：无。
+    /// 返回：只允许 Queued 到 Cancelled；Executing 不被强行中断或标为未执行。
+    fn drop(&mut self) {
+        let _ = self.0.compare_exchange(
+            COMMAND_QUEUED,
+            COMMAND_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
 
 /// owner 已完成本地构造，等待 registry/assign 统一放行。
 const STARTUP_PENDING: u8 = 0;
@@ -97,6 +114,7 @@ pub(crate) enum OwnerMode {
 }
 
 /// 一个 resolved group 的冻结启动计划。
+#[derive(Clone)]
 pub(crate) struct GroupPlan {
     /// 最终 group.id。
     pub(crate) group: String,
@@ -118,7 +136,19 @@ pub(crate) enum CommandReply {
     Assignment(Vec<Tp>),
 }
 
+/// 订阅集合的 owner 内原子修改方式。
+#[derive(Clone)]
+pub(crate) enum SubscriptionChange {
+    /// 完整替换。
+    Replace,
+    /// 在现有集合中增加。
+    Add,
+    /// 从现有集合中删除。
+    Remove,
+}
+
 /// owner 支持的有界控制命令。
+#[derive(Clone)]
 pub(crate) enum OwnerCommandKind {
     /// 停止 owner。
     Stop,
@@ -168,6 +198,8 @@ pub(crate) enum OwnerCommandKind {
     Subscribe {
         /// 新 topic 列表。
         topics: Vec<String>,
+        /// 在 owner 内计算新集合，避免并发调用丢失订阅修改。
+        change: SubscriptionChange,
     },
     /// 取消当前订阅并保留 owner。
     Unsubscribe,
@@ -185,10 +217,14 @@ pub(crate) struct OwnerCommand {
     pub(crate) kind: OwnerCommandKind,
     /// 单次结果通道。
     pub(crate) reply: oneshot::Sender<Result<CommandReply>>,
+    /// 命令入队时捕获的分配代次，分区控制必须在 owner 内复验。
+    pub(crate) expected_epoch: Option<u64>,
+    /// 与 owner 后台交付任务共享的停止门禁；可取消命令须先认领，整源永久停止可直接发布。
+    stop_requested: Arc<AtomicBool>,
 }
 
-/// 已启动 group 的共享句柄。
-pub(crate) struct GroupHandle {
+/// 已启动 owner 槽的共享句柄。
+pub(crate) struct OwnerHandle {
     /// 最终 group.id。
     group: Arc<str>,
     /// 有界 owner 命令发送端。
@@ -199,8 +235,12 @@ pub(crate) struct GroupHandle {
     next_command: AtomicU64,
     /// 当前健康快照。
     health: Arc<RwLock<GroupHealth>>,
+    /// 实际原文责任独立于健康采样频率，关闭后存活输入仍可观察。
+    records: Arc<super::capacity::RecordLedger>,
     /// owner 是否已经完全退出。
     stopped: AtomicBool,
+    /// 停止意图与实际退出分离，仍执行的业务或交付不能被提前释放。
+    stop_requested: Arc<AtomicBool>,
     /// owner 退出通知。
     stopped_notify: Notify,
     /// 只允许取走一次的线程 join handle。
@@ -209,19 +249,12 @@ pub(crate) struct GroupHandle {
     global_error: Arc<Mutex<Option<String>>>,
 }
 
-impl GroupHandle {
-    /// 业务作用：启动一个 group owner 线程。
-    ///
-    /// # 参数
-    ///
-    /// - `runtime`: 所属 Kafka 运行时。
-    /// - `plan`: 冻结 group 计划。
-    ///
-    /// # 错误
-    ///
-    /// 命令队列或线程构造失败时返回错误。
+impl OwnerHandle {
+    /// 业务作用：启动受共同准入门约束的消费槽 owner，先构造原生客户端，再等待路由登记放行。
+    /// 参数说明：runtime 为槽配置与共享源资源；plan 为冻结路由；startup_gate 为全部槽共用的启动门。
+    /// 返回：owner 句柄和本地构造结果接收端；线程创建失败直接返回错误，原生构造结果通过接收端交付，均不代表 broker 已分配分区。
     pub(crate) fn start(
-        runtime: Arc<KafkaProxyInner>,
+        runtime: Arc<super::group::OwnerRuntime>,
         plan: GroupPlan,
         startup_gate: Arc<StartupGate>,
     ) -> Result<(Arc<Self>, oneshot::Receiver<Result<()>>)> {
@@ -244,6 +277,12 @@ impl GroupHandle {
             commit_attempted: 0,
             commit_succeeded: 0,
             commit_failed: 0,
+            active_handlers: 0,
+            key_active_handlers: 0,
+            key_pending_records: 0,
+            retained_records: 0,
+            retained_bytes: 0,
+            key_pending_bytes: 0,
             last_error: None,
         }));
         let global_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -254,6 +293,8 @@ impl GroupHandle {
             next_command: AtomicU64::new(1),
             health: Arc::clone(&health),
             stopped: AtomicBool::new(false),
+            records: Arc::clone(&runtime.records),
+            stop_requested: Arc::clone(&runtime.stop_requested),
             stopped_notify: Notify::new(),
             join: Mutex::new(None),
             global_error: Arc::clone(&global_error),
@@ -262,11 +303,14 @@ impl GroupHandle {
         let health_for_thread = Arc::clone(&health);
         let group_for_name = handle.group.to_string();
         let join = std::thread::Builder::new()
-            .name(format!("nafka-owner-{group_for_name}"))
+            .name(format!(
+                "nafka-owner-{group_for_name}-slot-{}",
+                runtime.slot
+            ))
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::consumer::poll_task::run_owner(
-                        runtime,
+                        Arc::clone(&runtime),
                         plan,
                         receiver,
                         Arc::clone(&health_for_thread),
@@ -286,9 +330,17 @@ impl GroupHandle {
                     let mut snapshot = health_for_thread
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // 线程异常退出后旧 Ready 不再代表可用权威，健康槽不能掩盖此槽的缺席。
                     snapshot.state = GroupState::Crashed;
+                    snapshot.ready_assignment_epoch = None;
                     snapshot.last_error = Some(format!("owner panic: {detail}"));
+                    let metric_snapshot = snapshot.clone();
+                    drop(snapshot);
+                    runtime.publish_health(&group_for_name, metric_snapshot);
                 }
+                // 外层异常不能绕过业务实际退出责任；等待超时由调用方承担，不能提前注销消费槽。
+                runtime.handlers.await_idle();
+                runtime.records.clear(None);
                 if let Some(handle) = weak_handle.upgrade() {
                     handle.stopped.store(true, Ordering::Release);
                     handle.stopped_notify.notify_waiters();
@@ -312,12 +364,22 @@ impl GroupHandle {
     /// 读侧合并:owner 状态机没写过 `last_error` 时,用 librdkafka 后台 callback 捕获的
     /// broker 级错误(ALL_BROKERS_DOWN/认证/SSL)兜底填充——join 迟迟不成时快照能给出真实根因,
     /// 且绝不覆盖状态机已写入的更具体主因。
+    /// 参数说明：无。
+    /// 返回：已停止准入的实例始终撤销 Ready，实际退出前保留 Stopping 与活动责任。
     pub(crate) fn health(&self) -> GroupHealth {
         let mut snapshot = self
             .health
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // 停止后的 DLT/commit 收尾可以更新诊断，但不能重新授予业务路由。
+        (snapshot.retained_records, snapshot.retained_bytes) = self.records.usage();
+        if self.stop_requested.load(Ordering::Acquire) {
+            snapshot.ready_assignment_epoch = None;
+            if !self.stopped.load(Ordering::Acquire) {
+                snapshot.state = GroupState::Stopping;
+            }
+        }
         if snapshot.last_error.is_none() {
             snapshot.last_error = self
                 .global_error
@@ -358,8 +420,46 @@ impl GroupHandle {
                 state,
                 kind: OwnerCommandKind::Stop,
                 reply,
+                expected_epoch: None,
+                stop_requested: Arc::clone(&self.stop_requested),
             })
             .is_ok()
+    }
+
+    /// 业务作用：发布源所有者的永久停止意图，不让已耗尽的等待预算阻止撤销消费权威。
+    /// 参数说明：无。
+    /// 返回：立即封闭派发与确认，并尝试唤醒 owner；实际退出仍由 stop_until 等待，邮箱满不解除停止门。
+    pub(crate) fn request_permanent_stop(&self) {
+        // 整源退出已经授权且不可撤回，不沿用普通可取消控制命令的 queued 裁决。
+        self.records.begin_closing();
+        self.stop_requested.store(true, Ordering::Release);
+        let _ = self.request_stop_best_effort();
+    }
+
+    /// 业务作用：区分 owner 真正退出、存活输入和停止时未确认释放，不依赖健康表清零。
+    /// 参数说明：无。
+    /// 返回：纯数值快照；线程未结束即使 stopped 已发布也继续报告活动资源。
+    pub(crate) fn close_report(&self) -> crate::CloseConsumers {
+        let health = self.health();
+        let running = !self.stopped.load(Ordering::Acquire)
+            || self
+                .join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished());
+        crate::CloseConsumers {
+            active_owners: usize::from(running),
+            active_handlers: if self.stopped.load(Ordering::Acquire) {
+                0
+            } else {
+                health.active_handlers
+            },
+            retained_records: health.retained_records,
+            retained_bytes: health.retained_bytes,
+            released_unverified_records: self.records.released_unverified(),
+            returned_for_redelivery: 0,
+        }
     }
 
     /// 业务作用：在调用方给定的等待预算内提交一条 fenced 命令。
@@ -373,14 +473,34 @@ impl GroupHandle {
     ///
     /// 队列满、owner 退出、确定未执行、结果未知或命令本身失败时返回错误。
     async fn command_for(&self, kind: OwnerCommandKind, timeout: Duration) -> Result<CommandReply> {
+        let epoch = if super::group::partition_targets(&kind).is_some() {
+            self.health().ready_assignment_epoch
+        } else {
+            None
+        };
+        self.command_at(kind, timeout, epoch).await
+    }
+
+    /// 业务作用：提交携带调用方冻结代次的命令，防止跨目标等待隐式取得新分配权威。
+    /// 参数说明：kind 为命令；timeout 为剩余总预算；expected_epoch 为派发时必须复验的代次。
+    /// 返回：owner 终态或确定未执行/结果未知；调用 future 取消时撤销尚未开始的命令。
+    pub(crate) async fn command_at(
+        &self,
+        kind: OwnerCommandKind,
+        timeout: Duration,
+        expected_epoch: Option<u64>,
+    ) -> Result<CommandReply> {
         let id = self.next_command.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(AtomicU8::new(COMMAND_QUEUED));
+        let _cancellation = CommandCancellation(Arc::clone(&state));
         let (reply, mut receiver) = oneshot::channel();
         let command = OwnerCommand {
             id,
             state: Arc::clone(&state),
+            expected_epoch,
             kind,
             reply,
+            stop_requested: Arc::clone(&self.stop_requested),
         };
         self.commands
             .try_send(command)
@@ -501,17 +621,11 @@ impl GroupHandle {
         Ok(())
     }
 
-    /// 业务作用：owner 取命令时执行 queued→executing fencing。
-    ///
-    /// # 参数
-    ///
-    /// - `command`: 待执行命令。
-    ///
-    /// # 返回
-    ///
-    /// 调用端尚未取消时返回 true。
+    /// 业务作用：取得排队命令的执行权，并为已受理 Stop 发布实际责任的停止意图。
+    /// 参数说明：command 为 owner 取出的待执行命令。
+    /// 返回：queued 成功转为 executing 时为 true；已取消命令返回 false，未受理的 Stop 不改变后台交付准入。
     pub(crate) fn begin_command(command: &OwnerCommand) -> bool {
-        command
+        let accepted = command
             .state
             .compare_exchange(
                 COMMAND_QUEUED,
@@ -519,7 +633,12 @@ impl GroupHandle {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .is_ok();
+        // 先认领命令再关闭重试准入；排队中已经取消的停止请求不能影响仍运行的消费组。
+        if accepted && matches!(command.kind, OwnerCommandKind::Stop) {
+            command.stop_requested.store(true, Ordering::Release);
+        }
+        accepted
     }
 
     /// 业务作用：owner 完成命令并发送结果。
@@ -534,6 +653,15 @@ impl GroupHandle {
         // 结果必须先进入 oneshot，再以 Release 发布 Completed；超时调用方 Acquire
         // 观察到 Completed 后即可用 try_recv 读取确定结果。
         state.store(COMMAND_COMPLETED, Ordering::Release);
+    }
+
+    /// 业务作用：对尚未产生所请求副作用的命令交付明确拒绝证据。
+    /// 参数说明：command 为已认领但未执行的命令；reason 为固定本地诊断。
+    /// 返回：调用方取得 ControlNotApplied，不能用于掩盖已开始的原生操作失败。
+    pub(crate) fn reject_command(command: OwnerCommand, reason: &'static str) {
+        tracing::debug!(command_id = command.id, reason, "控制命令未执行");
+        let id = command.id;
+        Self::finish_command(command, Err(NafkaError::ControlNotApplied(id)));
     }
 }
 

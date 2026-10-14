@@ -8,6 +8,8 @@
 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
 使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
 
+Kafka 能力提供与 Java `nasa-kafka` 对应的多数据源事件运行时：命名集群与 producer lane 隔离、有界有序消费、同集群原子处理，以及可持久接续的回放、转发和 DLT 回投。详见 [Kafka 事件运行时](#kafka-事件运行时)。
+
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
 并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
 
@@ -45,6 +47,25 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 [受管能力合同](docs/managed-capabilities.md)。
 其中，Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
+
+## Kafka 事件运行时
+
+启用 `kafka` 后，业务统一使用 `nasa::kafka`；结合 `application` 和 `"kafka"` 组件，单源配置使用 `kafka`，多源使用 `kafkas.<name>`，两根互斥。`app.kafka(name)` 返回绑定来源的业务句柄，显式未知名称不会回退。Java/Rust 共享事件线路、组名、稳定事务身份和有限任务持久格式；API 和配置拼写遵循各自语言。
+
+```text
+命名配置 → 单源 KafkaProxy → 独立 producer lane → broker 交付确认
+                    ├─ 多 owner 消费 → 有界路由执行 → 当前代次安全前缀 → 提交
+                    ├─ 专属事务 → 完整输入位点 + 批准输出 → 原子 commit
+                    └─ 有限任务 → 处理或目标确认 → checkpoint → 进度发布
+```
+
+普通消费支持分区顺序与按键并发，输入责任由进程、源、组、分区和 key 共同限制；旧 Ack 失权不能推进新 owner 的位点。独立 lane 隔离发送额度，不隔离整个进程的 CPU、内存或 broker。`fire` 受理、broker 交付和事务 commit 是不同确认时刻，取消等待不抹掉在途责任。
+
+同集群事务使用稳定部署身份与专属资源，将完整输入位点和批准输出原子提交；提交未知时保护 owner 并按原身份恢复。有限 Replay、单目标 Transfer 与 DLT 回投先确认处理或目标，再持久推进进度，允许重复而不伪装为跨资源原子事务。数据库、HTTP、socket 和其它 Kafka 集群的副作用不自动进入事务。
+
+业务通过当前 Ready、组及单槽健康、交付状态、64项固定指标目录和关闭报告观察实际责任。Admin 默认只读，写权限须按源显式开放并满足 broker ACL。合法组名原文不变，非法组在业务开放前拒绝；事务还要求 broker 内部 listener 可达及事务日志满足副本和 ISR 条件。
+
+[完整架构与能力边界](nafka/README.md) · [受管配置和生命周期](napp/README.md#kafka-受管模式) · [属性宏声明](nafka-macro/README.md) · [部署前置条件](docs/deployment.md#kafka-来源与事务前置条件)
 
 ## 多注册中心与共享发现生命周期
 
@@ -483,7 +504,7 @@ Kafka Schema Registry、对象存储、gRPC listener 和受管 Web listener 已�
 
 | 能力 | 解决的问题 | 运行架构 | 明确不负责 |
 | --- | --- | --- | --- |
-| [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、schema 拉取/兼容/注册与缓存 | 独立 client，或 Application 按 `schema_registries.<name>` 装配的命名资源；无需声明 Kafka 消费组件 | codec 生成、schema 治理、subject ACL、灾备复制 |
+| [Schema Registry](nafka/README.md#schema-registry) | Confluent envelope、批准 ID、有界查询/等待/缓存、独立 CA/mTLS、取消后的请求责任 | 独立 client，或 Application 按 `schema_registries.<name>` 装配的命名资源；无需声明 Kafka 消费组件 | codec 生成、引用解析、schema 治理、subject ACL、灾备复制 |
 | [对象存储](naobject/README.md) | 有界单对象读写、条件创建、SigV4 与内容完整性 | provider-neutral trait + path-style S3 adapter；可独立构造，或由 Application 按 `object_stores.<name>` 托管 | multipart、流式/range/list、STS 刷新、对象版本治理 |
 | [gRPC](nagrpc/README.md) | 统一 codegen、generated service registry、HTTP/2/TLS/方法门禁、具名发现调用、观测与有预算排空 | 独立 handle，或交给 Application 的 listener 与 discovery owner 托管 | proto 业务语义、service mesh、业务授权 |
 | [Web listener](napp/README.md#web-http-listener-受管模式) | 确定的 HTTP/1/h2c 选择、连接与 stream 上界、协议观测和有预算排空 | Application `"web"` 组件独占明文 TCP listener 与路由服务图 | TLS 终止、h2c Upgrade 协商、服务间协议选择 |
@@ -1031,7 +1052,7 @@ HTTP/1/h2c listener。
 | [naws](naws/README.md) | `ws` / `ws-client` / `ws-redis` / `ws-socketio` / `ws-kafka` | TCP/WebSocket 服务端、原生 TCP Client、鉴权、广播、背压与真实退出等待 | 入站 `ws.*`；命名出站 `ws_clients` |
 | [naws-proto](naws-proto/README.md) | `ws` | 长连接协议帧和编码模式 | `ws.protocol.*` |
 | [naws-proto-derive](naws-proto-derive/README.md) | `ws` | 协议结构体派生 | 网络配置由 `naws` 读取 |
-| [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` | 发布、消费、路由、确认，以及可选 Confluent envelope 与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；受管 Registry 用 `schema_registries.<name>`，独立 client 显式传入 options |
+| [nafka](nafka/README.md) | `kafka` / `kafka-schema-registry` / `kafka-mysql-checkpoint` | 多数据源与独立producer lane、有界按键消费、组内多owner、安全确认、同集群消费/输出/位点事务、LSO 冻结回放、持久 checkpoint、单目标原文转发和有限DLT回投/原文隔离；可选单主 MySQL 跨语言共享进度，以及 Confluent envelope、批准 ID 映射与有界 schema client | Kafka 用 `kafka.*` / `kafkas.*`；事务通过 `transact` 固定部署身份与白名单；受管 Registry 用 `schema_registries.<name>`，独立 client 与 MySQL checkpoint 显式构造 |
 | [nafka-macro](nafka-macro/README.md) | `kafka` | `#[kafka_consumer]` 静态收集 | 由 Kafka 运行时读取 |
 | [ncrypto](ncrypto/README.md) | `crypto` | 现代令牌加密和受控兼容加解密 | `crypto.*`、环境变量承载密钥 |
 | [nanum](nanum/README.md) | `numeric` | 定点金额、价格、最小变动单位对齐、舍入 | `numeric.*` |

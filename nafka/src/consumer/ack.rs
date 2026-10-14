@@ -1,6 +1,6 @@
 //! 回调期内有效的本地确认槽；不接触 broker，也不直接修改提交水位。
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::error::{NafkaError, Result};
@@ -20,6 +20,10 @@ pub(crate) struct AckIdentity {
     pub(crate) invocation_id: u64,
     /// 创建 token 时的 assignment epoch。
     pub(crate) assignment_epoch: u64,
+    /// 并发调用的实时确认权威；owner 失权或预算到期时立即撤销。
+    pub(crate) authority: Option<Arc<AtomicBool>>,
+    /// 源所有者的永久停止意图，不等待 owner 消费控制邮箱才失权。
+    pub(crate) stopping: Option<Arc<AtomicBool>>,
     /// topic 名。
     pub(crate) topic: String,
     /// 分区号。
@@ -55,8 +59,16 @@ impl AckSlot {
     /// # 错误
     ///
     /// 回调已结束或 assignment 已失效时返回 [`NafkaError::AckExpired`]。
+    ///
+    /// 参数说明：无。
+    /// 返回：仅当前有效调用可临时确认；失权、超时或封存后返回 AckExpired。
     fn acknowledge(&self) -> Result<()> {
         loop {
+            // 先复验 owner 的实时权威；即使同步 handler 尚未归还线程，也不能继续确认。
+            if !self.authorized() {
+                self.state.store(SLOT_SEALED, Ordering::Release);
+                return Err(NafkaError::AckExpired);
+            }
             match self.state.load(Ordering::Acquire) {
                 SLOT_OPEN => {
                     if self
@@ -69,7 +81,11 @@ impl AckSlot {
                         )
                         .is_ok()
                     {
-                        return Ok(());
+                        return if self.authorized() {
+                            Ok(())
+                        } else {
+                            Err(NafkaError::AckExpired)
+                        };
                     }
                 }
                 SLOT_ACKED => return Ok(()),
@@ -79,8 +95,28 @@ impl AckSlot {
     }
 
     /// 业务作用：封存槽并返回封存前是否已确认。
+    ///
+    /// 参数说明：无。
+    /// 返回：仅确认状态和 owner 权威同时有效时为 true，失权后的临时确认不能进入水位。
     fn seal(&self) -> bool {
-        self.state.swap(SLOT_SEALED, Ordering::AcqRel) == SLOT_ACKED
+        self.state.swap(SLOT_SEALED, Ordering::AcqRel) == SLOT_ACKED && self.authorized()
+    }
+
+    /// 业务作用：读取并发调用的实时确认许可，兼容 owner 栈内的同步路由。
+    ///
+    /// 参数说明：无。
+    /// 返回：源尚未永久停止且调用仍获 owner 授权；同步调用也不能跨源停止边界确认。
+    fn authorized(&self) -> bool {
+        !self
+            .identity
+            .stopping
+            .as_ref()
+            .is_some_and(|stopping| stopping.load(Ordering::Acquire))
+            && self
+                .identity
+                .authority
+                .as_ref()
+                .is_none_or(|authority| authority.load(Ordering::Acquire))
     }
 }
 

@@ -21,6 +21,8 @@ impl Tp {
     /// # 参数
     /// - `topic`: Kafka topic 名,调用方保证非空(空值在使用处的 validate 拦截,此处不重复校验)。
     /// - `partition`: 分区号,>= 0。
+    ///
+    /// 返回：只保存身份的分区值，实际使用入口继续校验合法范围。
     pub fn new(topic: impl Into<String>, partition: i32) -> Self {
         Self {
             topic: topic.into(),
@@ -46,18 +48,22 @@ pub struct KafkaHeader {
 /// 为什么不用 Map:Kafka header 是有序列表,同名可重复(socket 路由的 Uid/Router 就靠
 /// 重复 header 表达多值),Map 会丢重复项与跨名相对顺序。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct KafkaHeaders(Vec<KafkaHeader>);
+pub struct KafkaHeaders(std::sync::Arc<Vec<KafkaHeader>>);
 
 impl KafkaHeaders {
     /// 业务作用：从有序 header 列表构造;保留输入顺序与重复项。
     ///
     /// # 参数
     /// - `headers`: 按 wire 出现顺序排列的 header 列表。
+    ///
+    /// 返回：接管原列表所有权的头集合，不合并重复名称或 null 值。
     pub fn from_vec(headers: Vec<KafkaHeader>) -> Self {
-        Self(headers)
+        Self(std::sync::Arc::new(headers))
     }
 
     /// 业务作用：按 wire 顺序遍历全部 header(含重复名)。
+    /// 参数说明：无。
+    /// 返回：借用只读迭代器，不复制字节或转成无序映射。
     pub fn iter(&self) -> impl Iterator<Item = &KafkaHeader> {
         self.0.iter()
     }
@@ -68,6 +74,8 @@ impl KafkaHeaders {
     ///
     /// # 参数
     /// - `name`: header 名,大小写敏感精确匹配。
+    ///
+    /// 返回：最后一个匹配项的借用，缺失时为 None；不执行 singleton 合同校验。
     pub fn last(&self, name: &str) -> Option<&KafkaHeader> {
         self.0.iter().rev().find(|h| h.name == name)
     }
@@ -78,16 +86,22 @@ impl KafkaHeaders {
     ///
     /// # 参数
     /// - `name`: header 名,大小写敏感精确匹配。
+    ///
+    /// 返回：保留线路相对顺序的全部匹配项，缺失时为空迭代器。
     pub fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a KafkaHeader> + 'a {
         self.0.iter().filter(move |h| h.name == name)
     }
 
     /// 业务作用：header 总条数(含重复名),用于路由数量上限校验。
+    /// 参数说明：无。
+    /// 返回：完整条目数，不按名称去重。
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// 业务作用：是否没有任何 header。
+    /// 参数说明：无。
+    /// 返回：只有条目集合为空时为 true，null 值条目仍属于非空集合。
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -100,9 +114,10 @@ impl KafkaHeaders {
     ///
     /// 返回：无；删除全部同名旧值后在末尾追加唯一可信值。
     pub(crate) fn replace_framework_value(&mut self, name: &str, value: Vec<u8>) {
-        self.0
-            .retain(|header| !header.name.eq_ignore_ascii_case(name));
-        self.0.push(KafkaHeader {
+        // 业务上下文可共享只读头；更新可信次数时保留其它持有者的原快照，不能原地改写。
+        let headers = std::sync::Arc::make_mut(&mut self.0);
+        headers.retain(|header| !header.name.eq_ignore_ascii_case(name));
+        headers.push(KafkaHeader {
             name: name.to_owned(),
             value: Some(value),
         });
@@ -133,7 +148,8 @@ pub struct KafkaPartitionLag {
     pub lag: Option<i64>,
 }
 
-/// assign 固定分区消费的起始位点策略。
+/// assign 固定分区消费的首次起点策略；同一 owner 自动或显式重建使用已保存的绝对恢复坐标。
+/// 已确认提交推进恢复点，显式 seek 成功则替换它；内部重读不改变恢复责任。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartOffset {
     /// 从分区最早可用记录开始(受 retention 影响,不是历史第一条)。
@@ -155,6 +171,8 @@ pub struct AssignmentHandle {
     pub(crate) group: String,
     /// 所属运行时，用于复用统一 owner 控制面。
     pub(crate) proxy: crate::KafkaProxy,
+    /// 创建时的 owner 身份，防止同名 group 重建后被旧句柄控制。
+    owner: std::sync::Arc<crate::consumer::supervisor::GroupHandle>,
 }
 
 impl AssignmentHandle {
@@ -164,45 +182,72 @@ impl AssignmentHandle {
     ///
     /// - `proxy`: 所属运行时。
     /// - `group`: 独占 group.id。
-    pub(crate) fn new(proxy: crate::KafkaProxy, group: String) -> Self {
-        Self { group, proxy }
+    /// - `owner`: 创建本任务时的实例身份。
+    ///
+    /// 返回：不具有自动停止副作用的句柄。
+    pub(crate) fn new(
+        proxy: crate::KafkaProxy,
+        group: String,
+        owner: std::sync::Arc<crate::consumer::supervisor::GroupHandle>,
+    ) -> Self {
+        Self {
+            group,
+            proxy,
+            owner,
+        }
+    }
+
+    /// 业务作用：在发出控制命令前确认句柄仍对应已登记实例。
+    /// 参数说明：无。
+    /// 返回：身份相同则成功；已停止或被替换返回生命周期错误。
+    fn require_current(&self) -> Result<()> {
+        let current = self.proxy.group_handle(&self.group)?;
+        if !std::sync::Arc::ptr_eq(&current, &self.owner) {
+            return Err(crate::error::NafkaError::Lifecycle(
+                "assignment handle 已过期".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// 业务作用：本 assign 任务占用的 group.id(与 subscribe group 共用命名空间,冲突在 assign 时拒绝)。
+    /// 参数说明：无。
+    /// 返回：创建时固定的组名；该值不代表句柄仍持有活动 owner。
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// 业务作用：当前固定分区集合快照。
+    /// 参数说明：无。
+    /// 返回：本句柄 owner 的当前分配；实例已退出、被替换或控制失败时返回错误。
     pub async fn partitions(&self) -> Result<Vec<Tp>> {
-        self.proxy.assignment(&self.group).await
+        self.require_current()?;
+        match self
+            .owner
+            .command(crate::consumer::supervisor::OwnerCommandKind::Assignment)
+            .await?
+        {
+            crate::consumer::supervisor::CommandReply::Assignment(values) => Ok(values),
+            _ => Err(crate::error::NafkaError::Lifecycle(
+                "assignment 返回类型不匹配".into(),
+            )),
+        }
     }
 
     /// 业务作用：查询本 assign group 的健康快照。
-    ///
-    /// # 错误
-    ///
-    /// owner 已退出、命令未执行或结果未知时返回错误。
+    /// 参数说明：无。
+    /// 返回：本实例的即时观测；注册身份已失效时返回错误，快照不授予提交权威。
     pub async fn health(&self) -> Result<GroupHealth> {
-        self.proxy.group_health(&self.group).await
+        self.require_current()?;
+        Ok(self.owner.health())
     }
 
     /// 业务作用：停止本 assign 消费并注销 group;幂等,重复调用直接返回 Ok。
+    /// 参数说明：无。
+    /// 返回：仅本句柄的 owner 退出完成时成功；超时保留登记，同名新 owner 不受影响。
     pub async fn stop(&self) -> Result<()> {
-        let handle = match self.proxy.group_handle(&self.group) {
-            Ok(handle) => handle,
-            Err(crate::error::NafkaError::NoSuchGroup(_)) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(self.proxy.config().behavior.shutdown_timeout_ms);
-        handle.stop_until(deadline).await?;
         self.proxy
-            .inner
-            .groups
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.group);
-        Ok(())
+            .stop_group_instance(&self.group, &self.owner)
+            .await
     }
 }

@@ -4,6 +4,7 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+Kafka 命名来源把独立发布通道、有界有序消费、同集群事务和持久回放任务接入同一宿主，业务句柄固定源与权限，关闭保留真实在途责任；见 [Kafka 受管模式](#kafka-受管模式)。
 `discovery` 组件还统一托管多注册中心与 qualifier 选址，保持连接证据隔离及停机顺序。
 启动前可显式选择严格配置工厂：嵌套默认值、自然排序的文件导入、来源解释与目录观察共同进入
 候选流程，来源权限固定到启动。来源观察序号与组件应用状态分开记录，失败候选保留现有服务视图。
@@ -76,12 +77,15 @@ hystrix 在 Prepare 安装本代目录，可用于后续初始化与业务收尾
 | --- | --- | --- | --- |
 | 对象存储 | `application,object-store` | `object-store` | `object_stores.<name>` → `app.object_store(name).await` |
 | Schema Registry | `application,kafka-schema-registry` | `kafka-schema-registry` | `schema_registries.<name>` → `app.schema_registry(name).await` |
+| Kafka 共享进度 | `application,kafka-mysql-checkpoint` | `kafka-mysql-checkpoint` | 显式构造 `MySqlCheckpointStore`，传入 `KafkaHandle::replay` / `transfer` |
 
 命名计划须显式设置 `enabled: true`；未声明或禁用时不构造客户端、不读取其独占凭据。Prepare 使用
 同代配置和 `secret://` 材料绑定资源，并自动登记聚合指标。Service 在后续 initializer 或 Ready 后任务中
 使用句柄，Batch 在工作负载开始前完成装配。停机关闭新调用、等待在途调用，旧句柄永久返回 `Closed`；
 参数或凭据变化报告 `RestartRequired`。对象存储按显式健康策略监督远端状态；Registry 构造不探测远端、
 不注册 schema，其指标仅反映实际调用。
+
+Registry 的 `tls.ca` 与 `tls.identity` 是可选 `secret://` PEM 引用，分别提供替代默认根的信任锚及客户端证书链和未加密 PKCS#8 私钥；认证域独立于 Kafka，证书及主机名验证始终开启。取消业务等待后，已接纳的 HTTP 请求仍由客户端保留额度；宿主停止会关闭准入、取消本地读取并在共享截止点内等待请求退出，旧句柄返回 `Closed`。取消或关闭不能证明远端注册没有发生。
 
 独立 `S3ObjectStore` 和 `ConfluentSchemaRegistry` 仍可由业务显式构造并自行持有；与 Application
 组合时，独立指标源可在 UserHook 登记。标准受管计划已有指标 owner，不应重复手工登记。
@@ -1156,6 +1160,22 @@ Inbox 幂等、持久状态机和显式补偿，不提供跨服务 ACID、物理
 
 ## Kafka 受管模式
 
+命名 client 可在同一应用连接不同 Kafka 集群；业务句柄固定来源，每个 producer lane 独立持有原生客户端和交付额度。普通消费按连续安全前缀提交，有限任务按实际目标确认、持久 checkpoint、状态发布的顺序推进。接入能力及边界见 [nafka 核心价值与边界](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#核心价值与边界)。
+
+```text
+kafka / kafkas → 全表校验与来源创建 → registry 冻结 → 当前 Ready
+                       │                              │
+                       └─ 源绑定 KafkaHandle ← 业务取得句柄
+停机 → 停止消费与有限任务 → 业务收尾 → 关闭发布准入 → 等待实际资源退出
+```
+
+Java `nasa-kafka` 与此处运行时共享事件线路、实际组名输入域和恢复格式；受管句柄额外受 Application 状态约束。核心事务计划的静态合法性不代表宿主已准入，也不代表事务 consumer 已分配，业务仍须等待返回任务的当前 Ready。普通组、事务和有限任务的身份与额度相互独立，不能用一个任务成功推断其它任务已就绪。
+
+`KafkaHandle::capabilities()` 返回源的本地构建支持、冻结安全/压缩启用项、每 lane 算法及当前普通组
+Joined 就绪快照，不暴露凭据或原生资源。未启动组时 readiness 为空；支持 TLS/SASL 不等于认证或
+资源授权成功。源认证由 `kafka.security` 或 `kafkas.<client>.security` 统一配置，各角色和 lane 不允许
+覆盖身份；安全材料变更须通过完整源重建并重新验证 Ready，不进行原地凭据热替换。
+
 单 client 使用 `kafka`，多 client 使用 `kafkas`；两根互斥，解析后立即归一成按 client name 排序的
 同一张内部表。受管投影严格拒绝未知 client/container 字段，多 client 的 map key 是权威 client name：
 
@@ -1171,7 +1191,7 @@ kafka:
     monitor_interval_ms: 500   # 100..=10000
     readiness:
       default:
-        kind: joined            # joined | assigned | assigned_topics
+        kind: joined            # joined | assigned | assigned_topics | assigned_partitions
       groups:
         order-worker:
           kind: assigned_topics
@@ -1194,9 +1214,16 @@ kafkas:
 `collected` 会装入所有 `client` 与配置名一致的 `#[kafka_consumer]`，再按 Hook 登记顺序应用
 `configure_kafka` 闭包；任何收集项指向未知或 disabled client 都会拒绝 Ready。默认 `joined` 允许竞争组
 中已经 join 但暂时没有分区的 standby；必须拿到最少分区时用 `assigned + min_partitions`，必须覆盖指定
-topic 时用 `assigned_topics + topics`。`disabled` 不启动 consumer，以集群 metadata 或显式
+topic 时用 `assigned_topics + topics`；具体坐标使用 `assigned_partitions + partitions`，其中每项为
+`{ topic: orders, partition: 0 }`。空列表、重复项、空白 topic 和负分区号在启动前拒绝。
+`readiness.groups` 的键与实际消费组使用同一输入域：1 至 1024 个 UTF-8 字节、非纯空白、不含 NUL，
+且首尾不含 U+0000–0020。纯空白采用 `nafka` 的固定字符集合，NBSP、NEL、FIGURE SPACE 和 NARROW NBSP
+不属于该集合。组名始终原样匹配，不裁剪或改名；可用 `KafkaConfig::validate_group_id` 在装配前校验。
+`disabled` 不启动 consumer，以集群 metadata 或显式
 `producer_probe_topic` 作为 Ready 条件；进入运行期后仍按 `monitor_interval_ms` 低频复查，失败只让动态
 readiness 变为 false，broker 恢复后自动恢复，不因一次瞬时探测直接终止进程。
+
+consumer 的启动门禁与运行期监控使用 `ReadyRequirement::satisfied_by` 的同一合同：只有 Running 和有效 assignment 同时成立才就绪。重试、背压、保护和 rebalance 会撤下该 client 的动态 readiness，正常推进恢复后重新发布；其它 client 保留各自观测，Application 的总 readiness 要求所有必需来源就绪。
 
 ```rust
 #[nasa::application("log", "kafka", "web")]
@@ -1213,16 +1240,40 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 }
 ```
 
-`KafkaHandle` 提供 client lifecycle/readiness、`ProducerLane`、group health/assignment/position、
-pause/resume、seek、动态 subscribe/unsubscribe、人工 restart，以及受管 admin 的 topic metadata、
-`create_if_absent` 和显式删除能力；`KafkaAdmin::client_name()` 可复验管理操作的 client 归属。它不会
+`consumer.concurrency` 与 `consumer.group_concurrency` 可在各 client 配置内声明订阅组的 owner 槽数，
+固定 assign 仍为单槽。Ready 以全部槽的有效 join 和分区并集判断，空闲已 join 槽不阻止就绪；
+槽预算、控制部分结果与静态成员身份约束见 [nafka 组内多消费者](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#组内多消费者)。
+槽数变更与其它 Kafka 运行配置一样需要重启。
+
+`KafkaHandle` 提供 client lifecycle/readiness、`ProducerLane`、group health/assignment/position、`group_slots_health`、`group_readiness`、
+pause/resume、seek、逐目标 `control_partitions` 报告、动态 subscribe/unsubscribe、人工 restart，以及受管 admin 的只读 metadata、位点观测与 topic 合同核验；`KafkaAdmin::client_name()` 可复验管理操作的 client 归属。它不会
 返回原始 `KafkaProxy`、consumer registry、`connect` 或
 `shutdown`。即使业务仍持有 handle，容器停机仍先在 Ready 层停止 consumer，再让 UserTask/业务资源
 利用仍开放的 producer/admin 做退出收尾，最后在 Start 层关闭发布准入、flush lane 和 admin；全部步骤
 共用一个绝对停机 deadline。
 
+`handle.admin()` 始终返回只读视图；创建、删除、扩分区和配置修改在原生准入前返回 `Authorization`。克隆、`read_only()`、`until_shutdown()` 和附加 access scope 都不能恢复写权限。确需管理写入时，在对应 `kafka.container` 或 `kafkas.<name>.container` 显式设置 `admin_write: true`，再调用 `handle.administration()`；默认值为 false，授权不跨 client，实际操作仍需 broker ACL。两种视图都没有整源关闭权。
+
+由 `KafkaHandle.admin()` 和 `producer_lane()` 派生的长期句柄绑定宿主业务准入域：退出收尾阶段仍允许明确操作，最终清理 action 成功、失败或因预算耗尽被放弃后，所有克隆和尚未发送的 builder 都拒绝新操作。物理集群查询和只读回放观测同样受限，已准入责任不因门禁关闭而被取消。
+
+Application 的退出原因与 Kafka 资源清理结果独立。宿主已停止但仍有实际 Kafka 责任时，`KafkaHandle::lifecycle()` 返回 `Failed`，不宣称 `Closed`。只有宿主已结束最终清理后，才允许 `await_closed(deadline)` 接续等待剩余责任；它拒绝活跃应用，不能用于提前关闭整源。实际资源退出后状态才可为 `Closed`，重复等待不重复业务副作用，也不重新开放旧句柄。
+
+`KafkaHandle::close_report()` 在退出期间和之后继续开放纯只读诊断：分别呈现实际 owner/handler、未确认输入、未决或终态未知交付、DLT、有限任务、Admin 与观测资源。查询不重新建连或开放业务。资源已经关闭不表示全部业务成功；未核实来源存活的输入不会被声明为必然可重投，任务业务结局继续由原任务句柄保留。配置转换可显式调用 `nafka::inspect_legacy_config`，候选与人工决策项不会自动改写宿主配置或 broker 位点。
+
+`KafkaHandle::replay(plan, store, identity, processor)` 显式启动有限历史回放，返回 `ReplayHandle`；计划固定来源物理身份、topic 代次和 LSO 结束范围，不修改线上 group 位点。同步 processor 真实成功后才持久推进 checkpoint。Starting/Ready 可登记任务，Application 进入退出阶段后旧 handle 拒绝新任务；消费停止阶段同时通知并排干回放，保留 producer/Admin 供实际处理收尾。超时保留任务责任与 lease，不能当作取消已完成。文件 checkpoint 仅承诺 POSIX 本地恢复，目标成功而 checkpoint 未确认时可能重复。
+
+`KafkaHandle::transfer(plan, &destination, store, source_identity, destination_identity, registries)` 用两个明确的受管来源执行单目标转发。先登记目标依赖，再开放来源任务；任一端停止都等待实际转发退出，超时保留依赖与checkpoint独占权。目标lane要求acks=all，目标实际确认后才推进来源进度。`TransferStatus` 分开报告持久进度、目标确认数和目标失败，来源事件ID及有界路径用于重复识别。Confluent策略须明确绑定两个Registry与批准ID映射，不自动注册schema；普通原文模式不解释Registry ID。详见[单目标转发合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#可恢复的单目标转发)。
+
+`KafkaHandle::replay_dlt` 接受 `DltReplayPlan` 和与 `transfer` 相同的目标、checkpoint、资源目录与Registry能力参数。它显式过滤原DLT消费组及业务topic/partition，回投或原文隔离均等待真实目标确认，双方退出阶段拒绝新任务并排干实际责任。计数只属于当前执行实例，来源持久进度独立呈现；目标成功而checkpoint未确认时仍需按稳定事件ID处理重复。详见[有限DLT回投与原文隔离](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#有限-dlt-回投与原文隔离)。
+
+`KafkaHandle::transact(plan, processor).await` 使用稳定部署身份、专属 subscribe group 和事务 producer，将同集群完整输入、批准输出与组位点原子提交。仅 Starting/Ready 接受新登记；使用返回的 `TransactionHandle::await_ready` 等待当前事务分配就绪。来源两段停机等待实际回调与原生事务资源退出，提交结果未知不能通过取消改判中止。普通发布、数据库与其它外部副作用不属于该原子范围。详见[同集群消费与输出事务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#同集群消费与输出事务)。
+
+启用 `application,kafka-mysql-checkpoint` 后，可显式构造 `nasa::kafka::MySqlCheckpointStore` 并传入上述入口。单主 MySQL 会话锁与完整快照 CAS 支持 Java/Rust 跨主机互斥接管；实际 SQL 连接随任务排干，退出超时不能提前释放在途任务责任。初始化由运维显式调用，Application 不自动建表或重配 MySQL；SQL 失权后不再推进，但在途 Kafka 副作用仍可能重复。配置、容量、TLS 和单主故障切换边界见[MySQL 共享 checkpoint](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#mysql-共享-checkpoint)。
+
+`control_partitions` 同样要求容器 Ready，返回 `Applied`、`NotApplied`、`Unknown` 或 `OwnerChanged` 的逐分区证据。报告保留部分成功，无法把跨 owner 操作解释为原子事务；`Unknown` 须查询确认后再决定下一步。容器停止后旧 handle 不得通过报告入口重新开放控制。
+
 Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选帧仍先做完整无副作用校验，非法帧保留
-旧快照，合法但发生变化统一标记 `RestartRequired`，本版本不热切 broker、凭据、group 或 route。
+旧快照，合法但发生变化统一标记 `RestartRequired`，运行期不热切 broker、凭据、group 或 route。
 
 ### 业务项目复制后必须修改的 Kafka 项
 
@@ -1607,7 +1658,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 | `app.configure_outbox(plan)` | 启动 Hook | 为脱离 Saga 的事件流提交唯一受管发布计划 |
 | `app.register_outbox_publisher(...)` | 启动 Hook | 为已有事务域计划登记精确业务事件发布目标，共享同一 dispatcher |
 | `app.configure_kafka(name, ...)` | 启动 Hook | 在自动收集项之后追加有状态 consumer；Ready 取走后入口永久封口 |
-| `app.configure_kafka_metrics(name, sink)` | 启动 Hook | 为指定 client 安装一次无阻塞指标出口；未设置时为 Noop |
+| `app.configure_kafka_metrics(name, sink)` | 启动 Hook | 为指定 client 追加一次指标后端，由 nafka 源级有界线程调用；未设置时仍保留框架默认出口 |
 | `app.configure_redis_jobs(plan)` | 启动 Hook | 把唯一拥有式 RedisJob plan 交给独立组件；Prepare 后入口永久封口 |
 | `app.datasource(name) / redis(name)` | Start 完成后 | 直接取得共享语义明确、且能被容器显式关闭的数据源池与缓存客户端 |
 | `app.redis_job() / redis_job_control(source) / redis_job_query(source)` | RedisJob Ready 后至清理 | 取得无停机权的业务门面，或显式选择 source 的结构化控制、查询、健康与指标；未知 source 不回退 |
@@ -1621,6 +1672,13 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 | `app.scheduling()` | Ready 完成后至清理 | 底层调度库只读句柄、任务数量和可选选主状态，不开放停止或重启 |
 | `app.shutdown()` | Service 运行期 | 幂等主动停机；Batch 返回阶段错误 |
 | `Application::try_global()` | Service sealed 后 | 迁移期全局逃生舱，返回 `Result`，Batch 不发布 |
+
+Kafka 默认指标目录直接使用 `nafka::METRIC_CATALOG` 的64个逻辑族，保留 `source` 与完整 group/lane/topic 标签，
+多个命名 client 中相同组名和 lane 不会合并成同一序列。目录涵盖发布准入与真实交付、Ready、提交、执行占用、
+DLT、typed 裁决、借用回调、控制结果和关闭责任。`KafkaHandle::sample_metrics()` 显式采样源级责任与注册规模，
+不执行网络查询；`observe_offsets(...)` 的实际结果更新 broker lag，缺少任何请求分区证据时 lag 为 -1，
+需结合覆盖范围、缺失数和时间戳解释。具体类型、单位和路线边界见 nafka 的指标合同。指标队列丢弃、用户后端 panic 和真实关闭
+责任可通过 `KafkaHandle.metrics_export_stats()` 查询，不将指标后端可用性当作业务确认条件。
 
 `Application` 是自动 Web Router 的唯一根 State。业务 interceptor 需要容器时直接声明
 `State<Application>`；高频路径可在 UserHook 从容器一次性构造窄 State，再通过

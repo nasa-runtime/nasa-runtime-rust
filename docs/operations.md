@@ -176,6 +176,23 @@ Application `/readyz`，业务必须显式接入健康策略。
 直接 Drop、发出 cancel 或停止续租都不能代替 handler、I/O 和锁的退出证明。
 详细状态与配置见 [Redis 分区消费](../nadis/docs/partition.md)。
 
+## Kafka 观测与恢复
+
+先固定命名来源、物理 cluster ID、group 和任务身份，再区分普通消费、事务或有限任务。`KafkaHandle::capabilities()` 只反映构建与冻结配置及当前普通组快照，不能证明任意业务资源已经授权。
+
+| 现象 | 查看与处理 |
+| --- | --- |
+| 组未就绪或积压增长 | 联合 `group_health`、`group_slots_health`、`group_readiness` 查看 assignment、失败前缀、实际调用和容量；Joined 的空闲槽不等于卡死 |
+| 发布超时或等待取消 | 区分本地拒绝、明确交付失败和未知结局，继续保留实际交付责任；不要盲目重发非幂等事件 |
+| 事务初始化持续失败 | 核对物理身份、内部 listener、事务日志副本/ISR、ACL与隔离配置，源 metadata 可用不替代事务 Ready |
+| `CommitUnknown` / `AbortUnknown` | 查看事务 status 的输入范围和失败分类，停止新工作，复用稳定身份恢复并读取 broker 提交位置；不改随机身份猜测重发 |
+| 有限任务进度落后于目标确认数 | 核对 checkpoint 权威与持久结果，按稳定事件 ID 识别重复，不按计数差直接复制位点 |
+| 宿主已停止但资源未关闭 | 查看 `close_report` 的真实 owner、调用、保留输入和未决交付；最终清理结束后可 `await_closed` 继续等待，不重新开放业务 |
+
+固定指标目录区分实际 handler、保留记录/字节、原生交付、提交、重试/DLT及关闭责任。broker lag 来自显式观测并带时间和缺失原因，缺项不解释为0；不要把 offset 差当成业务消息数量。trace 与错误默认不暴露 payload、凭据或 broker 自由文本。
+
+两段停机先停止普通消费和有限任务，再等待业务收尾及发布资源。逻辑取消不证明外部调用退出，资源关闭也不证明每条业务都成功；保留任务句柄的业务结局。完整指标、状态和 API 见 [nafka](../nafka/README.md#健康指标与管理面)。
+
 ## 配置刷新
 
 配置视图把期望快照和每个组件的应用状态放在同一次发布动作中。运维必须同时查看配置修订与状态：

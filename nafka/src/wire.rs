@@ -1,7 +1,6 @@
 //! Wire 协议层:header 常量、payload 编解码契约与跨语言互通规则。
 //!
-//! 本模块是跨语言兼容面:常量与 mode 名和上游对标实现逐字节一致,改名即破坏互通,
-//! 任何调整都是协议变更,必须同步跨语言 golden 向量。
+//! 本模块是跨语言兼容面：常量与 mode 名在两端逐字节一致，调整字段需采用相同定义才能互通。
 
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -28,7 +27,7 @@ pub const HEADER_DELIVERY_ATTEMPT: &str = "X-Nasa-Delivery-Attempt";
 pub const HEADER_DLT_ORIGIN_TOPIC: &str = "X-Nasa-DLT-Origin-Topic";
 /// DLT 记录的来源分区。
 pub const HEADER_DLT_ORIGIN_PARTITION: &str = "X-Nasa-DLT-Origin-Partition";
-/// DLT 记录的来源 offset;三元组共同构成 DLT 消费端的去重键。
+/// DLT 记录的来源 offset；结合物理集群、topic和分区识别重复，不证明同名topic的物理代次。
 pub const HEADER_DLT_ORIGIN_OFFSET: &str = "X-Nasa-DLT-Origin-Offset";
 /// DLT 原因(截断后的安全文本,<=1024 字节,不含 payload/凭据)。
 pub const HEADER_DLT_REASON: &str = "X-Nasa-DLT-Reason";
@@ -36,29 +35,71 @@ pub const HEADER_DLT_REASON: &str = "X-Nasa-DLT-Reason";
 pub const HEADER_DLT_DELIVERY_ATTEMPTS: &str = "X-Nasa-DLT-Delivery-Attempts";
 /// DLT 记录的来源 consumer group；用于归属告警和人工重放审计。
 pub const HEADER_DLT_ORIGIN_GROUP: &str = "X-Nasa-Dlt-Origin-Group";
+/// DLT 的实际消费源别名；不能用它替代物理集群身份。
+pub const HEADER_DLT_ORIGIN_SOURCE: &str = "X-Nasa-DLT-Origin-Source";
+/// DLT 的实际来源物理集群身份，由 owner 查询 broker 得到。
+pub const HEADER_DLT_ORIGIN_CLUSTER: &str = "X-Nasa-DLT-Origin-Cluster";
 /// [`HEADER_PAYLOAD_CODEC`] 的唯一合法值。
 pub const PAYLOAD_CODEC_PROTOCOL_BYTES: &str = "protocol-bytes";
+
+/// 业务作用：统一发布、注册与消费的事件空白边界，保留其它事件原文身份。
+/// 参数说明：event 为合法 UTF-8 事件名。
+/// 返回：空串或仅含 Java Character.isWhitespace 对应字符时为 true；NEL 和不换行空格不属于该集合。
+pub(crate) fn is_blank_event(event: &str) -> bool {
+    event.chars().all(|value| {
+        matches!(value, '\u{0009}'..='\u{000d}' | '\u{001c}'..='\u{0020}' | '\u{1680}'
+            | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}' | '\u{2028}' | '\u{2029}'
+            | '\u{205f}' | '\u{3000}')
+    })
+}
+
+/// 普通消费组的共同字节上限，与 DLT 来源证据的组身份容量一致。
+pub(crate) const MAX_GROUP_BYTES: usize = 1024;
+
+/// 业务作用：在路由发布与原生请求之前验证普通组的共同输入边界。
+/// 参数说明：group 为已经解析的精确 group.id，保留共同边界内的 Unicode 原文。
+/// 返回：非纯空白、无 NUL、首尾不含 U+0000–0020 且为1至1024个 UTF-8 字节时通过，否则为 Config；不改写身份。
+pub(crate) fn validate_group(group: &str) -> Result<()> {
+    // 组与事件共用固定空白集合，不能让 Unicode trim 吞掉 NEL、NBSP 等有效身份。
+    // NUL 无法穿过 native C 字符串边界，超长身份也不能被完整写入 DLT 来源证据。
+    // Java native 的 STRING 配置会裁剪首尾 U+0000–0020，共同准入必须先拒绝会改换身份的原文。
+    if is_blank_event(group) || group.contains('\0') || group.len() > MAX_GROUP_BYTES
+        || group.as_bytes().first().is_some_and(|c| *c <= 0x20)
+        || group.as_bytes().last().is_some_and(|c| *c <= 0x20)
+    {
+        return Err(NafkaError::Config(
+            "group 必须非纯空白、不含 NUL、首尾不含 U+0000–0020 且为1至1024个 UTF-8 字节".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// 业务作用：判断 header 名是否为框架保留:业务发布接口写保留 header 直接报错,不静默覆盖。
 ///
 /// # 参数
-/// - `name`: 待检查的 header 名,大小写敏感(保留 header 一律精确大小写)。
+/// - `name`: 待检查的 header 名；转发证据拒绝所有大小写变体，其余保留字段按协议精确匹配。
+///
+/// 返回：普通发布接口是否必须拒绝该名称。
 pub fn is_reserved_header(name: &str) -> bool {
-    matches!(
-        name,
-        HEADER_EVENT
-            | HEADER_PAYLOAD_CODEC
-            | HEADER_PAYLOAD_MODE
-            | HEADER_PASSTHROUGH
-            | HEADER_TRACEPARENT
-            | HEADER_DELIVERY_ATTEMPT
-            | HEADER_DLT_ORIGIN_TOPIC
-            | HEADER_DLT_ORIGIN_PARTITION
-            | HEADER_DLT_ORIGIN_OFFSET
-            | HEADER_DLT_REASON
-            | HEADER_DLT_DELIVERY_ATTEMPTS
-            | HEADER_DLT_ORIGIN_GROUP
-    )
+    crate::dlt_replay::origin::is_header(name)
+        || name.eq_ignore_ascii_case(crate::TransferTrace::HEADER)
+        || name.eq_ignore_ascii_case(crate::DltReplayTrace::HEADER)
+        || name.eq_ignore_ascii_case(crate::DltQuarantineTrace::HEADER)
+        || matches!(
+            name,
+            HEADER_EVENT
+                | HEADER_PAYLOAD_CODEC
+                | HEADER_PAYLOAD_MODE
+                | HEADER_PASSTHROUGH
+                | HEADER_TRACEPARENT
+                | HEADER_DELIVERY_ATTEMPT
+                | HEADER_DLT_ORIGIN_TOPIC
+                | HEADER_DLT_ORIGIN_PARTITION
+                | HEADER_DLT_ORIGIN_OFFSET
+                | HEADER_DLT_REASON
+                | HEADER_DLT_DELIVERY_ATTEMPTS
+                | HEADER_DLT_ORIGIN_GROUP
+        )
 }
 
 /// 业务作用：为 durability-first DLT 构造唯一可信的来源证据 headers。
@@ -132,7 +173,8 @@ pub fn dead_letter_headers(
 ///
 /// 返回：属于框架证据字段时返回真；比较大小写不敏感，防止变体绕过清理。
 fn is_dead_letter_evidence_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case(HEADER_DELIVERY_ATTEMPT)
+    crate::dlt_replay::origin::is_header(name)
+        || name.eq_ignore_ascii_case(HEADER_DELIVERY_ATTEMPT)
         || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_TOPIC)
         || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_PARTITION)
         || name.eq_ignore_ascii_case(HEADER_DLT_ORIGIN_OFFSET)
@@ -232,11 +274,18 @@ pub trait DecodePayload: Sized + Send + 'static {
     /// 业务作用：从 Kafka value 字节还原业务对象。
     ///
     /// # 参数
-    /// - `bytes`: 消息 value 原始字节(非空;tombstone 在路由前处理,不会进到这里)。
+    /// - `bytes`: 消息 value 原始字节；空 slice 不是 tombstone，不能自动解释为 null。
     ///
     /// # 错误
     /// 解码失败返回 [`NafkaError::Codec`];dispatcher 将该 offset 精确标记为 undecodable。
     fn decode(bytes: &[u8]) -> Result<Self>;
+
+    /// 业务作用：在显式 Deliver 策略下决定业务类型是否能表示删除标记。
+    /// 参数说明：无。
+    /// 返回：默认拒绝；nullable 类型可返回自己的空值，不用伪造载荷字节。
+    fn decode_tombstone() -> Result<Self> {
+        Err(NafkaError::MissingPayload)
+    }
 }
 
 // JSON blanket:一切 serde 类型默认走 JSON UTF-8,共享消息的消费者必须采用同一 JSON 结构。
@@ -278,6 +327,38 @@ impl<T: DeserializeOwned + Send + 'static> DecodePayload for T {
                 e.column()
             ))
         })
+    }
+
+    /// 业务作用：把显式交付的删除标记映射为 serde 类型的 null 表示。
+    /// 参数说明：无。
+    /// 返回：Option 等可空类型得到空值；非 nullable DTO 返回已脱敏的 codec 错误。
+    fn decode_tombstone() -> Result<Self> {
+        <Self as DecodePayload>::decode(b"null")
+    }
+}
+
+/// 可空 typed 消费包装；支持 Proto 等没有 serde null 表示的类型，保留其原 codec 声明。
+pub struct NullablePayload<T>(pub Option<T>);
+
+impl<T: DecodePayload> DecodePayload for NullablePayload<T> {
+    const CODEC: PayloadCodec = T::CODEC;
+
+    /// 业务作用：保留实际负载的类型解码，JSON null 映射为空业务值。
+    /// 参数说明：bytes 为原始非 tombstone 载荷，空字节仍按 codec 判定。
+    /// 返回：有效负载为 Some；合法 JSON null 为 None；解码错误仍进入无效记录策略。
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        if T::CODEC == PayloadCodec::Json && serde_json::from_slice::<()>(bytes).is_ok() {
+            Ok(Self(None))
+        } else {
+            T::decode(bytes).map(|value| Self(Some(value)))
+        }
+    }
+
+    /// 业务作用：让显式 Deliver 策略携带不伪造业务对象的删除标记。
+    /// 参数说明：无。
+    /// 返回：None，来源 key、offset 和 headers 继续保留在 KafkaRecord 上下文。
+    fn decode_tombstone() -> Result<Self> {
+        Ok(Self(None))
     }
 }
 

@@ -1,4 +1,17 @@
 //! `#[kafka_consumer]` 无状态异步消费者收集宏。
+//!
+//! # 声明与运行架构
+//!
+//! 业务通过 `nasa::kafka::kafka_consumer` 声明 topic、精确 event、client、group、确认与执行模式。
+//! 宏在编译期校验函数签名及共同身份输入域，生成类型适配与静态 descriptor；
+//! nafka / Application 冻结 registry 后负责连接、消费、当前代次确认、重试与两段停机。
+//! Java nasa-kafka 的声明式入口采用对应的线路与责任合同，合法组名不裁剪或归一化。
+//!
+//! # 能力边界
+//!
+//! 宏不读取 YAML、不创建客户端，也不提供独立 Ready 或指标。运行时仍校验来源、默认组与路由组合。
+//! 编译通过不证明 broker 可达或组已获得分区；Manual 必须使用携带确认权威的 record 形态，
+//! 按键模式仅适用于单条消费者，事务执行使用独立同步上下文而不通过此宏声明。
 
 #![deny(missing_docs)]
 
@@ -21,8 +34,14 @@ struct ConsumerArgs {
     group: Option<LitStr>,
     /// 广播 scope；`Some(None)` 表示使用默认 scope。
     broadcast: Option<Option<LitStr>>,
+    /// 共同身份编码的明确广播作用域，与旧 broadcast 声明互斥。
+    broadcast_scope: Option<LitStr>,
+    /// 共同广播的稳定实例身份，缺省沿用源配置或进程身份。
+    instance_id: Option<LitStr>,
     /// route 确认模式。
     ack: AckArg,
+    /// 同组共享的分区或按键顺序域。
+    execution: ExecutionArg,
     /// 静态收集目标 client。
     client: LitStr,
 }
@@ -34,6 +53,15 @@ enum AckArg {
     Auto,
     /// 业务回调显式确认且最终成功才生效。
     Manual,
+}
+
+/// 宏属性中的业务执行顺序域。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionArg {
+    /// 分区内顺序派发，允许连续批次。
+    PartitionOrdered,
+    /// 同分区不同 key 可并发，仅允许单条。
+    KeyOrdered,
 }
 
 /// 业务函数参数的四种规范形态。
@@ -73,6 +101,8 @@ impl HandlerShape {
 /// 业务作用：收集无状态异步消费函数。
 ///
 /// 支持 `T`、`KafkaRecord<T>`、`Vec<T>`、`Vec<KafkaRecord<T>>` 四种参数形态。
+/// 参数说明：attr 为 topic、事件、来源和确认等属性；item 为被标注的异步自由函数。
+/// 返回：保留业务函数并追加类型适配和静态登记；非法声明生成编译错误，不创建任何运行期客户端。
 #[proc_macro_attribute]
 pub fn kafka_consumer(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
@@ -83,16 +113,9 @@ pub fn kafka_consumer(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// 业务作用：校验属性和函数签名并生成 trait 实现与静态收集项。
-///
-/// # 参数
-///
-/// - `metas`: 属性参数列表。
-/// - `function`: 被标注的异步 free function。
-///
-/// # 错误
-///
-/// 属性、函数限定符或参数形态不符合契约时返回编译错误。
+/// 业务作用：校验路由属性和函数签名，生成消费 trait 实现与静态收集项。
+/// 参数说明：metas 为路由属性；function 为被标注的异步自由函数。
+/// 返回：一致的类型适配与登记代码；非法属性、函数限定符、参数形态或按键批声明返回编译错误。
 fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<TokenStream2> {
     let args = parse_args(metas)?;
     validate_function(&function)?;
@@ -111,6 +134,13 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
         }
     };
     let shape = parse_shape(&input.ty)?;
+    // 批次不能隐藏各个 key 的独立失败责任，在生成任何可激活路由前拒绝。
+    if args.execution == ExecutionArg::KeyOrdered && shape.is_batch() {
+        return Err(syn::Error::new_spanned(
+            &input.ty,
+            "execution = \"key_ordered\" 不支持批消费者",
+        ));
+    }
     if args.ack == AckArg::Manual && !shape.receives_record() {
         return Err(syn::Error::new_spanned(
             &input.ty,
@@ -130,6 +160,10 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
         AckArg::Manual => quote!(#root::AckMode::Manual),
     };
     let group = group_tokens(&args, function_name, &root);
+    let execution_mode = match args.execution {
+        ExecutionArg::PartitionOrdered => quote!(#root::ExecutionMode::PartitionOrdered),
+        ExecutionArg::KeyOrdered => quote!(#root::ExecutionMode::KeyOrdered),
+    };
     let invocation = invocation_tokens(&shape, function_name);
     let trait_impl = if shape.is_batch() {
         quote! {
@@ -159,6 +193,13 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
                 /// 业务作用：返回属性中声明的确认模式。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
+                }
+
+                /// 业务作用：冻结路由的执行顺序域。
+                /// 参数说明：无。
+                /// 返回：声明的模式，同组混合模式在启动前拒绝。
+                fn execution_mode(&self) -> #root::ExecutionMode {
+                    #execution_mode
                 }
 
                 /// 业务作用：将框架批记录转换为业务函数声明的参数形态并调用。
@@ -198,6 +239,13 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
                 /// 业务作用：返回属性中声明的确认模式。
                 fn ack_mode(&self) -> #root::AckMode {
                     #ack_mode
+                }
+
+                /// 业务作用：冻结路由的执行顺序域。
+                /// 参数说明：无。
+                /// 返回：声明的模式，同组混合模式在启动前拒绝。
+                fn execution_mode(&self) -> #root::ExecutionMode {
+                    #execution_mode
                 }
 
                 /// 业务作用：将框架单记录转换为业务函数声明的参数形态并调用。
@@ -256,21 +304,18 @@ fn expand(metas: Punctuated<Meta, Token![,]>, function: ItemFn) -> syn::Result<T
     })
 }
 
-/// 业务作用：解析宏属性参数。
-///
-/// # 参数
-///
-/// - `metas`: 逗号分隔属性项。
-///
-/// # 错误
-///
-/// 必填项缺失、重复项、未知项或字面量类型错误时返回编译错误。
+/// 业务作用：解析路由属性，拒绝不完整、冲突或无法形成确定身份的声明。
+/// 参数说明：metas 为逗号分隔的属性项。
+/// 返回：合法属性的冻结值；缺少必填项、重复或未知属性、非法值及字面量类型错误返回编译错误。
 fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
     let mut topics = None;
     let mut event = None;
     let mut group = None;
     let mut broadcast = None;
+    let mut broadcast_scope = None;
+    let mut instance_id = None;
     let mut ack = None;
+    let mut execution = None;
     let mut client = None;
 
     for meta in metas {
@@ -296,6 +341,12 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
                     ));
                 }
             });
+        } else if path.is_ident("broadcast_scope") {
+            ensure_missing(&broadcast_scope, &meta, "broadcast_scope")?;
+            broadcast_scope = Some(parse_string_value(&meta, "broadcast_scope")?);
+        } else if path.is_ident("instance_id") {
+            ensure_missing(&instance_id, &meta, "instance_id")?;
+            instance_id = Some(parse_string_value(&meta, "instance_id")?);
         } else if path.is_ident("ack") {
             ensure_missing(&ack, &meta, "ack")?;
             let value = parse_string_value(&meta, "ack")?;
@@ -306,6 +357,19 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
                     return Err(syn::Error::new_spanned(
                         value,
                         "ack 只允许 \"auto\" 或 \"manual\"",
+                    ));
+                }
+            });
+        } else if path.is_ident("execution") {
+            ensure_missing(&execution, &meta, "execution")?;
+            let value = parse_string_value(&meta, "execution")?;
+            execution = Some(match value.value().as_str() {
+                "partition_ordered" => ExecutionArg::PartitionOrdered,
+                "key_ordered" => ExecutionArg::KeyOrdered,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "execution 只允许 \"partition_ordered\" 或 \"key_ordered\"",
                     ));
                 }
             });
@@ -321,24 +385,37 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
         topics.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "缺少 topics"))?;
     let event =
         event.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "缺少 event"))?;
+    // 位点归属只能有一个来源；拒绝冲突声明，不能让宏与运行时各选择不同优先级。
+    if let Some(scope) = &broadcast_scope {
+        if group.is_some() || broadcast.is_some() {
+            return Err(syn::Error::new_spanned(
+                scope,
+                "broadcast_scope 与 group/broadcast 互斥",
+            ));
+        }
+        validate_broadcast_identity(scope)?;
+    }
+    if let Some(instance) = &instance_id {
+        if broadcast_scope.is_none() {
+            return Err(syn::Error::new_spanned(
+                instance,
+                "instance_id 要求 broadcast_scope",
+            ));
+        }
+        validate_broadcast_identity(instance)?;
+    }
     if let (Some(group_value), Some(_)) = (&group, &broadcast) {
         return Err(syn::Error::new_spanned(
             group_value,
             "group 与 broadcast 互斥",
         ));
     }
-    if event.value().trim().is_empty() {
+    if is_blank_event(&event.value()) {
         return Err(syn::Error::new_spanned(&event, "event 不能为空"));
     }
-    deny_padded(&event, "event")?;
-    if let Some(value) = group
-        .as_ref()
-        .filter(|value| value.value().trim().is_empty())
-    {
-        return Err(syn::Error::new_spanned(value, "group 不能为空"));
-    }
+    // 组与事件各自保留合法原文；组名按共同 native 边界校验，不使用 Unicode trim 排除 NBSP。
     if let Some(value) = group.as_ref() {
-        deny_padded(value, "group")?;
+        validate_group(value)?;
     }
     if let Some(value) = broadcast
         .as_ref()
@@ -364,9 +441,31 @@ fn parse_args(metas: Punctuated<Meta, Token![,]>) -> syn::Result<ConsumerArgs> {
         event,
         group,
         broadcast,
+        broadcast_scope,
+        instance_id,
         ack: ack.unwrap_or(AckArg::Auto),
+        execution: execution.unwrap_or(ExecutionArg::PartitionOrdered),
         client,
     })
+}
+
+/// 业务作用：在编译期拒绝共同广播身份中不可安全编码的字面量。
+/// 参数说明：value 为作用域或实例身份字面量。
+/// 返回：保留精确 UTF-8；空值、超长、控制字符及首尾 ASCII 空格产生编译错误。
+fn validate_broadcast_identity(value: &LitStr) -> syn::Result<()> {
+    let identity = value.value();
+    if identity.is_empty()
+        || identity.len() > 4096
+        || identity.starts_with(' ')
+        || identity.ends_with(' ')
+        || identity.chars().any(char::is_control)
+    {
+        return Err(syn::Error::new_spanned(
+            value,
+            "广播身份必须非空、无控制字符及首尾 ASCII 空格，且最多 4096 UTF-8 字节",
+        ));
+    }
+    Ok(())
 }
 
 /// 业务作用：拒绝同名属性重复出现。
@@ -388,20 +487,13 @@ fn ensure_missing<T>(current: &Option<T>, meta: &Meta, name: &str) -> syn::Resul
     }
 }
 
-/// 业务作用：校验一个字面量值不含首尾空白。
+/// 业务作用：校验 client、broadcast scope 与 topic 字面量的首尾空白边界。
 ///
-/// 这些值会原样进入 route 元数据：`client` 与 registry 精确比较、`event` 与 header 精确比较、
-/// `topics` 直接作为 Kafka topic 名。带一个空格就会变成「静默永不注册 / 永不匹配」，
-/// 且没有任何运行期报错，所以必须在编译期拦下（而不是悄悄 trim，以免与用户意图不符）。
+/// 这些字段参与资源选择或消费组派生，声明中的首尾空白直接拒绝，不能静默裁剪后改用另一个身份。
+/// event 与普通 group 使用各自的精确文本合同及空白边界，不经过本门禁。
 ///
-/// # 参数
-///
-/// - `value`: 待校验的字符串字面量。
-/// - `field`: 出错时提示的字段名。
-///
-/// # 错误
-///
-/// 值带首尾空白时返回编译错误。
+/// 参数说明：value 为待校验字面量，field 为诊断中的字段名。
+/// 返回：无首尾空白时通过，否则返回编译错误且不生成路由。
 fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
     let raw = value.value();
     if raw != raw.trim() {
@@ -411,6 +503,34 @@ fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// 业务作用：在生成静态路由前执行普通组的共同输入边界。
+/// 参数说明：group 为声明中的组名字面量，按 UTF-8 字节计长。
+/// 返回：非纯空白、无 NUL、首尾不含 U+0000–0020 且1至1024字节时通过，否则返回编译错误；不裁剪或改名。
+fn validate_group(group: &LitStr) -> syn::Result<()> {
+    let value = group.value();
+    if is_blank_event(&value) || value.contains('\0') || value.len() > 1024
+        || value.as_bytes().first().is_some_and(|c| *c <= 0x20)
+        || value.as_bytes().last().is_some_and(|c| *c <= 0x20)
+    {
+        return Err(syn::Error::new_spanned(
+            group,
+            "group 必须非纯空白、不含 NUL、首尾不含 U+0000–0020 且为1至1024个 UTF-8 字节",
+        ));
+    }
+    Ok(())
+}
+
+/// 业务作用：在展开前拒绝运行时不能注册的空白事件，保持事件字面量与线路合同一致。
+/// 参数说明：event 为宏参数中的事件原文。
+/// 返回：空串或仅含事件空白字符时为 true；不裁剪其它合法事件名。
+fn is_blank_event(event: &str) -> bool {
+    event.chars().all(|value| {
+        matches!(value, '\u{0009}'..='\u{000d}' | '\u{001c}'..='\u{0020}' | '\u{1680}'
+            | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}' | '\u{2028}' | '\u{2029}'
+            | '\u{205f}' | '\u{3000}')
+    })
 }
 
 /// 业务作用：解析 `topics = ["a", "b"]`。
@@ -624,7 +744,15 @@ fn group_tokens(
     function_name: &syn::Ident,
     root: &TokenStream2,
 ) -> TokenStream2 {
-    if let Some(group) = &args.group {
+    if let Some(scope) = &args.broadcast_scope {
+        let instance = match &args.instance_id {
+            Some(value) => {
+                quote!(::core::option::Option::Some(::std::string::ToString::to_string(#value)))
+            }
+            None => quote!(::core::option::Option::None),
+        };
+        quote!(#root::GroupSpec::StableBroadcast { scope: ::std::string::ToString::to_string(#scope), instance_id: #instance })
+    } else if let Some(group) = &args.group {
         quote!(#root::GroupSpec::Named(::std::string::ToString::to_string(#group)))
     } else if let Some(scope) = &args.broadcast {
         match scope {

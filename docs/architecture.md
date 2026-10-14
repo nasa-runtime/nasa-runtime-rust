@@ -118,6 +118,25 @@ Redis 的租约、PEL 和 fencing 决定持久接管权；`napart` Runner 决定
 域间共享 Tokio runtime 和 Redis 客户端，本地调度隔离不代表线程、连接或后端服务隔离。
 独立 `napart` 只提供本地执行，不持久化消息。详见 [分区消费](../nadis/docs/partition.md)。
 
+## Kafka 多源、确认与恢复
+
+`nasa::kafka` 将命名源、独立发布通道、消费 owner 与持久任务分开管理。Application 用 `kafka` / `kafkas` 装配来源并交出受限业务句柄；独立调用方可以持有 `KafkaProxy`，同时承担 Ready 和关闭顺序。
+
+```text
+普通消费：poll → 当前 assignment 责任 → 有界业务调用 → Ack / DLT 确认 → 安全前缀提交
+普通发布：lane 准入 → 原生发送 → 实际交付观察 → 释放发送责任
+同集群事务：完整输入 → 暂存批准输出与确认 → 复验权威 → outputs + offsets 原子 commit
+有限任务：冻结身份与范围 → 独占 checkpoint → 处理或目标确认 → 持久进度 → 状态发布
+```
+
+普通消费支持分区顺序和按键并发，订阅组可增加独立 owner 槽，共享组额度。进程、源、组、分区和 key 的容量约束实际输入责任；超时与失权不提前释放仍存活的调用。旧 Ack 不能推进新代次水位，同进程同 key 的新调用须等旧调用退出。
+
+Kafka 事务使用独立 producer 和稳定部署身份，同一集群内完整输入位点与批准输出共同提交。commit 已在途时取消不能改判 abort；未知结果使 owner 停止新工作，恢复复用身份并读取 broker 已提交位置。普通 lane、数据库和其它外部副作用不纳入原子范围。
+
+Replay、单目标 Transfer 和 DLT 回投使用共同持久格式，可与 Java `nasa-kafka` 接续；资源身份、计划和存储权威仍须一致。目标确认先于 checkpoint，进度持久化前退出可能重复。文件后端用于 POSIX 本地恢复，单主 MySQL 后端支持共享进度；存储租约不隔离已经在途的 Kafka 副作用。
+
+当前 Ready、组/槽健康、指标与关闭报告分别提供准入和资源责任证据。具体 API、容量与线路边界见 [nafka 架构](../nafka/README.md#运行架构与确认时刻)。
+
 ## 配置、身份与观测
 
 严格配置通过启动前工厂显式选择，分为三个所有者：`naml` 生成有界配置候选和来源解释，

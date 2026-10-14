@@ -1,18 +1,24 @@
+//! 受管多数据源 Kafka 的命名装配、业务权限、Ready 与两段停机。
+//!
+//! 单源和多源配置归一为同一目录；显式来源不存在时拒绝，不回退到其它集群。
+//! 业务句柄不交出原生 owner 或整源关闭权，Admin 默认只读；关闭准入不撤销已接受的实际责任。
+//! 事务、有限回放和转发沿用 nafka 的身份与持久合同，额外服从 Application 状态与共同停止期限。
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant},
 };
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    application::KafkaCustomization, capabilities::KafkaClientCapability, Application,
-    ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase, ApplicationResult,
-    ApplicationState, ComponentId, PrepareContext, ReadyContext, ShutdownAction, ShutdownContext,
-    StartContext,
+    Application, ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase,
+    ApplicationResult, ApplicationState, ComponentId, PrepareContext, ReadyContext, ShutdownAction,
+    ShutdownContext, StartContext, application::KafkaCustomization,
+    capabilities::KafkaClientCapability,
 };
 
 /// Kafka 启动门禁相对 Application 全局 deadline 预留的固定诊断余量。
@@ -31,7 +37,7 @@ enum ConsumerMode {
     /// 自动属性项与 UserHook 定制共同组成一次性 registry。
     #[default]
     Collected,
-    /// 只使用 producer/admin，Ready 通过 metadata 探测。
+    /// 不启动普通 consumer registry，Ready 使用 metadata 探测；事务和有限任务仍须业务显式创建并观察各自状态。
     Disabled,
 }
 
@@ -52,6 +58,21 @@ enum ReadyRule {
         /// 非空、无空值且不重复的必需 topic 集合。
         topics: Vec<String>,
     },
+    /// 当前 assignment 必须拥有全部具体分区，不以同 topic 的其它分区代替。
+    AssignedPartitions {
+        /// 非空、无重复的具体分区坐标。
+        partitions: Vec<ReadyPartition>,
+    },
+}
+
+/// 受管配置的分区坐标，配置解析拒绝多余字段。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadyPartition {
+    /// 必须分配的 topic。
+    topic: String,
+    /// 必须分配的非负分区号。
+    partition: i32,
 }
 
 impl ReadyRule {
@@ -82,6 +103,9 @@ impl ReadyRule {
                     Ok(())
                 }
             }
+            Self::AssignedPartitions { .. } => self.requirement().validate().map_err(
+                |_| "assigned_partitions readiness requires non-empty unique valid coordinates",
+            ),
         }
     }
 
@@ -99,36 +123,21 @@ impl ReadyRule {
             Self::AssignedTopics { topics } => {
                 nafka::ReadyRequirement::AssignedTopics(topics.clone())
             }
+            Self::AssignedPartitions { partitions } => nafka::ReadyRequirement::AssignedPartitions(
+                partitions
+                    .iter()
+                    .map(|tp| nafka::Tp::new(tp.topic.clone(), tp.partition))
+                    .collect(),
+            ),
         }
     }
 
-    /// 业务作用：判断运行期健康快照当前是否仍满足本规则。
-    ///
-    /// # 参数
-    ///
-    /// - `health`：同一 resolved group 的最新脱敏健康快照。
-    ///
-    /// # 返回
-    ///
-    /// 仅 Running/Retrying 且 assignment 事实满足规则时返回 true；软降级和 rebalance 返回 false。
+    /// 业务作用：用数据面的统一门禁判断该消费组当前是否满足受管 Ready 规则。
+    /// 参数说明：health 为同一实际组的最新脱敏健康快照。
+    /// 返回：仅 Running 且分配事实满足规则时为 true；重试、保护和 rebalance 不因仍保留旧分配而被判为就绪。
     fn is_satisfied(&self, health: &nafka::GroupHealth) -> bool {
-        if !matches!(
-            health.state,
-            nafka::GroupState::Running | nafka::GroupState::Retrying
-        ) || health.ready_assignment_epoch.is_none()
-        {
-            return false;
-        }
-        match self {
-            Self::Joined => true,
-            Self::Assigned { min_partitions } => health.assignment.len() >= *min_partitions,
-            Self::AssignedTopics { topics } => topics.iter().all(|required| {
-                health
-                    .assignment
-                    .iter()
-                    .any(|assigned| assigned.topic == *required)
-            }),
-        }
+        // 容器不能独立放宽数据面门禁，否则本地仍有分配时会把重试或保护误报为可服务。
+        self.requirement().satisfied_by(health)
     }
 }
 
@@ -148,6 +157,8 @@ struct KafkaReadinessOptions {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct KafkaContainerOptions {
+    /// 允许业务通过独立 administration 入口取得管理写能力；默认仅只读。
+    admin_write: bool,
     /// 是否自动启动 consumer registry。
     consumers: ConsumerMode,
     /// 运行期 group 健康轮询周期，单位毫秒，合法范围 100..=10_000。
@@ -164,6 +175,7 @@ impl Default for KafkaContainerOptions {
     /// 返回只影响 Application 编排、不改变 nafka 数据面默认值的配置。
     fn default() -> Self {
         Self {
+            admin_write: false,
             consumers: ConsumerMode::Collected,
             monitor_interval_ms: 500,
             readiness: KafkaReadinessOptions::default(),
@@ -174,22 +186,24 @@ impl Default for KafkaContainerOptions {
 impl KafkaContainerOptions {
     /// 业务作用：校验容器专属字段及其交叉约束。
     ///
+    /// 参数说明：无。
+    ///
     /// # 返回
     ///
     /// 全部字段合法且与 consumer mode 一致时返回 `Ok(())`。
     ///
     /// # 错误
     ///
-    /// 监控周期越界、规则非法、group key 为空或 producer probe 与 consumer 模式冲突时返回摘要。
+    /// 监控周期越界、规则非法、group key 不满足实际消费组输入域或 producer probe 与 consumer 模式冲突时返回摘要。
     fn validate(&self) -> Result<(), &'static str> {
         if !(100..=10_000).contains(&self.monitor_interval_ms) {
             return Err("container.monitor_interval_ms must be within 100..=10000");
         }
         self.readiness.default.validate()?;
         for (group, rule) in &self.readiness.groups {
-            if group.trim().is_empty() {
-                return Err("container.readiness.groups cannot contain an empty group id");
-            }
+            // 就绪规则必须引用原始消费组身份；在创建 owner 前复用数据面合同，避免合法组被容器拒绝或非法别名进入监控。
+            nafka::KafkaConfig::validate_group_id(group)
+                .map_err(|_| "container.readiness.groups contains an invalid group id")?;
             rule.validate()?;
         }
         if let Some(topic) = self.readiness.producer_probe_topic.as_deref() {
@@ -586,9 +600,11 @@ impl ApplicationComponent for KafkaComponent {
 
                 // connect 成功后先压 final action，再做任何可能失败的发布；否则后续 readiness
                 // 注册或 OnceLock 发布失败会只靠 Drop，丢失 producer flush。
+                let access_scope = nafka::KafkaAccessScope::new();
                 context.activate(Box::new(KafkaFinalShutdown {
                     client_name: name.clone(),
                     proxy: proxy.clone(),
+                    access_scope: access_scope.clone(),
                 }));
                 let contributor = application.register_readiness(
                     ComponentId::Kafka,
@@ -602,6 +618,8 @@ impl ApplicationComponent for KafkaComponent {
                     proxy.clone(),
                     contributor,
                     bridge,
+                    access_scope,
+                    client.container.admin_write,
                     client.container.consumers == ConsumerMode::Disabled,
                 ));
                 capabilities.insert(name.clone(), Arc::clone(&capability));
@@ -852,8 +870,9 @@ impl ShutdownAction for KafkaConsumersShutdown {
                     let proxy = proxy.clone();
                     let capability = Arc::clone(capability);
                     async move {
-                        let result = proxy.stop_consumers_until(context.deadline()).await;
+                        // 先撤销就绪再等待实际退出，等待 future 被取消也不能保留旧的流量许可。
                         capability.publish_readiness(false, Vec::new());
+                        let result = proxy.stop_consumers_until(context.deadline()).await;
                         (name, result)
                     }
                 }))
@@ -882,6 +901,20 @@ struct KafkaFinalShutdown {
     client_name: String,
     /// 拥有最终 producer/admin 关闭权的原始运行时句柄。
     proxy: nafka::KafkaProxy,
+    /// final action 释放时关闭业务域，覆盖正常返回、取消与未获执行预算。
+    access_scope: nafka::KafkaAccessScope,
+}
+
+impl Drop for KafkaFinalShutdown {
+    /// 业务作用：在最终清理责任交还宿主时永久撤销导出句柄的新准入。
+    /// 参数说明：无。
+    /// 返回：立即关闭本地原子门，不等待客户端；即使清理失败或 action 被放弃也不会重开业务路由。
+    fn drop(&mut self) {
+        // 最终动作可能根本没得到执行预算；门禁必须由 action 所有权终结保证。
+        self.access_scope.close();
+        // 原运行时退出前仍须通知消费失权，不能因异步 action 被放弃而继续派发或接受迟到确认。
+        self.proxy.request_consumer_stop();
+    }
 }
 
 impl ShutdownAction for KafkaFinalShutdown {
@@ -1387,7 +1420,9 @@ async fn probe_client_metadata(
     if remaining.is_zero() {
         return Err(kafka_error(
             phase,
-            format!("kafka client `{client_name}` timed out during metadata on {endpoint} (no remaining startup budget)"),
+            format!(
+                "kafka client `{client_name}` timed out during metadata on {endpoint} (no remaining startup budget)"
+            ),
         ));
     }
     let admin = proxy.admin();
@@ -1504,7 +1539,12 @@ fn group_ready_error(
     budget_ms: u128,
     error: nafka::NafkaError,
 ) -> ApplicationError {
-    if let nafka::NafkaError::GroupReadyTimeout { last_health, .. } = &error {
+    if let nafka::NafkaError::GroupReadyTimeout {
+        last_health,
+        readiness,
+        ..
+    } = &error
+    {
         let mut lines: Vec<String> = last_health
             .iter()
             .map(|health| {
@@ -1513,11 +1553,14 @@ fn group_ready_error(
                     .find(|(group, _)| group == &health.group)
                     .map(|(_, rule)| describe_requirement(&rule.requirement()))
                     .unwrap_or_else(|| "<unknown>".to_owned());
+                let reason = readiness.iter().find(|status| status.health.group == health.group)
+                    .map(|status| format!("{:?}", status.reason)).unwrap_or_else(|| "unknown".to_owned());
                 format!(
-                    "group `{}` did not satisfy `{}` before ~{}ms: state={:?} assignment={} ready_epoch={} last_error={}",
+                    "group `{}` did not satisfy `{}` before ~{}ms: reason={} state={:?} assignment={} ready_epoch={} last_error={}",
                     health.group,
                     requirement,
                     budget_ms,
+                    reason,
                     health.state,
                     health.assignment.len(),
                     if health.ready_assignment_epoch.is_some() {
@@ -1562,6 +1605,7 @@ fn describe_requirement(requirement: &nafka::ReadyRequirement) -> String {
             format!("assigned>={min_partitions}")
         }
         nafka::ReadyRequirement::AssignedTopics(_) => "assigned_topics".to_owned(),
+        nafka::ReadyRequirement::AssignedPartitions(_) => "assigned_partitions".to_owned(),
     }
 }
 

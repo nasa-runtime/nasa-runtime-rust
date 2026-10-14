@@ -1,14 +1,24 @@
 //! 每 group 单 owner 线程、借用路由、严格确认与同步安全提交。
 
+mod handler;
+mod key_ordered;
+mod route_headers;
+use key_ordered::KeyCompletions;
+use route_headers::RouteHeaders;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::Instrument;
 
+use super::group::OwnerRuntime;
 use crate::consumer::ack::{AckIdentity, ManualAckSet, RecordAck};
-use crate::consumer::dlt::{DltAdmission, DltDispatcher, DltEnvelope, DltJob, DltRecord};
+use crate::consumer::dlt::{DltDispatcher, DltEnvelope, DltJob, DltRecord};
 use crate::consumer::erased::{ConsumerShape, ErasedRecord, InvocationOutcome, RawRecord};
 use crate::consumer::offset_state::{AckSource, GroupOffsetState, RecordOutcome, SkipReason};
 use crate::consumer::passthrough::{
@@ -16,10 +26,10 @@ use crate::consumer::passthrough::{
     PassthroughFailureAction,
 };
 use crate::consumer::supervisor::{
-    update_state, CommandReply, GroupHandle, GroupPlan, OwnerCommand, OwnerCommandKind, OwnerMode,
+    update_state, CommandReply, GroupPlan, OwnerCommand, OwnerCommandKind, OwnerHandle, OwnerMode,
     StartupGate,
 };
-use crate::consumer::{AckMode, ConsumeCtx};
+use crate::consumer::{AckMode, ConsumeCtx, ExecutionMode};
 use crate::error::{NafkaError, Result};
 use crate::health::{GroupHealth, GroupState, HaltReason, PauseReason};
 use crate::rd::consumer::{
@@ -73,30 +83,60 @@ enum ActionFlow {
     StopOwner,
 }
 
-/// 维护性 poll 后 owner 主循环应采取的会话级动作。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MaintenanceFlow {
-    /// 当前门禁已经解除，可以恢复业务派发。
-    Ready,
-    /// 门禁仍然存在，本轮只维护心跳。
-    Blocked,
-    /// poll 已报告会话级临时或致命错误，必须退出当前会话。
-    StopOwner,
-}
-
 /// 业务作用：把可信投递序号与毒消息预算分开计数，避免控制态延后伪造投递次数或耗尽 DLT 预算。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RetryAttemptState {
     /// 当前 offset 已经完成但未成功的 handler 投递次数，包含控制态延后。
     failed_deliveries: u32,
     /// 当前 offset 已消耗的普通失败次数，不包含控制态延后。
     bounded_failures: u32,
+    /// 与本条失败计数同寿命，移除或清空状态时归还组级额度。
+    _permit: super::metadata_capacity::RetryPermit,
+}
+
+/// 业务作用：整批登记尚未保存次数的失败记录，保证多 owner 共用上限且批次无部分准入。
+/// 参数说明：runtime 为共享组容量；attempts 为本槽状态；identities 为本次失败的完整坐标。
+/// 返回：全部坐标都有凭证时为 true；容量不足不改变状态。
+fn admit_retry_entries(
+    runtime: &Arc<OwnerRuntime>,
+    attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
+    identities: impl IntoIterator<Item = (Tp, i64)>,
+) -> bool {
+    let missing: BTreeSet<_> = identities
+        .into_iter()
+        .filter(|key| !attempts.contains_key(key))
+        .collect();
+    let Some(permits) = runtime.metadata.reserve_retries(missing.len()) else {
+        return false;
+    };
+    for (identity, permit) in missing.into_iter().zip(permits) {
+        attempts.insert(
+            identity,
+            RetryAttemptState {
+                failed_deliveries: 0,
+                bounded_failures: 0,
+                _permit: permit,
+            },
+        );
+    }
+    true
+}
+
+/// 业务作用：读取逐记录投递历史，防止重试批次合并把旧失败次数转移给新输入。
+/// 参数说明：attempts 为失败账本；identity 为来源坐标。
+/// 返回：已失败投递数与毒消息预算消耗；未失败记录均为零。
+fn retry_counts(
+    attempts: &BTreeMap<(Tp, i64), RetryAttemptState>,
+    identity: &(Tp, i64),
+) -> (u32, u32) {
+    attempts.get(identity).map_or((0, 0), |state| {
+        (state.failed_deliveries, state.bounded_failures)
+    })
 }
 
 /// owner 应用处理结果时共享的可变状态引用集合。
 struct ActionContext<'a> {
     /// 所属运行时。
-    runtime: &'a Arc<KafkaProxyInner>,
+    runtime: &'a Arc<OwnerRuntime>,
     /// owner 唯一 consumer。
     consumer: &'a ConsumerClient,
     /// group 健康快照。
@@ -115,8 +155,8 @@ struct ActionContext<'a> {
     dlt_pending: &'a mut BTreeMap<Tp, PendingDlt>,
     /// DLT completion 有界发送端。
     dlt_sender: &'a tokio::sync::mpsc::Sender<DltCompletion>,
-    /// dispatcher 暂无 permit 时每 owner 唯一的本地准入任务。
-    dlt_admission: &'a mut Option<PendingDltAdmission>,
+    /// dispatcher 暂无 permit 时各失败分区的有界坐标等待。
+    dlt_admission: &'a mut BTreeMap<Tp, PendingDltAdmission>,
     /// 连续安全水位状态。
     progress: &'a mut GroupOffsetState,
     /// 最近一次成功提交时间。
@@ -199,6 +239,8 @@ impl DeadLetterSource for RdMessage<'_> {
 
 /// typed 逻辑批中的拥有型原始消息；不会进入 passthrough 借用链路。
 struct OwnedTypedMessage {
+    /// 原文跨 poll、准备和派发队列转移时持续保留原始输入额度。
+    input_permit: Arc<super::capacity::RecordPermit>,
     /// 来源 topic。
     topic: String,
     /// 来源分区。
@@ -223,15 +265,21 @@ impl OwnedTypedMessage {
     /// # 参数
     ///
     /// - `message`: 已通过单记录字节上限检查的借用消息。
+    /// - `parsed`: 在借用期解析的只读头描述符。
+    /// - `input_permit`: 原文物化前取得且必须随数据持续保留的责任。
+    ///
+    /// 返回：独立原文与其额度；额度不会因外层逻辑批结束而提前归还。
     fn copy_from(
         message: &RdMessage<'_>,
         parsed: &Result<Vec<crate::rd::consumer::RdHeaderRef<'_>>>,
+        input_permit: Arc<super::capacity::RecordPermit>,
     ) -> Self {
         let (headers, malformed_headers) = match parsed {
             Ok(headers) => (owned_headers(headers), false),
             Err(_) => (KafkaHeaders::default(), true),
         };
         Self {
+            input_permit,
             topic: message.topic().to_owned(),
             partition: message.partition(),
             offset: message.offset(),
@@ -307,9 +355,12 @@ impl DeadLetterSource for RawRecord {
         self.ctx.timestamp
     }
 
-    /// 业务作用：返回已解析 typed 原始记录的 UTF-8 key 字节。
+    /// 业务作用：让 DLT 保留来源 key 的完整字节身份。
+    ///
+    /// 参数说明：无。
+    /// 返回：原始可空字节，不通过 UTF-8 便利视图重编码。
     fn source_key(&self) -> Option<&[u8]> {
-        self.ctx.key.as_deref().map(str::as_bytes)
+        self.ctx.raw_key.as_deref()
     }
 
     /// 业务作用：返回已解析 typed 原始记录的 payload。
@@ -367,6 +418,8 @@ struct LogicalTypedBatch {
     items: Vec<TypedBatchItem>,
     /// 已物化消息的累计 retained bytes。
     retained_bytes: usize,
+    /// 批次提前回退或失权时，原文仍存活到本批退出，不能只清理账本就提前归还计费。
+    _permits: Vec<Arc<super::capacity::RecordPermit>>,
 }
 
 /// 一个失败分区的非阻塞退避状态。
@@ -375,6 +428,8 @@ struct PartitionRetry {
     retry_from: i64,
     /// 允许恢复派发的单调时钟时刻。
     ready_at: Instant,
+    /// 按键输入仍保留在有界队列中，退避只阻止失败 key，无需再次物化原文。
+    in_place: bool,
 }
 
 /// owner 持有的单分区在途 DLT 身份与取消句柄。
@@ -383,8 +438,8 @@ struct PendingDlt {
     assignment_epoch: u64,
     /// 失败单元首 offset。
     first_offset: i64,
-    /// owner 会话退出或 rebalance 失效时的任务取消句柄。
-    abort: tokio::task::AbortHandle,
+    /// 失权后关闭新交付；已发出的请求及其配额等待真实终态。
+    cancel: Arc<AtomicBool>,
 }
 
 /// 异步 DLT worker 返回 owner 的有界 completion。
@@ -399,21 +454,19 @@ struct DltCompletion {
     result: Result<()>,
 }
 
-/// dispatcher permit 暂不可得时 owner 唯一允许保留的本地 DLT job。
+/// dispatcher permit 暂不可得时只保留坐标和计量，不持有额外原文副本。
 struct PendingDltAdmission {
-    /// 尚未取得全局 permit 的原始任务。
-    job: DltJob,
+    /// 已校验的完整信封字节上界；取入原坐标时仍须原子复验额度。
+    required_bytes: usize,
     /// 来源 topic-partition。
     tp: Tp,
     /// 调度时 assignment epoch。
     assignment_epoch: u64,
     /// 失败单元按交付顺序排列的 offsets。
     offsets: Vec<i64>,
-    /// group 级维护性 poll 已取出但未派发的每分区最小 offset。
-    discarded: BTreeMap<Tp, i64>,
 }
 
-/// typed 记录完成路由前处理与逐条解码后的派发形态。
+/// typed 记录完成框架路由后的派发形态；自定义解码与业务共用实际调用责任。
 enum PreparedTypedItem {
     /// 尚未构造 typed 上下文时已经得到框架动作。
     ImmediateOwned {
@@ -422,21 +475,21 @@ enum PreparedTypedItem {
         /// 无需调用业务 handler 的动作。
         action: ProcessAction,
     },
-    /// 构造 typed 上下文后解码失败得到的框架动作。
-    ImmediateRaw {
+    /// 已发现解码失败，但尚未进入按分区顺序的失败治理。
+    DecodeFailure {
         /// 保留 DLT 与进度身份的 typed 原始记录。
         source: RawRecord,
-        /// 无需调用业务 handler 的动作。
-        action: ProcessAction,
+        /// 冻结的处理器身份；只有 owner 实际接管本条失败才发出指标。
+        consumer_id: &'static str,
+        /// 用于后续策略裁决的解码原因。
+        reason: String,
     },
-    /// 已匹配 route 且逐条解码成功的记录。
+    /// 已匹配 route、尚待执行或已有完成证据的记录。
     Routed {
         /// 保留失败重试与 DLT 所需原始数据。
         source: RawRecord,
         /// 匹配的冻结 route。
         route: Arc<dyn crate::consumer::erased::ErasedConsumer>,
-        /// 已恢复前仍保持擦除的业务值。
-        decoded: ErasedRecord,
     },
     /// 未复制业务字节的超限记录。
     Oversize {
@@ -454,7 +507,7 @@ impl PreparedTypedItem {
     fn location(&self) -> (Tp, i64) {
         match self {
             Self::ImmediateOwned { source, .. } => (source.tp(), source.offset),
-            Self::ImmediateRaw { source, .. } | Self::Routed { source, .. } => {
+            Self::DecodeFailure { source, .. } | Self::Routed { source, .. } => {
                 (source.ctx.topic_partition(), source.ctx.offset)
             }
             Self::Oversize { tp, offset, .. } => (tp.clone(), *offset),
@@ -489,7 +542,7 @@ enum RestartBackoffOutcome {
 /// - `runtime`: 提供初始值与封顶值。
 /// - `attempt`: 当前滑动窗口内第几次自动重建，从一开始。
 /// - `seed`: resolved group 派生的稳定种子。
-fn restart_delay(runtime: &Arc<KafkaProxyInner>, attempt: u32, seed: u64) -> Duration {
+fn restart_delay(runtime: &Arc<OwnerRuntime>, attempt: u32, seed: u64) -> Duration {
     restart_delay_values(
         runtime.config.behavior.consume_restart_delay_ms,
         runtime.config.behavior.consume_restart_max_delay_ms,
@@ -599,26 +652,24 @@ fn wait_restart_backoff(
         match commands.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(command) if matches!(command.kind, OwnerCommandKind::Stop) => {
                 // 同上：被取消的 Stop 不得产生"停止 owner"这个副作用。
-                if !GroupHandle::begin_command(&command) {
+                if !OwnerHandle::begin_command(&command) {
                     continue;
                 }
                 update_state(health, GroupState::Stopped, None);
-                GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                 return RestartBackoffOutcome::Stopped;
             }
             Ok(command) if matches!(command.kind, OwnerCommandKind::Restart) => {
-                if GroupHandle::begin_command(&command) {
-                    GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                if OwnerHandle::begin_command(&command) {
+                    OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                     return RestartBackoffOutcome::Restarted;
                 }
             }
             Ok(command) => {
-                if GroupHandle::begin_command(&command) {
-                    GroupHandle::finish_command(
+                if OwnerHandle::begin_command(&command) {
+                    OwnerHandle::reject_command(
                         command,
-                        Err(NafkaError::Lifecycle(
-                            "consumer 正在自动重建退避，仅允许 restart_group 或 stop".into(),
-                        )),
+                        "consumer 正在自动重建退避，仅允许 restart_group 或 stop",
                     );
                 }
             }
@@ -642,7 +693,7 @@ fn wait_restart_backoff(
 /// - `startup_reply`: owner 本地 consumer 构造结果。
 /// - `global_error`: 与 supervisor 共享的 broker 级错误单槽,跨会话重建复用。
 pub(crate) fn run_owner(
-    runtime: Arc<KafkaProxyInner>,
+    runtime: Arc<OwnerRuntime>,
     mut plan: GroupPlan,
     commands: std::sync::mpsc::Receiver<OwnerCommand>,
     health: Arc<RwLock<GroupHealth>>,
@@ -650,11 +701,13 @@ pub(crate) fn run_owner(
     startup_reply: tokio::sync::oneshot::Sender<Result<()>>,
     global_error: Arc<std::sync::Mutex<Option<String>>>,
 ) {
+    let fixed_offsets = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
     let initial_consumer = match ConsumerClient::create(
         &runtime.config,
         &plan.group,
-        Arc::clone(&runtime.metrics),
+        runtime.metrics.clone(),
         Arc::clone(&global_error),
+        Arc::clone(&fixed_offsets),
     ) {
         Ok(consumer) => consumer,
         Err(error) => {
@@ -716,12 +769,21 @@ pub(crate) fn run_owner(
                 initial_consumer.take(),
                 &epoch_base,
                 &global_error,
+                &fixed_offsets,
             )
         }));
         // 会话已经结束（consumer 已析构）：立刻撤销 ready 租约，不能等到下一代入口。
         // 否则整个重建退避窗口（默认 3s，退避上限 60s）里 await_group_ready 仍会凭
         // 上一代 assignment 立即放行，而此刻底层什么都没在消费。
         invalidate_ready_snapshot(&runtime, &plan.group, &health);
+        // 即使会话因 panic 提前展开栈，也必须先等实际闭包退出，才允许重建或报告停止。
+        runtime.handlers.await_idle();
+        runtime.records.clear(None);
+        // 停止意图跨会话保留；停止收口期间的网络错误不能重新开放另一个消费会话。
+        if runtime.stop_requested.load(Ordering::Acquire) {
+            update_state(&health, GroupState::Stopped, None);
+            return;
+        }
         let exit = match session {
             Ok(exit) => exit,
             Err(payload) => {
@@ -774,7 +836,7 @@ pub(crate) fn run_owner(
                 );
                 update_state(
                     &health,
-                    GroupState::Degraded,
+                    GroupState::Recovering,
                     Some(format!(
                         "consumer 临时错误，等待自动重建 delay_ms={}: {detail}",
                         delay.as_millis()
@@ -829,20 +891,15 @@ fn wait_startup_gate(
         }
         match commands.recv_timeout(Duration::from_millis(10)) {
             Ok(command) => {
-                if !GroupHandle::begin_command(&command) {
+                if !OwnerHandle::begin_command(&command) {
                     continue;
                 }
                 if matches!(&command.kind, OwnerCommandKind::Stop) {
                     update_state(health, GroupState::Stopped, None);
-                    GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                    OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                     return false;
                 }
-                GroupHandle::finish_command(
-                    command,
-                    Err(NafkaError::Lifecycle(
-                        "consumer owner 尚未通过 startup gate".into(),
-                    )),
-                );
+                OwnerHandle::reject_command(command, "consumer owner 尚未通过 startup gate");
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -864,13 +921,14 @@ fn wait_startup_gate(
 /// - `initial_consumer`: 首次会话由 startup handshake 预先构造的 consumer；后续重建为 None。
 /// - `epoch_base`: 跨会话递增的消费世代基线。
 /// - `global_error`: 跨会话共享的最近错误单槽。
+/// - `fixed_offsets`: 固定分配已经解析、定位或确认提交的跨会话恢复坐标。
 ///
 /// # 返回
 ///
 /// 返回本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
-#[allow(clippy::too_many_arguments)] // owner 会话参数本就逐项显式;第 8 个是 共享错误单槽,合并会造隐式上下文
+#[allow(clippy::too_many_arguments)] // 启动握手、控制邮箱、故障证据和恢复坐标分别承担跨会话责任。
 fn run_owner_session(
-    runtime_ref: &Arc<KafkaProxyInner>,
+    runtime_ref: &Arc<OwnerRuntime>,
     plan: &mut GroupPlan,
     commands: &std::sync::mpsc::Receiver<OwnerCommand>,
     health_ref: &Arc<RwLock<GroupHealth>>,
@@ -878,8 +936,10 @@ fn run_owner_session(
     initial_consumer: Option<ConsumerClient>,
     epoch_base: &std::sync::atomic::AtomicU64,
     global_error: &Arc<std::sync::Mutex<Option<String>>>,
+    fixed_offsets: &Arc<std::sync::Mutex<BTreeMap<Tp, i64>>>,
 ) -> OwnerSessionExit {
     let runtime = Arc::clone(runtime_ref);
+    let _assignment_session = runtime.metadata.session(runtime.slot);
     let health = Arc::clone(health_ref);
     let consumer = match initial_consumer {
         Some(consumer) => consumer,
@@ -887,8 +947,9 @@ fn run_owner_session(
             match ConsumerClient::create(
                 &runtime.config,
                 &plan.group,
-                Arc::clone(&runtime.metrics),
+                runtime.metrics.clone(),
                 Arc::clone(global_error),
+                Arc::clone(fixed_offsets),
             ) {
                 Ok(consumer) => consumer,
                 Err(error) => return classify_session_error(&health, &plan.group, error),
@@ -899,6 +960,20 @@ fn run_owner_session(
     if !delay.is_zero() && !delay_with_commands(&consumer, commands, &health, delay) {
         update_state(&health, GroupState::Stopped, None);
         return OwnerSessionExit::Stopped;
+    }
+    // 固定分配先取得完整组范围，不能在原生 assign 后才发现超限并留下可派发窗口。
+    if let OwnerMode::Assign { partitions, .. } = &plan.mode {
+        if let Err(actual) = runtime.metadata.assign(runtime.slot, partitions) {
+            return classify_session_error(
+                &health,
+                &plan.group,
+                NafkaError::AssignmentTooLarge {
+                    group: plan.group.clone(),
+                    actual,
+                    max: runtime.config.consumer.max_assignment_partitions,
+                },
+            );
+        }
     }
     // 启动延迟必须发生在 subscribe/assign 之前；否则维护性 poll 会取走尚未派发的记录。
     if let Err(error) = initialize_owner(
@@ -930,7 +1005,7 @@ fn run_owner_session(
     };
     let mut retries: BTreeMap<Tp, PartitionRetry> = BTreeMap::new();
     let mut dlt_pending: BTreeMap<Tp, PendingDlt> = BTreeMap::new();
-    let mut dlt_admission: Option<PendingDltAdmission> = None;
+    let mut dlt_admission: BTreeMap<Tp, PendingDltAdmission> = BTreeMap::new();
     let (dlt_sender, mut dlt_receiver) =
         tokio::sync::mpsc::channel(runtime.config.behavior.dlt_max_in_flight.saturating_add(1));
     let mut progress = GroupOffsetState::new(
@@ -939,12 +1014,19 @@ fn run_owner_session(
     );
     let mut last_commit = Instant::now();
     let poll_timeout = Duration::from_millis(runtime.config.behavior.poll_timeout_ms);
+    let poll_cadence = poll_timeout.min(Duration::from_millis(25));
+    let mut last_typed_poll = Instant::now() - poll_cadence;
     let commit_interval = Duration::from_millis(runtime.config.behavior.commit_interval_ms);
     let mut partition_cursor = 0_usize;
     let mut deferred_stop: Option<OwnerCommand> = None;
     // 按分区隔离的连续解码失败计数（解码整体故障熔断，见 decode_failure_action）。
     // owner 单线程独占，成功即移除条目，规模受 assignment 约束。
     let mut decode_streaks: BTreeMap<Tp, u64> = BTreeMap::new();
+    // 后续 key 的完成证据跨本地重投保留，避免前缀失败令已成功的业务调用重复执行。
+    // 该证据仅在当前 assignment 内有效，不能跨失权、人工定位或 owner 会话恢复复用。
+    let mut key_completions = KeyCompletions::default();
+    // 未裁决输入跨 poll 保留；实际调用不能阻塞其它分区的主循环。
+    let mut queued_typed: BTreeMap<Tp, VecDeque<PreparedTypedItem>> = BTreeMap::new();
     let mut transient_exit = None;
     // progress 反压门禁连续多少轮没能释放容量；只用于把长期反压升级成运维可见的 Degraded。
     let mut progress_gate_idle: u32 = 0;
@@ -954,6 +1036,22 @@ fn run_owner_session(
     // 仪表采样节流：主循环每轮都跑，但 sink 是用户实现，不能按 poll 频率打。
     let mut last_gauge_sample = Instant::now() - GAUGE_SAMPLE_INTERVAL;
     while !stopping {
+        runtime.records.prune_committed(&progress);
+        resume_input_partitions(&consumer, &health, &runtime.records.resumable());
+        key_completions.prune_committed(&progress);
+        key_completions.collect_finished(
+            &consumer,
+            assignment_epoch,
+            runtime.stop_requested.load(Ordering::Acquire) || deferred_stop.is_some(),
+            &health,
+        );
+        key_completions.resume_idle(&consumer, &health);
+        if let Some(error) = key_completions.fatal_error() {
+            // 致命框架结论不等待更早的慢 key，先关闭新派发再收尾真实调用。
+            update_state(&health, GroupState::Crashed, Some(error));
+            break;
+        }
+
         // 暂停行与 ready 租约可在多个分支变化，按固定节奏统一采样，避免仪表停留在旧状态。
         if last_gauge_sample.elapsed() >= GAUGE_SAMPLE_INTERVAL {
             publish_health_gauges(&runtime, &plan.group, &health);
@@ -983,8 +1081,12 @@ fn run_owner_session(
         if stopping {
             break;
         }
-        if deferred_stop.is_some() && dlt_pending.is_empty() && dlt_admission.is_none() {
-            GroupHandle::finish_command(
+        if deferred_stop.is_some()
+            && dlt_pending.is_empty()
+            && dlt_admission.is_empty()
+            && !key_completions.has_active()
+        {
+            OwnerHandle::finish_command(
                 deferred_stop.take().expect("停止命令存在"),
                 Ok(CommandReply::Unit),
             );
@@ -992,6 +1094,7 @@ fn run_owner_session(
             continue;
         }
         activate_due_retries(
+            &runtime,
             &consumer,
             &health,
             &mut retries,
@@ -1000,14 +1103,15 @@ fn run_owner_session(
         while let Ok(command) = commands.try_recv() {
             // 先 CAS 认领命令：调用方已超时取消时直接丢弃，绝不让一个不会被执行的命令
             // 产生任何副作用。
-            if !GroupHandle::begin_command(&command) {
+            if !OwnerHandle::begin_command(&command) {
                 continue;
             }
             if deferred_stop.is_some() {
-                GroupHandle::finish_command(
-                    command,
-                    Err(NafkaError::Lifecycle("group 正在等待 DLT 收尾".into())),
-                );
+                OwnerHandle::reject_command(command, "group 正在等待 DLT 收尾");
+                continue;
+            }
+            if let Some(error) = command_epoch_error(&consumer, &health, &command) {
+                OwnerHandle::finish_command(command, Err(error));
                 continue;
             }
             // 全部拒绝理由集中在 admission 裁决里，且必须早于 commit/cancel/clear 这些
@@ -1019,10 +1123,30 @@ fn run_owner_session(
                 &dlt_pending,
                 &dlt_admission,
             ) {
-                GroupHandle::finish_command(command, Err(error));
+                tracing::debug!(error = %error, "控制命令未通过副作用准入");
+                let id = command.id;
+                OwnerHandle::finish_command(command, Err(NafkaError::ControlNotApplied(id)));
                 continue;
             }
             let invalidates = command_invalidates_progress(&command.kind);
+            // 定位不能清掉仍在队列或执行中的输入；停止等待独立的真实退出责任。
+            let targets = super::group::partition_targets(&command.kind);
+            let input_busy = targets
+                .as_ref()
+                .filter(|targets| !targets.is_empty())
+                .map_or_else(
+                    || !queued_typed.is_empty() || key_completions.has_active(),
+                    |targets| {
+                        targets.iter().any(|tp| {
+                            queued_typed.contains_key(tp) || key_completions.active_partition(tp)
+                        })
+                    },
+                );
+            if invalidates && !matches!(command.kind, OwnerCommandKind::Stop) && input_busy {
+                let id = command.id;
+                OwnerHandle::finish_command(command, Err(NafkaError::ControlNotApplied(id)));
+                continue;
+            }
             if invalidates && progress.observed_total() != 0 {
                 stopping |= commit_until_resolved(
                     &consumer,
@@ -1034,17 +1158,35 @@ fn run_owner_session(
                     &mut last_commit,
                     runtime.config.behavior.consume_retry_backoff_ms,
                     &mut transient_exit,
-                    !dlt_pending.is_empty() || dlt_admission.is_some(),
+                    !dlt_pending.is_empty() || !dlt_admission.is_empty(),
                     &mut deferred_stop,
                 );
                 if stopping {
                     break;
                 }
             }
+            // 提交等待可能处理了新的协调事件；清理旧责任前必须再次复验命令权威。
+            if let Some(error) = command_epoch_error(&consumer, &health, &command) {
+                OwnerHandle::finish_command(command, Err(error));
+                continue;
+            }
+            if invalidates
+                && super::group::partition_targets(&command.kind).is_some_and(|targets| {
+                    targets.iter().any(|tp| {
+                        progress.has_partition_observations(tp) || retries.contains_key(tp)
+                    })
+                })
+            {
+                // 定位不能抹去目标尚未完成的输入或退避责任，必须先由原业务形成安全提交前缀。
+                let id = command.id;
+                OwnerHandle::finish_command(command, Err(NafkaError::ControlNotApplied(id)));
+                continue;
+            }
             if invalidates {
                 cancel_retry_states(&consumer, &health, &mut retries, &command.kind);
                 if !matches!(command.kind, OwnerCommandKind::Stop) {
                     cancel_dlt_states(
+                        &runtime,
                         &consumer,
                         &health,
                         &mut dlt_pending,
@@ -1054,12 +1196,26 @@ fn run_owner_session(
                 }
             }
             if matches!(command.kind, OwnerCommandKind::Stop)
-                && (!dlt_pending.is_empty() || dlt_admission.is_some())
+                && (!dlt_pending.is_empty()
+                    || !dlt_admission.is_empty()
+                    || key_completions.has_active())
             {
                 update_state(&health, GroupState::Stopping, None);
                 deferred_stop = Some(command);
                 break;
             }
+            let changed_targets = super::group::partition_targets(&command.kind);
+            let previous_subscriptions = if matches!(
+                command.kind,
+                OwnerCommandKind::Subscribe { .. } | OwnerCommandKind::Unsubscribe
+            ) {
+                match &plan.mode {
+                    OwnerMode::Subscribe { topics } => Some(topics.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             stopping = execute_command(
                 &consumer,
                 &mut plan.mode,
@@ -1068,8 +1224,26 @@ fn run_owner_session(
                 &runtime.config.consumer.auto_offset_reset,
                 command,
             );
+            if previous_subscriptions.is_some_and(|previous| matches!(&plan.mode, OwnerMode::Subscribe { topics } if *topics != previous)) {
+                // 订阅真正改变后的 Ready 必须来自后续分配；相同集合不丢弃原本有效的初始化证据。
+                pending_ready_epoch = None;
+            }
+            if matches!(&plan.mode, OwnerMode::Subscribe { topics } if topics.is_empty()) {
+                let _ = runtime.metadata.assign(runtime.slot, &[]);
+            }
             if invalidates {
-                progress.clear();
+                if let Some(targets) = changed_targets.filter(|targets| !targets.is_empty()) {
+                    // 人工定位只建立目标分区的新坐标，其它分区的完成证据和安全前沿继续有效。
+                    runtime.records.clear(Some(&targets));
+                    for tp in targets {
+                        key_completions.clear_partition(&tp);
+                        progress.clear_partition(&tp);
+                    }
+                } else {
+                    runtime.records.clear(None);
+                    key_completions.clear();
+                    progress.clear();
+                }
             }
             if stopping {
                 break;
@@ -1078,7 +1252,8 @@ fn run_owner_session(
         if stopping {
             break;
         }
-        let admission_flow = {
+        resume_key_retry_inputs(&consumer, &health, &retries);
+        {
             let mut context = ActionContext {
                 runtime: &runtime,
                 consumer: &consumer,
@@ -1099,14 +1274,6 @@ fn run_owner_session(
             };
             service_dlt_admission(&mut context)
         };
-        match admission_flow {
-            MaintenanceFlow::Ready => {}
-            MaintenanceFlow::Blocked => continue,
-            MaintenanceFlow::StopOwner => {
-                stopping = true;
-                continue;
-            }
-        }
         if deferred_stop.is_some() {
             if let Err(error) = consumer.poll(Duration::from_millis(50)) {
                 record_maintenance_poll_error(&health, &mut transient_exit, error);
@@ -1133,12 +1300,13 @@ fn run_owner_session(
                 &mut last_commit,
                 runtime.config.behavior.consume_retry_backoff_ms,
                 &mut transient_exit,
-                !dlt_pending.is_empty() || dlt_admission.is_some(),
+                !dlt_pending.is_empty() || !dlt_admission.is_empty(),
                 &mut deferred_stop,
             );
             if stopping {
                 continue;
             }
+            runtime.records.prune_committed(&progress);
             if progress.has_dispatch_capacity(progress_gate_trigger.as_ref()) {
                 let assignment = consumer.assignment().unwrap_or_default();
                 let resumable =
@@ -1177,10 +1345,42 @@ fn run_owner_session(
             }
         }
         if !plan.typed.is_empty() {
-            let batch = match collect_typed_batch(&consumer, &runtime, &health, poll_timeout) {
+            let local_work = key_completions.has_active() || !queued_typed.is_empty();
+            // 本地已有输入或调用时只做非阻塞 native 维护，完成票据唤醒后及时收割，不给每条业务附加网络等待。
+            let wait = if local_work {
+                Duration::ZERO
+            } else {
+                poll_timeout
+            };
+            // 连续完成独立推进；网络维护按有界周期进行，让已接纳输入在下一次拉取前获得释放额度的机会。
+            let polled = !local_work || last_typed_poll.elapsed() >= poll_cadence;
+            let incoming = if polled {
+                let value = collect_typed_batch(
+                    &consumer,
+                    &runtime,
+                    &health,
+                    wait,
+                    &queued_typed,
+                    &progress,
+                    assignment_epoch,
+                );
+                last_typed_poll = Instant::now();
+                health
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_poll_at = Some(SystemTime::now());
+                value
+            } else {
+                Ok(LogicalTypedBatch {
+                    items: Vec::new(),
+                    retained_bytes: 0,
+                    _permits: Vec::new(),
+                })
+            };
+            let batch = match incoming {
                 Ok(batch) => batch,
                 Err(RdPollError::Transient(error)) => {
-                    update_state(&health, GroupState::Degraded, Some(error.clone()));
+                    update_state(&health, GroupState::Recovering, Some(error.clone()));
                     transient_exit = Some(error);
                     break;
                 }
@@ -1189,11 +1389,15 @@ fn run_owner_session(
                     break;
                 }
             };
-            health
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .last_poll_at = Some(SystemTime::now());
             if let Some(event) = consumer.take_rebalance() {
+                key_completions.clear();
+                let mut unstarted = queued_typed
+                    .iter()
+                    .filter_map(|(tp, items)| {
+                        items.front().map(|item| (tp.clone(), item.location().1))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                queued_typed.clear();
                 // Assigned 分支会 prime_assignment_positions，把每个分区重置回 committed；
                 // 那之后再按"本批最小 offset"回退等于把位置往**前**推，会跳过
                 // committed 与批首之间那些已观察但随 reset_for_assignment 一起作废的记录。
@@ -1215,7 +1419,7 @@ fn run_owner_session(
                 ) {
                     break;
                 }
-                if !batch.items.is_empty() {
+                if !batch.items.is_empty() || !unstarted.is_empty() {
                     // 本批已经从 broker 取走但一条都没派发。只有在**没有重新 prime**的事件
                     // （`Error`：不改 assignment 不 prime；cooperative 的 revoke-only：保留分区
                     // 不 prime）上才需要按批首回退，否则丢批等于让后续安全前沿跨过未处理记录。
@@ -1232,37 +1436,46 @@ fn run_owner_session(
                                         .or_insert_with(|| item.offset());
                                     acc
                                 });
-                        let failed = consumer.rewind_offsets(&rewind);
+                        for (tp, offset) in rewind {
+                            unstarted
+                                .entry(tp)
+                                .and_modify(|current| *current = (*current).min(offset))
+                                .or_insert(offset);
+                        }
+                        let failed = rewind_input_offsets(&runtime, &consumer, &health, &unstarted);
                         halt_failed_rewinds(&consumer, &health, &failed);
                     }
                     continue;
                 }
-            } else if let Some(ready_epoch) = pending_ready_epoch.take() {
-                publish_assignment_health(
-                    &runtime,
-                    &plan.group,
-                    &health,
-                    &assignment,
-                    external_epoch(epoch_base, ready_epoch),
-                );
-            }
-            if batch.items.is_empty() {
-                if progress.observed_total() != 0 && last_commit.elapsed() >= commit_interval {
-                    stopping |= commit_until_resolved(
-                        &consumer,
-                        &mut progress,
+            } else if polled {
+                // 本地调度轮次不构成初始化后的 broker 维护证据；必须等实际 poll 才开放新的 Ready。
+                if let Some(ready_epoch) = pending_ready_epoch.take() {
+                    publish_assignment_health(
+                        &runtime,
+                        &plan.group,
                         &health,
-                        commands,
-                        &mut plan.mode,
-                        attempts,
-                        &mut last_commit,
-                        runtime.config.behavior.consume_retry_backoff_ms,
-                        &mut transient_exit,
-                        !dlt_pending.is_empty() || dlt_admission.is_some(),
-                        &mut deferred_stop,
+                        &assignment,
+                        external_epoch(epoch_base, ready_epoch),
                     );
                 }
-                continue;
+            }
+            if batch.items.is_empty()
+                && progress.observed_total() != 0
+                && last_commit.elapsed() >= commit_interval
+            {
+                stopping |= commit_until_resolved(
+                    &consumer,
+                    &mut progress,
+                    &health,
+                    commands,
+                    &mut plan.mode,
+                    attempts,
+                    &mut last_commit,
+                    runtime.config.behavior.consume_retry_backoff_ms,
+                    &mut transient_exit,
+                    !dlt_pending.is_empty() || !dlt_admission.is_empty(),
+                    &mut deferred_stop,
+                );
             }
             debug_assert!(
                 batch.retained_bytes <= runtime.config.behavior.max_batch_bytes
@@ -1288,13 +1501,46 @@ fn run_owner_session(
                 &mut progress_gate_trigger,
                 &mut deferred_stop,
                 &mut decode_streaks,
+                &mut key_completions,
+                &mut queued_typed,
             );
+            if !stopping
+                && queued_typed.is_empty()
+                && !key_completions.has_active()
+                && retries.is_empty()
+                && dlt_pending.is_empty()
+                && dlt_admission.is_empty()
+                && progress.observed_total() != 0
+                && !progress.has_pending_gap()
+            {
+                // 本地责任已经形成完整安全前缀，尾批无需等待定时阈值；未知提交仍进入原有保护和退避流程。
+                stopping |= commit_until_resolved(
+                    &consumer,
+                    &mut progress,
+                    &health,
+                    commands,
+                    &mut plan.mode,
+                    attempts,
+                    &mut last_commit,
+                    runtime.config.behavior.consume_retry_backoff_ms,
+                    &mut transient_exit,
+                    false,
+                    &mut deferred_stop,
+                );
+            }
+            if (key_completions.has_active() || !queued_typed.is_empty())
+                && !stopping
+                && !key_completions.has_finished()
+            {
+                // unpark 保留先到的完成通知；等待仍有上限，使 broker 维护、重试和失权检查持续推进。
+                std::thread::park_timeout(poll_cadence.saturating_sub(last_typed_poll.elapsed()));
+            }
             continue;
         }
         let message = match consumer.poll(poll_timeout) {
             Ok(message) => message,
             Err(RdPollError::Transient(error)) => {
-                update_state(&health, GroupState::Degraded, Some(error.clone()));
+                update_state(&health, GroupState::Recovering, Some(error.clone()));
                 transient_exit = Some(error);
                 break;
             }
@@ -1360,11 +1606,55 @@ fn run_owner_session(
                     &mut last_commit,
                     runtime.config.behavior.consume_retry_backoff_ms,
                     &mut transient_exit,
-                    !dlt_pending.is_empty() || dlt_admission.is_some(),
+                    !dlt_pending.is_empty() || !dlt_admission.is_empty(),
                     &mut deferred_stop,
                 );
             }
             continue;
+        };
+        let tp = Tp::new(message.topic(), message.partition());
+        if let Some(expected) = runtime
+            .records
+            .accept_dead_letter_position(&tp, message.offset())
+        {
+            halt_partition(
+                &consumer,
+                &health,
+                &tp,
+                HaltReason::ProgressInvariant,
+                format!(
+                    "DLT 原坐标 {expected} 未重新交付，实际位置 {}",
+                    message.offset()
+                ),
+            );
+            continue;
+        }
+        let bytes = message.retained_bytes();
+        let _input_permit = if bytes
+            <= runtime
+                .config
+                .behavior
+                .max_record_bytes
+                .min(runtime.records.maximum_record_bytes())
+        {
+            match runtime.records.retain(
+                &tp,
+                message.offset(),
+                super::capacity::input_reservation_bytes(bytes),
+                message.key(),
+            ) {
+                Some(permit) => Some(permit),
+                None => {
+                    // 借用消费同样受完整责任额度约束；未执行业务的记录必须从其原坐标重新交付。
+                    let failed =
+                        consumer.rewind_offsets(&BTreeMap::from([(tp.clone(), message.offset())]));
+                    halt_failed_rewinds(&consumer, &health, &failed);
+                    enter_input_backpressure(&consumer, &health, &tp);
+                    continue;
+                }
+            }
+        } else {
+            None
         };
         let action = process_message(&runtime, plan, assignment_epoch, &message);
         let flow = {
@@ -1412,6 +1702,15 @@ fn run_owner_session(
             }
         }
     }
+    key_completions.clear();
+    queued_typed.clear();
+    // 退出先撤销旧调用，再等实际资源归还；短关闭等待不能授权另一调用越过它。
+    while key_completions.has_active() {
+        key_completions.collect_finished(&consumer, assignment_epoch, true, &health);
+        if key_completions.has_active() {
+            let _ = consumer.poll(Duration::from_millis(25));
+        }
+    }
     // 已认领（EXECUTING）的 deferred Stop 必须在这里得到确定结果：直接丢弃会让调用方
     // 收到 ControlOutcomeUnknown，而 stop_until 把它当成"已停止"不再重发，
     // 于是本会话按 Transient 自动重建、group 在 ShuttingDown 下继续消费，shutdown 只能超时。
@@ -1424,10 +1723,10 @@ fn run_owner_session(
                 "owner 会话在 DLT 收尾完成前退出，死信未确认".into(),
             ))
         };
-        GroupHandle::finish_command(command, result);
+        OwnerHandle::finish_command(command, result);
     }
     for (_, pending) in dlt_pending {
-        pending.abort.abort();
+        pending.cancel.store(true, Ordering::Release);
     }
     drop(dlt_admission);
     consumer.unsubscribe();
@@ -1472,25 +1771,23 @@ fn wait_for_crashed_command(
             update_state(health, GroupState::Stopped, None);
             return false;
         };
-        if !GroupHandle::begin_command(&command) {
+        if !OwnerHandle::begin_command(&command) {
             continue;
         }
         match &command.kind {
             OwnerCommandKind::Restart => {
                 update_state(health, GroupState::Starting, None);
-                GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                 return true;
             }
             OwnerCommandKind::Stop => {
                 update_state(health, GroupState::Stopped, None);
-                GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                 return false;
             }
-            _ => GroupHandle::finish_command(
+            _ => OwnerHandle::reject_command(
                 command,
-                Err(NafkaError::Lifecycle(
-                    "group 已 Crashed，仅允许 restart_group 或 stop".into(),
-                )),
+                "group 已 Crashed，仅允许 restart_group 或 stop",
             ),
         }
     }
@@ -1513,6 +1810,10 @@ fn initialize_owner(
     auto_offset_reset: &str,
 ) -> Result<()> {
     match mode {
+        OwnerMode::Subscribe { topics } if topics.is_empty() => {
+            consumer.unsubscribe();
+            Ok(())
+        }
         OwnerMode::Subscribe { topics } => consumer.subscribe(topics),
         OwnerMode::Assign { partitions, starts } => {
             if partitions.len() != starts.len()
@@ -1541,7 +1842,7 @@ fn classify_session_error(
 ) -> OwnerSessionExit {
     match error {
         NafkaError::Broker(message) => {
-            update_state(health, GroupState::Degraded, Some(message.clone()));
+            update_state(health, GroupState::Recovering, Some(message.clone()));
             OwnerSessionExit::Transient(message)
         }
         NafkaError::GroupFatal { message, .. } => {
@@ -1580,17 +1881,14 @@ fn delay_with_commands(
             if matches!(command.kind, OwnerCommandKind::Stop) {
                 // 副作用必须在 CAS 之内：调用方已超时并把命令置为 CANCELLED 时，
                 // 保证「返回 ControlNotApplied 即绝不执行」，这里不能照样停掉 owner。
-                if !GroupHandle::begin_command(&command) {
+                if !OwnerHandle::begin_command(&command) {
                     continue;
                 }
-                GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                 return false;
             }
-            if GroupHandle::begin_command(&command) {
-                GroupHandle::finish_command(
-                    command,
-                    Err(NafkaError::Lifecycle("consumer 尚在启动延迟阶段".into())),
-                );
+            if OwnerHandle::begin_command(&command) {
+                OwnerHandle::reject_command(command, "consumer 尚在启动延迟阶段");
             }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1608,26 +1906,33 @@ fn delay_with_commands(
 /// 达到字节上限时，已经被底层返回但尚未复制的边界记录会立即 seek 回原 offset，留给下一批；
 /// 因而 owner 不需要持有一个额外的超上限 lookahead。
 ///
-/// # 参数
+/// # 参数说明
 ///
 /// - `consumer`: owner 唯一 consumer。
 /// - `runtime`: 提供记录数、字节数与单记录上限。
 /// - `health`: 最近 poll 时间的健康快照。
 /// - `first_timeout`: 首条消息最长等待时间。
+/// - `queued`: 已跨 poll 保留的输入；确实取到新记录后才建立身份索引，维护回退后不重复物化原文。
+/// - `progress`、`assignment_epoch`: 当前处理证据及其派发权威，用于排除已经安全处理的重复 fetch。
 ///
-/// # 错误
+/// # 返回
 ///
-/// poll、边界 seek 或字节计量失败时返回错误。
+/// 返回受记录数和字节数约束的输入批；poll、边界 seek 或字节计量失败时返回错误。
 fn collect_typed_batch(
     consumer: &ConsumerClient,
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     health: &Arc<RwLock<GroupHealth>>,
     first_timeout: Duration,
+    queued: &BTreeMap<Tp, VecDeque<PreparedTypedItem>>,
+    progress: &GroupOffsetState,
+    assignment_epoch: u64,
 ) -> std::result::Result<LogicalTypedBatch, RdPollError> {
     let mut batch = LogicalTypedBatch {
-        items: Vec::with_capacity(runtime.config.behavior.max_batch_records),
+        items: Vec::new(),
         retained_bytes: 0,
+        _permits: Vec::new(),
     };
+    let mut known: Option<BTreeSet<(Tp, i64)>> = None;
     loop {
         let timeout = if batch.items.is_empty() {
             first_timeout
@@ -1641,11 +1946,52 @@ fn collect_typed_batch(
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_poll_at = Some(SystemTime::now());
+        let position_tp = Tp::new(message.topic(), message.partition());
+        // 提交恢复会回退 native 位置，而本地批次可能已继续完成；先核对处理证据，
+        // 防止已释放的完成票据令迟到 fetch 再次执行业务。人工定位会清除目标证据，
+        // 失权会作废未提交结果，因此这里不会吞掉需要重新处理的失败或新会话输入。
+        if progress.already_safe(&position_tp, assignment_epoch, message.offset()) {
+            continue;
+        }
+        // 本地已保留坐标不能因维护回退再物化一份未独立计费的原文。
+        if known
+            .get_or_insert_with(|| {
+                queued
+                    .values()
+                    .flat_map(|items| items.iter().map(PreparedTypedItem::location))
+                    .collect()
+            })
+            .contains(&(position_tp.clone(), message.offset()))
+        {
+            continue;
+        }
+        if let Some(expected) = runtime
+            .records
+            .accept_dead_letter_position(&position_tp, message.offset())
+        {
+            halt_partition(
+                consumer,
+                health,
+                &position_tp,
+                HaltReason::ProgressInvariant,
+                format!(
+                    "DLT 原坐标 {expected} 未重新交付，实际位置 {}",
+                    message.offset()
+                ),
+            );
+            continue;
+        }
         // headers 只解析一次：底层对非 UTF-8 header 名会 panic（由 RdMessage::headers 兜住），
         // 重复调用等于对同一条坏记录反复 panic/unwind，既有噪声也有额外开销。
         let headers = message.headers();
         let retained = message.retained_bytes_with(headers.as_ref().ok());
-        if retained > runtime.config.behavior.max_record_bytes {
+        if retained
+            > runtime
+                .config
+                .behavior
+                .max_record_bytes
+                .min(runtime.records.maximum_record_bytes())
+        {
             batch.items.push(TypedBatchItem::Oversize {
                 tp: Tp::new(message.topic(), message.partition()),
                 offset: message.offset(),
@@ -1665,12 +2011,36 @@ fn collect_typed_batch(
                     .map_err(|error| RdPollError::Transient(error.to_string()))?;
                 break;
             }
+            let tp = Tp::new(message.topic(), message.partition());
+            let Some(permit) = runtime.records.retain(
+                &tp,
+                message.offset(),
+                super::capacity::input_reservation_bytes(retained),
+                message.key(),
+            ) else {
+                // 尚未物化或派发的边界记录保留重读位置；已有输入仍负责完成并释放共享额度。
+                consumer
+                    .seek_offsets(&BTreeMap::from([(tp.clone(), message.offset())]))
+                    .map_err(|error| RdPollError::Transient(error.to_string()))?;
+                enter_input_backpressure(consumer, health, &tp);
+                break;
+            };
+            batch._permits.push(Arc::clone(&permit));
             batch.retained_bytes = next_bytes;
             batch
                 .items
                 .push(TypedBatchItem::Owned(OwnedTypedMessage::copy_from(
-                    &message, &headers,
+                    &message, &headers, permit,
                 )));
+            // 此处尚未跨过下一条原生记录：额度趋满时先处理当前批，避免仅因预取过快而回退并重复解压。
+            // 这只是批次收口提示，周期性 poll 仍继续，其它 key/分区的实际准入始终重新检查各层额度。
+            if !runtime.records.may_accept_similar(
+                &tp,
+                super::capacity::input_reservation_bytes(retained),
+                message.key(),
+            ) {
+                break;
+            }
         }
         if batch.items.len() >= runtime.config.behavior.max_batch_records
             || consumer.has_rebalance()
@@ -1703,7 +2073,11 @@ fn execute_command(
     auto_offset_reset: &str,
     command: OwnerCommand,
 ) -> bool {
-    // 调用方已在 owner 主循环里完成 begin_command 与 admission 裁决；到这里的命令一定会执行。
+    // 维护窗口也可以执行查询和暂停；最终 native 副作用前统一复验分配代次与目标归属。
+    if let Some(error) = command_epoch_error(consumer, health, &command) {
+        OwnerHandle::finish_command(command, Err(error));
+        return false;
+    }
     let stop = matches!(&command.kind, OwnerCommandKind::Stop);
     let command_id = command.id;
     let result = match &command.kind {
@@ -1711,7 +2085,7 @@ fn execute_command(
             update_state(health, GroupState::Stopping, None);
             Ok(CommandReply::Unit)
         }
-        OwnerCommandKind::Seek { offsets } => consumer.seek_offsets(offsets).map(|()| {
+        OwnerCommandKind::Seek { offsets } => consumer.seek_control_offsets(offsets).map(|()| {
             clear_attempts(attempts, offsets.keys());
             clear_operator_pauses(consumer, health, offsets.keys());
             CommandReply::Unit
@@ -1732,13 +2106,13 @@ fn execute_command(
         }
         // Committed 必须先查 broker 再 seek 绝对 offset：框架强制关闭本地 offset store
         //，底层 Offset::Stored 在本框架下恒为空。
-        OwnerCommandKind::SeekCommitted { tps } => consumer
-            .seek_to_committed(tps, auto_offset_reset)
-            .map(|()| {
+        OwnerCommandKind::SeekCommitted { tps } => {
+            consumer.seek_to_committed(tps, "none").map(|()| {
                 clear_attempts(attempts, tps.iter());
                 clear_operator_pauses(consumer, health, tps.iter());
                 CommandReply::Unit
-            }),
+            })
+        }
         OwnerCommandKind::SeekTimestamp { times } => consumer.seek_times(times).map(|()| {
             clear_attempts(attempts, times.keys());
             clear_operator_pauses(consumer, health, times.keys());
@@ -1749,30 +2123,61 @@ fn execute_command(
             CommandReply::Unit
         }),
         OwnerCommandKind::Resume { tps } => {
+            let requested = if tps.is_empty() {
+                consumer.assignment()
+            } else {
+                Ok(tps.clone())
+            };
             let targets = resumable_user_targets(consumer, health, tps);
-            consumer.resume(&targets).map(|resumed| {
-                set_user_paused(health, &resumed, false);
-                CommandReply::Unit
+            requested.and_then(|requested| {
+                consumer.resume(&targets).map(|_| {
+                    // 解除用户意图与 native 可恢复范围不同；内部保护仍有效，但不应留下已撤销的 User 原因。
+                    set_user_paused(health, &requested, false);
+                    CommandReply::Unit
+                })
             })
         }
         OwnerCommandKind::Position { tps } => consumer.position(tps).map(CommandReply::Positions),
         OwnerCommandKind::Assignment => consumer.assignment().map(CommandReply::Assignment),
-        OwnerCommandKind::Subscribe { topics } => match mode {
-            OwnerMode::Subscribe { .. } => consumer.subscribe(topics).map(|()| {
-                *mode = OwnerMode::Subscribe {
-                    topics: topics.clone(),
-                };
-                attempts.clear();
-                CommandReply::Unit
-            }),
+        OwnerCommandKind::Subscribe { topics, change } => match mode {
+            OwnerMode::Subscribe { topics: current } => {
+                use super::supervisor::SubscriptionChange;
+                let mut desired: BTreeSet<String> = current.iter().cloned().collect();
+                match change {
+                    SubscriptionChange::Replace => desired = topics.iter().cloned().collect(),
+                    SubscriptionChange::Add => desired.extend(topics.iter().cloned()),
+                    SubscriptionChange::Remove => desired.retain(|topic| !topics.contains(topic)),
+                }
+                let desired: Vec<String> = desired.into_iter().collect();
+                if desired == *current {
+                    // 同集合不触发新 join，不能撤销 Ready 后等待一个不会发生的分配事件。
+                    Ok(CommandReply::Unit)
+                } else {
+                    let result = if desired.is_empty() {
+                        consumer.unsubscribe();
+                        Ok(())
+                    } else {
+                        consumer.subscribe(&desired)
+                    };
+                    // native 接受修改后再更新恢复声明、撤销旧 Ready，最后才回报控制成功。
+                    result.map(|()| {
+                        *current = desired;
+                        attempts.clear();
+                        invalidate_subscription_health(health, current.is_empty());
+                        CommandReply::Unit
+                    })
+                }
+            }
             OwnerMode::Assign { .. } => Err(NafkaError::Lifecycle(
                 "固定 assign group 不支持 subscribe_group".into(),
             )),
         },
         OwnerCommandKind::Unsubscribe => match mode {
-            OwnerMode::Subscribe { .. } => {
+            OwnerMode::Subscribe { topics } => {
                 consumer.unsubscribe();
+                topics.clear();
                 attempts.clear();
+                invalidate_subscription_health(health, true);
                 Ok(CommandReply::Unit)
             }
             OwnerMode::Assign { .. } => Err(NafkaError::Lifecycle(
@@ -1801,9 +2206,25 @@ fn execute_command(
             })
         }
     };
-    GroupHandle::finish_command(command, result);
+    OwnerHandle::finish_command(command, result);
     tracing::debug!(command_id, "consumer owner 控制命令已完成");
     stop
+}
+
+/// 业务作用：订阅控制成功后先撤销旧 Ready，再交付控制回执。
+/// 参数说明：health 为共享快照，empty 表示已退订全部 topic。
+/// 返回：旧分配不再满足接流量条件；后续原生分配事件才能重新开放。
+fn invalidate_subscription_health(health: &Arc<RwLock<GroupHealth>>, empty: bool) {
+    // native 接受订阅意图不等于完成 join；旧快照不能在控制成功后继续授权接流量。
+    let mut snapshot = health
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    snapshot.ready_assignment_epoch = None;
+    snapshot.state = GroupState::Joining;
+    snapshot.last_error = None;
+    if empty {
+        snapshot.assignment.clear();
+    }
 }
 
 /// 业务作用：在产生任何副作用之前裁决一条控制命令能否执行。
@@ -1817,7 +2238,7 @@ fn execute_command(
 /// - `mode`: 当前订阅方式；固定 assign 不接受动态订阅命令。
 /// - `health`: 共享健康快照；restart 的状态门读它。
 /// - `pending`: 已准入的每分区 DLT worker。
-/// - `admission`: 唯一 owner-local DLT 准入任务。
+/// - `admission`: 各分区的 DLT 准入等待。
 ///
 /// # 返回
 ///
@@ -1827,7 +2248,7 @@ fn command_admission_error(
     mode: &OwnerMode,
     health: &Arc<RwLock<GroupHealth>>,
     pending: &BTreeMap<Tp, PendingDlt>,
-    admission: &Option<PendingDltAdmission>,
+    admission: &BTreeMap<Tp, PendingDltAdmission>,
 ) -> Option<NafkaError> {
     if seek_conflicts_with_dlt(kind, pending, admission) {
         return Some(NafkaError::Lifecycle(
@@ -1857,15 +2278,41 @@ fn command_admission_error(
     }
 }
 
+/// 业务作用：阻止组级路由后的命令作用于已经转移的分区或后来的 assignment。
+/// 参数说明：consumer 为唯一 native owner；health 为本槽观测；command 为带入队代次的命令。
+/// 返回：权威和归属都匹配时 None，否则返回确定未执行，不向其它槽自动重试。
+fn command_epoch_error(
+    consumer: &ConsumerClient,
+    health: &Arc<RwLock<GroupHealth>>,
+    command: &OwnerCommand,
+) -> Option<NafkaError> {
+    let targets = super::group::partition_targets(&command.kind)?;
+    let current = health
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ready_assignment_epoch;
+    if command.expected_epoch.is_none()
+        || current != command.expected_epoch
+        || consumer.has_rebalance()
+        || consumer.assignment_lost()
+    {
+        return Some(NafkaError::ControlOwnerChanged(command.id));
+    }
+    match consumer.assignment() {
+        Ok(assigned) if targets.iter().all(|tp| assigned.contains(tp)) => None,
+        _ => Some(NafkaError::ControlOwnerChanged(command.id)),
+    }
+}
+
 /// 业务作用：判断 seek 是否会覆盖尚未得到 durability-first 终态的 DLT 分区。
 ///
 /// - `kind`: 待执行控制命令；只检查五种 seek。
 /// - `pending`: 已准入并由 worker 投递的 DLT。
-/// - `admission`: 尚在等待全局 permit 的唯一 DLT。
+/// - `admission`: 尚在等待源级 permit 的各分区 DLT。
 fn seek_conflicts_with_dlt(
     kind: &OwnerCommandKind,
     pending: &BTreeMap<Tp, PendingDlt>,
-    admission: &Option<PendingDltAdmission>,
+    admission: &BTreeMap<Tp, PendingDltAdmission>,
 ) -> bool {
     let targets = match kind {
         OwnerCommandKind::Seek { offsets } => Some(offsets.keys().collect::<BTreeSet<_>>()),
@@ -1878,9 +2325,7 @@ fn seek_conflicts_with_dlt(
     let targets = targets.expect("seek 分支必须提供目标集合");
     let all = targets.is_empty();
     pending.keys().any(|tp| all || targets.contains(tp))
-        || admission
-            .as_ref()
-            .is_some_and(|item| all || targets.contains(&item.tp))
+        || admission.keys().any(|tp| all || targets.contains(tp))
 }
 
 /// 业务作用：清理指定分区的本地失败尝试状态。
@@ -1976,7 +2421,7 @@ fn external_epoch(base: &std::sync::atomic::AtomicU64, session_epoch: u64) -> u6
     value
 }
 
-/// group 仪表重采样间隔；下限由用户 MetricsSink 的实现成本决定，不按 poll 频率打。
+/// group 仪表重采样间隔，限制标签快照与指标队列准入的频率。
 const GAUGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 业务作用：发布一次真实 assign 后的健康与 ready 快照。
@@ -1987,7 +2432,7 @@ const GAUGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// - `assignment`: callback 或固定 assign 给出的分区。
 /// - `epoch`: 本次 assignment epoch。
 fn publish_assignment_health(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     group: &str,
     health: &Arc<RwLock<GroupHealth>>,
     assignment: &[Tp],
@@ -2006,9 +2451,7 @@ fn publish_assignment_health(
     // ready 必须由 owner 的真实状态驱动。若只在 await_group_ready 里写，典型用法是启动时
     // 调一次，之后该 gauge 就永远停在 1——group 已 Crashed 或丢掉 assignment 也看不出来，
     // 比没有这个指标更危险。
-    // 先取值再释放锁：gauge 会调用**用户实现**的 MetricsSink，绝不能在持有 health 锁时执行。
-    // 慢实现会卡住所有 group_health() 查询；若它回调进来再取读锁，写偏好的 RwLock 下
-    // 还可能与排队中的写者形成死锁。
+    // 先释放健康锁再构造指标快照，避免观测准入延长控制面状态锁的占用。
     publish_health_gauges(runtime, group, health);
 }
 
@@ -2017,7 +2460,7 @@ fn publish_assignment_health(
 /// ready 租约与暂停分区统一从同一健康快照采样，使撤销、重新加入和暂停变化都反映到指标。
 ///
 /// 语义定义（写在这里是因为它必须唯一）：
-/// - `group_ready` = 是否持有有效 assignment 租约。空 assignment 也算 1，
+/// - `group_ready` = 全部槽持有有效 assignment 权威且处于 Running。空 assignment 也可算 1，
 ///   那是竞争组 standby 的合法形态；要区分 standby 看 `assigned_partitions`。
 /// - `paused_partitions` 数的是**分区数**不是暂停行数：同一分区可同时挂
 ///   `User` 与 `Halt` 两行，按行数会翻倍。
@@ -2028,45 +2471,30 @@ fn publish_assignment_health(
 /// - `group`: group.id 标签。
 /// - `health`: 共享健康快照。
 ///
-/// 返回：无；读取快照后释放锁，再向用户提供的 MetricsSink 发布仪表，避免回调持锁。
+/// 返回：无；读取快照后释放锁，再向有界出口提交仪表，用户代码仅在导出线程执行。
 fn publish_health_gauges(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     group: &str,
     health: &Arc<RwLock<GroupHealth>>,
 ) {
-    // 先取值再释放锁：gauge 会调用**用户实现**的 MetricsSink，绝不能在持有 health 锁时执行。
-    // 慢实现会卡住所有 group_health() 查询；若它回调进来再取读锁，写偏好的 RwLock 下
-    // 还可能与排队中的写者形成死锁。
-    let (ready, assigned, paused) = {
-        let snapshot = health
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let paused: BTreeSet<&Tp> = snapshot.paused.iter().map(|(tp, _)| tp).collect();
-        (
-            i64::from(snapshot.ready_assignment_epoch.is_some()),
-            snapshot.assignment.len(),
-            paused.len(),
-        )
-    };
-    let labels = [("group", group)];
-    runtime.gauge("group_ready", ready, &labels);
-    runtime.gauge(
-        "assigned_partitions",
-        i64::try_from(assigned).unwrap_or(i64::MAX),
-        &labels,
-    );
-    runtime.gauge(
-        "paused_partitions",
-        i64::try_from(paused).unwrap_or(i64::MAX),
-        &labels,
-    );
+    // 先释放健康锁，再向组级聚合和有界观测队列传递快照。
+    let snapshot = health
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    runtime.publish_health(group, snapshot);
 }
 
 /// 业务作用：撤销旧底层会话发布的 ready 快照。
 ///
+/// 参数说明：
+/// - `runtime`: 提供指标出口的冻结资源。
+/// - `group`: 失去会话权威的消费组。
 /// - `health`: 跨会话共享的 group 健康状态。
+///
+/// 返回：无；只在实际调用已排空后清除旧 assignment 与容量观测。
 fn invalidate_ready_snapshot(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     group: &str,
     health: &Arc<RwLock<GroupHealth>>,
 ) {
@@ -2076,6 +2504,10 @@ fn invalidate_ready_snapshot(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         snapshot.assignment.clear();
         snapshot.ready_assignment_epoch = None;
+        snapshot.active_handlers = 0;
+        snapshot.key_active_handlers = 0;
+        snapshot.key_pending_records = 0;
+        snapshot.key_pending_bytes = 0;
         snapshot.last_assignment_at = Some(SystemTime::now());
     }
     publish_health_gauges(runtime, group, health);
@@ -2134,7 +2566,7 @@ fn reapply_persistent_pauses(
 fn apply_rebalance(
     consumer: &ConsumerClient,
     group: &str,
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     health: &Arc<RwLock<GroupHealth>>,
     assignment: &mut Vec<Tp>,
     epoch: &mut u64,
@@ -2142,14 +2574,20 @@ fn apply_rebalance(
     attempts: &mut BTreeMap<(Tp, i64), RetryAttemptState>,
     retries: &mut BTreeMap<Tp, PartitionRetry>,
     dlt_pending: &mut BTreeMap<Tp, PendingDlt>,
-    dlt_admission: &mut Option<PendingDltAdmission>,
+    dlt_admission: &mut BTreeMap<Tp, PendingDltAdmission>,
     pending_ready_epoch: &mut Option<u64>,
     event: RdRebalanceEvent,
 ) -> bool {
+    // 分配变更会丢弃旧本地队列，保留分区的重试重新依据 broker 坐标恢复。
+    for state in retries.values_mut() {
+        state.in_place = false;
+    }
     match event.kind {
         RdRebalanceKind::Assigned => {
+            runtime.counter("rebalance_assigned_total", 1, &[("group", group)]);
             let max = runtime.config.consumer.max_assignment_partitions;
-            if event.partitions.len() > max {
+            // 全组并集准入先于 Ready 与本地权威发布，容量拒绝时关闭本槽业务路由。
+            if let Err(actual) = runtime.metadata.assign(runtime.slot, &event.partitions) {
                 let _ = consumer.unassign();
                 update_state(
                     health,
@@ -2157,7 +2595,7 @@ fn apply_rebalance(
                     Some(
                         NafkaError::AssignmentTooLarge {
                             group: group.to_owned(),
-                            actual: event.partitions.len(),
+                            actual,
                             max,
                         }
                         .to_string(),
@@ -2178,6 +2616,7 @@ fn apply_rebalance(
                 return false;
             }
             progress.reset_for_assignment(assignment);
+            runtime.records.clear(None);
             publish_commit_snapshot(consumer, progress);
             let assigned: BTreeSet<&Tp> = assignment.iter().collect();
             // librdkafka 的 pause 是 consumer-local 状态；同一分区在 rebalance 后重新
@@ -2203,10 +2642,8 @@ fn apply_rebalance(
             reapply_persistent_pauses(consumer, health, assignment);
             attempts.retain(|(tp, _), _| assigned.contains(tp));
             retries.retain(|tp, _| assigned.contains(tp));
-            // DLT worker 的 completion 用 (tp, assignment_epoch, first_offset) 三元组配对，
-            // 因此跨 epoch 保留 worker 会让 completion 永远配不上、分区卡死在 DltPending。
-            // 这里仍然按旧规则作废：记录会在新 epoch 下从 committed 位置重新消费并重投 DLT，
-            // 代价是可能出现重复死信，换取状态机自洽。
+            // completion 只授权调度时的代次；新分配关闭旧任务的新发送并从 committed 重新交付。
+            // 旧任务已经发出的请求继续收口，允许重复死信，但旧完成不能推进新代次来源位点。
             let stale_dlt = dlt_pending
                 .iter()
                 .filter(|(tp, pending)| {
@@ -2216,28 +2653,11 @@ fn apply_rebalance(
                 .collect::<Vec<_>>();
             for tp in stale_dlt {
                 if let Some(pending) = dlt_pending.remove(&tp) {
-                    pending.abort.abort();
+                    pending.cancel.store(true, Ordering::Release);
                 }
             }
-            if dlt_admission
-                .as_ref()
-                .is_some_and(|pending| pending.assignment_epoch != event.epoch)
-            {
-                // 门禁记录的回退 offset 属于**其它仍持有的分区**（门禁竖起时已 poll 未派发），
-                // 只有 finish_dlt_admission_gate 会 seek 它们；直接丢结构体等于让这些记录被
-                // 后续安全前沿跨过。作废前先把回退落到底层。
-                if let Some(pending) = dlt_admission.take() {
-                    let retained = pending
-                        .discarded
-                        .into_iter()
-                        .filter(|(tp, _)| assigned.contains(tp))
-                        .collect::<BTreeMap<_, _>>();
-                    if !retained.is_empty() {
-                        let failed = consumer.rewind_offsets(&retained);
-                        halt_failed_rewinds(consumer, health, &failed);
-                    }
-                }
-            }
+            // 新分配已回到 broker 起点，旧等待意图不能自行开放新权威。
+            dlt_admission.retain(|_, pending| pending.assignment_epoch == event.epoch);
             for (tp, state) in retries.iter() {
                 let _ = consumer.pause(std::slice::from_ref(tp));
                 let _ = consumer.seek_offsets(&BTreeMap::from([(tp.clone(), state.retry_from)]));
@@ -2271,38 +2691,50 @@ fn apply_rebalance(
             }
             let revoked: BTreeSet<Tp> = event.partitions.into_iter().collect();
             assignment.retain(|tp| !revoked.contains(tp));
+            let _ = runtime.metadata.assign(runtime.slot, assignment);
             for tp in &revoked {
                 progress.reset_partition(tp);
             }
+            runtime
+                .records
+                .clear(Some(&revoked.iter().cloned().collect::<Vec<_>>()));
             publish_commit_snapshot(consumer, progress);
             attempts.retain(|(tp, _), _| !revoked.contains(tp));
             retries.retain(|tp, _| !revoked.contains(tp));
-            for tp in &revoked {
-                if let Some(pending) = dlt_pending.remove(tp) {
-                    pending.abort.abort();
+            // 组代次已改变，保留分区也不能接纳旧 DLT completion；先撤销新发送，再恢复未确认坐标。
+            // 已发送请求继续持有信封与并行额度直到真实终态，来源重投允许产生重复死信。
+            let mut dlt_rewind = BTreeMap::new();
+            for (tp, pending) in std::mem::take(dlt_pending) {
+                pending.cancel.store(true, Ordering::Release);
+                if !revoked.contains(&tp) {
+                    dlt_rewind.insert(tp, pending.first_offset);
                 }
             }
-            if dlt_admission
-                .as_ref()
-                .is_some_and(|pending| revoked.contains(&pending.tp))
-            {
-                // 同 Assigned 分支：丢弃门禁前把仍持有分区的回退 offset 落到底层。
-                if let Some(pending) = dlt_admission.take() {
-                    let retained = pending
-                        .discarded
-                        .into_iter()
-                        .filter(|(tp, _)| !revoked.contains(tp))
-                        .collect::<BTreeMap<_, _>>();
-                    if !retained.is_empty() {
-                        let failed = consumer.rewind_offsets(&retained);
-                        halt_failed_rewinds(consumer, health, &failed);
+            for (_, pending) in std::mem::take(dlt_admission) {
+                if !revoked.contains(&pending.tp) {
+                    dlt_rewind.insert(pending.tp, pending.offsets[0]);
+                }
+            }
+            if !dlt_rewind.is_empty() {
+                for (tp, offset) in &dlt_rewind {
+                    if runtime.records.dead_letter_intent(tp, *offset).is_some() {
+                        runtime.records.expect_dead_letter(tp, *offset);
                     }
                 }
+                let failed = rewind_input_offsets(runtime, consumer, health, &dlt_rewind);
+                halt_failed_rewinds(consumer, health, &failed);
             }
-            // revoke-only 的 rebalance（cooperative 协议）不会跟随 Assigned，
-            // 保留分区上残留的框架瞬时暂停（CommitBlocked / DltBackpressure /
-            // ProgressBackpressure）没有任何其它清除路径，会造成"health 显示 Running、
-            // 底层永久 paused、committed 冻结"。这里对**保留分区**做一次恢复基线。
+            // 这些门禁由已作废的任务拥有；只解除 DLT 原因，用户暂停与 Halt 继续阻止业务。
+            for reason in [
+                PauseReason::DltPending,
+                PauseReason::DltRetryDegraded,
+                PauseReason::DltBackpressure,
+            ] {
+                let resumable = clear_pause_reason(health, assignment, &reason);
+                let _ = consumer.resume(&resumable);
+            }
+            // cooperative 撤权不保证后续出现 Assigned；保留分区的提交和进度门禁必须在此复位。
+            // 仅清理这些框架瞬态原因，其它保护仍独立阻止 native 取入。
             let retained = assignment.clone();
             let stale_transient = {
                 let snapshot = health
@@ -2343,7 +2775,8 @@ fn apply_rebalance(
                         || matches!(reason, PauseReason::User | PauseReason::Halt(_))
                 });
             *epoch = event.epoch;
-            *pending_ready_epoch = None;
+            // cooperative 只撤权时也要由下一次成功 poll 重建保留分区的 Ready 证据。
+            *pending_ready_epoch = (!assignment.is_empty()).then_some(*epoch);
             let mut snapshot = health
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2453,10 +2886,11 @@ fn cancel_retry_states(
 /// - `admission`: owner-local 准入任务。
 /// - `kind`: 即将执行的控制命令。
 fn cancel_dlt_states(
+    _runtime: &OwnerRuntime,
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
     pending: &mut BTreeMap<Tp, PendingDlt>,
-    admission: &mut Option<PendingDltAdmission>,
+    admission: &mut BTreeMap<Tp, PendingDltAdmission>,
     kind: &OwnerCommandKind,
 ) {
     let targets = match kind {
@@ -2487,28 +2921,29 @@ fn cancel_dlt_states(
         .collect::<Vec<_>>();
     for tp in &cancelled {
         if let Some(task) = pending.remove(tp) {
-            task.abort.abort();
+            task.cancel.store(true, Ordering::Release);
         }
     }
-    let mut gate_cleared = Vec::new();
-    if admission.as_ref().is_some_and(|item| {
-        targets
-            .as_ref()
-            .is_none_or(|targets| targets.contains(&item.tp))
-    }) {
-        // 丢弃门禁前先把它记录的回退 offset 落到底层：这些是**其它仍持有分区**在门禁竖起时
-        // 已 poll 未派发的记录，只有 finish_dlt_admission_gate 会 seek 它们，直接丢结构体
-        // 等于把那些记录跳过去（与 的"解除反压前按安全前沿重新 seek"冲突）。
-        if let Some(item) = admission.take() {
-            if !item.discarded.is_empty() {
-                let failed = consumer.rewind_offsets(&item.discarded);
-                halt_failed_rewinds(consumer, health, &failed);
-            }
-            gate_cleared = consumer.assignment().unwrap_or_default();
-        }
+    let gate_cleared = admission
+        .keys()
+        .filter(|tp| targets.as_ref().is_none_or(|targets| targets.contains(*tp)))
+        .cloned()
+        .collect::<Vec<_>>();
+    for tp in &gate_cleared {
+        admission.remove(tp);
     }
     // 摘掉 health 的 DLT 暂停行必须同步 resume，否则控制面显示未暂停而分区在底层永久停流。
     let mut resumable = clear_pause_reason(health, &cancelled, &PauseReason::DltPending);
+    resumable.extend(clear_pause_reason(
+        health,
+        &gate_cleared,
+        &PauseReason::DltPending,
+    ));
+    resumable.extend(clear_pause_reason(
+        health,
+        &cancelled,
+        &PauseReason::DltRetryDegraded,
+    ));
     if !gate_cleared.is_empty() {
         resumable.extend(clear_pause_reason(
             health,
@@ -2523,18 +2958,56 @@ fn cancel_dlt_states(
     }
 }
 
-/// 业务作用：记录一次业务安全处理完成，但不声称 broker 已提交。
-///
-/// # 参数
-///
-/// - `health`: group 健康快照。
+/// 业务作用：记录安全处理或提交进展，保留仍生效的分区保护和会话关闭状态。
+/// 参数说明：health 为 group 健康快照。
+/// 返回：更新最近成功时间；其它分区成功或旧安全前缀提交不能解除硬暂停、失权或停止。
 fn note_success(health: &Arc<RwLock<GroupHealth>>) {
     let mut snapshot = health
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    snapshot.state = GroupState::Running;
     snapshot.last_success_at = Some(SystemTime::now());
-    snapshot.last_error = None;
+    // 成功仅证明该项责任完成，不代表其它分区门禁已经解除；停机与致命状态更不能被覆盖。
+    if matches!(
+        snapshot.state,
+        GroupState::Stopping | GroupState::Stopped | GroupState::Crashed | GroupState::Recovering
+    ) || snapshot.ready_assignment_epoch.is_none()
+    {
+        return;
+    }
+    snapshot.state =
+        if snapshot.paused.iter().any(|(_, reason)| {
+            matches!(reason, PauseReason::Halt(_) | PauseReason::DltRetryDegraded)
+        }) {
+            GroupState::Degraded
+        } else if snapshot
+            .paused
+            .iter()
+            .any(|(_, reason)| *reason == PauseReason::CommitBlocked)
+        {
+            GroupState::CommitBlocked
+        } else if snapshot
+            .paused
+            .iter()
+            .any(|(_, reason)| *reason == PauseReason::DltBackpressure)
+        {
+            GroupState::DltBackpressure
+        } else if snapshot.paused.iter().any(|(_, reason)| {
+            matches!(
+                reason,
+                PauseReason::ProgressBackpressure | PauseReason::InputBackpressure
+            )
+        }) {
+            GroupState::ProgressBackpressure
+        } else if snapshot
+            .paused
+            .iter()
+            .any(|(_, reason)| *reason == PauseReason::RetryBackoff)
+        {
+            GroupState::Retrying
+        } else {
+            snapshot.last_error = None;
+            GroupState::Running
+        };
 }
 
 /// 业务作用：累计一次底层 consumer 会话创建；首次之后的尝试同时计入重建次数。
@@ -2596,7 +3069,7 @@ fn record_maintenance_poll_error(
 ) {
     match error {
         RdPollError::Transient(message) => {
-            update_state(health, GroupState::Degraded, Some(message.clone()));
+            update_state(health, GroupState::Recovering, Some(message.clone()));
             *transient_exit = Some(message);
         }
         RdPollError::Fatal(message) => {
@@ -2762,7 +3235,7 @@ fn commit_until_resolved_inner(
 
         while let Ok(command) = commands.try_recv() {
             if matches!(command.kind, OwnerCommandKind::Stop) {
-                if !GroupHandle::begin_command(&command) {
+                if !OwnerHandle::begin_command(&command) {
                     continue;
                 }
                 update_state(health, GroupState::Stopping, None);
@@ -2773,16 +3246,11 @@ fn commit_until_resolved_inner(
                     *deferred_stop = Some(command);
                     return false;
                 }
-                GroupHandle::finish_command(command, Ok(CommandReply::Unit));
+                OwnerHandle::finish_command(command, Ok(CommandReply::Unit));
                 return true;
             }
-            if GroupHandle::begin_command(&command) {
-                GroupHandle::finish_command(
-                    command,
-                    Err(NafkaError::Lifecycle(
-                        "commit 未确认期间只接受停止命令".into(),
-                    )),
-                );
+            if OwnerHandle::begin_command(&command) {
+                OwnerHandle::reject_command(command, "commit 未确认期间只接受停止命令");
             }
         }
         if consumer.has_rebalance() {
@@ -2860,7 +3328,7 @@ fn observe_one_with_recovery(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         return Err(ActionFlow::StopOwner);
@@ -2927,7 +3395,7 @@ fn observe_run_with_recovery(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         return Err(ActionFlow::StopOwner);
@@ -3082,7 +3550,7 @@ fn apply_process_action<S: DeadLetterSource + ?Sized>(
                     context.last_commit,
                     context.runtime.config.behavior.consume_retry_backoff_ms,
                     context.transient_exit,
-                    !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+                    !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
                     context.deferred_stop,
                 )
             {
@@ -3138,16 +3606,14 @@ fn apply_retry_action<S: DeadLetterSource + ?Sized>(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         return ActionFlow::StopOwner;
     }
     context.progress.reset_partition(tp);
     publish_commit_snapshot(context.consumer, context.progress);
-    if !context.attempts.contains_key(&(tp.clone(), offset))
-        && context.attempts.len() >= context.runtime.config.behavior.max_retry_entries
-    {
+    if !admit_retry_entries(context.runtime, context.attempts, [(tp.clone(), offset)]) {
         halt_partition(
             context.consumer,
             context.health,
@@ -3157,7 +3623,10 @@ fn apply_retry_action<S: DeadLetterSource + ?Sized>(
         );
         return ActionFlow::StopPartition;
     }
-    let state = context.attempts.entry((tp.clone(), offset)).or_default();
+    let state = context
+        .attempts
+        .get_mut(&(tp.clone(), offset))
+        .expect("已准入失败记录");
     state.failed_deliveries = state.failed_deliveries.saturating_add(1);
     state.bounded_failures = state.bounded_failures.saturating_add(1);
     let exhausted = context.runtime.config.behavior.max_consume_attempts != 0
@@ -3269,7 +3738,7 @@ fn apply_direct_dlt_action<S: DeadLetterSource + ?Sized>(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         return ActionFlow::StopOwner;
@@ -3340,7 +3809,7 @@ fn apply_availability_skip(context: &mut ActionContext<'_>, tp: &Tp, offset: i64
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         ActionFlow::StopOwner
@@ -3388,7 +3857,7 @@ fn observe_safe_run(
             context.last_commit,
             context.runtime.config.behavior.consume_retry_backoff_ms,
             context.transient_exit,
-            !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+            !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
             context.deferred_stop,
         )
     {
@@ -3415,6 +3884,15 @@ fn apply_invocation_outcome(
     outcome: InvocationOutcome,
 ) -> ActionFlow {
     match outcome {
+        InvocationOutcome::DecodeFailed { .. } => {
+            // 解码结局必须先拆回输入策略，不能伪装成已执行的 handler 或越过对应 offset。
+            update_state(
+                context.health,
+                GroupState::Crashed,
+                Some("解码结局尚未归还消息策略".into()),
+            );
+            ActionFlow::StopOwner
+        }
         InvocationOutcome::Completed {
             acked_prefix,
             acked_after_gap,
@@ -3470,6 +3948,7 @@ fn apply_invocation_outcome(
                     &sources[acked_prefix..],
                     "手动确认未覆盖连续 run 后缀".into(),
                     RetryBudget::Bounded,
+                    route.meta().execution_mode == ExecutionMode::KeyOrdered,
                 )
             }
         }
@@ -3490,6 +3969,10 @@ fn apply_invocation_outcome(
             let tp = source.ctx.topic_partition();
             // DLT 与来源 offset 的提交由同一 owner 状态机串联：只有 broker 已确认死信后，
             // completion 才把该 offset 标为安全并提交，进程在两者之间崩溃只会重放原消息。
+            if let Err(error) = remember_dlt_run(context, sources, &reason) {
+                update_state(context.health, GroupState::Crashed, Some(error.to_string()));
+                return ActionFlow::StopOwner;
+            }
             apply_direct_dlt_action(context, source, &tp, source.ctx.offset, reason)
         }
         InvocationOutcome::Failed(NafkaError::HandlerDeferred(reason)) => {
@@ -3498,9 +3981,15 @@ fn apply_invocation_outcome(
                 1,
                 &[("group", context.group), ("consumer_id", route.meta().id)],
             );
-            // 延后仍执行与普通失败相同的 pause/seek/退避，并推进可信投递序号；
+            // 延后仍执行与普通失败相同的顺序域退避，并推进可信投递序号；
             // 但它不推进毒消息预算，恢复控制态后必须重新交给同一 handler。
-            apply_retry_run(context, sources, reason, RetryBudget::Deferred)
+            apply_retry_run(
+                context,
+                sources,
+                reason,
+                RetryBudget::Deferred,
+                route.meta().execution_mode == ExecutionMode::KeyOrdered,
+            )
         }
         InvocationOutcome::Failed(error) => {
             context.runtime.counter(
@@ -3508,7 +3997,13 @@ fn apply_invocation_outcome(
                 1,
                 &[("group", context.group), ("consumer_id", route.meta().id)],
             );
-            apply_retry_run(context, sources, error.to_string(), RetryBudget::Bounded)
+            apply_retry_run(
+                context,
+                sources,
+                error.to_string(),
+                RetryBudget::Bounded,
+                route.meta().execution_mode == ExecutionMode::KeyOrdered,
+            )
         }
         InvocationOutcome::Fatal(error) => {
             context.runtime.counter(
@@ -3527,7 +4022,7 @@ fn apply_invocation_outcome(
 enum RetryBudget {
     /// 计入 `max_consume_attempts`，耗尽后进入 DLT。
     Bounded,
-    /// 只做 pause/seek/退避，不计入 DLT 预算。
+    /// 只做顺序域退避，不计入 DLT 预算。
     Deferred,
 }
 
@@ -3538,6 +4033,7 @@ enum RetryBudget {
 /// - `sources`: 同分区且按交付顺序排列的非空失败后缀。
 /// - `error`: 已脱敏失败原因。
 /// - `budget`: 是否计入底层毒消息预算。
+/// - `in_place`: 按键原文仍保留在本地队列，退避期间不回退 native 取入位置。
 ///
 /// 返回：已安排退避重投、DLT 或分区停止后的 owner 流程动作；空 run 或跨分区 run
 /// 返回停止动作并发布不变量错误。
@@ -3546,6 +4042,7 @@ fn apply_retry_run(
     sources: &[RawRecord],
     error: String,
     budget: RetryBudget,
+    in_place: bool,
 ) -> ActionFlow {
     let Some(first) = sources.first() else {
         update_state(
@@ -3582,7 +4079,7 @@ fn apply_retry_run(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     ) {
         return ActionFlow::StopOwner;
@@ -3594,9 +4091,12 @@ fn apply_retry_run(
         u64::try_from(sources.len()).unwrap_or(u64::MAX),
         &[("group", context.group), ("topic", tp.topic.as_str())],
     );
-    if !context.attempts.contains_key(&(tp.clone(), first_offset))
-        && context.attempts.len() >= context.runtime.config.behavior.max_retry_entries
-    {
+    // 所有失败记录都需要独立历史；整批容量不足时保护分区，不能只保存首条次数。
+    if !admit_retry_entries(
+        context.runtime,
+        context.attempts,
+        sources.iter().map(|source| (tp.clone(), source.ctx.offset)),
+    ) {
         halt_partition(
             context.consumer,
             context.health,
@@ -3606,15 +4106,20 @@ fn apply_retry_run(
         );
         return ActionFlow::StopPartition;
     }
-    let state = context
-        .attempts
-        .entry((tp.clone(), first_offset))
-        .or_default();
-    state.failed_deliveries = state.failed_deliveries.saturating_add(1);
-    if budget == RetryBudget::Deferred {
-        return schedule_retry_flow(context, &tp, first_offset);
+    for source in sources {
+        let state = context
+            .attempts
+            .get_mut(&(tp.clone(), source.ctx.offset))
+            .expect("已准入失败记录");
+        state.failed_deliveries = state.failed_deliveries.saturating_add(1);
+        if budget != RetryBudget::Deferred {
+            state.bounded_failures = state.bounded_failures.saturating_add(1);
+        }
     }
-    state.bounded_failures = state.bounded_failures.saturating_add(1);
+    if budget == RetryBudget::Deferred {
+        return schedule_typed_retry(context, &tp, first_offset, in_place);
+    }
+    let state = &context.attempts[&(tp.clone(), first_offset)];
     let exhausted = context.runtime.config.behavior.max_consume_attempts != 0
         && state.bounded_failures >= context.runtime.config.behavior.max_consume_attempts;
     if exhausted {
@@ -3677,7 +4182,38 @@ fn apply_retry_run(
         );
         return ActionFlow::StopPartition;
     }
-    schedule_retry_flow(context, &tp, first_offset)
+    schedule_typed_retry(context, &tp, first_offset, in_place)
+}
+
+/// 业务作用：为保留原文的按键失败设置独立退避，避免回退 native 后再次交付已经完成的输入。
+/// 参数说明：context 为当前责任表；tp/offset 为失败前缀；in_place 指示原文由有界本地队列持续保留。
+/// 返回：已登记退避后停止裁决本前缀；非按键输入复用分区回退语义。
+fn schedule_typed_retry(
+    context: &mut ActionContext<'_>,
+    tp: &Tp,
+    offset: i64,
+    in_place: bool,
+) -> ActionFlow {
+    if !in_place {
+        return schedule_retry_flow(context, tp, offset);
+    }
+    // 原文仍在队列时不能 seek：迟到的旧 fetch 会在本地成功提交后再次物化同一记录。
+    context.retries.insert(
+        tp.clone(),
+        PartitionRetry {
+            retry_from: offset,
+            ready_at: Instant::now()
+                + Duration::from_millis(context.runtime.config.behavior.consume_retry_backoff_ms),
+            in_place: true,
+        },
+    );
+    add_pause_reason(
+        context.health,
+        std::slice::from_ref(tp),
+        PauseReason::RetryBackoff,
+    );
+    update_state(context.health, GroupState::Retrying, None);
+    ActionFlow::StopPartition
 }
 
 /// 业务作用：把单条消息构造成 DLT job 并接入非阻塞准入/worker 流程。
@@ -3698,94 +4234,42 @@ fn schedule_single_dlt<S: DeadLetterSource + ?Sized>(
 ) -> Result<()> {
     let tp = Tp::new(source.source_topic(), source.source_partition());
     let offset = source.source_offset();
-    let record = build_dlt_record(
-        &context.runtime.config.behavior.dead_letter_topic_suffix,
-        context.group,
-        source,
-        reason,
-    )?;
-    schedule_dlt_job(
-        context,
-        tp,
-        vec![offset],
-        DltJob::from_records(vec![record])?,
-    )
-}
-
-/// 业务作用：把一个 typed 连续失败 run 构造成单个 DLT job 并非阻塞调度。
-///
-/// # 参数
-///
-/// - `context`: owner 本轮共享状态。
-/// - `sources`: 同分区、按交付顺序排列的失败 run。
-/// - `reason`: 已脱敏失败原因。
-///
-/// # 错误
-///
-/// run 为空、递归 DLT、job 构造、pause/seek 或准入失败时返回错误。
-fn schedule_dlt_run(
-    context: &mut ActionContext<'_>,
-    sources: &[RawRecord],
-    reason: &str,
-) -> Result<()> {
-    let first = sources
-        .first()
-        .ok_or_else(|| NafkaError::Lifecycle("DLT 失败 run 不能为空".into()))?;
-    let records = sources
-        .iter()
-        .map(|source| {
-            build_dlt_record(
-                &context.runtime.config.behavior.dead_letter_topic_suffix,
-                context.group,
-                source,
-                reason,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let offsets = sources
-        .iter()
-        .map(|source| source.ctx.offset)
-        .collect::<Vec<_>>();
-    schedule_dlt_job(
-        context,
-        first.ctx.topic_partition(),
-        offsets,
-        DltJob::from_records(records)?,
-    )
-}
-
-/// 业务作用：对已构造 job 执行无等待全局准入；容量不足时只留下一个 owner-local pending。
-///
-/// # 参数
-///
-/// - `context`: owner 本轮共享状态。
-/// - `tp`: 来源分区。
-/// - `offsets`: 失败单元真实 offsets。
-/// - `job`: 已有界构造的 DLT job。
-///
-/// # 错误
-///
-/// 同分区已有任务、owner 已持有 local pending、pause/seek 或 dispatcher 失败时返回错误。
-fn schedule_dlt_job(
-    context: &mut ActionContext<'_>,
-    tp: Tp,
-    offsets: Vec<i64>,
-    job: DltJob,
-) -> Result<()> {
-    let first_offset = *offsets
-        .first()
-        .ok_or_else(|| NafkaError::Lifecycle("DLT offsets 不能为空".into()))?;
-    if context.dlt_pending.contains_key(&tp)
-        || context
-            .dlt_admission
-            .as_ref()
-            .is_some_and(|pending| pending.tp == tp)
-    {
-        return Err(NafkaError::Lifecycle(format!(
-            "分区已有 DLT 任务: {}:{}",
-            tp.topic, tp.partition
-        )));
+    let suffix = &context.runtime.config.behavior.dead_letter_topic_suffix;
+    if !suffix.is_empty() && source.source_topic().ends_with(suffix) {
+        return Err(NafkaError::RecursiveDlt);
     }
+    if !context.runtime.records.remember_dead_letter(
+        &tp,
+        offset,
+        reason,
+        source_delivery_attempts(source),
+    ) {
+        return Err(NafkaError::Lifecycle("DLT 原输入不在责任账本中".into()));
+    }
+    let (intent, raw_bytes) = context
+        .runtime
+        .records
+        .dead_letter_intent(&tp, offset)
+        .ok_or_else(|| NafkaError::Lifecycle("DLT 原输入意图已失效".into()))?;
+    // 固定余量覆盖1024字节原因、2048字节源/集群、字段名与数字；原头全部保守保留计量。
+    let required_bytes = raw_bytes
+        .checked_add(tp.topic.len())
+        .and_then(|n| n.checked_add(context.group.len()))
+        .and_then(|n| n.checked_add(4096))
+        .ok_or_else(|| NafkaError::Config("DLT 字节计量溢出".into()))?;
+    if context.dlt_pending.contains_key(&tp) || context.dlt_admission.contains_key(&tp) {
+        return Err(NafkaError::Lifecycle(
+            "DLT 分区或本地准入责任尚未退出".into(),
+        ));
+    }
+    let dispatcher = context
+        .runtime
+        .dlt_dispatcher
+        .get()
+        .ok_or_else(|| NafkaError::Lifecycle("DLT dispatcher 尚未初始化".into()))?
+        .clone();
+    // 先取得完整额度再复制原文；等待只有意图和坐标，不能把额外信封藏在本地队列。
+    let reservation = dispatcher.try_reserve(1, required_bytes)?;
     context.consumer.pause(std::slice::from_ref(&tp))?;
     add_pause_reason(
         context.health,
@@ -3794,37 +4278,69 @@ fn schedule_dlt_job(
     );
     context
         .consumer
-        .seek_offsets(&BTreeMap::from([(tp.clone(), first_offset)]))?;
-    let dispatcher = context
-        .runtime
-        .dlt_dispatcher
-        .get()
-        .ok_or_else(|| NafkaError::Lifecycle("DLT dispatcher 尚未初始化".into()))?
-        .clone();
-    match dispatcher.try_admit(job)? {
-        DltAdmission::Admitted(envelope) => {
-            spawn_dlt_worker(context, dispatcher, envelope, tp, offsets);
-        }
-        DltAdmission::Backpressured(job) => {
-            if context.dlt_admission.is_some() {
-                return Err(NafkaError::Lifecycle(
-                    "owner 已有一个 DLT local pending".into(),
-                ));
-            }
-            let all = context
-                .consumer
-                .assignment()
-                .unwrap_or_else(|_| vec![tp.clone()]);
-            context.consumer.pause(&all)?;
-            add_pause_reason(context.health, &all, PauseReason::DltBackpressure);
-            update_state(context.health, GroupState::DltBackpressure, None);
-            *context.dlt_admission = Some(PendingDltAdmission {
-                job,
+        .seek_offsets(&BTreeMap::from([(tp.clone(), offset)]))?;
+    if let Some(reservation) = reservation {
+        let record = build_dlt_record(
+            suffix,
+            context.group,
+            source,
+            &intent.reason,
+            intent.attempts,
+        )?;
+        let envelope = reservation.attach(DltJob::from_records(vec![record])?)?;
+        spawn_dlt_worker(context, dispatcher, envelope, tp, vec![offset]);
+    } else {
+        // 信封容量只阻止该分区的失败责任，健康分区继续取入与提交。
+        add_pause_reason(
+            context.health,
+            std::slice::from_ref(&tp),
+            PauseReason::DltBackpressure,
+        );
+        update_state(context.health, GroupState::DltBackpressure, None);
+        context.dlt_admission.insert(
+            tp.clone(),
+            PendingDltAdmission {
+                required_bytes,
                 tp,
                 assignment_epoch: context.assignment_epoch,
-                offsets,
-                discarded: BTreeMap::new(),
-            });
+                offsets: vec![offset],
+            },
+        );
+    }
+    Ok(())
+}
+
+/// 业务作用：冻结整个失败批的逐记录死信意图，按来源顺序在有界信封池中逐条推进。
+/// 参数说明：context 为当前控制权威；sources 为同分区失败输入；reason 为失败原因。
+/// 返回：仅首条开始交付或等待；后继重读直接执行原死信意图，不重复执行业务。
+fn schedule_dlt_run(
+    context: &mut ActionContext<'_>,
+    sources: &[RawRecord],
+    reason: &str,
+) -> Result<()> {
+    let first = sources
+        .first()
+        .ok_or_else(|| NafkaError::Lifecycle("DLT 失败 run 不能为空".into()))?;
+    remember_dlt_run(context, sources, reason)?;
+    schedule_single_dlt(context, first, reason)
+}
+
+/// 业务作用：把一批已失败业务的意图逐条绑定到原输入凭证，允许小信封池分段交付。
+/// 参数说明：context 为会话账本；sources 为已准入的同分区记录；reason 为有界失败说明。
+/// 返回：全部原坐标仍属于本会话时登记成功；缺失责任时拒绝交付，不能静默丢弃后继。
+fn remember_dlt_run(
+    context: &ActionContext<'_>,
+    sources: &[RawRecord],
+    reason: &str,
+) -> Result<()> {
+    for source in sources {
+        if !context.runtime.records.remember_dead_letter(
+            &source.ctx.topic_partition(),
+            source.ctx.offset,
+            reason,
+            source_delivery_attempts(source),
+        ) {
+            return Err(NafkaError::Lifecycle("失败批的原输入责任已失效".into()));
         }
     }
     Ok(())
@@ -3836,7 +4352,7 @@ fn schedule_dlt_job(
 ///
 /// - `context`: owner 本轮共享状态。
 /// - `dispatcher`: 全运行时共享 dispatcher。
-/// - `envelope`: 已取得 job/byte permit 的任务信封。
+/// - `envelope`: 已取得记录数与字节 permit 的任务信封。
 /// - `tp`: 来源分区。
 /// - `offsets`: 失败单元真实 offsets。
 fn spawn_dlt_worker(
@@ -3852,11 +4368,17 @@ fn spawn_dlt_worker(
     let initial_ms = context.runtime.config.behavior.dlt_retry_initial_ms;
     let max_ms = context.runtime.config.behavior.dlt_retry_max_ms;
     let degraded_after = context.runtime.config.behavior.dlt_degraded_after_attempts;
+    let ready_epoch = context
+        .health
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ready_assignment_epoch;
     let sender = context.dlt_sender.clone();
     let health = Arc::clone(context.health);
     let completion_tp = tp.clone();
     let runtime = Arc::clone(context.runtime);
     emit_dlt_queue_usage(context.runtime, &dispatcher);
+    let failure_group = context.group.to_owned();
     let span = tracing::info_span!(
         "kafka.dlt",
         origin_topic = %tp.topic,
@@ -3864,8 +4386,17 @@ fn spawn_dlt_worker(
         offset = first_offset,
         reason = "handler_or_invalid"
     );
-    let task = context.runtime.runtime.spawn(
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task_cancel = Arc::clone(&cancel);
+    let responsibility = dispatcher.worker(context.group);
+    context.runtime.runtime.spawn(
         async move {
+            // 分配表可以先撤销旧任务，但源级停止必须等待这个实际 future 退出。
+            let _responsibility = responsibility;
+            let stopped = || {
+                task_cancel.load(Ordering::Acquire)
+                    || runtime.stop_requested.load(Ordering::Acquire)
+            };
             let result = deliver_dlt_envelope(
                 &dispatcher,
                 &envelope,
@@ -3875,6 +4406,16 @@ fn spawn_dlt_worker(
                 degraded_after,
                 first_offset,
                 &health,
+                &completion_tp,
+                ready_epoch,
+                &stopped,
+                || {
+                    runtime.counter(
+                        "dlt_attempt_failed_total",
+                        offsets.len() as u64,
+                        &[("group", &failure_group), ("topic", &completion_tp.topic)],
+                    )
+                },
             )
             .await;
             drop(envelope);
@@ -3905,7 +4446,7 @@ fn spawn_dlt_worker(
         PendingDlt {
             assignment_epoch,
             first_offset,
-            abort: task.abort_handle(),
+            cancel,
         },
     );
 }
@@ -3925,22 +4466,22 @@ fn emit_dlt_queue_usage(runtime: &KafkaProxyInner, dispatcher: &DltDispatcher) {
     );
 }
 
-/// 业务作用：在异步 worker 内执行 DLT delivery；durability-first 模式使用同一信封无限外层重试。
+/// 业务作用：执行可靠 DLT 交付与退避，停止或失权后只收口已发送请求。
 ///
-/// # 参数
+/// # 参数说明
 ///
-/// - `dispatcher`: 全运行时共享 dispatcher。
-/// - `envelope`: 已取得全局 permit 的任务信封。
-/// - `required`: 是否 durability-first。
-/// - `initial_ms`: 指数退避初始毫秒。
-/// - `max_ms`: 指数退避封顶毫秒。
-/// - `degraded_after`: 连续失败进入 Degraded 的次数。
-/// - `seed`: 稳定抖动种子。
-/// - `health`: group 健康快照。
+/// - `dispatcher`：源级共享交付资源。
+/// - `envelope`：已取得记录和字节额度的任务信封。
+/// - `required`：是否必须取得 DLT 确认才允许来源推进。
+/// - `initial_ms`、`max_ms`：指数退避初始值与上限。
+/// - `degraded_after`：连续失败进入 Degraded 的次数。
+/// - `seed`：稳定抖动种子。
+/// - `health`：组健康快照。
+/// - `tp`、`ready_epoch`：来源分区与分配代次，失权后不能写入旧降级原因。
+/// - `stop_requested`：源停止与任务失权的准入门，不代表已发请求退出。
+/// - `failed_attempt`：非停止失败的观测回调，不决定来源提交。
 ///
-/// # 错误
-///
-/// availability-first 的首次 delivery 失败，或 dispatcher 永久关闭时返回错误。
+/// 返回：全部交付确认才成功；非必需交付失败、永久关闭或停止返回错误，停止不推定业务成功。可靠模式的重试次数不限，退避间隔有上限。
 #[allow(clippy::too_many_arguments)]
 async fn deliver_dlt_envelope(
     dispatcher: &DltDispatcher,
@@ -3951,25 +4492,90 @@ async fn deliver_dlt_envelope(
     degraded_after: u32,
     seed: i64,
     health: &Arc<RwLock<GroupHealth>>,
+    tp: &Tp,
+    ready_epoch: Option<u64>,
+    stop_requested: &impl Fn() -> bool,
+    failed_attempt: impl Fn(),
 ) -> Result<()> {
     let mut attempt = 0_u32;
     loop {
         attempt = attempt.saturating_add(1);
-        match dispatcher.deliver(envelope).await {
+        match dispatcher.deliver(envelope, stop_requested).await {
             Ok(()) => return Ok(()),
-            Err(error) if !required => return Err(error),
             Err(error) => {
+                // 原输入仍未提交，可以交回重投；停止后不再制造无限 DLT 轮次阻止资源退出。
+                if stop_requested() {
+                    return Err(error);
+                }
+                // 保留责任的重试也必须可观测；终结失败仍由 owner 的独立 completion 计数承担。
+                failed_attempt();
+                if !required {
+                    return Err(error);
+                }
                 if attempt >= degraded_after {
-                    update_state(
+                    mark_dlt_degraded(
                         health,
-                        GroupState::Degraded,
-                        Some(format!("DLT delivery 连续失败 attempt={attempt}: {error}")),
+                        tp,
+                        ready_epoch,
+                        format!("DLT delivery 连续失败 attempt={attempt}: {error}"),
                     );
                 }
-                tokio::time::sleep(dlt_retry_delay_values(initial_ms, max_ms, attempt, seed)).await;
+                let deadline = tokio::time::Instant::now()
+                    + dlt_retry_delay_values(initial_ms, max_ms, attempt, seed);
+                while tokio::time::Instant::now() < deadline {
+                    if stop_requested() {
+                        return Err(error);
+                    }
+                    tokio::time::sleep_until(
+                        deadline.min(tokio::time::Instant::now() + Duration::from_millis(25)),
+                    )
+                    .await;
+                }
             }
         }
     }
+}
+
+/// 业务作用：将持续 DLT 失败绑定到仍有效的分区交付责任，防止其它成功覆盖其降级状态。
+/// 参数说明：health 为槽快照；tp/ready_epoch 为启动交付时的分区和代次；detail 为脱敏失败诊断。
+/// 返回：仅当前分配仍拥有 DltPending 时增加降级原因；失权、关闭和终结后的迟到失败不改变新状态。
+fn mark_dlt_degraded(
+    health: &Arc<RwLock<GroupHealth>>,
+    tp: &Tp,
+    ready_epoch: Option<u64>,
+    detail: String,
+) {
+    let mut snapshot = health
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // 后台交付不能把旧代次故障重新发布到新 assignment，也不能重新开放停机中的状态。
+    if ready_epoch.is_none()
+        || snapshot.ready_assignment_epoch != ready_epoch
+        || matches!(
+            snapshot.state,
+            GroupState::Stopping
+                | GroupState::Stopped
+                | GroupState::Crashed
+                | GroupState::Recovering
+        )
+        || !snapshot
+            .paused
+            .iter()
+            .any(|(current, reason)| current == tp && *reason == PauseReason::DltPending)
+    {
+        return;
+    }
+    if !snapshot
+        .paused
+        .iter()
+        .any(|(current, reason)| current == tp && *reason == PauseReason::DltRetryDegraded)
+    {
+        snapshot
+            .paused
+            .push((tp.clone(), PauseReason::DltRetryDegraded));
+    }
+    snapshot.state = GroupState::Degraded;
+    snapshot.last_error = Some(detail);
 }
 
 /// 业务作用：优先收割异步 DLT completion，并在 delivery 成功后生成终态 outcome 与同步提交。
@@ -3986,6 +4592,10 @@ fn drain_dlt_completions(
     context: &mut ActionContext<'_>,
     receiver: &mut tokio::sync::mpsc::Receiver<DltCompletion>,
 ) -> bool {
+    // 原生 callback 已撤销旧权威时，旧结果不能趁 owner 尚未处理 mailbox 越过 fencing。
+    if context.consumer.has_rebalance() || context.consumer.assignment_lost() {
+        return false;
+    }
     while let Ok(completion) = receiver.try_recv() {
         let first_offset = completion.offsets.first().copied().unwrap_or_default();
         let matches_pending = context
@@ -4014,6 +4624,8 @@ fn drain_dlt_completions(
                 );
                 RecordOutcome::DeadLettered
             }
+            // 停止使尚未发送的信封也会返回；不能将取消准入解释成 availability-first 的成功跳过。
+            Err(_) if context.runtime.stop_requested.load(Ordering::Acquire) => continue,
             Err(error) if !context.runtime.config.behavior.dead_letter_required => {
                 context.runtime.counter(
                     "dlt_failed_total",
@@ -4086,7 +4698,7 @@ fn drain_dlt_completions(
             context.last_commit,
             context.runtime.config.behavior.consume_retry_backoff_ms,
             context.transient_exit,
-            !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+            !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
             context.deferred_stop,
         ) {
             return true;
@@ -4105,6 +4717,16 @@ fn drain_dlt_completions(
             );
             continue;
         };
+        if let Some(expected) = context
+            .runtime
+            .records
+            .next_dead_letter(&completion.tp, next_offset)
+        {
+            context
+                .runtime
+                .records
+                .expect_dead_letter(&completion.tp, expected);
+        }
         if let Err(error) = context
             .consumer
             .seek_offsets(&BTreeMap::from([(completion.tp.clone(), next_offset)]))
@@ -4121,108 +4743,88 @@ fn drain_dlt_completions(
         context
             .attempts
             .remove(&(completion.tp.clone(), first_offset));
+        // DLT 后继可能已在原逻辑批中计费；其重投不依赖新记录额度，也不能被该门禁永久挡住。
+        let targets = context
+            .runtime
+            .records
+            .replaying(&BTreeMap::from([(completion.tp.clone(), next_offset)]));
+        resume_input_partitions(context.consumer, context.health, &targets);
         let resumable = clear_pause_reason(
             context.health,
             std::slice::from_ref(&completion.tp),
             &PauseReason::DltPending,
         );
+        let mut resumable = resumable;
+        resumable.extend(clear_pause_reason(
+            context.health,
+            std::slice::from_ref(&completion.tp),
+            &PauseReason::DltRetryDegraded,
+        ));
         let _ = context.consumer.resume(&resumable);
         note_success(context.health);
     }
     false
 }
 
-/// 业务作用：推进 owner 唯一的 DLT local pending 准入；未取得 permit 时只做一次短维护 poll。
-///
-/// # 参数
-///
-/// - `context`: owner 本轮共享状态。
-///
-/// # 返回
-///
-/// 返回门禁是否解除，或维护性 poll 是否要求结束当前会话。
-fn service_dlt_admission(context: &mut ActionContext<'_>) -> MaintenanceFlow {
-    let Some(mut pending) = context.dlt_admission.take() else {
-        return MaintenanceFlow::Ready;
-    };
-    if pending.assignment_epoch != context.assignment_epoch {
-        finish_dlt_admission_gate(context, &pending.discarded);
-        return MaintenanceFlow::Ready;
+/// 业务作用：非阻塞复验各失败分区的 DLT 准入条件，健康分区继续由主循环处理。
+/// 参数说明：context 为当前 owner 的分配权威、等待表和暂停事实。
+/// 返回：仅开放容量已恢复的原坐标；停止或失权释放未发出的等待，不宣称来源已完成。
+fn service_dlt_admission(context: &mut ActionContext<'_>) {
+    if context.consumer.has_rebalance() || context.consumer.assignment_lost() {
+        return;
     }
-    let dispatcher = match context.runtime.dlt_dispatcher.get() {
-        Some(dispatcher) => dispatcher.clone(),
-        None => {
-            halt_partition(
-                context.consumer,
-                context.health,
-                &pending.tp,
-                HaltReason::DltInfrastructure,
-                "DLT dispatcher 尚未初始化".into(),
-            );
-            finish_dlt_admission_gate(context, &pending.discarded);
-            return MaintenanceFlow::Ready;
-        }
-    };
-    match dispatcher.try_admit(pending.job) {
-        Ok(DltAdmission::Admitted(envelope)) => {
-            finish_dlt_admission_gate(context, &pending.discarded);
-            spawn_dlt_worker(context, dispatcher, envelope, pending.tp, pending.offsets);
-            MaintenanceFlow::Ready
-        }
-        Ok(DltAdmission::Backpressured(job)) => {
-            pending.job = job;
-            match context.consumer.poll(Duration::from_millis(50)) {
-                Ok(Some(message)) => {
-                    let tp = Tp::new(message.topic(), message.partition());
-                    pending
-                        .discarded
-                        .entry(tp)
-                        .and_modify(|offset| *offset = (*offset).min(message.offset()))
-                        .or_insert(message.offset());
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    record_maintenance_poll_error(context.health, context.transient_exit, error);
-                    *context.dlt_admission = Some(pending);
-                    return MaintenanceFlow::StopOwner;
-                }
+    let stopping = context.runtime.stop_requested.load(Ordering::Acquire);
+    let dispatcher = context.runtime.dlt_dispatcher.get().cloned();
+    let targets = context
+        .dlt_admission
+        .iter()
+        .filter(|(_, pending)| {
+            stopping
+                || pending.assignment_epoch != context.assignment_epoch
+                || dispatcher
+                    .as_ref()
+                    .is_none_or(|dispatcher| dispatcher.can_reserve(pending.required_bytes))
+        })
+        .map(|(tp, _)| tp.clone())
+        .collect::<Vec<_>>();
+    for tp in targets {
+        let pending = context.dlt_admission.remove(&tp).expect("已选中的等待责任");
+        if !stopping && pending.assignment_epoch == context.assignment_epoch {
+            if dispatcher.is_none() {
+                halt_partition(
+                    context.consumer,
+                    context.health,
+                    &tp,
+                    HaltReason::DltInfrastructure,
+                    "DLT dispatcher 尚未初始化".into(),
+                );
+            } else {
+                // 只恢复失败原坐标；信封复制仍须在再次取入时原子取得全额预算。
+                let offset = pending.offsets[0];
+                context.runtime.records.expect_dead_letter(&tp, offset);
+                let failed = rewind_input_offsets(
+                    context.runtime,
+                    context.consumer,
+                    context.health,
+                    &BTreeMap::from([(tp.clone(), offset)]),
+                );
+                halt_failed_rewinds(context.consumer, context.health, &failed);
             }
-            context
-                .health
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .last_poll_at = Some(SystemTime::now());
-            *context.dlt_admission = Some(pending);
-            MaintenanceFlow::Blocked
         }
-        Err(error) => {
-            halt_partition(
-                context.consumer,
-                context.health,
-                &pending.tp,
-                HaltReason::DltInfrastructure,
-                error.to_string(),
-            );
-            finish_dlt_admission_gate(context, &pending.discarded);
-            MaintenanceFlow::Ready
+        clear_pause_reason(
+            context.health,
+            std::slice::from_ref(&tp),
+            &PauseReason::DltBackpressure,
+        );
+        let resumable = clear_pause_reason(
+            context.health,
+            std::slice::from_ref(&tp),
+            &PauseReason::DltPending,
+        );
+        if !stopping {
+            let _ = context.consumer.resume(&resumable);
         }
     }
-}
-
-/// 业务作用：清理 group 级 DLT 准入门禁，同时恢复维护性 poll 取出的记录位置。
-///
-/// # 参数
-///
-/// - `context`: owner 本轮共享状态。
-/// - `discarded`: 门禁期间每分区已取出但未派发的最小 offset。
-fn finish_dlt_admission_gate(context: &mut ActionContext<'_>, discarded: &BTreeMap<Tp, i64>) {
-    if !discarded.is_empty() {
-        let failed = context.consumer.rewind_offsets(discarded);
-        halt_failed_rewinds(context.consumer, context.health, &failed);
-    }
-    let assignment = context.consumer.assignment().unwrap_or_default();
-    let resumable = clear_pause_reason(context.health, &assignment, &PauseReason::DltBackpressure);
-    let _ = context.consumer.resume(&resumable);
 }
 
 /// 业务作用：availability-first 地把整个失败 run 标为安全跳过并提交末尾边界。
@@ -4263,7 +4865,7 @@ fn apply_availability_skip_run(
         context.last_commit,
         context.runtime.config.behavior.consume_retry_backoff_ms,
         context.transient_exit,
-        !context.dlt_pending.is_empty() || context.dlt_admission.is_some(),
+        !context.dlt_pending.is_empty() || !context.dlt_admission.is_empty(),
         context.deferred_stop,
     );
     context.attempts.remove(&(tp, first_offset));
@@ -4320,23 +4922,24 @@ fn clear_commit_blocked(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHeal
     let _ = consumer.resume(&resumable);
 }
 
-/// 业务作用：对一条拥有型 typed 消息完成 event 路由、codec 校验、上下文构造与逐条解码。
-///
-/// # 参数
-///
-/// - `runtime`: 提供无匹配和无效记录策略。
-/// - `plan`: 当前 resolved group 的冻结 route 计划。
-/// - `assignment_epoch`: 本次逻辑批所属 assignment epoch。
-/// - `decode_streaks`: owner 会话局部的按分区连续解码失败表（解码整体故障熔断，见
-///   `decode_failure_action`）。
-/// - `message`: 已受 records/bytes 双上限约束的拥有型消息。
+/// 业务作用：为拥有型输入解析事件路由、校验 codec 声明并构造来源上下文。
+/// 参数说明：runtime 提供无匹配及无效记录策略；plan 为冻结组路由；assignment_epoch 为本批权威；message 为已受条数和字节预算约束的输入。
+/// 返回：可派发原始记录或消息策略；此处不执行自定义 codec，不改变解码失败计数或保护状态。
 fn prepare_typed_message(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     plan: &GroupPlan,
     assignment_epoch: u64,
-    decode_streaks: &mut BTreeMap<Tp, u64>,
     message: OwnedTypedMessage,
 ) -> PreparedTypedItem {
+    if let Some((intent, _)) = runtime
+        .records
+        .dead_letter_intent(&message.tp(), message.offset)
+    {
+        return PreparedTypedItem::ImmediateOwned {
+            source: message,
+            action: ProcessAction::DeadLetter(intent.reason),
+        };
+    }
     if message.malformed_headers {
         return PreparedTypedItem::ImmediateOwned {
             source: message,
@@ -4347,25 +4950,26 @@ fn prepare_typed_message(
             ),
         };
     }
-    let event = match message.headers.last(HEADER_EVENT) {
-        None => DEFAULT_EVENT,
-        Some(header) => match header.value.as_deref() {
-            None | Some([]) => DEFAULT_EVENT,
-            Some(value) => match std::str::from_utf8(value) {
-                Ok(value) => value,
-                Err(_) => {
-                    return PreparedTypedItem::ImmediateOwned {
-                        source: message,
-                        action: invalid_action(
-                            runtime,
-                            crate::consumer::InvalidRecordReason::MalformedRoute,
-                            "event header 不是 UTF-8",
-                        ),
-                    };
-                }
-            },
-        },
+    let declaration = match RouteHeaders::parse(
+        message
+            .headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_deref())),
+        runtime.config.behavior.strict_headers,
+    ) {
+        Ok(declaration) => declaration,
+        Err(reason) => {
+            return PreparedTypedItem::ImmediateOwned {
+                source: message,
+                action: invalid_action(
+                    runtime,
+                    crate::consumer::InvalidRecordReason::MalformedRoute,
+                    reason,
+                ),
+            };
+        }
     };
+    let event = declaration.event;
     let Some(route) = plan
         .typed
         .iter()
@@ -4397,12 +5001,32 @@ fn prepare_typed_message(
         };
     };
     if message.payload.is_none() {
-        return PreparedTypedItem::ImmediateOwned {
-            source: message,
-            action: ProcessAction::Safe(RecordOutcome::Skipped(SkipReason::Tombstone)),
+        use crate::config::TombstonePolicy;
+        let action = match runtime.config.behavior.tombstone_policy {
+            TombstonePolicy::Skip => Some(ProcessAction::Safe(RecordOutcome::Skipped(
+                SkipReason::Tombstone,
+            ))),
+            TombstonePolicy::DeadLetter => Some(ProcessAction::DeadLetter("Tombstone".into())),
+            TombstonePolicy::Halt => Some(ProcessAction::Halt(
+                HaltReason::InvalidRecord(crate::consumer::InvalidRecordReason::MissingPayload),
+                "Tombstone".into(),
+            )),
+            TombstonePolicy::Deliver => None,
         };
+        // 只有明确的 Deliver 才进入类型解码；跳过、DLT 和暂停不会伪造一次业务调用。
+        if let Some(action) = action {
+            return PreparedTypedItem::ImmediateOwned {
+                source: message,
+                action,
+            };
+        }
     }
-    if let Err(error) = validate_owned_codec(route.codec(), &message.headers) {
+    // tombstone 没有编码格式；Deliver 使用类型的空值入口，其余载荷必须匹配 codec/mode。
+    if let Err(error) = if message.payload.is_some() {
+        declaration.validate_codec(route.meta().codec)
+    } else {
+        Ok(())
+    } {
         return PreparedTypedItem::ImmediateOwned {
             source: message,
             action: invalid_or_dlt(runtime, error.to_string()),
@@ -4428,6 +5052,7 @@ fn prepare_typed_message(
         None => serde_json::Map::new(),
     };
     let OwnedTypedMessage {
+        input_permit,
         topic,
         partition,
         offset,
@@ -4437,34 +5062,23 @@ fn prepare_typed_message(
         malformed_headers: _,
         payload,
     } = message;
-    let key = match key {
-        Some(bytes) => match String::from_utf8(bytes) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                return PreparedTypedItem::ImmediateOwned {
-                    source: OwnedTypedMessage {
-                        topic,
-                        partition,
-                        offset,
-                        timestamp,
-                        key: Some(error.into_bytes()),
-                        headers,
-                        malformed_headers: false,
-                        payload,
-                    },
-                    action: invalid_or_dlt(runtime, "key 不是 UTF-8".into()),
-                };
-            }
-        },
-        None => None,
-    };
+    let raw_key = key;
+    let key = raw_key
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::to_owned);
     let mut headers = headers;
     // 来源 producer 无权自报投递次数；首次交付也必须先覆盖同名值，避免伪造 header
     // 影响 Saga 等有界重试消费者的 ACK/DLT 裁决。
     headers.replace_framework_value(HEADER_DELIVERY_ATTEMPT, b"1".to_vec());
-    let raw = RawRecord {
+    let tombstone = payload.is_none();
+    let raw = RawRecord::new(
         payload,
-        ctx: ConsumeCtx {
+        ConsumeCtx {
+            tombstone,
+            source_id: runtime.config.client_name.clone(),
+            group: plan.group.clone(),
+            assignment_epoch,
             topic,
             partition,
             offset,
@@ -4472,33 +5086,17 @@ fn prepare_typed_message(
             retry_attempt: 1,
             timestamp,
             key,
+            raw_key,
             headers,
             passthrough,
         },
         assignment_epoch,
-    };
-    let tp = Tp::new(&raw.ctx.topic, raw.ctx.partition);
-    match route.decode(&raw) {
-        Ok(decoded) => {
-            note_decode_success(decode_streaks, &tp);
-            PreparedTypedItem::Routed {
-                source: raw,
-                route,
-                decoded,
-            }
-        }
-        Err(error) => {
-            runtime.counter(
-                "decode_failed_total",
-                1,
-                &[("group", &plan.group), ("consumer_id", route.meta().id)],
-            );
-            PreparedTypedItem::ImmediateRaw {
-                source: raw,
-                action: decode_failure_action(runtime, decode_streaks, &tp, error.to_string()),
-            }
-        }
+        input_permit,
+    );
+    if route.meta().execution_mode == ExecutionMode::KeyOrdered {
+        raw.input_permit().mark_keyed();
     }
+    PreparedTypedItem::Routed { source: raw, route }
 }
 
 /// 业务作用：在每次调用业务 handler 前，同步可信总投递序号与独立的普通失败预算序号。
@@ -4509,30 +5107,18 @@ fn prepare_typed_message(
 ///
 /// 参数说明：
 /// - `sources`: DLT 与 offset 裁决保留的原始记录。
-/// - `decoded`: 即将交给业务 handler 的已解码记录。
 /// - `delivery_attempt`: 包含控制态延后的本次总投递序号。
 /// - `retry_attempt`: 排除控制态延后的本次普通失败预算序号。
 ///
-/// 返回：无；两个视图都携带相同的可信投递元数据。
-fn annotate_delivery_attempt(
-    sources: &mut [RawRecord],
-    decoded: &mut [ErasedRecord],
-    delivery_attempt: u32,
-    retry_attempt: u32,
-) {
+/// 返回：原始上下文携带可信序号，worker 解码时继承同一份业务身份。
+fn annotate_delivery_attempt(sources: &mut [RawRecord], delivery_attempt: u32, retry_attempt: u32) {
     let value = delivery_attempt.to_string().into_bytes();
     for source in sources {
-        source.ctx.delivery_attempt = delivery_attempt;
-        source.ctx.retry_attempt = retry_attempt;
-        source
-            .ctx
-            .headers
-            .replace_framework_value(HEADER_DELIVERY_ATTEMPT, value.clone());
-    }
-    for record in decoded {
-        record.ctx.delivery_attempt = delivery_attempt;
-        record.ctx.retry_attempt = retry_attempt;
-        record
+        // 实际 worker 共享原文；只有派发前的独占引用可以改变可信次数。
+        let original = source.exclusive();
+        original.ctx.delivery_attempt = delivery_attempt;
+        original.ctx.retry_attempt = retry_attempt;
+        original
             .ctx
             .headers
             .replace_framework_value(HEADER_DELIVERY_ATTEMPT, value.clone());
@@ -4547,22 +5133,40 @@ fn annotate_delivery_attempt(
 /// - `route`: 本次调用的冻结 route。
 /// - `records`: 同分区、同 route 的非空连续交付 run。
 /// - `handler_ambient`：从消息传播信息派生的 handler 环境 trace。
+/// - `deadline`：执行准入时冻结、已由解码消耗的共同截止时刻。
 ///
 /// 返回：handler 的完成结局；超过冻结预算时返回稳定超时失败。
 fn invoke_typed_handler(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     route: &Arc<dyn crate::consumer::erased::ErasedConsumer>,
     records: Vec<ErasedRecord>,
     handler_ambient: Option<natelemetry::TraceContext>,
+    deadline: Option<Instant>,
 ) -> InvocationOutcome {
+    // 解码已经消耗同一预算，不能在没有剩余时间时首次轮询业务 future。
+    if deadline.is_some_and(|end| Instant::now() >= end) {
+        return InvocationOutcome::Failed(NafkaError::Broker("consumer handler timeout".into()));
+    }
     // handler 全程处于消息链路的环境作用域:业务在处理中发起的出站调用(REST/Kafka)未显式绑定
     // 上下文时自动延续本条消息的 trace,与 HTTP 入站中间件的作用域语义一致。
-    let future = natelemetry::with_ambient(handler_ambient, route.invoke(records));
-    if let Some(timeout) = runtime.config.behavior.handler_timeout_ms {
+    let links = if records.len() > 1 {
+        crate::KafkaTraceLinks::from_contexts(records.iter().map(|r| &r.ctx))
+    } else {
+        crate::KafkaTraceLinks::default()
+    };
+    let future = links.scope(natelemetry::with_ambient(
+        handler_ambient,
+        route.invoke(records),
+    ));
+    if let Some(deadline) = deadline {
         runtime.runtime.block_on(async {
-            match tokio::time::timeout(Duration::from_millis(timeout), future).await {
-                Ok(outcome) => outcome,
-                Err(_) => {
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), future)
+                .await
+            {
+                Ok(outcome) if Instant::now() < deadline => outcome,
+                // 同步阻塞的 handler 可能直到返回才归还执行权；实际退出后仍按总预算失败，
+                // 不能让其迟到成功越过输入位点，也不能在它退出前开放同顺序域的后继调用。
+                Ok(_) | Err(_) => {
                     InvocationOutcome::Failed(NafkaError::Broker("consumer handler timeout".into()))
                 }
             }
@@ -4581,18 +5185,25 @@ fn invoke_typed_handler(
 /// - `health`: group 健康快照。
 /// - `commands`: owner 控制命令接收端。
 /// - `attempts`: 本进程失败尝试表。
+/// - `retries`: 按分区保留的退避和重新交付责任。
+/// - `dlt_pending`、`dlt_sender`、`dlt_admission`: 已准入 DLT、完成邮箱与待准入门禁。
 /// - `progress`: 连续安全水位。
 /// - `last_commit`: 最近一次成功提交时间。
 /// - `assignment_epoch`: 当前 assignment epoch。
 /// - `batch`: 已完成 records/bytes 双门禁的逻辑批。
 /// - `partition_cursor`: 跨批轮转分区起点。
 /// - `transient_exit`: 维护性 poll 捕获的临时会话错误。
+/// - `gate_trigger`: 触发进度容量保护的分区。
+/// - `deferred_stop`: 已接纳但仍等待实际调用或 DLT 排空的停止命令。
+/// - `decode_streaks`: 各分区连续解码失败的保护计数。
+/// - `key_completions`: 当前 assignment 内尚未接入连续前缀的有界按键完成证据。
+/// - `queued`: 跨 poll 保留的分区有序输入，实际 worker 结束后按原边界裁决。
 ///
 /// 返回：
 /// owner 必须停止当前会话时返回 true。
 #[allow(clippy::too_many_arguments)]
 fn process_logical_typed_batch(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     consumer: &ConsumerClient,
     plan: &mut GroupPlan,
     health: &Arc<RwLock<GroupHealth>>,
@@ -4601,7 +5212,7 @@ fn process_logical_typed_batch(
     retries: &mut BTreeMap<Tp, PartitionRetry>,
     dlt_pending: &mut BTreeMap<Tp, PendingDlt>,
     dlt_sender: &tokio::sync::mpsc::Sender<DltCompletion>,
-    dlt_admission: &mut Option<PendingDltAdmission>,
+    dlt_admission: &mut BTreeMap<Tp, PendingDltAdmission>,
     progress: &mut GroupOffsetState,
     last_commit: &mut Instant,
     assignment_epoch: u64,
@@ -4611,6 +5222,8 @@ fn process_logical_typed_batch(
     gate_trigger: &mut Option<Tp>,
     deferred_stop: &mut Option<OwnerCommand>,
     decode_streaks: &mut BTreeMap<Tp, u64>,
+    key_completions: &mut KeyCompletions,
+    queued: &mut BTreeMap<Tp, VecDeque<PreparedTypedItem>>,
 ) -> bool {
     let mut partitions: BTreeMap<Tp, Vec<TypedBatchItem>> = BTreeMap::new();
     for item in batch.items {
@@ -4619,16 +5232,7 @@ fn process_logical_typed_batch(
     for items in partitions.values_mut() {
         items.sort_by_key(TypedBatchItem::offset);
     }
-    let mut order = partitions.keys().cloned().collect::<Vec<_>>();
-    if !order.is_empty() {
-        let start = *partition_cursor % order.len();
-        order.rotate_left(start);
-        *partition_cursor = (*partition_cursor + 1) % order.len();
-    }
-    for tp in order {
-        let Some(items) = partitions.remove(&tp) else {
-            continue;
-        };
+    for (tp, items) in std::mem::take(&mut partitions) {
         if items
             .windows(2)
             .any(|pair| pair[0].offset() >= pair[1].offset())
@@ -4642,11 +5246,14 @@ fn process_logical_typed_batch(
             );
             continue;
         }
-        let mut prepared = items
-            .into_iter()
-            .map(|item| match item {
+        // 这里只解析已受批字节上限约束的框架头和冻结路由，不等待业务执行额度。
+        // 自定义 codec 与 handler 仍在实际调用 worker 内运行，池饱和不能阻塞完成裁决。
+        queued
+            .entry(tp)
+            .or_default()
+            .extend(items.into_iter().map(|item| match item {
                 TypedBatchItem::Owned(message) => {
-                    prepare_typed_message(runtime, plan, assignment_epoch, decode_streaks, message)
+                    prepare_typed_message(runtime, plan, assignment_epoch, message)
                 }
                 TypedBatchItem::Oversize {
                     tp,
@@ -4657,9 +5264,68 @@ fn process_logical_typed_batch(
                     offset,
                     retained_bytes,
                 },
-            })
-            .collect::<VecDeque<_>>();
-        while let Some(item) = prepared.pop_front() {
+            }));
+    }
+    key_completions.collect_finished(
+        consumer,
+        assignment_epoch,
+        runtime.stop_requested.load(Ordering::Acquire) || deferred_stop.is_some(),
+        health,
+    );
+    if let Some(error) = key_completions.fatal_error() {
+        // 更高 offset 的框架致命结论也先关闭新派发，不能等慢前缀后才开始保护。
+        update_state(health, GroupState::Crashed, Some(error));
+        return true;
+    }
+    if consumer.has_rebalance()
+        || consumer.assignment_lost()
+        || deferred_stop.is_some()
+        || runtime.stop_requested.load(Ordering::Acquire)
+    {
+        return false;
+    }
+    let mut order = queued.keys().cloned().collect::<Vec<_>>();
+    if !order.is_empty() {
+        let start = *partition_cursor % order.len();
+        order.rotate_left(start);
+        *partition_cursor = (*partition_cursor + 1) % order.len();
+    }
+    for tp in order {
+        let Some(mut prepared) = queued.remove(&tp) else {
+            continue;
+        };
+        while !prepared.is_empty() {
+            if matches!(prepared.front(), Some(PreparedTypedItem::Routed { route, .. }) if route.meta().execution_mode == ExecutionMode::KeyOrdered)
+            {
+                let retry_offset = retries
+                    .get(&tp)
+                    .filter(|state| state.in_place)
+                    .map(|state| state.retry_from);
+                key_completions.launch_round(
+                    runtime,
+                    attempts,
+                    &mut prepared,
+                    health,
+                    retry_offset,
+                );
+                if let Some(error) = key_completions.fatal_error() {
+                    update_state(health, GroupState::Crashed, Some(error));
+                    return true;
+                }
+                let first = prepared.front().expect("队列非空").location();
+                if key_completions.outcome(&first.0, first.1).is_none() {
+                    break;
+                }
+            }
+            let first = prepared.front().expect("队列非空").location();
+            // 用户暂停只关闭新派发，已经实际完成的前缀仍须接入账本并提交，避免责任永久滞留。
+            if key_completions.active_at(&first.0, first.1)
+                || (handler::user_paused(health, &tp)
+                    && key_completions.outcome(&first.0, first.1).is_none())
+            {
+                break;
+            }
+            let item = prepared.pop_front().expect("前置检查保证有记录");
             let flow = match item {
                 PreparedTypedItem::ImmediateOwned { source, action } => {
                     let mut context = ActionContext {
@@ -4682,7 +5348,15 @@ fn process_logical_typed_batch(
                     };
                     apply_process_action(&mut context, &source, action)
                 }
-                PreparedTypedItem::ImmediateRaw { source, action } => {
+                PreparedTypedItem::DecodeFailure {
+                    source,
+                    consumer_id,
+                    reason,
+                } => {
+                    let tp = source.ctx.topic_partition();
+                    let previous = decode_streaks.get(&tp).copied();
+                    // 批次尾部可能随前缀重试被整体丢弃；只有走到本条输入时才决定连续失败保护。
+                    let action = decode_failure_action(runtime, decode_streaks, &tp, reason);
                     let mut context = ActionContext {
                         runtime,
                         consumer,
@@ -4701,7 +5375,22 @@ fn process_logical_typed_batch(
                         deferred_stop,
                         assignment_epoch,
                     };
-                    apply_process_action(&mut context, &source, action)
+                    let flow = apply_process_action(&mut context, &source, action);
+                    if matches!(flow, ActionFlow::StopBatch { .. }) {
+                        // 容量不足尚未接管失败责任，回退后重新取入不能再次消耗失败阈值。
+                        if let Some(value) = previous {
+                            decode_streaks.insert(tp, value);
+                        } else {
+                            decode_streaks.remove(&tp);
+                        }
+                    } else {
+                        runtime.counter(
+                            "decode_failed_total",
+                            1,
+                            &[("group", &plan.group), ("consumer_id", consumer_id)],
+                        );
+                    }
+                    flow
                 }
                 PreparedTypedItem::Oversize {
                     tp,
@@ -4717,103 +5406,100 @@ fn process_logical_typed_batch(
                     );
                     ActionFlow::StopPartition
                 }
-                PreparedTypedItem::Routed {
-                    source,
-                    route,
-                    decoded,
-                } => {
+                PreparedTypedItem::Routed { source, route } => {
                     let mut sources = vec![source];
-                    let mut decoded_records = vec![decoded];
+                    let mut source_bytes = sources[0].retained_bytes();
+                    let batch_retry_counts =
+                        retry_counts(attempts, &(tp.clone(), sources[0].ctx.offset));
+                    let completed_count =
+                        key_completions.completed_count(&tp, sources[0].ctx.offset);
                     if route.meta().shape == ConsumerShape::Batch {
-                        while matches!(prepared.front(), Some(PreparedTypedItem::Routed { route: next, .. }) if Arc::ptr_eq(&route, next))
+                        while sources.len()
+                            < completed_count.unwrap_or(runtime.config.behavior.max_batch_records)
+                            && matches!(prepared.front(), Some(PreparedTypedItem::Routed { source: next_source, route: next }) if Arc::ptr_eq(&route, next) && (completed_count.is_some() || (source_bytes.saturating_add(next_source.retained_bytes()) <= runtime.config.behavior.max_batch_bytes && retry_counts(attempts, &(tp.clone(), next_source.ctx.offset)) == batch_retry_counts)))
                         {
-                            let Some(PreparedTypedItem::Routed {
-                                source, decoded, ..
-                            }) = prepared.pop_front()
+                            let Some(PreparedTypedItem::Routed { source, .. }) =
+                                prepared.pop_front()
                             else {
                                 unreachable!("前置形态检查已确认 routed item");
                             };
+                            source_bytes = source_bytes.saturating_add(source.retained_bytes());
                             sources.push(source);
-                            decoded_records.push(decoded);
                         }
                     }
                     let first_offset = sources[0].ctx.offset;
-                    let state = attempts.get(&(tp.clone(), first_offset));
-                    let delivery_attempt = state
-                        .map_or(0, |state| state.failed_deliveries)
-                        .saturating_add(1);
-                    let retry_attempt = state
-                        .map_or(0, |state| state.bounded_failures)
-                        .saturating_add(1);
-                    annotate_delivery_attempt(
-                        &mut sources,
-                        &mut decoded_records,
-                        delivery_attempt,
-                        retry_attempt,
-                    );
-                    let first = &sources[0].ctx;
-                    let last_offset = sources
-                        .last()
-                        .map_or(first.offset, |source| source.ctx.offset);
-                    // 缺失或非法 traceparent 的消息必须建立新根：否则 handler 内的 REST/Kafka
-                    // 出站调用仍会断链。新根是否采样沿用 exporter 的冻结策略；未装 recorder 时
-                    // 只传播不记录，避免为了关联性擅自增加遥测出口负载。
-                    let parent = first.trace_context().unwrap_or_else(|| {
-                        natelemetry::TraceContext::new_root(
-                            runtime
-                                .span_recorder
-                                .as_ref()
-                                .is_some_and(natelemetry::SpanRecorder::should_sample_root),
-                        )
-                    });
-                    let trace_id = parent.trace_id_hex();
-                    let consumer_span = runtime.span_recorder.as_ref().map(|recorder| {
-                        recorder.start("Kafka consume", &parent, natelemetry::SpanKind::Consumer)
-                    });
-                    // handler 的环境上下文与 consumer span 同一 span-id;recorder 未启用时
-                    // 也派生子上下文,保证下游 parent 指向本次消费而不是上游 producer。
-                    let handler_ambient = consumer_span
-                        .as_ref()
-                        .map(natelemetry::SpanGuard::context)
-                        .or_else(|| Some(parent.child(natelemetry::random_span_id())));
-                    let outcome = if route.meta().shape == ConsumerShape::Batch {
-                        let span = tracing::info_span!(
-                            "kafka.consume_batch",
-                            group = %plan.group,
-                            consumer_id = route.meta().id,
-                            topic = %first.topic,
-                            partition = first.partition,
-                            first_offset = first.offset,
-                            last_offset,
-                            count = sources.len(),
-                            event = %route.meta().event,
-                            delivery_attempt,
-                            retry_attempt,
-                            trace_id
+                    // 每条原文携带自己的可信历史；分批边界变化不能重置尾部或把首条次数借给新输入。
+                    for source in &mut sources {
+                        let (deliveries, failures) =
+                            retry_counts(attempts, &(tp.clone(), source.ctx.offset));
+                        annotate_delivery_attempt(
+                            std::slice::from_mut(source),
+                            deliveries.saturating_add(1),
+                            failures.saturating_add(1),
                         );
-                        span.in_scope(|| {
-                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
-                        })
-                    } else {
-                        let span = tracing::info_span!(
-                            "kafka.consume",
-                            group = %plan.group,
-                            consumer_id = route.meta().id,
-                            topic = %first.topic,
-                            partition = first.partition,
-                            offset = first.offset,
-                            event = %route.meta().event,
-                            delivery_attempt,
-                            retry_attempt,
-                            trace_id
-                        );
-                        span.in_scope(|| {
-                            invoke_typed_handler(runtime, &route, decoded_records, handler_ambient)
-                        })
-                    };
-                    if let Some(span) = consumer_span {
-                        let _ = span.finish(None);
                     }
+                    let cached = key_completions.outcome(&tp, first_offset);
+                    let outcome = if let Some(outcome) = cached.clone() {
+                        outcome
+                    } else {
+                        match key_completions.start_partition(runtime, &route, sources.clone()) {
+                            Ok(_) => {
+                                // 启动或等待额度都保留前缀，立即轮转到其它分区。
+                                for source in sources.into_iter().rev() {
+                                    prepared.push_front(PreparedTypedItem::Routed {
+                                        source,
+                                        route: Arc::clone(&route),
+                                    });
+                                }
+                                break;
+                            }
+                            Err(outcome) => outcome,
+                        }
+                    };
+                    if let InvocationOutcome::DecodeFailed { failures } = outcome {
+                        // 解码失败不算一次业务调用：按原 offset 拆回消息策略，正常前后缀保留再次准入资格。
+                        // 只有主循环真正接管失败项时才更新连续失败计数，预备尾部不能提前重置保护。
+                        let mut failures = failures.into_iter().collect::<BTreeMap<_, _>>();
+                        if failures.is_empty()
+                            || failures.keys().any(|offset| {
+                                !sources.iter().any(|source| source.ctx.offset == *offset)
+                            })
+                        {
+                            update_state(
+                                health,
+                                GroupState::Crashed,
+                                Some("解码结局与本次输入身份不一致".into()),
+                            );
+                            return true;
+                        }
+                        for source in sources.into_iter().rev() {
+                            let item = if let Some(reason) = failures.remove(&source.ctx.offset) {
+                                PreparedTypedItem::DecodeFailure {
+                                    source,
+                                    consumer_id: route.meta().id,
+                                    reason,
+                                }
+                            } else {
+                                PreparedTypedItem::Routed {
+                                    source,
+                                    route: Arc::clone(&route),
+                                }
+                            };
+                            prepared.push_front(item);
+                        }
+                        if cached.is_some() {
+                            key_completions.remove(&tp, first_offset);
+                        }
+                        // 拆回消息策略后仍先处理可能到达的失权，不能绕过逻辑批末尾的分配门禁。
+                        if consumer.has_rebalance() || consumer.assignment_lost() {
+                            let rewind = unprocessed_offsets(&prepared, &partitions);
+                            let failed = rewind_input_offsets(runtime, consumer, health, &rewind);
+                            halt_failed_rewinds(consumer, health, &failed);
+                            return false;
+                        }
+                        continue;
+                    }
+                    note_decode_success(decode_streaks, &tp);
                     let mut context = ActionContext {
                         runtime,
                         consumer,
@@ -4832,16 +5518,44 @@ fn process_logical_typed_batch(
                         deferred_stop,
                         assignment_epoch,
                     };
-                    apply_invocation_outcome(&mut context, &route, &sources, outcome)
+                    let flow = apply_invocation_outcome(&mut context, &route, &sources, outcome);
+                    if cached.is_some() && !matches!(flow, ActionFlow::StopBatch { .. }) {
+                        key_completions.remove(&tp, first_offset);
+                    }
+                    if flow == ActionFlow::StopPartition
+                        && route.meta().execution_mode == ExecutionMode::KeyOrdered
+                        && retries.contains_key(&tp)
+                    {
+                        // 同 key 的失败前缀留在队列占有顺序域；其它 key 可继续使用空闲额度。
+                        retries.get_mut(&tp).expect("已登记按键退避").in_place = true;
+                        for source in sources.into_iter().rev() {
+                            prepared.push_front(PreparedTypedItem::Routed {
+                                source,
+                                route: Arc::clone(&route),
+                            });
+                        }
+                        resume_key_retry_inputs(consumer, health, retries);
+                        ActionFlow::Continue
+                    } else {
+                        flow
+                    }
                 }
             };
-            if dlt_admission.is_some() {
-                record_unprocessed_for_dlt_gate(dlt_admission, &prepared, &partitions);
-                return false;
-            }
             match flow {
                 ActionFlow::Continue => {}
-                ActionFlow::StopPartition => break,
+                ActionFlow::StopPartition => {
+                    // 失败坐标重读前等待本分区旧调用退出，防止同源字节和副作用重叠；其它分区继续。
+                    if key_completions.active_partition(&tp) {
+                        let _ = consumer.pause(std::slice::from_ref(&tp));
+                        add_pause_reason(
+                            health,
+                            std::slice::from_ref(&tp),
+                            PauseReason::HandlerInFlight,
+                        );
+                    }
+                    prepared.clear();
+                    break;
+                }
                 ActionFlow::StopBatch { tp, offset } => {
                     // 触发记录本身没有进入 progress，必须与本批未派发记录一起回退；
                     // 取 min 保证不会被"下一条记录"的回退把它跳过去。
@@ -4850,7 +5564,7 @@ fn process_logical_typed_batch(
                         .entry(tp.clone())
                         .and_modify(|current| *current = (*current).min(offset))
                         .or_insert(offset);
-                    let failed = consumer.rewind_offsets(&rewind);
+                    let failed = rewind_input_offsets(runtime, consumer, health, &rewind);
                     halt_failed_rewinds(consumer, health, &failed);
                     *gate_trigger = Some(tp);
                     return false;
@@ -4863,36 +5577,18 @@ fn process_logical_typed_batch(
                 // 分区则可从原 offset 重新交付。
                 let rewind = unprocessed_offsets(&prepared, &partitions);
                 if !rewind.is_empty() {
-                    let failed = consumer.rewind_offsets(&rewind);
+                    let failed = rewind_input_offsets(runtime, consumer, health, &rewind);
                     halt_failed_rewinds(consumer, health, &failed);
                 }
                 return false;
             }
         }
+        if !prepared.is_empty() {
+            queued.insert(tp, prepared);
+        }
     }
+    key_completions.publish_load(health);
     false
-}
-
-/// 业务作用：把当前逻辑批尚未派发的全部分区记录并入 DLT group 级门禁回退表。
-///
-/// - `admission`: 当前唯一 local pending DLT；存在时持有门禁回退表。
-/// - `prepared`: 当前分区尚未派发的记录。
-/// - `partitions`: 本批轮转顺序中尚未开始派发的其它分区。
-fn record_unprocessed_for_dlt_gate(
-    admission: &mut Option<PendingDltAdmission>,
-    prepared: &VecDeque<PreparedTypedItem>,
-    partitions: &BTreeMap<Tp, Vec<TypedBatchItem>>,
-) {
-    let Some(pending) = admission.as_mut() else {
-        return;
-    };
-    for (tp, offset) in unprocessed_offsets(prepared, partitions) {
-        pending
-            .discarded
-            .entry(tp)
-            .and_modify(|current| *current = (*current).min(offset))
-            .or_insert(offset);
-    }
 }
 
 /// 业务作用：汇总逻辑批中尚未派发的每分区最小 offset。
@@ -4929,16 +5625,28 @@ fn unprocessed_offsets(
 /// - `assignment_epoch`: 当前 owner epoch。
 /// - `message`: poll 借用消息。
 fn process_message(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     plan: &GroupPlan,
     assignment_epoch: u64,
     message: &RdMessage<'_>,
 ) -> ProcessAction {
-    if message.retained_bytes() > runtime.config.behavior.max_record_bytes {
+    if message.retained_bytes()
+        > runtime
+            .config
+            .behavior
+            .max_record_bytes
+            .min(runtime.records.maximum_record_bytes())
+    {
         return ProcessAction::Halt(
             HaltReason::OversizeRecord,
             format!("record bytes={} 超过上限", message.retained_bytes()),
         );
+    }
+    if let Some((intent, _)) = runtime.records.dead_letter_intent(
+        &Tp::new(message.topic(), message.partition()),
+        message.offset(),
+    ) {
+        return ProcessAction::DeadLetter(intent.reason);
     }
     let headers = match message.headers() {
         Ok(headers) => headers,
@@ -4950,20 +5658,20 @@ fn process_message(
             );
         }
     };
-    let event = match last_header(&headers, HEADER_EVENT) {
-        None | Some(None) => DEFAULT_EVENT,
-        Some(Some(value)) => match std::str::from_utf8(value) {
-            Ok("") => DEFAULT_EVENT,
-            Ok(value) => value,
-            Err(_) => {
-                return invalid_action(
-                    runtime,
-                    crate::consumer::InvalidRecordReason::MalformedRoute,
-                    "event header 不是 UTF-8",
-                );
-            }
-        },
+    let declaration = match RouteHeaders::parse(
+        headers.iter().map(|header| (header.name, header.value)),
+        runtime.config.behavior.strict_headers,
+    ) {
+        Ok(declaration) => declaration,
+        Err(reason) => {
+            return invalid_action(
+                runtime,
+                crate::consumer::InvalidRecordReason::MalformedRoute,
+                reason,
+            );
+        }
     };
+    let event = declaration.event;
     // 单消息路径只服务 passthrough-only group：registry 禁止 typed 与 passthrough 混入同一
     // group，而 typed 非空时 owner 主循环走逻辑批路径，不会到达这里。此处不做 typed 路由，
     // 避免维护一份永远不会执行、却会随 ack/指标语义演进而漂移的第二实现。
@@ -5012,7 +5720,7 @@ fn process_message(
 /// - `message`: 借用消息。
 /// - `headers`: 底层借用 headers。
 fn process_passthrough(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     group: &str,
     route: &crate::consumer::registry::RegisteredPassthrough,
     assignment_epoch: u64,
@@ -5028,6 +5736,8 @@ fn process_passthrough(
         .collect();
     let ack_set = (route.meta.ack_mode == AckMode::Manual).then(|| {
         ManualAckSet::new(vec![AckIdentity {
+            authority: None,
+            stopping: Some(Arc::clone(&runtime.stop_requested)),
             invocation_id: 0,
             assignment_epoch,
             topic: message.topic().to_owned(),
@@ -5060,9 +5770,31 @@ fn process_passthrough(
         attempt = 1_u32,
         trace_id = tracing::field::Empty
     );
+    let incoming = crate::trace::extract_fields(public_headers.iter().map(|h| (h.name, h.value)));
+    if let Err(reason) = incoming {
+        runtime.counter(
+            "trace_invalid_total",
+            1,
+            &[("group", group), ("reason", reason.as_str())],
+        );
+    }
+    let (trace, context) =
+        crate::trace::consume_span(runtime.span_recorder.as_ref(), incoming.ok().flatten());
+    let callback_started = Instant::now();
     let outcome = span.in_scope(|| {
-        std::panic::catch_unwind(AssertUnwindSafe(|| route.handler.consume_borrowed(record)))
+        natelemetry::with_ambient_sync(Some(context), || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| route.handler.consume_borrowed(record)))
+        })
     });
+    if let Some(trace) = trace {
+        let _ = trace.finish(None);
+    }
+    runtime.counter("passthrough_calls_total", 1, &[("group", group)]);
+    runtime.counter(
+        "passthrough_duration_micros_total",
+        u64::try_from(callback_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        &[("group", group)],
+    );
     match outcome {
         Ok(Ok(disposition)) => {
             finish_passthrough_success(disposition, route.meta.ack_mode, ack_set.as_ref())
@@ -5134,56 +5866,15 @@ fn finish_passthrough_success(
     }
 }
 
-/// 业务作用：校验拥有型 typed 消息的 codec headers 与 route 声明一致。
-///
-/// # 参数
-///
-/// - `codec`: route 编译期固定 codec。
-/// - `headers`: 已物化但仍保持有序多值语义的 headers。
-///
-/// # 错误
-///
-/// codec 或 payload mode 缺失、非法、不匹配时返回错误。
-fn validate_owned_codec(codec: PayloadCodec, headers: &KafkaHeaders) -> Result<()> {
-    let actual_codec = headers
-        .last(HEADER_PAYLOAD_CODEC)
-        .and_then(|header| header.value.as_deref());
-    match codec {
-        PayloadCodec::Json if actual_codec.is_none() => Ok(()),
-        PayloadCodec::Json => Err(NafkaError::Codec(
-            "JSON route 收到带二进制 codec header 的记录".into(),
-        )),
-        PayloadCodec::Proto(mode) => {
-            if actual_codec != Some(PAYLOAD_CODEC_PROTOCOL_BYTES.as_bytes()) {
-                return Err(NafkaError::Codec(
-                    "ProtocolBytes codec header 不匹配".into(),
-                ));
-            }
-            let actual_mode = headers
-                .last(HEADER_PAYLOAD_MODE)
-                .and_then(|header| header.value.as_deref());
-            if let Some(actual_mode) = actual_mode {
-                let actual_mode = std::str::from_utf8(actual_mode)
-                    .ok()
-                    .and_then(crate::wire::mode_from_wire_name);
-                if actual_mode != Some(mode) {
-                    return Err(NafkaError::Codec("ProtocolBytes mode header 不匹配".into()));
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-/// 业务作用：按配置把确定无效记录映射为 DLT/重试或 Halt。
-///
-/// # 参数
-///
-/// - `runtime`: 所属运行时。
-/// - `message`: 原消息。
-/// - `reason`: 已脱敏原因。
-fn invalid_or_dlt(runtime: &Arc<KafkaProxyInner>, reason: String) -> ProcessAction {
+/// 业务作用：按显式无效输入策略选择跳过、可靠死信或保留位点暂停。
+/// 参数说明：runtime 为所属运行时，reason 为脱敏原因。
+/// 返回：只在显式 Skip 下放弃输入；默认 DLT 仍须完成交付后才产生安全水位。
+fn invalid_or_dlt(runtime: &Arc<OwnerRuntime>, reason: String) -> ProcessAction {
     match runtime.config.behavior.invalid_record_policy {
+        // 跳过必须来自显式策略，不能由 DLT 不可用或解码失败自动降级产生。
+        crate::config::InvalidRecordPolicy::Skip => {
+            ProcessAction::Safe(RecordOutcome::Skipped(SkipReason::InvalidRecord))
+        }
         crate::config::InvalidRecordPolicy::Halt => ProcessAction::Halt(
             HaltReason::InvalidRecord(crate::consumer::InvalidRecordReason::MalformedRoute),
             reason,
@@ -5192,31 +5883,22 @@ fn invalid_or_dlt(runtime: &Arc<KafkaProxyInner>, reason: String) -> ProcessActi
     }
 }
 
-/// 业务作用：解码失败的处置：先过**本分区**连续失败熔断，再落到 `invalid_record_policy`。
-///
-/// 单条畸形 payload 走 DeadLetter 是对的；但"解码器整体坏了"在这条路径上长得一模一样，
-/// 而后者会让整个 topic 满速排进 DLT、offset 一路前进、group 仍报 Running。
-/// 连续失败达到 `decode_failure_halt_streak` 即 Halt 分区，交由人工判定。
-///
-/// 计数**必须按分区隔离**：进程级单计数会被同进程其它 group/route 的正常解码成功清零
-/// （socket-center 的 data + control 双 group 共用一个 KafkaProxy 就是典型形态），
-/// 使这道守卫在最该生效的多路场景里被架空。这里以 owner 会话局部的 `streaks` 表按 `tp`
-/// 累计，与 Halt 的分区粒度一致；owner 单线程独占该表，无需原子/锁。
-///
-/// # 参数
-///
-/// - `runtime`: 所属运行时（提供阈值配置）。
-/// - `streaks`: owner 会话局部的按分区连续解码失败表。
-/// - `tp`: 触发失败的分区。
-/// - `reason`: 已脱敏原因。
+/// 业务作用：在应用单条无效输入策略前检查本分区连续解码保护，防止系统性解码失败持续排干来源。
+/// 参数说明：runtime提供冻结阈值；streaks为本owner按分区隔离的连续失败计数；tp为失败分区；reason为脱敏原因。
+/// 返回：正阈值耗尽时关闭该分区准入；未配置或阈值为零时只应用invalid_record_policy，不影响其它分区计数。
 fn decode_failure_action(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     streaks: &mut BTreeMap<Tp, u64>,
     tp: &Tp,
     reason: String,
 ) -> ProcessAction {
     let streak = record_decode_failure(streaks, tp);
-    if let Some(limit) = runtime.config.behavior.decode_failure_halt_streak {
+    if let Some(limit) = runtime
+        .config
+        .behavior
+        .decode_failure_halt_streak
+        .filter(|limit| *limit > 0)
+    {
         if streak >= limit {
             // Halt 后本分区不再派发；保留计数无害且下次成功解码即清零。
             return ProcessAction::Halt(
@@ -5253,16 +5935,18 @@ fn note_decode_success(streaks: &mut BTreeMap<Tp, u64>, tp: &Tp) {
 
 /// 业务作用：构造不依赖消息所有权的无效路由动作。
 ///
-/// # 参数
-///
-/// - `runtime`: 所属运行时。
-/// - `reason`: 已脱敏原因。
+/// 参数说明：runtime 为所属运行时，invalid_reason 为强类型原因，reason 为脱敏文本。
+/// 返回：明确的安全跳过、DLT 或硬暂停；普通业务失败预算不改变此策略。
 fn invalid_action(
-    runtime: &Arc<KafkaProxyInner>,
+    runtime: &Arc<OwnerRuntime>,
     invalid_reason: crate::consumer::InvalidRecordReason,
     reason: &str,
 ) -> ProcessAction {
     match runtime.config.behavior.invalid_record_policy {
+        // 只有显式接受放弃的源才可把无效记录记作安全跳过。
+        crate::config::InvalidRecordPolicy::Skip => {
+            ProcessAction::Safe(RecordOutcome::Skipped(SkipReason::InvalidRecord))
+        }
         crate::config::InvalidRecordPolicy::Halt => {
             ProcessAction::Halt(HaltReason::InvalidRecord(invalid_reason), reason.into())
         }
@@ -5270,42 +5954,20 @@ fn invalid_action(
     }
 }
 
-/// 业务作用：从原始消息构造保留来源身份的单条死信记录。
-///
-/// # 参数
-///
-/// - `suffix`: 冻结的 DLT topic 后缀。
-/// - `group`: 来源 group。
-/// - `message`: 原始消息视图。
-/// - `reason`: 已脱敏失败原因。
-///
-/// # 错误
-///
-/// 原记录已经来自 DLT 时返回递归错误。
+/// 业务作用：在已取得信封额度后复制原文并写入当前来源证据。
+/// 参数说明：suffix/group 为冻结目标与来源组，message 为原始视图；reason 为有界失败原因，delivery_attempts 为首次失败意图冻结的可信次数。
+/// 返回：独立拥有的死信原文；真实来源已经是 DLT 时返回递归错误，不接受伪造来源头作为权威。
 fn build_dlt_record<S: DeadLetterSource + ?Sized>(
     suffix: &str,
     group: &str,
     message: &S,
     reason: &str,
+    delivery_attempts: u32,
 ) -> Result<DltRecord> {
-    // 递归判定只能用**不可伪造**的信号：记录是否真的来自死信 topic。
-    //
-    // 规范 原文写的是"原记录已带 X-Nasa-DLT-Origin-Topic 时"判定为递归，但该 header
-    // 由生产者任意填写：任何有写权限的客户端只要发一条「合法 event + 伪造 origin header +
-    // 解不出来的 payload」，就能让该分区进入 Halt(RecursiveDlt) 并停止消费，直到人工介入
-    // ——外部单条消息可能阻塞整个分区。它同时阻断了
-    // "把 DLT 记录重放回业务 topic"这一正常运维流程：重放记录天然带着 origin header，
-    // 再次失败时本应重新进 DLT，却会把分区打成 Halt。
-    //
-    // 来源 topic 名由框架自己拼（`<topic><suffix>`），生产者无法伪造，且完全满足
-    // 的意图——避免 `topic.DLT.DLT` 链。因此以它为唯一判据。
-    let already_dead_lettered = !suffix.is_empty() && message.source_topic().ends_with(suffix);
-    if already_dead_lettered {
+    // 来源 topic 是实际 broker 身份，来源侧可伪造的旧死信头不能授予或阻止本次留证。
+    if !suffix.is_empty() && message.source_topic().ends_with(suffix) {
         return Err(NafkaError::RecursiveDlt);
     }
-    // 剥掉来源侧可能携带的同名 origin header，避免伪造值与框架写入值共存导致
-    // DLT 消费者按 的 "origin topic + partition + offset 去重" 时读到歧义值。
-    let delivery_attempts = source_delivery_attempts(message);
     let headers = crate::wire::dead_letter_headers(
         &message.source_headers(),
         group,
@@ -5420,13 +6082,14 @@ fn schedule_partition_retry(
         PartitionRetry {
             retry_from: offset,
             ready_at: Instant::now() + Duration::from_millis(backoff_ms),
+            in_place: false,
         },
     );
     update_state(health, GroupState::Retrying, None);
     Ok(())
 }
 
-/// 业务作用：恢复所有退避到期分区；每个分区恢复前再次 seek，消除底层预取位置漂移。
+/// 业务作用：恢复退避到期的调用；保留原文的按键责任直接重派，其余分区先恢复 broker 坐标。
 ///
 /// # 参数
 ///
@@ -5434,7 +6097,11 @@ fn schedule_partition_retry(
 /// - `health`: group 健康快照。
 /// - `retries`: owner 的每分区退避表。
 /// - `retry_delay_ms`: seek 临时失败后的再次尝试间隔。
+/// - `runtime`: 原输入责任表，已计费重试不会重新申请共享容量。
+///
+/// 返回：到期且定位成功的分区移除退避；定位失败继续保留输入和退避责任。
 fn activate_due_retries(
+    runtime: &OwnerRuntime,
     consumer: &ConsumerClient,
     health: &Arc<RwLock<GroupHealth>>,
     retries: &mut BTreeMap<Tp, PartitionRetry>,
@@ -5444,11 +6111,21 @@ fn activate_due_retries(
     let due = retries
         .iter()
         .filter(|(_, state)| state.ready_at <= now)
-        .map(|(tp, state)| (tp.clone(), state.retry_from))
+        .map(|(tp, state)| (tp.clone(), state.retry_from, state.in_place))
         .collect::<Vec<_>>();
-    for (tp, offset) in due {
-        match consumer.seek_offsets(&BTreeMap::from([(tp.clone(), offset)])) {
+    for (tp, offset, in_place) in due {
+        let positioned = if in_place {
+            Ok(())
+        } else {
+            consumer.seek_offsets(&BTreeMap::from([(tp.clone(), offset)]))
+        };
+        match positioned {
             Ok(()) => {
+                // 失败前缀已经拥有输入额度，不能被后续新记录触发的容量暂停挡住。
+                let targets = runtime
+                    .records
+                    .replaying(&BTreeMap::from([(tp.clone(), offset)]));
+                resume_input_partitions(consumer, health, &targets);
                 retries.remove(&tp);
                 let resumable = clear_pause_reason(
                     health,
@@ -5476,6 +6153,115 @@ fn activate_due_retries(
             update_state(health, GroupState::Running, None);
         }
     }
+}
+
+/// 业务作用：按键退避只阻止对应顺序域，允许同分区其它 key 继续取入。
+/// 参数说明：consumer/health 为本槽取入权威与暂停原因；retries 为仍在保留原文的退避责任。
+/// 返回：只恢复没有 User、容量、DLT 或硬保护原因的分区，保留 RetryBackoff 观测与期限。
+fn resume_key_retry_inputs(
+    consumer: &ConsumerClient,
+    health: &Arc<RwLock<GroupHealth>>,
+    retries: &BTreeMap<Tp, PartitionRetry>,
+) {
+    let snapshot = health
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let targets = retries
+        .iter()
+        .filter(|(tp, state)| {
+            state.in_place
+                && !snapshot
+                    .paused
+                    .iter()
+                    .any(|(current, reason)| current == *tp && *reason != PauseReason::RetryBackoff)
+        })
+        .map(|(tp, _)| tp.clone())
+        .collect::<Vec<_>>();
+    drop(snapshot);
+    let _ = consumer.resume(&targets);
+}
+
+/// 业务作用：新输入无共享额度时只保护触发分区，保留其它分区释放责任的机会。
+/// 参数说明：consumer/health 为当前 owner；tp 为已定位回未取入记录的分区。
+/// 返回：登记输入暂停；暂停失败时保留可见错误，下一次取入仍会再次检查额度。
+fn enter_input_backpressure(consumer: &ConsumerClient, health: &Arc<RwLock<GroupHealth>>, tp: &Tp) {
+    // 原文尚未复制，先保持 broker 重投位置，再禁止无额度的新业务进入。
+    let error = consumer
+        .pause(std::slice::from_ref(tp))
+        .err()
+        .map(|error| error.to_string());
+    add_pause_reason(
+        health,
+        std::slice::from_ref(tp),
+        PauseReason::InputBackpressure,
+    );
+    update_state(health, GroupState::ProgressBackpressure, error);
+}
+
+/// 业务作用：额度可用或已计费输入重新交付时，只解除输入容量门禁。
+/// 参数说明：consumer/health 为当前 owner；offsets 为已获得重新准入资格的分区及原重读坐标。
+/// 返回：仅恢复仍属本会话且无其它保护原因的分区；恢复失败转为硬暂停，避免状态与实际路由分离。
+fn resume_input_partitions(
+    consumer: &ConsumerClient,
+    health: &Arc<RwLock<GroupHealth>>,
+    offsets: &BTreeMap<Tp, i64>,
+) {
+    if offsets.is_empty() {
+        return;
+    }
+    let targets = offsets.keys().cloned().collect::<Vec<_>>();
+    let assigned = consumer.assignment().unwrap_or_default();
+    let resumable = clear_pause_reason(health, &targets, &PauseReason::InputBackpressure)
+        .into_iter()
+        .filter(|tp| assigned.contains(tp))
+        .collect::<Vec<_>>();
+    if resumable.is_empty() {
+        return;
+    }
+    // 容量可用不是 User、RetryBackoff、Halt 等独立控制权威的解除证据。
+    let resumed = (|| {
+        let offsets = resumable
+            .iter()
+            .map(|tp| (tp.clone(), offsets[tp]))
+            .collect();
+        consumer.resume(&resumable)?;
+        // 原生 resume 仅解除暂停标记，空闲 broker 线程可能仍在等待；以原坐标重新激活 fetch。
+        // 这里不运行 poll、不改变恢复水位，不越过未接纳输入；任一步失败都在后续派发前重新保护分区。
+        consumer.seek_offsets(&offsets)
+    })();
+    if let Err(error) = resumed {
+        for tp in &resumable {
+            halt_partition(
+                consumer,
+                health,
+                tp,
+                HaltReason::ProgressInvariant,
+                error.to_string(),
+            );
+        }
+    } else {
+        note_success(health);
+    }
+}
+
+/// 业务作用：未完成输入回退后恢复其原额度的使用权，避免新输入门禁阻断已计费责任。
+/// 参数说明：runtime 提供责任账本；consumer/health 为当前会话；offsets 为应重新交付的最早坐标。
+/// 返回：实际回退失败的分区；失败目标不解除任何输入保护。
+fn rewind_input_offsets(
+    runtime: &OwnerRuntime,
+    consumer: &ConsumerClient,
+    health: &Arc<RwLock<GroupHealth>>,
+    offsets: &BTreeMap<Tp, i64>,
+) -> Vec<Tp> {
+    let failed = consumer.rewind_offsets(offsets);
+    let accepted = offsets
+        .iter()
+        .filter(|(tp, _)| !failed.contains(tp))
+        .map(|(tp, offset)| (tp.clone(), *offset))
+        .collect();
+    let targets = runtime.records.replaying(&accepted);
+    resume_input_partitions(consumer, health, &targets);
+    failed
 }
 
 /// 业务作用：移除一组目标上的指定框架暂停原因，并返回已经没有任何暂停原因的分区。
@@ -5556,23 +6342,6 @@ fn set_user_paused(health: &Arc<RwLock<GroupHealth>>, targets: &[Tp], paused: bo
             .paused
             .extend(targets.into_iter().map(|tp| (tp, PauseReason::User)));
     }
-}
-
-/// 业务作用：读取指定名字的最后一个底层 header。
-///
-/// # 参数
-///
-/// - `headers`: 底层 header 描述符。
-/// - `name`: 大小写敏感名称。
-fn last_header<'a>(
-    headers: &'a [crate::rd::consumer::RdHeaderRef<'a>],
-    name: &str,
-) -> Option<Option<&'a [u8]>> {
-    headers
-        .iter()
-        .rev()
-        .find(|header| header.name == name)
-        .map(|header| header.value)
 }
 
 /// 业务作用：复制底层 headers 为公共有序拥有型集合。

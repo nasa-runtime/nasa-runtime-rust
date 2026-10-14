@@ -49,16 +49,9 @@ pub(crate) struct EffectiveProducerLane {
     pub(crate) properties: BTreeMap<String, String>,
 }
 
-/// 业务作用：合并 default producer 与命名 lane 覆盖项。
-///
-/// # 参数
-///
-/// - `config`: 冻结后的顶层配置。
-/// - `lane`: `default` 或已声明的命名 lane。
-///
-/// # 错误
-///
-/// lane 不存在或幂等约束冲突时返回配置错误。
+/// 业务作用：合并源默认producer与一个lane的显式覆盖，先验证可靠发送及有界容量合同。
+/// 参数说明：config为冻结的源配置；lane为default或已声明名称，命名lane只继承源默认值。
+/// 返回：合法的独立有效配置；未知lane、非法容量/时限及幂等顺序冲突返回错误，不创建原生资源。
 pub(crate) fn effective_producer_lane(
     config: &KafkaConfig,
     lane: &str,
@@ -83,7 +76,7 @@ pub(crate) fn effective_producer_lane(
         retries: override_
             .and_then(|value| value.retries)
             .unwrap_or(base.retries),
-        retry_backoff_ms: base.retry_backoff_ms,
+        retry_backoff_ms: pick(|value| value.retry_backoff_ms, base.retry_backoff_ms),
         linger_ms: pick(|value| value.linger_ms, base.linger_ms),
         batch_size: override_
             .and_then(|value| value.batch_size)
@@ -124,6 +117,24 @@ pub(crate) fn effective_producer_lane(
             .map(|value| value.properties.clone())
             .unwrap_or_default(),
     };
+    // 这些字段将进入原生有符号整数配置；提前拒绝无界、无确认超时与无效容量，不能等待首次发送再失败。
+    if !matches!(effective.acks.as_str(), "all" | "-1" | "0" | "1")
+        || effective.request_timeout_ms == 0
+        || effective.delivery_timeout_ms == 0
+        || effective.batch_size == 0
+        || effective.batch_size > i32::MAX as usize
+        || effective.retries > i32::MAX as u32
+        || effective.max_in_flight_requests_per_connection == 0
+        || effective.queue_buffering_max_messages == 0
+        || effective.queue_buffering_max_messages > i32::MAX as usize
+        || effective.queue_buffering_max_kbytes == 0
+        || effective.queue_buffering_max_kbytes > i32::MAX as usize
+        || effective.fire_observer_capacity == 0
+    {
+        return Err(NafkaError::Config(
+            "producer确认策略、请求时限或队列容量非法".into(),
+        ));
+    }
     if effective.delivery_timeout_ms
         < effective
             .request_timeout_ms
@@ -135,6 +146,7 @@ pub(crate) fn effective_producer_lane(
     }
     if effective.stalled_rebuild_after_ms == 0
         || effective.stalled_rebuild_min_failures == 0
+        || effective.stalled_rebuild_min_failures > i32::MAX as u32
         || effective.stalled_rebuild_cooldown_ms == 0
     {
         return Err(NafkaError::Config(format!(
@@ -217,20 +229,12 @@ pub(crate) fn producer_config(config: &KafkaConfig, lane: &str) -> Result<Client
     Ok(native)
 }
 
-/// 业务作用：构建并原生校验 subscribe consumer 配置。
-///
-/// # 参数
-///
-/// - `config`: 冻结后的顶层配置。
-/// - `group`: 最终 group.id。
-///
-/// # 错误
-///
-/// group 为空或底层拒绝任一键值时返回错误。
+/// 业务作用：构建订阅消费者配置，并在原生客户端创建前复验实际组身份。
+/// 参数说明：config 为冻结源配置；group 为最终原文 group.id。
+/// 返回：满足组身份边界并经原生配置解析的配置；非法组或原生拒绝键值时为 Config，不建立消费会话。
 pub(crate) fn consumer_config(config: &KafkaConfig, group: &str) -> Result<ClientConfig> {
-    if group.trim().is_empty() {
-        return Err(NafkaError::Config("consumer group.id 不能为空".into()));
-    }
+    // subscribe、assign 和临时位点查询使用同一 native 配置入口，不能绕过组身份边界。
+    crate::wire::validate_group(group)?;
     let consumer = &config.consumer;
     let role = consumer_role(group);
     let mut native = common_config(config, &role);
@@ -297,7 +301,7 @@ pub(crate) fn admin_config(config: &KafkaConfig) -> Result<ClientConfig> {
 ///
 /// 清洗并截断到固定上限的角色后缀，保证 client.id 长度有界且字符集稳定。
 fn consumer_role(group: &str) -> String {
-    /// 角色后缀里保留的 group 最大字符数；group.id 上限是 255，不截断会让 client.id 过长。
+    /// 诊断用 client.id 后缀最多保留64个组名字符；实际 group.id 原文不受此显示长度影响。
     const MAX_GROUP_CHARS: usize = 64;
     let sanitized: String = group
         .chars()
@@ -407,8 +411,9 @@ fn validate_native(native: &ClientConfig, scope: &str) -> Result<()> {
 /// librdkafka 的 desc 形如 `Invalid value "<VALUE>" for configuration property "<KEY>"`，
 /// value 内嵌在 desc 开头，任何"砍尾巴"式脱敏都会把凭据明文原样留下。
 ///
-/// - `error`: 底层返回的错误；其 Display 可能同时在 desc 与尾部回显被拒的值。
-fn redact(error: &KafkaError) -> String {
+/// 参数说明：error 为底层返回的错误；其 Display 可能同时在 desc 与尾部回显被拒的值。
+/// 返回：配置错误仅含属性名及固定类别，构造错误不保留原文，避免公开错误链输出认证材料。
+pub(crate) fn redact(error: &KafkaError) -> String {
     match error {
         // ClientConfig(res, desc, key, value)：只保留错误码与属性名，desc/value 一律丢弃。
         KafkaError::ClientConfig(res, _, key, _) => {

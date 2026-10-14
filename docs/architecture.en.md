@@ -146,6 +146,28 @@ and the Redis client; local scheduling isolation is not thread, connection or ba
 A standalone `napart` runner provides local execution without message persistence. See the Chinese
 [partition consumption reference](../nadis/docs/partition.md).
 
+## Kafka sources, confirmation and recovery
+
+`nasa::kafka` separates named sources, producer lanes, consumption owners and durable tasks.
+Application configures `kafka` or `kafkas` and returns source-bound business handles; standalone
+callers own the proxy, readiness checks and shutdown order themselves.
+
+Ordinary consumption follows poll, current-assignment responsibility, bounded handling, Ack or DLT
+confirmation, then safe-prefix commit. Subscription groups can use several owners sharing group
+capacity. Process, source, group, partition and key budgets retain responsibility until actual work
+exits; timeout does not release a still-running call, and stale Ack cannot advance a new assignment.
+
+Same-cluster transactions use dedicated resources and stable deployment identities to atomically
+commit complete input offsets and approved outputs. Cancellation cannot turn an in-flight commit
+into an abort. An unknown result protects the owner; recovery reuses the identity and broker commit
+position. Ordinary lanes, database writes and other external effects are outside this atomic scope.
+
+Finite replay, single-destination transfer and DLT replay share durable formats with Java `nasa-kafka`.
+Matching resources, compatible plans and checkpoint authority remain prerequisites. Processing or
+destination confirmation precedes checkpoint persistence and progress publication; an intervening
+failure can cause duplicates. Current readiness, health, metrics and close reports expose these
+distinct facts. See the [component architecture](../nafka/README.md#运行架构与确认时刻).
+
 ## Configuration, identity and observability
 
 Strict configuration is selected through a factory before preflight. Three owners have separate roles:

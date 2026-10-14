@@ -5,6 +5,7 @@
 `nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
 应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+`kafka` 提供与 Java `nasa-kafka` 对应的多数据源事件运行时，组合独立发布通道、有界有序消费、同集群事务与持久任务接续；业务无需直接依赖 `nafka`。见 [Kafka 事件门面](#kafka-事件门面)。
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
 并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
 
@@ -35,6 +36,24 @@ secret/TLS 与本地文件监听。业务提供配置与 handler，框架负责�
 [受管能力合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/managed-capabilities.md)。
 Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 hystrix 命令目录随 Application 实例重建，业务收尾后排干，旧命令永久拒绝执行。
+
+## Kafka 事件门面
+
+`nasa::kafka` 导出源配置、`KafkaProxy`、producer lane、consumer trait/macro、`TransactionPlan`、`ReplayPlan`、`TransferPlan`、`DltReplayPlan`、持久 checkpoint 和诊断类型。启用 `application,kafka` 时，通过 `app.default_kafka()` / `app.kafka(name)` 取得受管 `KafkaHandle`；单源 `kafka` 与多源 `kafkas` 互斥，显式来源不回退。
+
+每个源冻结连接和安全配置，lane 独立持有原生 producer 与交付额度，普通组的 owner 槽独占 consumer。当前代次确认只能推进连续安全前缀；同 key 的实际调用退出前仍占用顺序和容量。`transact` 用稳定身份与专属资源提交完整输入位点及批准输出，结果未知时停止新工作；有限任务则按处理或目标确认、持久进度、状态发布的顺序推进，跨资源可能重投。
+
+共同组名输入域、事件线路、null/空字节、有序 header 与持久格式支持 Java/Rust 互通，恢复还须复验物理资源和计划。数据库、HTTP、socket 与跨 Kafka 集群副作用不属于同集群事务。受管 Admin 默认只读，按源显式授权才开放写入；当前 Ready、健康、指标和关闭报告分别呈现准入与实际责任。
+
+| Feature | 用途 |
+| --- | --- |
+| `kafka` | 类型化事件运行时、宏、同集群事务和有限任务 |
+| `application,kafka` | 命名来源、受管 Ready、健康与两段停机 |
+| `kafka-mysql-checkpoint` | 单主 MySQL 共享进度和跨主机接管 |
+| `kafka-schema-registry` | Confluent envelope、批准 ID 与有界 Registry client |
+| `kafka-tls` / `kafka-gssapi` / `kafka-zstd` | 对应认证、传输安全与压缩构建能力 |
+
+完整资源架构、配置、确认时刻和限制见 [nafka](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md)，宿主权限与关闭顺序见 [napp](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/napp/README.md#kafka-受管模式)。
 
 ## 多注册中心与共享发现生命周期
 
@@ -193,6 +212,14 @@ async fn save_order() -> anyhow::Result<()> {
 Application 先校验完整命名表，再按稳定名称逐源探测，全部成功后一次性发布。同一 `datasources` 表可
 同时声明 MySQL 与 PostgreSQL，Outbox 与 Saga 通过 `datasource_ref` 的 driver 选择持久后端；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
 consumer/producer 使用 client name。引用不存在时会在 Ready 前失败，不会回退默认源。
+
+Kafka 的 `consumer.concurrency` 和 `consumer.group_concurrency` 配置订阅组的独立消费槽，
+`group_health` 汇总全组，`group_slots_health` 查询单槽；固定 assign 始终单槽。
+`control_partitions` 在核心与受管门面均提供逐目标执行报告，区分已执行、未执行、结果未知和归属变化；容器门面继续服从 Ready 与停止准入。
+`group_readiness` 返回要求、稳定原因和同次分配健康；`AssignedPartitions` 可要求具体分区。多组等待共用期限并复验全部组，不锁存已失效的早先成功。
+容量切分、Ready 和跨槽控制的边界见 [nafka 组内多消费者](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#组内多消费者)。
+
+同一应用的命名 Kafka 来源可以连接不同物理集群；每个来源内的 producer lane 独立持有原生客户端与发送额度，适合隔离控制消息和批量流量。普通输入由进程、源、组、分区和 key 共同限制责任，有限回放和转发使用独立持久计划。完整能力与交付边界见 [nafka 核心价值与边界](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nafka/README.md#核心价值与边界)。
 
 两种数据库持久适配器都提供显式绑定入口。MySQL 使用 `MySqlInbox::with_datasource`、
 `MySqlOutbox::with_datasource`、`MySqlIdempotencyStore::with_datasource`、
@@ -414,7 +441,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 | 能力 | feature 与入口 | 生命周期 owner | 核心安全合同 |
 | --- | --- | --- | --- |
-| Schema Registry | `kafka-schema-registry` → `nasa::kafka`；配合 `application` 用 `app.schema_registry(name).await` | 独立 client 由业务持有；`schema_registries.<name>` 由 Application 托管，无需 Kafka 消费组件 | schema ID 白名单、有界正负缓存、默认禁止注册、凭据由 `SecretBytes` 承载 |
+| Schema Registry | `kafka-schema-registry` → `nasa::kafka`；配合 `application` 用 `app.schema_registry(name).await` | 独立 client 由业务持有；`schema_registries.<name>` 由 Application 托管，无需 Kafka 消费组件 | 批准 ID、有界缓存/HTTP/等待者、独立私有 CA/mTLS、取消后保留请求责任、默认禁止注册 |
 | 对象存储 | `object-store` → `nasa::object`；配合 `application` 用 `app.object_store(name).await` | 独立 adapter 由业务持有；`object_stores.<name>` 由 Application 托管，无需新增组件字符串 | 有界单对象、`CreateOnly` 条件写、默认 SHA-256 metadata 复核、SigV4 credential 脱敏 |
 | gRPC listener | `grpc` → `nasa::grpc` | 独立 `GrpcServerHandle` 或 Application `"grpc"` 二选一 | 统一 codegen/service registry、permit 先于 accept、TLS/mTLS、固定方法指标与有预算排空 |
 | Web listener | `application,web` → `#[nasa::application("web")]` | Application 独占明文 listener；不提供脱离 Application 的 listener 模式 | HTTP/1/h2c 确定选择、连接与 stream 上界、固定协议指标与有预算排空；不终止 TLS |
@@ -557,6 +584,7 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 | `kafka` | `nasa::kafka` | 发布、消费、路由、确认和健康 |
 | `kafka-tls` / `kafka-gssapi` / `kafka-zstd` | `nasa::kafka` | Kafka 传输安全与压缩子能力 |
 | `kafka-schema-registry` | `nasa::kafka`、`nasa::secret` | 有界 schema adapter；蕴含 `kafka` 与 `secret`，配合 `application` 纳管 `schema_registries`，进入 `full` |
+| `kafka-mysql-checkpoint` | `nasa::kafka::MySqlCheckpointStore` | 单主 MySQL 共享进度与跨语言互斥接管，显式 SQLx 后端；可传入受管 Replay/Transfer，进入 `full` |
 | `saga` | `nasa::saga` | 无 I/O 的 definition、身份和补偿合同 |
 | `saga-runtime` | `nasa::saga`、`nasa::application` | Orchestrator、参与方 adapter 与 Application Saga 组件 |
 | `saga-runtime-pgsql` | `nasa::saga::pgsql`、`nasa::application` | PostgreSQL Store/Inbox/Outbox 组合与共享 Saga 状态机 |
@@ -764,7 +792,7 @@ server:
 | `cache` | `cacheable` 受管组件 |
 | `saga` | Application Saga 组件 |
 | `outbox` | Application Outbox 组件；也由 Saga 隐式纳入 |
-| `kafka` / `kafkas` | `nafka` 受管组件 |
+| `kafka` / `kafkas` | `nafka` 受管组件；`transact` 提供同集群完整输入、输出与组位点的专属事务；通过 `nasa::kafka` 规划有限回放、单目标转发与有限DLT回投/原文隔离，实际目标确认后持久推进 checkpoint；受管模式使用 `KafkaHandle::transact` / `replay` / `transfer` / `replay_dlt` |
 | `schema_registries.<name>` | Application Prepare 装配的命名 Registry client；需 `application,kafka-schema-registry`，无需 Kafka 消费组件 |
 | `object_stores.<name>` | Application Prepare 装配的命名对象存储；需 `application,object-store`，无需新增组件字符串 |
 | `grpc` | Application gRPC listener、TLS、方法策略与协议能力；独立模式不读取此根 |

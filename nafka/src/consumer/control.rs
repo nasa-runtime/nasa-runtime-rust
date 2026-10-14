@@ -3,29 +3,68 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::consumer::erased::erase_single;
+use crate::consumer::erased::{erase_batch, erase_single, ErasedConsumer};
 use crate::consumer::supervisor::{
     CommandReply, GroupHandle, GroupPlan, OwnerCommandKind, OwnerMode, StartupGate,
 };
-use crate::consumer::SingleConsumer;
+use crate::consumer::{BatchConsumer, SingleConsumer};
 use crate::error::Result;
 use crate::health::GroupHealth;
 use crate::types::{AssignmentHandle, StartOffset, Tp};
 use crate::KafkaProxy;
 
 impl KafkaProxy {
+    /// 业务作用：执行逐分区控制并保留部分成功证据，不自动重路由或重试未知结果。
+    /// 参数说明：group 为最终组名；actions 为非空、显式的目标与操作映射。
+    /// 返回：总控制预算内的独立报告；非法声明、组不存在或生命周期拒绝返回错误。
+    pub async fn control_partitions(
+        &self,
+        group: &str,
+        actions: BTreeMap<Tp, crate::PartitionControl>,
+    ) -> Result<crate::ControlReport> {
+        if actions.is_empty() {
+            return Err(crate::NafkaError::Config("分区控制目标不能为空".into()));
+        }
+        for (tp, action) in &actions {
+            action.validate(tp)?;
+        }
+        let outcomes = self
+            .control_group_handle(group)?
+            .control_partitions(actions)
+            .await;
+        for outcome in outcomes.values() {
+            let name = match outcome {
+                crate::ControlOutcome::Applied => "applied",
+                crate::ControlOutcome::NotApplied => "not_applied",
+                crate::ControlOutcome::Unknown => "unknown",
+                crate::ControlOutcome::OwnerChanged => "owner_changed",
+            };
+            self.inner.counter(
+                "control_target_total",
+                1,
+                &[("group", group), ("outcome", name)],
+            );
+        }
+        Ok(crate::ControlReport {
+            source_id: self.config().client_name.clone(),
+            group: group.into(),
+            outcomes,
+        })
+    }
+
     /// 业务作用：以独占 group 固定消费指定分区。
     ///
-    /// # 参数
+    /// # 参数说明
     ///
-    /// - `group`: 与 subscribe/其他 assign 共用命名空间的 group id。
+    /// - `group`: 与 subscribe/其他 assign 共用命名空间及共同输入边界的精确 group id。
     /// - `partitions`: 固定 topic-partition 集合。
     /// - `start`: 起始位点策略。
     /// - `consumer`: 单条类型化 handler。
     ///
     /// # 错误
     ///
-    /// group 冲突、分区非法、位点解析或 owner 构造失败时返回错误。
+    /// group 冲突、分区非法或 owner 本地构造失败时返回错误。
+    /// 返回：绑定本次 owner 的句柄；broker 分配及起点解析通过 Ready 与 health 继续观测。
     pub async fn assign<C: SingleConsumer>(
         &self,
         group: &str,
@@ -33,12 +72,48 @@ impl KafkaProxy {
         start: StartOffset,
         consumer: C,
     ) -> Result<AssignmentHandle> {
-        if group.trim().is_empty() {
-            return Err(crate::error::NafkaError::Registry(
-                "assign group 不能为空".into(),
-            ));
-        }
-        let mut partitions: Vec<Tp> = partitions.into_iter().collect();
+        self.assign_route(
+            group,
+            partitions.into_iter().collect(),
+            start,
+            erase_single(consumer)?,
+        )
+        .await
+    }
+
+    /// 业务作用：以独占 group 对固定分区执行连续批消费，确认与停止边界与单条消费一致。
+    ///
+    /// 参数说明：group 为独占组名，partitions 为固定分区，start 为起点，consumer 为批处理器。
+    /// 返回：绑定该 owner 的句柄；声明冲突或初始化失败时返回错误且不开放消费。
+    pub async fn assign_batch<C: BatchConsumer>(
+        &self,
+        group: &str,
+        partitions: impl IntoIterator<Item = Tp>,
+        start: StartOffset,
+        consumer: C,
+    ) -> Result<AssignmentHandle> {
+        self.assign_route(
+            group,
+            partitions.into_iter().collect(),
+            start,
+            erase_batch(consumer)?,
+        )
+        .await
+    }
+
+    /// 业务作用：统一验证固定分区声明并在资源登记之后开放 owner。
+    ///
+    /// 参数说明：group 为独占组名，partitions 为分区，start 为起点，route 为冻结处理器。
+    /// 返回：当前 owner 的句柄；非法组以 Config 拒绝且不创建资源，其它失败关闭本次创建的资源。
+    async fn assign_route(
+        &self,
+        group: &str,
+        mut partitions: Vec<Tp>,
+        start: StartOffset,
+        route: Arc<dyn ErasedConsumer>,
+    ) -> Result<AssignmentHandle> {
+        // 固定分区也会持有组位点，必须先验证完整身份再占有生命周期与 owner 槽。
+        crate::wire::validate_group(group)?;
         partitions.sort();
         if partitions.is_empty() {
             return Err(crate::error::NafkaError::Registry(
@@ -90,7 +165,6 @@ impl KafkaProxy {
             }
         }
         crate::rd::config::consumer_config(self.config(), group)?;
-        let route = erase_single(consumer)?;
         let starts = partitions.iter().cloned().map(|tp| (tp, start)).collect();
         let plan = GroupPlan {
             group: group.to_owned(),
@@ -103,7 +177,7 @@ impl KafkaProxy {
         };
         let startup_gate = Arc::new(StartupGate::new());
         let (handle, startup_result) =
-            GroupHandle::start(Arc::clone(&self.inner), plan, Arc::clone(&startup_gate))?;
+            GroupHandle::start(Arc::clone(&self.inner), plan, Arc::clone(&startup_gate)).await?;
         let startup_result = match startup_result.await {
             Ok(result) => result,
             Err(_) => Err(crate::error::NafkaError::Lifecycle(format!(
@@ -111,6 +185,7 @@ impl KafkaProxy {
             ))),
         };
         if let Err(error) = startup_result {
+            // 尚未发布的 owner 必须保持消费门关闭，失败不允许留下后台业务副作用。
             startup_gate.abort();
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_millis(self.config().behavior.shutdown_timeout_ms);
@@ -144,6 +219,7 @@ impl KafkaProxy {
                         .transition(crate::Lifecycle::Created, crate::Lifecycle::Running)
                     {
                         Ok(()) => {
+                            // 先发布实例登记再开放数据面，控制入口不能看不见已经开始消费的 owner。
                             groups.insert(group.to_owned(), Arc::clone(&handle));
                             startup_gate.open();
                             Ok(())
@@ -152,6 +228,7 @@ impl KafkaProxy {
                     }
                 }
                 crate::Lifecycle::Running => {
+                    // 统一登记后放行的顺序，使停止快照能够覆盖本次新增 owner。
                     groups.insert(group.to_owned(), Arc::clone(&handle));
                     startup_gate.open();
                     Ok(())
@@ -159,13 +236,72 @@ impl KafkaProxy {
             }
         };
         if let Err(error) = commit_result {
+            // 登记未成功时不能开放消费；收口失败的资源仍由原句柄承担停止责任。
             startup_gate.abort();
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_millis(self.config().behavior.shutdown_timeout_ms);
             let _ = handle.stop_until(deadline).await;
             return Err(error);
         }
-        Ok(AssignmentHandle::new(self.clone(), group.to_owned()))
+        Ok(AssignmentHandle::new(
+            self.clone(),
+            group.to_owned(),
+            handle,
+        ))
+    }
+
+    /// 业务作用：停止当前注册的消费组，并且只注销本次捕获的 owner。
+    ///
+    /// 参数说明：group 为已运行组名。
+    /// 返回：不存在或退出完成时成功；期限内未退出时保留所有权并返回错误。
+    pub async fn stop_group(&self, group: &str) -> Result<()> {
+        let handle = match self.group_handle(group) {
+            Ok(handle) => handle,
+            Err(crate::error::NafkaError::NoSuchGroup(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.stop_group_instance(group, &handle).await
+    }
+
+    /// 业务作用：保护停止动作的实例身份，旧句柄不得停止或删除后来重建的同名组。
+    ///
+    /// 参数说明：group 为组名，handle 为创建时捕获的 owner。
+    /// 返回：本实例退出或已被替换时成功；仍未退出时保留登记并返回错误。
+    pub(crate) async fn stop_group_instance(
+        &self,
+        group: &str,
+        handle: &Arc<GroupHandle>,
+    ) -> Result<()> {
+        {
+            let groups = self
+                .inner
+                .groups
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // 同名新实例不继承旧句柄的控制权，停止前先按实例身份复验。
+            if !groups
+                .get(group)
+                .is_some_and(|current| Arc::ptr_eq(current, handle))
+            {
+                return Ok(());
+            }
+        }
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(self.config().behavior.shutdown_timeout_ms);
+        handle.stop_until(deadline).await?;
+        // 等待期间允许其它生命周期操作推进；完成后必须复验实例，防止删掉同名新 owner。
+        let mut groups = self
+            .inner
+            .groups
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if groups
+            .get(group)
+            .is_some_and(|current| Arc::ptr_eq(current, handle))
+        {
+            groups.remove(group);
+        }
+        Ok(())
     }
 
     /// 业务作用：将一个分区定位到显式 offset，并清理该分区本地 progress/retry 状态。
@@ -179,17 +315,24 @@ impl KafkaProxy {
     /// # 错误
     ///
     /// group 不存在、命令未执行、结果未知或底层 seek 失败时返回错误。
+    /// 返回：owner 完成定位时成功；结果未知时应重新查询实际位置。
     pub async fn seek(&self, group: &str, tp: Tp, offset: i64) -> Result<()> {
-        if offset < 0 {
+        self.seek_offsets(group, BTreeMap::from([(tp, offset)]))
+            .await
+    }
+
+    /// 业务作用：在同一 owner 命令中定位多个分区；不承诺多个 native seek 的原子性。
+    /// 参数说明：group 为消费组，offsets 为各分区的非负目标。
+    /// 返回：全部定位成功才成功；失败或超时需查询实际位置，不能推定全部未执行。
+    pub async fn seek_offsets(&self, group: &str, offsets: BTreeMap<Tp, i64>) -> Result<()> {
+        if offsets.is_empty() || offsets.values().any(|offset| *offset < 0) {
             return Err(crate::error::NafkaError::Config(
                 "seek offset 不能为负".into(),
             ));
         }
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Seek {
-                    offsets: BTreeMap::from([(tp, offset)]),
-                })
+                .command(OwnerCommandKind::Seek { offsets })
                 .await?,
         )
     }
@@ -386,6 +529,13 @@ impl KafkaProxy {
         Ok(self.group_handle(group)?.health())
     }
 
+    /// 业务作用：查询组内全部 owner，区分空闲槽、慢调用与异常成员。
+    /// 参数说明：group 为最终消费组名称。
+    /// 返回：按固定槽号排列的健康快照；组未注册时返回 NoSuchGroup。
+    pub async fn group_slots_health(&self, group: &str) -> Result<Vec<GroupHealth>> {
+        Ok(self.group_handle(group)?.slots_health())
+    }
+
     /// 业务作用：重建处于允许恢复状态的 group owner。
     ///
     /// # 参数
@@ -427,9 +577,71 @@ impl KafkaProxy {
         }
         expect_unit(
             self.control_group_handle(group)?
-                .command(OwnerCommandKind::Subscribe { topics })
+                .command(OwnerCommandKind::Subscribe {
+                    topics,
+                    change: super::supervisor::SubscriptionChange::Replace,
+                })
                 .await?,
         )
+    }
+
+    /// 业务作用：明确替换订阅集合；空集合清空订阅并保留 owner。
+    /// 参数说明：group 为已运行组，topics 为新集合。
+    /// 返回：owner 已应用或返回控制失败，不改变冻结路由表。
+    pub async fn replace_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
+        if topics.is_empty() {
+            self.unsubscribe_group(group).await
+        } else {
+            self.subscribe_group(group, topics).await
+        }
+    }
+
+    /// 业务作用：原子追加订阅，避免多个调用通过读改写互相覆盖。
+    /// 参数说明：group 为已运行组，topics 为待增加集合。
+    /// 返回：owner 已应用新集合或返回控制错误。
+    pub async fn add_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
+        self.change_subscriptions(group, topics, super::supervisor::SubscriptionChange::Add)
+            .await
+    }
+
+    /// 业务作用：只退订指定 topic，其它订阅继续保留。
+    /// 参数说明：group 为已运行组，topics 为待删除集合。
+    /// 返回：owner 已应用；删空时保留可再次订阅的 owner。
+    pub async fn remove_subscriptions(&self, group: &str, topics: Vec<String>) -> Result<()> {
+        self.change_subscriptions(group, topics, super::supervisor::SubscriptionChange::Remove)
+            .await
+    }
+
+    /// 业务作用：在进入有界控制队列前验证订阅修改的完整声明。
+    /// 参数说明：group 为组名，topics 为修改集，change 为追加或删除。
+    /// 返回：命令实际终态，非法声明不入队。
+    async fn change_subscriptions(
+        &self,
+        group: &str,
+        mut topics: Vec<String>,
+        change: super::supervisor::SubscriptionChange,
+    ) -> Result<()> {
+        topics.sort();
+        if topics.is_empty()
+            || topics.iter().any(|topic| topic.trim().is_empty())
+            || topics.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err(crate::error::NafkaError::Config(
+                "topics 必须非空且不重复".into(),
+            ));
+        }
+        expect_unit(
+            self.control_group_handle(group)?
+                .command(OwnerCommandKind::Subscribe { topics, change })
+                .await?,
+        )
+    }
+
+    /// 业务作用：清空订阅且保留 owner，供后续重新订阅。
+    /// 参数说明：group 为已运行组。
+    /// 返回：owner 已取消订阅或返回控制错误。
+    pub async fn clear_subscriptions(&self, group: &str) -> Result<()> {
+        self.unsubscribe_group(group).await
     }
 
     /// 业务作用：取消一个 subscribe group 的当前订阅但保留 owner 与控制句柄。
