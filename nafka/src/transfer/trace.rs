@@ -1,6 +1,6 @@
 //! 转发坐标与路径的有界共同编码；摘要检测完整性，不承担身份认证。
 
-use super::{TransferError, TransferPlan, TransferResult, token, valid_partition};
+use super::{token, valid_partition, TransferError, TransferPlan, TransferResult};
 use crate::{KafkaHeader, KafkaHeaders, ReplayRecord, Tp};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

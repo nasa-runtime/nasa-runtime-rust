@@ -4,7 +4,7 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "2.0.2"
+version = "2.0.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Rust server framework for managed lifecycles, multi-registry discovery, multi-source Kafka and reliable execution with durable Saga recovery"
@@ -274,8 +274,8 @@ full-pgsql = [
 [dependencies]
 discovery_runtime_impl = { package = "nadisc-runtime", path = "../nadisc-runtime", version = "1.0.0", optional = true }
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", path = "../napp", version = "2.0.2", optional = true }
-application_macro = { package = "napp-macro", path = "../napp-macro", version = "2.0.1", optional = true }
+application_impl = { package = "napp", path = "../napp", version = "2.0.3", optional = true }
+application_macro = { package = "napp-macro", path = "../napp-macro", version = "2.0.3", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
 grafana_impl = { package = "nafana", version = "2.0.0", optional = true }
@@ -308,7 +308,7 @@ saga_core_impl = { package = "nasaga-core", version = "2.0.0", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.1", optional = true }
 saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.1", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "2.0.0", optional = true }
-grpc_impl = { package = "nagrpc", path = "../nagrpc", version = "2.0.0", optional = true }
+grpc_impl = { package = "nagrpc", path = "../nagrpc", version = "2.0.3", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "2.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "2.0.0", optional = true }
 async_macro = { package = "async-macro", version = "2.0.0", optional = true }
@@ -319,7 +319,7 @@ mapper_pgsql_impl = { package = "namapper-pgsql", version = "2.0.0", optional = 
 namapper_macro = { package = "namapper-macro", version = "2.0.0", optional = true }
 partition_impl = { package = "napart", version = "2.0.0", optional = true }
 ws_impl = { package = "naws", version = "2.0.0", optional = true, default-features = false }
-kafka_impl = { package = "nafka", version = "2.0.0", optional = true, default-features = false }
+kafka_impl = { path = "../nafka", package = "nafka", version = "2.0.3", optional = true, default-features = false }
 redis_impl = { package = "nadis", version = "2.0.0", optional = true, default-features = false }
 crypto_impl = { package = "ncrypto", version = "2.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "2.0.0", optional = true }
@@ -328,8 +328,8 @@ base_impl = { package = "nabase", version = "2.0.0", optional = true }
 yml_impl = { package = "naml", version = "2.0.1", optional = true }
 config_boot_impl = { package = "config-boot", version = "2.0.1", optional = true }
 image_impl = { package = "naimg", version = "2.0.0", optional = true }
-discovery_impl = { package = "nadisc", path = "../nadisc", version = "2.0.0", optional = true }
-nacos_impl = { package = "nanacos", version = "2.0.0", optional = true, default-features = false }
-rest_discovery_impl = { package = "rest-discovery", path = "../rest-discovery", version = "2.0.0", optional = true }
-rest_client_macro = { package = "rest-client-macro", path = "../rest-client-macro", version = "2.0.0", optional = true }
-rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "2.0.0", optional = true, default-features = false }
+discovery_impl = { package = "nadisc", path = "../nadisc", version = "2.0.3", optional = true }
+nacos_impl = { path = "../nanacos", package = "nanacos", version = "2.0.3", optional = true, default-features = false }
+rest_discovery_impl = { package = "rest-discovery", path = "../rest-discovery", version = "2.0.3", optional = true }
+rest_client_macro = { package = "rest-client-macro", path = "../rest-client-macro", version = "2.0.3", optional = true }
+rest_discovery_nacos_impl = { path = "../rest-discovery-nacos", package = "rest-discovery-nacos", version = "2.0.3", optional = true, default-features = false }

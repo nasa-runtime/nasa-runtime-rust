@@ -9,6 +9,7 @@ use std::{
 use tokio::{sync::OwnedSemaphorePermit, task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+/// 一次传输任务的容量许可，绑定 owner 的关闭通知与任务归属。
 pub struct TransportLease {
     core: Weak<Core>,
     stop: CancellationToken,

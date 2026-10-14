@@ -15,7 +15,10 @@ pub type Result<T> = std::result::Result<T, RestDiscoveryError>;
 pub enum RestDiscoveryError {
     /// 显式 qualifier 没有绑定客户端，不能回落到默认环境。
     #[error("unknown REST qualifier: {qualifier}")]
-    UnknownQualifier { qualifier: String },
+    UnknownQualifier {
+        /// 未找到对应连接的 qualifier 原值。
+        qualifier: String,
+    },
     /// 未声明 qualifier 的调用没有可用的显式默认引用。
     #[error("REST default qualifier is not configured")]
     MissingDefaultQualifier,

@@ -13,25 +13,39 @@ use std::{
 };
 use tokio::{sync::Mutex, time::Instant};
 
+/// Nacos 受管发现连接的作用域、凭据和有限读取预算。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ManagedNacosConfig {
+    /// 显式 Nacos 服务端地址，可按受支持的分隔方式声明多个地址。
     pub server_addr: String,
+    /// 目标所在的命名空间。
     pub namespace: String,
+    /// 目标服务或配置所属的分组。
     pub group: String,
+    /// Nacos 登录用户名，不写入诊断。
     pub username: String,
+    /// Nacos 登录密码，不写入诊断。
     pub password: String,
+    /// 按逻辑服务名绑定的目标，不接受重复键。
     pub services: BTreeMap<String, NacosService>,
+    /// 一次请求的最大耗时，单位为毫秒。
     pub request_timeout_ms: u64,
+    /// 单次后端响应允许占用的最大字节数。
     pub max_response_bytes: usize,
+    /// 单次完整服务观察允许包含的实例数量上限。
     pub max_instances: usize,
+    /// HTTPS 证书验证使用的附加 CA PEM；不关闭系统信任校验。
     pub ca_pem: Option<String>,
 }
 
+/// 逻辑服务到 Nacos 服务名及可选集群的显式绑定。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NacosService {
+    /// 目标后端中的服务名称。
     pub name: String,
+    /// 可选 Nacos 集群范围；省略时不按集群筛选。
     #[serde(default)]
     pub cluster: Option<String>,
 }
@@ -61,6 +75,7 @@ struct Token {
     expires: Instant,
 }
 
+/// 受管 Nacos HTTP 适配器，隔离连接身份并验证注册所有权。
 pub struct ManagedNacos {
     config: ManagedNacosConfig,
     servers: Vec<Url>,

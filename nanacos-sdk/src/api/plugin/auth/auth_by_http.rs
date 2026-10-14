@@ -8,8 +8,10 @@ use crate::api::plugin::{AuthContext, AuthPlugin, LoginIdentityContext};
 
 use super::RequestResource;
 
+/// HTTP 登录参数中的用户名键。
 pub const USERNAME: &str = "username";
 
+/// HTTP 登录参数中的密码键。
 pub const PASSWORD: &str = "password";
 
 pub(crate) const ACCESS_TOKEN: &str = "accessToken";

@@ -54,12 +54,19 @@ impl Drop for Data {
 #[derive(Clone)]
 pub struct Snapshot {
     data: Arc<Data>,
+    /// 产生证据的 owner 标识，用于区分独立运行时。
     pub owner_id: String,
+    /// 证据所属连接的 qualifier。
     pub connection: String,
+    /// 证据对应的逻辑服务名。
     pub service: String,
+    /// 后端身份代次；失权前的证据不能跨代继续使用。
     pub epoch: u64,
+    /// 同一观察中的快照序号，用于区分实例集合变化。
     pub sequence: u64,
+    /// 当前证据被确认的本地单调时刻。
     pub observed_at: Instant,
+    /// 当前证据的有效截止时刻；不替代提交请求时的复验。
     pub valid_until: Option<Instant>,
 }
 

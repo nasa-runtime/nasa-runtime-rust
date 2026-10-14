@@ -59,13 +59,8 @@ has_local_patch() {
 }
 
 blocked=0
-# 当前批次也必须解除根覆盖，避免归档验证和实际上传使用不同的依赖来源。
-for crate_name in $current_crates; do
-  if has_local_patch "$crate_name"; then
-    echo "批次 $release_batch 的 crate $crate_name 仍由根级 path patch 覆盖" >&2
-    blocked=1
-  fi
-done
+# 当前批次可以由下游工作区通过 patch 装配；归档不携带根 patch。
+# 当前包不得依赖同批包，已发布前置包必须解除覆盖，保证逐包归档验证使用 registry 中的前置实现。
 while IFS= read -r crate_name; do
   [[ -z "$crate_name" ]] && continue
   if has_local_patch "$crate_name"; then
@@ -88,6 +83,15 @@ jq -r --arg current "$current_crates" --rawfile predecessors "$predecessors_file
   | select(($owners | index($owner.name)) != null or ($previous | index($dependency.name)) != null)
   | [$owner.name, .name, .path] | @tsv
 ' "$metadata_file" > "$paths_file"
+if ! jq -e --arg current "$current_crates" '
+  ($current | split(" ")) as $names
+  | [.packages[] as $owner | select(($names | index($owner.name)) != null)
+     | $owner.dependencies[] | select(.kind != "dev")
+     | select(.name as $name | ($names | index($name)) != null)] | length == 0
+' "$metadata_file" > /dev/null; then
+  echo "当前批次存在内部依赖，必须拆分为前后两个批次" >&2
+  blocked=1
+fi
 if [[ -s "$paths_file" ]]; then
   cat "$paths_file" >&2
   echo "上述直接 path 依赖必须先改为保留版本与 feature 的 registry 依赖" >&2

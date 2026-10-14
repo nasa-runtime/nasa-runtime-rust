@@ -5,7 +5,7 @@ mod runtime;
 mod trace;
 pub(crate) mod wire;
 use crate::{ReplayObservation, ReplayPlan, ReplayPosition, Tp};
-pub(crate) use runtime::{Delivery, TargetInspection, replay_error};
+pub(crate) use runtime::{replay_error, Delivery, TargetInspection};
 pub use runtime::{TransferHandle, TransferRegistries, TransferStatus};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

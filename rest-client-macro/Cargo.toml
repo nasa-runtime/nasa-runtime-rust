@@ -11,7 +11,7 @@
 # ============================================================================
 [package]
 name = "rest-client-macro"
-version = "2.0.0"
+version = "2.0.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "声明式 HTTP 客户端宏，支持 qualifier 多注册中心选择、参数绑定与公网 URL 调用"

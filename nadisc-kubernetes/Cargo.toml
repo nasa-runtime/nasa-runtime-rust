@@ -10,10 +10,10 @@ description = "Kubernetes Service 与 EndpointSlice 只读发现、就绪过滤�
 keywords = ["kubernetes", "discovery", "endpointslice", "microservices"]
 categories.workspace = true
 readme = "README.md"
-include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/NOTICE"]
 
 [dependencies]
-nadisc = { version = "2.0.0", path = "../nadisc", features = ["http"] }
+nadisc = { version = "2.0.3", path = "../nadisc", features = ["http"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

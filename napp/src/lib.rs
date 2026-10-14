@@ -459,8 +459,10 @@ pub use web_handle::{RouteInfo, WebHandle, WebMetricsSnapshot, WebReadinessState
 /// 每个子模块只在对应运行能力编入时存在。属性展开代码引用其中的常量，缺失能力会直接形成
 /// 指向组件名的编译错误，不会把问题延后到进程启动阶段。
 pub mod components {
+    /// 发现功能的编译期能力标记。
     #[cfg(feature = "discovery-runtime")]
     pub mod discovery {
+        /// 宏在编译期确认发现功能已启用的标记。
         pub const FEATURE_CHECK: () = ();
     }
     /// 日志组件的编译期能力探测点。

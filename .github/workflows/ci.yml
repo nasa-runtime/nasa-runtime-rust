@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master, release/2.0.0, release/2.0.1, release/2.0.2]
+    branches: [main, master, release/2.0.0, release/2.0.1, release/2.0.2, release/2.0.3]
   pull_request:
 
 env:
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -102,14 +102,22 @@ jobs:
       - run: cargo test --workspace --all-features
       # 公开 API 文档是当前合同的一部分，缺失项和失效链接均阻止发布。
       - run: RUSTDOCFLAGS="-D missing_docs -D warnings" cargo doc --workspace --no-deps
-      # 每个 .crate 归档都必须携带两份许可证正文和名称声明。
+      # 每个归档必须携带其声明许可对应的正文和名称声明，不能给 Apache 单许可组件增加未授权许可。
       - name: verify archive notices
         shell: bash
         run: |
-          package_count="$(cargo metadata --no-deps --format-version 1 | jq '.packages | length')"
-          archive_list="$(cargo package --workspace --list)"
-          test "$(grep -Ec '^LICENSE-(MIT|APACHE)$' <<< "$archive_list")" -eq "$((package_count * 2))"
-          test "$(grep -c '^NOTICE$' <<< "$archive_list")" -eq "$package_count"
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          while IFS=$'\t' read -r crate_name license; do
+            case "$license" in
+              'MIT OR Apache-2.0') license_files="LICENSE-MIT LICENSE-APACHE" ;;
+              'Apache-2.0') license_files="LICENSE" ;;
+              *) echo "未定义归档许可证文件策略: $crate_name $license" >&2; exit 1 ;;
+            esac
+            archive_list="$(cargo package -p "$crate_name" --list)"
+            for required_file in README.md $license_files NOTICE; do
+              grep -Fxq "$required_file" <<< "$archive_list" || exit 1
+            done
+          done < <(jq -r '.packages[] | [.name, .license] | @tsv' <<< "$metadata")
       # 发布路径不得携带验证资产，组件源码、manifest 和随包文档也不得描述本地验证实现。
       - name: audit crate release boundary
         shell: bash

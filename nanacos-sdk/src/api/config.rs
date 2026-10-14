@@ -147,6 +147,9 @@ impl ConfigService {
 
 /// The ConfigChangeListener receive notify of [`ConfigResponse`].
 pub trait ConfigChangeListener: Send + Sync {
+    /// 业务作用：把配置变更交给业务监听器。
+    /// 参数说明：`config_resp` 包含当前配置正文及作用域。
+    /// 返回：监听器处理变更；回调没有返回值。
     fn notify(&self, config_resp: ConfigResponse);
 }
 
@@ -191,6 +194,9 @@ impl std::fmt::Display for ConfigResponse {
 }
 
 impl ConfigResponse {
+    /// 业务作用：封装一次配置读取的作用域、正文和摘要。
+    /// 参数说明：`data_id`、`group`、`namespace` 定位配置，`content` 为正文，`content_type` 为内容类型，`md5` 为摘要。
+    /// 返回：返回配置响应值，不触发网络查询。
     pub fn new(
         data_id: String,
         group: String,
@@ -209,26 +215,45 @@ impl ConfigResponse {
         }
     }
 
+    /// 业务作用：供业务读取配置所属命名空间。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置所属命名空间，不触发网络查询。
     pub fn namespace(&self) -> &String {
         &self.namespace
     }
+    /// 业务作用：供业务读取配置标识。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置标识，不触发网络查询。
     pub fn data_id(&self) -> &String {
         &self.data_id
     }
+    /// 业务作用：供业务读取配置所属分组。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置所属分组，不触发网络查询。
     pub fn group(&self) -> &String {
         &self.group
     }
+    /// 业务作用：供业务读取配置正文。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置正文，不触发网络查询。
     pub fn content(&self) -> &String {
         &self.content
     }
+    /// 业务作用：供业务读取配置正文类型。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置正文类型，不触发网络查询。
     pub fn content_type(&self) -> &String {
         &self.content_type
     }
+    /// 业务作用：供业务读取配置正文摘要。
+    /// 参数说明：无。
+    /// 返回：返回当前记录中的配置正文摘要，不触发网络查询。
     pub fn md5(&self) -> &String {
         &self.md5
     }
 }
 
+/// SDK 默认值及受支持的环境变量键。
 pub mod constants {
     /// param type, use for [`crate::api::config::ConfigService::publish_config_param`]
     pub const KEY_PARAM_CONTENT_TYPE: &str = "type";
@@ -282,6 +307,9 @@ impl Default for ConfigServiceBuilder {
 }
 
 impl ConfigServiceBuilder {
+    /// 业务作用：使用显式连接属性创建 Nacos 客户端构建器。
+    /// 参数说明：`client_props` 为服务端地址、命名空间和客户端属性。
+    /// 返回：返回尚未建立连接的构建器。
     pub fn new(client_props: props::ClientProps) -> Self {
         ConfigServiceBuilder {
             client_props,
@@ -290,11 +318,17 @@ impl ConfigServiceBuilder {
         }
     }
 
+    /// 业务作用：为客户端选择 Nacos HTTP 登录认证。
+    /// 参数说明：无。
+    /// 返回：返回已绑定 HTTP 认证插件的构建器，不立即登录。
     #[cfg(feature = "auth-by-http")]
     pub fn enable_auth_plugin_http(self) -> Self {
         self.with_auth_plugin(Arc::new(plugin::HttpLoginAuthPlugin::default()))
     }
 
+    /// 业务作用：为客户端选择 Aliyun RAM 签名认证。
+    /// 参数说明：无。
+    /// 返回：返回已绑定 RAM 认证插件的构建器，不立即发起请求。
     #[cfg(feature = "auth-by-aliyun")]
     pub fn enable_auth_plugin_aliyun(self) -> Self {
         self.with_auth_plugin(Arc::new(plugin::AliyunRamAuthPlugin::default()))
@@ -306,6 +340,9 @@ impl ConfigServiceBuilder {
         self
     }
 
+    /// 业务作用：设置配置读写的过滤器链。
+    /// 参数说明：`config_filters` 为按声明顺序执行的过滤器。
+    /// 返回：替换原过滤器列表并返回构建器。
     pub fn with_config_filters(
         mut self,
         config_filters: Vec<Box<dyn plugin::ConfigFilter>>,
@@ -314,6 +351,9 @@ impl ConfigServiceBuilder {
         self
     }
 
+    /// 业务作用：为配置读写追加一个过滤器。
+    /// 参数说明：`config_filter` 为新增的内容处理逻辑。
+    /// 返回：在现有链尾部追加并返回构建器。
     pub fn add_config_filter(mut self, config_filter: Box<dyn plugin::ConfigFilter>) -> Self {
         self.config_filters.push(config_filter);
         self

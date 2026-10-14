@@ -21,18 +21,29 @@ use std::{
     time::Duration,
 };
 
+/// Consul 数据中心、查询入口、可选写入 agent 和访问预算。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConsulConfig {
+    /// Consul 查询 API 地址；写入入口由 agent_addr 单独声明。
     pub api_addr: String,
+    /// 可选注册写入 agent 地址；未配置时不提供注册能力。
     pub agent_addr: Option<String>,
+    /// 显式限定的 Consul 数据中心。
     pub datacenter: String,
+    /// Consul ACL token，不写入诊断或实例 metadata。
     pub token: String,
+    /// HTTPS 证书验证使用的附加 CA PEM；不关闭系统信任校验。
     pub ca_pem: Option<String>,
+    /// 按逻辑服务名绑定的目标，不接受重复键。
     pub services: BTreeMap<String, String>,
+    /// 一次请求的最大耗时，单位为毫秒。
     pub request_timeout_ms: u64,
+    /// 单次后端响应允许占用的最大字节数。
     pub max_response_bytes: usize,
+    /// 单次完整服务观察允许包含的实例数量上限。
     pub max_instances: usize,
+    /// Consul blocking query 的服务端等待预算，单位为毫秒。
     pub blocking_wait_ms: u64,
 }
 
@@ -56,16 +67,24 @@ impl Default for ConsulConfig {
     }
 }
 
+/// Consul 注册目标的独立健康检查定义。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HealthCheck {
+    /// 由客户端定期报告本地资格的 TTL 检查。
     Ttl {
+        /// 健康报告的最大有效时长，单位为毫秒。
         ttl_ms: u64,
+        /// 健康报告间隔，单位为毫秒，必须短于 TTL。
         report_interval_ms: u64,
     },
+    /// 由 Consul agent 请求目标 HTTP 健康端点。
     Http {
+        /// agent 可达的本地业务健康端点，不应反向依赖注册中心健康。
         url: String,
+        /// HTTP 健康检查间隔，单位为毫秒。
         interval_ms: u64,
+        /// 一次 HTTP 健康检查的超时预算，单位为毫秒。
         timeout_ms: u64,
     },
 }
@@ -82,6 +101,7 @@ impl HealthCheck {
     }
 }
 
+/// 隔离数据中心和 agent 身份的 Consul 受管适配器。
 pub struct ConsulProvider {
     config: ConsulConfig,
     api: Url,

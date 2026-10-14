@@ -37,6 +37,8 @@ secret/TLS 与本地文件监听。业务提供配置与 handler，框架负责�
 Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 hystrix 命令目录随 Application 实例重建，业务收尾后排干，旧命令永久拒绝执行。
 
+采用 Kafka 能力的现有应用需要完成公开 API 与默认配置迁移，详见[迁移要求](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#kafka-源码与配置迁移)。
+
 ## Kafka 事件门面
 
 `nasa::kafka` 导出源配置、`KafkaProxy`、producer lane、consumer trait/macro、`TransactionPlan`、`ReplayPlan`、`TransferPlan`、`DltReplayPlan`、持久 checkpoint 和诊断类型。启用 `application,kafka` 时，通过 `app.default_kafka()` / `app.kafka(name)` 取得受管 `KafkaHandle`；单源 `kafka` 与多源 `kafkas` 互斥，显式来源不回退。
@@ -171,7 +173,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = [
+nasa = { version = "2.0.3", features = [
     "application",
     "tx",
     "mapper",
@@ -473,7 +475,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = ["application", "grpc"] }
+nasa = { version = "2.0.3", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"

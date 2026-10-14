@@ -10,7 +10,7 @@ socket 绑定与接流授权分离：受管启动先完成 `Bound` 装配，待�
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["application", "grpc"] }
+nasa = { version = "2.0.3", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"

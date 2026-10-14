@@ -63,7 +63,9 @@ pub(crate) fn validate_group(group: &str) -> Result<()> {
     // 组与事件共用固定空白集合，不能让 Unicode trim 吞掉 NEL、NBSP 等有效身份。
     // NUL 无法穿过 native C 字符串边界，超长身份也不能被完整写入 DLT 来源证据。
     // Java native 的 STRING 配置会裁剪首尾 U+0000–0020，共同准入必须先拒绝会改换身份的原文。
-    if is_blank_event(group) || group.contains('\0') || group.len() > MAX_GROUP_BYTES
+    if is_blank_event(group)
+        || group.contains('\0')
+        || group.len() > MAX_GROUP_BYTES
         || group.as_bytes().first().is_some_and(|c| *c <= 0x20)
         || group.as_bytes().last().is_some_and(|c| *c <= 0x20)
     {

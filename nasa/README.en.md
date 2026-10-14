@@ -35,6 +35,8 @@ This is an independent open-source project with no affiliation, sponsorship, end
 relationship with the United States National Aeronautics and Space Administration. The archive includes
 the complete statement in `NOTICE`.
 
+Existing Kafka consumers must migrate public APIs and configuration defaults; see the [migration requirements](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.en.md#migrate-kafka-source-and-configuration).
+
 ## Kafka facade
 
 Use `nasa::kafka` for source configuration, `KafkaProxy`, producer lanes, consumer traits/macros,
@@ -106,7 +108,7 @@ executor. Independent component assembly remains possible, with ownership transf
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |

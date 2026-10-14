@@ -38,6 +38,8 @@ async executor, database or message broker.
 > or an official project of the United States National Aeronautics and Space Administration. It does
 > not use the agency's insignia, logotype, seal or other official visual identifiers. See [NOTICE](NOTICE).
 
+Existing Kafka consumers must migrate public APIs and configuration defaults; see the [migration requirements](docs/migration.en.md#migrate-kafka-source-and-configuration).
+
 ## Kafka event runtime
 
 Enable `kafka` and use `nasa::kafka`. Managed applications also enable `application`, declare the
@@ -158,7 +160,7 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,

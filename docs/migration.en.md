@@ -3,7 +3,7 @@
 [中文](migration.md) | [English](migration.en.md)
 
 This guide explains how an existing Rust application adopts the dependency and runtime contracts
-of `nasa 2.0.2`. The steps depend on the capabilities in use. A version number alone cannot establish
+of `nasa 2.0.3`. The steps depend on the capabilities in use. A version number alone cannot establish
 API, schema, message or configuration compatibility. For a new application, start with the
 [quickstart](quickstart.en.md).
 
@@ -13,10 +13,10 @@ Prefer selecting capabilities through the facade:
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.2"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
+`version = "2.0.3"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
 versions. When adopting registry components, remove `path` dependencies and `[patch.crates-io]`
 overrides pointing to local NASA sources while preserving required features. An application using
 `sqlx::FromRow` or `sqlx::migrate!` still declares the appropriate direct dependency; the facade does
@@ -66,6 +66,18 @@ Copied external client handles do not acquire the revocation guarantees of manag
 
 The detailed [Application contract](../napp/README.md), currently in Chinese, defines fields, defaults
 and admission conditions.
+
+## Migrate Kafka source and configuration
+
+`nafka 2.0.3` and its `napp`/`nasa` entry points include source-incompatible changes. Consumers must migrate and recompile; the patch number does not imply drop-in source compatibility. Keep the previous lockfile until migration is complete.
+
+- Full `ConsumerConfig` literals need `concurrency` and `group_concurrency`. Prefer explicit overrides with `..Default::default()` and review the remaining defaults. Other public producer and lane configuration structures also have additional fields.
+- Exhaustive `NafkaError` matches and complete field patterns must account for new variants and fields. Keep definite failure, unknown outcome, authorization denial and incomplete shutdown distinct.
+- Producer defaults are `acks=all`, `enable_idempotence=true`, at most 10000 queued messages and 65536 KiB. Review broker ISR, throughput and memory requirements before adopting them.
+- Managed Admin writes require explicit `container.admin_write` permission and broker ACL. The default managed view is read-only.
+- Use `inspect_legacy_config` to review old configuration and decisions. Unknown fields and unsupported native overrides are rejected under the current contract.
+
+Group offsets, transaction identities and checkpoints are not migrated automatically. Successful startup does not establish compatibility with an existing durable task plan.
 
 ## Preserve Kafka identity and delivery contracts
 

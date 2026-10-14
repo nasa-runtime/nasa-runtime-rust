@@ -8,30 +8,46 @@ use crate::Instance;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorCode {
+    /// 配置无效，在外部操作之前拒绝。
     InvalidConfig,
+    /// 后端或当前配置不支持所请求的能力。
     Unsupported,
+    /// 身份认证失败，旧身份的证据不能继续授权发送。
     Unauthenticated,
+    /// 目标作用域的访问被拒绝。
     PermissionDenied,
+    /// 服务端按权限过滤了结果，不能视为完整服务快照。
     PermissionFiltered,
+    /// 后端暂不可用，是否复用旧证据由时效策略裁决。
     Unavailable,
+    /// 后端拒绝当前请求速率，需要按预算退避。
     RateLimited,
+    /// 操作的绝对截止期限已经耗尽。
     DeadlineExceeded,
     /// 响应未能完整同步，不能据此发布新候选；普通读取可以使用尚在宽限内的完整旧证据。
     IncompleteSnapshot,
     /// 已确认完整候选或对象身份非法，必须立即撤销旧证据，不能按同步失败宽限。
     InvalidSnapshot,
+    /// 本地有限资源或后端响应规模超过容量限制。
     CapacityExceeded,
+    /// 外部写入是否生效无法确认，禁止按确定成功继续推进。
     OutcomeUnknown,
+    /// 当前没有可承载请求的服务实例。
     NoInstances,
+    /// 资源 owner 已关闭，不再接纳工作。
     OwnerClosed,
+    /// 连接或发布资格尚未满足当前操作的前置条件。
     NotReady,
+    /// 目标已被其他所有者占用或状态与预期不一致。
     Conflict,
 }
 
 /// 携带稳定原因与配置路径的发现错误；秘密材料由 adapter 内部管理。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryError {
+    /// 可供调用方分支处理的稳定失败类别。
     pub code: ErrorCode,
+    /// 可公开展示的固定原因，不携带配置原文。
     pub reason: &'static str,
     /// 只包含配置字段与已校验的条目名称，不包含配置值或认证材料。
     pub config_path: Option<String>,
@@ -90,46 +106,63 @@ impl fmt::Display for DiscoveryError {
 
 impl std::error::Error for DiscoveryError {}
 
+/// 受管发现操作的成功值或结构化失败。
 pub type Result<T> = std::result::Result<T, DiscoveryError>;
 
 /// 证据只说明其来源，不替代业务协议认证。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvidenceKind {
+    /// 实例集合来自静态配置，不代表远端健康。
     Static,
+    /// 只有地址解析证据，不代表后端健康。
     Address,
+    /// 后端提供了健康状态证据，仍受 owner 时效约束。
     BackendHealth,
 }
 
 /// 后端实际支持的操作；权限不足通过操作错误另行表达。
 #[derive(Clone, Copy, Debug)]
 pub struct Capabilities {
+    /// 是否允许受管注册写入。
     pub registration: bool,
+    /// 是否支持显式服务范围之外的服务枚举。
     pub enumeration: bool,
+    /// 后端实际提供的证据等级。
     pub evidence: EvidenceKind,
 }
 
 /// 一次完整观察；错误与完整空集合分别返回。
 #[derive(Debug)]
 pub struct ProviderSnapshot {
+    /// 当前完整观察中的实例集合，包括不能接流的实例。
     pub instances: Vec<Instance>,
+    /// 后端实际提供的证据等级。
     pub evidence: EvidenceKind,
 }
 
 /// 冻结的注册事实。字段由宿主解析完毕，重试不生成另一实例身份。
 #[derive(Clone, Debug)]
 pub struct RegistrationPlan {
+    /// 注册目标的本地唯一标识。
     pub id: String,
+    /// 注册目标的逻辑服务名。
     pub service: String,
+    /// 本次发布的地址、端口与实例属性。
     pub instance: Instance,
+    /// 后端专用注册参数，不与中性 metadata 混用。
     pub attributes: BTreeMap<String, String>,
 }
 
 /// 注册查询不能用“健康列表中没找到”猜测管理端意图。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistrationEvidence {
+    /// 后端确认实例健康。
     Healthy,
+    /// 后端确认实例不健康，不应接流。
     Unhealthy,
+    /// 后端已禁用实例，不应接流。
     Disabled,
+    /// 后端未发现目标实例。
     Missing,
 }
 

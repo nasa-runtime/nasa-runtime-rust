@@ -27,6 +27,9 @@ pub struct ConfigReq {
 }
 
 impl ConfigReq {
+    /// 业务作用：构造传给配置过滤器的作用域和正文。
+    /// 参数说明：`data_id`、`group`、`namespace` 定位配置，`content` 为正文，`encrypted_data_key` 为加密数据密钥材料。
+    /// 返回：返回待过滤的数据，不发起网络请求。
     pub fn new(
         data_id: String,
         group: String,
@@ -59,6 +62,9 @@ pub struct ConfigResp {
 }
 
 impl ConfigResp {
+    /// 业务作用：构造传给配置过滤器的作用域和正文。
+    /// 参数说明：`data_id`、`group`、`namespace` 定位配置，`content` 为正文，`encrypted_data_key` 为加密数据密钥材料。
+    /// 返回：返回待过滤的数据，不发起网络请求。
     pub fn new(
         data_id: String,
         group: String,

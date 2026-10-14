@@ -1,6 +1,6 @@
 [package]
 name = "napp-macro"
-version = "2.0.1"
+version = "2.0.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "NASA application macros for managed lifecycles, multi-registry discovery and ordered initializers"

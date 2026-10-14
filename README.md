@@ -48,6 +48,8 @@ secret/TLS 与本地文件监听。业务提交配置与 handler，框架在接�
 其中，Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可，关键资源失效会阻止 Ready；
 隔离命令由本代 Application 统一拥有，停机等待在途责任，旧句柄不能重新开放。
 
+采用 Kafka 能力的现有应用需要完成公开 API 与默认配置迁移，详见[迁移要求](docs/migration.md#kafka-源码与配置迁移)。
+
 ## Kafka 事件运行时
 
 启用 `kafka` 后，业务统一使用 `nasa::kafka`；结合 `application` 和 `"kafka"` 组件，单源配置使用 `kafka`，多源使用 `kafkas.<name>`，两根互斥。`app.kafka(name)` 返回绑定来源的业务句柄，显式未知名称不会回退。Java/Rust 共享事件线路、组名、稳定事务身份和有限任务持久格式；API 和配置拼写遵循各自语言。
@@ -815,7 +817,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。

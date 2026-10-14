@@ -83,7 +83,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.2"
+version = "2.0.3"
 edition = "2021"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
@@ -93,9 +93,18 @@ keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
-nafka = { path = "nafka" }
-nafka-macro = { path = "nafka-macro" }
-nagrpc = { path = "nagrpc" }
 nadisc = { path = "nadisc" }
+nanacos-sdk = { path = "nanacos-sdk" }
+nafka-macro = { path = "nafka-macro" }
+napp-macro = { path = "napp-macro" }
+rest-client-macro = { path = "rest-client-macro" }
+nafka = { path = "nafka" }
+nagrpc = { path = "nagrpc" }
 nanacos = { path = "nanacos" }
 rest-discovery = { path = "rest-discovery" }
+nadisc-consul = { path = "nadisc-consul" }
+nadisc-kubernetes = { path = "nadisc-kubernetes" }
+nadisc-runtime = { path = "nadisc-runtime" }
+rest-discovery-nacos = { path = "rest-discovery-nacos" }
+napp = { path = "napp" }
+nasa = { path = "nasa" }

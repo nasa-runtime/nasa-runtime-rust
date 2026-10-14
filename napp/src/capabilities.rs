@@ -1,5 +1,7 @@
 #[cfg(feature = "kafka")]
 use std::collections::BTreeMap;
+#[cfg(any(feature = "log", feature = "scheduling"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "log",
     feature = "kafka",
@@ -9,8 +11,6 @@ use std::collections::BTreeMap;
     feature = "scheduling"
 ))]
 use std::sync::Arc;
-#[cfg(any(feature = "log", feature = "scheduling"))]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "nacos-config",
     feature = "ws",
@@ -22,7 +22,6 @@ use std::sync::{OnceLock, Weak};
 #[cfg(feature = "ws")]
 use std::net::SocketAddr;
 
-use crate::ApplicationState;
 #[cfg(any(
     feature = "log",
     feature = "kafka",
@@ -32,6 +31,7 @@ use crate::ApplicationState;
     feature = "scheduling"
 ))]
 use crate::state::StateCell;
+use crate::ApplicationState;
 #[cfg(any(
     feature = "kafka",
     feature = "nacos-config",
@@ -462,10 +462,15 @@ impl KafkaHandle {
         self.ensure_operation_open("administration access", true)?;
         // 业务不能通过普通 getter 将只读能力提升为写能力；配置授权与 broker ACL 必须同时成立。
         if !self.capability.admin_write {
-            return Err(self.operation_error("administration access",
-                nafka::NafkaError::Authorization));
+            return Err(
+                self.operation_error("administration access", nafka::NafkaError::Authorization)
+            );
         }
-        Ok(self.capability.proxy.admin().with_access_scope(&self.capability.access_scope))
+        Ok(self
+            .capability
+            .proxy
+            .admin()
+            .with_access_scope(&self.capability.access_scope))
     }
 
     /// 业务作用：在容器来源上登记独立回放任务，关闭责任仍归 Application 所有。
@@ -622,10 +627,14 @@ impl KafkaHandle {
     /// 业务作用：开放停机期间及之后的只读责任诊断，不授予活跃宿主整源关闭权。
     /// 参数说明：无。
     /// 返回：源实际资源与未确认输入的独立快照；查询不重建原生资源，也不经过业务准入。
-    pub fn close_report(&self) -> nafka::CloseReport { self.capability.proxy.close_report() }
+    pub fn close_report(&self) -> nafka::CloseReport {
+        self.capability.proxy.close_report()
+    }
     /// 业务作用：让宿主采样该源的剩余责任；已停止的业务句柄仍可取得关闭证据。
     /// 参数说明：无。返回：关闭快照；异步指标可能丢弃，不授予停止或管理写权限。
-    pub fn sample_metrics(&self) -> nafka::CloseReport { self.capability.proxy.sample_metrics() }
+    pub fn sample_metrics(&self) -> nafka::CloseReport {
+        self.capability.proxy.sample_metrics()
+    }
 
     /// 业务作用：查询一个 resolved group 的当前 assignment。
     ///

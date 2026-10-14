@@ -11,12 +11,12 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.0", features = ["nacos-sdk"] }
+nasa = { version = "2.0.3", features = ["nacos-sdk"] }
 ```
 
 ## 多连接受管注册
 
-`managed` feature 提供 `managed::ManagedNacos`，使用 Nacos 3 的 HTTP API，与旧 SDK 入口分开。发现、注册、心跳与删除使用 client API，注册所有权核验使用限定服务范围的 admin 实例详情。`nacos` feature 的兼容 SDK 最低版本为 0.8.3；新 HTTP owner 路径不依赖 SDK 的后台 redo 生命周期，也不把释放旧 SDK 引用表述为终止其全部任务。旧配置中心和单 Nacos 用法保持原有入口。
+`managed` feature 提供 `managed::ManagedNacos`，使用 Nacos 3 的 HTTP API，与旧 SDK 入口分开。发现、注册、心跳与删除使用 client API，注册所有权核验使用限定服务范围的 admin 实例详情。`nacos` feature 使用源自 nacos-sdk 0.8.3 的 `nanacos-sdk 1.0.0` 兼容传输；新 HTTP owner 路径不依赖 SDK 的后台 redo 生命周期，也不把释放旧 SDK 引用表述为终止其全部任务。旧配置中心和单 Nacos 用法保持原有入口。
 
 `ManagedNacosConfig` 为每个连接固定 `server_addr`、`namespace`、`group`、`username`/`password`、`services` 及可选 `ca_pem`。`server_addr` 支持同一集群的逗号分隔服务器 URL；显式 HTTPS 开启校验，禁止 URL 用户信息、重定向和环境代理。多个地址不能混装不同集群，namespace 使用真实标识。服务别名绑定 `{name, cluster}`，`cluster` 默认省略，表示不额外过滤集群。查询枚举只返回显式绑定，不需要全局服务目录权限。
 

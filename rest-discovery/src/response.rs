@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// 绑定调用预算和发现证据的 HTTP 响应；读取正文仍会复验发送资格。
 pub struct ManagedResponse {
     status: reqwest::StatusCode,
     headers: reqwest::header::HeaderMap,

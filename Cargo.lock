@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "nadisc"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "nafka"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "async-trait",
  "base64",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "nafka-macro"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "macro-support 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "nagrpc"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "nanacos"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "napp"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3482,7 +3482,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest",
  "rest-discovery",
- "rest-discovery-nacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery-nacos",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "napp-macro"
-version = "2.0.1"
+version = "2.0.3"
 dependencies = [
  "macro-support 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proc-macro2",
@@ -3511,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "nasa"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "async-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "cacheable 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3572,7 +3572,7 @@ dependencies = [
  "ncrypto 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rest-client-macro",
  "rest-discovery",
- "rest-discovery-nacos 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rest-discovery-nacos",
 ]
 
 [[package]]
@@ -5274,7 +5274,7 @@ dependencies = [
 
 [[package]]
 name = "rest-client-macro"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -5284,7 +5284,7 @@ dependencies = [
 
 [[package]]
 name = "rest-discovery"
-version = "2.0.0"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5310,21 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "rest-discovery-nacos"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "nanacos",
- "rest-discovery",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rest-discovery-nacos"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2f799b21e6c3da2260c2c583f3ecbe9bef4c8d85b7c02c4074f0086f0f90e6d"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "nanacos",

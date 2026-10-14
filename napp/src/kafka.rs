@@ -10,15 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{stream::FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    Application, ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase,
-    ApplicationResult, ApplicationState, ComponentId, PrepareContext, ReadyContext, ShutdownAction,
-    ShutdownContext, StartContext, application::KafkaCustomization,
-    capabilities::KafkaClientCapability,
+    application::KafkaCustomization, capabilities::KafkaClientCapability, Application,
+    ApplicationComponent, ApplicationError, ApplicationFuture, ApplicationPhase, ApplicationResult,
+    ApplicationState, ComponentId, PrepareContext, ReadyContext, ShutdownAction, ShutdownContext,
+    StartContext,
 };
 
 /// Kafka 启动门禁相对 Application 全局 deadline 预留的固定诊断余量。
@@ -103,9 +103,9 @@ impl ReadyRule {
                     Ok(())
                 }
             }
-            Self::AssignedPartitions { .. } => self.requirement().validate().map_err(
-                |_| "assigned_partitions readiness requires non-empty unique valid coordinates",
-            ),
+            Self::AssignedPartitions { .. } => self.requirement().validate().map_err(|_| {
+                "assigned_partitions readiness requires non-empty unique valid coordinates"
+            }),
         }
     }
 

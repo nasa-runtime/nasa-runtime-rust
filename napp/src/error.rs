@@ -43,6 +43,7 @@ pub enum ComponentId {
     Ws,
     /// Nacos 服务注册与发现。
     NacosDiscovery,
+    /// 发现运行时初始化、发布或关闭阶段的失败。
     Discovery,
     /// 异步任务和定时调度。
     Scheduling,

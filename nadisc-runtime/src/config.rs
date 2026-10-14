@@ -3,17 +3,27 @@
 use nadisc::managed::{DiscoveryError, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 
+/// owner 共享的资源上限；超出容量时拒绝新增工作。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
+    /// 同时保留的连接数量上限。
     pub max_connections: usize,
+    /// owner 可持有的注册目标数量上限。
     pub max_registrations: usize,
+    /// 每个连接可同时观察的服务数量上限。
     pub max_service_watches_per_connection: usize,
+    /// owner 后端操作的并发上限。
     pub max_parallel_operations: usize,
+    /// owner 同时持有的后端 watch 流数量上限。
     pub max_watch_streams: usize,
+    /// 单个服务快照允许包含的实例数量上限。
     pub max_instances_per_service: usize,
+    /// owner 所有保留快照的实例总数上限。
     pub max_total_instances: usize,
+    /// owner 所有保留快照的估算字节总数上限。
     pub max_snapshot_bytes: usize,
+    /// 连接驱动与正文等传输任务的共享容量上限。
     pub max_transport_tasks: usize,
 }
 
@@ -78,16 +88,25 @@ impl Limits {
     }
 }
 
+/// 单个连接的准备、查询、证据时效和回收预算。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConnectionPolicy {
+    /// 是否要求启动阶段确认成功；失败时阻止宿主完成启动。
     pub startup_required: bool,
+    /// 一次请求的最大耗时，单位为毫秒。
     pub request_timeout_ms: u64,
+    /// 后台轮询间隔，单位为毫秒，必须留出请求和证据时效预算。
     pub poll_interval_ms: u64,
+    /// 发现证据的最大年龄，单位为毫秒。
     pub max_age_ms: u64,
+    /// 查询异常后的旧证据宽限，单位为毫秒；零表示禁止异常复用。
     pub stale_if_error_ms: u64,
+    /// 无人使用的服务观察保留时长，单位为毫秒。
     pub idle_timeout_ms: u64,
+    /// 连接恢复的初始退避，单位为毫秒。
     pub initial_backoff_ms: u64,
+    /// 连接恢复退避的上限，单位为毫秒。
     pub max_backoff_ms: u64,
 }
 
@@ -136,13 +155,19 @@ impl ConnectionPolicy {
     }
 }
 
+/// 服务发布的首次确认要求、就绪影响和摘流预算。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegistrationPolicy {
+    /// 是否要求启动阶段确认成功；失败时阻止宿主完成启动。
     pub startup_required: bool,
+    /// 远端注册失去有效健康证据时是否影响宿主整体就绪。
     pub readiness_critical: bool,
+    /// 注册健康回查间隔，单位为毫秒。
     pub monitor_interval_ms: u64,
+    /// 注册健康证据的有效窗口，单位为毫秒。
     pub observation_grace_ms: u64,
+    /// 单项注销预算，单位为毫秒，仍受宿主关闭总期限限制。
     pub deregister_timeout_ms: u64,
 }
 

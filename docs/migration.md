@@ -2,7 +2,7 @@
 
 [中文](migration.md) | [English](migration.en.md)
 
-本文说明现有 Rust 应用如何采用当前 `nasa 2.0.2` 的依赖与运行合同。步骤取决于应用使用的能力，
+本文说明现有 Rust 应用如何采用当前 `nasa 2.0.3` 的依赖与运行合同。步骤取决于应用使用的能力，
 不能仅凭版本号推断 API、数据库结构、消息协议或配置兼容。最小新应用见 [快速开始](quickstart.md)。
 
 ## 固定依赖来源与能力
@@ -11,10 +11,10 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.2"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
+`version = "2.0.3"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
 移除指向本地 NASA 源码的 `path` 与 `[patch.crates-io]` 覆盖，保留原本需要的 feature。
 直接使用 `sqlx::FromRow` 或 `sqlx::migrate!` 的业务仍需声明对应直接依赖；门面不替业务隐式提供外部 crate 名称。
 
@@ -53,6 +53,21 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 - 连接来源与其它冻结字段变化需要重启；读取新配置不证明热应用完成。
 
 字段、默认值和准入条件以 [Application 合同](../napp/README.md) 为准。
+
+## Kafka 源码与配置迁移
+
+`nafka 2.0.3` 及其 `napp`、`nasa` 入口包含源码不兼容变化，使用方必须迁移并重新编译，不能依据补丁号假定直接替换兼容。尚未完成迁移的应用应通过原锁文件固定依赖，避免无审阅地更新。
+
+| 调用方用法 | 需要采取的动作 |
+| --- | --- |
+| 完整字段构造 `ConsumerConfig` | 补充 `concurrency`、`group_concurrency`；优先使用 `ConsumerConfig { concurrency: 2, ..Default::default() }`，并核对其余默认值 |
+| 构造 producer lane 等公开配置结构 | 按当前结构补齐新增字段；使用 `Default` 的配置也需核对可靠性与容量策略 |
+| 穷尽匹配 `NafkaError` 或完整字段模式 | 覆盖新增错误类别及字段；区分确定失败、结果未知、权限拒绝和关闭未完成，不把未知结果作为普通可重试失败 |
+| 依赖 producer 默认值 | 当前默认 `acks=all`、`enable_idempotence=true`，队列上限为 10000 条和 65536 KiB；根据 broker ISR、吞吐和内存预算显式选择 |
+| 通过受管 Admin 修改资源 | 显式配置 `container.admin_write` 并取得 broker ACL；默认只读入口不授予写权限 |
+| 旧配置携带未识别字段或原生透传键 | 使用 `inspect_legacy_config` 核对转换候选和人工决策项，按当前严格配置合同调整后再启动 |
+
+不自动迁移 group 位点、事务身份或 checkpoint。迁移后的启动成功也不证明旧持久任务可以按新计划接续。
 
 ## Kafka 身份与交付合同
 

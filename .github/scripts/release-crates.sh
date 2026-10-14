@@ -11,17 +11,23 @@ fi
 # 返回：已知批次输出空格分隔的 `crate@version`；未知批次返回非零状态。
 release_items() {
   case "$1" in
-    configuration-core)
-      printf '%s\n' "naml@2.0.1 napp-macro@2.0.1"
+    discovery-foundation)
+      printf '%s\n' "nadisc@2.0.3 nanacos-sdk@1.0.0 nafka-macro@2.0.3 napp-macro@2.0.3 rest-client-macro@2.0.3"
       ;;
-    configuration-bootstrap)
-      printf '%s\n' "config-boot@2.0.1"
+    backend-adapters)
+      printf '%s\n' "nanacos@2.0.3 nadisc-consul@1.0.0 nadisc-kubernetes@1.0.0 nafka@2.0.3"
+      ;;
+    discovery-runtime)
+      printf '%s\n' "nadisc-runtime@1.0.0 rest-discovery@2.0.3"
+      ;;
+    client-transports)
+      printf '%s\n' "nagrpc@2.0.3 rest-discovery-nacos@2.0.3"
       ;;
     application-runtime)
-      printf '%s\n' "napp@2.0.2"
+      printf '%s\n' "napp@2.0.3"
       ;;
     facade)
-      printf '%s\n' "nasa@2.0.2"
+      printf '%s\n' "nasa@2.0.3"
       ;;
     *)
       echo "未知发布批次: $1" >&2
@@ -50,10 +56,12 @@ release_crates() {
 # 返回：逐行输出批次标识与单调递增的拓扑阶段。
 release_stages() {
   cat <<'PLAN'
-configuration-core 1
-configuration-bootstrap 2
-application-runtime 3
-facade 4
+discovery-foundation 1
+backend-adapters 2
+discovery-runtime 3
+client-transports 4
+application-runtime 5
+facade 6
 PLAN
 }
 

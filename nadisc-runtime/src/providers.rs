@@ -15,6 +15,7 @@ enum Backend {
     Dns(DnsDiscovery),
 }
 
+/// 静态实例或 DNS 地址的只读适配器，不提供注册中心健康证据或写入能力。
 pub struct LocalProvider {
     backend: Backend,
     closed: AtomicBool,

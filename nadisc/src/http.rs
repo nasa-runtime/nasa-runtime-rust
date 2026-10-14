@@ -7,12 +7,16 @@ pub use reqwest::{
 };
 use std::{sync::Mutex, time::Duration};
 
+/// 具有请求超时、响应大小与 TLS 约束的后端 HTTP 传输。
 pub struct HttpTransport {
     client: Mutex<Option<reqwest::Client>>,
     max_bytes: usize,
 }
+/// 完成有限读取后的 HTTP 响应头与正文。
 pub struct HttpResponse {
+    /// 服务端响应头，用于版本、权限过滤等协议证据。
     pub headers: HeaderMap,
+    /// 受响应字节上限约束的完整正文。
     pub body: Vec<u8>,
 }
 

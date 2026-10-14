@@ -21,43 +21,62 @@ use std::{
     time::Duration,
 };
 
+/// 单个集群的显式认证、namespace 范围与有限读取预算。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KubernetesConfig {
+    /// 认证材料的唯一来源；不执行 kubeconfig 中的外部认证程序。
     pub auth: Authentication,
+    /// 允许访问的 namespace 白名单，不自动枚举其他作用域。
     pub namespaces: Vec<String>,
+    /// 按逻辑服务名绑定的目标，不接受重复键。
     pub services: BTreeMap<String, ServiceBinding>,
+    /// 一次请求的最大耗时，单位为毫秒。
     #[serde(default = "request_timeout")]
     pub request_timeout_ms: u64,
+    /// 单次 watch 的等待上限，单位为毫秒。
     #[serde(default = "watch_timeout")]
     pub watch_timeout_ms: u64,
+    /// 单次后端响应允许占用的最大字节数。
     #[serde(default = "byte_limit")]
     pub max_response_bytes: usize,
+    /// 单次完整服务观察允许包含的实例数量上限。
     #[serde(default = "instance_limit")]
     pub max_instances: usize,
+    /// Kubernetes 分页读取期望的单页条目数。
     #[serde(default = "page_size")]
     pub page_size: usize,
 }
 
+/// 逻辑服务到具体 Service 及命名端口的显式绑定。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceBinding {
+    /// 目标所在的命名空间。
     pub namespace: String,
+    /// 目标后端中的服务名称。
     pub name: String,
+    /// Service 中用于发现实例端口的命名端口。
     pub port_name: String,
+    /// 允许路由的实例地址族。
     #[serde(default)]
     pub address_family: AddressFamily,
 }
 
+/// 实例地址族筛选策略。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressFamily {
+    /// 只接受 IPv4 地址。
     Ipv4,
+    /// 只接受 IPv6 地址。
     Ipv6,
+    /// 接受 IPv4 和 IPv6 地址。
     #[default]
     Both,
 }
 
+/// 只读取 Service 与控制器所属 EndpointSlice 的发现适配器。
 pub struct KubernetesProvider {
     config: KubernetesConfig,
     server: Url,

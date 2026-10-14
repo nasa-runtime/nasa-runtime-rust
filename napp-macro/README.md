@@ -75,7 +75,7 @@ REST 接口上的 `qualifier` 由 `rest-client` 宏读取，Application 宏不�
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = ["application", "log", "redis", "cache", "web"] }
+nasa = { version = "2.0.3", features = ["application", "log", "redis", "cache", "web"] }
 ```
 
 ```rust

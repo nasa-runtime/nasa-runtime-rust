@@ -16,6 +16,14 @@ watch 只触发完整重读。BOOKMARK 不续健康期限；断流、过期 reso
 
 不读取 Pod、Node 或 Secret，不注册实例，不支持 ExternalName、无 selector 的手工服务或任意手工 EndpointSlice。服务选择器和 namespace 配置不是 RBAC 权限隔离的替代品。DNS 模式使用公共 runtime 的 DNS provider，不能将 DNS 解析成功视为 Pod 健康。
 
+## 集群外服务的发布
+
+集群外 Rust 服务可以由集群内受管代理转发。为代理 Pod 建立带 selector 的 Service，由 Kubernetes 控制器生成 EndpointSlice；发现客户端取得代理端点，代理再连接集群外服务。该目录中的对象身份和健康条件属于代理 Pod，不是外部进程的原生 Pod 身份。
+
+代理必须具备到外部地址的路由、端口和认证权限，并用能反映上游可用性的 readiness 检查控制接流。仅检测代理监听端口只能证明代理已启动，不能证明上游服务可用。代理或上游失效时必须关闭接流；应用不得伪造 controller-owned EndpointSlice。gRPC 代理需要支持 HTTP/2 或透明 TCP，TLS authority 和证书身份应与终止位置一致。
+
+此方式需要部署方管理代理、Service 和网络策略；本组件不创建这些对象，也不为集群外服务提供 Kubernetes 写侧注册。
+
 ## 配置
 
 启用 `nadisc-runtime/kubernetes`，或 NASA 的 `application`、`discovery-kubernetes`，使用 `#[nasa::application("discovery")]`。

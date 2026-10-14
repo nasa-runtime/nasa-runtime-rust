@@ -144,35 +144,59 @@ impl Default for Eligibility {
     }
 }
 
+/// 冻结前的注册计划、目标连接与本地发布资格。
 pub struct RegistrationSpec {
+    /// 目标连接的 qualifier，必须引用 owner 中已配置的连接。
     pub connection_ref: String,
+    /// 冻结后提交给后端的完整注册计划。
     pub plan: RegistrationPlan,
+    /// 目标连接或注册的冻结策略。
     pub policy: RegistrationPolicy,
+    /// 发布前复验的本地业务资格，不依赖远端注册健康回查。
     pub eligibility: Eligibility,
 }
 
+/// 单个注册目标的发布、健康确认与注销状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistrationState {
+    /// 计划已冻结，尚未写入后端。
     Planned,
+    /// 正在提交注册写入。
     Registering,
+    /// 远端写入结果不明，需要协调后才能继续发布。
     OutcomeUnknown,
+    /// 已提交注册，尚未获得有效健康证据。
     PendingHealth,
+    /// 已获得健康证据，仍需按 valid_until 判断时效。
     Active,
+    /// 本地资格或后端证据不再允许继续接流。
     Suspended,
+    /// 已停止发布，正在注销远端实例。
     Withdrawing,
+    /// 注销未能确认完成，可能存在远端残留。
     Residual,
+    /// 已确认目标注销完成。
     Removed,
 }
 
+/// 注册目标的只读证据摘要；Active 仍需检查证据有效期。
 #[derive(Clone, Debug)]
 pub struct RegistrationStatus {
+    /// 注册目标的本地唯一标识。
     pub id: String,
+    /// 承载该注册的连接 qualifier。
     pub connection: String,
+    /// 当前注册阶段；远端写入结果不明时不能当作成功。
     pub state: RegistrationState,
+    /// 是否曾完成启动所要求的首次注册确认。
     pub startup_confirmed: bool,
+    /// 远端注册失去有效健康证据时是否影响宿主整体就绪。
     pub readiness_critical: bool,
+    /// 最近一次有效健康证据的本地单调时刻。
     pub observed_at: Option<Instant>,
+    /// 当前健康证据的截止时刻；缺失或过期均不代表就绪。
     pub valid_until: Option<Instant>,
+    /// 最近的注册或回查错误，不包含凭据原文。
     pub error: Option<DiscoveryError>,
 }
 

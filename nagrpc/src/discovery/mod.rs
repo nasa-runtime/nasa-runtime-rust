@@ -26,31 +26,49 @@ use tower_service::Service;
 /// gRPC 调用端的有限资源与连接存活策略，排队、建连和正文共用 request_timeout。
 #[derive(Clone)]
 pub struct DiscoveryClientOptions {
+    /// 共享调用器允许同时占用的请求数量上限。
     pub max_inflight: usize,
+    /// 同时保留的连接数量上限。
     pub max_connections: usize,
+    /// 排队、建连和正文共用的单次调用总预算。
     pub request_timeout: Duration,
+    /// 空闲连接保留期限，到期后不再用于新调用。
     pub idle_timeout: Duration,
+    /// 连接最大存活年龄，到期后新调用需要重建连接。
     pub max_connection_age: Duration,
+    /// 建立连接失败后的初始退避。
     pub initial_connect_backoff: Duration,
+    /// 建立连接失败后的最大退避。
     pub max_connect_backoff: Duration,
+    /// 传输正文单帧允许的最大字节数。
     pub max_frame_bytes: usize,
+    /// 调用端 TLS 配置；服务端认证或双向认证必须提供。
     pub tls: Option<Arc<rustls::ClientConfig>>,
+    /// TLS 证书校验使用的显式服务名，不从发现地址猜测。
     pub tls_server_name: Option<String>,
+    /// 允许的 HTTP/2 authority 集合；用于约束发现证据中的逻辑目标。
     pub allowed_authorities: std::collections::BTreeSet<String>,
+    /// 缺少协议 metadata 时使用的完整显式绑定；与已有声明冲突时拒绝调用。
     pub protocol: Option<DiscoveryProtocol>,
 }
 
 /// 无协议 metadata 的 DNS/Kubernetes 服务采用完整显式绑定，端口来自当前发现实例。
 #[derive(Clone)]
 pub struct DiscoveryProtocol {
+    /// HTTP/2 请求的逻辑 authority，与拨号地址分离。
     pub authority: String,
+    /// 连接必须采用的认证模式，不允许静默降级。
     pub tls_mode: DiscoveryTlsMode,
 }
 
+/// 调用端显式声明的传输认证模式，必须与发现证据一致。
 #[derive(Clone, Copy)]
 pub enum DiscoveryTlsMode {
+    /// 显式使用明文 HTTP/2。
     Disabled,
+    /// 启用 TLS 并校验服务端证书。
     Server,
+    /// 启用 TLS 服务端校验及客户端证书认证。
     Mutual,
 }
 

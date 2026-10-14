@@ -6,7 +6,7 @@
 #   配置的 parse+merge+apply 是 app 策略,留在各 app。
 [package]
 name = "nanacos"
-version = "2.0.0"
+version = "2.0.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Nacos 配置与注册发现门面，支持独立具名连接和受管 HTTP 注册生命周期"
@@ -21,7 +21,7 @@ categories.workspace = true
 name = "nanacos"
 [dependencies]
 # 服务实例中性类型(provider-neutral);naming 的 register/discover/subscribe 用它,与 eureka 等后端共享。
-nadisc = { package = "nadisc", version = "2.0.0", path = "../nadisc" }
+nadisc = { package = "nadisc", version = "2.0.3", path = "../nadisc" }
 anyhow = "1"
 tracing = "0.1"
 # 实现 discovery 的 provider-neutral 接口(DiscoveryClient/ServiceRegistry/...,对象安全)。

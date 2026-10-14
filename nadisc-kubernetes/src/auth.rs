@@ -10,11 +10,19 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 
+/// Kubernetes 认证来源，只支持显式文件或集群内标准挂载。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Authentication {
+    /// 使用 Pod 标准挂载的 ServiceAccount token 与 CA。
     InCluster,
-    Kubeconfig { path: PathBuf, context: String },
+    /// 从指定文件和 context 读取认证材料，不搜索其他来源。
+    Kubeconfig {
+        /// 显式 kubeconfig 文件路径。
+        path: PathBuf,
+        /// 必须存在的 context 名称。
+        context: String,
+    },
 }
 
 pub(crate) enum Credential {

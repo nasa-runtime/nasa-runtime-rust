@@ -5,6 +5,7 @@ use crate::api::plugin::{ConfigFilter, ConfigReq, ConfigResp};
  */
 pub const DEFAULT_CIPHER_PREFIX: &str = "cipher-";
 
+/// 加密配置名中用于分隔算法标识的字符。
 pub const DEFAULT_CIPHER_SPLIT: &str = "-";
 
 /// EncryptionPlugin for Config.
@@ -91,6 +92,9 @@ pub struct ConfigEncryptionFilter {
 }
 
 impl ConfigEncryptionFilter {
+    /// 业务作用：将算法插件登记为配置加解密过滤器。
+    /// 参数说明：`encryption_plugins` 为可用于配置正文的算法插件。
+    /// 返回：返回按算法名称选择插件的过滤器。
     pub fn new(encryption_plugins: Vec<Box<dyn EncryptionPlugin>>) -> Self {
         Self { encryption_plugins }
     }

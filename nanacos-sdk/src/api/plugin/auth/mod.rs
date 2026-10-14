@@ -25,6 +25,7 @@ pub trait AuthPlugin: Send + Sync {
     fn get_login_identity(&self, resource: RequestResource) -> LoginIdentityContext;
 }
 
+/// 认证插件共享的登录参数上下文。
 #[derive(Clone, Default)]
 pub struct AuthContext {
     pub(crate) params: HashMap<String, String>,
@@ -44,6 +45,7 @@ impl AuthContext {
     }
 }
 
+/// 认证成功后提供给请求签名的身份上下文。
 #[derive(Clone, Default)]
 pub struct LoginIdentityContext {
     pub(crate) contexts: HashMap<String, String>,
@@ -116,10 +118,15 @@ pub(crate) async fn init_auth_plugin(
     );
 }
 
+/// 认证插件用于判定请求作用域和签名资源的描述。
 #[derive(Debug, Default)]
 pub struct RequestResource {
+    /// 被认证请求的业务类型。
     pub request_type: String,
+    /// 目标所在的命名空间。
     pub namespace: Option<String>,
+    /// 目标服务或配置所属的分组。
     pub group: Option<String>,
+    /// 请求作用域中的具体资源标识。
     pub resource: Option<String>,
 }

@@ -510,7 +510,9 @@ fn deny_padded(value: &LitStr, field: &str) -> syn::Result<()> {
 /// 返回：非纯空白、无 NUL、首尾不含 U+0000–0020 且1至1024字节时通过，否则返回编译错误；不裁剪或改名。
 fn validate_group(group: &LitStr) -> syn::Result<()> {
     let value = group.value();
-    if is_blank_event(&value) || value.contains('\0') || value.len() > 1024
+    if is_blank_event(&value)
+        || value.contains('\0')
+        || value.len() > 1024
         || value.as_bytes().first().is_some_and(|c| *c <= 0x20)
         || value.as_bytes().last().is_some_and(|c| *c <= 0x20)
     {

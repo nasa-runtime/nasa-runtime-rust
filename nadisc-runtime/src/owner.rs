@@ -18,18 +18,28 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// 发现 owner 的生命周期阶段；关闭后不能重新开放路由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnerPhase {
+    /// 目录已构造，尚未启动后端连接。
     Prepared,
+    /// 正在准备连接或确认首次注册。
     Starting,
+    /// 已完成发布阶段，可按有效证据提供发现。
     Serving,
+    /// 已撤销发布资格，正在摘流或等待业务排空。
     Quiescing,
+    /// 资源关闭已开始或完成，不再接纳新发现工作。
     Closed,
 }
 
+/// 由宿主提供的具名后端及其冻结策略。
 pub struct ConnectionSpec {
+    /// 连接的本地 qualifier，不是后端服务名称。
     pub name: String,
+    /// 后端类型或实例，决定该连接支持的发现及注册能力。
     pub provider: Arc<dyn ManagedProvider>,
+    /// 目标连接或注册的冻结策略。
     pub policy: ConnectionPolicy,
 }
 
@@ -444,13 +454,18 @@ impl Drop for DiscoveryOwner {
     }
 }
 
+/// 关闭完成后的注册残留、后端错误和期限摘要。
 #[derive(Clone, Debug)]
 pub struct CloseReport {
+    /// 注册目标集合，包含各目标独立的状态或发布策略。
     pub registrations: Vec<RegistrationStatus>,
+    /// 按连接 qualifier 记录的后端关闭错误。
     pub provider_errors: BTreeMap<String, DiscoveryError>,
+    /// 关闭总期限是否耗尽；为真时仍需核对注册残留。
     pub deadline_elapsed: bool,
 }
 
+/// 关闭结果的等待凭据；丢弃凭据不取消后台清理。
 #[derive(Clone)]
 pub struct CloseTicket {
     receiver: watch::Receiver<Option<CloseReport>>,
@@ -469,6 +484,7 @@ impl CloseTicket {
     }
 }
 
+/// 摘流结果的等待凭据；保留业务排空所需的发现连接。
 #[derive(Clone)]
 pub struct QuiesceTicket {
     receiver: watch::Receiver<Option<Vec<RegistrationStatus>>>,

@@ -261,7 +261,7 @@ pub mod cache {
     // `CacheBackend`/`ClusterConnectionBackend`:L2 后端窄接口,让 `CacheLayer` 与具体 Redis 连接
     // 类型解耦,编排层可传入复用受管 Redis 的 adapter。
     pub use cache_impl::cache::{
-        CacheBackend, CacheLayer, ClusterConnectionBackend, GroupedCache, SEP, field,
+        field, CacheBackend, CacheLayer, ClusterConnectionBackend, GroupedCache, SEP,
     };
 }
 
@@ -308,8 +308,8 @@ pub mod inbox {
 #[cfg(any(feature = "outbox", feature = "outbox-pgsql"))]
 pub mod outbox {
     pub use outbox_core_impl::{
-        DispatchReport, InMemoryOutbox, OutboxEvent, OutboxPublishError, OutboxPublisher,
-        OutboxWriter, dispatch_in_order,
+        dispatch_in_order, DispatchReport, InMemoryOutbox, OutboxEvent, OutboxPublishError,
+        OutboxPublisher, OutboxWriter,
     };
     #[cfg(feature = "outbox")]
     pub use outbox_mysql_impl::{MySqlOutbox, OutboxStoreError};
@@ -419,17 +419,18 @@ pub use nasaga_macro::saga_workflow;
 #[cfg(feature = "grpc")]
 pub mod grpc {
     pub use grpc_impl::{
-        Certificate, Channel, ClientTlsConfig, Code, Deadline, DeadlineSource, Endpoint,
-        GrpcMessageLimits, GrpcMethodDescriptor, GrpcMethodPolicy, GrpcMethodType,
-        GrpcRpcMethodSnapshot, GrpcRpcOutcome, GrpcRpcRejectionReason, GrpcServerConfig,
-        GrpcServerError, GrpcServerHandle, GrpcServerObserver, GrpcServerSnapshot, GrpcServerState,
-        GrpcTlsIdentity, Identity, ManagedGrpcService, ManagedService, PeerIdentity, Request,
-        Response, ServerPlan, Status, Streaming, async_trait, call_with_budget, health,
-        include_proto, propagate_deadline_from, propagate_request_budget, reflection,
+        async_trait, call_with_budget, health, include_proto, propagate_deadline_from,
+        propagate_request_budget, reflection, Certificate, Channel, ClientTlsConfig, Code,
+        Deadline, DeadlineSource, Endpoint, GrpcMessageLimits, GrpcMethodDescriptor,
+        GrpcMethodPolicy, GrpcMethodType, GrpcRpcMethodSnapshot, GrpcRpcOutcome,
+        GrpcRpcRejectionReason, GrpcServerConfig, GrpcServerError, GrpcServerHandle,
+        GrpcServerObserver, GrpcServerSnapshot, GrpcServerState, GrpcTlsIdentity, Identity,
+        ManagedGrpcService, ManagedService, PeerIdentity, Request, Response, ServerPlan, Status,
+        Streaming,
     };
 
     #[doc(hidden)]
-    pub use grpc_impl::{CODEGEN_ABI, GrpcServicePolicy, codegen};
+    pub use grpc_impl::{codegen, GrpcServicePolicy, CODEGEN_ABI};
 
     #[cfg(all(feature = "application", feature = "rest-discovery-nacos"))]
     pub use application_impl::{GrpcDiscoveredEndpoint, GrpcDiscoveredTlsMode};
@@ -445,7 +446,7 @@ pub mod oauth {
 /// 入口名称强调运行时任务而非系统线程，避免调用方误判调度和取消边界。
 #[cfg(feature = "scheduling")]
 pub mod scheduling {
-    pub use async_macro::{Async, EnableAsync, EnableScheduling, scheduled};
+    pub use async_macro::{scheduled, Async, EnableAsync, EnableScheduling};
     pub use scheduling_impl::*;
 }
 
@@ -680,8 +681,8 @@ pub mod discovery {
     pub use discovery_runtime_impl as runtime;
     // provider-neutral 中性类型 + 流量过滤规则 + 抽象接口(业务/RestDiscovery 面向这些,不绑定后端)。
     pub use discovery_impl::{
-        DiscoveryClient, DnsDiscovery, DnsService, Instance, Registration, ServiceRegistry,
-        ServiceWatch, ServiceWatchGuard, StaticDiscovery, WatchOptions, is_traffic_instance,
+        is_traffic_instance, DiscoveryClient, DnsDiscovery, DnsService, Instance, Registration,
+        ServiceRegistry, ServiceWatch, ServiceWatchGuard, StaticDiscovery, WatchOptions,
     };
 
     /// Nacos 注册中心后端(独立 `NacosDiscoveryClient`,只建命名服务)。**只给机制**(注册/心跳/优雅下线/发现/订阅),不认识业务类型。
@@ -709,9 +710,9 @@ pub mod discovery {
     /// `disc`(`DiscoveryHandle`)由 main 持有到进程结束;优雅停机【先】`disc.deregister().await` 摘流、【再】drain HTTP。
     #[cfg(feature = "rest-discovery-nacos")]
     pub use rest_discovery_nacos_impl::{
-        AppRegistrationInfo, DiscoveryConfig, DiscoveryHandle, HttpConfig, NacosConnConfig,
-        ProviderKind, RegistrationConfig, RestConfig, RetryConfig, WatchConfig, init_from_config,
-        init_from_config_with_load_balancer,
+        init_from_config, init_from_config_with_load_balancer, AppRegistrationInfo,
+        DiscoveryConfig, DiscoveryHandle, HttpConfig, NacosConnConfig, ProviderKind,
+        RegistrationConfig, RestConfig, RetryConfig, WatchConfig,
     };
 
     /// `rest-discovery` 的底层类型(client / builder / 选项 / LB)。手动装配时用:
@@ -721,13 +722,13 @@ pub mod discovery {
         #[doc(hidden)]
         pub use rest_discovery_impl::__private;
         pub use rest_discovery_impl::{
-            HeuristicHttpMode, InstanceScheme, LbStrategy, LoadBalancer, Method, NoInstancePolicy,
-            RemoteRuntime, RequestBudget, RestClientSet, RestDiscoveryClient, RestDiscoveryError,
-            RestDiscoveryOptions, RestHeuristicOptions, RestHttpOptions, RestMetrics,
-            RestMetricsSnapshot, RestRequestBuilder, RestResilienceOptions, RestWatchOptions,
-            RetryOptions, RoundRobinLoadBalancer, SchemePolicy, ServiceMatchMode, SpanRecorder,
-            StartupPolicy, StatusCode, TraceContext, UnknownHostPolicy,
-            WeightedRoundRobinLoadBalancer, reqwest,
+            reqwest, HeuristicHttpMode, InstanceScheme, LbStrategy, LoadBalancer, Method,
+            NoInstancePolicy, RemoteRuntime, RequestBudget, RestClientSet, RestDiscoveryClient,
+            RestDiscoveryError, RestDiscoveryOptions, RestHeuristicOptions, RestHttpOptions,
+            RestMetrics, RestMetricsSnapshot, RestRequestBuilder, RestResilienceOptions,
+            RestWatchOptions, RetryOptions, RoundRobinLoadBalancer, SchemePolicy, ServiceMatchMode,
+            SpanRecorder, StartupPolicy, StatusCode, TraceContext, UnknownHostPolicy,
+            WeightedRoundRobinLoadBalancer,
         };
 
         /// 声明式 REST 客户端宏(crate = `rest-client-macro`)。
@@ -736,7 +737,7 @@ pub mod discovery {
         /// 无需 import,由 `#[rest_client]` 消费。
         #[cfg(feature = "rest-client")]
         pub use rest_client_macro::{
-            DeleteMapping, GetMapping, PatchMapping, PostMapping, PutMapping, rest_client,
+            rest_client, DeleteMapping, GetMapping, PatchMapping, PostMapping, PutMapping,
         };
     }
 }

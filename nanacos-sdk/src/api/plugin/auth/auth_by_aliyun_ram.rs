@@ -7,22 +7,39 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const ACCESS_KEY: &str = "accessKey";
 pub(crate) const ACCESS_SECRET: &str = "secretKey";
 pub(crate) const SIGN_REGION_ID: &str = "signature_region_id";
+/// 请求中声明签名算法代次的协议键。
 pub const SIGNATURE_VERSION: &str = "signatureVersion";
+/// 签名材料中的分组服务名键。
 pub const GROUPED_NAME: &str = "groupedName";
+/// 携带访问密钥标识的请求头名称。
 pub const ACCESS_KEY_HEADER: &str = "Spas-AccessKey";
+/// Aliyun RAM 签名协议的 v4 标识。
 pub const V4: &str = "v4";
+/// v4 签名采用的 HMAC 算法名称。
 pub const SIGNATURE_V4_METHOD: &str = "HmacSHA256";
+/// 签名作用域中的 Nacos 产品标识。
 pub const SIGNATURE_V4_PRODUCE: &str = "mse-nacos";
+/// v4 派生签名密钥所用的协议前缀。
 pub const PREFIX: &str = "aliyun_v4";
+/// v4 派生签名密钥所用的协议终止标识。
 pub const CONSTANT: &str = "aliyun_v4_request";
+/// 签名作用域采用的年月日格式。
 pub const V4_SIGN_DATE_FORMATTER: &str = "%Y%m%d";
+/// 签名结果在请求材料中的键。
 pub const SIGNATURE_FILED: &str = "signature";
+/// 待签名正文在请求材料中的键。
 pub const DATA_FILED: &str = "data";
+/// 访问密钥标识在请求材料中的键。
 pub const AK_FILED: &str = "ak";
+/// 签名时间戳的请求头名称。
 pub const TIMESTAMP_HEADER: &str = "Timestamp";
+/// 签名值的请求头名称。
 pub const SIGNATURE_HEADER: &str = "Spas-Signature";
+/// 签名作用域中的分组键。
 pub const GROUP_KEY: &str = "group";
+/// 签名作用域中的租户键。
 pub const TENANT_KEY: &str = "tenant";
+/// 兼容签名采用的 HMAC 算法名称。
 pub const SHA_ENCRYPT: &str = "HmacSHA1";
 
 fn get_current_timestamp() -> u128 {

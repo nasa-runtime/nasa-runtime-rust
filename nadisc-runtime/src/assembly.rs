@@ -18,40 +18,60 @@ use std::{
     sync::Arc,
 };
 
+/// 多注册中心连接、发布目标与资源预算；配置冻结后由同一 owner 管理生命周期。
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscoveryConfig {
+    /// 是否启用发现；禁用时不得同时声明连接、注册或资格探针。
     pub enabled: bool,
+    /// 是否启用宿主本地资格探针；不以远端注册结果反向驱动本地资格。
     pub eligibility_probe: bool,
     /// 兼容显式默认引用；省略时只采用名为 primary 的连接，不按数量或顺序推断。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_connection: Option<String>,
+    /// 所有连接和发布目标共享的有限资源预算。
     pub limits: Limits,
+    /// 以 qualifier 为键的连接目录，不按顺序推断默认连接。
     #[serde(deserialize_with = "unique_map")]
     pub connections: BTreeMap<String, ConnectionConfig>,
+    /// 注册目标集合，包含各目标独立的状态或发布策略。
     #[serde(deserialize_with = "unique_map")]
     pub registrations: BTreeMap<String, RegistrationConfig>,
 }
 
+/// 单个 qualifier 的后端配置；provider 必须与唯一的后端配置块一致。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConnectionConfig {
+    /// 后端类型或实例，决定该连接支持的发现及注册能力。
     pub provider: String,
+    /// 是否要求启动阶段确认成功；失败时阻止宿主完成启动。
     pub startup_required: bool,
+    /// 一次请求的最大耗时，单位为毫秒。
     pub request_timeout_ms: u64,
+    /// 后台轮询间隔，单位为毫秒，必须留出请求和证据时效预算。
     pub poll_interval_ms: u64,
+    /// 无人使用的服务观察保留时长，单位为毫秒。
     pub idle_timeout_ms: u64,
+    /// 共享发现证据的年龄上限与异常宽限。
     pub snapshot: SnapshotPolicy,
+    /// 连接准备失败时的重试退避预算。
     pub retry: RetryPolicy,
+    /// Nacos 专用配置，只有 Nacos 后端可以使用。
     #[serde(deserialize_with = "optional_unique_value")]
     pub nacos: Option<serde_json::Value>,
+    /// Consul 专用配置，只有 Consul 后端可以使用。
     #[serde(deserialize_with = "optional_unique_value")]
     pub consul: Option<serde_json::Value>,
+    /// Kubernetes 只读发现配置，不授予 Service 或 EndpointSlice 写入权。
     #[serde(deserialize_with = "optional_unique_value")]
     pub kubernetes: Option<serde_json::Value>,
+    /// 静态实例映射；配置文件中的键为 static。
     #[serde(rename = "static")]
     pub static_config: Option<StaticConfig>,
+    /// DNS 服务映射，不支持服务注册。
     pub dns: Option<DnsConfig>,
+    /// 该连接的 REST 调用策略，与其他 qualifier 的调用预算隔离。
     pub rest: Option<RestPolicy>,
 }
 
@@ -59,12 +79,19 @@ pub struct ConnectionConfig {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RestPolicy {
+    /// 一次请求的最大耗时，单位为毫秒。
     pub request_timeout_ms: u64,
+    /// HTTP 建连预算，单位为毫秒，不得超过请求总预算。
     pub connect_timeout_ms: u64,
+    /// 实例选择策略，可使用 round_robin 或 weighted。
     pub lb_strategy: String,
+    /// 发现实例的 HTTP 协议，只接受 http 或 https。
     pub instance_scheme: String,
+    /// 是否允许 GET/HEAD 在传输错误后按剩余预算重试。
     pub retry_get_head_on_transport_error: bool,
+    /// 是否允许 GET/HEAD 在可重试响应状态后重试。
     pub retry_get_head_on_retryable_status: bool,
+    /// 一次逻辑请求允许的总尝试次数，包含首次调用。
     pub max_attempts: usize,
 }
 impl Default for RestPolicy {
@@ -102,10 +129,13 @@ impl RestPolicy {
     }
 }
 
+/// 发现证据的有效期与查询异常后的有限宽限，单位为毫秒。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SnapshotPolicy {
+    /// 发现证据的最大年龄，单位为毫秒。
     pub max_age_ms: u64,
+    /// 查询异常后的旧证据宽限，单位为毫秒；零表示禁止异常复用。
     pub stale_if_error_ms: u64,
 }
 impl Default for SnapshotPolicy {
@@ -120,10 +150,13 @@ impl Default for SnapshotPolicy {
     }
 }
 
+/// 连接准备失败后的有限退避策略，单位为毫秒。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetryPolicy {
+    /// 连接恢复的初始退避，单位为毫秒。
     pub initial_backoff_ms: u64,
+    /// 连接恢复退避的上限，单位为毫秒。
     pub max_backoff_ms: u64,
 }
 impl Default for RetryPolicy {
@@ -161,43 +194,64 @@ impl Default for ConnectionConfig {
     }
 }
 
+/// 由配置提供的固定实例集合，不向注册中心写入。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticConfig {
+    /// 按逻辑服务名绑定的目标，不接受重复键。
     #[serde(deserialize_with = "unique_map")]
     pub services: BTreeMap<String, Vec<Instance>>,
 }
+/// 逻辑服务到 DNS 名称和端口的显式映射。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
+    /// 按逻辑服务名绑定的目标，不接受重复键。
     #[serde(deserialize_with = "unique_map")]
     pub services: BTreeMap<String, DnsTarget>,
 }
+/// DNS 查询目标；端口由配置确定，不从名称推断。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsTarget {
+    /// 需要解析的 DNS 主机名。
     pub host: String,
+    /// 目标监听端口；注册配置省略时由 listener_ref 解析。
     pub port: u16,
 }
 
+/// 单个服务发布目标及其启动、健康回查和摘流策略。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RegistrationConfig {
     /// 发布目标的 qualifier；Rust 字段保留兼容名称，配置序列化使用 qualifier。
     #[serde(rename = "qualifier", alias = "connection_ref")]
     pub connection_ref: String,
+    /// 发布到目标后端的服务名称，必须存在对应服务绑定。
     pub service_name: String,
+    /// 对外可达地址；注册配置可显式覆盖宿主监听地址。
     pub ip: Option<String>,
+    /// 目标监听端口；注册配置省略时由 listener_ref 解析。
     pub port: Option<u16>,
+    /// 宿主已绑定监听器的引用，用于解析未显式指定的地址与端口。
     pub listener_ref: Option<String>,
+    /// 宿主本地业务资格引用，控制是否允许发布实例。
     pub eligibility_ref: Option<String>,
+    /// 随注册写入的实例属性，不得携带凭据。
     pub metadata: HashMap<String, String>,
+    /// 是否要求启动阶段确认成功；失败时阻止宿主完成启动。
     pub startup_required: bool,
+    /// 远端注册失去有效健康证据时是否影响宿主整体就绪。
     pub readiness_critical: bool,
+    /// 注册健康回查间隔，单位为毫秒。
     pub monitor_interval_ms: u64,
+    /// 注册健康证据的有效窗口，单位为毫秒。
     pub observation_grace_ms: u64,
+    /// 单项注销预算，单位为毫秒，仍受宿主关闭总期限限制。
     pub deregister_timeout_ms: u64,
+    /// Nacos 专用配置，只有 Nacos 后端可以使用。
     pub nacos: Option<NacosRegistration>,
+    /// Consul 专用配置，只有 Consul 后端可以使用。
     #[serde(deserialize_with = "optional_unique_value")]
     pub consul: Option<serde_json::Value>,
 }
@@ -226,11 +280,15 @@ impl Default for RegistrationConfig {
     }
 }
 
+/// Nacos 注册专用属性，不用于其他后端。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NacosRegistration {
+    /// 是否发布 Nacos 临时实例，由客户端维持其存活。
     pub ephemeral: bool,
+    /// Nacos 实例所属集群名称。
     pub cluster_name: String,
+    /// Nacos 实例选择权重。
     pub weight: f64,
 }
 impl Default for NacosRegistration {
@@ -249,7 +307,9 @@ impl Default for NacosRegistration {
 /// 宿主已绑定 listener 的事实；代理映射地址由 registration 的 ip/port 显式覆盖。
 #[derive(Clone)]
 pub struct ListenerEndpoint {
+    /// 对外可达地址；注册配置可显式覆盖宿主监听地址。
     pub ip: String,
+    /// 目标监听端口；注册配置省略时由 listener_ref 解析。
     pub port: u16,
 }
 

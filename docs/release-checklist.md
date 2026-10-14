@@ -5,7 +5,7 @@
 ## 仓库内容
 
 - [ ] 根目录保留双许可证说明 `LICENSE`；每个公开归档包含完整的 `LICENSE-MIT`、`LICENSE-APACHE`
-      和 `NOTICE`，与 manifest 的 `MIT OR Apache-2.0` 一致，不能只携带指向仓库外文件的说明。
+      和 `NOTICE`，与 manifest 的 `MIT OR Apache-2.0` 一致；Apache-2.0 单许可组件携带完整 `LICENSE` 与 `NOTICE`。不能只携带指向仓库外文件的说明，也不能为上游代码增加未授权许可。
 - [ ] 根 README 能索引全部组件，组件 README 均包含用途、接入、初始化、yml 和主要边界。
 - [ ] 从业务使用者视角逐项说明解决的问题、核心价值、运行架构、安全与顺序不变量、非目标和观测方式；
       不能用零散指标、API 名称或一句实现摘要代替核心能力的独立说明。

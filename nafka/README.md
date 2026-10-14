@@ -6,6 +6,8 @@ passthrough。
 可选 Schema Registry 能力在同一门面下提供 Confluent wire envelope、schema ID 白名单、
 有界正负缓存以及显式兼容性检查/注册，把消息编解码所需的远端 schema 访问与 Kafka 生命周期解耦。
 
+当前公开配置结构、错误类型和默认策略要求调用方完成源码与配置迁移；`2.0.3` 不能按补丁号推断源码兼容。迁移动作见[接入与升级](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/migration.md#kafka-源码与配置迁移)。
+
 ## 核心价值与边界
 
 每个 `KafkaProxy` 绑定一个命名源，多个实例可在同一进程连接不同集群；受管应用通过 `kafkas.<name>` 装配，并使用 `app.kafka(name)` 获取绑定该源的业务句柄。JSON 事件、key、有序 header、DLT 来源字段与持久任务格式对应 Java `nasa-kafka`。
@@ -57,7 +59,7 @@ Java `KafkaClients` / `KafkaHandle` 与 Rust 的命名 `KafkaProxy` / Applicatio
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.2", features = ["kafka"] }
+nasa = { version = "2.0.3", features = ["kafka"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -240,7 +242,7 @@ Service 同时开启 `application` 与 `kafka` 后，可以把 Kafka 声明成�
 `connect`、registry start、broker Ready 或 shutdown：
 
 ```toml
-nasa = { version = "2.0.2", features = ["application", "kafka", "web"] }
+nasa = { version = "2.0.3", features = ["application", "kafka", "web"] }
 ```
 
 ```rust
@@ -1708,7 +1710,7 @@ Kafka header 只表达逻辑路由和消息元数据，不能指定任意 IP、h
 TLS/SCRAM 使用 `nasa` 的 `kafka-tls` feature：
 
 ```toml
-nasa = { version = "2.0.2", features = ["kafka-tls"] }
+nasa = { version = "2.0.3", features = ["kafka-tls"] }
 ```
 
 ```yaml
