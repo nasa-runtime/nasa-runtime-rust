@@ -22,9 +22,9 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
-nanacos = { version = "2.0.3", path = "../nanacos", optional = true, default-features = false, features = ["managed"] }
-nadisc-consul = { version = "1.0.0", path = "../nadisc-consul", optional = true }
-nadisc-kubernetes = { version = "1.0.0", path = "../nadisc-kubernetes", optional = true }
+nanacos = { version = "2.0.3", optional = true, default-features = false, features = ["managed"] }
+nadisc-consul = { version = "1.0.0", optional = true }
+nadisc-kubernetes = { version = "1.0.0", optional = true }
 
 [features]
 default = []
