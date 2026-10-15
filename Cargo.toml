@@ -93,5 +93,4 @@ keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
-napp = { path = "napp" }
 nasa = { path = "nasa" }
