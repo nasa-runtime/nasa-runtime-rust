@@ -94,12 +94,8 @@ categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
 nafana = { path = "nafana" }
-nafka = { path = "nafka" }
 nagrpc = { path = "nagrpc" }
-nanacos = { path = "nanacos" }
 rest-discovery = { path = "rest-discovery" }
-nadisc-consul = { path = "nadisc-consul" }
-nadisc-kubernetes = { path = "nadisc-kubernetes" }
 nadisc-runtime = { path = "nadisc-runtime" }
 rest-discovery-nacos = { path = "rest-discovery-nacos" }
 napp = { path = "napp" }
