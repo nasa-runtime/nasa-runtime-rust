@@ -244,6 +244,25 @@ controller 在启动时冻结配置，不订阅运行期配置变更；观测配
 `instance_id` 改用 `platform-controller`，不借用 Pod UID。secret 材料只解析选中的 Grafana 声明及其
 config_path 引用，不读取数据库或通知的 secret fragment。配置中心开启时，controller 需单独获得其只读凭据。
 
+### 采集配置生成与发布
+
+Compose 的 DNS SD 配置先由 `discovery_config` 构造为 `serde_json::Value`，再交给
+`naml::yaml::to_string` 编码。该阶段保留字段类型、特殊字符与原始字符串，不重新执行环境替换、
+占位符或 imports，也不解析和合并目标文件中的人工配置。
+
+```text
+有效应用配置 → 采集配置值树 → naml 完整编码 → 复验 owner
+       → 写入同目录临时文件并 rename → 再次复验 owner → Prometheus reload
+```
+
+默认预算为深度 64、节点 100000、单字符串或键一 MiB、累计文本与 YAML 输出三十二 MiB；
+转义后的实际字节同样计费，文件头的 owner 标记由 controller 另行添加。
+目标存在时必须带当前 owner 标记，无标记或属于其他 owner 的文件不会被覆盖。
+编码失败不会进入文件写入；后续 I/O、失权或 reload 失败均报告本轮调和失败。
+rename 成功后的文件不会因 reload 失败自动回滚，因此文件存在不代表 Prometheus 已采用内容。
+controller 后续按相同身份继续调和，部署方应同时检查 controller 错误和 Prometheus 的实际采集状态。
+YAML 值模型、预算与错误边界见 [naml 文档合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md#外部-yaml-文档读写)。
+
 ### 平台 binding
 
 平台 binding 可以位于同一 YAML 的 `provisioning.bindings`，或由平台注入等价环境变量：

@@ -3,7 +3,7 @@
 # 业务项目优先依赖 nasa 门面并开启 grafana feature;内部迁移可直接依赖 nafana 包。
 [package]
 name = "nafana"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "接口隔离监控、YAML 统一指标出口、集群 Dashboard 与独立单 owner 平台 controller"
@@ -43,9 +43,8 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 zeroize = "1"
-serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 nasecret = { version = "2.0.0" }
-naml = { version = "2.0.0" }
+naml = { version = "2.0.2" }
 config-boot = { version = "2.0.0" }
 nanacos = { version = "2.0.0", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

@@ -139,6 +139,15 @@ Replay、单目标 Transfer 和 DLT 回投使用共同持久格式，可与 Java
 
 ## 配置、身份与观测
 
+YAML 的组件边界统一在 `naml`：配置加载器与 `naml::yaml` 共用有界事件解析，分别承担配置装配
+和协议文档读写。`nasa/yml` 重导出这两类入口，`nadisc-kubernetes` 用文档入口读取 kubeconfig，
+`nafana-controller` 用加载器取得有效应用配置，再用文档编码器生成 Prometheus 配置。
+
+协议文档入口不访问文件或环境，不执行 imports；原始键、字符串与值类型保持独立于配置路径和
+表达式语义。调用方固定输入、文本、节点与深度预算，别名按复制成本计费，失败不交付部分结果。
+naml 不拥有认证客户端、目标文件或 Prometheus 的发布权：认证适配器校验材料，controller 完成
+owner 复验、文件替换与 reload。文件发布与后端采用是两个确认时刻，reload 失败不自动撤销文件。
+
 严格配置通过启动前工厂显式选择，分为三个所有者：`naml` 生成有界配置候选和来源解释，
 `config-boot` 提供按声明匹配的 Nacos 文本，`napp` 负责材料、观察集和运行态发布。
 主文件、profile、有序 imports、环境覆盖完成后才求值业务表达式；远端首拉之前只求值必要引导依赖。

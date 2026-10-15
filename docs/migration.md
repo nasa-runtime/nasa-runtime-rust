@@ -121,6 +121,22 @@ Nacos 的受管 HTTP adapter 要求 Nacos 3，不能把 SDK 的服务端兼容�
 热更新同时检查来源观察序号、配置快照版本和组件状态。`ApplyFailed` 不因无关或同值重读自动清除，
 同值候选可能被去重；资源条件恢复后可重启重新装配。详见[运维指南](operations.md#配置刷新)。
 
+## 选择 YAML 文档入口
+
+应用配置继续使用 `nasa::yml::YmlLoader` 或显式严格加载器；外部协议文档使用
+`nasa::yml::yaml::{from_slice, to_string}`，两者均由 `yml` feature 提供。组件内部使用 `naml`
+的对应入口，无需业务另选解析后端。自定义预算使用 `from_slice_with_limits`、
+`to_string_with_limits` 和 `Limits`；输入及输出的中性值类型为 `serde_json::Value`。
+
+接入文档读写时，确认来源是单个 UTF-8 文档，键为字符串；删除重复键，将 merge key 展开为
+明确字段，移除未知标签。普通锚点和别名在预算内可用。整数须在 `i64`/`u64` 范围，小数须为有限
+`f64`；需要原始拼写或超出数值范围的业务标识应显式写成字符串。编码不保留注释、排版或锚点名称。
+
+外部文档中的点号、方括号和空字符串键按原文保留，`${...}` 与 imports 不会执行；不能据此推断
+严格配置也接受这些键。调用方负责将返回的完整值交给协议校验，并在文件替换或外部 reload 前
+完成权限检查。示例与预算见 [门面文档入口](../nasa/README.md#外部-yaml-文档)；kubeconfig 的更小
+限额及凭据规则见 [Kubernetes 认证](../nadisc-kubernetes/README.md#kubeconfig-文档边界)。
+
 ## 核对持久状态与重试
 
 升级二进制前应确认运行中的 schema、消息保留窗口、Saga 定义、身份和已有业务实例能被目标配置读取。

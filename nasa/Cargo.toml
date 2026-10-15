@@ -149,7 +149,7 @@ log = ["dep:log_impl", "application_impl?/log"]
 # 启用 base 即引入 nabase 的完整依赖和公开模块，不再拆分日期子 feature。
 base = ["dep:base_impl"]
 
-# 通用分层 YAML 配置加载器由 naml 提供。
+# 有界 YAML 文档读写与分层配置加载器统一由 naml 提供。
 # 本地主配置 + profile + overlay(含 Nacos 多配置)+ env + ${} 占位符 → 强类型 T;不认识业务 AppConfig。
 # 「按 import 调 Nacos 拉取拼 overlay」的胶水在门面层(yml 本身零 Nacos 依赖)。
 yml = ["dep:yml_impl"]
@@ -278,7 +278,7 @@ application_impl = { package = "napp", path = "../napp", version = "2.0.3", opti
 application_macro = { package = "napp-macro", version = "2.0.3", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
-grafana_impl = { package = "nafana", version = "2.0.0", optional = true }
+grafana_impl = { package = "nafana", version = "2.0.1", optional = true }
 grafana_macro = { package = "nafana-macro", version = "2.0.0", optional = true }
 cache_impl = { package = "cacheable", version = "2.0.0", optional = true }
 nacache_macro = { package = "nacache-macro", version = "2.0.0", optional = true }
@@ -325,7 +325,7 @@ crypto_impl = { package = "ncrypto", version = "2.0.0", optional = true }
 numeric_impl = { package = "nanum", version = "2.0.0", optional = true }
 log_impl = { package = "nalog", version = "2.0.0", optional = true }
 base_impl = { package = "nabase", version = "2.0.0", optional = true }
-yml_impl = { package = "naml", version = "2.0.1", optional = true }
+yml_impl = { package = "naml", version = "2.0.2", optional = true }
 config_boot_impl = { package = "config-boot", version = "2.0.1", optional = true }
 image_impl = { package = "naimg", version = "2.0.0", optional = true }
 discovery_impl = { package = "nadisc", version = "2.0.3", optional = true }

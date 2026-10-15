@@ -18,7 +18,8 @@ Named Nacos, Consul, Kubernetes and Static/DNS connections isolate registry cred
 and failures. Select internal calls with `qualifier`, use complete URLs for internet APIs, and keep
 registration and shutdown under one owner. The default connection name is lowercase `primary`.
 
-The `yml` feature provides nested defaults, ordered filename imports and explainable configuration
+The `yml` feature uses `naml` for bounded YAML reading, encoding and configuration assembly. Protocol
+documents use [`nasa::yml::yaml`](#external-yaml-documents). Configuration supports nested defaults, ordered filename imports and explainable
 candidates. A strict factory connects fixed source permissions, observation and application state
 to the same host. See [Strict configuration assembly](#strict-configuration-assembly).
 
@@ -129,6 +130,38 @@ For example, declare `"db"` for managed database resources. Declaring `"saga"` i
 and Outbox, while transport remains explicit. `mapper`, `hystrix` and `grafana` are not component strings.
 The [complete feature matrix](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md#feature-总表)
 is currently in Chinese.
+
+## External YAML documents
+
+Enable `yml` to use the bounded `naml` document API through `nasa::yml::yaml`. No separate YAML library
+is required. Kubernetes authentication files and Prometheus scrape configuration use the same API;
+application configuration evaluation uses the loaders described in the next section.
+
+```toml
+[dependencies]
+nasa = { version = "2.0.3", features = ["yml"] }
+```
+
+```rust
+use nasa::yml::yaml::{from_slice_with_limits, to_string_with_limits, Limits};
+
+let limits = Limits {
+    input_bytes: 1024 * 1024,
+    output_bytes: 1024 * 1024,
+    ..Default::default()
+};
+let document = from_slice_with_limits(b"service.name: orders\ntoken: ${TOKEN}\n", &limits)?;
+let encoded = to_string_with_limits(&document, &limits)?;
+```
+
+`document` is a `serde_json::Value`. The key `service.name` and the string `${TOKEN}` remain literal;
+reading does not access the environment, execute imports or open files. Mapping, sequence and scalar
+roots are accepted within a single UTF-8 document. Duplicate keys, merge keys, unknown tags and exceeded
+limits are rejected; alias expansion consumes the budget. Numbers are limited to `i64`/`u64` and finite `f64`.
+Encoding preserves values and types, without retaining comments, layout or anchor names. Failures return
+`nasa::yml::strict::ConfigError` without a partial document. The caller owns file permissions, atomic
+replacement and external reload. See the [naml document contract](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md#外部-yaml-文档读写)
+for default budgets and detailed type rules.
 
 ## Strict configuration assembly
 

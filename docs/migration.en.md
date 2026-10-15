@@ -146,6 +146,25 @@ For reloads, inspect source observation revisions, snapshot versions and compone
 Restart to assemble resources again after their conditions recover. The detailed
 [operations reference](operations.md#配置刷新) is in Chinese.
 
+## Select the YAML document API
+
+Application configuration uses `nasa::yml::YmlLoader` or an explicit strict loader. Protocol documents
+use `nasa::yml::yaml::{from_slice, to_string}`; both are available through the `yml` feature. Components
+use the corresponding `naml` API, so applications need no separate parser backend. Custom budgets use
+`from_slice_with_limits`, `to_string_with_limits` and `Limits`. The neutral value type is `serde_json::Value`.
+
+Inputs must be single UTF-8 documents with string keys. Remove duplicate keys, expand merge keys into
+explicit fields and remove unknown tags. Ordinary anchors and aliases are available within budgets.
+Integers must fit `i64`/`u64`; decimals must fit finite `f64`. Use explicit strings for business identifiers
+that require their original spelling or exceed the numeric range. Encoding does not retain comments,
+layout or anchor names.
+
+Protocol documents retain dots, brackets and empty string keys literally and do not evaluate `${...}`
+or imports. Strict configuration has its own key restrictions. The caller validates the complete
+document against its protocol and checks permissions before file replacement or external reload.
+See the [facade example](../nasa/README.en.md#external-yaml-documents) and the smaller limits and credential
+rules for [Kubernetes authentication](../nadisc-kubernetes/README.md#kubeconfig-文档边界).
+
 ## Check durable state and retry semantics
 
 Before changing a deployed binary, establish that its target configuration can read the existing

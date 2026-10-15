@@ -93,6 +93,8 @@ keywords = ["runtime", "backend", "microservices", "async"]
 categories = ["asynchronous", "web-programming"]
 
 [patch.crates-io]
+naml = { path = "naml" }
+nafana = { path = "nafana" }
 nadisc = { path = "nadisc" }
 nanacos-sdk = { path = "nanacos-sdk" }
 nafka-macro = { path = "nafka-macro" }

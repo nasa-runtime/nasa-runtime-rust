@@ -64,6 +64,20 @@ auth:
 
 不搜索用户默认 kubeconfig，不执行 exec/auth-provider，不使用 impersonation、环境代理、跳过 TLS 验证或隐式认证回退。kubeconfig 支持 token、tokenFile 或客户端证书/私钥，三者只选一种；CA 必须明确配置。路径相对 kubeconfig 所在目录解析。集群内使用标准 ServiceAccount token 与 CA 挂载；既定 tokenFile 每次请求重新读取，支持轮换，文件须是最多一 MiB 的普通文件。认证材料不进入诊断。
 
+### kubeconfig 文档边界
+
+kubeconfig 统一通过 `naml::yaml` 读取，只接受单个 UTF-8 文档，可含 BOM；重复键、merge key、
+未知 tag 和解析超限均拒绝。字符串键按原文保留，字段中的点号不会变为配置路径；不执行 YAML
+外部文件包含、环境覆盖或占位符。`token: ${TOKEN}` 因而不会读取环境变量，轮换凭据应使用既定
+`tokenFile`。CA、证书及私钥的显式文件字段仍由认证适配器按上述来源规则读取。
+
+普通锚点与别名可用，正文和累计文本分别最多一 MiB，单字符串最多一 MiB，解析深度最多 64 层、
+节点最多 100000 个；锚点保存和别名展开均计费。解析失败报告脱敏的 `InvalidConfig`，不会用部分
+文档创建认证客户端，诊断不包含认证正文。共用的值类型和标签规则见
+[naml 文档合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md#外部-yaml-文档读写)。
+
+### 认证失效与运行期观察
+
 运行期 tokenFile 缺失、不可读、变成非普通文件、超过容量或读取期间增长越界，以及 token 为空、编码非法或不能形成合法认证头，统一作为 `Unauthenticated` 撤销本连接全部目标的旧发现资格。恢复合法文件后，需要新的完整观察才能重新接流，不沿用先前身份的证据；其他连接保持独立。启动时 kubeconfig、CA 与静态绑定的配置校验仍按各自配置语义报告错误。
 
 默认 `request_timeout_ms=3000`、`watch_timeout_ms=30000`、`max_response_bytes=4194304`、`max_instances=4096`、`page_size=250`。`address_family` 为 `ipv4`、`ipv6` 或默认 `both`；协议仅 TCP，必须命中明确端口名。其余连接时效由公共 runtime 配置，不另加 watcher 缓存宽限。配置与认证来源变更要求重启，既定 token 文件轮换除外。

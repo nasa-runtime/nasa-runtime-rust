@@ -1,11 +1,11 @@
-# naml 只处理通用配置来源、分层合并、占位符和强类型反序列化。
+# naml 统一提供有界 YAML 文档读写、通用配置来源、分层合并、占位符和强类型反序列化。
 # 远端配置由调用方作为内存 overlay 提供；本 crate 不连接配置中心，也不发布业务配置。
 [package]
 name = "naml"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
-description = "分层配置加载器，支持嵌套表达式、自然排序导入、来源追踪、有界读取与目录观察"
+description = "有界 YAML 读写与分层配置加载器，支持嵌套表达式、自然排序导入、来源追踪与目录观察"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -23,14 +23,18 @@ watch = ["dep:notify"]
 [dependencies]
 nabase = { package = "nabase", version = "2.0.0" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 # 分层配置合并器：本地文件、profile、内存 overlay 与环境变量按叶子级深合并。
 # 格式由 file_extension 决定：支持 yaml/json/toml，其它格式 fail-fast 而不猜测。
 config = { version = "0.15", default-features = false, features = ["yaml", "json", "toml"] }
 anyhow = "1"
 tracing = "0.1"
 notify = { version = "8.2", optional = true }
+# 标量浮点识别沿用既有规则；文档事件由 granit-parser 提供。
 yaml-rust2 = "0.11"
+granit-parser = { version = "2.0.0", default-features = false }
+# 底层序列化器仅用于 YAML 编码；文档读取共用有界事件解析器。
+serde-saphyr = { version = "2", default-features = false, features = ["serialize"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 serde_path_to_error = "0.1"
 sha2 = "0.10"

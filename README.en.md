@@ -18,6 +18,8 @@ Named Nacos, Consul, Kubernetes and Static/DNS connections isolate registry cred
 and failures. Select internal calls with `qualifier`, use complete URLs for internet APIs, and keep
 registration and shutdown under one owner. The default connection name is lowercase `primary`.
 
+`naml` provides one bounded YAML API for application configuration, kubeconfig and Prometheus documents,
+with separate rules for configuration evaluation and literal protocol values. See [Unified YAML access](#unified-yaml-access).
 Configuration assembly supports nested defaults, naturally ordered filename imports and bounded,
 explainable candidates. Source observations remain separate from component application state; rejected
 candidates preserve the current view. See [Strict configuration assembly](#strict-configuration-assembly).
@@ -166,6 +168,26 @@ nasa = { version = "2.0.3", default-features = false, features = ["application",
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,
 startup command and HTTP requests. It uses crates.io dependencies and does not require a local
 checkout of this workspace or any database, Redis or Nacos service.
+
+## Unified YAML access
+
+Enable `nasa/yml` to access configuration loaders and document encoding through `nasa::yml`.
+Components delegate YAML parsing and encoding to `naml`; Kubernetes authentication and the observability
+controller use the same public document API.
+
+| Use | Entry | Permissions and failure behavior |
+| --- | --- | --- |
+| Application configuration | `YmlLoader` or `strict::ConfigLoader` | Merge sources, apply environment overlays and evaluate expressions; strict loading fixes source permissions and rejects incomplete candidates |
+| Protocol documents | `yaml::from_slice` / `yaml::to_string` | Preserve original string keys in `serde_json::Value`; no imports, environment substitution or filesystem access |
+| kubeconfig | Explicit `nadisc-kubernetes` authentication source | Input and cumulative text are limited to one MiB; parsing failure prevents authentication client creation |
+| Prometheus scrape configuration | `nafana-controller` | Encode fully, revalidate the owner, replace the managed file and request reload; encoding failure publishes no partial document |
+
+Reading accepts one UTF-8 document and charges alias expansion against resource limits. Duplicate keys,
+merge keys, unknown tags and exceeded limits are rejected. Protocol documents may have scalar or sequence
+roots; strict configuration requires a mapping and rejects ambiguous path keys. Encoding preserves values
+and types, without preserving comments, layout or anchor names or providing arbitrary-precision numbers.
+Errors omit document contents; callers still control access to diagnostic fields. See the
+[document contract](naml/README.md#外部-yaml-文档读写) for budgets, numeric ranges and string handling.
 
 ## Strict configuration assembly
 

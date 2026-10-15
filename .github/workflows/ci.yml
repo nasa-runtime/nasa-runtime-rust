@@ -26,7 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 发布编译使用 manifest 声明的工具链，保持 feature 门禁与 MSRV 的告警语义一致。
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p nafka --no-default-features
       - run: cargo check -p nafka --features tls
@@ -63,7 +64,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 两种 Linux 架构使用同一声明工具链，避免编译器漂移改变发布合同。
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

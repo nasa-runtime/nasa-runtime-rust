@@ -9,7 +9,8 @@
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
 并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
 
-`yml` 提供嵌套默认值、有序通配符导入和可解释的配置候选；严格工厂把来源权限、观察与
+`yml` 通过 `naml` 统一提供有界 YAML 读写与配置装配，外部协议文档使用
+[`nasa::yml::yaml`](#外部-yaml-文档)。配置支持嵌套默认值、有序通配符导入和可解释的候选；严格工厂把来源权限、观察与
 运行时应用状态纳入同一宿主。见[严格配置装配](#严格配置装配)。
 从 [最小服务](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/quickstart.md#最小可运行服务)
 开始，或阅读 [架构说明](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/architecture.md)
@@ -514,6 +515,35 @@ Batch 在工作负载前完成装配，不要求启动 Web。feature 名称以�
 停机由所属 owner 撤销准入并等待在途工作，旧受管句柄不能重新开放。诊断快照不发起后端探测；
 构造成功也不等于远端健康。各能力的健康策略、容量、事务与取消边界仍按组件合同执行。
 
+## 外部 YAML 文档
+
+启用 `yml` 后，`nasa::yml::yaml` 导出 `naml` 的有界文档读写，不需要另外依赖 YAML 解析库。
+Kubernetes 认证文件与 Prometheus 采集配置也使用该入口。应用配置求值使用下节的加载器。
+
+```toml
+[dependencies]
+nasa = { version = "2.0.3", features = ["yml"] }
+```
+
+```rust
+use nasa::yml::yaml::{from_slice_with_limits, to_string_with_limits, Limits};
+
+let limits = Limits {
+    input_bytes: 1024 * 1024,
+    output_bytes: 1024 * 1024,
+    ..Default::default()
+};
+let document = from_slice_with_limits(b"service.name: orders\ntoken: ${TOKEN}\n", &limits)?;
+let encoded = to_string_with_limits(&document, &limits)?;
+```
+
+`document` 为 `serde_json::Value`；`service.name` 保留为完整键，`${TOKEN}` 保留为字符串，
+不会访问环境、执行 imports 或打开文件。允许映射、数组和标量根，读取只接受单个 UTF-8 文档，
+拒绝重复键、merge key、未知标签和超限，普通别名展开计入预算。数字限定为 `i64`/`u64` 与有限 `f64`。
+编码保留值和类型，不保留注释、排版或锚点名称；错误使用 `nasa::yml::strict::ConfigError`，
+不返回半份正文。目标文件权限、原子替换和外部重载由调用方负责。默认预算与详细类型规则见
+[naml 文档合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md#外部-yaml-文档读写)。
+
 ## 严格配置装配
 
 `yml` 导出 `nasa::yml::strict`，提供有界内存/文件装配、嵌套默认值、自然排序的文件名通配符、
@@ -616,7 +646,7 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 | `ws-client` | `nasa::ws`；与 `application` 组合时含命名发送句柄 | 原生 TCP 帧 Client，按 `ws_clients` 管理首连、启动许可、重连健康和退出；不启动入站 listener |
 | `ws-redis` / `ws-socketio` / `ws-kafka` | `nasa::ws` | 长连接集群与协议子能力 |
 | `log` | `nasa::log` | tracing、滚动文件和级别热切 |
-| `yml` | `nasa::yml` | 分层 YAML、overlay、环境变量和占位符 |
+| `yml` | `nasa::yml` | 有界 YAML 文档读写、分层配置、overlay、环境变量和占位符 |
 | `yml-watch` | `nasa::yml::watch` | 精确文件变化观察；同时启用 `yml` |
 | `config-boot` / `nacos-config` | `nasa::yml::nacos` | 配置中心引导与应用组件桥 |
 | `discovery` | `nasa::discovery` | 静态/DNS/provider-neutral 发现合同 |

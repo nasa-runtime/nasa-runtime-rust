@@ -12,6 +12,8 @@
 //! 可以使用 [`metrics`]。[`observability`] 提供冻结身份、共享配置、Dashboard 与平台边界。
 //! controller 独立持有平台写权限，业务副本只持有指标数据面凭据。remote write 失联规则只引用
 //! 外部平台持续提供的期望实例指标，不维护库存，也不从应用心跳推断实例本应在线。
+//! controller 的配置装配与 Prometheus YAML 编码统一使用 naml。完整编码后复验 owner，
+//! 再原子替换受管文件并复验后请求 reload；编码失败不写文件，reload 失败不回滚已经替换的文件。
 #![recursion_limit = "512"]
 
 mod command;

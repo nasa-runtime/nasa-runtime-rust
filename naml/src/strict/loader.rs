@@ -778,7 +778,7 @@ impl Merged {
         self.add_parsed(document, parsed);
         Ok(())
     }
-    /// 业务作用：让所有文件和内存来源共同消耗数量及字节预算。
+    /// 业务作用：让所有文件和内存来源共同消耗输入及实际解析预算，覆盖不退还此前消耗。
     /// 参数说明：`document` 为下一来源；`policy` 是共享限制。
     /// 返回：通过预算和严格解析的文档。
     fn parse(&mut self, document: &SourceDocument, policy: &LoadPolicy) -> Result<ParsedDocument> {
@@ -789,29 +789,21 @@ impl Merged {
         if self.bytes > policy.limits.total_bytes || self.records.len() >= policy.limits.sources {
             return Err(ConfigError::new(ErrorKind::Limit));
         }
-        let parsed = document.parse(self.records.len(), policy)?;
-        let mut nodes = vec![parsed.tree()];
-        while let Some(value) = nodes.pop() {
-            self.parsed_nodes = self.parsed_nodes.saturating_add(1);
-            match value {
-                Value::Object(map) => {
-                    self.parsed_text = self
-                        .parsed_text
-                        .saturating_add(map.keys().map(String::len).sum::<usize>());
-                    nodes.extend(map.values());
-                }
-                Value::Array(list) => nodes.extend(list),
-                Value::String(text) => {
-                    self.parsed_text = self.parsed_text.saturating_add(text.len())
-                }
-                _ => {}
-            }
-            if self.parsed_nodes > policy.limits.nodes
-                || self.parsed_text > policy.limits.output_bytes
-            {
-                return Err(ConfigError::new(ErrorKind::Limit).in_source(parsed.source_id));
-            }
-        }
+        // 把已有消耗交给下一来源，在解析期间拒绝超限；结果树不能反推出原数值文本或锚点副本成本。
+        let parsed = document.parse_with_prior(
+            self.records.len(),
+            policy,
+            self.parsed_nodes,
+            self.parsed_text,
+        )?;
+        self.parsed_nodes = self
+            .parsed_nodes
+            .checked_add(parsed.parsed_nodes)
+            .ok_or_else(|| ConfigError::new(ErrorKind::Limit).in_source(parsed.source_id))?;
+        self.parsed_text = self
+            .parsed_text
+            .checked_add(parsed.parsed_text)
+            .ok_or_else(|| ConfigError::new(ErrorKind::Limit).in_source(parsed.source_id))?;
         Ok(parsed)
     }
     /// 业务作用：合并已验证文档并保留字段覆盖来源。

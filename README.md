@@ -13,6 +13,8 @@ Kafka 能力提供与 Java `nasa-kafka` 对应的多数据源事件运行时：�
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
 并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
 
+YAML 统一由 `naml` 提供有界读写，应用配置与 kubeconfig、Prometheus 等协议文档共用解析规则，
+区分配置表达式求值与外部文档的字面值。见[统一 YAML 入口](#统一-yaml-入口)。
 配置装配支持嵌套默认值和自然排序的文件名导入，固定环境与来源权限后生成可解释候选；
 来源观察和组件应用状态分开记录，错误候选保留当前可用视图。详见[严格配置装配](#严格配置装配)。
 
@@ -824,6 +826,23 @@ nasa = { version = "2.0.3", features = ["hystrix", "cache", "ws-redis", "rest-cl
 Cargo 包坐标不改变业务接口：门面模块仍是 `nasa::base`、`nasa::date`、
 `nasa::image` 等。
 
+## 统一 YAML 入口
+
+启用 `nasa/yml` 后，业务通过 `nasa::yml` 使用 `naml` 的配置加载器和文档读写入口。
+组件内的 YAML 解析与编码由 `naml` 封装；Kubernetes 认证和观测 controller 使用同一公开合同。
+
+| 使用场景 | 入口 | 权限与失败边界 |
+| --- | --- | --- |
+| 应用配置 | `YmlLoader` 或 `strict::ConfigLoader` | 合并来源、环境覆盖和表达式求值；严格入口固定来源权限，拒绝不完整候选 |
+| 外部协议文档 | `yaml::from_slice` / `yaml::to_string` | 使用 `serde_json::Value` 保留原始字符串键；不执行 imports、环境替换或文件访问 |
+| kubeconfig | `nadisc-kubernetes` 的显式认证来源 | 限制正文与累计文本为一 MiB；解析失败不创建认证客户端 |
+| Prometheus 采集配置 | `nafana-controller` | 完整编码后复验 owner，再替换受管文件并请求 reload；编码失败不发布半份正文 |
+
+读取要求单个 UTF-8 文档，普通别名按展开成本计费；重复键、merge key、未知标签和超限均拒绝。
+外部入口允许数组及标量根，严格配置要求映射根并拒绝含糊路径键。编码保留值和类型，不保留注释、
+排版或锚点名称，也不提供任意精度数字。错误不包含正文，调用方仍须控制诊断字段的展示权限。
+具体预算、数值和字符串合同见 [naml](naml/README.md#外部-yaml-文档读写)。
+
 ## 严格配置装配
 
 `nasa::yml::strict` 把主文件、profile、有序 imports 和固定环境快照装配成完整候选，支持
@@ -997,7 +1016,7 @@ HTTP/1/h2c listener。
 | [nasa](nasa/README.md) | 门面包 | 统一导出所有业务能力 | 不直接读取 yml，按组件配置 |
 | [napp](napp/README.md) | `application` / `rate-limit` | `#[nasa::application]` 生命周期编排，以及显式装配的跨副本 Redis 业务配额 | `application.*` 及各组件配置根；配额参数由业务构造 |
 | [napp-macro](napp-macro/README.md) | `application` | `#[nasa::application(...)]` 属性宏与编译期校验 | 由 `napp` 运行时读取 |
-| [naml](naml/README.md) | `yml` / `yml-watch` | 嵌套表达式、自然排序导入、有界候选、字段来源与目录观察 | `yml.*`、业务自定义根节点 |
+| [naml](naml/README.md) | `yml` / `yml-watch` | 有界 YAML 读写、嵌套表达式、自然排序导入、字段来源与目录观察 | `yml.*`、业务自定义根节点；外部文档不执行配置装配 |
 | [config-boot](config-boot/README.md) | `config-boot` | 启动期读取本地和远端配置 | `nacos.*`、`nacos.imports` |
 | [nanacos](nanacos/README.md) | `nacos` / `nacos-sdk` | Nacos 配置、注册、发现、监听 | `nacos.*` |
 | [nadisc](nadisc/README.md) | `discovery` | 服务发现抽象、实例过滤、watch 契约 | `discovery.*` |

@@ -603,9 +603,10 @@ impl PlatformController {
                         return Err("Prometheus config belongs to another owner".into());
                     }
                 }
-                self.ensure_leader().await?;
-                let encoded = serde_yaml::to_string(&config)
+                let encoded = naml::yaml::to_string(&config)
                     .map_err(|_| "Prometheus config encoding failed")?;
+                // 完整编码后才复验平台写权限；写入前和通知前分别确认，失权后停止后续动作。
+                self.ensure_leader().await?;
                 let temp = path.with_extension(format!("{}.pending", self.holder));
                 std::fs::write(&temp, format!("{marker}{encoded}"))
                     .map_err(|_| "Prometheus config cannot be written")?;

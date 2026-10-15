@@ -18,6 +18,11 @@
 可以使用 `discovery: existing`，保留原采集所有权。Prometheus HA 必须由平台提供去重查询入口。
 
 controller 在判断启用状态前按标准优先级合并主文件、profile、启用的配置中心 imports 和 `APP__` 覆盖；
+配置装配和 Prometheus YAML 编码统一通过 `naml`。平台文件编码保留原始值类型，不再次求值占位符；
+只有完整编码成功且 owner 仍有效时才原子替换文件，随后复验权威并请求 Prometheus reload。
+默认编码预算限制深度 64、节点 100000、单字符串一 MiB、累计文本及输出三十二 MiB；编码失败
+不替换目标文件。文件替换成功与 Prometheus 已加载是两个确认时刻，reload 失败报告本轮调和失败，
+不撤销已写入文件，后续由 controller 继续调和。完整顺序见[采集配置生成](OBSERVABILITY.md#采集配置生成与发布)。
 服务身份与 Grafana 凭据取同一有效树。读取 Nacos 时显式启用 `controller-nacos`，不要求业务指标出口编入该传输。
 remote write 在全部 Ready 静态登记和 initializer 任务工厂构造完成后、出口和业务终端任务开始前核对容量，计入显式预留与已创建
 原生序列，包括 initializer histogram 和 Web 静态源。容量不足时拒绝启动并释放暂存任务。
@@ -66,7 +71,7 @@ axum = "0.8"
 
 ```toml
 [dependencies]
-nafana = "2.0.0"
+nafana = "2.0.1"
 axum = "0.8"
 ```
 

@@ -1,6 +1,8 @@
 //! 只读取显式 namespace 内的 Service 与 EndpointSlice；不注册实例，不读取 Pod、Node 或 Secret。
 //! 公共 owner 按 qualifier 隔离集群身份，默认连接名为 primary。
 //! Service 与 EndpointSlice 联合复验决定候选；权限失效立即撤销旧发送资格。
+//! 显式 kubeconfig 由 naml 有界读取，原始字段不执行环境表达式或 YAML 文件包含。
+//! 正文和累计文本分别最多一 MiB，重复键、未知标签或超限拒绝整个认证配置，错误不回显正文。
 
 mod auth;
 pub use auth::Authentication;

@@ -170,6 +170,19 @@ distinct facts. See the [component architecture](../nafka/README.md#运行架构
 
 ## Configuration, identity and observability
 
+`naml` owns the YAML boundary. Configuration loaders and `naml::yaml` share bounded event parsing,
+with separate contracts for configuration assembly and protocol documents. `nasa/yml` re-exports both.
+`nadisc-kubernetes` reads kubeconfig through the document API; `nafana-controller` uses a loader for
+effective application configuration and the document encoder for Prometheus configuration.
+
+The document API does not access files or environment variables or execute imports. Original keys,
+strings and value types remain independent of configuration paths and expressions. Callers fix input,
+text, node and depth budgets; alias copying is charged and failures return no partial result.
+Authentication clients, target files and Prometheus publication remain with their respective owners:
+the authentication adapter validates materials, while the controller revalidates its authority, replaces
+the file and requests reload. File publication and backend adoption are separate confirmations;
+a reload failure does not automatically undo the file replacement.
+
 Strict configuration is selected through a factory before preflight. Three owners have separate roles:
 `naml` produces bounded candidates and provenance, `config-boot` supplies Nacos text matching the declared
 plan, and `napp` owns material preparation, observation and runtime publication. Business expressions

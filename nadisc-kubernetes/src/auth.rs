@@ -85,7 +85,7 @@ pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
 
 /// 业务作用：只从用户指定的认证模式取得集群地址及证书，不搜索其他 kubeconfig。
 /// 参数说明：`auth` 是冻结的来源，集群内模式使用 Kubernetes 标准挂载。
-/// 返回：尚未创建网络连接的认证材料。
+/// 返回：尚未创建网络连接的认证材料；来源、解析预算或认证约束不满足时拒绝加载。
 pub(crate) async fn load(auth: &Authentication) -> Result<Material> {
     match auth {
         Authentication::InCluster => {
@@ -109,7 +109,14 @@ pub(crate) async fn load(auth: &Authentication) -> Result<Material> {
         }
         Authentication::Kubeconfig { path, context } => {
             let bytes = read_file(path).await?;
-            let value: Value = serde_yaml::from_slice(&bytes)
+            // 认证字段不能因重复键或隐式合并改变含义；别名展开也必须受结构和文本预算约束。
+            // 不启用文件包含及属性展开，解析错误统一脱敏，避免认证正文进入诊断。
+            let limits = naml::yaml::Limits {
+                input_bytes: 1024 * 1024,
+                output_bytes: 1024 * 1024,
+                ..Default::default()
+            };
+            let value = naml::yaml::from_slice_with_limits(&bytes, &limits)
                 .map_err(|_| error(ErrorCode::InvalidConfig, "invalid kubeconfig"))?;
             let context = named(&value, "contexts", context)?;
             let context = &context["context"];

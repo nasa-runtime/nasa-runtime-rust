@@ -28,4 +28,5 @@ pub use policy::{LoadLimits, LoadPolicy, ProfileSelection, ValueHint};
 #[cfg(feature = "watch")]
 pub use watcher::{ConfigWatchEvent, ConfigWatcher, WatchHealth};
 
+pub(crate) use document::parse_yaml_value;
 pub(crate) use expression::resolve_compatible;

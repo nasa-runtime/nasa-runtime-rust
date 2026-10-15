@@ -7,6 +7,8 @@
 //! 持久事实、事务提交和租约权威仍由所选数据库与消息系统承载。
 //! `yml` 提供嵌套默认值、自然排序的本地导入和可解释配置候选；启动前的严格工厂使来源权限、
 //! 目录观察和配置应用进入同一宿主。来源序号、期望快照与组件实际状态保持独立，不承诺统一回滚。
+//! 同一 feature 下的 `nasa::yml::yaml` 统一提供外部协议文档的有界读写，保留原始字符串键，
+//! 不执行配置表达式或来源导入；文档编码与应用运行态发布分别由组件和宿主负责。
 //! `discovery-runtime` 提供具名连接、跨环境注册和可撤销的动态调用；可按需选择 Nacos、Consul、
 //! Kubernetes 或 Static/DNS。同一公共 owner 支持独立宿主与 Application，连接之间隔离凭据和故障。
 //! 完整空集、权限撤销和证据到期会阻止新提交；已提交业务仍需要认证、幂等与结果不明处理。
@@ -623,7 +625,10 @@ pub mod base {
     pub use base_impl::*;
 }
 
-/// 分层配置、嵌套表达式与本地来源装配(crate = `naml`)。
+/// 有界 YAML 文档读写、分层配置、嵌套表达式与本地来源装配(crate = `naml`)。
+/// `yaml` 子模块统一读写外部协议文档，以 `serde_json::Value` 保留原始字符串键，
+/// 不执行来源导入、环境访问或表达式。调用方通过 `yaml::Limits` 限定输入、节点、深度与输出，
+/// 失败不返回部分结果；文件替换与外部重载仍由调用方负责。
 /// `nasa = { features = ["yml"] }` → `use nasa::yml::{YmlLoader, YmlOverlay};`
 /// `nasa = { features = ["yml-watch"] }` → `use nasa::yml::watch::YmlWatcher;`
 /// 本地主配置 `zcf/application.yml` + profile + overlay(含 Nacos 多配置)+ 环境变量 + `${}` 占位符 → 强类型 `T`。

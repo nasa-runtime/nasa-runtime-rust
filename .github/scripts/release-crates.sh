@@ -12,13 +12,13 @@ fi
 release_items() {
   case "$1" in
     discovery-foundation)
-      printf '%s\n' "nadisc@2.0.3 nanacos-sdk@1.0.0 nafka-macro@2.0.3 napp-macro@2.0.3 rest-client-macro@2.0.3"
+      printf '%s\n' "nadisc@2.0.3 nanacos-sdk@1.0.0 nafka-macro@2.0.3 napp-macro@2.0.3 rest-client-macro@2.0.3 naml@2.0.2"
       ;;
     backend-adapters)
       printf '%s\n' "nanacos@2.0.3 nadisc-consul@1.0.0 nadisc-kubernetes@1.0.0 nafka@2.0.3"
       ;;
     discovery-runtime)
-      printf '%s\n' "nadisc-runtime@1.0.0 rest-discovery@2.0.3"
+      printf '%s\n' "nadisc-runtime@1.0.0 rest-discovery@2.0.3 nafana@2.0.1"
       ;;
     client-transports)
       printf '%s\n' "nagrpc@2.0.3 rest-discovery-nacos@2.0.3"
