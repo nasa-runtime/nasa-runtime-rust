@@ -108,7 +108,7 @@ audit-mysql = ["db", "dep:naaudit", "dep:naaudit-mysql", "dep:naoutbox-mysql", "
 audit-pgsql = ["db-pgsql", "dep:naaudit", "dep:naaudit-pgsql", "dep:naoutbox-pgsql", "dep:async-trait"]
 
 [dependencies]
-nadisc-runtime = { path = "../nadisc-runtime", version = "1.0.0", optional = true }
+nadisc-runtime = { version = "1.0.0", optional = true }
 hystrix = { version = "2.0.0", optional = true }
 nasecret-vault = { version = "2.0.0", optional = true }
 nasecret-http = { version = "2.0.0", optional = true }
@@ -173,7 +173,7 @@ nanacos = { version = "2.0.3", optional = true, default-features = false }
 nasched = { version = "2.0.0", optional = true }
 naws = { version = "2.0.0", optional = true, default-features = false }
 rest-discovery-nacos = { path = "../rest-discovery-nacos", version = "2.0.3", optional = true, default-features = false }
-rest-discovery = { path = "../rest-discovery", version = "2.0.3", optional = true }
+rest-discovery = { version = "2.0.3", optional = true }
 nadisc = { version = "2.0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
