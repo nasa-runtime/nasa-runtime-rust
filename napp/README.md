@@ -35,7 +35,7 @@ Redis 消费、微批调用和出站 Client 与宿主终端共用启动许可；
 
 `app.discovery()?.client(Some("business"))` 选择发现环境；`rest(Some("business"))` 返回该环境的共享 HTTP 客户端，默认 REST 门面使用 `primary`；兼容配置的显式默认引用优先。生成的 gRPC 客户端可注入受管 `DiscoveryGrpcService`。完整空集、权限撤销、期限耗尽与关闭会拒绝新提交；已经提交的请求仍须按业务幂等与结果不明语义处理。
 
-连接选择统一称为 `qualifier`。默认连接固定命名为 `primary`，无需额外默认字段；注册目标及 Saga 目标使用 `qualifier`。旧 `default_connection` 保留显式默认引用的兼容，旧 `connection_ref` 是 `qualifier` 的别名，这两个键不能同时声明。REST 声明式客户端以 `Client::with_clients(app.discovery()?.rest_clients()?)` 共享已装配的客户端，并在五种 Mapping 或 trait 上声明 `qualifier = "business"`；方法值覆盖 trait 默认。未声明时选择 `primary`；缺少 primary 时仅具名调用可用，未知名称或目标连接故障不会回退到其他连接。
+连接选择统一称为 `qualifier`。默认连接固定命名为 `primary`，无需额外默认字段；注册目标及 Saga 目标使用 `qualifier`。旧 `default_connection` 保留显式默认引用的兼容；旧 `connection_ref` 是 `qualifier` 的别名，同一目标中不能同时声明这两个键。REST 声明式客户端以 `Client::with_clients(app.discovery()?.rest_clients()?)` 共享已装配的客户端，并在五种 Mapping 或 trait 上声明 `qualifier = "business"`；方法值覆盖 trait 默认。未声明时选择 `primary`；缺少 primary 时仅具名调用可用，未知名称或目标连接故障不会回退到其他连接。
 
 `#[GetMapping(url = "https://dns.google/resolve")]` 使用默认 HTTP 客户端访问公网，不查询 Nacos。
 `url` 模式不能配置或继承 `qualifier`；宏不读取 YML 占位符。完整配置、内部服务及 Google API
@@ -176,9 +176,10 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ```toml
 nasa = { version = "2.0.3", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
-    "kafka", "oauth", "web",
+    "partition", "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
 ] }
+anyhow = "1"
 ```
 
 ```rust
@@ -197,7 +198,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 
 ## `application` 支持的组件字符串
 
-属性当前只接受下面 17 个小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
+属性接受下表列出的小写字符串，名称区分大小写，不支持别名。业务可按任意顺序书写；宏会拒绝
 未知名称和重复名称，再按唯一规范顺序生成组件列表。字符串对应的门面 feature 没有启用时会在编译期
 拒绝，不会静默跳过。
 
@@ -236,8 +237,9 @@ MySQL 或 PostgreSQL Mapper 缓存不新增组件字符串。配置 `mapper_cach
 在启动 Hook 安装，不能与标准计划重复占用默认槽。codec/metrics 使用 `configure_mapper_defaults`，
 与缓存 owner 一起受启动回滚和停机管理。
 
-不要填写 `"nacos"`、`"discovery"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法
-字符串分别是 `"nacos-config"`、`"nacos-discovery"`、`"db"`、`"ws"` 和 `"scheduling"`。
+不要填写 `"nacos"`、`"database"`、`"websocket"` 或 `"schedule"`；对应的合法字符串分别是
+`"nacos-config"`、`"db"`、`"ws"` 和 `"scheduling"`。多注册中心使用 `"discovery"`，单 Nacos
+兼容入口使用 `"nacos-discovery"`；两者不能在同一应用中同时声明，以免重复持有注册生命周期。
 
 规范顺序固定为 `log -> nacos-config -> telemetry -> db -> redis -> cache -> partition -> saga -> kafka -> outbox -> redis-job ->
 grpc -> auth -> web -> ws -> nacos-discovery/discovery -> scheduling`。业务书写顺序不改变启动顺序；停机严格反向执行。
