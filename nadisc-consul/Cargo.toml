@@ -13,7 +13,7 @@ readme = "README.md"
 include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/NOTICE"]
 
 [dependencies]
-nadisc = { version = "2.0.3", path = "../nadisc", features = ["http"] }
+nadisc = { version = "2.0.3", features = ["http"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

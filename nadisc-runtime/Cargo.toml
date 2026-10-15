@@ -13,7 +13,7 @@ readme = "README.md"
 include = ["/Cargo.toml", "/src/**", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/NOTICE"]
 
 [dependencies]
-nadisc = { version = "2.0.3", path = "../nadisc", features = ["serde"] }
+nadisc = { version = "2.0.3", features = ["serde"] }
 anyhow = "1"
 async-trait = "0.1"
 futures-util = "0.3"

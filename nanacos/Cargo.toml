@@ -21,7 +21,7 @@ categories.workspace = true
 name = "nanacos"
 [dependencies]
 # 服务实例中性类型(provider-neutral);naming 的 register/discover/subscribe 用它,与 eureka 等后端共享。
-nadisc = { package = "nadisc", version = "2.0.3", path = "../nadisc" }
+nadisc = { package = "nadisc", version = "2.0.3" }
 anyhow = "1"
 tracing = "0.1"
 # 实现 discovery 的 provider-neutral 接口(DiscoveryClient/ServiceRegistry/...,对象安全)。
@@ -29,7 +29,7 @@ async-trait = "0.1"
 # Drop best-effort spawn(rt);watch/subscribe channel 需 sync;subscribe_channel 轮询兜底需 time(interval)+ macros(select!)。
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # 真实传输实现;feature 关时不编进 binary，由 `nacos` feature 控制。
-nacos-sdk = { package = "nanacos-sdk", version = "1.0.0", path = "../nanacos-sdk", optional = true }
+nacos-sdk = { package = "nanacos-sdk", version = "1.0.0", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 

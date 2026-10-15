@@ -174,7 +174,7 @@ nasched = { version = "2.0.0", optional = true }
 naws = { version = "2.0.0", optional = true, default-features = false }
 rest-discovery-nacos = { path = "../rest-discovery-nacos", version = "2.0.3", optional = true, default-features = false }
 rest-discovery = { path = "../rest-discovery", version = "2.0.3", optional = true }
-nadisc = { path = "../nadisc", version = "2.0.3", optional = true }
+nadisc = { version = "2.0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
