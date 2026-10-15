@@ -420,6 +420,10 @@ pub use nasaga_macro::saga_workflow;
 /// readiness 与 shutdown owner 由框架统一装配。独立进程通过 `ServerPlan` 使用同一运行合同。
 #[cfg(feature = "grpc")]
 pub mod grpc {
+    /// 具名发现客户端、传输选项与协议身份，和 Application 使用同一底层类型。
+    #[cfg(feature = "grpc-discovery")]
+    pub use grpc_impl::discovery;
+
     pub use grpc_impl::{
         async_trait, call_with_budget, health, include_proto, propagate_deadline_from,
         propagate_request_budget, reflection, Certificate, Channel, ClientTlsConfig, Code,

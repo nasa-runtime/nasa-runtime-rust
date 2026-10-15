@@ -308,7 +308,7 @@ saga_core_impl = { package = "nasaga-core", version = "2.0.0", optional = true }
 saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.1", optional = true }
 saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.1", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "2.0.0", optional = true }
-grpc_impl = { package = "nagrpc", path = "../nagrpc", version = "2.0.3", optional = true }
+grpc_impl = { package = "nagrpc", version = "2.0.3", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "2.0.0", optional = true }
 scheduling_impl = { package = "nasched", version = "2.0.0", optional = true }
 async_macro = { package = "async-macro", version = "2.0.0", optional = true }
@@ -332,4 +332,4 @@ discovery_impl = { package = "nadisc", version = "2.0.3", optional = true }
 nacos_impl = { package = "nanacos", version = "2.0.3", optional = true, default-features = false }
 rest_discovery_impl = { package = "rest-discovery", version = "2.0.3", optional = true }
 rest_client_macro = { package = "rest-client-macro", version = "2.0.3", optional = true }
-rest_discovery_nacos_impl = { path = "../rest-discovery-nacos", package = "rest-discovery-nacos", version = "2.0.3", optional = true, default-features = false }
+rest_discovery_nacos_impl = { package = "rest-discovery-nacos", version = "2.0.3", optional = true, default-features = false }

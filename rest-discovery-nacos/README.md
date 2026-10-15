@@ -6,7 +6,7 @@
 
 `rest-discovery-nacos` 是 `rest-discovery` 与 `nanacos` 的装配层。它把强类型 `DiscoveryConfig` 映射成 Nacos 连接、可选实例注册、`RestDiscoveryOptions`，并安装全局 `RestDiscovery`。
 
-`rest-discovery` 本体保持 provider-neutral，不直接依赖 Nacos。
+`rest-discovery` 默认路径面向 provider-neutral 的 `nadisc::DiscoveryClient`；本组件负责 Nacos 连接和注册装配。
 
 普通业务只依赖门面；需要直接控制 `DiscoverySession` 的框架集成层再显式增加 adapter：
 
@@ -24,7 +24,7 @@ rest_discovery:
   provider: nacos
   nacos:
     server_addr: 127.0.0.1:8848
-    namespace: public
+    namespace: ""
     group: DEFAULT_GROUP
     app_name: order-service
   registration:

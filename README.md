@@ -1024,7 +1024,7 @@ HTTP/1/h2c listener。
 | [nadisc-consul](nadisc-consul/README.md) | `discovery-consul` | 固定 agent 注册、HTTP/TTL 检查与一致性健康发现 | `discovery.connections.*.consul` |
 | [nadisc-kubernetes](nadisc-kubernetes/README.md) | `discovery-kubernetes` | Service/EndpointSlice 联合证据与只读发现 | `discovery.connections.*.kubernetes` |
 | [rest-discovery](rest-discovery/README.md) | `rest-discovery` | `lb://service` REST 负载均衡调用 | `rest.*` |
-| [rest-discovery-nacos](rest-discovery-nacos/README.md) | `rest-discovery-nacos` | Nacos 注册发现和 REST 负载均衡组合 | `rest_discovery.*`、`nacos.*` |
+| [rest-discovery-nacos](rest-discovery-nacos/README.md) | `rest-discovery-nacos` | 单 Nacos 注册发现和 REST 负载均衡组合 | `rest_discovery.*`；与配置中心的 `nacos.*` 分离 |
 | [rest-client-macro](rest-client-macro/README.md) | `rest-client` | 声明式 REST 客户端宏 | `rest_clients.*` |
 | [naweb](naweb/README.md) | `web` / `web-security` | Axum 路由、interceptor 与端点安全运行时 | `server.*` 由 napp 读取 |
 | [naweb-macro](naweb-macro/README.md) | `web` | MVC 风格路由注解和路由收集 | 编译期属性，无运行期配置 |
@@ -1091,7 +1091,7 @@ HTTP/1/h2c listener。
 | [nasecret-http](nasecret-http/README.md) | `secret-http` | 随 secret 代际轮换的 TLS/mTLS HTTP client | 引用 `secrets.*` ID |
 | [nasecret-vault](nasecret-vault/README.md) | `secret-vault` | 有界 KV v2 secret provider | provider 配置由业务投影 |
 | [naobject](naobject/README.md) | `object-store` | 有界对象合同与 S3-compatible adapter | 受管模式用 `object_stores.<name>`；独立 adapter 显式传入 options |
-| [nagrpc](nagrpc/README.md) | `grpc` | 统一 codegen/service registry、HTTP/2/TLS、健康、反射、方法策略、观测与排空 | `grpc.*`；可独立构造或交给 Application 托管 |
+| [nagrpc](nagrpc/README.md) | `grpc` / `grpc-discovery` | 统一 codegen/service registry、HTTP/2/TLS、具名发现调用、健康、反射、方法策略、观测与排空 | listener 使用 `grpc.*`，动态客户端使用发现 owner；可独立构造或交给 Application 托管 |
 | [nagrpc-build](nagrpc-build/README.md) | `grpc` 的 build dependency | vendored protoc、descriptor/摘要、受管 server adapter 与兼容门禁 | 只写 Cargo `OUT_DIR` |
 | [macro-support](macro-support/README.md) | 宏内部依赖 | 过程宏路径解析 | 无运行时 yml |
 

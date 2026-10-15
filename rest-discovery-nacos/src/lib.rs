@@ -2,14 +2,18 @@
 //! 本组件保留单 Nacos 装配；多注册中心由 nadisc-runtime 的具名连接目录持有。
 //!
 //! 将 Nacos 服务发现、注册守卫和 HTTP 负载均衡客户端组合成业务启动期的一站式入口。
+//! [`DiscoverySession`] 把出站准备、本实例注册、摘流和运行时关闭分开：先准备出站客户端，
+//! listener 就绪后注册，停机先注销实例、等待业务排空，再等待客户端后台任务退出。
+//! Application 持有唯一会话；独立调用方负责相同顺序与关闭预算，不得把关闭通知当作退出证明。
+//! 真实后端需要 `nacos-sdk`；本组件不选择多注册中心，也不把发现地址当作业务健康证明。
 // ============================================================================
 // rest-discovery-nacos —— RestDiscovery + Nacos 一键装配便利层。
 //
 //   业务 main 只调一个入口(经 nasa 门面):
-//     let disc = nasa::discovery::init_from_config(&cfg.nasa_discovery, app_info).await?;
+//     let disc = nasa::discovery::init_from_config(&cfg.rest_discovery, app_info).await?;
 //   优雅停机:disc.deregister().await(先摘流)→ 再 drain HTTP server → 最后 drop。
 //
-// 边界:rest-discovery 仍 provider-neutral(不依赖 nacos);本 crate 收敛 Nacos 装配 +
+// 边界:rest-discovery 默认路径面向 provider-neutral 抽象;本 crate 收敛 Nacos 装配 +
 //   DiscoveryConfig(yml 强类型)→ RestDiscoveryOptions 映射 + 注册生命周期(DiscoveryHandle 交 main 持有)。
 // ============================================================================
 #![forbid(unsafe_code)]

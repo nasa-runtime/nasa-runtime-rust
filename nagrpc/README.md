@@ -329,7 +329,9 @@ secret owner 和证书轮换。正常停机必须等待 `shutdown().await`，同
 ## 明确边界
 
 - 单个 Application 组件只拥有一个 listener；一个 listener 可登记最多 64 个业务 service、256 个方法。
-- gRPC-Web、HTTP/1.1 fallback、多 listener、客户端连接池、客户端负载均衡和 service mesh 不在本合同内。
+- gRPC-Web、HTTP/1.1 fallback、多 listener 和 service mesh 不在本合同内。
+- 动态客户端须启用 `discovery`；有限连接池和轮询选址由 discovery owner 管理，实例提交复验与正文
+  预算遵循[动态发现调用器](#动态发现调用器)合同。自行构造的 tonic Channel 不获得这些生命周期保证。
 - reflection 默认关闭；开启后以 sealed generated service registry 作为编译期 full-name allowlist。
   `ListServices` 只列出实际装配的业务 service，descriptor 中未登记的相邻 service 也不能通过 symbol
   查询旁路暴露；业务不手工登记 descriptor。
