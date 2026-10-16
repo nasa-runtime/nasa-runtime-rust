@@ -3662,7 +3662,7 @@ dependencies = [
  "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime",
- "nasaga-runtime-pgsql",
+ "nasaga-runtime-pgsql 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3766,7 +3766,7 @@ dependencies = [
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime",
- "nasaga-runtime-pgsql",
+ "nasaga-runtime-pgsql 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret-http 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3997,6 +3997,26 @@ dependencies = [
 [[package]]
 name = "nasaga-runtime-pgsql"
 version = "2.0.2"
+dependencies = [
+ "anyhow",
+ "linkme",
+ "nainbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
+name = "nasaga-runtime-pgsql"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cde7da73a9fdc39e2f9b64c69570d501726658b648c9d7977d905e43eacf483f"
 dependencies = [
  "anyhow",
  "linkme",
