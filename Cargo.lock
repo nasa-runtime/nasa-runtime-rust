@@ -3868,6 +3868,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasaga-mysql"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ab79da34e17e439a3382865969a12251b23ec6a933754f9cfb5bcb842f8b653"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "nasaga-pgsql"
 version = "2.0.0"
 dependencies = [
@@ -3908,7 +3923,7 @@ dependencies = [
  "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-mysql",
+ "nasaga-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "natx 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",

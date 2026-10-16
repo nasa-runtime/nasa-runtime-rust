@@ -11,8 +11,11 @@ fi
 # 返回：已知批次输出空格分隔的 `crate@version`；未知批次返回非零状态。
 release_items() {
   case "$1" in
-    saga-storage)
-      printf '%s\n' "nasaga-mysql@2.0.1 nasaga-runtime-pgsql@2.0.2"
+    saga-mysql)
+      printf '%s\n' "nasaga-mysql@2.0.1"
+      ;;
+    saga-pgsql)
+      printf '%s\n' "nasaga-runtime-pgsql@2.0.2"
       ;;
     saga-runtime)
       printf '%s\n' "nasaga-runtime@2.0.2"
@@ -50,10 +53,11 @@ release_crates() {
 # 返回：逐行输出批次标识与单调递增的拓扑阶段。
 release_stages() {
   cat <<'PLAN'
-saga-storage 1
-saga-runtime 2
-application-runtime 3
-facade 4
+saga-mysql 1
+saga-pgsql 2
+saga-runtime 3
+application-runtime 4
+facade 5
 PLAN
 }
 
