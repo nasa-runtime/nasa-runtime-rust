@@ -3661,7 +3661,7 @@ dependencies = [
  "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "naoutbox-pgsql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "napart 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
+ "nasaga-runtime 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime-pgsql 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3765,7 +3765,7 @@ dependencies = [
  "napp-macro 2.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-macro 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nasaga-runtime",
+ "nasaga-runtime 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasaga-runtime-pgsql 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasched 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nasecret 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3913,6 +3913,32 @@ dependencies = [
 [[package]]
 name = "nasaga-runtime"
 version = "2.0.2"
+dependencies = [
+ "anyhow",
+ "hex",
+ "linkme",
+ "nainbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nainbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "naoutbox-mysql 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-backend 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-core 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-mysql 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nasaga-runtime-core 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natelemetry 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "natx 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "nasaga-runtime"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c19e4f65718c7f41a9f2e798ef7e38aea6690c2528e25ab3819d6c46562e942a"
 dependencies = [
  "anyhow",
  "hex",
