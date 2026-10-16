@@ -2,7 +2,7 @@
 //!
 //! 账本与创建/终态迁移**同一事务**维护:创建真实发生时同事务原子预留(+1),实例进入
 //! 任一终态时同事务释放(-1)。预留用"条件 UPDATE 影响行数"裁决而不是先查后写——
-//! 无锁 `COUNT(*)` 在并发创建下必然穿透上限。账本与事实漂移时由有界对账收敛回已提交事实,
+//! 无锁 `COUNT(*)` 在并发创建下必然穿透上限。账本与事实漂移时由受锁对账按当前实例事实收敛,
 //! 不在请求路径扫描整表。
 
 use nasaga_backend::QuotaReservation;
@@ -24,15 +24,16 @@ pub(crate) const CREATE_QUOTA_SQL: &str = "CREATE TABLE IF NOT EXISTS saga_tenan
 impl MySqlSagaStore {
     /// 业务作用：在创建事务内为租户原子预留一个在飞名额。
     ///
-    /// 顺序固定:先幂等补账本行,再执行 `in_flight < cap` 的条件自增——两步都持有该租户
-    /// 行锁,并发创建被串行化在同一行上,上限不可能被穿透。`cap` 为空表示该租户只观测
+    /// 顺序固定:先幂等补账本行并取得排他锁,再执行 `in_flight < cap` 的条件自增——
+    /// 并发创建被串行化在同一行上,上限不可能被穿透。`cap` 为空表示该租户只观测
     /// 不设限,自增无条件执行(用量仍精确记账)。
     ///
     /// 参数说明：
     /// - `tenant`: 租户身份。
     /// - `cap`: 该租户的在飞实例上限;`None` 表示不设限。
     ///
-    /// 返回：预留成功或超限结论;事务缺失或底层失败返回错误。
+    /// 返回：预留成功或已初始化账本的超限结论；设限账本未初始化、事务缺失或底层失败返回错误。
+    /// 拒绝原因按当前受锁账本判断，不沿用调用方已有的一致性快照。
     pub async fn reserve_tenant_quota(
         &self,
         tenant: &nasaga_core::TenantId,
@@ -43,11 +44,15 @@ impl MySqlSagaStore {
         let mut connection = natx::mandatory_conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        sqlx::query("INSERT IGNORE INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
-            .bind(tenant.as_str())
-            .execute(connection.as_mut())
-            .await
-            .map_err(map_database)?;
+        // 补行直接取得排他锁,避免已有租户的并发事务先持共享锁、再相互等待锁升级。
+        sqlx::query(
+            "INSERT INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0) \
+             ON DUPLICATE KEY UPDATE tenant_id = saga_tenant_quota.tenant_id",
+        )
+        .bind(tenant.as_str())
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
         let updated = match cap {
             // 设限租户的预留要求账本已初始化:存量非终态实例只有经受锁对账回填后才在账,
             // 否则其终态释放会扣掉新实例持有的名额,上限被静默穿透。未初始化按部署
@@ -71,8 +76,10 @@ impl MySqlSagaStore {
         };
         if updated.rows_affected() == 0 {
             if cap.is_some() {
+                // 条件更新与拒绝分类必须使用同一当前账本；已有排他锁不会刷新普通读快照，
+                // 因此继续锁定读，避免把并发已完成初始化的满额账本误判为缺行或未初始化。
                 let initialized: i8 = sqlx::query_scalar(
-                    "SELECT initialized FROM saga_tenant_quota WHERE tenant_id = ?",
+                    "SELECT initialized FROM saga_tenant_quota WHERE tenant_id = ? FOR UPDATE",
                 )
                 .bind(tenant.as_str())
                 .fetch_one(connection.as_mut())
@@ -169,18 +176,19 @@ impl MySqlSagaStore {
         }
     }
 
-    /// 业务作用：按已提交事实有界对账单个租户的账本——把历史数据或崩溃窗口造成的
-    /// 漂移收敛回真实在飞数。
+    /// 业务作用：按当前非终态实例事实有界对账单个租户的账本，包含本事务自身的变更，
+    /// 使账本与实例事实随调用方事务一起提交或回滚。
     ///
-    /// 必须在 ambient 事务内调用,且**先锁账本行再计数**:创建/终态路径的每次账本变更
-    /// 都持有同一把行锁,未提交的在线事务被挡在行锁外、其实例行对本次计数不可见;
-    /// 先计数后覆盖的写法会让"计数与覆盖之间提交的在线变更"被旧值覆盖,对账本身
-    /// 制造漂移。计数范围由租户过滤约束;不在请求路径调用,由运维显式触发。
+    /// 必须在 ambient 事务内调用，先锁账本行，再以锁定读计数，不能沿用外层事务已有的
+    /// 一致性快照。计数所需记录被其它事务锁定时立即失败，不等待或跳过记录，避免与先修改
+    /// 实例再释放配额的终态路径形成反向等待。调用方须回滚整个事务后有界重试；
+    /// 本方法不提交、重启或更改调用方事务的隔离级别。计数由租户索引约束，供运维显式触发。
     ///
     /// 参数说明：
     /// - `tenant`: 租户身份。
     ///
-    /// 返回：对账后的在飞实例数;事务缺失或底层失败返回错误。
+    /// 返回：对账后的在飞实例数；事务缺失、事实行锁冲突或底层失败返回错误。
+    /// 计数失败不覆盖账本或置初始化标记；成功修改仍需调用方提交才对其它事务可见。
     pub async fn reconcile_tenant_quota(
         &self,
         tenant: &nasaga_core::TenantId,
@@ -191,13 +199,17 @@ impl MySqlSagaStore {
         let mut connection = natx::mandatory_conn_for(&self.datasource)
             .await
             .map_err(map_connection)?;
-        sqlx::query("INSERT IGNORE INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0)")
-            .bind(tenant.as_str())
-            .execute(connection.as_mut())
-            .await
-            .map_err(map_database)?;
-        // 行锁先行:此后任何在线创建(预留)与终态(释放)都在本事务提交前被阻塞,
-        // 计数窗口内不可能再有账本参与方提交新事实。
+        // 对账与预留采用相同的排他补行方式,避免两个入口并发时形成共享锁升级环。
+        sqlx::query(
+            "INSERT INTO saga_tenant_quota (tenant_id, in_flight) VALUES (?, 0) \
+             ON DUPLICATE KEY UPDATE tenant_id = saga_tenant_quota.tenant_id",
+        )
+        .bind(tenant.as_str())
+        .execute(connection.as_mut())
+        .await
+        .map_err(map_database)?;
+        // 账本锁阻止其它记账事务提交；它不会刷新已有一致性快照，也不阻止终态事务
+        // 先持有实例行锁，因此后续计数仍必须使用当前锁定读并拒绝实例锁等待。
         let _locked: u64 = sqlx::query_scalar(
             "SELECT in_flight FROM saga_tenant_quota WHERE tenant_id = ? FOR UPDATE",
         )
@@ -205,9 +217,11 @@ impl MySqlSagaStore {
         .fetch_one(connection.as_mut())
         .await
         .map_err(map_database)?;
+        // FOR SHARE 读取当前事实而非旧快照；NOWAIT 避免对账持账本锁等待实例、终态
+        // 持实例锁等待账本的环。不得使用 SKIP LOCKED，否则漏计仍会开放额外名额。
         let actual: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM saga_instance WHERE tenant_id = ? \
-             AND status NOT IN (?, ?, ?)",
+            "SELECT COUNT(*) FROM saga_instance FORCE INDEX (idx_tenant_status_saga) \
+             WHERE tenant_id = ? AND status NOT IN (?, ?, ?) FOR SHARE NOWAIT",
         )
         .bind(tenant.as_str())
         .bind(nasaga_core::SagaStatus::Completed.as_str())

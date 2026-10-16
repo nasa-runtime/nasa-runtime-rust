@@ -405,6 +405,16 @@ workflow、创建时间上下界和有界 keyset 分页；相同过滤条件的 
 游标会拒绝。管理动作共用 tenant 权限、审计原因、operation_id 和 state/control CAS。已提交操作重放
 返回当前事实，不能再次产生外部命令或第二条审计。独立传输认证失败不暴露业务实例存在性。
 
+## MySQL 租户配额与对账
+
+配额预留与创建事实同事务提交，终态释放与终态事实同事务提交；重复创建不重复占用名额。
+启用租户上限前，必须在事务内完成对账并置初始化标记。预留未成功时，当前账本未初始化返回错误，
+已初始化且容量不足返回 `QuotaReservation::Exceeded`，不能把数据库失败视为普通满额。
+
+对账先取得租户账本排他锁，再使用当前锁定读计数，包含本事务自身变更，不沿用外层旧快照。
+所需实例记录被其它事务锁定时立即失败，不跳过记录、不覆盖账本或置初始化标记；调用方必须回滚
+整个事务后有界重试。对账不自行提交或改变隔离级别，应由运维显式触发，不能嵌入普通请求路径。
+
 ## 观测
 
 数据库指标覆盖实例状态、due timer、attempt、冲突、配额、Outbox 积压、派发与死信；进程指标覆盖
@@ -415,7 +425,8 @@ workflow、创建时间上下界和有界 keyset 分页；相同过滤条件的 
 `nasaga_stage_duration_seconds` 使用固定 stage 标签采集 `participant_handler`、`participant_transaction`、
 `start_transaction`、`transition_transaction` 和 `timer_lateness`。前四项计入失败与取消尝试的实际占用时间；
 timer lateness 在复验领取权威后采集到期后的调度滞后。Prometheus 与 OTLP 从同一有界直方图读取，
-可按阶段计算 P50/P95/P99。`napp_outbox_oldest_pending_age_seconds` 使用数据库时钟查询尚未派发且未死信的
+全部固定阶段在启动时预留完整桶、sum 和 count 容量，未采样阶段保留零计数；可按阶段计算 P50/P95/P99。
+`napp_outbox_oldest_pending_age_seconds` 使用数据库时钟查询尚未派发且未死信的
 最老 Saga Outbox 行；多个受管数据库取最大值，查询失败保留上一帧并由快照年龄指标表明新鲜度。
 这些指标不带 tenant、saga_id、business_key、payload、credential 或 datasource endpoint。
 

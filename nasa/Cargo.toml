@@ -4,7 +4,7 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "2.0.3"
+version = "2.0.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Rust server framework for managed lifecycles, multi-registry discovery, multi-source Kafka and reliable execution with durable Saga recovery"
@@ -274,7 +274,7 @@ full-pgsql = [
 [dependencies]
 discovery_runtime_impl = { package = "nadisc-runtime", version = "1.0.0", optional = true }
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "2.0.3", optional = true }
+application_impl = { package = "napp", version = "2.0.5", optional = true }
 application_macro = { package = "napp-macro", version = "2.0.3", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
@@ -305,8 +305,8 @@ secret_http_impl = { package = "nasecret-http", version = "2.0.0", optional = tr
 secret_vault_impl = { package = "nasecret-vault", version = "2.0.0", optional = true }
 object_impl = { package = "naobject", version = "2.0.0", optional = true }
 saga_core_impl = { package = "nasaga-core", version = "2.0.0", optional = true }
-saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.1", optional = true }
-saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.1", optional = true }
+saga_runtime_impl = { package = "nasaga-runtime", version = "2.0.2", optional = true }
+saga_runtime_pgsql_impl = { package = "nasaga-runtime-pgsql", version = "2.0.2", optional = true }
 nasaga_macro = { package = "nasaga-macro", version = "2.0.0", optional = true }
 grpc_impl = { package = "nagrpc", version = "2.0.3", optional = true }
 oauth_impl = { package = "nauth-oauth", version = "2.0.0", optional = true }

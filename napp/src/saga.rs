@@ -12867,7 +12867,7 @@ impl ApplicationComponent for SagaComponent {
                 .metrics_hub()
                 .register_legacy_source_reserved(
                     Arc::new(latency_metrics::SagaLatencyMetricsSource),
-                    5,
+                    latency_metrics::SagaLatencyMetricsSource::required_series(),
                 )
                 .map_err(|error| {
                     saga_error(

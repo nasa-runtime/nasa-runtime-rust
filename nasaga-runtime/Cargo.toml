@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-runtime"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "MySQL durable Saga orchestration with fenced execution and continuously authorized result recovery"
@@ -18,7 +18,7 @@ linkme = "0.3"
 # Saga 核心合同与 MySQL store 均固定使用公开坐标，避免运行时装载来源分裂的状态合同。
 nasaga-core = { version = "2.0.0" }
 nasaga-backend = { version = "2.0.0" }
-nasaga-mysql = { version = "2.0.0" }
+nasaga-mysql = { version = "2.0.1" }
 nasaga-runtime-core = { version = "2.0.1" }
 nainbox-core = { version = "2.0.0" }
 nainbox-mysql = { version = "2.0.0" }

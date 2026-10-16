@@ -1,6 +1,6 @@
 [package]
 name = "nasaga-mysql"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Durable named-datasource MySQL store for NASA Saga state, fencing, audit, quotas and recovery"

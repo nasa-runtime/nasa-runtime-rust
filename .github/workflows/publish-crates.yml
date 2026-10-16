@@ -8,14 +8,12 @@ on:
         required: true
         type: choice
         options:
-          - discovery-foundation
-          - backend-adapters
-          - discovery-runtime
-          - client-transports
+          - saga-storage
+          - saga-runtime
           - application-runtime
           - facade
       confirm:
-        description: "输入 publish-<batch>，例如 publish-discovery-foundation"
+        description: "输入 publish-<batch>，例如 publish-saga-storage"
         required: true
         type: string
 
@@ -41,8 +39,8 @@ jobs:
         shell: bash
         run: |
           case "$RELEASE_BATCH" in
-            discovery-foundation|backend-adapters|discovery-runtime|client-transports|application-runtime|facade)
-              expected_ref="refs/heads/release/2.0.3"
+            saga-storage|saga-runtime|application-runtime|facade)
+              expected_ref="refs/heads/release"
               expected_confirm="publish-${RELEASE_BATCH}"
               ;;
             *)
@@ -205,7 +203,7 @@ jobs:
             fi
             mkdir -p "$local_dir" "$remote_dir"
             curl --fail --silent --show-error --location \
-              --user-agent "nasa-runtime-release/2.0.3" \
+              --user-agent "nasa-runtime-release" \
               --output "$remote_archive" \
               "https://crates.io/api/v1/crates/${crate_name}/${version}/download"
             actual_remote_checksum="$(sha256sum "$remote_archive" | awk '{print $1}')"
@@ -246,7 +244,7 @@ jobs:
             response_file="$RUNNER_TEMP/${crate_name}-${version}.json"
             version_url="https://crates.io/api/v1/crates/${crate_name}/${version}"
             http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-              --user-agent "nasa-runtime-release/2.0.3" "$version_url")"
+              --user-agent "nasa-runtime-release" "$version_url")"
 
             case "$http_code" in
               200)
@@ -275,7 +273,7 @@ jobs:
             while true; do
               if (( publish_attempt > 1 )); then
                 http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                  --user-agent "nasa-runtime-release/2.0.3" "$version_url")"
+                  --user-agent "nasa-runtime-release" "$version_url")"
                 if [[ "$http_code" == "200" ]]; then
                   remote_checksum="$(jq -r '.version.checksum // empty' "$response_file")"
                   if [[ "$remote_checksum" != "$local_checksum" ]]; then
@@ -329,7 +327,7 @@ jobs:
             published=false
             for _ in {1..30}; do
               http_code="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-                --user-agent "nasa-runtime-release/2.0.3" "$version_url")"
+                --user-agent "nasa-runtime-release" "$version_url")"
               if [[ "$http_code" == "200" ]]; then
                 published=true
                 break

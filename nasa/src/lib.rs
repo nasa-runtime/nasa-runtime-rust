@@ -79,6 +79,9 @@
 //! 信任有效时，保护态参与方仍可重投原事件，但新 Start、timer claim 与 Ready 保持关闭。
 //! 每个请求冻结期限、撤销身份、安全发布代际和合同摘要，并在状态事务中持续复验；失权完整回滚，
 //! A→B→A 不恢复旧资格。COMMIT 已发出后的结局仍由数据库收据或提交结果不明语义裁决。
+//! MySQL 与 PostgreSQL 受管步骤工厂分别登记，可同时编入；每个步骤仍绑定自身后端与事务域。
+//! MySQL 配额对账按当前锁定事实执行，锁冲突时拒绝覆盖账本，调用方须整体回滚后有界重试。
+//! Application 为全部固定 Saga 阶段预留完整直方图容量，未采样阶段保持零计数。
 //!
 //! 启用 `application` 后，`#[nasa::initializer]` 与 `Application::register_initializer` 提供统一的
 //! Ready 前业务初始化屏障。Runner 在 migration 和出站依赖准备完成后执行三轮全局屏障，全部成功

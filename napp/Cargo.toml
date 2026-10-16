@@ -1,6 +1,6 @@
 [package]
 name = "napp"
-version = "2.0.3"
+version = "2.0.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Application runtime for strict configuration, managed lifecycles, multi-registry discovery, multi-source Kafka and durable Saga recovery"
@@ -167,8 +167,8 @@ naoutbox-pgsql = { version = "2.0.0", optional = true }
 nainbox-core = { version = "2.0.0", optional = true }
 nainbox-mysql = { version = "2.0.0", optional = true }
 nainbox-pgsql = { version = "2.0.0", optional = true }
-nasaga-runtime = { version = "2.0.1", optional = true }
-nasaga-runtime-pgsql = { version = "2.0.1", optional = true }
+nasaga-runtime = { version = "2.0.2", optional = true }
+nasaga-runtime-pgsql = { version = "2.0.2", optional = true }
 nanacos = { version = "2.0.3", optional = true, default-features = false }
 nasched = { version = "2.0.0", optional = true }
 naws = { version = "2.0.0", optional = true, default-features = false }

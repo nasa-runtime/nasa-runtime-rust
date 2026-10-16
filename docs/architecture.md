@@ -92,6 +92,10 @@ Saga Orchestrator 在同一事务中提交 Inbox、实例 CAS、journal、timer 
 在另一同源事务中提交 Inbox、gate、业务事实与 result Outbox。定义摘要和身份在占用去重键前复验。
 无法确认的外部效果进入 resolve 或人工介入，数据库提交不明不能直接改为普通重试。
 
+MySQL 与 PostgreSQL 的受管步骤工厂分别登记，共享后端中立工作流描述，每个步骤绑定自己的事务域。
+MySQL 配额预留与对账在租户账本排他锁下串行化；对账读取当前受锁事实，记录锁冲突时立即拒绝，
+调用方整体回滚后有界重试，避免沿用旧快照或与终态释放形成反向等待。
+
 已提交 result 使用独立于 command 路由的 Catalog 资格。共享目录、在途实例冻结定义和 producer 信任
 仍须完整，缺少 command route 时只允许原结果收敛，不开放新 Start、timer claim、管理操作或 Ready。
 请求冻结证据期限、撤销身份、安全发布代际与合同摘要，并在异步恢复、实例锁后和事务交还前持续复验；

@@ -174,7 +174,7 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ## 最小入口
 
 ```toml
-nasa = { version = "2.0.3", features = [
+nasa = { version = "2.0.5", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "partition", "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -390,7 +390,7 @@ UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["application", "tx-pgsql"] }
+nasa = { version = "2.0.5", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 
@@ -777,6 +777,9 @@ naweb、nafana、Outbox 和 Saga Streams；naweb 在 Ready 期按全部静态 ro
 `telemetry:metrics-exporter` 降级，不重试当前快照、不背压业务；停机时在全局剩余预算内
 尝试最后一次快照。`app.otlp_metrics_snapshot()` 只暴露批次、已确认样本和失败数，
 不暴露 endpoint 或 label 值。
+
+Saga 阶段耗时在启动时按全部固定阶段及每个直方图的完整桶、sum、count 预留容量，
+尚未采样的阶段也保留零计数序列。阶段集合不随租户、流程或实例数量增长。
 
 结构化兼容源当前无样本时仍保持同一快照路径，不会改读自身文本入口。单个 label 值最多 4096 个
 UTF-8 字节；超过资源上限或与 descriptor 形状不一致的样本会从 Prometheus 与 OTLP 一致拒绝，并以
@@ -1433,7 +1436,7 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["application", "grpc"] }
+nasa = { version = "2.0.5", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"

@@ -18,6 +18,18 @@ static DESCRIPTORS: [&MetricDescriptor; 1] = [&DURATION];
 /// 业务作用：让所有 Saga 角色将相同阶段边界接入 Prometheus 与 OTLP。
 pub(super) struct SagaLatencyMetricsSource;
 
+impl SagaLatencyMetricsSource {
+    /// 业务作用：为全部固定阶段预留直方图展开后的公开序列容量。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：所有阶段的有限桶、正无穷桶、总量和计数所需的序列数；不依赖采样次数。
+    pub(super) fn required_series() -> usize {
+        // 快照始终包含所有固定阶段,包含尚未采样的阶段；不能只按阶段数预留容量。
+        nasaga_runtime::saga_latency_snapshot().len() * (DURATION.histogram_bounds.len() + 3)
+    }
+}
+
 impl LegacyMetricsSource for SagaLatencyMetricsSource {
     /// 业务作用：登记唯一耗时 family 与固定阶段标签。
     ///

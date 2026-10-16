@@ -437,6 +437,10 @@ journal、timer、result Inbox 与 command Outbox；participant 只拥有本地 
 与 result Outbox；client 只获得远程 start/query 能力，启用 reliable_start 时才创建本地 start-intent
 Outbox。业务 main 不构造 DefinitionRegistry、Orchestrator、SagaApplicationPlan 或 dispatcher。
 
+MySQL 与 PostgreSQL 的受管步骤工厂分别登记，可以同时编入一个程序；每个步骤仍绑定自身后端与事务域。
+MySQL 租户配额在创建和终态事务内维护，对账使用当前锁定读；事实行有锁冲突时拒绝覆盖账本，
+调用方须回滚整个事务后有界重试。阶段耗时为全部固定阶段预留完整直方图容量，未采样阶段保留零计数。
+
 managed 数据面支持 HTTP、gRPC、Kafka 与 Redis Streams。Application 按角色自动构造 publisher、
 consumer、Inbox/Outbox、DLT、健康门禁与停机排空；HTTP 和 gRPC 还提供标准 start、get、query、audit、
 管理、Definition Registry 与 metrics API。参与方从已链接的 `#[saga]` descriptor 构造 handler，并通过
@@ -819,7 +823,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.5", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。

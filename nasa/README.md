@@ -113,6 +113,10 @@ Saga 支持 MySQL/PostgreSQL、HTTP/gRPC 共用的管理语义、原始字节与
 消息与审计引用门禁。部署、轮换与观测配置见
 [Saga 生产运行指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/saga-production.md)。
 
+同时启用 `saga-runtime` 与 `saga-runtime-pgsql` 时，两类受管步骤工厂保持隔离，每个步骤仍绑定自身
+数据库事务域。MySQL 配额对账按当前锁定事实执行，锁冲突时拒绝覆盖账本并要求调用方整体回滚后重试。
+Application 为全部固定 Saga 阶段预留完整直方图容量，未采样阶段也提供零计数序列。
+
 门面还提供四项稳定基础设施合同：有界 Schema Registry client、有完整性门禁的对象存储 adapter、
 可独立运行或交给 Application 托管的 gRPC listener，以及由 Application 独占的受管 Web listener。
 同时启用 `application,web` 并声明 `#[nasa::application("web")]` 后，Web 默认只接受 HTTP/1；在最终
@@ -174,7 +178,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = [
+nasa = { version = "2.0.5", features = [
     "application",
     "tx",
     "mapper",
@@ -476,7 +480,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["application", "grpc"] }
+nasa = { version = "2.0.5", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"
@@ -522,7 +526,7 @@ Kubernetes 认证文件与 Prometheus 采集配置也使用该入口。应用配
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["yml"] }
+nasa = { version = "2.0.5", features = ["yml"] }
 ```
 
 ```rust

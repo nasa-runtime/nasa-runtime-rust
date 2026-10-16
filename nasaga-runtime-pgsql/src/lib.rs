@@ -376,8 +376,13 @@ pub struct ManagedSagaStepFactory {
 }
 
 /// 当前二进制中显式允许受管构造的全部 PostgreSQL 步骤工厂。
+// 链接段按静态项名称区分；后端必须使用不同名称,防止双后端同编入时混合不同 runtime 工厂。
+#[doc(hidden)]
 #[nasaga_runtime_core::__private::linkme::distributed_slice]
-pub static COLLECTED_MANAGED_SAGA_STEPS: [ManagedSagaStepFactory];
+pub static COLLECTED_MANAGED_PGSQL_SAGA_STEPS: [ManagedSagaStepFactory];
+
+/// PostgreSQL 受管步骤工厂目录；与 MySQL 目录隔离,宏登记和运行时读取使用同一目录。
+pub use COLLECTED_MANAGED_PGSQL_SAGA_STEPS as COLLECTED_MANAGED_SAGA_STEPS;
 
 /// 业务作用：把 `Default` 构造的业务 Service 与 PostgreSQL Participant runtime 绑定为受管 handler。
 ///

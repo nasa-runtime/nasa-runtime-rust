@@ -44,6 +44,9 @@ authorized 结果 API 才取得该动态权限边界。
 
 ## 初始化与受管角色
 
+同一个程序可同时编入 MySQL 与 PostgreSQL Saga。两类受管步骤工厂分别登记，
+工作流与步骤描述仍共享后端中立目录；每个步骤的 runtime 与事务能力由其声明的后端绑定。
+
 直接依赖包装层时，调用方可以构造 PgOrchestrator::with_datasource 或 PgParticipantRuntime，并自行拥有
 schema、Catalog、transport、timer 与停机。普通业务通过 nasa 门面声明 Saga 组件，由 napp 按角色调用
 本 crate 的命名数据源入口。

@@ -21,7 +21,7 @@ dispatcher 固定扫描该数据源；本地已受理与远端流程完成是两
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.1", features = ["saga-runtime"] }
+nasa = { version = "2.0.5", features = ["saga-runtime"] }
 # Kafka 托管消费入口使用 features = ["saga-kafka"]
 # Redis Streams 托管消费入口使用 features = ["saga-redis-stream"]
 # gRPC generated service/client 与封闭收据：features = ["saga-grpc"]
@@ -244,6 +244,8 @@ PostgreSQL 使用各自与排序匹配的索引查询。稀疏状态位于历史
   收敛为创建幂等键。领导权只控制领取新项，exactly-once 仍由数据库唯一事实承担。
 - `tenant_quotas` 在创建事务内预留在飞实例名额，终态事务释放；未列出租户只观测不拒绝。存量库
   必须先事务内对账并置初始化标记，再启用上限。
+  MySQL 预留与对账先取得同一租户账本排他锁；拒绝分类和对账计数使用当前锁定事实，不沿用旧快照。
+  对账所需事实行被其它事务占用时立即失败，不跳过记录或覆盖账本，调用方须整体回滚后有界重试。
 - `tenant_action_rates` 使用数据库时钟的固定窗口限制变更类管理动作；预算与动作同事务提交，失败
   回滚退还，只读查询不占预算。完全相同的已提交 `operation_id` 在预留前返回，不重复计数；
   `max_actions = 0` 表示完全封禁新 operation。
