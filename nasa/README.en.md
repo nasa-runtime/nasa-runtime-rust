@@ -104,12 +104,18 @@ types and lifecycle owners; avoid mixing a local component with a different regi
 cleanup before dependent resources are released. It builds on Tokio and does not create a new
 executor. Independent component assembly remains possible, with ownership transferred to the caller.
 
+With both `saga-runtime` and `saga-runtime-pgsql` enabled, managed step factories stay isolated by
+database backend. MySQL quota reconciliation uses current locking reads; a lock conflict refuses
+the ledger overwrite and requires the caller to roll back the whole transaction before a bounded retry.
+Application reserves complete histogram capacity for every fixed Saga stage, including zero-count
+series for stages with no observations.
+
 ## Select capabilities
 
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |
@@ -139,7 +145,7 @@ application configuration evaluation uses the loaders described in the next sect
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.3", features = ["yml"] }
+nasa = { version = "2.0.5", features = ["yml"] }
 ```
 
 ```rust

@@ -162,7 +162,7 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.3", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,
