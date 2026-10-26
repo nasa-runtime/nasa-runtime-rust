@@ -5,6 +5,7 @@
 `nasa` 是面向 Rust 服务端应用的受管生命周期与可靠业务执行门面，也是 `nasa-runtime-rust` 的唯一业务入口。
 应用只依赖本 crate，通过 feature 选择能力，再从
 `nasa::<module>` 使用稳定入口；实现 crate 和宏 crate 由门面按需引入。
+`application,mapper-sqlite` 让业务沿用 `#[Mapper]`、`#[Query]` 等宏，并把 SQLite 文件、迁移、事务、观测与停机交给 napp 的同一个 `"db"` 组件。每个 datasource 独立声明 driver，见 [SQLite 与逐数据源 driver](#sqlite-与逐数据源-driver)。
 `kafka` 提供与 Java `nasa-kafka` 对应的多数据源事件运行时，组合独立发布通道、有界有序消费、同集群事务与持久任务接续；业务无需直接依赖 `nafka`。见 [Kafka 事件门面](#kafka-事件门面)。
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
 并以完整 URL 访问互联网 API；连接与注册资源共用受管生命周期。
@@ -23,7 +24,7 @@
 直接取消 Runner 也不会先释放仍存活任务所依赖的资源。
 受管 Orchestrator 将已提交 result 的恢复资格与 command 路由分开，允许保护态参与方重投原事件，
 同时持续关闭新 Start、timer claim 和 Ready；在途事务始终受原安全发布代际与期限约束。
-与 `mapper`/`mapper-pgsql` 组合时，Application 自动装配 SQL 原子指标、受控日志、有界通知和指标
+与 `mapper`/`mapper-pgsql`/`mapper-sqlite` 组合时，Application 自动装配 SQL 原子指标、受控日志、有界通知和指标
 出口，业务通过同一份 YAML 配置；参数默认不输出，通知故障不会改变 SQL 与事务结果。
 业务通过 `nasa::application::notifications::init(Arc<dyn Notify>)` 安装进程通知实现；没有实现就忽略，
 默认不要求 provider 配置。通知微服务的协议与客户端由业务实现，框架不连接具体消息渠道。
@@ -126,7 +127,7 @@ HTTP/1，其它 transport 参数均可省略并采用受校验默认值。四项
 
 ## SQL 阈值通知与观测架构
 
-同时启用 `application` 与 `mapper`/`mapper-pgsql`，Application 会自动登记方法、数据库执行、连接
+同时启用 `application` 与 `mapper`/`mapper-pgsql`/`mapper-sqlite`，Application 会自动登记方法、数据库执行、连接
 等待、Pool 与通知指标。完成路径只更新原子事实并尝试入队；受管 worker 调用业务实现，指标出口
 读取统一快照。无需业务编写 Mapper Hook 或周期采集任务。
 
@@ -178,7 +179,7 @@ exactly-once 调度。
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = [
+nasa = { version = "2.0.6", features = [
     "application",
     "tx",
     "mapper",
@@ -206,18 +207,19 @@ async fn save_order() -> anyhow::Result<()> {
 
 ## 受管单源与多源
 
-启用 `application` 后，MySQL、PostgreSQL、Redis 与 Kafka 都由最终 YAML 创建，业务不在 `main` 中自行建池或维护
+启用 `application` 后，MySQL、PostgreSQL、SQLite、Redis 与 Kafka 都由最终 YAML 创建，业务不在 `main` 中自行建池或维护
 第二张连接表。单源与多源配置根、默认身份及选择入口如下：
 
 | 资源 | 单源 | 多源 | 选择入口 |
 | --- | --- | --- | --- |
 | MySQL | `database` | `datasources.<name>` | `app.default_datasource().await` / `app.datasource(name).await` |
+| SQLite | `database` | `datasources.<name>` | `app.default_sqlite_datasource().await` / `app.sqlite_datasource(name).await` |
 | PostgreSQL | `database` | `datasources.<name>` | `app.default_pg_datasource().await` / `app.pg_datasource(name).await` |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | `app.default_redis().await` / `app.redis(name).await` |
 | Kafka | `kafka` | `kafkas.<client>` | `app.default_kafka()` / `app.kafka(name)` |
 
 Application 先校验完整命名表，再按稳定名称逐源探测，全部成功后一次性发布。同一 `datasources` 表可
-同时声明 MySQL 与 PostgreSQL，Outbox 与 Saga 通过 `datasource_ref` 的 driver 选择持久后端；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
+同时声明 MySQL、PostgreSQL 与 SQLite，Outbox 与 Saga 仅支持前两种后端，并通过 `datasource_ref` 的 driver 选择持久后端；Cache、缓存失效广播与 Scheduling 通过 `redis_ref` 选择 Redis；Kafka
 consumer/producer 使用 client name。引用不存在时会在 Ready 前失败，不会回退默认源。
 
 Kafka 的 `consumer.concurrency` 和 `consumer.group_concurrency` 配置订阅组的独立消费槽，
@@ -480,7 +482,7 @@ Service 的 initializer 先于业务停机任务释放，Batch 的静态 initial
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["application", "grpc"] }
+nasa = { version = "2.0.6", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"
@@ -526,7 +528,7 @@ Kubernetes 认证文件与 Prometheus 采集配置也使用该入口。应用配
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["yml"] }
+nasa = { version = "2.0.6", features = ["yml"] }
 ```
 
 ```rust
@@ -597,6 +599,10 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 | `tx` | `nasa::tx` | ambient MySQL 事务和 `#[transactional]` |
 | `tx-pgsql` | `nasa::tx::pgsql` | PostgreSQL ambient 事务、`PgConn` 和专用 `#[transactional]`；与 `application` 组合时启用受管 PgPool |
 | `mapper` | `nasa::mapper` | 声明式 SQL Mapper，蕴含 `tx` |
+| `tx-sqlite` | `nasa::tx::sqlite`、`nasa::migration::sqlite` | 文件数据源、同源事务、备份与迁移；与 application 组合启用 db-sqlite |
+| `mapper-sqlite` | `nasa::mapper::sqlite` | SQLite Mapper，蕴含 tx-sqlite |
+| `mapper-redis-cache-sqlite` | `nasa::mapper::sqlite` | SQLite Mapper Redis L2 与受管缓存接线 |
+| `mapper-cache-grouped-sqlite` | `nasa::mapper::sqlite` | SQLite Mapper 接 GroupedCache |
 | `mapper-pgsql` | `nasa::mapper::pgsql` | PostgreSQL Mapper，蕴含 `tx-pgsql`；可复用受管或 standalone PgPool |
 | `mapper-redis-cache` | `nasa::mapper` | Mapper Redis Hash L2 |
 | `mapper-cache-grouped` | `nasa::mapper` | Mapper 接 `GroupedCache` |
@@ -672,6 +678,55 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 `nacos` 和 `rest-discovery-nacos` 只保证 API 可编译；真正连接后端必须同时启用 `nacos-sdk`。
 `full` 选择 Kafka 和 gRPC 作为纳入的 Saga transport，同时纳入 gRPC listener；Redis Streams 替代
 通道仍需显式开启。生产服务仍建议只选择实际使用的 feature，避免无意扩大依赖面与运行责任。
+
+## SQLite 与逐数据源 driver
+
+`#[nasa::application("db")]` 声明使用数据库组件，具体后端由每个 `datasources.<name>.driver` 独立选择。编译时开启对应能力：MySQL 用 `mapper` / `tx`，PostgreSQL 用 `mapper-pgsql` / `tx-pgsql`，SQLite 用 `mapper-sqlite` / `tx-sqlite`。只启用 `application + mapper-sqlite` 不引入 MySQL/PostgreSQL runtime。
+
+```text
+nasa features 与 SQL 宏 → 对应 typed Mapper / transaction adapter
+datasources 配置 → napp 全表校验 → 各 source 的 owner 与统一 catalog
+                → 显式 migration 门禁 → 初始化 → 业务开放
+```
+
+每份源只有一个关闭 owner，业务 getter 返回使用句柄。显式未知名称和错 driver 均拒绝；默认 getter 只选择 `default`，不会猜选唯一来源。`database` 是单源形式，与 `datasources` 互斥；SQLite 必须显式写 `driver: sqlite`，不从文件后缀或 URI 推断。
+
+```toml
+[dependencies]
+nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
+```
+
+```yaml
+datasources:
+  primary:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+  local:
+    driver: sqlite
+    sqlite:
+      path: ./data/local.db
+      create_if_missing: true
+      create_parent_directories: true
+      journal_mode: wal
+      synchronous: full
+    max_connections: 4
+    operation_timeout_ms: 30000
+    transaction_timeout_ms: 30000
+    migrations:
+      mode: validate
+      lock_timeout_ms: 5000
+      execution_timeout_ms: 30000
+```
+
+SQLite 业务导入 `nasa::mapper::sqlite::Mapper`，继续使用 `#[Mapper(datasource = "local")]` 与 `#[Query]` 等方法宏。MySQL 导入 `nasa::mapper::Mapper`，PostgreSQL 导入 `nasa::mapper::pgsql::Mapper`；SQL 方言不自动翻译。读取 SQLite 使用句柄调用 `app.sqlite_datasource("local").await`，`default_sqlite_datasource()` 只查找确切的 `default` 名称。
+
+SQLite 文件 owner、连接、迁移门禁、观测与停机均由同一 Application 管理。Service 在 UserHook 登记完整 Migrator，Batch 用 `MIGRATION_PLANS`；Prepare 完成后才开放业务。显式配置非 disabled 的 SQLite migrations 必须登记计划，配置不会自动发现 SQL 文件。迁移文件使用语义名称，持久标识通过 `Migration::new` 明确给出。
+
+`nasa::tx::sqlite::conn_for_budget` 在独立连接接纳前传播请求与配置的较短绝对期限，包含首次 SQL 前的持有阶段；环境事务仅收敛本次句柄期限。`read_with_budget` 约束完整读取取消。停机或预算结束后，真实原生执行与关闭仍占容量并保活文件 owner。统一 `sql.observability` 覆盖 SQLite，来源隔离和维护错误进入 readiness 与固定诊断指标。
+
+可运行的 Mapper、静态迁移与 Batch 入口见 [SQLite 接入指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/sqlite.md)。
+
+仅支持 Linux/macOS 本地私有文件。SQLite 禁止延后 `saga.database_bootstrap: user_hook`，不提供 Saga/Inbox/Outbox 持久后端，也不提供跨 driver 或跨 datasource 原子事务。`source.maintenance()` 提供有界 checkpoint 与原生一致性备份，恢复只能写入不存在的新路径。完整配置与失败边界见 [SQLite 数据源](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/natx-sqlite/README.md)、[SQLite Mapper](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-sqlite/README.md) 和 [SQLite 迁移](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namigrate-sqlite/README.md)。
 
 ## PostgreSQL 受管与 standalone 入口
 
@@ -823,7 +878,7 @@ server:
 | `log` | `nalog` |
 | `nacos` | `config-boot` / `nanacos` |
 | `telemetry` | `napp` telemetry 组件，含受管 OTLP trace 与可选 cumulative metrics 出口 |
-| `database` / `datasources` | `natx` / `namigrate` / `namapper` |
+| `database` / `datasources` | 按 driver 选择 MySQL、PostgreSQL 或 SQLite 的 transaction、migration 和 Mapper adapter |
 | `redis` | `nadis` |
 | `cache` | `cacheable` 受管组件 |
 | `saga` | Application Saga 组件 |

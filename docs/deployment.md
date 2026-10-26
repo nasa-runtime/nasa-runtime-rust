@@ -135,6 +135,16 @@ server:
 完整字段、范围和指标合同见
 [napp Web listener 受管模式](../napp/README.md#web-http-listener-受管模式)。
 
+## SQLite 文件与持久化前提
+
+SQLite 部署选择 `application,mapper-sqlite` 或 `application,tx-sqlite`，同一 `"db"` 组件管理文件来源。每个 datasource 显式声明 driver，SQLite 用 `sqlite.path`，不接受网络 URL 或内存数据库。只支持 Linux/macOS 私有本地文件系统；容器挂载整个数据库目录，不能让多个实例共写同一文件，也不使用 NFS/SMB 或共享多主卷。
+
+已有主文件、锁文件与 sidecar 必须属于运行账号并无 group/other 权限，父目录不得被其它账号写入。保留稳定 owner 锁文件，不能以锁文件存在与否判断活跃权威。已有文件必须匹配声明的 journal_mode；WAL 默认 FULL，DELETE 默认 EXTRA，持久性依赖文件系统与设备履行同步。只读部署仍可能需要锁和协调文件。
+
+部署必须显式登记完整迁移计划；Service 在 UserHook 或静态工厂登记，Batch 使用静态 `MIGRATION_PLANS`。validate 不建表，apply 整批事务执行；跨来源已成功的迁移不会回滚。运行期配置变更要求重启，旧 Mapper client 不会切换到新 owner。
+
+备份使用原生一致备份入口，恢复只写新目标，不以拷贝活动主文件或删除 WAL 代替恢复流程。停止或预算超时后，必须等待真实原生连接退出，才能由另一 owner 接管。SQLx 0.9 与 `libsqlite3-sys 0.37` 的单 native 库约束也适用于应用中的其它 SQLite 驱动。配置及代码见 [SQLite 接入指南](sqlite.md)。
+
 ## SQL 通知与监控平台
 
 部署前为通知适配器提供业务配置，在启动前或初始化阶段调用

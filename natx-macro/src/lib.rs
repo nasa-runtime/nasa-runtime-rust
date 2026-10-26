@@ -1,82 +1,33 @@
 //! ambient 事务属性宏。
 //!
-//! `#[transactional]` 在编译期包装 async 函数体，让业务方法自动进入 `natx` 事务运行时。
-// ============================================================================
-// tx-macro —— 属性宏 #[transactional](ambient 事务编排)
-//
-// 作用:把被注解的 async fn 的【函数体】包进 `crate::tx::run(async move { ... }).await`:
-//   · 进入时 begin 一个事务(若外层已在事务中则【加入】,不另开 —— 嵌套复用外层事务)
-//   · 函数体正常返回 Ok → commit
-//   · 函数体返回 Err(或 ? 上抛) → rollback
-//
-// 它只负责【编排】(begin/commit/rollback 样板);函数体里嵌套调用的 repo 怎么自动用上同一个
-// 事务连接,是 src/tx.rs 用 task_local ambient 事务做的(repo 走 tx::conn() 取"当前连接")。
-//
-// 约束:被注解函数的返回类型必须是 `anyhow::Result<T>`(run 的返回类型与之对齐)。
-// 三类过程宏里这是【attribute 属性宏】。
-// ============================================================================
+//! `#[transactional]` 在编译期包装 async 函数体，导入路径固定选择 MySQL、PostgreSQL 或 SQLite。
+//! 宏将业务 future 交给对应 typed runtime；datasource 配置必须匹配该 driver，不按 URL 改写后端。
+//! SQLite 支持 Deferred/Immediate，嵌套调用继承外层模式或拒绝显式冲突；不提供跨库原子事务。
+//! napp 的 `db` 组件拥有受管来源，宏不另建连接池，也不把 after-commit 当作持久消息投递。
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser;
 use syn::{parse_macro_input, ItemFn, LitStr};
 
-/// 业务作用：`#[transactional]` —— 给 async fn 套上 ambient 事务编排。
+/// 业务作用：为 MySQL async 业务函数生成同源环境事务编排。
+/// 参数说明：
+/// - `attr`：空参数、datasource 名称或 never 传播声明。
+/// - `item`：返回值兼容 anyhow::Result 的 async 函数。
+/// 返回：保留签名并包装函数体；非法参数或函数形式产生编译错误。
 ///
-/// 进入时 begin、正常返回 Ok → commit、返回 Err(或 `?` 上抛)→ rollback。
-/// 函数体里嵌套调用的 repo【自动用同一个事务连接】(靠 `src/tx.rs` 的 task_local ambient 事务,
-/// repo 走 `tx::conn()` 取"当前连接"——有事务用事务、没有用池)。约束:返回类型须为 `anyhow::Result<T>`。
-///
-/// # 嵌套调用(a 调 b,a、b 都 #[transactional])—— 默认就对
-/// 嵌套复用:a 未提交时调 b,b 检测到"已在事务中"→【不另开】,直接加入 a 的事务,最后 a 统一 commit;
-/// b 出错 → 整体回滚。**这是想要的行为**。注意:不要"先让 a commit 再调 b"——那就拆成两个独立事务了。
-///
-/// # ⚠️ repo 必须用 `tx::conn()` 取连接,否则不进事务
-/// 被本注解的流程里,repo 的连接【必须】走 `crate::tx::conn().await`(它会自动用上当前事务连接)。
-/// 若 repo 用的是 `&self.pool`(struct 字段那种,如原版 `KLineRepository`),它会【另取一条池连接、
-/// 绕过事务】——写入不在事务内、回滚时不会撤销(静默脏写)。详见 `tx::conn()` 的文档表格。
-///
-/// # ⚠️ 三条使用纪律(ambient 实现的代价,务必看)
-/// 1. **同一事务内绝不并发查询**(别 `tokio::join!` 两个都查库的调用)——事务=单连接,物理上也并发不了。
-/// 2. **绝不在持有一个 `conn()` 句柄时,再去调用也要 `conn()` 的代码**——嵌套获取会立即返回连接
-///    占用错误。正确:一条 query 取-用-丢(让 `Conn` 立刻离开作用域),再下一条。
-/// 3. 事务函数保持短小、命名点明,弥补"签名看不出在事务里"的可读性损失。
-///
-/// # 第 2 条什么时候真会咬人?
-/// - **常规分层(service→repo 的 CRUD)不会咬**:`#[transactional]` 的 service 只编排、【不直接写 `conn()`】;
-///   `conn()` 只在最底层 repo 的一条自包含查询里"取-用-丢"。所以 a 调 b 时谁都没攥着 conn → 安全。
-///   是否提交与连接占用无关；只有调用内层方法时仍持有活的 `Conn` 才会被拒绝。
-/// - **唯一现实陷阱:repo 里【流式游标 fetch 边读边写】**——`fetch()` 返回的流会长时间攥着连接,
-///   这期间又对每行调另一个 `conn()` 的写操作会返回连接占用错误。示意:
-///   ```ignore
-///   let mut c = tx::conn().await?;
-///   let mut rows = sqlx::query("SELECT id FROM t").fetch(c.as_mut()); // c 被流借住到读完
-///   while let Some(row) = rows.next().await {
-///       other_repo::update(id).await?;  // c 仍被流持有，update 内部 conn() 返回错误
-///   }
-///   ```
-///
-/// # 想彻底免疫?用【显式 `&mut tx`】(生产推荐)
-/// 不用本宏,改成把事务当参数显式传:
-/// ```ignore
-/// let mut tx = pool.begin().await?;
-/// repo::insert_e(&mut *tx, ..).await?;   // 显式传;a 调 b 就 b(&mut *tx)
-/// tx.commit().await?;                    // 出错 ? 上抛 → tx drop 自动 ROLLBACK
-/// ```
-/// 上面的流式边读边写冲突在显式版中会变成【编译错误】(不能同时两次 `&mut *tx`)——
-/// 同一个"单连接不能同时干两件事"的限制,借用检查器在编译期就拦住了。详见
-/// 展开代码遵守 ambient transaction 传播边界，避免生成调用绕过当前事务上下文。
-///
-/// # 参数
-///
-/// - `attr`: `#[transactional(...)]` 括号内的 token stream；为空表示默认 datasource,
-///   也可写 `datasource = "reporting"`。
-/// - `item`: 被注解的 async 函数 token stream。
-///
-/// 返回：保持原签名并接入 MySQL ambient transaction 的展开结果；非法输入生成编译错误。
+/// 根调用由运行时开始并收口事务，嵌套调用加入当前同源事务；业务错误交由运行时裁决回滚。
+/// Mapper 或低层查询必须通过同一 typed runtime 的连接入口，另取裸池连接的写入不属于该事务。
+/// 同一事务只借用一个连接槽，连接或结果流未释放时再次借用会被拒绝；应先结束当前读取再执行后续 SQL。
+/// task-local 不跨 spawn 传播，after_commit 只有在明确提交后执行，不能代替持久消息投递。
 #[proc_macro_attribute]
 pub fn transactional(attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_transactional(attr, item, nasa_macro_support::runtime_root("tx", "natx"))
+    expand_transactional(
+        attr,
+        item,
+        nasa_macro_support::runtime_root("tx", "natx"),
+        None,
+    )
 }
 
 /// 业务作用：为 PostgreSQL async 业务函数生成固定指向 `natx-pgsql` 或 `nasa::tx::pgsql` 的事务编排。
@@ -92,21 +43,71 @@ pub fn transactional_pgsql(attr: TokenStream, item: TokenStream) -> TokenStream 
         attr,
         item,
         nasa_macro_support::runtime_root_nested(&["tx", "pgsql"], "tx-pgsql", "natx-pgsql"),
+        None,
     )
 }
 
-/// 业务作用：共享两种数据库事务宏的语法校验与函数体包装，确保差异只来自编译期运行时路径。
+/// 业务作用：让 SQLite 业务函数进入同源本地事务，并显式选择外层锁策略。
+/// 参数说明：
+/// - `attr`：datasource、mode 或 never 传播声明。
+/// - `item`：被包装的 async 函数。
+/// 返回：保持签名的事务展开；非法模式、重复参数和互斥声明产生编译错误。
+#[proc_macro_attribute]
+pub fn transactional_sqlite(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let root =
+        nasa_macro_support::runtime_root_nested(&["tx", "sqlite"], "tx-sqlite", "natx-sqlite");
+    if attr.is_empty() || syn::parse::<LitStr>(attr.clone()).is_ok() {
+        return expand_transactional(attr, item, root, None);
+    }
+    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+    let attributes = match parser.parse(attr) {
+        Ok(attributes) => attributes,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let mut mode = None;
+    let mut remaining = Vec::new();
+    for attribute in attributes {
+        if attribute.path().is_ident("mode") {
+            let parsed = match &attribute {
+                syn::Meta::NameValue(value) => match &value.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) => Some(value.value()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if mode.is_some() || !matches!(parsed.as_deref(), Some("deferred" | "immediate")) {
+                return syn::Error::new_spanned(
+                    attribute,
+                    "SQLite mode 必须唯一且为 deferred 或 immediate",
+                )
+                .to_compile_error()
+                .into();
+            }
+            mode = parsed;
+        } else {
+            remaining.push(attribute);
+        }
+    }
+    expand_transactional(quote!(#(#remaining),*).into(), item, root, mode.as_deref())
+}
+
+/// 业务作用：共享数据库事务宏的语法校验与函数体包装，按后端选择运行时路径和锁策略。
 ///
 /// 参数说明：
 /// - `attr`：属性参数 token。
 /// - `item`：被包装函数 token。
 /// - `runtime_root`：对应 typed runtime 的已解析路径或依赖提示。
+/// - `sqlite_mode`：SQLite 显式锁策略，其它 driver 不传入。
 ///
 /// 返回：可由编译器继续处理的宏展开 token。
 fn expand_transactional(
     attr: TokenStream,
     item: TokenStream,
     runtime_root: Result<proc_macro2::TokenStream, String>,
+    sqlite_mode: Option<&str>,
 ) -> TokenStream {
     let root = match runtime_root {
         Ok(r) => r,
@@ -143,14 +144,29 @@ fn expand_transactional(
     //    `async move #block`:把原函数体当成一个 async 块,按 move 捕获所有参数 →
     //       它就是 run 需要的"事务内要执行的业务 future",输出 = 原返回类型 anyhow::Result<T>。
     //    #root = 解析出的运行时根(::nasa::tx / ::tx / crate),run 见 tx crate 的 src/lib.rs。
-    let run_call = match datasource {
+    let mode = sqlite_mode.map(|mode| match mode {
+        "immediate" => quote!(#root::TransactionMode::Immediate),
+        _ => quote!(#root::TransactionMode::Deferred),
+    });
+    if mode.is_some() && matches!(datasource, TransactionalMode::Never) {
+        return syn::Error::new_spanned(&func.sig.ident, "SQLite never 与 mode 互斥")
+            .to_compile_error()
+            .into();
+    }
+    let run_call = match (datasource, mode) {
         // never:进入前拒绝 ambient 事务且不开启新事务——供"绝不能被外层事务包住"的路径
         // (如自治审计写、必须立即可见的对外副作用)把违规调用变成显式错误而不是静默入伙。
-        TransactionalMode::Never => quote! { #root::run_never(async move #block).await },
-        TransactionalMode::Named(datasource) => {
+        (TransactionalMode::Never, _) => quote! { #root::run_never(async move #block).await },
+        (TransactionalMode::Named(datasource), Some(mode)) => {
+            quote! { #root::run_for_mode(#datasource, Some(#mode), async move #block).await }
+        }
+        (TransactionalMode::Default, Some(mode)) => {
+            quote! { #root::run_for_mode("default", Some(#mode), async move #block).await }
+        }
+        (TransactionalMode::Named(datasource), None) => {
             quote! { #root::run_for(#datasource, async move #block).await }
         }
-        TransactionalMode::Default => quote! { #root::run(async move #block).await },
+        (TransactionalMode::Default, None) => quote! { #root::run(async move #block).await },
     };
     let expanded = quote! {
         #(#attrs)*

@@ -1,7 +1,9 @@
 //! 数据库后端中立的 datasource 身份、受管所有权与事务裁决合同。
 //!
-//! 本 crate 不创建连接，也不依赖 SQLx 的数据库 feature。MySQL 与 PostgreSQL driver crate
+//! 本 crate 不创建连接，也不依赖 SQLx 的数据库 feature。MySQL、PostgreSQL 与 SQLite driver crate
 //! 通过同一进程协调器发布 typed registry，确保同一 Application 只有一张名称与 driver catalog。
+//! 每个 datasource 独立选择编入的 driver；完整 catalog 开放前 getter 不发放资源，错 driver 拒绝。
+//! SQLite 文件 owner 与物理连接生命周期由对应 adapter 负责，本 crate 只裁决共享身份与准入。
 //! 连接观测按固定 datasource 与 purpose 区分 Pool acquire、事务槽等待和执行前拒绝；取消只收口
 //! 一次终态，Pool 状态为近似快照。等待日志与有界通知不能改变连接结果，不计作 Mapper 执行耗时。
 
@@ -29,6 +31,8 @@ pub enum DatabaseDriver {
     MySql,
     /// PostgreSQL 协议。
     PostgreSql,
+    /// 本地 SQLite 文件数据库。
+    Sqlite,
 }
 
 /// 业务作用：声明当前编译产物实际包含的数据库后端，避免把可解析 driver 误当成已编入能力。
@@ -38,6 +42,7 @@ pub struct DatabaseCapabilities(u8);
 impl DatabaseCapabilities {
     const MYSQL: u8 = 1;
     const POSTGRESQL: u8 = 1 << 1;
+    const SQLITE: u8 = 1 << 2;
 
     /// 业务作用：构造不包含任何数据库后端的能力集合。
     ///
@@ -57,6 +62,7 @@ impl DatabaseCapabilities {
         let flag = match driver {
             DatabaseDriver::MySql => Self::MYSQL,
             DatabaseDriver::PostgreSql => Self::POSTGRESQL,
+            DatabaseDriver::Sqlite => Self::SQLITE,
         };
         Self(self.0 | flag)
     }
@@ -70,6 +76,7 @@ impl DatabaseCapabilities {
         let flag = match driver {
             DatabaseDriver::MySql => Self::MYSQL,
             DatabaseDriver::PostgreSql => Self::POSTGRESQL,
+            DatabaseDriver::Sqlite => Self::SQLITE,
         };
         self.0 & flag != 0
     }
@@ -85,6 +92,7 @@ impl std::fmt::Display for DatabaseDriver {
         formatter.write_str(match self {
             Self::MySql => "mysql",
             Self::PostgreSql => "postgresql",
+            Self::Sqlite => "sqlite",
         })
     }
 }

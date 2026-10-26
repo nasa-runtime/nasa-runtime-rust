@@ -1,7 +1,7 @@
 # namapper-core
 
 `namapper-core` 定义后端中立的 Mapper SQL 渲染、分页、排序、缓存和观测合同。数据库连接与 SQLx
-类型实现在 `namapper` 和 `namapper-pgsql` 中。
+类型实现在 `namapper`、`namapper-pgsql` 和 `namapper-sqlite` 中，分别支持 MySQL、PostgreSQL 与 SQLite；三者共用 `#[Mapper]` 与 SQL 方法属性的合同。
 静态方法目录和固定原子单元区分逻辑调用、真实数据库访问与流消费，缓存命中不会伪造数据库访问；
 基础指标不受日志级别、慢阈值或通知开关影响。
 达到配置阈值的 SQL 可逐条提交异步通知；业务主动安装通知实现，框架不选择消息渠道或下游协议。
@@ -25,7 +25,7 @@ Stream 构造、首次 poll、首行、底层活跃读取和完整生命周期�
 生命周期；从未 poll 的流只记录构造与取消，不增加真实数据库调用。取消和展开由守卫记一次终态，
 析构路径不输出日志或通知。
 
-同时启用 `nasa` 的 `application` 与 `mapper`/`mapper-pgsql` 时，`napp` 自动冻结策略、预留整个 SQL
+同时启用 `nasa` 的 `application` 与 `mapper`/`mapper-pgsql`/`mapper-sqlite` 时，`napp` 自动冻结策略、预留整个 SQL
 系列预算并注册 source，不需要 Mapper Hook 或业务注册指标。独立宿主可使用
 `observability::metrics_source()`，连接资源与 exporter 生命周期由宿主负责。
 
@@ -152,9 +152,9 @@ sql:
 `Application::sql_observability_effective(datasource, method)` 获取，不包含 URL、SQL 或凭据。
 这些策略在启动时冻结；修改需要重启，已有 Stream 始终使用原策略。
 
-同时编译两个后端、无 Mapper 静态方法且默认池由 UserHook 提交时，启动先为两个后端候选预留
+同时编译 MySQL 与 PostgreSQL、无 Mapper 静态方法且默认池由 UserHook 提交时，启动先为两个后端候选预留
 指标预算，首次提交的具类型 Pool 冻结真实后端。之后不能提交另一后端，Ready 前必须提交默认池；
-实际连接获取超时仍在 Prepare 复验。
+实际连接获取超时仍在 Prepare 复验。SQLite 不支持此延后注入模式，必须由 Application 按配置取得文件 owner。
 
 ## 开发控制台与数据边界
 
@@ -199,24 +199,47 @@ Prometheus 与 OTLP 读取同一组结构化 source。
 节点产生连续 `$n`，不会扫描或改写文本中的 `?`，因此字符串、quoted identifier、块注释和 JSON
 操作符不会与参数编号混淆。空列表没有统一 SQL 业务语义，会明确返回错误。
 
-分页通过有界 `PageRequest` 提供可直接 bind 的 `limit`/`offset`；动态排序通过 `MapperOrderField`
+分页通过有界 `PageRequest` 提供可直接 bind 的只读 `limit`/`offset`；动态排序通过 `MapperOrderField`
 白名单输出列名；`MapperCacheMeta`、`MapperL2Cache`、codec、metrics 和 after-commit 清理目标用于让不同
 数据库 adapter 共享同一缓存语义。进程内 single-flight、版本化/fallback codec 和默认注册槽也在本
-crate 单点实现，因此同一个手写缓存、codec 或指标实现可同时供 MySQL 与 PostgreSQL Mapper 使用。
+crate 单点实现，因此同一个手写缓存、codec 或指标实现可同时供 MySQL、PostgreSQL 与 SQLite Mapper 使用。
+
+### 分页输入与更新
+
+`PageRequest` 的构造、反序列化和更新共同要求 `limit > 0`、`offset >= 0`，且两个值均在 i64 范围内。
+JSON 保持 `{"limit":20,"offset":40}` 结构；`#{page.limit}`、`#{page.offset}` 和 Rust 的字段读取保持可用。
+分页值通过只读视图提供，不能使用结构体字面量构造 `PageRequest` 或直接给字段赋值；请使用构造器、
+`PageRequest::try_from(PageRequestValues { ... })` 或 `set_offset_limit`。更新失败保留原值。
+
+`new` 使用默认最大页大小 1000；`with_max_page_size` 接受业务指定上限。反序列化及 `from_offset_limit`
+只检查基本不变量，不隐式套用 1000 上限；接收外部 DTO 时应在业务入口调用 `validate_with_max_page_size`：
+
+```rust
+use namapper_core::PageRequest;
+
+let page: PageRequest = serde_json::from_str(r#"{"limit":20,"offset":40}"#)?;
+page.validate_with_max_page_size(500)?;
+// 业务校验完成后，将 page 交给 Mapper 的 LIMIT/OFFSET 字段绑定。
+```
+
+`validate()` 可显式确认基本不变量。任意普通整数参数与业务自定义 DTO 不受 `PageRequest` 的类型约束，
+框架不会依据参数名或 SQL 文本擅自改变它们的含义；这类输入由业务自行校验。
 
 启用 `redis-cache` 后还提供 `RedisMapperL2Cache` 与
 `RedisDistributedSingleFlightMapperL2Cache`。Redis 实现只依赖缓存合同，不依赖 SQLx driver；
-PostgreSQL-only 应用使用它不会引入 MySQL runtime。
+PostgreSQL-only 或 SQLite-only 应用使用它不会引入 MySQL runtime。
+
+SQLite adapter 还将缓存空间绑定到实际文件 owner 和提交序号。事务默认旁路 L2；显式 `cache_in_tx = true` 只允许弱一致读取已有值，事务内未命中不回填共享缓存。同源写入、提交未确认与来源隔离的处理见 [SQLite 缓存与观测](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-sqlite/README.md#缓存与观测)。
 
 ## 主要边界
 
 该 crate 不创建数据库连接、不执行 SQL，也不根据数据库 URL 选择后端。普通应用应使用 `namapper` 或
-`namapper-pgsql`；adapter 与宏实现可直接依赖本 crate 的稳定合同。Redis 连接仍由业务或受管应用创建，
+`namapper-pgsql` 或 `namapper-sqlite`；adapter 与宏实现可直接依赖本 crate 的稳定合同。Redis 连接仍由业务或受管应用创建，
 独立模式由调用方显式安装默认 Mapper L2，Application 模式由命名配置完成安装与关闭。
 
 ## Application 接入
 
-门面开启 `application,mapper-redis-cache` 或 `application,mapper-redis-cache-pgsql`，并声明
+门面开启 `application,mapper-redis-cache`、`application,mapper-redis-cache-pgsql` 或 `application,mapper-redis-cache-sqlite`，并声明
 `"redis"`。`mapper_cache.enabled` 与 `redis_ref` 选择受管 Redis，准备阶段验证 Hash 字段过期能力；
 Service 与 Batch 均在查询前完成门禁。
 

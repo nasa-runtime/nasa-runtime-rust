@@ -632,7 +632,11 @@ impl ApplicationRunner {
                     return self.handle_startup_stop(stop, &mut broker).await;
                 }
 
-                #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+                #[cfg(any(
+                    feature = "mapper-cache",
+                    feature = "mapper-cache-pgsql",
+                    feature = "mapper-cache-sqlite"
+                ))]
                 if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
                     return self
                         .handle_startup_stop(StartupStop::Failure(error), &mut broker)
@@ -723,7 +727,11 @@ impl ApplicationRunner {
                 self.active.push_initializer_tasks();
 
                 // 静态装配与 initializer 均已完成，接流前确认缓存查询具有可用默认 L2。
-                #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+                #[cfg(any(
+                    feature = "mapper-cache",
+                    feature = "mapper-cache-pgsql",
+                    feature = "mapper-cache-sqlite"
+                ))]
                 if let Err(error) = crate::mapper_cache::ensure_mapper_l2_installed() {
                     // 尚未移交的捕获值必须先于依赖资源释放，守卫隔离各工厂的析构异常。
                     drop(staged_tasks);
@@ -864,7 +872,7 @@ impl ApplicationRunner {
     fn validate_component_order(&self) -> ApplicationResult<()> {
         let component_ids = self.declared_components();
         crate::spec::validate_component_order(&component_ids)?;
-        #[cfg(any(feature = "db", feature = "db-pgsql"))]
+        #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
         if !crate::migrations::MIGRATION_PLANS.is_empty()
             && !component_ids.contains(&ComponentId::Db)
         {

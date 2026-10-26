@@ -1,6 +1,6 @@
 [package]
 name = "namapper-core"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Backend-neutral mapper SQL rendering, shared cache, atomic metrics, and bounded threshold notifications"

@@ -27,7 +27,7 @@ rust-version = "1.94"
 
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
 Replace `src/main.rs` with the following. Source comments retain Chinese to follow the repository's
@@ -114,13 +114,13 @@ startup order; changing their order in the attribute does not change dependency 
 For MySQL transactions and mapping, extend the facade dependency to:
 
 ```toml
-nasa = { version = "2.0.5", features = ["application", "web", "tx", "mapper"] }
+nasa = { version = "2.0.6", features = ["application", "web", "tx", "mapper"] }
 ```
 
 For PostgreSQL:
 
 ```toml
-nasa = { version = "2.0.5", features = ["application", "web", "tx-pgsql", "mapper-pgsql"] }
+nasa = { version = "2.0.6", features = ["application", "web", "tx-pgsql", "mapper-pgsql"] }
 ```
 
 Declare `"db"` alongside `"web"` in the application attribute. Add a named datasource to the YAML,
@@ -142,6 +142,18 @@ datasource. Enabling both drivers does not create a distributed transaction.
 Application can own migration gates, but migration SQL and its registration still belong to the
 application. See the [database and migration example](quickstart.md#配置) in Chinese for the detailed
 registration contract and [Integration and upgrades](migration.en.md) for data compatibility constraints.
+
+## SQLite files with Mapper
+
+Use `application,mapper-sqlite` and keep the `#[nasa::application("db")]` entry. Each SQLite source
+requires `driver: sqlite` and `sqlite.path`; import `Mapper` from `nasa::mapper::sqlite` and use the
+same Query/Insert/Update/Delete method attributes. `app.sqlite_datasource(name).await?` returns the
+managed usage handle. Compile additional backend features when different sources use different drivers.
+
+The [complete SQLite Batch example](sqlite.md#可运行的-batch-应用) includes a manifest, semantic migration
+filename, YAML, static migration factory and runnable main (Chinese). Batch migration factories run
+before the workload; Service can register a plan during UserHook. SQLite does not supply persistence
+adapters for Saga, Inbox or Outbox. The application owns domain SQL; napp owns preparation and close.
 
 ## Add messaging or a workflow
 

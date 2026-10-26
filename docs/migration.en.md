@@ -3,7 +3,7 @@
 [中文](migration.md) | [English](migration.en.md)
 
 This guide explains how an existing Rust application adopts the dependency and runtime contracts
-of `nasa 2.0.5`. The steps depend on the capabilities in use. A version number alone cannot establish
+of `nasa 2.0.6`. The steps depend on the capabilities in use. A version number alone cannot establish
 API, schema, message or configuration compatibility. For a new application, start with the
 [quickstart](quickstart.en.md).
 
@@ -13,14 +13,12 @@ Prefer selecting capabilities through the facade:
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.5"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
-versions. When adopting registry components, remove `path` dependencies and `[patch.crates-io]`
-overrides pointing to local NASA sources while preserving required features. An application using
-`sqlx::FromRow` or `sqlx::migrate!` still declares the appropriate direct dependency; the facade does
-not implicitly make external crate names available to application code.
+`version = "2.0.6"` is a Cargo compatibility range; the application's `Cargo.lock` fixes the resolved
+versions. Applications using `sqlx::FromRow` or `sqlx::migrate!` still declare the appropriate direct
+dependency; the facade does not implicitly make external crate names available to application code.
 
 Inspect the application's graph for mixed registry, Git and local identities of the same component:
 
@@ -55,7 +53,7 @@ Copied external client handles do not acquire the revocation guarantees of manag
 - `application.mode` selects Service or Batch. Set `service` explicitly for a long-running background
   process without an inbound component.
 - Use `database` for a single source or `datasources` for named sources; the roots are mutually
-  exclusive. PostgreSQL requires `driver: postgresql` explicitly.
+  exclusive. PostgreSQL requires `driver: postgresql`; SQLite requires `driver: sqlite` and `sqlite.path`.
 - Datasource names, Redis qualifiers and Kafka client names are resource identities. Unknown explicit
   references prevent startup.
 - A single Redis source has durable identity `primary`; `default` is a lookup alias and does not rename
@@ -66,6 +64,25 @@ Copied external client handles do not acquire the revocation guarantees of manag
 
 The detailed [Application contract](../napp/README.md), currently in Chinese, defines fields, defaults
 and admission conditions.
+
+## Adopt SQLite and the shared page contract
+
+Select `application,mapper-sqlite`, import the same SQL macros from `nasa::mapper::sqlite`, and use
+`nasa::tx::sqlite` for transaction boundaries. Each datasource may choose a different driver; changing
+YAML does not translate SQL or row types. Existing SQLite files must satisfy identity, private
+permissions, journal mode, migration history and exclusive ownership requirements. Startup does not
+convert file modes or move application data automatically.
+
+`DatabaseDriver` includes `MySql`, `PostgreSql` and `Sqlite`; exhaustive matches must cover all variants.
+`PageRequest` preserves its JSON and readable fields, while constructors, deserialization and updates
+validate nonnegative offset and positive limit. Replace struct literals and field assignments with
+constructors or `set_offset_limit`; failed updates preserve the old value. Validate external page
+inputs against the application's explicit maximum size.
+
+SQLite-only features avoid MySQL/PostgreSQL runtimes, but all SQLite users in one program must share
+one compatible native library. Keep semantic migration filenames and explicit persistent IDs; do not
+rewrite applied SQL to bypass checksum mismatches. See the [SQLite guide](sqlite.md) and
+[page contract](../namapper-core/README.md#分页输入与更新) (Chinese).
 
 ## Migrate Kafka source and configuration
 

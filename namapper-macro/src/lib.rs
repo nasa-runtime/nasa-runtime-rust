@@ -1,8 +1,13 @@
 //! SQL mapper 声明式过程宏。
 //!
 //! `#[Mapper]` 读取 trait 方法上的 SQL 注解，在编译期生成基于 `sqlx`、事务运行时和可选 L2 缓存的实现。
+//! MySQL、PostgreSQL、SQLite 使用同名 SQL 方法属性，通过导入路径选择 typed adapter；
+//! SQLite 的生成代码沿用受控 executor 和实际文件 owner，napp 按 datasource driver 管理生命周期。
+//! 配置不转换 SQL 方言或 Rust 行类型，宏不创建数据库连接。
 //! 同时生成静态方法身份与生命周期守卫，逻辑调用、真实数据库执行和 Stream 终态分别计量。
 //! YAML 策略由宿主冻结，宏不创建指标出口或通知任务，也不要求参数实现额外的日志 trait。
+mod sqlite;
+
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote};
@@ -92,6 +97,44 @@ pub fn derive_pg_mapper_enum(item: TokenStream) -> TokenStream {
     }
 }
 
+/// 业务作用：为 SQLite Mapper 生成同名 SQL 注解的受控执行实现。
+/// 参数说明：
+/// - `attr`：数据源与缓存声明。
+/// - `item`：业务 Mapper trait。
+/// 返回：固定绑定 SQLite 的客户端实现或编译期错误。
+#[proc_macro_attribute]
+#[allow(non_snake_case)]
+pub fn SqliteMapper(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match mapper_impl(attr.into(), item.into(), MapperBackend::Sqlite) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：生成 SQLite 业务枚举的稳定序号映射。
+/// 参数说明：
+/// - `item`：无字段业务枚举。
+/// 返回：SQLite MapperEnum 实现或编译期错误。
+#[proc_macro_derive(SqliteMapperEnum)]
+pub fn derive_sqlite_mapper_enum(item: TokenStream) -> TokenStream {
+    match mapper_enum_impl(item.into(), MapperBackend::Sqlite) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// 业务作用：生成 SQLite 排序字段白名单，避免业务值成为 SQL 标识符。
+/// 参数说明：
+/// - `item`：排序字段枚举。
+/// 返回：受控字段映射或编译期错误。
+#[proc_macro_derive(SqliteMapperOrderField, attributes(mapper_order_field))]
+pub fn derive_sqlite_mapper_order_field(item: TokenStream) -> TokenStream {
+    match mapper_order_field_impl(item.into(), MapperBackend::Sqlite) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
 /// Mapper 宏生成代码所使用的数据库后端。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MapperBackend {
@@ -99,6 +142,8 @@ enum MapperBackend {
     MySql,
     /// 使用 `$n` 占位符和 `namapper-pgsql` runtime。
     PostgreSql,
+    /// SQLite 文件数据源与原生权限门禁。
+    Sqlite,
 }
 
 impl MapperBackend {
@@ -109,6 +154,11 @@ impl MapperBackend {
     /// 返回：可写入宏展开代码的 runtime 路径；依赖缺失时返回清晰提示。
     fn runtime_root(self) -> Result<TokenStream2, String> {
         match self {
+            Self::Sqlite => nasa_macro_support::runtime_root_nested(
+                &["mapper", "sqlite"],
+                "mapper-sqlite",
+                "namapper-sqlite",
+            ),
             Self::MySql => nasa_macro_support::runtime_root("mapper", "namapper"),
             Self::PostgreSql => nasa_macro_support::runtime_root_nested(
                 &["mapper", "pgsql"],
@@ -300,7 +350,8 @@ fn mapper_order_field_column(variant: &syn::Variant) -> syn::Result<String> {
             }
             Meta::NameValue(nv) => {
                 let Expr::Lit(ExprLit {
-                    lit: Lit::Str(lit), ..
+                    lit: Lit::Str(lit),
+                    ..
                 }) = &nv.value
                 else {
                     return Err(syn::Error::new_spanned(
@@ -536,6 +587,7 @@ struct MethodArgs {
 struct ParamInfo {
     ident: Ident,
     ty: Type,
+    blob_scalar: bool,
 }
 
 /// SQL bind 参数的形态。
@@ -779,6 +831,7 @@ fn mapper_impl(
         let driver = match plan.backend {
             MapperBackend::MySql => "mysql",
             MapperBackend::PostgreSql => "postgresql",
+            MapperBackend::Sqlite => "sqlite",
         };
         let operation = match plan.kind {
             SqlKind::Query => "query",
@@ -805,6 +858,35 @@ fn mapper_impl(
         impl_methods.push(gen_method(&root, &key_expr, plan, &method_meta)?);
     }
 
+    let (source_field, source_init, source_builder) = if backend == MapperBackend::Sqlite {
+        let datasources = plans
+            .iter()
+            .map(|plan| plan.datasource.as_deref().unwrap_or("default"));
+        (
+            quote!(datasource: #root::SourceBinding,),
+            quote!(datasource: #root::SourceBinding::default(),),
+            quote! {
+                /// 业务作用：固定 client 的数据源 owner，防止同名来源替换后静默改绑。
+                /// 参数说明：
+                /// - `source`：Application 或 standalone owner 提供的来源句柄。
+                /// 返回：首次绑定成功返回 client；身份冲突时失败。
+                pub fn with_datasource(self, source: #root::SqliteDataSource) -> #root::__private::anyhow::Result<Self> {
+                    if ![#(#datasources),*].contains(&source.name()) {
+                        return Err(#root::__private::anyhow::anyhow!("SQLite source name is not declared by this Mapper"));
+                    }
+                    self.datasource.bind(source)?;
+                    Ok(self)
+                }
+            },
+        )
+    } else {
+        (
+            TokenStream2::new(),
+            TokenStream2::new(),
+            TokenStream2::new(),
+        )
+    };
+
     let expanded = quote! {
         #(#method_metadata)*
         #[#root::__private::async_trait::async_trait]
@@ -814,16 +896,19 @@ fn mapper_impl(
         ///
         /// 生成的 client 持有可选 L2 缓存和 codec,业务通常通过 `new()` 创建后直接调用 mapper 方法。
         pub struct #client_ident {
+            #source_field
             l2_cache: ::core::option::Option<::std::sync::Arc<dyn #root::MapperL2Cache>>,
             cache_codec: ::core::option::Option<::std::sync::Arc<dyn #root::MapperCacheCodec>>,
         }
 
         impl #client_ident {
+            #source_builder
             /// 业务作用：创建 mapper client。
             ///
             /// 默认接入全局 L2 缓存和 trait 级 codec；特殊场景可用 builder 方法覆盖。
             pub fn new() -> Self {
                 Self {
+                    #source_init
                     l2_cache: #root::default_l2_cache(),
                     cache_codec: #trait_cache_codec,
                 }
@@ -1050,17 +1135,18 @@ fn plan_method(
     } else {
         false
     };
+
     let flush_cache = method_args
         .flush_cache
         .unwrap_or_else(|| kind.default_flush_cache());
-    if backend == MapperBackend::PostgreSql
+    if backend != MapperBackend::MySql
         && (cache || flush_cache)
         && method_args.datasource.is_some()
         && method_args.datasource != trait_args.datasource
     {
         return Err(syn::Error::new_spanned(
             attr,
-            "PostgreSQL Mapper 使用 L2 cache 时 datasource 必须声明在 trait 级，确保 driver/datasource 进入统一缓存身份",
+            "该 Mapper 使用 L2 cache 时 datasource 必须声明在 trait 级，确保 driver/datasource 进入统一缓存身份",
         ));
     }
     if kind.is_query() && cache && flush_cache {
@@ -1173,6 +1259,20 @@ fn parse_method_attr(attr: &Attribute) -> syn::Result<MethodArgs> {
                 args.sql = Some(sql.value());
                 return Ok(args);
             }
+            let normalize = |input: syn::parse::ParseStream<'_>| -> syn::Result<TokenStream2> {
+                if input.peek(LitStr) {
+                    let sql: LitStr = input.parse()?;
+                    if input.is_empty() {
+                        return Ok(quote!(sql = #sql));
+                    }
+                    input.parse::<syn::Token![,]>()?;
+                    let options: TokenStream2 = input.parse()?;
+                    Ok(quote!(sql = #sql, #options))
+                } else {
+                    input.parse()
+                }
+            };
+            let tokens = Parser::parse2(normalize, list.tokens.clone())?;
             let parser = syn::meta::parser(|meta| {
                 let key = meta
                     .path
@@ -1180,7 +1280,12 @@ fn parse_method_attr(attr: &Attribute) -> syn::Result<MethodArgs> {
                     .map(|ident| ident.to_string())
                     .unwrap_or_default();
                 match key.as_str() {
-                    "sql" | "value" => args.sql = Some(meta.value()?.parse::<LitStr>()?.value()),
+                    "sql" | "value" => {
+                        if args.sql.is_some() {
+                            return Err(meta.error("SQL 只能声明一次"));
+                        }
+                        args.sql = Some(meta.value()?.parse::<LitStr>()?.value());
+                    }
                     "datasource" => {
                         let lit = meta.value()?.parse::<LitStr>()?;
                         validate_datasource_literal(&lit.value(), lit.span())?;
@@ -1224,7 +1329,7 @@ fn parse_method_attr(attr: &Attribute) -> syn::Result<MethodArgs> {
                 }
                 Ok(())
             });
-            Parser::parse2(parser, list.tokens.clone())?;
+            Parser::parse2(parser, tokens)?;
             Ok(args)
         }
         Meta::Path(_) => Err(syn::Error::new_spanned(attr, "SQL 注解必须带 SQL 字符串")),
@@ -1268,6 +1373,7 @@ fn parse_params(method: &TraitItemFn) -> syn::Result<Vec<ParamInfo>> {
         params.push(ParamInfo {
             ident: pat_ident.ident.clone(),
             ty: (*pat_ty.ty).clone(),
+            blob_scalar: false,
         });
     }
     Ok(params)
@@ -1286,6 +1392,9 @@ fn parse_sql_template(
     span: proc_macro2::Span,
     backend: MapperBackend,
 ) -> syn::Result<ParsedSqlTemplate> {
+    if backend == MapperBackend::Sqlite {
+        return sqlite::parse_template(sql, params, span);
+    }
     validate_sql_template_safety(sql, span, backend)?;
 
     if has_dynamic_sql_tag(sql, span)? {
@@ -1521,7 +1630,7 @@ fn parse_plain_sql_template(
                         ),
                     ));
                 }
-                if is_collection && !is_list_context {
+                if is_collection && !is_list_context && !param.blob_scalar {
                     return Err(syn::Error::new(
                         span,
                         format!("集合参数 `{name}` 只能用于 IN (#{{{name}}}) 列表占位符"),
@@ -1598,7 +1707,9 @@ fn parse_dynamic_sql_template(
     if pos != sql.len() {
         return Err(syn::Error::new(span, "动态 SQL 模板解析未完整消费"));
     }
-    Ok(DynamicSqlPlan { nodes })
+    Ok(DynamicSqlPlan {
+        nodes,
+    })
 }
 /// 业务作用：解析 Mapper DSL 的 `parse_dynamic_nodes` 阶段输入，并将非法语法定位为编译期错误。
 /// # 参数
@@ -1650,7 +1761,10 @@ fn parse_dynamic_nodes(
             let (body, next, close_tag) =
                 parse_dynamic_nodes(sql, body_start, &["if"], params, local_items, span)?;
             require_close_tag(close_tag, "if", span)?;
-            nodes.push(SqlNode::If { test, body });
+            nodes.push(SqlNode::If {
+                test,
+                body,
+            });
             pos = next;
             continue;
         }
@@ -1689,7 +1803,9 @@ fn parse_dynamic_nodes(
                     format!("order_by value `{value}` 不是方法参数"),
                 ));
             }
-            nodes.push(SqlNode::OrderBy { value });
+            nodes.push(SqlNode::OrderBy {
+                value,
+            });
             pos = next;
             continue;
         }
@@ -1789,7 +1905,13 @@ fn parse_choose_node(
             if whens.is_empty() {
                 return Err(syn::Error::new(span, "<choose> 至少需要一个 <when>"));
             }
-            return Ok((SqlNode::Choose { whens, otherwise }, close_end));
+            return Ok((
+                SqlNode::Choose {
+                    whens,
+                    otherwise,
+                },
+                close_end,
+            ));
         }
         if pos >= sql.len() {
             return Err(syn::Error::new(span, "<choose> 缺少 </choose>"));
@@ -1804,7 +1926,10 @@ fn parse_choose_node(
             let (body, next, close_tag) =
                 parse_dynamic_nodes(sql, body_start, &["when"], params, local_items, span)?;
             require_close_tag(close_tag, "when", span)?;
-            whens.push(WhenNode { test, body });
+            whens.push(WhenNode {
+                test,
+                body,
+            });
             pos = next;
             continue;
         }
@@ -1919,13 +2044,14 @@ fn parse_dynamic_foreach(
         next,
     ))
 }
-/// 业务作用：解析 Mapper DSL 的 `parse_dynamic_bind` 阶段输入，并将非法语法定位为编译期错误。
-/// # 参数
+/// 业务作用：为动态 SQL 确定单值或显式列表绑定，沿用适配层确认的 BLOB 单值语义。
+/// 参数说明：
 /// - `sql`: SQL 模板文本,用于解析占位符或动态节点。
 /// - `start`: 起始位置或范围下界。
 /// - `params`: 已解析的函数参数或宏参数列表。
 /// - `local_items`: 当前语法块内收集到的局部变量或局部条目。
 /// - `span`: 源码位置,用于生成精确的编译期错误。
+/// 返回：绑定计划与占位符终点；非字节集合误作单值或非法字段路径在编译期拒绝。
 fn parse_dynamic_bind(
     sql: &str,
     start: usize,
@@ -1977,7 +2103,8 @@ fn parse_dynamic_bind(
             format!("IN 列表占位符 `#{{{name}}}` 必须使用 Vec<T>、&[T] 或数组等集合参数"),
         ));
     }
-    if is_collection && !is_list_context {
+    // 静态与动态路径共用适配层的字节标记；显式 IN 仍按列表展开，普通集合不获得单值绑定能力。
+    if is_collection && !is_list_context && !param.blob_scalar {
         return Err(syn::Error::new(
             span,
             format!("集合参数 `{name}` 只能用于 IN (#{{{name}}}) 或 <foreach>"),
@@ -2552,17 +2679,32 @@ fn collect_node_binds(nodes: &[SqlNode], out: &mut Vec<BindInfo>) {
         match node {
             SqlNode::Text(_) => {}
             SqlNode::Bind(bind) => out.push(bind.clone()),
-            SqlNode::If { body, .. } => collect_node_binds(body, out),
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::If {
+                body,
+                ..
+            } => collect_node_binds(body, out),
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 for when in whens {
                     collect_node_binds(&when.body, out);
                 }
                 collect_node_binds(otherwise, out);
             }
-            SqlNode::Foreach { body, .. } | SqlNode::Trim { body, .. } => {
+            SqlNode::Foreach {
+                body,
+                ..
+            }
+            | SqlNode::Trim {
+                body,
+                ..
+            } => {
                 collect_node_binds(body, out);
             }
-            SqlNode::OrderBy { .. } => {}
+            SqlNode::OrderBy {
+                ..
+            } => {}
         }
     }
 }
@@ -2574,17 +2716,30 @@ fn nodes_contain_bind_root(nodes: &[SqlNode], ident: &Ident) -> bool {
     nodes.iter().any(|node| match node {
         SqlNode::Text(_) => false,
         SqlNode::Bind(bind) => bind.root == *ident,
-        SqlNode::If { body, .. } => nodes_contain_bind_root(body, ident),
-        SqlNode::Choose { whens, otherwise } => {
+        SqlNode::If {
+            body,
+            ..
+        } => nodes_contain_bind_root(body, ident),
+        SqlNode::Choose {
+            whens,
+            otherwise,
+        } => {
             whens
                 .iter()
                 .any(|when| nodes_contain_bind_root(&when.body, ident))
                 || nodes_contain_bind_root(otherwise, ident)
         }
-        SqlNode::Foreach { body, .. } | SqlNode::Trim { body, .. } => {
-            nodes_contain_bind_root(body, ident)
+        SqlNode::Foreach {
+            body,
+            ..
         }
-        SqlNode::OrderBy { .. } => false,
+        | SqlNode::Trim {
+            body,
+            ..
+        } => nodes_contain_bind_root(body, ident),
+        SqlNode::OrderBy {
+            ..
+        } => false,
     })
 }
 /// 业务作用：完成 Mapper 宏 `render_nodes_for_signature` 的编译期转换步骤，并把失败定位到调用方源码。
@@ -2599,15 +2754,24 @@ fn render_nodes_for_signature(nodes: &[SqlNode]) -> String {
                 BindKind::Scalar => sql.push('?'),
                 BindKind::List => sql.push('?'),
             },
-            SqlNode::If { body, .. } => sql.push_str(&render_nodes_for_signature(body)),
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::If {
+                body,
+                ..
+            } => sql.push_str(&render_nodes_for_signature(body)),
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 for when in whens {
                     sql.push_str(&render_nodes_for_signature(&when.body));
                 }
                 sql.push_str(&render_nodes_for_signature(otherwise));
             }
             SqlNode::Foreach {
-                open, close, body, ..
+                open,
+                close,
+                body,
+                ..
             } => {
                 sql.push_str(open);
                 sql.push_str(&render_nodes_for_signature(body));
@@ -2623,7 +2787,9 @@ fn render_nodes_for_signature(nodes: &[SqlNode]) -> String {
                 sql.push_str(&render_nodes_for_signature(body));
                 sql.push_str(suffix);
             }
-            SqlNode::OrderBy { .. } => sql.push_str(" ORDER BY <order_by>"),
+            SqlNode::OrderBy {
+                ..
+            } => sql.push_str(" ORDER BY <order_by>"),
         }
     }
     sql
@@ -2902,11 +3068,17 @@ fn collect_dynamic_used_params(
         match node {
             SqlNode::Text(_) => {}
             SqlNode::Bind(bind) => mark_used_param(&bind.root, params, used),
-            SqlNode::If { test, body } => {
+            SqlNode::If {
+                test,
+                body,
+            } => {
                 collect_expr_used_params(test, params, used);
                 collect_dynamic_used_params(body, params, used);
             }
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 for when in whens {
                     collect_expr_used_params(&when.test, params, used);
                     collect_dynamic_used_params(&when.body, params, used);
@@ -2914,13 +3086,20 @@ fn collect_dynamic_used_params(
                 collect_dynamic_used_params(otherwise, params, used);
             }
             SqlNode::Foreach {
-                collection, body, ..
+                collection,
+                body,
+                ..
             } => {
                 mark_used_param(collection, params, used);
                 collect_dynamic_used_params(body, params, used);
             }
-            SqlNode::Trim { body, .. } => collect_dynamic_used_params(body, params, used),
-            SqlNode::OrderBy { value } => mark_used_param(value, params, used),
+            SqlNode::Trim {
+                body,
+                ..
+            } => collect_dynamic_used_params(body, params, used),
+            SqlNode::OrderBy {
+                value,
+            } => mark_used_param(value, params, used),
         }
     }
 }
@@ -3181,7 +3360,11 @@ fn collect_local_used_params(
 /// - `shadowed`: 当前作用域内被局部变量遮蔽的参数名集合。
 fn collect_pat_shadowed_params(pat: &Pat, shadowed: &mut ::std::collections::HashSet<String>) {
     match pat {
-        Pat::Ident(PatIdent { ident, subpat, .. }) => {
+        Pat::Ident(PatIdent {
+            ident,
+            subpat,
+            ..
+        }) => {
             shadowed.insert(ident.to_string());
             if let Some((_, subpat)) = subpat {
                 collect_pat_shadowed_params(subpat, shadowed);
@@ -3265,12 +3448,29 @@ fn gen_method(
     }?;
     let mut method: syn::ImplItemFn = syn::parse2(generated)?;
     let body = &method.block;
+    let entry = if plan.backend == MapperBackend::Sqlite {
+        let array_bindings = sqlite::array_bindings(&plan.params);
+        let name = plan.datasource.as_deref().unwrap_or("default");
+        let mode = match plan.tx {
+            TxMode::Auto => "auto",
+            TxMode::Mandatory => "mandatory",
+            TxMode::Never => "never",
+        };
+        quote! {
+            #array_bindings
+            let __mapper_source = self.datasource.resolve(#name)?;
+            #root::check_mapper_source(&__mapper_source, #mode)?;
+            let __mapper_l2_cache = #root::scoped_cache(self.l2_cache.clone(), &__mapper_source);
+        }
+    } else {
+        quote!(let __mapper_l2_cache = self.l2_cache.clone();)
+    };
     method.block = syn::parse_quote!({
         let __mapper_meta = &#metadata;
         let mut __mapper_guard = #root::observability::MapperCallGuard::start(__mapper_meta);
         let __mapper_call = &__mapper_guard;
         // 内层提前返回只结束本次逻辑调用；外层仍统一结算缓存、连接失败和数据库结果。
-        let __mapper_outcome = async { #body }.await;
+        let __mapper_outcome = async { #entry #body }.await;
         __mapper_guard.finish(#root::classify_method_result(&__mapper_outcome));
         __mapper_outcome
     });
@@ -3291,7 +3491,7 @@ fn gen_query_method(
     let fetch = fetch_mode(plan, result_ty)?;
     let sql_init = sql_init_tokens(root, plan, sig.ident.span());
     let query = query_tokens(root, plan, fetch)?;
-    let conn = conn_tokens(root, plan.tx, plan.datasource.as_deref());
+    let conn = conn_tokens(root, plan.tx, plan.datasource.as_deref(), plan.backend);
     let clear = clear_tokens(root, key_expr, plan.flush_cache, plan.flush_refs);
 
     if !plan.cache {
@@ -3343,7 +3543,7 @@ fn gen_query_method(
             let __mapper_cache_ttl_ms: ::core::option::Option<u64> = #cache_ttl;
             // `cache = true` 只表示普通场景启用 L2。ambient 事务内是否也读写 L2
             // 必须由业务显式声明 `cache_in_tx = true`，避免默认把未提交视图写入共享缓存。
-            let __mapper_has_l2_cache = self.l2_cache.is_some();
+            let __mapper_has_l2_cache = __mapper_l2_cache.is_some();
             let __mapper_in_transaction = #root::in_transaction();
             let __mapper_cache_enabled = __mapper_has_l2_cache
                 && (!__mapper_in_transaction || #cache_in_tx);
@@ -3388,7 +3588,7 @@ fn gen_query_method(
         }
     })
 }
-/// 业务作用：生成 Mapper 宏 `gen_stream_method` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
+/// 业务作用：生成持有受控连接的 Mapper 行流，并在 SQLite 流交付前登记来源消费预算。
 /// # 参数
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
 /// - `plan`: 宏期方法计划,包含 SQL、参数、缓存和事务信息。
@@ -3405,8 +3605,20 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
     };
     let sql_init = sql_init_tokens(root, plan, sig.ident.span());
     let query = stream_query_builder_tokens(root, plan, row_ty)?;
-    let conn = conn_tokens(root, TxMode::Auto, plan.datasource.as_deref());
+    let conn = conn_tokens(root, TxMode::Auto, plan.datasource.as_deref(), plan.backend);
 
+    let executor = sqlite::executor_tokens(plan, false);
+    let (stream_budget, stream_result) = if matches!(plan.backend, MapperBackend::Sqlite) {
+        (
+            quote! { let __mapper_stream_budget = __mapper_conn.stream_budget(); },
+            quote! { #root::MapperStream::observed_with_budget(__mapper_stream, __mapper_stream_guard, __mapper_stream_budget) },
+        )
+    } else {
+        (
+            quote! {},
+            quote! { #root::MapperStream::observed(__mapper_stream, __mapper_stream_guard) },
+        )
+    };
     Ok(quote! {
         #sig {
             #sql_init
@@ -3415,17 +3627,18 @@ fn gen_stream_method(root: &TokenStream2, plan: &MethodPlan) -> syn::Result<Toke
             // ambient transaction 中绕过检查而静默退化为池读取。连接持有到流消费完或丢弃；
             // 事务内流存活期间同一事务不得发出其它语句，未释放就返回事务体会在提交门禁显式失败。
             let mut __mapper_conn = #conn;
+            #stream_budget
             let __mapper_query = #query;
             let __mapper_stream_guard = #root::observability::MapperStreamGuard::new(__mapper_meta, __mapper_normalized_sql.as_ref());
             let __mapper_stream = #root::__private::async_stream::try_stream! {
-                let mut __mapper_rows = __mapper_query.fetch(__mapper_conn.as_mut());
+                let mut __mapper_rows = __mapper_query.fetch(#executor);
                 while let ::core::option::Option::Some(__mapper_row) =
                     #root::__private::futures_util::TryStreamExt::try_next(&mut __mapper_rows).await?
                 {
                     yield __mapper_row;
                 }
             };
-            ::core::result::Result::Ok(#root::MapperStream::observed(__mapper_stream, __mapper_stream_guard))
+            ::core::result::Result::Ok(#stream_result)
         }
     })
 }
@@ -3443,19 +3656,20 @@ fn gen_write_method(
     let result_ty = result_inner(&sig.output)?;
     let sql_init = sql_init_tokens(root, plan, sig.ident.span());
     let query = write_query_tokens(root, plan)?;
+    let executor = sqlite::executor_tokens(plan, true);
     let execute = quote! {
         {
             __mapper_call.path(#root::observability::CallPath::Database);
             let __mapper_prepared_query = #query;
             let mut __mapper_db_guard = #root::observability::MapperDbGuard::start(__mapper_meta);
-            let __mapper_db_result = __mapper_prepared_query.execute(__mapper_conn.as_mut()).await;
+            let __mapper_db_result = __mapper_prepared_query.execute(#executor).await;
             let __mapper_rows = __mapper_db_result.as_ref().map(|value| value.rows_affected()).unwrap_or(0);
             let __mapper_code = __mapper_meta.database_code_enabled().then(|| __mapper_db_result.as_ref().err().and_then(|error| error.as_database_error()).and_then(|error| error.code())).flatten();
             __mapper_db_guard.finish(#root::classify_sqlx_result(&__mapper_db_result), __mapper_rows, __mapper_normalized_sql.as_ref(), __mapper_code.as_deref());
             __mapper_db_result?
         }
     };
-    let conn = conn_tokens(root, plan.tx, plan.datasource.as_deref());
+    let conn = conn_tokens(root, plan.tx, plan.datasource.as_deref(), plan.backend);
     let clear = clear_tokens(root, key_expr, plan.flush_cache, plan.flush_refs);
 
     if is_unit(result_ty) {
@@ -3596,13 +3810,21 @@ fn query_tokens(
     } else {
         query_builder_tokens(root, plan, fetch)?
     };
+    let executor = sqlite::executor_tokens(plan, plan.flush_cache);
+    let failure = if plan.backend == MapperBackend::Sqlite && plan.flush_cache {
+        quote!(if __mapper_db_result.is_err() {
+            __mapper_conn.mark_write_failed();
+        })
+    } else {
+        TokenStream2::new()
+    };
     let execution = match fetch {
-        FetchMode::All(_) => quote! { __mapper_prepared_query.fetch_all(__mapper_conn.as_mut()) },
+        FetchMode::All(_) => quote! { __mapper_prepared_query.fetch_all(#executor) },
         FetchMode::Optional(_) => {
-            quote! { __mapper_prepared_query.fetch_optional(__mapper_conn.as_mut()) }
+            quote! { __mapper_prepared_query.fetch_optional(#executor) }
         }
         FetchMode::One(_) | FetchMode::Scalar(_) => {
-            quote! { __mapper_prepared_query.fetch_one(__mapper_conn.as_mut()) }
+            quote! { __mapper_prepared_query.fetch_one(#executor) }
         }
     };
     let rows = match fetch {
@@ -3615,6 +3837,7 @@ fn query_tokens(
         let __mapper_prepared_query = #query;
         let mut __mapper_db_guard = #root::observability::MapperDbGuard::start(__mapper_meta);
         let __mapper_db_result = #execution.await;
+        #failure
         let __mapper_rows = __mapper_db_result.as_ref().map(|__mapper_value| #rows).unwrap_or(0);
         let __mapper_code = __mapper_meta.database_code_enabled().then(|| __mapper_db_result.as_ref().err().and_then(|error| error.as_database_error()).and_then(|error| error.code())).flatten();
         __mapper_db_guard.finish(#root::classify_sqlx_result(&__mapper_db_result), __mapper_rows, __mapper_normalized_sql.as_ref(), __mapper_code.as_deref());
@@ -3843,7 +4066,10 @@ fn dynamic_bind_steps_tokens(
             SqlNode::Bind(bind) => {
                 steps.push(dynamic_bind_one_token(bind, params, local_items)?);
             }
-            SqlNode::If { test, body } => {
+            SqlNode::If {
+                test,
+                body,
+            } => {
                 let body = dynamic_bind_steps_tokens(body, params, local_items)?;
                 steps.push(quote! {
                     if #test {
@@ -3851,7 +4077,10 @@ fn dynamic_bind_steps_tokens(
                     }
                 });
             }
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 let otherwise = dynamic_bind_steps_tokens(otherwise, params, local_items)?;
                 let mut chain = quote! { #otherwise };
                 for when in whens.iter().rev() {
@@ -3882,10 +4111,15 @@ fn dynamic_bind_steps_tokens(
                     }
                 });
             }
-            SqlNode::Trim { body, .. } => {
+            SqlNode::Trim {
+                body,
+                ..
+            } => {
                 steps.push(dynamic_bind_steps_tokens(body, params, local_items)?);
             }
-            SqlNode::OrderBy { .. } => {}
+            SqlNode::OrderBy {
+                ..
+            } => {}
         }
     }
     Ok(quote! { #(#steps)* })
@@ -3934,7 +4168,7 @@ fn dynamic_bind_one_token(
 /// - `span`: 源码位置,用于生成精确的编译期错误。
 ///
 /// 返回：运行时构造当前后端最终 prepared SQL 的代码。
-fn sql_init_tokens(
+fn raw_sql_init_tokens(
     root: &TokenStream2,
     plan: &MethodPlan,
     span: proc_macro2::Span,
@@ -3943,7 +4177,7 @@ fn sql_init_tokens(
         return dynamic_sql_init_tokens(root, dynamic, span, plan.backend);
     }
 
-    if plan.backend == MapperBackend::MySql
+    if plan.backend != MapperBackend::PostgreSql
         && !plan.binds.iter().any(|bind| bind.kind == BindKind::List)
     {
         let sql_lit = LitStr::new(&plan.normalized_sql, span);
@@ -4004,6 +4238,25 @@ fn sql_init_tokens(
         };
     }
 }
+/// 业务作用：生成最终 SQL，并在 SQLite 缓存命中前执行真实只读权限验证。
+/// 参数说明：
+/// - `root`：当前后端 runtime。
+/// - `plan`：方法 SQL 和缓存合同。
+/// - `span`：调用方源码位置。
+/// 返回：SQL 构建与必要的执行前门禁代码。
+fn sql_init_tokens(
+    root: &TokenStream2,
+    plan: &MethodPlan,
+    span: proc_macro2::Span,
+) -> TokenStream2 {
+    let sql = raw_sql_init_tokens(root, plan, span);
+    if plan.backend == MapperBackend::Sqlite && plan.cache {
+        quote! { #sql #root::validate_cached_read(&__mapper_source, __mapper_normalized_sql.as_ref()).await?; }
+    } else {
+        sql
+    }
+}
+
 /// 业务作用：生成 Mapper 宏 `dynamic_sql_init_tokens` 阶段所需的 Rust token，保持参数绑定和运行时调用语义一致。
 /// # 参数
 /// - `root`: 运行时 crate 根路径 token,用于生成可编译代码。
@@ -4086,7 +4339,10 @@ fn push_dynamic_sql_nodes_tokens(
                     }
                 }
             },
-            SqlNode::If { test, body } => {
+            SqlNode::If {
+                test,
+                body,
+            } => {
                 let body = push_dynamic_sql_nodes_tokens(root, body, span, target, backend);
                 parts.push(quote! {
                     if #test {
@@ -4094,7 +4350,10 @@ fn push_dynamic_sql_nodes_tokens(
                     }
                 });
             }
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 let otherwise =
                     push_dynamic_sql_nodes_tokens(root, otherwise, span, target, backend);
                 let mut chain = quote! { #otherwise };
@@ -4174,7 +4433,9 @@ fn push_dynamic_sql_nodes_tokens(
                     }
                 });
             }
-            SqlNode::OrderBy { value } => {
+            SqlNode::OrderBy {
+                value,
+            } => {
                 parts.push(quote! {
                     #root::__private::write_mapper_order_by_clause(&#value, &mut #target)?;
                 });
@@ -4267,7 +4528,10 @@ fn dynamic_cache_arg_steps_tokens(
             SqlNode::Bind(bind) => {
                 steps.push(dynamic_cache_arg_one_token(root, bind, local_items));
             }
-            SqlNode::If { test, body } => {
+            SqlNode::If {
+                test,
+                body,
+            } => {
                 let body = dynamic_cache_arg_steps_tokens(root, body, local_items);
                 steps.push(quote! {
                     if #test {
@@ -4275,7 +4539,10 @@ fn dynamic_cache_arg_steps_tokens(
                     }
                 });
             }
-            SqlNode::Choose { whens, otherwise } => {
+            SqlNode::Choose {
+                whens,
+                otherwise,
+            } => {
                 let otherwise = dynamic_cache_arg_steps_tokens(root, otherwise, local_items);
                 let mut chain = quote! { #otherwise };
                 for when in whens.iter().rev() {
@@ -4306,10 +4573,15 @@ fn dynamic_cache_arg_steps_tokens(
                     }
                 });
             }
-            SqlNode::Trim { body, .. } => {
+            SqlNode::Trim {
+                body,
+                ..
+            } => {
                 steps.push(dynamic_cache_arg_steps_tokens(root, body, local_items));
             }
-            SqlNode::OrderBy { .. } => {}
+            SqlNode::OrderBy {
+                ..
+            } => {}
         }
     }
     quote! { #(#steps)* }
@@ -4550,7 +4822,7 @@ fn cache_get_or_load_tokens(
     };
     quote! {
         if let (::core::option::Option::Some(cache), ::core::option::Option::Some(hash_key)) =
-            (&self.l2_cache, __mapper_hash_key.as_ref())
+            (&__mapper_l2_cache, __mapper_hash_key.as_ref())
         {
             let mut __mapper_cache_loaded_value: ::core::option::Option<#cache_ty> =
                 ::core::option::Option::None;
@@ -4766,7 +5038,7 @@ fn cache_get_tokens(
     };
     quote! {
         if let (::core::option::Option::Some(cache), ::core::option::Option::Some(hash_key)) =
-            (&self.l2_cache, __mapper_hash_key.as_ref())
+            (&__mapper_l2_cache, __mapper_hash_key.as_ref())
         {
             match cache.get(__mapper_l2_key, hash_key).await {
                 ::core::result::Result::Ok(::core::option::Option::Some(bytes)) => {
@@ -4893,7 +5165,7 @@ fn cache_put_tokens(root: &TokenStream2, cache_errors: CacheErrors) -> TokenStre
     };
     quote! {
         if let (::core::option::Option::Some(cache), ::core::option::Option::Some(hash_key)) =
-            (&self.l2_cache, __mapper_hash_key.as_ref())
+            (&__mapper_l2_cache, __mapper_hash_key.as_ref())
         {
             match #root::encode_cache_value_with_codec(
                 &__mapper_value,
@@ -4944,7 +5216,7 @@ fn clear_tokens(
     if flush_cache {
         quote! {
             let __mapper_clear_keys = #root::cache_clear_targets(#key_expr, #flush_refs);
-            #root::clear_after_commit_or_now(self.l2_cache.clone(), __mapper_clear_keys).await?;
+            #root::clear_after_commit_or_now(__mapper_l2_cache.clone(), __mapper_clear_keys).await?;
         }
     } else {
         quote! {}
@@ -4957,7 +5229,20 @@ fn clear_tokens(
 /// - `datasource`: mapper 方法绑定的数据源名称。
 ///
 /// 返回：按事务模式和 datasource 选定默认、强制事务或拒绝事务连接入口的 token。
-fn conn_tokens(root: &TokenStream2, tx: TxMode, datasource: Option<&str>) -> TokenStream2 {
+fn conn_tokens(
+    root: &TokenStream2,
+    tx: TxMode,
+    datasource: Option<&str>,
+    backend: MapperBackend,
+) -> TokenStream2 {
+    if backend == MapperBackend::Sqlite {
+        let mode = match tx {
+            TxMode::Auto => "auto",
+            TxMode::Mandatory => "mandatory",
+            TxMode::Never => "never",
+        };
+        return quote!(#root::mapper_conn_from(&__mapper_source, #mode).await?);
+    }
     let datasource = datasource.unwrap_or("default");
     let acquire = match tx {
         TxMode::Auto => quote! { #root::mapper_conn_for(#datasource).await? },
@@ -5099,15 +5384,21 @@ fn result_inner(output: &ReturnType) -> syn::Result<&Type> {
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
 fn first_generic_inner<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
-    let Type::Path(TypePath { path, .. }) = ty else {
+    let Type::Path(TypePath {
+        path,
+        ..
+    }) = ty
+    else {
         return None;
     };
     let segment = path.segments.last()?;
     if segment.ident != name {
         return None;
     }
-    let PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) =
-        &segment.arguments
+    let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+        args,
+        ..
+    }) = &segment.arguments
     else {
         return None;
     };
@@ -5127,7 +5418,11 @@ fn is_unit(ty: &Type) -> bool {
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
 /// - `name`: 业务名称、字段名或配置名,用于定位目标对象。
 fn is_type_ident(ty: &Type, name: &str) -> bool {
-    let Type::Path(TypePath { path, .. }) = ty else {
+    let Type::Path(TypePath {
+        path,
+        ..
+    }) = ty
+    else {
         return false;
     };
     path.segments
@@ -5138,7 +5433,11 @@ fn is_type_ident(ty: &Type, name: &str) -> bool {
 /// # 参数
 /// - `ty`: Rust 类型 AST,用于宏期类型判定。
 fn is_scalar_type(ty: &Type) -> bool {
-    let Type::Path(TypePath { path, .. }) = ty else {
+    let Type::Path(TypePath {
+        path,
+        ..
+    }) = ty
+    else {
         return false;
     };
     let Some(segment) = path.segments.last() else {
@@ -5171,7 +5470,10 @@ fn is_collection_type(ty: &Type) -> bool {
     match ty {
         Type::Reference(reference) => is_collection_type(&reference.elem),
         Type::Slice(_) | Type::Array(_) => true,
-        Type::Path(TypePath { path, .. }) => path.segments.last().is_some_and(|segment| {
+        Type::Path(TypePath {
+            path,
+            ..
+        }) => path.segments.last().is_some_and(|segment| {
             matches!(segment.ident.to_string().as_str(), "Vec" | "VecDeque")
         }),
         _ => false,
@@ -5242,6 +5544,16 @@ fn key_expr(
         (MapperBackend::MySql, None) => {
             quote! { concat!(module_path!(), "::", stringify!(#trait_ident)) }
         }
+        (MapperBackend::Sqlite, Some(key)) => {
+            let datasource = datasource.unwrap_or("default");
+            quote!(concat!("sqlite:", #datasource, ":", #key))
+        }
+        (MapperBackend::Sqlite, None) => {
+            let datasource = datasource.unwrap_or("default");
+            quote!(
+                concat!("sqlite:", #datasource, ":", module_path!(), "::", stringify!(#trait_ident))
+            )
+        }
         (MapperBackend::PostgreSql, Some(key)) => {
             let key = LitStr::new(key, trait_ident.span());
             let datasource = LitStr::new(datasource.unwrap_or("default"), trait_ident.span());
@@ -5280,9 +5592,14 @@ fn cache_reference_array_tokens(
         return str_array_tokens(values);
     }
     let datasource = datasource.unwrap_or("default");
+    let driver = if backend == MapperBackend::Sqlite {
+        "sqlite"
+    } else {
+        "postgresql"
+    };
     let values = values.iter().map(|value| {
         LitStr::new(
-            &format!("postgresql:{datasource}:{value}"),
+            &format!("{driver}:{datasource}:{value}"),
             proc_macro2::Span::call_site(),
         )
     });
@@ -5310,14 +5627,19 @@ fn cache_codec_factory_tokens(path: Option<&Path>) -> TokenStream2 {
 /// # 参数
 /// - `expr`: Rust 表达式 AST,用于宏期分析。
 fn parse_string_array(expr: Expr) -> syn::Result<Vec<String>> {
-    let Expr::Array(ExprArray { elems, .. }) = expr else {
+    let Expr::Array(ExprArray {
+        elems,
+        ..
+    }) = expr
+    else {
         return Err(syn::Error::new_spanned(expr, "期望字符串数组"));
     };
     elems
         .iter()
         .map(|elem| match elem {
             Expr::Lit(ExprLit {
-                lit: Lit::Str(lit), ..
+                lit: Lit::Str(lit),
+                ..
             }) => Ok(lit.value()),
             _ => Err(syn::Error::new_spanned(elem, "数组元素必须是字符串字面量")),
         })

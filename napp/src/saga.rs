@@ -2736,6 +2736,9 @@ async fn load_managed_definition(
     version: u32,
 ) -> anyhow::Result<Option<nasaga_runtime::DefinitionRecord>> {
     match runtime.driver() {
+        natx_core::DatabaseDriver::Sqlite => {
+            Err(anyhow::anyhow!("SQLite Saga runtime is unavailable"))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             return nasaga_runtime::load_definition_for(
@@ -6254,6 +6257,12 @@ async fn build_managed_client_plan(
         })?;
         let driver = managed_datasource_driver(application, datasource).await?;
         let append: Arc<dyn naoutbox_core::DurableOutboxAppend> = match driver {
+            natx_core::DatabaseDriver::Sqlite => {
+                return Err(saga_error(
+                    ApplicationPhase::Ready,
+                    "SQLite Saga backend is unavailable",
+                ))
+            }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
                 {
@@ -8495,6 +8504,9 @@ async fn authenticate_managed_http_request(
     let expires_at_ms =
         i64::try_from(expires_at_ms).map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
     let claimed = match server.driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            Err(anyhow::anyhow!("SQLite Saga runtime is unavailable"))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -9575,6 +9587,9 @@ async fn apply_managed_definition_lifecycle(
 ) -> anyhow::Result<nasaga_runtime::DefinitionRecord> {
     let (tenant, workflow, version) = key;
     match driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            Err(anyhow::anyhow!("SQLite Saga runtime is unavailable"))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -9844,6 +9859,9 @@ async fn load_managed_dynamic_catalog(
     phase: ApplicationPhase,
 ) -> ApplicationResult<nasaga_runtime::DynamicCatalogSnapshot> {
     match driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(phase, "SQLite Saga backend is unavailable"))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -11075,6 +11093,12 @@ async fn build_managed_orchestrator_plan(
         )
     })?;
     match driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Ready,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -11144,6 +11168,12 @@ async fn build_managed_orchestrator_plan(
     };
     let registry = catalog_snapshot.registry.clone();
     let runtime = match driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Ready,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -11513,6 +11543,12 @@ async fn build_managed_participant_plan(
         let trusts = trusts.into_values().collect::<Vec<_>>();
         let driver = managed_datasource_driver(application, &datasource).await?;
         match driver {
+            natx_core::DatabaseDriver::Sqlite => {
+                return Err(saga_error(
+                    ApplicationPhase::Ready,
+                    "SQLite Saga backend is unavailable",
+                ))
+            }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
                 {
@@ -12766,6 +12802,12 @@ async fn ensure_custom_role_schema(
     role: SagaRole,
 ) -> ApplicationResult<()> {
     match driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Ready,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -13145,6 +13187,12 @@ impl ApplicationComponent for SagaComponent {
                         )
                     })?;
                 match runtime_driver {
+                    natx_core::DatabaseDriver::Sqlite => {
+                        return Err(saga_error(
+                            ApplicationPhase::Ready,
+                            "SQLite Saga backend is unavailable",
+                        ))
+                    }
                     natx_core::DatabaseDriver::MySql => {
                         #[cfg(feature = "saga")]
                         {
@@ -14903,6 +14951,12 @@ async fn acknowledge_managed_catalog_snapshot(
     )?;
     let started = Instant::now();
     let lease_until_ms = match watch.driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Running,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -14975,6 +15029,9 @@ async fn acknowledge_managed_catalog_snapshot(
 /// 返回：无返回值；停机路径只记录数据库失败并依赖既有租约自然到期。
 async fn retire_managed_catalog_replica(watch: &ManagedCatalogWatchPlan) {
     let result = match watch.driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            Err(anyhow::anyhow!("SQLite Saga backend is unavailable"))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             {
@@ -15020,6 +15077,12 @@ async fn publish_managed_local_definitions(
     };
     for artifact in &watch.definition_artifacts {
         match watch.driver {
+            natx_core::DatabaseDriver::Sqlite => {
+                return Err(saga_error(
+                    ApplicationPhase::Running,
+                    "SQLite Saga backend is unavailable",
+                ))
+            }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
                 {
@@ -15128,6 +15191,12 @@ async fn activate_managed_validated_candidate(
         )
     })?;
     match watch.driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Running,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             nasaga_runtime::activate_definition_with_operation_for(
@@ -15295,6 +15364,12 @@ async fn managed_catalog_generation_is_acknowledged(
         ApplicationPhase::Running,
     )?;
     match watch.driver {
+        natx_core::DatabaseDriver::Sqlite => {
+            return Err(saga_error(
+                ApplicationPhase::Running,
+                "SQLite Saga backend is unavailable",
+            ))
+        }
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "saga")]
             return nasaga_runtime::catalog_generation_fully_acknowledged_for(

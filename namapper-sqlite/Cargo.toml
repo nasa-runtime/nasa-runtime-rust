@@ -1,0 +1,33 @@
+[package]
+name = "namapper-sqlite"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Declarative SQLite Mapper and SQL macros with napp-managed datasources, transactions and bounded results"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["sqlite", "mapper", "database", "async"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[features]
+default = []
+redis-cache = ["namapper-core/redis-cache"]
+grouped-cache = ["dep:cacheable"]
+
+[dependencies]
+namapper-core = { version = "2.0.1" }
+namapper-macro = { version = "2.0.1" }
+natx-sqlite = { version = "1.0.0", path = "../natx-sqlite" }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "chrono", "json", "macros"] }
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+cacheable = { version = "2.0.0", optional = true }
+futures-core = "0.3"
+futures-util = "0.3"
+linkme = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

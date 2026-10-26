@@ -8,6 +8,9 @@
 并通过事务、Inbox/Outbox、Saga 与有序消息处理支持可恢复的业务流程。应用按 feature 选择能力，
 使用已有的数据库和消息系统承载持久事实；各组件保留明确的资源、事务和失败边界。
 
+SQLite 业务沿用 `#[Mapper]`、`#[Query]` 等 SQL 宏，由同一个 napp `"db"` 组件管理文件、迁移、事务和停机。
+每个 `datasources.<name>.driver` 独立选择 MySQL、PostgreSQL 或 SQLite；详见 [SQLite 文件数据源与统一 Mapper](#sqlite-文件数据源与统一-mapper)。
+
 Kafka 能力提供与 Java `nasa-kafka` 对应的多数据源事件运行时：命名集群与 producer lane 隔离、有界有序消费、同集群原子处理，以及可持久接续的回放、转发和 DLT 回投。详见 [Kafka 事件运行时](#kafka-事件运行时)。
 
 通过具名连接同时使用 Nacos、Consul、Kubernetes 或 Static/DNS，按 `qualifier` 隔离内部调用，
@@ -204,7 +207,7 @@ Redis 来源租约与 PEL → 有界读取 → 共享账本与业务键顺序门
 
 ## SQL 观测与统一配置
 
-`application + mapper` 或 `application + mapper-pgsql` 自动把方法指标、连接与 Pool 指标、有界通知
+`application + mapper`、`application + mapper-pgsql` 或 `application + mapper-sqlite` 自动把方法指标、连接与 Pool 指标、有界通知
 和统一指标出口纳入运行时，不需要业务实现 Mapper Hook、周期采集任务或 metrics Router。
 所有可调策略支持 YAML，非必要项递归提供默认值，未知字段、目录外引用和越界配置在启动时拒绝。
 
@@ -271,7 +274,7 @@ Service 在业务任务前完成入口摘流、Ready action 与 initializer 清�
 
 ## 受管多源运行时
 
-Application 可从最终 YAML 同时创建多组 MySQL、PostgreSQL、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
+Application 可从最终 YAML 同时创建多组 MySQL、PostgreSQL、SQLite、Redis 与 Kafka 连接，并把它们冻结为当前进程唯一的
 命名资源表。业务通过 qualifier 取得句柄；Inbox、Outbox、幂等、审计与 Saga 等持久适配器也把
 datasource 身份固化在自身句柄中，不需要各自维护连接池或依赖隐式默认库。
 
@@ -396,6 +399,24 @@ Principal 选择 tenant、subject/client_id，也可选择真实客户端 IP 或
 Redis Lua 在服务端原子完成计数与首次过期设置。默认 Redis provider 在后端不可达、窗口非法或脚本
 失败时默认 fail-open 并记录告警，优先保持业务可用；高保障入口可把 Redis provider 配置为
 fail-closed。该能力与 Web 的单实例令牌桶分层：前者约束跨副本总量，后者只保护当前进程。
+
+## SQLite 文件数据源与统一 Mapper
+
+`application + mapper-sqlite` 让同一个 `"db"` 组件管理 SQLite 文件 owner、连接、迁移、观测与停机。业务从 `nasa::mapper::sqlite` 导入 `Mapper`，继续以 `#[Mapper]`、`#[Query]`、`#[Insert]` 等宏操作 SQL。每个 `datasources.<name>.driver` 独立选择 MySQL、PostgreSQL 或 SQLite；编译时启用实际使用的后端，SQLite 独立组合不引入其它数据库 runtime。
+
+```text
+Cargo 后端能力 + datasources.<name>.driver
+  → napp 全表校验与逐源打开 → 文件 owner / typed registry / 统一 catalog
+  → 显式迁移计划与 Prepare 门禁 → 业务初始化与开放
+  → Mapper 绑定与映射 → 受控 executor → 同源原生连接与事务
+  → 停机封口、限时排空 → 原生关闭确认 → 释放容量与文件权威
+```
+
+配置选择资源的 driver，宏导入路径确定 SQLx 类型，二者必须一致。SQLite 用 `sqlite.path`，MySQL/PostgreSQL 用 `url`；数据库组件字符串始终为 `"db"`。迁移策略不包含 SQL 计划：Service 在 UserHook 登记，Batch 使用 `MIGRATION_PLANS`，门禁失败不执行工作负载。完整可运行示例见 [SQLite 接入指南](docs/sqlite.md)。
+
+请求预算在独立租约接纳前与配置上限取较短期限，覆盖取连接、首次 SQL 前的持有和结果消费；取消等待不会提前释放真实原生责任。环境事务保留独立总期限，提交确认后才运行有界 `after_commit`。统一观测区分方法、执行、连接等待、物理连接、WAL/空间压力和持续隔离。
+
+SQLite 使用 `sqlite.path`，已有文件不隐式切换日志模式；支持同源事务、只读连接、受控流、原生一致备份与恢复到新目标。仅支持 Linux/macOS 本地私有文件，不提供 SQLite Saga/Inbox/Outbox 或跨库原子事务。详见 [受管配置与混配](nasa/README.md#sqlite-与逐数据源-driver)、[事务与文件权威](natx-sqlite/README.md)、[Mapper](namapper-sqlite/README.md) 和 [迁移](namigrate-sqlite/README.md)。
 
 ## PostgreSQL 受管与独立持久能力
 
@@ -761,6 +782,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | 完整端点安全流水线 | `web-security` | `try_register_all`、`MappingRuntime`、route policy |
 | SQL Mapper | `mapper` | `nasa::mapper::{Mapper, Query, Insert, Update, Delete}` |
 | PostgreSQL SQL Mapper | `mapper-pgsql` | `nasa::mapper::pgsql::{Mapper, Query, Insert, Update, Delete}`；与 `application` 组合时复用受管 PgPool |
+| SQLite SQL Mapper | `mapper-sqlite` | `nasa::mapper::sqlite::{Mapper, Query, Insert, Update, Delete}`；组合 `application` 由同一 db 组件管理文件来源 |
+| SQLite 事务与迁移 | `tx-sqlite` | `nasa::tx::sqlite`、`nasa::migration::sqlite` |
+| SQLite Mapper L2 缓存 | `mapper-redis-cache-sqlite` | 共享 Redis L2 合同，缓存隔离实际文件 owner 与提交序号 |
 | Mapper L2 缓存 | `mapper-redis-cache` | `#[Query(..., cache = true)]` |
 | PostgreSQL Mapper L2 缓存 | `mapper-redis-cache-pgsql` | `nasa::mapper::pgsql::{RedisMapperL2Cache, MapperL2Cache}`；与 MySQL 共享合同和进程默认注册槽 |
 | MySQL 事务 | `tx` | `nasa::tx::{transactional, run}` |
@@ -823,7 +847,7 @@ use nasa::ws::Server;                // WebSocket 服务端
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
+nasa = { version = "2.0.6", features = ["hystrix", "cache", "ws-redis", "rest-client"] }
 ```
 
 内部实现包使用工作区 `Cargo.toml` 中的 package name，例如 `nabase`、`naimg`、`naws`。
@@ -1002,7 +1026,7 @@ rest_discovery:         # nacos-discovery 组件
 
 1. `naml` 加载本地 yml、profile、环境变量并解析 import 描述；`config-boot` 负责拉取远端配置并组装 overlay。
 2. `nalog` 初始化日志。
-3. `nadis` 初始化 Redis；`natx` / `natx-pgsql` 按实际 driver 初始化 MySQL/PostgreSQL pool。
+3. `nadis` 初始化 Redis；`natx` / `natx-pgsql` / `natx-sqlite` 按实际 driver 初始化数据库资源。
 4. `namapper`、`cacheable` 注入缓存和数据源。
 5. `nanacos`、`rest-discovery` 准备出站服务发现和 REST 负载均衡，此时不注册本实例。
 6. `naweb` 装配路由，业务自行拥有 HTTP listener、协议选择与排空；`naws` 启动长连接服务，`nasched`
@@ -1035,6 +1059,9 @@ HTTP/1/h2c listener。
 | [namapper](namapper/README.md) | `mapper` / `mapper-redis-cache` | MySQL 声明式 SQL Mapper、动态 SQL、二级缓存 | `database.*`、`datasources.*`、`sql.observability.*`；L2 显式安装 |
 | [namapper-macro](namapper-macro/README.md) | `mapper` | Mapper 派生和 SQL 注解宏 | 由 `namapper` 运行时读取 |
 | [namapper-core](namapper-core/README.md) | runtime 内部合同 | 后端中立分页、排序、缓存合同、共享缓存运行时与结构化 SQL 节点 | 不读取业务配置 |
+| [namapper-sqlite](namapper-sqlite/README.md) | `mapper-sqlite` | SQLite 声明式 SQL、动态绑定、流与 owner 隔离缓存 | 复用受管或 standalone SQLite 数据源 |
+| [natx-sqlite](natx-sqlite/README.md) | `tx-sqlite` | SQLite 文件权威、有界执行、事务、checkpoint 与备份 | `datasources.<name>.driver: sqlite` 与 `sqlite.path` |
+| [namigrate-sqlite](namigrate-sqlite/README.md) | `tx-sqlite` 内部迁移门禁 | SQLite 只读 validate、整批原子 apply 与历史保护 | 显式登记完整 Migrator，Application 在 Prepare 执行 |
 | [namapper-pgsql](namapper-pgsql/README.md) | `mapper-pgsql` / `mapper-redis-cache-pgsql` | PostgreSQL Mapper、`$n` bind、动态 SQL、流式结果与 Redis L2 | standalone 显式注册 pool；Application 模式复用受管 datasource |
 | [natx](natx/README.md) | `tx` | ambient MySQL 事务、after-commit 回调、多数据源 | `database.*`、`datasources.*` |
 | [natx-core](natx-core/README.md) | runtime 内部合同 | datasource/driver catalog、owner、事务结果分类 | 不读取业务配置 |

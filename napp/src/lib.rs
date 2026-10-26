@@ -1,4 +1,6 @@
 //! NASA 应用生命周期运行时核心。
+//! 同一 `db` 组件按每个 datasource 的 driver 管理 MySQL、PostgreSQL 和 SQLite，
+//! 业务沿用 Mapper 与 SQL 方法宏；SQLite 的文件 owner、迁移门禁、健康和关闭责任统一纳管。
 //! 发现连接的默认名称为 primary，REST Mapping 与注册清单统一通过 qualifier 选择。
 //! 完整 URL 使用默认 HTTP 客户端直连，发现配置变化拒绝整份热更新候选并保留原视图。
 //!
@@ -22,6 +24,11 @@
 //! 资源关闭报告与业务任务结局独立，超时不会把仍在途的责任标为成功。
 //!
 //! # 资源装配与初始化
+//!
+//! 数据库先校验完整命名表，再取得各源 owner 并发布统一 catalog。SQLite 使用私有本地文件，
+//! Service 在 UserHook 登记迁移计划，Batch 使用 `MIGRATION_PLANS`，Prepare 门禁失败不开放业务。
+//! 停机先关闭新根准入，再按期限排空；原生关闭未完成时继续保留容量和文件权威。
+//! SQLite 不提供 Saga、Inbox、Outbox 持久适配器；不同 driver 或 datasource 不共享原子事务。
 //!
 //! 命名 REST、幂等 store、事务审计、对象存储、Schema Registry、TLS HTTP、缓存与 Redis 派生任务
 //! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature
@@ -132,9 +139,9 @@ mod managed_adapters;
 mod schema_registry;
 pub use diagnostics::{ConfigStatusSummary, DiagnosticSnapshot, Sampled};
 pub use nabudget::{BudgetError, RequestBudget};
-#[cfg(any(feature = "db", feature = "db-pgsql"))]
+#[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
 mod migrations;
-#[cfg(any(feature = "db", feature = "db-pgsql"))]
+#[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
 pub use migrations::{MigrationPlanFactory, MIGRATION_PLANS};
 mod grouped_cache;
 mod object_store;
@@ -162,9 +169,9 @@ mod config;
 mod config_reload;
 #[cfg(feature = "config-watch")]
 mod config_watch;
-#[cfg(all(feature = "db", not(feature = "db-pgsql")))]
+#[cfg(all(feature = "db", not(any(feature = "db-pgsql", feature = "db-sqlite"))))]
 mod db;
-#[cfg(feature = "db-pgsql")]
+#[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
 #[path = "db_multi.rs"]
 mod db;
 /// 稳定 gRPC listener：UserHook service registry、Ready 绑定、关键监督与有界排空。
@@ -191,6 +198,10 @@ pub use namigrate::{
 pub use namigrate_pgsql::{
     MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
 };
+#[cfg(all(not(feature = "db"), not(feature = "db-pgsql"), feature = "db-sqlite"))]
+pub use namigrate_sqlite::{
+    MigrationError, MigrationMode, MigrationReport, MigrationSettings, Migrator,
+};
 #[cfg(feature = "telemetry")]
 pub use telemetry::OtlpMetricsSnapshot;
 #[cfg(feature = "nacos-discovery")]
@@ -210,11 +221,16 @@ pub mod managed_discovery;
 pub use inbox::{InboxRetentionPlan, InboxRetentionSnapshot};
 #[cfg(feature = "log")]
 mod log;
-#[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+#[cfg(any(
+    feature = "mapper-cache",
+    feature = "mapper-cache-pgsql",
+    feature = "mapper-cache-sqlite"
+))]
 mod mapper_cache;
 #[cfg(any(
     feature = "mapper-cache",
     feature = "mapper-cache-pgsql",
+    feature = "mapper-cache-sqlite",
     feature = "mapper-observability"
 ))]
 mod mapper_defaults;
@@ -480,7 +496,7 @@ pub mod components {
     }
 
     /// 数据源组件的编译期能力探测点。
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     pub mod db {
         /// 组件能力已编入时可被属性展开代码引用的零大小标记。
         pub const FEATURE_CHECK: () = ();

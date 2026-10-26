@@ -36,7 +36,8 @@ enum PgConnectionTopology {
 impl PgConnectionTopology {
     /// 业务作用：把配置中的 PostgreSQL 连接拓扑冻结为迁移门禁可判定的封闭枚举。
     ///
-    /// 参数说明：`raw` 是可选的 `connection_topology` 配置值。
+    /// 参数说明：
+    /// - `raw`：`raw` 是可选的 `connection_topology` 配置值。
     ///
     /// 返回：缺省为直连；未知值在建连前返回启动错误。
     fn parse(raw: Option<&str>) -> ApplicationResult<Self> {
@@ -53,17 +54,23 @@ impl PgConnectionTopology {
 }
 
 #[derive(Clone)]
-/// 业务作用：冻结单个 PostgreSQL datasource 的迁移策略、目标 schema 与独立 session 拓扑。
+/// 业务作用：冻结 datasource 的迁移策略与执行预算，PostgreSQL 另保留 schema 和 session 拓扑。
+#[cfg_attr(not(feature = "db-pgsql"), allow(dead_code))]
 struct MigrationPlan {
     settings: namigrate_core::MigrationSettings,
     schema: String,
     session_url: Option<String>,
     topology: PgConnectionTopology,
+    execution_timeout_ms: u64,
+    explicit: bool,
 }
 
 enum DriverConfig {
+    #[cfg(feature = "db-sqlite")]
+    Sqlite(natx_sqlite::DataSourceConfig),
     #[cfg(feature = "db")]
     MySql(natx::datasource::DataSourceConfig),
+    #[cfg(feature = "db-pgsql")]
     PostgreSql {
         config: natx_pgsql::datasource::DataSourceConfig,
         schema: Option<String>,
@@ -79,31 +86,61 @@ struct DatasourceSpec {
 }
 
 enum ManagedPool {
+    #[cfg(feature = "db-sqlite")]
+    Sqlite(Arc<natx_sqlite::SqliteDataSourceOwner>),
     #[cfg(feature = "db")]
     MySql(natx::MySqlPool),
+    #[cfg(feature = "db-pgsql")]
     PostgreSql(natx_pgsql::PgPool),
 }
 
 impl ManagedPool {
+    /// 业务作用：把 SQLite 持续隔离转成固定 readiness 原因，避免被普通探针恢复覆盖。
+    /// 参数说明：无。
+    /// 返回：关键文件故障的稳定原因；其它后端保留原有探针语义。
+    fn unavailable_reason(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "db-sqlite")]
+            Self::Sqlite(owner) => match owner.datasource().isolation_reason() {
+                Some(natx_sqlite::IsolationReason::FileIdentity) => "sqlite_file_identity",
+                Some(natx_sqlite::IsolationReason::Corrupt) => "sqlite_corrupt",
+                Some(natx_sqlite::IsolationReason::Io) => "sqlite_io",
+                Some(natx_sqlite::IsolationReason::Worker) => "sqlite_worker",
+                Some(natx_sqlite::IsolationReason::Policy) => "sqlite_policy",
+                None => reason::PROBE_TIMEOUT,
+            },
+            #[cfg(feature = "db")]
+            Self::MySql(_) => reason::PROBE_TIMEOUT,
+            #[cfg(feature = "db-pgsql")]
+            Self::PostgreSql(_) => reason::PROBE_TIMEOUT,
+        }
+    }
     /// 业务作用：以统一方式探测一种受管数据库池是否仍可取得连接。
     ///
-    /// 参数说明：`datasource` 为冻结目录中的数据源身份。
+    /// 参数说明：
+    /// - `_datasource`：`datasource` 为冻结目录中的数据源身份。
     ///
     /// 返回：取得并立即释放连接时成功；池关闭或后端不可达时返回基础设施错误。
-    async fn acquire(&self, datasource: &str) -> anyhow::Result<()> {
+    async fn acquire(&self, _datasource: &str) -> anyhow::Result<()> {
         match self {
+            #[cfg(feature = "db-sqlite")]
+            Self::Sqlite(owner) => {
+                let mut connection = natx_sqlite::conn_from(&owner.datasource()).await?;
+                connection.validate_read("SELECT 1").await?;
+            }
             #[cfg(feature = "db")]
             Self::MySql(pool) => {
                 natx::observed_pool_acquire(
-                    datasource,
+                    _datasource,
                     natx_core::observability::ConnectionPurpose::Probe,
                     pool,
                 )
                 .await?;
             }
+            #[cfg(feature = "db-pgsql")]
             Self::PostgreSql(pool) => {
                 natx_pgsql::observed_pool_acquire(
-                    datasource,
+                    _datasource,
                     natx_core::observability::ConnectionPurpose::Probe,
                     pool,
                 )
@@ -115,15 +152,20 @@ impl ManagedPool {
 
     /// 业务作用：等待一种受管数据库池停止发放连接并关闭其共享资源。
     ///
-    /// 参数说明: 无。
+    /// 参数说明：
+    /// - `_deadline`：宿主允许的 SQLite 物理关闭截止点。
     ///
-    /// 返回：无；两种 SQLx pool 的关闭均等待已借出连接归还。
-    async fn close(&self) {
+    /// 返回：全部连接关闭时成功，SQLite 关闭未确认时保留 owner 并返回错误。
+    async fn close(&self, _deadline: tokio::time::Instant) -> anyhow::Result<()> {
         match self {
+            #[cfg(feature = "db-sqlite")]
+            Self::Sqlite(owner) => owner.close(_deadline).await?,
             #[cfg(feature = "db")]
             Self::MySql(pool) => pool.close().await,
+            #[cfg(feature = "db-pgsql")]
             Self::PostgreSql(pool) => pool.close().await,
         }
+        Ok(())
     }
 }
 
@@ -134,12 +176,15 @@ struct DbMonitorInput {
     contributor: ReadinessContributor,
 }
 
-/// 业务作用：统一管理同一 Application 中全部 MySQL 与 PostgreSQL datasource 的生命周期。
+/// 业务作用：统一管理同一 Application 中全部 MySQL、PostgreSQL 与 SQLite datasource 的生命周期。
 pub(crate) struct DbComponent {
     critical_task: Option<ApplicationFuture<'static>>,
     #[cfg(feature = "db")]
     mysql_pools: BTreeMap<String, natx::MySqlPool>,
+    #[cfg(feature = "db-pgsql")]
     pg_pools: BTreeMap<String, natx_pgsql::PgPool>,
+    #[cfg(feature = "db-sqlite")]
+    sqlite_pools: BTreeMap<String, Arc<natx_sqlite::SqliteDataSourceOwner>>,
     drivers: BTreeMap<String, DatabaseDriver>,
     migrations: BTreeMap<String, MigrationPlan>,
     catalog: Option<Arc<DataSourceCatalog>>,
@@ -167,7 +212,10 @@ impl DbComponent {
             critical_task: None,
             #[cfg(feature = "db")]
             mysql_pools: BTreeMap::new(),
+            #[cfg(feature = "db-pgsql")]
             pg_pools: BTreeMap::new(),
+            #[cfg(feature = "db-sqlite")]
+            sqlite_pools: BTreeMap::new(),
             drivers: BTreeMap::new(),
             migrations: BTreeMap::new(),
             catalog: None,
@@ -240,7 +288,7 @@ async fn run_db_monitor(
             let state = if acquired {
                 (DependencyState::Ready, reason::HEALTHY)
             } else {
-                (DependencyState::NotReady, reason::PROBE_TIMEOUT)
+                (DependencyState::NotReady, input.pool.unavailable_reason())
             };
             input.contributor.observe(state.0, state.1, now);
         }
@@ -252,7 +300,7 @@ async fn run_db_monitor(
                     return Ok(());
                 }
             }
-            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {}
+            _ = tokio::time::sleep(DB_MONITOR_INTERVAL) => {},
         }
     }
 }
@@ -267,9 +315,10 @@ impl ApplicationComponent for DbComponent {
         ComponentId::Db
     }
 
-    /// 业务作用：全表校验并建立全部 MySQL/PostgreSQL pool，在单一 owner 下原子发布 catalog 与 typed registry。
+    /// 业务作用：全表校验并建立全部 MySQL/PostgreSQL pool 与 SQLite 文件来源，在单一 owner 下原子发布 catalog 与 typed registry。
     ///
-    /// 参数说明：`context` 提供启动资源批量登记和失败清理栈。
+    /// 参数说明：
+    /// - `context`：`context` 提供启动资源批量登记和失败清理栈。
     ///
     /// 返回：全部数据源均可受管时成功；任何配置、探测或发布失败都触发本轮资源逆序撤销。
     fn start<'a>(&'a mut self, context: &'a mut StartContext<'_>) -> ApplicationFuture<'a> {
@@ -339,10 +388,26 @@ impl ApplicationComponent for DbComponent {
 
             for source in sources {
                 let name = source.name.clone();
-                #[cfg(feature = "mapper-observability")]
+                #[cfg(all(
+                    feature = "mapper-observability",
+                    any(feature = "db", feature = "db-pgsql")
+                ))]
                 let logging =
                     crate::sql_observability::statement_logging(&application, &name).await?;
                 let pool = match source.config {
+                    #[cfg(feature = "db-sqlite")]
+                    DriverConfig::Sqlite(config) => {
+                        let owner = Arc::new(
+                            natx_sqlite::open_owned(&name, config).await.map_err(|_| {
+                                db_error(
+                                    ApplicationPhase::Start,
+                                    format!("cannot open SQLite datasource `{name}`"),
+                                )
+                            })?,
+                        );
+                        self.sqlite_pools.insert(name.clone(), owner.clone());
+                        ManagedPool::Sqlite(owner)
+                    }
                     #[cfg(feature = "db")]
                     DriverConfig::MySql(config) => {
                         if config.probe_on_start {
@@ -376,7 +441,11 @@ impl ApplicationComponent for DbComponent {
                         self.mysql_pools.insert(name.clone(), pool.clone());
                         ManagedPool::MySql(pool)
                     }
-                    DriverConfig::PostgreSql { config, schema } => {
+                    #[cfg(feature = "db-pgsql")]
+                    DriverConfig::PostgreSql {
+                        config,
+                        schema,
+                    } => {
                         if config.probe_on_start {
                             #[cfg(feature = "mapper-observability")]
                             let probe = match schema.as_deref() {
@@ -453,11 +522,15 @@ impl ApplicationComponent for DbComponent {
                 crate::sql_observability::install_mysql_pools(&application, &self.mysql_pools)
                     .await?;
             }
-            #[cfg(feature = "mapper-observability")]
+            #[cfg(all(feature = "mapper-observability", feature = "db-pgsql"))]
             if !self.pg_pools.is_empty() {
                 crate::sql_observability::install_postgres_pools(&application, &self.pg_pools)
                     .await?;
             }
+
+            #[cfg(all(feature = "mapper-observability", feature = "db-sqlite"))]
+            crate::sql_observability::install_sqlite_pools(&application, &self.sqlite_pools)
+                .await?;
 
             let catalog = Arc::new(
                 DataSourceCatalog::try_new(
@@ -494,6 +567,7 @@ impl ApplicationComponent for DbComponent {
                     })?,
                 ))
             };
+            #[cfg(feature = "db-pgsql")]
             let pg_registry = if self.pg_pools.is_empty() {
                 None
             } else {
@@ -513,13 +587,36 @@ impl ApplicationComponent for DbComponent {
                     })?,
                 ))
             };
+            #[cfg(feature = "db-sqlite")]
+            let sqlite_registry = if self.sqlite_pools.is_empty() {
+                None
+            } else {
+                Some(Arc::new(
+                    natx_sqlite::SqliteDataSourceRegistry::try_new_managed(
+                        self.sqlite_pools
+                            .iter()
+                            .map(|(name, pool)| (name.clone(), pool.datasource())),
+                        &token,
+                    )
+                    .map_err(|error| {
+                        db_error_src(
+                            ApplicationPhase::Start,
+                            "cannot freeze managed SQLite datasource registry",
+                            error,
+                        )
+                    })?,
+                ))
+            };
 
             // 先把精确清理动作压入 active stack，后续任一 registry/catalog 发布失败都会按 owner 撤销本轮全局状态。
             context.activate(Box::new(DbRegistryShutdown {
                 catalog_owner: Some(token.owner().clone()),
                 #[cfg(feature = "db")]
                 mysql: mysql_registry.clone(),
+                #[cfg(feature = "db-pgsql")]
                 pgsql: pg_registry.clone(),
+                #[cfg(feature = "db-sqlite")]
+                sqlite: sqlite_registry.clone(),
             }));
 
             // typed registry 先进入 Open，但所有查询仍受关闭的 catalog 门控；最后开放 catalog 才会
@@ -534,6 +631,7 @@ impl ApplicationComponent for DbComponent {
                     )
                 })?;
             }
+            #[cfg(feature = "db-pgsql")]
             if let Some(registry) = &pg_registry {
                 natx_pgsql::install_closed_managed_registry(registry, &token).map_err(|error| {
                     db_error_src(
@@ -542,6 +640,18 @@ impl ApplicationComponent for DbComponent {
                         error,
                     )
                 })?;
+            }
+            #[cfg(feature = "db-sqlite")]
+            if let Some(registry) = &sqlite_registry {
+                natx_sqlite::install_closed_managed_registry(registry, &token).map_err(
+                    |error| {
+                        db_error_src(
+                            ApplicationPhase::Start,
+                            "cannot install closed SQLite datasource registry",
+                            error,
+                        )
+                    },
+                )?;
             }
             natx_core::install_managed_catalog(&token, &catalog).map_err(|error| {
                 db_error_src(
@@ -560,6 +670,7 @@ impl ApplicationComponent for DbComponent {
                     )
                 })?;
             }
+            #[cfg(feature = "db-pgsql")]
             if let Some(registry) = &pg_registry {
                 natx_pgsql::attach_managed_catalog(registry, &catalog, &token).map_err(
                     |error| {
@@ -571,20 +682,42 @@ impl ApplicationComponent for DbComponent {
                     },
                 )?;
             }
+            #[cfg(feature = "db-sqlite")]
+            if let Some(registry) = &sqlite_registry {
+                natx_sqlite::attach_managed_catalog(registry, &catalog, &token).map_err(
+                    |error| {
+                        db_error_src(
+                            ApplicationPhase::Start,
+                            "cannot bind SQLite registry to datasource catalog",
+                            error,
+                        )
+                    },
+                )?;
+            }
 
             context.register_resource_batch(|batch| {
                 #[cfg(feature = "db")]
                 for (name, pool) in &self.mysql_pools {
                     batch.push(Some(name), pool.clone())?;
                 }
+                #[cfg(feature = "db-pgsql")]
                 for (name, pool) in &self.pg_pools {
                     batch.push(Some(name), pool.clone())?;
+                }
+                #[cfg(feature = "db-sqlite")]
+                for (name, owner) in &self.sqlite_pools {
+                    batch.push(Some(name), owner.datasource())?;
+                }
+                #[cfg(feature = "db-sqlite")]
+                if let Some(registry) = &sqlite_registry {
+                    batch.push(None, Arc::clone(registry))?;
                 }
                 batch.push(None, Arc::clone(&catalog))?;
                 #[cfg(feature = "db")]
                 if let Some(registry) = &mysql_registry {
                     batch.push(None, Arc::clone(registry))?;
                 }
+                #[cfg(feature = "db-pgsql")]
                 if let Some(registry) = &pg_registry {
                     batch.push(None, Arc::clone(registry))?;
                 }
@@ -600,11 +733,22 @@ impl ApplicationComponent for DbComponent {
                     )
                 })?;
             }
+            #[cfg(feature = "db-pgsql")]
             if let Some(registry) = &pg_registry {
                 natx_pgsql::open_managed_registry(registry, &token).map_err(|error| {
                     db_error_src(
                         ApplicationPhase::Start,
                         "cannot open PostgreSQL datasource registry",
+                        error,
+                    )
+                })?;
+            }
+            #[cfg(feature = "db-sqlite")]
+            if let Some(registry) = &sqlite_registry {
+                natx_sqlite::open_managed_registry(registry, &token).map_err(|error| {
+                    db_error_src(
+                        ApplicationPhase::Start,
+                        "cannot open SQLite datasource registry",
                         error,
                     )
                 })?;
@@ -628,7 +772,8 @@ impl ApplicationComponent for DbComponent {
 
     /// 业务作用：执行每个 datasource 的迁移门禁，并在全部成功后登记冻结的后端观测事实。
     ///
-    /// 参数说明：`context` 提供已发布 Application 资源和延后接管入口。
+    /// 参数说明：
+    /// - `context`：`context` 提供已发布 Application 资源和延后接管入口。
     ///
     /// 返回：全部 schema 与 topology 合同成立时成功；任一数据源失败都会阻止 Application Ready。
     fn prepare<'a>(
@@ -650,7 +795,23 @@ impl ApplicationComponent for DbComponent {
                 self.adopt_deferred(context).await?;
             }
             let application = context.application().clone();
-            for (name, migrator) in application.take_migrations()? {
+            let registered = application.take_migrations()?;
+            // 显式 SQLite 迁移策略必须绑定完整计划；空计划也需要由业务明确登记。
+            for (name, plan) in &self.migrations {
+                if self.drivers.get(name) == Some(&DatabaseDriver::Sqlite)
+                    && plan.explicit
+                    && plan.settings.mode != namigrate_core::MigrationMode::Disabled
+                    && !registered
+                        .iter()
+                        .any(|(registered_name, _)| registered_name == name)
+                {
+                    return Err(db_error(
+                        ApplicationPhase::Prepare,
+                        format!("SQLite datasource `{name}` requires a registered migration plan"),
+                    ));
+                }
+            }
+            for (name, migrator) in registered {
                 let driver = self.drivers.get(&name).copied().ok_or_else(|| {
                     db_error(
                         ApplicationPhase::Prepare,
@@ -666,8 +827,43 @@ impl ApplicationComponent for DbComponent {
                         schema: "public".to_owned(),
                         session_url: None,
                         topology: PgConnectionTopology::Direct,
+                        execution_timeout_ms: 30_000,
+                        explicit: false,
                     });
                 match driver {
+                    DatabaseDriver::Sqlite => {
+                        #[cfg(feature = "db-sqlite")]
+                        {
+                            let source = self
+                                .sqlite_pools
+                                .get(&name)
+                                .ok_or_else(|| {
+                                    db_error(
+                                        ApplicationPhase::Prepare,
+                                        "SQLite datasource is unavailable",
+                                    )
+                                })?
+                                .datasource();
+                            namigrate_sqlite::run_gate_with_timeout(
+                                &source,
+                                &migrator,
+                                &plan.settings,
+                                plan.execution_timeout_ms,
+                            )
+                            .await
+                            .map_err(|error| {
+                                db_error(
+                                    ApplicationPhase::Prepare,
+                                    format!("datasource `{name}` migration gate failed: {error}"),
+                                )
+                            })?;
+                        }
+                        #[cfg(not(feature = "db-sqlite"))]
+                        return Err(db_error(
+                            ApplicationPhase::Prepare,
+                            "SQLite migration support is not compiled",
+                        ));
+                    }
                     DatabaseDriver::MySql => {
                         #[cfg(feature = "db")]
                         {
@@ -692,63 +888,73 @@ impl ApplicationComponent for DbComponent {
                         ));
                     }
                     DatabaseDriver::PostgreSql => {
-                        let business_pool = self.pg_pools.get(&name).ok_or_else(|| {
-                            db_error(ApplicationPhase::Prepare, "PostgreSQL pool is unavailable")
-                        })?;
-                        if plan.settings.mode != namigrate_core::MigrationMode::Disabled
-                            && plan.topology == PgConnectionTopology::TransactionPool
-                            && plan.session_url.is_none()
+                        #[cfg(feature = "db-pgsql")]
                         {
-                            return Err(db_error(
+                            let business_pool = self.pg_pools.get(&name).ok_or_else(|| {
+                                db_error(
+                                    ApplicationPhase::Prepare,
+                                    "PostgreSQL pool is unavailable",
+                                )
+                            })?;
+                            if plan.settings.mode != namigrate_core::MigrationMode::Disabled
+                                && plan.topology == PgConnectionTopology::TransactionPool
+                                && plan.session_url.is_none()
+                            {
+                                return Err(db_error(
                                 ApplicationPhase::Prepare,
                                 format!(
                                     "datasource `{name}` requires migrations.session_url for transaction pooling"
                                 ),
                             ));
-                        }
-                        if plan.settings.mode == namigrate_core::MigrationMode::Disabled {
-                            namigrate_pgsql::run_gate_with_evidence_for(
-                                business_pool,
-                                &name,
-                                &plan.schema,
-                                &migrator,
-                                &plan.settings,
-                                &[],
-                            )
-                            .await
-                            .map_err(|error| {
-                                db_error(
-                                    ApplicationPhase::Prepare,
-                                    format!("datasource `{name}` migration gate failed: {error}"),
+                            }
+                            if plan.settings.mode == namigrate_core::MigrationMode::Disabled {
+                                namigrate_pgsql::run_gate_with_evidence_for(
+                                    business_pool,
+                                    &name,
+                                    &plan.schema,
+                                    &migrator,
+                                    &plan.settings,
+                                    &[],
                                 )
-                            })?;
-                        } else if let Some(session_url) = &plan.session_url {
-                            let config = natx_pgsql::datasource::DataSourceConfig {
-                                url: session_url.clone(),
-                                max_connections: 1,
-                                min_connections: 0,
-                                acquire_timeout_ms: 2_000,
-                                connect_timeout_ms: 5_000,
-                                probe_on_start: true,
-                            };
-                            #[cfg(feature = "mapper-observability")]
-                            let pool = natx_pgsql::datasource::build_pool_with_logging(
-                                &config,
-                                crate::sql_observability::statement_logging(&application, &name)
+                                .await
+                                .map_err(|error| {
+                                    db_error(
+                                        ApplicationPhase::Prepare,
+                                        format!(
+                                            "datasource `{name}` migration gate failed: {error}"
+                                        ),
+                                    )
+                                })?;
+                            } else if let Some(session_url) = &plan.session_url {
+                                let config = natx_pgsql::datasource::DataSourceConfig {
+                                    url: session_url.clone(),
+                                    max_connections: 1,
+                                    min_connections: 0,
+                                    acquire_timeout_ms: 2_000,
+                                    connect_timeout_ms: 5_000,
+                                    probe_on_start: true,
+                                };
+                                #[cfg(feature = "mapper-observability")]
+                                let pool = natx_pgsql::datasource::build_pool_with_logging(
+                                    &config,
+                                    crate::sql_observability::statement_logging(
+                                        &application,
+                                        &name,
+                                    )
                                     .await?,
-                            );
-                            #[cfg(not(feature = "mapper-observability"))]
-                            let pool = natx_pgsql::datasource::build_pool(&config);
-                            let pool = pool.map_err(|error| {
-                                db_error_src(
-                                    ApplicationPhase::Prepare,
-                                    format!(
-                                        "datasource `{name}` migration session pool is invalid"
-                                    ),
-                                    error,
-                                )
-                            })?;
-                            let result: ApplicationResult<()> = async {
+                                );
+                                #[cfg(not(feature = "mapper-observability"))]
+                                let pool = natx_pgsql::datasource::build_pool(&config);
+                                let pool = pool.map_err(|error| {
+                                    db_error_src(
+                                        ApplicationPhase::Prepare,
+                                        format!(
+                                            "datasource `{name}` migration session pool is invalid"
+                                        ),
+                                        error,
+                                    )
+                                })?;
+                                let result: ApplicationResult<()> = async {
                                 let mut migration_connection = natx_pgsql::observed_pool_acquire(
                                     &name,
                                     natx_core::observability::ConnectionPurpose::Migration,
@@ -801,25 +1007,33 @@ impl ApplicationComponent for DbComponent {
                                 Ok(())
                             }
                             .await;
-                            pool.close().await;
-                            result?;
-                        } else {
-                            namigrate_pgsql::run_gate_with_evidence_for(
-                                business_pool,
-                                &name,
-                                &plan.schema,
-                                &migrator,
-                                &plan.settings,
-                                &[],
-                            )
-                            .await
-                            .map_err(|error| {
-                                db_error(
-                                    ApplicationPhase::Prepare,
-                                    format!("datasource `{name}` migration gate failed: {error}"),
+                                pool.close().await;
+                                result?;
+                            } else {
+                                namigrate_pgsql::run_gate_with_evidence_for(
+                                    business_pool,
+                                    &name,
+                                    &plan.schema,
+                                    &migrator,
+                                    &plan.settings,
+                                    &[],
                                 )
-                            })?;
+                                .await
+                                .map_err(|error| {
+                                    db_error(
+                                        ApplicationPhase::Prepare,
+                                        format!(
+                                            "datasource `{name}` migration gate failed: {error}"
+                                        ),
+                                    )
+                                })?;
+                            }
                         }
+                        #[cfg(not(feature = "db-pgsql"))]
+                        return Err(db_error(
+                            ApplicationPhase::Prepare,
+                            "PostgreSQL datasource requires napp feature `db-pgsql`",
+                        ));
                     }
                 }
             }
@@ -830,6 +1044,13 @@ impl ApplicationComponent for DbComponent {
                 )
             })?;
             application.register_database_backend_metrics(Arc::clone(catalog))?;
+            #[cfg(feature = "db-sqlite")]
+            application.register_sqlite_metrics(
+                self.sqlite_pools
+                    .values()
+                    .map(|owner| owner.datasource())
+                    .collect(),
+            )?;
             Ok(())
         })
     }
@@ -850,7 +1071,8 @@ impl ApplicationComponent for DbComponent {
 impl DbComponent {
     /// 业务作用：接管 UserHook 安装的单一默认池，并把它纳入与配置建池相同的 owner/catalog 生命周期。
     ///
-    /// 参数说明：`context` 提供 Prepare 期资源批量登记与失败清理栈。
+    /// 参数说明：
+    /// - `context`：`context` 提供 Prepare 期资源批量登记与失败清理栈。
     ///
     /// 返回：待接管 driver、pool 与 owner 身份一致时成功；缺失或错配时在开放 catalog 前失败。
     async fn adopt_deferred(
@@ -885,11 +1107,19 @@ impl DbComponent {
                 )
             })?,
         );
+        #[allow(unused_assignments)]
         #[cfg(feature = "db")]
         let mut mysql_registry = None;
         #[allow(unused_assignments)]
+        #[cfg(feature = "db-pgsql")]
         let mut pg_registry = None;
         let pool = match driver {
+            DatabaseDriver::Sqlite => {
+                return Err(db_error(
+                    ApplicationPhase::Prepare,
+                    "SQLite does not support Saga UserHook deferred bootstrap",
+                ))
+            }
             DatabaseDriver::MySql => {
                 #[cfg(feature = "db")]
                 {
@@ -922,29 +1152,36 @@ impl DbComponent {
                 ));
             }
             DatabaseDriver::PostgreSql => {
-                let registry = natx_pgsql::adopt_standalone_default_registry_closed(
-                    &deferred.token,
-                )
-                .map_err(|error| {
-                    db_error_src(
-                        ApplicationPhase::Prepare,
-                        "cannot adopt deferred PostgreSQL datasource",
-                        error,
-                    )
-                })?;
-                let pool = registry
-                    .managed_pool(DEFAULT_DATASOURCE, &deferred.token)
-                    .map_err(|error| {
-                        db_error_src(
-                            ApplicationPhase::Prepare,
-                            "deferred PostgreSQL datasource is unavailable",
-                            error,
-                        )
-                    })?;
-                self.pg_pools
-                    .insert(DEFAULT_DATASOURCE.to_owned(), pool.clone());
-                pg_registry = Some(registry);
-                ManagedPool::PostgreSql(pool)
+                #[cfg(feature = "db-pgsql")]
+                {
+                    let registry =
+                        natx_pgsql::adopt_standalone_default_registry_closed(&deferred.token)
+                            .map_err(|error| {
+                                db_error_src(
+                                    ApplicationPhase::Prepare,
+                                    "cannot adopt deferred PostgreSQL datasource",
+                                    error,
+                                )
+                            })?;
+                    let pool = registry
+                        .managed_pool(DEFAULT_DATASOURCE, &deferred.token)
+                        .map_err(|error| {
+                            db_error_src(
+                                ApplicationPhase::Prepare,
+                                "deferred PostgreSQL datasource is unavailable",
+                                error,
+                            )
+                        })?;
+                    self.pg_pools
+                        .insert(DEFAULT_DATASOURCE.to_owned(), pool.clone());
+                    pg_registry = Some(registry);
+                    ManagedPool::PostgreSql(pool)
+                }
+                #[cfg(not(feature = "db-pgsql"))]
+                return Err(db_error(
+                    ApplicationPhase::Prepare,
+                    "PostgreSQL datasource requires napp feature `db-pgsql`",
+                ));
             }
         };
         context.activate(Box::new(DbPoolShutdown {
@@ -952,14 +1189,20 @@ impl DbComponent {
             pool: Some(match &pool {
                 #[cfg(feature = "db")]
                 ManagedPool::MySql(pool) => ManagedPool::MySql(pool.clone()),
+                #[cfg(feature = "db-sqlite")]
+                ManagedPool::Sqlite(owner) => ManagedPool::Sqlite(owner.clone()),
+                #[cfg(feature = "db-pgsql")]
                 ManagedPool::PostgreSql(pool) => ManagedPool::PostgreSql(pool.clone()),
             }),
         }));
         // 接管后 pool 已不再属于 standalone；先登记 owner-aware 清理，防止 catalog 绑定失败留下半完成全局状态。
         context.activate(Box::new(DbRegistryShutdown {
             catalog_owner: Some(deferred.token.owner().clone()),
+            #[cfg(feature = "db-sqlite")]
+            sqlite: None,
             #[cfg(feature = "db")]
             mysql: mysql_registry.clone(),
+            #[cfg(feature = "db-pgsql")]
             pgsql: pg_registry.clone(),
         }));
         #[cfg(all(feature = "mapper-observability", feature = "db"))]
@@ -967,7 +1210,7 @@ impl DbComponent {
             crate::sql_observability::install_mysql_pools(context.application(), &self.mysql_pools)
                 .await?;
         }
-        #[cfg(feature = "mapper-observability")]
+        #[cfg(all(feature = "mapper-observability", feature = "db-pgsql"))]
         if !self.pg_pools.is_empty() {
             crate::sql_observability::install_postgres_pools(context.application(), &self.pg_pools)
                 .await?;
@@ -990,6 +1233,7 @@ impl DbComponent {
                 )
             })?;
         }
+        #[cfg(feature = "db-pgsql")]
         if let Some(registry) = &pg_registry {
             natx_pgsql::attach_managed_catalog(registry, &catalog, &deferred.token).map_err(
                 |error| {
@@ -1003,10 +1247,15 @@ impl DbComponent {
         }
         context.register_resource_batch(|batch| {
             match &pool {
+                #[cfg(feature = "db-sqlite")]
+                ManagedPool::Sqlite(owner) => {
+                    batch.push(Some(DEFAULT_DATASOURCE), owner.datasource())?;
+                }
                 #[cfg(feature = "db")]
                 ManagedPool::MySql(pool) => {
                     batch.push(Some(DEFAULT_DATASOURCE), pool.clone())?;
                 }
+                #[cfg(feature = "db-pgsql")]
                 ManagedPool::PostgreSql(pool) => {
                     batch.push(Some(DEFAULT_DATASOURCE), pool.clone())?;
                 }
@@ -1016,6 +1265,7 @@ impl DbComponent {
             if let Some(registry) = &mysql_registry {
                 batch.push(None, Arc::clone(registry))?;
             }
+            #[cfg(feature = "db-pgsql")]
             if let Some(registry) = &pg_registry {
                 batch.push(None, Arc::clone(registry))?;
             }
@@ -1031,6 +1281,7 @@ impl DbComponent {
                 )
             })?;
         }
+        #[cfg(feature = "db-pgsql")]
         if let Some(registry) = &pg_registry {
             natx_pgsql::open_managed_registry(registry, &deferred.token).map_err(|error| {
                 db_error_src(
@@ -1084,13 +1335,46 @@ fn build_monitor_inputs(
 ) -> ApplicationResult<Vec<DbMonitorInput>> {
     let mut inputs = Vec::with_capacity(component.drivers.len());
     for (name, driver) in &component.drivers {
+        let mut policy = db_readiness_policy();
+        if *driver == DatabaseDriver::Sqlite {
+            policy.failure_threshold = 1;
+        }
         let contributor = application.register_readiness(
             ComponentId::Db,
             Arc::<str>::from(format!("db:{name}")),
-            db_readiness_policy(),
+            policy,
         )?;
         contributor.observe(DependencyState::Ready, reason::HEALTHY, Instant::now());
         let pool = match driver {
+            DatabaseDriver::Sqlite => {
+                #[cfg(feature = "db-sqlite")]
+                {
+                    ManagedPool::Sqlite(
+                        component
+                            .sqlite_pools
+                            .get(name)
+                            .ok_or_else(|| {
+                                db_error(
+                                    ApplicationPhase::Start,
+                                    "SQLite datasource is unavailable",
+                                )
+                            })?
+                            .clone(),
+                    )
+                }
+                #[cfg(not(feature = "db-sqlite"))]
+                return Err(db_error(
+                    ApplicationPhase::Start,
+                    "SQLite datasource support is not compiled",
+                ));
+            }
+            #[cfg(not(feature = "db-pgsql"))]
+            DatabaseDriver::PostgreSql => {
+                return Err(db_error(
+                    ApplicationPhase::Start,
+                    "PostgreSQL datasource support is not compiled",
+                ))
+            }
             DatabaseDriver::MySql => {
                 #[cfg(feature = "db")]
                 {
@@ -1110,6 +1394,7 @@ fn build_monitor_inputs(
                     "MySQL datasource requires napp feature `db`",
                 ));
             }
+            #[cfg(feature = "db-pgsql")]
             DatabaseDriver::PostgreSql => ManagedPool::PostgreSql(
                 component
                     .pg_pools
@@ -1146,7 +1431,8 @@ impl ShutdownAction for BootstrapShutdown {
 
     /// 业务作用：在启动失败或停机时撤销仍未完成的 bootstrap token，释放进程级模式占用。
     ///
-    /// 参数说明：`_context` 未参与该进程级身份撤销。
+    /// 参数说明：
+    /// - `_context`：`_context` 未参与该进程级身份撤销。
     ///
     /// 返回：幂等完成；token 已消费时不再动作。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
@@ -1162,8 +1448,11 @@ impl ShutdownAction for BootstrapShutdown {
 /// 业务作用：在停机时先封口 datasource catalog，再按 owner 身份撤销各后端 typed registry。
 struct DbRegistryShutdown {
     catalog_owner: Option<ManagedRegistryOwner>,
+    #[cfg(feature = "db-sqlite")]
+    sqlite: Option<Arc<natx_sqlite::SqliteDataSourceRegistry>>,
     #[cfg(feature = "db")]
     mysql: Option<Arc<natx::DataSourceRegistry>>,
+    #[cfg(feature = "db-pgsql")]
     pgsql: Option<Arc<natx_pgsql::PgDataSourceRegistry>>,
 }
 
@@ -1179,7 +1468,8 @@ impl ShutdownAction for DbRegistryShutdown {
 
     /// 业务作用：先撤销全局 datasource 权威，再清空同 owner typed registry，阻止新事务进入待关闭 pool。
     ///
-    /// 参数说明：`_context` 未参与 owner 身份复验。
+    /// 参数说明：
+    /// - `_context`：`_context` 未参与 owner 身份复验。
     ///
     /// 返回：每个槽只处理一次；旧 owner 不能撤销后来 Application 的资源。
     fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
@@ -1188,10 +1478,15 @@ impl ShutdownAction for DbRegistryShutdown {
             if let Some(owner) = self.catalog_owner.take() {
                 let _ = natx_core::clear_managed_catalog(&owner);
             }
+            #[cfg(feature = "db-sqlite")]
+            if let Some(registry) = self.sqlite.take() {
+                natx_sqlite::clear_managed_registry_slot(&registry);
+            }
             #[cfg(feature = "db")]
             if let Some(registry) = self.mysql.take() {
                 natx::clear_managed_registry_slot(&registry);
             }
+            #[cfg(feature = "db-pgsql")]
             if let Some(registry) = self.pgsql.take() {
                 natx_pgsql::clear_managed_registry_slot(&registry);
             }
@@ -1218,14 +1513,22 @@ impl ShutdownAction for DbPoolShutdown {
 
     /// 业务作用：在 registry 已封口后等待指定 pool 排空并释放后端连接。
     ///
-    /// 参数说明：`_context` 未改变 SQLx pool 的关闭语义。
+    /// 参数说明：
+    /// - `context`：`context` 未改变 SQLx pool 的关闭语义。
     ///
     /// 返回：首次调用完成关闭；重复调用无副作用。
-    fn shutdown<'a>(&'a mut self, _context: &'a ShutdownContext) -> ApplicationFuture<'a> {
+    fn shutdown<'a>(&'a mut self, context: &'a ShutdownContext) -> ApplicationFuture<'a> {
         Box::pin(async move {
             if let Some(pool) = self.pool.take() {
                 tracing::debug!("closing datasource `{}` pool", self.name);
-                pool.close().await;
+                pool.close(tokio::time::Instant::from_std(context.deadline()))
+                    .await
+                    .map_err(|_| {
+                        db_error(
+                            ApplicationPhase::Stopping,
+                            "SQLite physical shutdown is incomplete",
+                        )
+                    })?;
             }
             Ok(())
         })
@@ -1330,119 +1633,200 @@ fn split_datasource(
         .ok_or_else(|| db_error(phase, format!("datasource `{name}` must be an object")))?;
     let driver_raw = take_optional_string_field(object, &name, "driver", phase)?;
     let migrations_raw = object.remove("migrations");
-    let topology_raw = take_optional_string_field(object, &name, "connection_topology", phase)?;
-    let schema_raw = take_optional_string_field(object, &name, "schema", phase)?;
-    let schema_was_present = schema_raw.is_some();
-    let migration_schema = schema_raw.clone().unwrap_or_else(|| "public".to_owned());
-    let url = object
-        .get("url")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| db_error(phase, format!("datasource `{name}` url is required")))?;
-    let driver = match driver_raw.as_deref() {
-        None if url.starts_with("mysql://") => DatabaseDriver::MySql,
-        Some("mysql") => DatabaseDriver::MySql,
-        Some("postgresql") => DatabaseDriver::PostgreSql,
-        None => {
-            return Err(db_error(
-                phase,
-                format!("datasource `{name}` PostgreSQL driver must be explicit"),
-            ))
-        }
-        Some(_) => {
-            return Err(db_error(
-                phase,
-                format!("datasource `{name}` driver is invalid"),
-            ))
-        }
-    };
-    let migration = parse_migration_plan(
-        &name,
-        migrations_raw,
-        topology_raw.as_deref(),
-        migration_schema,
-        driver,
-        phase,
-    )?;
-    let config = match driver {
-        DatabaseDriver::MySql => {
-            if !url.starts_with("mysql://") {
-                return Err(db_error(
-                    phase,
-                    format!("datasource `{name}` driver and URL scheme do not match"),
-                ));
-            }
-            if topology_raw.is_some() {
-                return Err(db_error(
-                    phase,
-                    format!("datasource `{name}` MySQL does not accept connection_topology"),
-                ));
-            }
-            if schema_was_present {
-                return Err(db_error(
-                    phase,
-                    format!("datasource `{name}` MySQL does not accept schema"),
-                ));
-            }
-            #[cfg(feature = "db")]
+    if driver_raw.as_deref() == Some("sqlite") {
+        #[cfg(feature = "db-sqlite")]
+        {
+            if ["url", "schema", "connection_topology"]
+                .iter()
+                .any(|key| object.contains_key(*key))
             {
-                let config = serde_json::from_value::<natx::datasource::DataSourceConfig>(value)
-                    .map_err(|error| {
+                return Err(db_error(
+                    phase,
+                    "SQLite datasource accepts sqlite.path, not network database options",
+                ));
+            }
+            let config: natx_sqlite::DataSourceConfig =
+                serde_json::from_value(value).map_err(|_| {
+                    db_error(
+                        phase,
+                        format!("invalid SQLite datasource `{name}` configuration"),
+                    )
+                })?;
+            config.validate().map_err(|_| {
+                db_error(
+                    phase,
+                    format!("invalid SQLite datasource `{name}` configuration"),
+                )
+            })?;
+            let migration = parse_migration_plan(
+                &name,
+                migrations_raw,
+                None,
+                String::new(),
+                DatabaseDriver::Sqlite,
+                phase,
+            )?;
+            if config.sqlite.read_only
+                && migration
+                    .as_ref()
+                    .is_some_and(|plan| plan.settings.mode == namigrate_core::MigrationMode::Apply)
+            {
+                return Err(db_error(
+                    phase,
+                    "read-only SQLite datasource cannot apply migrations",
+                ));
+            }
+            return Ok(DatasourceSpec {
+                name,
+                driver: DatabaseDriver::Sqlite,
+                config: DriverConfig::Sqlite(config),
+                migration,
+            });
+        }
+        #[cfg(not(feature = "db-sqlite"))]
+        return Err(db_error(
+            phase,
+            "SQLite datasource requires napp feature `db-sqlite`",
+        ));
+    }
+
+    #[cfg(not(any(feature = "db", feature = "db-pgsql")))]
+    return Err(db_error(
+        phase,
+        "this build contains only the SQLite datasource driver",
+    ));
+    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    {
+        let topology_raw = take_optional_string_field(object, &name, "connection_topology", phase)?;
+        let schema_raw = take_optional_string_field(object, &name, "schema", phase)?;
+        let schema_was_present = schema_raw.is_some();
+        let migration_schema = schema_raw.clone().unwrap_or_else(|| "public".to_owned());
+        let url = object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| db_error(phase, format!("datasource `{name}` url is required")))?;
+        let driver = match driver_raw.as_deref() {
+            None if url.starts_with("mysql://") => DatabaseDriver::MySql,
+            Some("mysql") => DatabaseDriver::MySql,
+            Some("postgresql") => DatabaseDriver::PostgreSql,
+            None => {
+                return Err(db_error(
+                    phase,
+                    format!("datasource `{name}` PostgreSQL driver must be explicit"),
+                ))
+            }
+            Some(_) => {
+                return Err(db_error(
+                    phase,
+                    format!("datasource `{name}` driver is invalid"),
+                ))
+            }
+        };
+        let migration = parse_migration_plan(
+            &name,
+            migrations_raw,
+            topology_raw.as_deref(),
+            migration_schema,
+            driver,
+            phase,
+        )?;
+        let config = match driver {
+            DatabaseDriver::Sqlite => {
+                return Err(db_error(
+                    phase,
+                    "SQLite configuration must use the file datasource parser",
+                ))
+            }
+            DatabaseDriver::MySql => {
+                if !url.starts_with("mysql://") {
+                    return Err(db_error(
+                        phase,
+                        format!("datasource `{name}` driver and URL scheme do not match"),
+                    ));
+                }
+                if topology_raw.is_some() {
+                    return Err(db_error(
+                        phase,
+                        format!("datasource `{name}` MySQL does not accept connection_topology"),
+                    ));
+                }
+                if schema_was_present {
+                    return Err(db_error(
+                        phase,
+                        format!("datasource `{name}` MySQL does not accept schema"),
+                    ));
+                }
+                #[cfg(feature = "db")]
+                {
+                    let config =
+                        serde_json::from_value::<natx::datasource::DataSourceConfig>(value)
+                            .map_err(|error| {
+                                db_error_src(
+                                    phase,
+                                    format!("invalid datasource `{name}` configuration"),
+                                    error,
+                                )
+                            })?;
+                    config.validate().map_err(|error| {
                         db_error_src(
                             phase,
                             format!("invalid datasource `{name}` configuration"),
                             error,
                         )
                     })?;
-                config.validate().map_err(|error| {
-                    db_error_src(
-                        phase,
-                        format!("invalid datasource `{name}` configuration"),
-                        error,
-                    )
-                })?;
-                DriverConfig::MySql(config)
-            }
-            #[cfg(not(feature = "db"))]
-            return Err(db_error(
-                phase,
-                format!("datasource `{name}` requires napp feature `db`"),
-            ));
-        }
-        DatabaseDriver::PostgreSql => {
-            if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+                    DriverConfig::MySql(config)
+                }
+                #[cfg(not(feature = "db"))]
                 return Err(db_error(
                     phase,
-                    format!("datasource `{name}` driver and URL scheme do not match"),
+                    format!("datasource `{name}` requires napp feature `db`"),
                 ));
             }
-            PgConnectionTopology::parse(topology_raw.as_deref())?;
-            let config = serde_json::from_value::<natx_pgsql::datasource::DataSourceConfig>(value)
-                .map_err(|error| {
-                    db_error_src(
-                        phase,
-                        format!("invalid PostgreSQL datasource `{name}` configuration"),
-                        error,
-                    )
-                })?;
-            config.validate().map_err(|error| {
-                db_error_src(
+            DatabaseDriver::PostgreSql => {
+                #[cfg(feature = "db-pgsql")]
+                {
+                    if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+                        return Err(db_error(
+                            phase,
+                            format!("datasource `{name}` driver and URL scheme do not match"),
+                        ));
+                    }
+                    PgConnectionTopology::parse(topology_raw.as_deref())?;
+                    let config =
+                        serde_json::from_value::<natx_pgsql::datasource::DataSourceConfig>(value)
+                            .map_err(|error| {
+                            db_error_src(
+                                phase,
+                                format!("invalid PostgreSQL datasource `{name}` configuration"),
+                                error,
+                            )
+                        })?;
+                    config.validate().map_err(|error| {
+                        db_error_src(
+                            phase,
+                            format!("invalid PostgreSQL datasource `{name}` configuration"),
+                            error,
+                        )
+                    })?;
+                    DriverConfig::PostgreSql {
+                        config,
+                        schema: schema_raw,
+                    }
+                }
+                #[cfg(not(feature = "db-pgsql"))]
+                return Err(db_error(
                     phase,
-                    format!("invalid PostgreSQL datasource `{name}` configuration"),
-                    error,
-                )
-            })?;
-            DriverConfig::PostgreSql {
-                config,
-                schema: schema_raw,
+                    "PostgreSQL datasource requires napp feature `db-pgsql`",
+                ));
             }
-        }
-    };
-    Ok(DatasourceSpec {
-        name,
-        driver,
-        config,
-        migration,
-    })
+        };
+        Ok(DatasourceSpec {
+            name,
+            driver,
+            config,
+            migration,
+        })
+    }
 }
 
 /// 业务作用：把 datasource 内的迁移配置冻结为后端可执行计划，并隔离 PostgreSQL session 参数。
@@ -1465,6 +1849,7 @@ fn parse_migration_plan(
     driver: DatabaseDriver,
     phase: ApplicationPhase,
 ) -> ApplicationResult<Option<MigrationPlan>> {
+    let explicit = raw.is_some();
     let mut raw = raw.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
     let session_url = match raw
         .as_object_mut()
@@ -1481,12 +1866,31 @@ fn parse_migration_plan(
             ));
         }
     };
-    if driver == DatabaseDriver::MySql && session_url.is_some() {
+    if driver != DatabaseDriver::PostgreSql && session_url.is_some() {
         return Err(db_error(
             phase,
-            "MySQL migrations do not accept session_url",
+            "this database driver does not accept migrations.session_url",
         ));
     }
+    let execution_timeout_ms = if driver == DatabaseDriver::Sqlite {
+        match raw
+            .as_object_mut()
+            .and_then(|object| object.remove("execution_timeout_ms"))
+        {
+            None => 30_000,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=3_600_000).contains(value))
+                .ok_or_else(|| {
+                    db_error(
+                        phase,
+                        "SQLite migration execution_timeout_ms must be 1..=3600000",
+                    )
+                })?,
+        }
+    } else {
+        30_000
+    };
     let settings: namigrate_core::MigrationSettings =
         serde_json::from_value(raw).map_err(|error| {
             db_error_src(
@@ -1503,7 +1907,15 @@ fn parse_migration_plan(
             error,
         )
     })?;
+    if driver == DatabaseDriver::Sqlite && !(1..=3_600_000).contains(&settings.lock_timeout_ms) {
+        return Err(db_error(
+            phase,
+            "SQLite migration lock_timeout_ms must be 1..=3600000",
+        ));
+    }
     Ok(Some(MigrationPlan {
+        explicit,
+        execution_timeout_ms,
         settings,
         schema,
         session_url,
@@ -1552,7 +1964,19 @@ pub(crate) fn validate_datasource_sections(
         ));
     }
     for (name, value) in values {
-        split_datasource(name, value, phase)?;
+        let source = split_datasource(name, value, phase)?;
+        // SQLite 必须在 Start 取得文件权威，不能绕过配置来源改由 UserHook 注入另一个文件。
+        if source.driver == DatabaseDriver::Sqlite
+            && tree
+                .pointer("/saga/database_bootstrap")
+                .and_then(serde_json::Value::as_str)
+                == Some("user_hook")
+        {
+            return Err(db_error(
+                phase,
+                "SQLite does not support saga.database_bootstrap=user_hook",
+            ));
+        }
     }
     Ok(())
 }
@@ -1581,6 +2005,7 @@ fn ensure_deferred_registry_empty() -> ApplicationResult<()> {
             error,
         )
     })?;
+    #[cfg(feature = "db-pgsql")]
     natx_pgsql::ensure_standalone_datasources_empty_for_managed_bootstrap().map_err(|error| {
         db_error_src(
             ApplicationPhase::Start,
@@ -1675,6 +2100,7 @@ impl nametrics_core::LegacyMetricsSource for DatasourceBackendMetricsSource {
                             match driver {
                                 DatabaseDriver::MySql => "mysql",
                                 DatabaseDriver::PostgreSql => "postgresql",
+                                DatabaseDriver::Sqlite => "sqlite",
                             }
                             .to_owned(),
                         ),
@@ -1687,7 +2113,8 @@ impl nametrics_core::LegacyMetricsSource for DatasourceBackendMetricsSource {
 
     /// 业务作用：保留旧文本渲染入口，实际文本由统一指标中心从结构化快照生成。
     ///
-    /// 参数说明：`_output` 是兼容接口缓冲区，本源不直接写入。
+    /// 参数说明：
+    /// - `_output`：`_output` 是兼容接口缓冲区。
     ///
     /// 返回：无。
     fn render_prometheus(&self, _output: &mut String) {}
@@ -1695,7 +2122,8 @@ impl nametrics_core::LegacyMetricsSource for DatasourceBackendMetricsSource {
 
 /// 业务作用：从当前 Application 的冻结 catalog 构造低基数 datasource 后端指标源。
 ///
-/// 参数说明：`catalog` 是已完成资源发布的同 owner catalog。
+/// 参数说明：
+/// - `catalog`：`catalog` 是已完成资源发布的同 owner catalog。
 ///
 /// 返回：指标源与最坏序列数；每个 datasource 精确对应一个 gauge 序列。
 pub(crate) fn backend_metrics_source(
@@ -1708,7 +2136,9 @@ pub(crate) fn backend_metrics_source(
         .collect::<Vec<_>>();
     let worst_case_series = entries.len();
     (
-        Arc::new(DatasourceBackendMetricsSource { entries }),
+        Arc::new(DatasourceBackendMetricsSource {
+            entries,
+        }),
         worst_case_series,
     )
 }
@@ -1720,6 +2150,7 @@ pub(crate) fn backend_metrics_source(
 /// - `name`：待解析的 datasource qualifier。
 ///
 /// 返回：名称确实绑定 PostgreSQL 时返回 pool；错配、缺失或封口后返回生命周期错误。
+#[cfg(feature = "db-pgsql")]
 pub(crate) async fn pg_datasource_handle(
     application: &Application,
     name: &str,
@@ -1751,7 +2182,9 @@ pub(crate) async fn pg_datasource_handle(
 
 /// 业务作用：为数据库生命周期边界构造不携带底层原因的稳定错误。
 ///
-/// 参数说明：`phase` 是失败阶段，`message` 是脱敏业务原因。
+/// 参数说明：
+/// - `phase`：`phase` 是失败阶段。
+/// - `message`：`message` 是脱敏业务原因。
 ///
 /// 返回：归属数据库组件的 Application 错误。
 fn db_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationError {
@@ -1760,7 +2193,10 @@ fn db_error(phase: ApplicationPhase, message: impl Into<String>) -> ApplicationE
 
 /// 业务作用：为数据库生命周期边界构造携带内部错误链、公开信息仍脱敏的错误。
 ///
-/// 参数说明：`phase` 是失败阶段，`message` 是稳定原因，`source` 是内部诊断链。
+/// 参数说明：
+/// - `phase`：`phase` 是失败阶段。
+/// - `message`：`message` 是稳定原因。
+/// - `source`：`source` 是内部诊断链。
 ///
 /// 返回：归属数据库组件的 Application 错误。
 fn db_error_src(
@@ -1769,4 +2205,39 @@ fn db_error_src(
     source: impl Into<anyhow::Error>,
 ) -> ApplicationError {
     ApplicationError::with_source(ComponentId::Db, phase, message, source)
+}
+
+/// 业务作用：在 Application 和进程目录同时确认身份后提供 SQLite 来源使用句柄。
+/// 参数说明：
+/// - `application`：当前宿主实例。
+/// - `name`：来源名称。
+/// 返回：属于该宿主的来源句柄，不授予关闭权。
+#[cfg(feature = "db-sqlite")]
+pub(crate) async fn sqlite_datasource_handle(
+    application: &Application,
+    name: &str,
+) -> ApplicationResult<natx_sqlite::SqliteDataSource> {
+    // staging 期间只允许模式机给出封闭的 RegistryUnavailable，避免资源表的建立顺序泄漏为另一类错误。
+    natx_core::resolve_datasource(name, DatabaseDriver::Sqlite).map_err(|error| {
+        db_error_src(
+            ApplicationPhase::Running,
+            "SQLite datasource lookup failed",
+            error,
+        )
+    })?;
+    let catalog = application.resource::<Arc<DataSourceCatalog>>().await?;
+    catalog
+        .resolve(name, DatabaseDriver::Sqlite)
+        .map_err(|error| {
+            db_error_src(
+                ApplicationPhase::Running,
+                "SQLite datasource lookup failed",
+                error,
+            )
+        })?;
+    drop(catalog);
+    Ok(application
+        .named_resource::<natx_sqlite::SqliteDataSource>(name)
+        .await?
+        .clone())
 }

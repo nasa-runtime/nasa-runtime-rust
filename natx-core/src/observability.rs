@@ -236,6 +236,7 @@ static SLOTS: [OnceLock<ConnectionSlot>; MAX_MANAGED_DATASOURCES * 2] =
 static REGISTRATION: Mutex<()> = Mutex::new(());
 static UNKNOWN_MYSQL: OnceLock<ConnectionSlot> = OnceLock::new();
 static UNKNOWN_PGSQL: OnceLock<ConnectionSlot> = OnceLock::new();
+static UNKNOWN_SQLITE: OnceLock<ConnectionSlot> = OnceLock::new();
 static CLOCK: OnceLock<Instant> = OnceLock::new();
 
 /// 业务作用：在启动期为已知 datasource 预分配槽，不允许运行时名称扩大指标基数。
@@ -326,6 +327,7 @@ fn fallback(driver: DatabaseDriver) -> &'static ConnectionSlot {
     match driver {
         DatabaseDriver::MySql => &UNKNOWN_MYSQL,
         DatabaseDriver::PostgreSql => &UNKNOWN_PGSQL,
+        DatabaseDriver::Sqlite => &UNKNOWN_SQLITE,
     }
     .get_or_init(|| ConnectionSlot::new(driver, "__unknown__"))
 }
@@ -531,6 +533,7 @@ fn driver_name(driver: DatabaseDriver) -> &'static str {
     match driver {
         DatabaseDriver::MySql => "mysql",
         DatabaseDriver::PostgreSql => "postgresql",
+        DatabaseDriver::Sqlite => "sqlite",
     }
 }
 

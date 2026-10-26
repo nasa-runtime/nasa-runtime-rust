@@ -10,6 +10,10 @@ features are empty. Application combines configuration, resource preparation, in
 traffic admission and shutdown, while transactions, Inbox/Outbox, Saga and ordered processing
 support recoverable workflows.
 
+With `application,mapper-sqlite`, the same Mapper and SQL attributes operate on SQLite files managed
+by napp's `"db"` component, including migrations, transactions, observability and shutdown. Each
+named datasource selects its own driver; see [SQLite and per-datasource drivers](#sqlite-and-per-datasource-drivers).
+
 The `kafka` feature exposes a multi-source event runtime with Java `nasa-kafka` wire and recovery
 contracts, isolated producer lanes, bounded ordered consumption, same-cluster transactions and durable
 tasks. See [Kafka facade](#kafka-facade).
@@ -115,7 +119,7 @@ series for stages with no observations.
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
 | Capability | Features | Public entry |
@@ -124,6 +128,7 @@ nasa = { version = "2.0.5", default-features = false, features = ["application",
 | HTTP routing | `web` | `nasa::web`; combine with `application` for managed listening |
 | MySQL mapping and transactions | `mapper,tx` | `nasa::mapper`, `nasa::tx` |
 | PostgreSQL mapping and transactions | `mapper-pgsql,tx-pgsql` | `nasa::mapper::pgsql`, `nasa::tx::pgsql` |
+| SQLite mapping, transactions and migration | `mapper-sqlite` (includes `tx-sqlite`) | `nasa::mapper::sqlite`, `nasa::tx::sqlite`, `nasa::migration::sqlite` |
 | Redis and ordered consumption | `redis` | `nasa::redis` |
 | Local partition execution | `partition` | `nasa::partition` |
 | Kafka | `kafka` | `nasa::kafka` |
@@ -137,6 +142,56 @@ and Outbox, while transport remains explicit. `mapper`, `hystrix` and `grafana` 
 The [complete feature matrix](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/nasa/README.md#feature-总表)
 is currently in Chinese.
 
+## SQLite and per-datasource drivers
+
+Cargo features select available typed backends. The `"db"` component owns their lifecycle; each
+`datasources.<name>.driver` selects one compiled backend. Macro imports determine SQLx types, so
+changing YAML does not translate SQL or switch an already compiled Mapper to another driver.
+
+```toml
+[dependencies]
+nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
+```
+
+```yaml
+datasources:
+  primary:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+  local:
+    driver: sqlite
+    sqlite:
+      path: ./data/local.db
+      create_if_missing: true
+      create_parent_directories: true
+    migrations:
+      mode: validate
+```
+
+Use `nasa::mapper::sqlite::Mapper` with `#[Mapper(datasource = "local")]` and the usual SQL method
+attributes. `app.sqlite_datasource("local").await` returns a usage handle; Application retains the
+close owner. The default getter only selects the exact `default` name. Unknown names, wrong drivers
+and missing features fail before SQL. `database` is the mutually exclusive single-source form.
+
+```text
+all-source validation → source owners and complete catalog → explicit migration gates
+  → application initialization → Mapper calls → stop admission → native draining and close
+```
+
+Service registers migrations in UserHook; Batch uses `MIGRATION_PLANS` before its workload runs.
+Configuration alone does not discover SQL files. SQLite requires explicit plans for configured,
+non-disabled migrations and does not support deferred `saga.database_bootstrap: user_hook`.
+
+`nasa::tx::sqlite::conn_for_budget` propagates the shorter request/configuration deadline before
+independent lease admission, including idle holding before the first SQL. Ambient transactions keep
+their original total deadline. `read_with_budget` bounds complete read cancellation; unfinished native
+work and close retain capacity and file ownership. SQL metrics and readiness share the named source.
+
+Only private local Linux/macOS files are supported. SQLite has no Saga/Inbox/Outbox persistence
+adapter, cross-datasource atomic commit or SQL dialect conversion. Backups produce validated
+standalone files; restore only writes a new destination. See the [complete runnable guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/sqlite.md)
+and the [SQLite runtime contract](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/natx-sqlite/README.md) (Chinese).
+
 ## External YAML documents
 
 Enable `yml` to use the bounded `naml` document API through `nasa::yml::yaml`. No separate YAML library
@@ -145,7 +200,7 @@ application configuration evaluation uses the loaders described in the next sect
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["yml"] }
+nasa = { version = "2.0.6", features = ["yml"] }
 ```
 
 ```rust
@@ -200,7 +255,7 @@ and [integration guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/m
 
 ## Resource and workflow contracts
 
-- Named MySQL/PostgreSQL, Redis and Kafka resources come from final YAML. Unknown names and driver
+- Named MySQL/PostgreSQL/SQLite, Redis and Kafka resources come from final YAML. Unknown names and driver
   mismatches fail instead of selecting a different source. A transaction stays within one datasource.
 - Kafka named sources isolate physical clients, delivery budgets and lifecycle; producer lanes reserve
   separate capacity within each source. Typed consumers provide partition ordering or per-key concurrency
@@ -226,7 +281,7 @@ and [integration guide](https://github.com/nasa-runtime/nasa-runtime-rust/blob/m
 - Redis ordered consumption separates durable takeover from local runners. Sources are independent;
   same-key order within a plan covers handler, ACK and retry. An uncertain ACK is reconciled without
   rerunning a successful handler. Delivery remains at least once.
-- Combining `application` with `mapper` or `mapper-pgsql` installs SQL metrics, controlled logging and
+- Combining `application` with `mapper`, `mapper-pgsql` or `mapper-sqlite` installs SQL metrics, controlled logging and
   bounded notifications. Applications install `Notify` through
   `nasa::application::notifications::init`; no implementation means no notification delivery.
   Notification failure does not change SQL or transaction outcomes.

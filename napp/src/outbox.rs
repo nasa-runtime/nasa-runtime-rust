@@ -115,7 +115,7 @@ async fn create_managed_outbox(
     application: &Application,
     datasource: &str,
 ) -> ApplicationResult<ManagedOutbox> {
-    #[cfg(all(feature = "outbox", feature = "outbox-pgsql"))]
+    #[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
     let driver = {
         let catalog = application
             .resource::<Arc<natx_core::DataSourceCatalog>>()
@@ -139,12 +139,14 @@ async fn create_managed_outbox(
             })?
     };
 
-    #[cfg(all(feature = "outbox", not(feature = "outbox-pgsql")))]
+    #[cfg(not(any(feature = "db-pgsql", feature = "db-sqlite")))]
     let driver = natx_core::DatabaseDriver::MySql;
-    #[cfg(all(not(feature = "outbox"), feature = "outbox-pgsql"))]
-    let driver = natx_core::DatabaseDriver::PostgreSql;
 
     match driver {
+        natx_core::DatabaseDriver::Sqlite => Err(outbox_error(
+            ApplicationPhase::Ready,
+            "SQLite outbox backend is unavailable",
+        )),
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "outbox")]
             {

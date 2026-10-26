@@ -2,7 +2,7 @@
 
 [中文](migration.md) | [English](migration.en.md)
 
-本文说明现有 Rust 应用如何采用当前 `nasa 2.0.5` 的依赖与运行合同。步骤取决于应用使用的能力，
+本文说明现有 Rust 应用如何采用当前 `nasa 2.0.6` 的依赖与运行合同。步骤取决于应用使用的能力，
 不能仅凭版本号推断 API、数据库结构、消息协议或配置兼容。最小新应用见 [快速开始](quickstart.md)。
 
 ## 固定依赖来源与能力
@@ -11,11 +11,10 @@
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
-`version = "2.0.5"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。采用线上组件时，
-移除指向本地 NASA 源码的 `path` 与 `[patch.crates-io]` 覆盖，保留原本需要的 feature。
+`version = "2.0.6"` 是 Cargo 的兼容范围约束，应用的 `Cargo.lock` 固定实际解析结果。
 直接使用 `sqlx::FromRow` 或 `sqlx::migrate!` 的业务仍需声明对应直接依赖；门面不替业务隐式提供外部 crate 名称。
 
 检查应用依赖图，确认同一组件没有 registry、Git 和本地路径混合身份：
@@ -46,13 +45,21 @@ owner，再调整业务接线。直接复制外部客户端句柄不能获得与
 
 - `zcf/application.yml` 必须存在，按进程工作目录解析。
 - `application.mode` 决定 Service 或 Batch；无入站的常驻后台服务应显式使用 `service`。
-- 单源数据库使用 `database`，多源使用 `datasources`，两种根互斥；PostgreSQL 显式声明 `driver: postgresql`。
+- 单源数据库使用 `database`，多源使用 `datasources`，两种根互斥；PostgreSQL 显式声明 `driver: postgresql`，SQLite 显式声明 `driver: sqlite` 并使用 `sqlite.path`。
 - datasource、Redis qualifier 和 Kafka client name 都是资源身份；显式引用不存在时拒绝启动。
 - 单源 Redis 的持久身份为 `primary`，`default` 是查询别名，不用于更改持久 key 空间。
 - 使用 `/readyz` 判断接流，不能只判断端口或某个组件启动成功。
 - 连接来源与其它冻结字段变化需要重启；读取新配置不证明热应用完成。
 
 字段、默认值和准入条件以 [Application 合同](../napp/README.md) 为准。
+
+## 接入 SQLite 与共享分页合同
+
+SQLite 业务选择 `application,mapper-sqlite`，从 `nasa::mapper::sqlite` 导入宏；事务入口为 `nasa::tx::sqlite`。不同 datasource 可以使用不同 driver，但不能只修改 YAML 就复用其它方言或类型的 Mapper。将现有 SQLite 文件交给 `open_owned` 或 Application 前，应核对文件身份、私有权限、journal_mode、迁移历史与唯一 owner；普通启动不转换文件模式，也不自动搬迁数据。
+
+`DatabaseDriver` 包含 `MySql`、`PostgreSql`、`Sqlite`，下游穷尽匹配需覆盖全部变体。`PageRequest` 保持 JSON 与字段读取格式，但构造、反序列化和更新都校验非负 offset 与正 limit；结构体字面量和字段赋值不可用，改用构造器或 `set_offset_limit`。更新失败保留原值，外部请求需显式 `validate_with_max_page_size` 落实业务上限。
+
+SQLite-only 依赖组合不引入 MySQL/PostgreSQL runtime，但仍必须与程序内其它 SQLite 驱动使用兼容的唯一 native 库。SQL 迁移采用语义文件名与显式正整数 ID，不能通过改写已应用 SQL 消除 checksum 不一致。接入步骤见 [SQLite 指南](sqlite.md)，分页约束见 [共享 Mapper 合同](../namapper-core/README.md#分页输入与更新)。
 
 ## Kafka 源码与配置迁移
 

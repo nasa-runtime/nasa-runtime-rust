@@ -138,6 +138,20 @@ remote write 失败、无调用和无数据需要区分。remote write 失联信
 详细默认值见 [SQL 观测](../namapper-core/README.md#sql-观测与配置)，出口与平台含义见
 [统一观测说明](../nafana/OBSERVABILITY.md)。
 
+## SQLite 观测与收口
+
+SQLite 使用固定 `driver=sqlite` 与 datasource 身份，统一采集 Mapper 方法、真实 SQL 执行、连接等待和物理连接责任；默认不输出参数。`natx_sqlite_errors_total`、`natx_sqlite_maintenance_state`、`natx_sqlite_backups_total` 补充错误、维护、备份、隔离、WAL 和空间压力。指标抓取读取内存状态，不执行文件 I/O 或 checkpoint。
+
+| 状态 | 业务含义与处置 |
+| --- | --- |
+| 新请求取连接超时 | 结合真实物理连接数、长读句柄与关闭状态判断；不能只按 Rust 句柄数推断容量 |
+| 请求到期后旧句柄仍存在 | 原生监督已失效该借用，真实关闭完成才回收容量；不能复活旧句柄或提前解除 owner 锁 |
+| WAL/空间压力 | 新写入受门禁限制，读取与维护保留；检查长读、空间和 checkpoint，不删除活动 WAL |
+| 来源持续隔离 | readiness 不可用，普通探针成功不解除；查明身份、损坏或 I/O 原因后停止并重新创建来源 |
+| COMMIT 或备份发布未确认 | 先核对持久业务事实或实际目标，保留原始错误，禁止自动覆盖或重放 |
+
+`source.maintenance()` 提供有界 checkpoint 和一致备份，恢复使用 `restore_to_new` 写新路径。SQLite-only 服务不使用 Saga/Inbox/Outbox 的持久恢复流程。停机先封新根调用，既有事务按自身与宿主期限收口，回滚与真实关闭继续承担清理责任。完整限制见 [文件与事务合同](../natx-sqlite/README.md)。
+
 ## 授权与链路观测
 
 - `napp_authz_routes_uncovered` 必须与发布时批准的公开 route 覆盖一致；deny 模式下未覆盖鉴权 route

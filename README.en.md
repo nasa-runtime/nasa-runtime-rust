@@ -10,6 +10,10 @@ Saga and ordered message processing support recoverable business workflows. Appl
 capabilities through Cargo features and use their databases and message systems to hold durable facts.
 Each component keeps explicit resource, transaction and failure boundaries.
 
+SQLite applications use the same `#[Mapper]` and SQL attributes under napp's managed `"db"`
+component. Each named datasource selects its own MySQL, PostgreSQL or SQLite driver; see
+[SQLite and per-datasource drivers](#sqlite-and-per-datasource-drivers).
+
 Kafka provides a multi-source event runtime with shared Java `nasa-kafka` wire and recovery contracts:
 isolated sources and producer lanes, bounded ordered consumption, same-cluster transactions, and durable
 replay, transfer and DLT replay. See [Kafka event runtime](#kafka-event-runtime).
@@ -129,6 +133,36 @@ Ready; application-owned listeners should use `serve_when_ready`.
 
 See [Architecture](docs/architecture.en.md) for the ordering and failure contracts.
 
+## SQLite and per-datasource drivers
+
+The same `#[nasa::application("db")]` component manages MySQL, PostgreSQL and SQLite. Each
+`datasources.<name>.driver` selects its own backend; compile the matching Cargo features.
+`application,mapper-sqlite` works without MySQL or PostgreSQL runtimes. Import `Mapper` from
+`nasa::mapper::sqlite` and keep using `#[Query]`, `#[Insert]` and the other SQL method attributes.
+
+```text
+backend features + named driver configuration
+  → napp validates all sources → file owners, typed registries and one catalog
+  → explicit migration plans → initialization → application admission
+  → generated Mapper client → controlled executor → source-bound native transaction
+  → stop admission → bounded draining → actual native close → release ownership
+```
+
+SQLite uses `sqlite.path` on a private local Linux/macOS filesystem. Application owns migration,
+readiness, SQL observability and shutdown. A standalone caller retains its explicit owner instead.
+Request deadlines reach the native lease before independent connection admission; waiting and idle
+holding consume the same budget. Cancellation does not release capacity or the file owner before
+native work actually exits. Ambient transactions retain their own total deadline.
+
+WAL defaults to FULL synchronization; DELETE defaults to EXTRA. Existing files must match the
+configured journal mode. Native backup creates a standalone validated database; restore only writes
+a new path. A local transaction stays within one driver and datasource. SQLite has no Saga, Inbox
+or Outbox persistence adapter and does not translate SQL dialects.
+
+See the [runnable SQLite guide](docs/sqlite.md) (Chinese), [facade configuration](nasa/README.en.md#sqlite-and-per-datasource-drivers),
+[file ownership and transactions](natx-sqlite/README.md), [Mapper](namapper-sqlite/README.md), and
+[migration](namigrate-sqlite/README.md).
+
 ## Choose capabilities
 
 The default feature set is empty. Compile the capabilities you need, declare the managed lifecycle
@@ -141,12 +175,13 @@ different purposes; for example, `mapper` is a feature, while `"db"` selects dat
 | gRPC service and discovery | `application,grpc`; add `grpc-discovery` for dynamic clients | Generated services and clients, TLS/mTLS, submission gates, resource limits and draining |
 | MySQL transactions and mapping | `application,tx,mapper` | One driver and one datasource per local transaction |
 | PostgreSQL transactions and mapping | `application,tx-pgsql,mapper-pgsql` | Explicit PostgreSQL driver and typed APIs |
+| SQLite files and mapping | `application,mapper-sqlite` | Owned local file, same Mapper macros, managed migration and shutdown |
 | Durable Saga | `application,saga-runtime` or `application,saga-runtime-pgsql` | Durable state, Inbox/Outbox, compensation and explicit handling of unknown outcomes |
 | Redis and ordered consumption | `application,redis` | Redis ownership and pending entries remain separate from local execution |
 | Named local partition runners | `application,partition` | In-process ordering and bounded execution; no durable queue |
 | Kafka | `application,kafka` | Named sources and lanes, bounded ordered consumption, same-cluster atomic processing, durable replay, recoverable transfer, DLT replay and actual resource drain |
 | Transactional messaging | `inbox,outbox` or `inbox-pgsql,outbox-pgsql` | Business facts and delivery intent must share the same datasource |
-| SQL observability | `application,mapper` or `application,mapper-pgsql` | Automatic metrics; bounded notifications cannot change transaction results |
+| SQL observability | `application` with `mapper`, `mapper-pgsql` or `mapper-sqlite` | Automatic metrics; bounded notifications cannot change transaction results |
 | Secrets and outbound TLS | `secret,secret-http` | Explicit credential references and configuration application state |
 | Object storage | `object-store` | Bounded single-object operations and integrity checks |
 
@@ -162,7 +197,7 @@ Rust 1.94 or newer is required. A basic HTTP service needs:
 ```toml
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
 The [quickstart](docs/quickstart.en.md) supplies the complete manifest, application source, YAML,

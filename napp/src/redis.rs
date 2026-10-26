@@ -258,7 +258,11 @@ impl ApplicationComponent for RedisComponent {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = metric_clients;
             self.critical_task = Some(Box::pin(run_redis_monitor(application, monitored)));
             install_snowflakes(context).await?;
-            #[cfg(any(feature = "mapper-cache", feature = "mapper-cache-pgsql"))]
+            #[cfg(any(
+                feature = "mapper-cache",
+                feature = "mapper-cache-pgsql",
+                feature = "mapper-cache-sqlite"
+            ))]
             crate::mapper_cache::install_managed(context).await?;
             Ok(())
         })

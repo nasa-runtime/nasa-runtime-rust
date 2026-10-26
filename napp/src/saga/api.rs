@@ -581,6 +581,9 @@ impl SagaOrchestratorApi {
             return Err(Error::PermissionDenied.into());
         }
         match self.driver() {
+            natx_core::DatabaseDriver::Sqlite => {
+                anyhow::bail!("SQLite Saga runtime is unavailable")
+            }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
                 return nasaga_runtime::register_capability_for(
@@ -620,6 +623,9 @@ impl SagaOrchestratorApi {
         Self::authorize_registry(actor, &artifact.tenant, &artifact.workflow)
             .map_err(|_| nasaga_runtime::DefinitionCatalogError::PermissionDenied)?;
         match self.driver() {
+            natx_core::DatabaseDriver::Sqlite => {
+                anyhow::bail!("SQLite Saga runtime is unavailable")
+            }
             natx_core::DatabaseDriver::MySql => {
                 #[cfg(feature = "saga")]
                 return nasaga_runtime::publish_definition_for(

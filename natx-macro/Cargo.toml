@@ -1,18 +1,15 @@
-# ============================================================================
-# tx-macro —— 自定义属性宏 #[transactional](ambient 事务编排)
-#   把被注解的 async fn 包进 crate::tx::run(...):进方法 begin、正常 commit、出错 rollback。
-#   配合 src/tx.rs 的 task_local ambient 事务:方法体里嵌套调用的 repo 自动加入同一事务,无需手传连接。
-# ============================================================================
+# 事务属性宏在编译期选择 typed runtime，嵌套调用仍受同源事务与模式约束。
 [package]
 name = "natx-macro"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
-description = "Compile-time MySQL and PostgreSQL ambient transaction attribute macros"
+description = "Compile-time MySQL, PostgreSQL and SQLite ambient transaction attribute macros"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["macro", "transaction", "mysql", "postgresql", "async"]
+keywords = ["macro", "transaction", "mysql", "postgresql", "sqlite"]
 categories = ["asynchronous", "database"]
 
 [lib]

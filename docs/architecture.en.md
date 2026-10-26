@@ -88,6 +88,23 @@ business readiness is closed. Authentication, catalog trust and transaction gate
 Shutdown withdraws registrations before application draining and closes outbound observation and
 transport resources afterwards, under a shared deadline.
 
+## SQLite and the shared SQL entry
+
+MySQL, PostgreSQL and SQLite share napp's `"db"` component and datasource catalog. Each named source
+selects its driver, while imports from the matching `nasa::mapper` module select the typed Mapper
+implementation. SQL method attributes remain the same; YAML does not translate SQL dialects.
+
+SQLite combines an explicit file owner, bounded leases, native permission checks, source-bound
+transactions and controlled result delivery. Application validates the complete source table,
+creates resources and executes explicit migration plans before initialization and business admission.
+A usage handle does not own shutdown authority; an old client cannot adopt a replacement source.
+
+Independent leases receive the shorter request/configuration deadline before admission. Waiting and
+subsequent SQL consume that deadline; ambient transactions retain their own total deadline. Native
+work and close keep capacity and file ownership until actual exit, even after cancellation. SQLite
+supports local transactions, consistent backup and restore to a new destination, without Saga,
+Inbox/Outbox adapters or cross-source atomic commit. See the [SQLite guide](sqlite.md) (Chinese).
+
 ## Transactions, messages and Saga
 
 ```text

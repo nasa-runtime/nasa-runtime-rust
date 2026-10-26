@@ -73,6 +73,14 @@ REST 与 gRPC 在实际提交点复验当前实例、完整快照、权限和证
 过期时仍接受续租和已提交结果；认证、目录信任和事务门禁继续生效，不扩大新业务执行权。
 停机先撤销注册资格并摘流，允许业务排空使用出站依赖，再关闭观察与传输；所有步骤受共同期限约束。
 
+## SQLite 与统一 SQL 入口
+
+MySQL、PostgreSQL、SQLite 共用 napp 的 `"db"` 组件和 datasource catalog，每个名称独立指定 driver；业务通过对应的 `nasa::mapper` 模块使用同名 Mapper/Query/Insert 等宏。宏固定编译类型，配置不能转换 SQL 方言。
+
+SQLite 的执行路径为：文件 owner 与真实身份 → 有界 lease → 原生权限检查和同源事务 → 受控结果交付。Application 先校验整张来源表，再创建来源并在 Prepare 执行显式迁移计划；Service 之后进入初始化和 Ready，Batch 之后执行工作负载。业务句柄不拥有关闭权，旧 client 不能借同名新 source 恢复执行。
+
+独立请求在 lease 接纳前固定请求与配置的较短绝对期限，等待和后续 SQL 不续期；环境事务保留自己的总期限。取消或停机超时不代表原生关闭完成，真实连接继续占用容量并保活文件 owner。SQLite 提供本地事务、一致备份与新目标恢复，不提供 Saga/Inbox/Outbox 持久 adapter 或跨库原子提交。详见 [完整接入与边界](sqlite.md)。
+
 ## 事务、消息与 Saga
 
 ```text

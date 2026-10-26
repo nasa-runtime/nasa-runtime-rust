@@ -303,11 +303,11 @@ fn build_nacos_config_component(
 ///
 /// 本函数无参数；是否编入数据源组件由编译期 feature 决定。
 fn build_db_component() -> Result<Box<dyn ApplicationComponent>, ApplicationError> {
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     {
         Ok(Box::new(crate::db::DbComponent::new()))
     }
-    #[cfg(not(any(feature = "db", feature = "db-pgsql")))]
+    #[cfg(not(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite")))]
     {
         Err(feature_missing_error(ComponentId::Db, "tx"))
     }

@@ -58,8 +58,12 @@
 - [ ] 配置未知字段、非法零值、冲突配置和缺少凭据均在开放流量前失败。
 - [ ] MySQL 与 PostgreSQL 写路径各自的事务归属、提交结果不确定处理和回滚语义明确；两种 ambient
       transaction 不嵌套，也不宣称跨 driver 原子提交。
-- [ ] 同一 Application 可同时配置两种 driver，datasource 名称全局唯一，typed pool 查询拒绝 driver
-      mismatch，启动失败与停机均覆盖全部已受管 pool。
+- [ ] 同一 Application 可同时配置 MySQL、PostgreSQL 与 SQLite，datasource 名称全局唯一，typed getter 拒绝 driver
+      mismatch，启动失败与停机覆盖全部受管来源；SQLite-only 组合不引入其它数据库 runtime。
+- [ ] SQLite 业务沿用 Mapper/Query 等宏，文件 owner、显式迁移、观测与停机由同一 db 组件管理；
+      本地私有目录、语义迁移文件名、同源事务和新目标恢复的限制在全部入口一致。
+- [ ] SQLite 请求期限在独立 lease 接纳前传播，环境事务期限不被局部句柄改写；真实原生关闭前
+      保留容量和文件权威，不把预算结束或 Rust 句柄丢弃等同于文件已可接管。
 - [ ] Service 为每个业务 schema 显式登记构建期嵌入的 migrator；`disabled`、`validate` 与 `apply` 符合
       部署策略。PostgreSQL schema 和 connection topology 即使省略 `migrations` 段也不会丢失；事务级代理
       使用独立 session endpoint，并在 advisory lock 前与业务 pool 复验 database/schema 身份。

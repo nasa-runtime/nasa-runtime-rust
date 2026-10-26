@@ -70,7 +70,7 @@ pub(crate) type KafkaCustomization = Box<
 /// migrator 由业务 `sqlx::migrate!("./migrations")` 在 UserHook 构造并登记;DB 组件在 Prepare
 /// 阶段(监听器就绪、Web/Kafka consumer 接流之前)按数据源逐项取出,依 `database.migrations.mode`
 /// 运行 [`namigrate::run_gate`]。migrator 是嵌入式常量数据,`Send + 'static`,可跨阶段存放。
-#[cfg(any(feature = "db", feature = "db-pgsql"))]
+#[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
 pub(crate) type MigrationRegistration = (String, crate::Migrator);
 
 #[derive(Debug, Clone)]
@@ -216,7 +216,7 @@ pub(crate) struct ApplicationInner {
     /// 语义与 `ws_customizations`/`router_transforms` 一致:`None` 表示队列已被 DB 组件在 Prepare
     /// 阶段一次性取走,此后再登记不可能生效,必须报阶段错误而非静默丢弃。同步互斥锁只保护一次
     /// push/take,不跨 await 持有。
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     migrations: StdMutex<Option<Vec<MigrationRegistration>>>,
     /// UserHook 移交、Prepare 消费的唯一 RedisJob 核心计划。
     #[cfg(feature = "redis-job")]
@@ -407,7 +407,7 @@ impl Application {
                 #[cfg(feature = "hystrix")]
                 hystrix_owner: OnceLock::new(),
                 readiness: Arc::new(crate::readiness::ReadinessRegistry::new()),
-                #[cfg(any(feature = "db", feature = "db-pgsql"))]
+                #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
                 migrations: StdMutex::new(Some(Vec::new())),
                 #[cfg(feature = "redis-job")]
                 redis_job_runtime: crate::redis_job::RedisJobRuntimeState::new(),
@@ -966,6 +966,38 @@ impl Application {
         self.pg_datasource(crate::db::DEFAULT_DATASOURCE).await
     }
 
+    /// 业务作用：按名称获取受 Application catalog 保护的 SQLite datasource。
+    ///
+    /// 参数说明：
+    /// - `name` 是跨 driver 唯一的 datasource qualifier。
+    ///
+    /// 返回：名称存在且 driver 为 SQLite 时返回共享来源使用句柄；错配、缺失或停机时返回类型化错误。
+    #[cfg(feature = "db-sqlite")]
+    pub async fn sqlite_datasource(
+        &self,
+        name: &str,
+    ) -> ApplicationResult<natx_sqlite::SqliteDataSource> {
+        self.ensure_component_declared(
+            ComponentId::Db,
+            ApplicationPhase::Running,
+            "SQLite datasource access",
+        )?;
+        self.ensure_infrastructure_lookup_open(ComponentId::Db, "SQLite datasource access")?;
+        crate::db::sqlite_datasource_handle(self, name).await
+    }
+
+    /// 业务作用：获取 `default` 名下的 SQLite datasource，不猜测其它唯一实例。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：`default` 实际绑定 SQLite 时返回来源使用句柄；绑定其它 driver 或缺失时返回明确错误。
+    #[cfg(feature = "db-sqlite")]
+    pub async fn default_sqlite_datasource(
+        &self,
+    ) -> ApplicationResult<natx_sqlite::SqliteDataSource> {
+        self.sqlite_datasource(crate::db::DEFAULT_DATASOURCE).await
+    }
+
     /// 业务作用：为某数据源登记一组业务嵌入 migration,交由 DB 组件在监听器 Ready 前运行门禁。
     ///
     /// migration 属**业务 schema**,不进共享 runtime;业务在 UserHook 用
@@ -993,7 +1025,7 @@ impl Application {
     /// ```ignore
     /// app.configure_migrations("default", sqlx::migrate!("./migrations"))?;
     /// ```
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     pub fn configure_migrations(
         &self,
         datasource: &str,
@@ -1194,7 +1226,7 @@ impl Application {
     /// # 参数
     ///
     /// 本方法无参数;取走后队列置 `None`,此后 `configure_migrations` 一律返回封口错误。
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     pub(crate) fn take_migrations(&self) -> ApplicationResult<Vec<MigrationRegistration>> {
         let runtime = self
             .inner
@@ -2952,6 +2984,7 @@ impl Application {
         feature = "nacos-config",
         feature = "db",
         feature = "db-pgsql",
+        feature = "db-sqlite",
         feature = "redis",
         feature = "redis-job",
         feature = "cache",
@@ -2997,6 +3030,7 @@ impl Application {
     #[cfg(any(
         feature = "db",
         feature = "db-pgsql",
+        feature = "db-sqlite",
         feature = "redis",
         feature = "kafka"
     ))]
@@ -3288,7 +3322,7 @@ impl Application {
     /// 参数说明：`catalog` 是当前 Application 已发布且仍受 owner 保护的 catalog。
     ///
     /// 返回：descriptor 和最坏序列预算同时登记成功时完成；冲突或预算不足会阻止 Ready。
-    #[cfg(feature = "db-pgsql")]
+    #[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
     pub(crate) fn register_database_backend_metrics(
         &self,
         catalog: Arc<natx_core::DataSourceCatalog>,
@@ -3302,6 +3336,38 @@ impl Application {
                     ComponentId::Db,
                     ApplicationPhase::Prepare,
                     format!("datasource backend metrics registration failed: {error}"),
+                )
+            })
+    }
+
+    /// 业务作用：在 DB Prepare 内登记固定来源的 SQLite 维护诊断，不使用 UserHook 业务注册入口。
+    /// 参数说明：
+    /// - `sources`：已经创建并由 DB 组件拥有的来源句柄。
+    /// 返回：descriptor 与序列容量原子预留成功后允许继续 Ready。
+    #[cfg(feature = "db-sqlite")]
+    pub(crate) fn register_sqlite_metrics(
+        &self,
+        sources: Vec<natx_sqlite::SqliteDataSource>,
+    ) -> ApplicationResult<()> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let source = natx_sqlite::SqliteMetricsSource::new(sources).map_err(|_| {
+            ApplicationError::new(
+                ComponentId::Db,
+                ApplicationPhase::Prepare,
+                "invalid SQLite metrics sources",
+            )
+        })?;
+        let budget = source.series_budget();
+        self.inner
+            .metrics_hub
+            .register_legacy_source_reserved(Arc::new(source), budget)
+            .map_err(|error| {
+                ApplicationError::new(
+                    ComponentId::Db,
+                    ApplicationPhase::Prepare,
+                    format!("SQLite metrics registration failed: {error}"),
                 )
             })
     }

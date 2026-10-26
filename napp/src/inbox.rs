@@ -463,7 +463,7 @@ async fn create_managed_inbox(
     application: &Application,
     datasource_ref: &str,
 ) -> ApplicationResult<Arc<dyn DurableInboxRetention>> {
-    #[cfg(all(feature = "inbox", feature = "inbox-pgsql"))]
+    #[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
     let driver = {
         let catalog = application
             .resource::<Arc<natx_core::DataSourceCatalog>>()
@@ -487,12 +487,14 @@ async fn create_managed_inbox(
             })?
     };
 
-    #[cfg(all(feature = "inbox", not(feature = "inbox-pgsql")))]
+    #[cfg(not(any(feature = "db-pgsql", feature = "db-sqlite")))]
     let driver = natx_core::DatabaseDriver::MySql;
-    #[cfg(all(not(feature = "inbox"), feature = "inbox-pgsql"))]
-    let driver = natx_core::DatabaseDriver::PostgreSql;
 
     match driver {
+        natx_core::DatabaseDriver::Sqlite => Err(inbox_error(
+            ApplicationPhase::UserHook,
+            "SQLite inbox backend is unavailable",
+        )),
         natx_core::DatabaseDriver::MySql => {
             #[cfg(feature = "inbox")]
             {

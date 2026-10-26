@@ -4,6 +4,7 @@
 按优先级执行业务停机任务、组件启停、任务监督、信号处理与退出码。声明 `"web"` 时还独占具备确定
 HTTP/1/h2c 选择、容量门禁和有预算排空的 listener。业务项目经 `nasa` 门面开启 `application` feature
 使用，不需要为异步业务收尾另建信号监听或 callback 集合。
+同一个 `"db"` 组件管理 MySQL、PostgreSQL 与 SQLite；每个 datasource 独立指定 driver。SQLite 业务继续通过 Mapper 宏执行 SQL，文件 owner、迁移门禁、健康与关闭责任统一纳管，见 [SQLite 与逐数据源 driver](#sqlite-与逐数据源-driver)。
 Kafka 命名来源把独立发布通道、有界有序消费、同集群事务和持久回放任务接入同一宿主，业务句柄固定源与权限，关闭保留真实在途责任；见 [Kafka 受管模式](#kafka-受管模式)。
 `discovery` 组件还统一托管多注册中心与 qualifier 选址，保持连接证据隔离及停机顺序。
 启动前可显式选择严格配置工厂：嵌套默认值、自然排序的文件导入、来源解释与目录观察共同进入
@@ -94,7 +95,7 @@ Registry 的 `tls.ca` 与 `tls.identity` 是可选 `secret://` PEM 引用，分�
 
 ## SQL 观测与通知
 
-门面同时启用 `application` 与 `mapper`/`mapper-pgsql` 后，在 DB 建连前冻结方法目录与观测策略，
+门面同时启用 `application` 与 `mapper`/`mapper-pgsql`/`mapper-sqlite` 后，在 DB 建连前冻结方法目录与观测策略，
 预留所有低基数指标系列；UserHook 已能查询本地指标和有效配置。无需添加新的组件字符串。
 直接依赖本 crate 时使用 `mapper-observability`，统一出口使用 `observability`。关闭通知不创建队列；
 渠道客户端由业务提供，框架不包含具体消息渠道实现。关闭外送不停止基础计量。
@@ -174,7 +175,7 @@ generation，显式策略不会被公开路由豁免绕过；合法上游 trace 
 ## 最小入口
 
 ```toml
-nasa = { version = "2.0.5", features = [
+nasa = { version = "2.0.6", features = [
     "application", "log", "nacos-config", "telemetry", "tx", "redis", "cache",
     "partition", "kafka", "oauth", "web",
     "nacos-discovery", "scheduling",
@@ -207,7 +208,7 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 | `"log"` | `log` | `log` | 两阶段日志：早期控制台 → 最终文件日志；运行期 `log` 段可热重应用 | `app.log()` |
 | `"nacos-config"` | `nacos-config`；真实远端连接再加 `nacos-sdk` | `nacos` | 远端 overlay 首拉与 watch 热刷新；`enabled=false` 走纯本地 | `app.nacos_config()` |
 | `"telemetry"` | `telemetry` | `telemetry` | 有界 span 管道、可选 OTLP trace/metrics、受管停机 flush | `app.telemetry_snapshot()` / `app.otlp_metrics_snapshot()` |
-| `"db"` | MySQL 用 `tx`，PostgreSQL 用 `tx-pgsql`，混配同时开启 | `database` 或 `datasources.<name>` | 跨 driver 全表校验、逐源探测、冻结 catalog/registry 与显式停机 | MySQL 用 `app.datasource(name).await`；PostgreSQL 用 `app.pg_datasource(name).await` |
+| `"db"` | MySQL 用 `tx`，PostgreSQL 用 `tx-pgsql`，SQLite 用 `tx-sqlite`，混配同时开启 | `database` 或 `datasources.<name>` | 跨 driver 全表校验、逐源探测、冻结 catalog/registry 与显式停机 | MySQL 用 `app.datasource(name).await`；PostgreSQL 用 `app.pg_datasource(name).await`；SQLite 用 `app.sqlite_datasource(name).await` |
 | `"redis"` | `redis` | `redis` 或 `redis.properties.<qualifier>` | 多实例统一建连、逐源健康与显式停机 | `app.redis(name).await`、`app.default_redis().await` |
 | `"cache"` | `cache`；使用 `redis_ref` 时还需 `redis` | `cache` | scene 审计、L2 安装、失效广播与代际 owner | 宏经进程级 cache runtime 使用 |
 | `"partition"` | `partition` | `partition`，或 UserHook 提交 `PartitionApplicationPlan` | Prepare 启动命名 Runner、逐域健康与反序有界停机 | `app.partition()`、`app.partition_runner(name)` |
@@ -227,9 +228,9 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> {
 数据库 Web 应用可写 `#[nasa::application("db", "web")]`。独立批处理仍可只开启 `kafka` feature 并显式
 管理 `KafkaProxy`；Service 一旦把 `"kafka"` 写入属性，连接、消费、Ready、监控和停机就全部归容器所有。
 `hystrix`、`grafana`、`mapper` 不是属性组件字符串，仍通过各自 feature 使用。
-MySQL 或 PostgreSQL Mapper 缓存不新增组件字符串。配置 `mapper_cache.enabled: true` 与 `redis_ref` 后，
+MySQL、PostgreSQL 或 SQLite Mapper 缓存不新增组件字符串。配置 `mapper_cache.enabled: true` 与 `redis_ref` 后，
 框架复用受管 Redis 安装 L2 并验证字段过期能力；Service 在 Ready 前、Batch 在工作负载前完成门禁。
-通过 `nasa` 门面时，MySQL 使用 `mapper-redis-cache`，PostgreSQL 使用 `mapper-redis-cache-pgsql`。
+通过 `nasa` 门面时，MySQL 使用 `mapper-redis-cache`，PostgreSQL 使用 `mapper-redis-cache-pgsql`，SQLite 使用 `mapper-redis-cache-sqlite`。
 
 直接依赖 `napp` 时，`mapper-cache` 是 MySQL Mapper 的 Ready 门禁，并同步启用
 `namapper/redis-cache`；`mapper-cache-pgsql` 是 PostgreSQL Mapper 的 Ready 门禁，只依赖
@@ -247,7 +248,7 @@ grpc -> auth -> web -> ws -> nacos-discovery/discovery -> scheduling`。业务�
 
 ## YAML 创建单源与多源
 
-MySQL、PostgreSQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数都属于 YAML。Application 在启动期读取最终
+MySQL、PostgreSQL、SQLite、Redis 与 Kafka 的 endpoint、凭据、池和客户端参数都属于 YAML。Application 在启动期读取最终
 配置并创建全部实例；业务 `main` 只提交 publisher、consumer、handler、Saga 定义等业务计划，再通过
 `app.datasource(...)`、`app.redis(...)` 或 `app.kafka(...)` 取得已经受管的句柄，不自行建池、建连或
 维护第二张 source 表。所有 source 先完成全表校验，再按名称稳定排序创建；任一项失败都会阻止 Ready。
@@ -255,6 +256,7 @@ MySQL、PostgreSQL、Redis 与 Kafka 的 endpoint、凭据、池和客户端参�
 | 资源 | 单源 YAML | 多源 YAML | 默认身份 | 被其它组件引用的字段 |
 | --- | --- | --- | --- | --- |
 | MySQL / PostgreSQL | `database` | `datasources.<name>` | `default` | `outbox.datasource_ref`、`saga.orchestrator/participant/client.datasource_ref` |
+| SQLite | `database` | `datasources.<name>` | `default` | Mapper 的 `datasource`、迁移计划的来源名；不提供 Saga/Inbox/Outbox 持久适配器 |
 | Redis | 扁平 `redis` | `redis.properties.<qualifier>` | 持久身份 `primary`，查询兼容名 `default` | `cache.redis_ref`、`cache.invalidation.redis_ref`、`scheduling.redis_ref`、`redis.job.sources.<qualifier>` |
 | Kafka | `kafka` | `kafkas.<client>` | `client_name: default` | `configure_kafka(client, ...)`、`app.kafka(client)` 与 consumer 的 `client` |
 
@@ -320,6 +322,56 @@ outbox:
 `datasources`，两者共同形成原子事件链时必须使用相同的 `datasource_ref`；不存在的引用会在首次数据库
 握手前被拒绝。`database_bootstrap: user_hook` 只允许单个 `default`，命名库必须使用
 `database_bootstrap: application` 让容器从 YAML 创建。
+
+### SQLite 与逐数据源 driver
+
+`#[nasa::application("db")]` 声明使用数据库组件，具体后端由每个 `datasources.<name>.driver` 独立选择。编译时开启对应能力：MySQL 用 `mapper` / `tx`，PostgreSQL 用 `mapper-pgsql` / `tx-pgsql`，SQLite 用 `mapper-sqlite` / `tx-sqlite`。只启用 `application + mapper-sqlite` 不引入 MySQL/PostgreSQL runtime。
+
+```text
+最终 YAML → 全表 driver、feature、字段与引用校验 → 按名称取得每源 owner
+         → 关闭态 catalog 与 typed registry → 完整资源表发布
+         → Prepare 执行显式迁移计划 → 初始化 → 开放业务
+停机 → 拒绝新根调用 → 已接纳事务按剩余期限排空 → 原生关闭 → 释放文件权威
+```
+
+语义配置错误在创建目录、打开数据库或连接其它来源前拒绝；真实文件身份和权限在取得文件权威后核验。启动失败按已取得资源逆序清理。`database` 与 `datasources` 互斥，SQLite 必须显式声明 driver，不接受网络 URL 配置。
+
+```toml
+[dependencies]
+nasa = { version = "2.0.6", default-features = false, features = ["application", "mapper", "mapper-sqlite"] }
+```
+
+```yaml
+datasources:
+  primary:
+    driver: mysql
+    url: ${APP_MYSQL_URL}
+  local:
+    driver: sqlite
+    sqlite:
+      path: ./data/local.db
+      create_if_missing: true
+      create_parent_directories: true
+      journal_mode: wal
+      synchronous: full
+    max_connections: 4
+    operation_timeout_ms: 30000
+    transaction_timeout_ms: 30000
+    migrations:
+      mode: validate
+      lock_timeout_ms: 5000
+      execution_timeout_ms: 30000
+```
+
+SQLite 业务导入 `nasa::mapper::sqlite::Mapper`，继续使用 `#[Mapper(datasource = "local")]` 与 `#[Query]` 等方法宏。MySQL 导入 `nasa::mapper::Mapper`，PostgreSQL 导入 `nasa::mapper::pgsql::Mapper`；SQL 方言不自动翻译。读取 SQLite 使用句柄调用 `app.sqlite_datasource("local").await`，`default_sqlite_datasource()` 只查找确切的 `default` 名称。
+
+SQLite 文件 owner、连接、迁移门禁、观测与停机均由同一 Application 管理。Service 在 UserHook 登记完整 Migrator，Batch 用 `MIGRATION_PLANS`；Prepare 完成后才开放业务。显式配置非 disabled 的 SQLite migrations 必须登记计划，配置不会自动发现 SQL 文件。迁移文件使用语义名称，持久标识通过 `Migration::new` 明确给出。
+
+仅支持 Linux/macOS 本地私有文件。SQLite 禁止延后 `saga.database_bootstrap: user_hook`，不提供 Saga/Inbox/Outbox 持久后端，也不提供跨 driver 或跨 datasource 原子事务。`source.maintenance()` 提供有界 checkpoint 与原生一致性备份，恢复只能写入不存在的新路径。完整配置与失败边界见 [SQLite 数据源](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/natx-sqlite/README.md)、[SQLite Mapper](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namapper-sqlite/README.md) 和 [SQLite 迁移](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/namigrate-sqlite/README.md)。
+
+直接依赖 `napp` 时启用 `db-sqlite`，Redis Mapper 缓存启用 `mapper-cache-sqlite`。两者与 MySQL/PostgreSQL 对应 feature 独立。
+
+SQLite 的连接、结果和事务各有有限预算；独立请求的共同截止点在 lease 接纳前固定。真实原生执行或关闭未结束时继续占用容量和文件 owner，超时不证明文件已可由另一实例接管。普通健康探测不能解除持续隔离。`sql.observability`、SQLite 维护/错误指标与 readiness 使用同一来源身份；数据源配置热变更报告 `RestartRequired`，不会切换现存 Mapper client。完整代码和迁移登记见 [SQLite 接入指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/sqlite.md)。
 
 ### PostgreSQL 单源
 
@@ -390,7 +442,7 @@ UserHook 为每个需要门禁的数据源登记一份业务嵌入的 `Migrator`
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["application", "tx-pgsql"] }
+nasa = { version = "2.0.6", features = ["application", "tx-pgsql"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres"] }
 ```
 
@@ -1436,7 +1488,7 @@ UserHook 登记 generated service
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["application", "grpc"] }
+nasa = { version = "2.0.6", features = ["application", "grpc"] }
 
 [build-dependencies]
 nagrpc-build = "2.0.0"
@@ -1638,7 +1690,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 - `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
-- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的 `debug` 事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
+- 停机按 active stack 严格反序，所有清理共享 `application.shutdown_timeout_ms` 一个绝对预算；Runner 会在每个 `ShutdownAction` 外层派生提前截止预算，防止单个扩展耗尽后续清理时间。action 内部需要为自身报告或补偿继续细分预算时使用公开的 `ShutdownContext::child_budget`，不能直接把全部 `remaining()` 交给可能用满预算的子操作。启动失败沿同一条回滚链，primary 错误不被回滚错误覆盖。每个已尝试步骤产生带递增序号、固定类型、稳定归属、耗时和失败增量的调试级事件；清理结束后由不依赖日志组件的同步诊断通道输出一次有界摘要，包含各类步骤计数、任务 abort、deadline、放弃步骤与总耗时。
 - 组件身份 `id` 和静态 `dependencies` 在任何组件阶段之前统一受保护地读取一次；排序、配置投影和各阶段上下文只使用冻结值。元数据方法必须无副作用且有限时间返回。读取展开成为 Bootstrap 错误，不启动任何组件阶段；阶段执行后不再读取动态元数据，已登记补偿仍由统一异步回滚负责。
 - 组件 Bootstrap、Start、Prepare、Ready 的方法调用和 future 轮询发生单次展开式 panic 时，按组件与当前阶段报告固定错误，并沿 active stack 执行异步回滚。组件与 initializer 的启动 future、initializer 实例、暂存终端任务和任务工厂均在接管时建立释放保护；完成、超时、取消、信号或部分移交失败时，析构展开不越过回滚边界。实例从运行时登记或静态工厂产出起保持保护，拓扑排序只借用元数据；三轮结束及失败出口逐项释放实例后才清理其依赖。已有失败或停止原因保持不变，次要释放异常单独报告；成功结果后的释放异常阻止启动。异常 payload 的析构在独立边界处理，不输出正文。同步阻塞、`panic=abort` 与同一次展开中的再次 panic 无法安全抢占。
 - `ApplicationComponent` 对象从登记起受析构隔离保护，在清理栈和资源收口后逐项释放；尚未退出的受管任务保留组件所有权直到实际退出。批任务完成时的组件释放异常返回稳定的 Stopping 错误；已有主失败、信号或主动停止原因保持不变，释放异常进入次要清理报告。直接取消及延迟释放路径仅同步告警，不追改已交付结果。
@@ -1974,7 +2026,9 @@ fn configuration() -> nasa::yml::strict::Result<nasa::yml::strict::ConfigLoader>
 }
 
 /// 业务作用：让统一生命周期接管资源准备、接流和停机。
-/// 参数说明：`_app` 供业务登记计划与受监督任务。
+/// 参数说明：
+///
+/// - `_app`：供业务登记计划与受监督任务。
 /// 返回：登记成功后继续启动；门禁失败时不开放服务。
 #[nasa::application("log", "web", config = configuration)]
 async fn main(_app: nasa::Application) -> anyhow::Result<()> {

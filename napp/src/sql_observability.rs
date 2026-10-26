@@ -41,9 +41,13 @@ impl DatasourceObservation {
     /// 参数说明：无。
     /// 返回：已知后端返回单项；双后端延后模式固定返回两个候选。
     fn drivers(&self) -> impl Iterator<Item = DatabaseDriver> + '_ {
-        [DatabaseDriver::MySql, DatabaseDriver::PostgreSql]
-            .into_iter()
-            .filter(|driver| self.driver.is_none_or(|known| known == *driver))
+        [
+            DatabaseDriver::MySql,
+            DatabaseDriver::PostgreSql,
+            DatabaseDriver::Sqlite,
+        ]
+        .into_iter()
+        .filter(|driver| self.driver.is_none_or(|known| known == *driver))
     }
 }
 
@@ -53,7 +57,7 @@ pub struct SqlObservabilityRuntime {
     catalog: BTreeMap<String, DatasourceObservation>,
     notifications: Arc<NotificationRuntime>,
     pools: Vec<Arc<DeferredPoolSource>>,
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     pending_default_driver: Option<std::sync::OnceLock<DatabaseDriver>>,
 }
 
@@ -118,7 +122,7 @@ impl SqlObservabilityRuntime {
     /// 业务作用：只在建池后一次填入预先登记的指标代理，不改变 descriptor 或预算。
     /// 参数说明：`driver` 为 typed 后端，`names` 为实际建池目录，`source` 持有只读 Pool 句柄。
     /// 返回：实际目录与预留目录完全匹配时发布；不允许运行期增加数据源。
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     fn install_pools(
         &self,
         driver: DatabaseDriver,
@@ -189,7 +193,7 @@ impl SqlObservabilityRuntime {
 
 /// 先注册静态合同与预算、后装入 typed Pool 的只读代理。
 struct DeferredPoolSource {
-    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
     driver: DatabaseDriver,
     descriptors: &'static [&'static MetricDescriptor],
     source: RwLock<Option<Arc<PoolMetricsSource>>>,
@@ -440,7 +444,11 @@ impl ApplicationComponent for SqlObservabilityComponent {
             let mut budget = mapper.worst_case_series();
             let mut sources: Vec<Arc<dyn LegacyMetricsSource>> = vec![mapper];
             let mut pools = Vec::new();
-            for driver in [DatabaseDriver::MySql, DatabaseDriver::PostgreSql] {
+            for driver in [
+                DatabaseDriver::MySql,
+                DatabaseDriver::PostgreSql,
+                DatabaseDriver::Sqlite,
+            ] {
                 let count = catalog
                     .values()
                     .filter(|source| source.drivers().any(|candidate| candidate == driver))
@@ -455,7 +463,7 @@ impl ApplicationComponent for SqlObservabilityComponent {
                     observation_error(ApplicationPhase::Start, "Pool metrics could not initialize")
                 })?;
                 let pool = Arc::new(DeferredPoolSource {
-                    #[cfg(any(feature = "db", feature = "db-pgsql"))]
+                    #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
                     driver,
                     descriptors: empty.descriptors(),
                     source: RwLock::new(None),
@@ -474,7 +482,7 @@ impl ApplicationComponent for SqlObservabilityComponent {
                 format!("SQL metric registration failed: methods={}, datasources={}, required_series={}, available_series={}", MAPPER_METHOD_META.len(), catalog.len(), budget, nametrics_core::MAX_METRIC_SERIES.saturating_sub(hub.reserved_series()))))?;
             let runtime = Arc::new(SqlObservabilityRuntime {
                 settings,
-                #[cfg(any(feature = "db", feature = "db-pgsql"))]
+                #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
                 pending_default_driver: catalog
                     .values()
                     .any(|source| source.driver.is_none())
@@ -522,7 +530,7 @@ impl ApplicationComponent for SqlObservabilityComponent {
             let Some(runtime) = &self.runtime else {
                 return Ok(());
             };
-            #[cfg(any(feature = "db", feature = "db-pgsql"))]
+            #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
             if runtime
                 .pending_default_driver
                 .as_ref()
@@ -724,6 +732,46 @@ pub(crate) async fn install_postgres_pools(
     .map_err(|_| observation_error(ApplicationPhase::Start, "invalid PostgreSQL Pool metrics"))?;
     runtime.install_pools(
         DatabaseDriver::PostgreSql,
+        pools.keys().cloned().collect(),
+        source,
+    )
+}
+
+/// 业务作用：把 SQLite 真实 worker 状态填入 Start 阶段已预留的指标代理。
+/// 参数说明：
+/// - `application`：统一指标和配置宿主。
+/// - `pools`：已经登记关闭动作的文件来源 owner。
+/// 返回：名称和预算一致时完成绑定，失败阻止 Ready。
+#[cfg(feature = "db-sqlite")]
+pub(crate) async fn install_sqlite_pools(
+    application: &Application,
+    pools: &BTreeMap<String, Arc<natx_sqlite::SqliteDataSourceOwner>>,
+) -> ApplicationResult<()> {
+    if pools.is_empty() {
+        return Ok(());
+    }
+    let runtime = application
+        .resources()
+        .get::<Arc<SqlObservabilityRuntime>>()
+        .await?;
+    for (name, owner) in pools {
+        if runtime.effective(name, None)?.acquire_wait.threshold_ms
+            > owner.datasource().acquire_timeout_ms()
+        {
+            return Err(observation_error(
+                ApplicationPhase::Start,
+                "SQL acquire_wait threshold exceeds the SQLite acquire timeout",
+            ));
+        }
+    }
+    let source = natx_sqlite::pool_metrics_source(
+        pools
+            .iter()
+            .map(|(name, owner)| (name.clone(), owner.datasource())),
+    )
+    .map_err(|_| observation_error(ApplicationPhase::Start, "invalid SQLite pool metrics"))?;
+    runtime.install_pools(
+        DatabaseDriver::Sqlite,
         pools.keys().cloned().collect(),
         source,
     )
@@ -959,7 +1007,10 @@ fn datasource_catalog(
         let driver = match value.get("driver") {
             Some(Value::String(driver)) if driver == "mysql" => DatabaseDriver::MySql,
             Some(Value::String(driver)) if driver == "postgresql" => DatabaseDriver::PostgreSql,
-            None if !cfg!(feature = "db-pgsql") && cfg!(feature = "db") => {
+            Some(Value::String(driver)) if driver == "sqlite" => DatabaseDriver::Sqlite,
+            None if !cfg!(any(feature = "db-pgsql", feature = "db-sqlite"))
+                && cfg!(feature = "db") =>
+            {
                 // MySQL-only 入口允许省略 driver，必须与建池配置解释保持一致。
                 DatabaseDriver::MySql
             }
@@ -978,6 +1029,7 @@ fn datasource_catalog(
             }
         };
         let acquire_timeout_ms = match value.get("acquire_timeout_ms") {
+            None if driver == DatabaseDriver::Sqlite => 3000,
             None => 2000,
             Some(value) => value
                 .as_u64()
@@ -1003,6 +1055,12 @@ fn datasource_catalog(
             let driver = match method.driver {
                 "mysql" => DatabaseDriver::MySql,
                 "postgresql" => DatabaseDriver::PostgreSql,
+                "sqlite" => {
+                    return Err(observation_error(
+                        phase,
+                        "SQLite does not support Saga deferred bootstrap",
+                    ))
+                }
                 _ => return Err(observation_error(phase, "invalid static Mapper driver")),
             };
             if result
@@ -1141,6 +1199,7 @@ fn driver_name(driver: DatabaseDriver) -> &'static str {
     match driver {
         DatabaseDriver::MySql => "mysql",
         DatabaseDriver::PostgreSql => "postgresql",
+        DatabaseDriver::Sqlite => "sqlite",
     }
 }
 

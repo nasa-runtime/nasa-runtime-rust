@@ -82,6 +82,42 @@ pub(crate) fn validate_declared_sections(
     tree: &Value,
     phase: ApplicationPhase,
 ) -> ApplicationResult<()> {
+    let sqlite_configured = tree
+        .get("database")
+        .and_then(|value| value.get("driver"))
+        .and_then(Value::as_str)
+        == Some("sqlite")
+        || tree
+            .get("datasources")
+            .and_then(Value::as_object)
+            .is_some_and(|sources| {
+                sources
+                    .values()
+                    .any(|value| value.get("driver").and_then(Value::as_str) == Some("sqlite"))
+            });
+    if sqlite_configured && !components.contains(&ComponentId::Db) {
+        // 文件 owner 必须来自受管数据库组件，不能在遗漏组件声明时留下被静默忽略的持久配置。
+        return Err(crate::ApplicationError::new(
+            ComponentId::Db,
+            phase,
+            "SQLite datasource configuration requires the db component",
+        ));
+    }
+    if sqlite_configured {
+        // 尚无 SQLite 持久适配器；在文件创建之前拒绝不支持的引用，避免启动一半才发现后端不匹配。
+        for section in ["outbox", "saga", "idempotency_stores", "audit_sinks"] {
+            if tree
+                .get(section)
+                .is_some_and(|value| sqlite_adapter_reference(value, tree))
+            {
+                return Err(crate::ApplicationError::new(
+                    ComponentId::Db,
+                    phase,
+                    format!("SQLite persistence adapter is unavailable for {section}"),
+                ));
+            }
+        }
+    }
     // 两种入口都拥有注册生命周期；即使其中一段禁用，也不能以另一段静默覆盖迁移意图。
     if (components.contains(&ComponentId::Discovery)
         || components.contains(&ComponentId::NacosDiscovery))
@@ -106,7 +142,7 @@ pub(crate) fn validate_declared_sections(
             ComponentId::Log => crate::log::validate_log_section(tree, phase)?,
             #[cfg(feature = "nacos-config")]
             ComponentId::NacosConfig => crate::nacos_config::validate_nacos_section(tree, phase)?,
-            #[cfg(any(feature = "db", feature = "db-pgsql"))]
+            #[cfg(any(feature = "db", feature = "db-pgsql", feature = "db-sqlite"))]
             ComponentId::Db => crate::db::validate_datasource_sections(tree, phase)?,
             #[cfg(feature = "mapper-observability")]
             ComponentId::SqlObservability => {
@@ -152,6 +188,44 @@ pub(crate) fn validate_declared_sections(
     }
     validate_managed_references(components, tree, phase)?;
     Ok(())
+}
+
+/// 业务作用：在持久适配器配置中识别指向 SQLite 的来源，禁用的计划不要求后端存在。
+/// 参数说明：
+/// - `value`：已限定为持久适配器的配置子树。
+/// - `tree`：用于解析具名来源及 default 单源的完整配置。
+/// 返回：发现已启用的 SQLite 来源引用时为真，不产生连接或文件副作用。
+fn sqlite_adapter_reference(value: &Value, tree: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("enabled").and_then(Value::as_bool) == Some(false) {
+                return false;
+            }
+            let reference = fields
+                .get("datasource_ref")
+                .or_else(|| fields.get("source"));
+            if let Some(name) = reference.and_then(Value::as_str) {
+                let source = tree
+                    .get("datasources")
+                    .and_then(|sources| sources.get(name))
+                    .or_else(|| (name == "default").then(|| tree.get("database")).flatten());
+                if source
+                    .and_then(|source| source.get("driver"))
+                    .and_then(Value::as_str)
+                    == Some("sqlite")
+                {
+                    return true;
+                }
+            }
+            fields
+                .values()
+                .any(|child| sqlite_adapter_reference(child, tree))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|child| sqlite_adapter_reference(child, tree)),
+        _ => false,
+    }
 }
 
 /// 业务作用：在任何组件产生网络副作用前复验内置计划引用的资源名称确实属于同一候选配置。

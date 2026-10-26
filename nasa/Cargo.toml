@@ -4,10 +4,10 @@
 # (feature/依赖面/过程宏边界各自独立),本 crate 只做模块组织与重导出。
 [package]
 name = "nasa"
-version = "2.0.5"
+version = "2.0.6"
 edition.workspace = true
 rust-version.workspace = true
-description = "Rust server framework for managed lifecycles, multi-registry discovery, multi-source Kafka and reliable execution with durable Saga recovery"
+description = "Rust server framework for managed lifecycles, SQLite Mapper, multi-registry discovery, multi-source Kafka and reliable execution with durable Saga recovery"
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -29,7 +29,8 @@ grafana = ["dep:grafana_impl", "dep:grafana_macro", "application_impl?/observabi
 cache = ["dep:cache_impl", "dep:nacache_macro", "application_impl?/cache"]
 # 弱依赖桥：同时启用 application 时把 napp 的 db 组件编入，使 #[application("db", ...)] 生效。
 tx = ["dep:tx_impl", "dep:natx_macro", "application_impl?/db"]
-# PostgreSQL 事务入口保持独立 typed API；与 application 组合时向下启用受管 PostgreSQL 数据源组件。
+# 各后端保持独立 typed API；与 application 组合时向下启用相应受管数据源组件。
+tx-sqlite = ["dep:tx_sqlite_impl", "dep:migration_sqlite_impl", "application_impl?/db-sqlite"]
 tx-pgsql = ["dep:tx_pgsql_impl", "dep:natx_macro", "dep:migration_pgsql_impl", "application_impl?/db-pgsql"]
 # Inbox 去重标记与业务副作用共享 tx ambient MySQL 事务。
 inbox = ["tx", "dep:inbox_core_impl", "dep:inbox_mysql_impl", "application_impl?/inbox"]
@@ -89,7 +90,10 @@ web-crypto-legacy-rsa = ["web-crypto", "web_impl/legacy-rsa-private"]
 # 端点固定流水线的完整能力，同时启用身份与密码处理。
 web-security = ["web-auth", "web-crypto", "application_impl?/web-security"]
 mapper = ["tx", "dep:mapper_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
-# PostgreSQL Mapper 使用独立 typed API；与 application 组合时复用受管 PostgreSQL datasource。
+# PostgreSQL 与 SQLite Mapper 使用独立 typed API，并复用相应的受管 datasource。
+mapper-sqlite = ["tx-sqlite", "dep:mapper_sqlite_impl", "application_impl?/mapper-observability", "application_impl?/observability"]
+mapper-redis-cache-sqlite = ["mapper-sqlite", "mapper_sqlite_impl/redis-cache", "application_impl?/mapper-cache-sqlite"]
+mapper-cache-grouped-sqlite = ["mapper-sqlite", "cache", "mapper_sqlite_impl/grouped-cache"]
 mapper-pgsql = ["tx-pgsql", "dep:mapper_pgsql_impl", "dep:namapper_macro", "application_impl?/mapper-observability", "application_impl?/observability"]
 mapper-cache-grouped = ["mapper", "cache", "mapper_impl/grouped-cache"]
 mapper-cache-grouped-pgsql = ["mapper-pgsql", "cache", "mapper_pgsql_impl/grouped-cache"]
@@ -274,7 +278,7 @@ full-pgsql = [
 [dependencies]
 discovery_runtime_impl = { package = "nadisc-runtime", version = "1.0.0", optional = true }
 # 依赖 key 使用 *_impl，避免与门面公共模块同名。
-application_impl = { package = "napp", version = "2.0.5", optional = true }
+application_impl = { package = "napp", version = "2.0.6", optional = true }
 application_macro = { package = "napp-macro", version = "2.0.3", optional = true }
 hystrix_impl = { package = "hystrix", version = "2.0.0", optional = true }
 hystrix_macro = { package = "hystrix-macro", version = "2.0.0", optional = true }
@@ -283,9 +287,12 @@ grafana_macro = { package = "nafana-macro", version = "2.0.0", optional = true }
 cache_impl = { package = "cacheable", version = "2.0.0", optional = true }
 nacache_macro = { package = "nacache-macro", version = "2.0.0", optional = true }
 tx_impl = { package = "natx", version = "2.0.0", optional = true }
+tx_sqlite_impl = { package = "natx-sqlite", version = "1.0.0", path = "../natx-sqlite", optional = true }
+migration_sqlite_impl = { package = "namigrate-sqlite", version = "1.0.0", path = "../namigrate-sqlite", optional = true }
+mapper_sqlite_impl = { package = "namapper-sqlite", version = "1.0.0", path = "../namapper-sqlite", optional = true }
 tx_pgsql_impl = { package = "natx-pgsql", version = "2.0.0", optional = true }
 migration_pgsql_impl = { package = "namigrate-pgsql", version = "2.0.0", optional = true }
-natx_macro = { package = "natx-macro", version = "2.0.0", optional = true }
+natx_macro = { package = "natx-macro", version = "2.0.1", optional = true }
 inbox_core_impl = { package = "nainbox-core", version = "2.0.0", optional = true }
 inbox_mysql_impl = { package = "nainbox-mysql", version = "2.0.0", optional = true }
 inbox_pgsql_impl = { package = "nainbox-pgsql", version = "2.0.0", optional = true }
@@ -316,7 +323,7 @@ web_impl = { package = "naweb", version = "2.0.0", optional = true }
 web_macro = { package = "naweb-macro", version = "2.0.0", optional = true }
 mapper_impl = { package = "namapper", version = "2.0.0", optional = true }
 mapper_pgsql_impl = { package = "namapper-pgsql", version = "2.0.0", optional = true }
-namapper_macro = { package = "namapper-macro", version = "2.0.0", optional = true }
+namapper_macro = { package = "namapper-macro", version = "2.0.1", optional = true }
 partition_impl = { package = "napart", version = "2.0.0", optional = true }
 ws_impl = { package = "naws", version = "2.0.0", optional = true, default-features = false }
 kafka_impl = { package = "nafka", version = "2.0.3", optional = true, default-features = false }

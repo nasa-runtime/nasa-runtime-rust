@@ -106,7 +106,8 @@ pub(crate) fn validate(
     if mapper
         && !cfg!(any(
             feature = "mapper-cache",
-            feature = "mapper-cache-pgsql"
+            feature = "mapper-cache-pgsql",
+            feature = "mapper-cache-sqlite"
         ))
     {
         return Err(adapter_error(

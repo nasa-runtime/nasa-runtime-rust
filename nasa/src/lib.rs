@@ -20,7 +20,7 @@
 //! 通过 Application 的显式配置和启动期计划装配。宿主持有准入、健康和关闭 owner；默认 feature
 //! 为空，未选择的能力不建连。可用入口随对应 feature 导出，持久提交与租约仍由各自后端裁决。
 //!
-//! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL 事务、
+//! 业务项目优先依赖本 crate，并通过 feature 选择需要的应用生命周期、MySQL/PostgreSQL/SQLite 事务、
 //! Inbox、Outbox、Saga、消息传输、缓存、跨副本业务配额、路由、调度、配置、发现和工具模块。
 //!
 //! # 消费、出站与隔离命令的受管入口
@@ -55,13 +55,24 @@
 //!
 //! # SQL 观测与业务通知
 //!
-//! `application` 与 `mapper`/`mapper-pgsql` 自动装配 SQL、连接与 Pool 指标；YAML 控制开发日志、
+//! `application` 与 `mapper`/`mapper-pgsql`/`mapper-sqlite` 自动装配 SQL、连接与 Pool 指标；YAML 控制开发日志、
 //! 阈值通知与统一出口。原始执行耗时达到或超过阈值即命中，不计连接等待和 Stream 消费者处理。
 //! 业务通过 `nasa::application::notifications::init` 安装 `Notify`，未安装则忽略；逐条通知需启用
 //! 慢告警并设 `cooldown_ms=0`。SQL 路径只尝试入队，worker 调用业务适配器，框架不指定通知微服务
 //! 协议或连接机器人。通知拥塞、超时与失败不改变 SQL 或事务结果，也不构成持久送达保证。
 //! 指标出口由 `grafana.observability` 显式开启，平台 controller 独立拥有外部资源；期望实例指标由
 //! 外部平台持续提供，框架只引用，不维护静态实例清单。
+//!
+//! # SQLite 与逐数据源 driver
+//!
+//! `application,mapper-sqlite` 配合 `#[nasa::application("db")]` 托管本地 SQLite 文件。
+//! 业务从 `nasa::mapper::sqlite` 导入 Mapper，继续使用 Query、Insert 等同名 SQL 方法属性。
+//! 每个 `datasources.<name>.driver` 独立选择 MySQL、PostgreSQL 或 SQLite，编译时启用对应能力；
+//! 宏导入路径固定 driver 类型，YAML 不翻译 SQL。SQLite-only 组合不引入其它数据库运行时。
+//! napp 统一管理文件 owner、显式迁移计划、初始化、观测和停机；Service 在 UserHook 登记迁移，
+//! Batch 使用静态 `MIGRATION_PLANS`。`tx::sqlite` 提供同源事务、共同请求期限、checkpoint 与备份。
+//! 原生关闭前不提前归还容量和文件权威；SQLite 仅支持私有本地文件，没有 Saga/Inbox/Outbox
+//! 持久适配器，不提供跨 datasource 原子提交。恢复只写入不存在的新路径。
 //!
 //! # 持久化 Saga
 //!
@@ -157,7 +168,7 @@
 ///
 /// # 单源与多源 YAML
 ///
-/// 基础设施 source 由最终 YAML 创建，不在 `main` 中手工建池或建连。MySQL/PostgreSQL 单源使用
+/// 基础设施 source 由最终 YAML 创建，不在 `main` 中手工建池或建连。MySQL/PostgreSQL/SQLite 单源使用
 /// `database`，多源与混配使用 `datasources.<name>`；Redis 单源使用扁平 `redis`，多源使用
 /// `redis.properties.<qualifier>`；Kafka 单 client 使用 `kafka`，多 client 使用
 /// `kafkas.<client>`。同一种资源的单源根与多源根互斥，任一实例失败都会阻止完整命名表进入 Ready。
@@ -197,9 +208,10 @@
 /// ```
 ///
 /// 单源数据库固定为 `default`；MySQL 使用 `Application::datasource`，PostgreSQL 使用
-/// `Application::pg_datasource`，driver 错配不会回退。单源 Redis 的持久身份为 `primary`，并提供 `default` 查询别名；
+/// `Application::pg_datasource`，SQLite 使用 `Application::sqlite_datasource`；driver 错配不会回退。单源 Redis 的持久身份为 `primary`，并提供 `default` 查询别名；
 /// 单 client Kafka 省略 `client_name` 时默认为 `default`。业务通过 `default_datasource`/
-/// `datasource(name)`、`default_pg_datasource`/`pg_datasource(name)`、`default_redis`/`redis(name)`、
+/// `datasource(name)`、`default_pg_datasource`/`pg_datasource(name)`、
+/// `default_sqlite_datasource`/`sqlite_datasource(name)`、`default_redis`/`redis(name)`、
 /// `default_kafka`/`kafka(name)` 取得受管句柄。
 /// Outbox 用 `outbox.datasource_ref`；managed Saga 用角色作用域内的 `datasource_ref`，custom Saga
 /// 使用顶层 `saga.datasource_ref`。Cache、缓存失效广播和 Scheduling 用 `redis_ref` 选择命名源；
@@ -219,6 +231,8 @@
 /// `migrations.session_url`，并在 advisory lock 前与业务池复验 database/schema 身份。
 /// Service 与 Batch 都可通过 `application::MIGRATION_PLANS` 静态工厂登记迁移。
 /// Batch 在 initializer 与工作负载之前执行迁移，不接受工作负载 Hook 的动态登记。
+/// SQLite 使用 `Migration::new` 与 `Migrator::with_migrations` 显式嵌入语义化 SQL 文件，
+/// `migrations.execution_timeout_ms` 限制整批执行；配置了非 disabled 门禁却缺少计划时拒绝启动。
 ///
 /// # 跨副本业务配额
 ///
@@ -271,8 +285,13 @@ pub mod cache {
 }
 
 /// ambient 事务上下文与按数据库后端分区的声明式事务入口。
-#[cfg(any(feature = "tx", feature = "tx-pgsql"))]
+#[cfg(any(feature = "tx", feature = "tx-pgsql", feature = "tx-sqlite"))]
 pub mod tx {
+    /// SQLite 文件数据源、受控执行和本地事务。
+    #[cfg(feature = "tx-sqlite")]
+    pub mod sqlite {
+        pub use tx_sqlite_impl::*;
+    }
     #[cfg(feature = "tx")]
     pub use natx_macro::transactional;
     #[cfg(feature = "tx")]
@@ -286,10 +305,16 @@ pub mod tx {
     }
 }
 
-/// 数据库迁移门禁；PostgreSQL 入口显式接收与业务连接一致的 schema，并在事务池拓扑下使用独立 session 连接。
-#[cfg(feature = "tx-pgsql")]
+/// 数据库迁移门禁；PostgreSQL 入口复验 schema 与 session 身份，SQLite 入口复用文件 owner 并执行整批原子迁移。
+#[cfg(any(feature = "tx-pgsql", feature = "tx-sqlite"))]
 pub mod migration {
+    /// SQLite 整批事务迁移与只读校验。
+    #[cfg(feature = "tx-sqlite")]
+    pub mod sqlite {
+        pub use migration_sqlite_impl::*;
+    }
     /// PostgreSQL advisory lock、checksum 与 validate/apply 门禁。
+    #[cfg(feature = "tx-pgsql")]
     pub mod pgsql {
         pub use migration_pgsql_impl::*;
     }
@@ -474,9 +499,18 @@ pub mod web {
     };
 }
 
-/// 声明式 Mapper：MySQL 保持既有根入口，PostgreSQL 使用独立的 `mapper::pgsql`。
-#[cfg(any(feature = "mapper", feature = "mapper-pgsql"))]
+/// 声明式 Mapper：MySQL 使用根入口，PostgreSQL 与 SQLite 分别使用 `pgsql` 与 `sqlite` 模块。
+#[cfg(any(
+    feature = "mapper",
+    feature = "mapper-pgsql",
+    feature = "mapper-sqlite"
+))]
 pub mod mapper {
+    /// SQLite Mapper、匿名参数和受管文件来源。
+    #[cfg(feature = "mapper-sqlite")]
+    pub mod sqlite {
+        pub use mapper_sqlite_impl::*;
+    }
     #[cfg(feature = "mapper")]
     pub use mapper_impl::*;
     #[cfg(feature = "mapper")]

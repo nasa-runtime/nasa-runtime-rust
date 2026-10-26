@@ -1,5 +1,8 @@
 //! 后端中立 Mapper 合同。
 //!
+//! MySQL、PostgreSQL 与 SQLite adapter 共用声明式 SQL、分页排序、缓存和观测入口；
+//! driver 类型、实际连接与文件 owner 由具体 adapter 和 napp 管理，本 crate 不执行 SQL。
+//!
 //! 本 crate 承载结构化 SQL bind 渲染、分页、排序、缓存、静态方法目录与原子观测合同，
 //! 不依赖 SQLx 或具体数据库事务运行时。观测策略支持递归默认、逐叶覆盖和冻结；
 //! 数据库完成路径只记录低基数事实，命中通知规则时提交有界队列，不调用通知 provider。
@@ -117,13 +120,58 @@ pub fn render_postgres(nodes: &[SqlNode<'_>]) -> anyhow::Result<(String, usize)>
     Ok((normalize_sql_whitespace(&sql), binds.bind_count()))
 }
 
-/// Mapper 分页参数，`page_no` 使用 1-based 语义。
+/// Mapper 分页参数；字段只读，构造、反序列化和更新均保持正 limit、非负 offset。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "PageRequestValues", into = "PageRequestValues")]
 pub struct PageRequest {
-    /// SQL `LIMIT` bind 值。
+    values: PageRequestValues,
+}
+
+/// 分页绑定值的只读视图；独立输入必须通过 `PageRequest::try_from` 验证后才能成为分页参数。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename = "PageRequest")]
+pub struct PageRequestValues {
+    /// SQL `LIMIT` 原始值；有效分页要求大于零。
     pub limit: i64,
-    /// SQL `OFFSET` bind 值。
+    /// SQL `OFFSET` 原始值；有效分页要求非负。
     pub offset: i64,
+}
+
+impl std::ops::Deref for PageRequest {
+    type Target = PageRequestValues;
+
+    /// 业务作用：保留 SQL 字段路径绑定的读取方式，禁止绕过校验直接修改分页值。
+    /// 参数说明：无。
+    /// 返回：只读绑定值；不提供可变解引用。
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl TryFrom<PageRequestValues> for PageRequest {
+    type Error = anyhow::Error;
+
+    /// 业务作用：将外部有符号分页输入转换为经过验证的执行参数。
+    /// 参数说明：
+    /// - `values`：可能来自反序列化或业务计算的原始 limit/offset。
+    /// 返回：正 limit、非负 offset 才成功，不强加默认页大小上限。
+    fn try_from(values: PageRequestValues) -> anyhow::Result<Self> {
+        let page = Self {
+            values,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+}
+
+impl From<PageRequest> for PageRequestValues {
+    /// 业务作用：按原有 limit/offset 结构序列化或复制分页值，不开放原对象的修改权限。
+    /// 参数说明：
+    /// - `page`：已验证的分页参数。
+    /// 返回：独立的值副本，不改变原分页参数。
+    fn from(page: PageRequest) -> Self {
+        page.values
+    }
 }
 
 impl PageRequest {
@@ -132,7 +180,7 @@ impl PageRequest {
 
     /// 业务作用: 创建采用默认最大页大小的分页参数。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `page_no`: 从 1 开始的业务页码。
     /// - `page_size`: 大于零且不超过 1000 的单页条数。
     ///
@@ -143,7 +191,7 @@ impl PageRequest {
 
     /// 业务作用: 使用调用方上限创建 1-based 分页参数。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `page_no`: 从 1 开始的业务页码。
     /// - `page_size`: 大于零的单页条数。
     /// - `max_page_size`: 调用方允许的最大单页条数。
@@ -169,19 +217,55 @@ impl PageRequest {
 
     /// 业务作用: 从已经计算好的 offset/limit 构造分页 bind。
     ///
-    /// # 参数
+    /// 参数说明：
     /// - `offset`: 非负偏移量。
     /// - `limit`: 大于零的读取条数。
     ///
     /// 返回: i64 范围内的分页值；零 limit 或转换溢出时返回错误。
     pub fn from_offset_limit(offset: u64, limit: u64) -> anyhow::Result<Self> {
-        if limit == 0 {
-            anyhow::bail!("mapper page limit must be greater than zero");
-        }
-        Ok(Self {
+        Self::try_from(PageRequestValues {
             limit: i64::try_from(limit).map_err(|_| anyhow::anyhow!("mapper limit overflow"))?,
             offset: i64::try_from(offset).map_err(|_| anyhow::anyhow!("mapper offset overflow"))?,
         })
+    }
+
+    /// 业务作用：统一确认分页绑定不会因非正 limit 或负 offset 改变查询边界。
+    /// 参数说明：无。
+    /// 返回：limit 大于零且 offset 非负时成功；不替业务选择最大页大小。
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.limit > 0,
+            "mapper page limit must be greater than zero"
+        );
+        anyhow::ensure!(self.offset >= 0, "mapper page offset must not be negative");
+        Ok(())
+    }
+
+    /// 业务作用：在接收外部分页输入的业务边界执行调用方自己的最大页大小策略。
+    /// 参数说明：
+    /// - `max_page_size`：业务允许的最大单页条数，必须大于零。
+    /// 返回：基本分页不变量成立且未超过业务上限时成功。
+    pub fn validate_with_max_page_size(&self, max_page_size: u64) -> anyhow::Result<()> {
+        self.validate()?;
+        anyhow::ensure!(
+            max_page_size > 0,
+            "mapper page maximum must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.limit as u64 <= max_page_size,
+            "mapper page size exceeds configured maximum"
+        );
+        Ok(())
+    }
+
+    /// 业务作用：以一次验证完成偏移和条数更新，拒绝留下部分更新的分页状态。
+    /// 参数说明：
+    /// - `offset`：新的非负偏移量。
+    /// - `limit`：新的正读取条数。
+    /// 返回：成功后整体替换；零 limit 或 i64 溢出时保留原值。
+    pub fn set_offset_limit(&mut self, offset: u64, limit: u64) -> anyhow::Result<()> {
+        *self = Self::from_offset_limit(offset, limit)?;
+        Ok(())
     }
 }
 

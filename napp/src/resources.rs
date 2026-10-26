@@ -162,7 +162,7 @@ impl StagedResourceBatch {
     /// 参数说明：`qualifier` 是可选稳定名称，`value` 是待转交资源。
     ///
     /// 返回：名称合法时完成暂存；非法名称返回错误且批次尚未发布。
-    #[cfg(feature = "db-pgsql")]
+    #[cfg(any(feature = "db-pgsql", feature = "db-sqlite"))]
     pub(crate) fn push<T>(&mut self, qualifier: Option<&str>, value: T) -> ApplicationResult<()>
     where
         T: Send + Sync + 'static,

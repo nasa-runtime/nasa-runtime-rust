@@ -19,8 +19,8 @@
 | 原生 TCP 帧出站 | `ws-client`；无需入站组件 | `ws_clients.<name>` | `configure_ws_client_event` / `ws_client(name)` |
 | 隔离命令目录 | `hystrix`；无需组件字符串 | `hystrix.enabled` / `isolation` / `commands` | 属性命令、受管 Web dispatch、`hystrix_command(name)` |
 | Snowflake | `redis`；`"redis"` | `redis.snowflake.<name>` | `snowflake(name)` |
-| Mapper L2 | `mapper-redis-cache` 或 `mapper-redis-cache-pgsql`；`"redis"` | `mapper_cache.enabled`、`redis_ref` | Mapper 查询复用默认 L2 |
-| Mapper codec/metrics | `mapper` 或 `mapper-pgsql` | `configure_mapper_defaults` | Mapper 调用路径 |
+| Mapper L2 | `mapper-redis-cache`、`mapper-redis-cache-pgsql` 或 `mapper-redis-cache-sqlite`；`"redis"` | `mapper_cache.enabled`、`redis_ref` | Mapper 查询复用默认 L2 |
+| Mapper codec/metrics | `mapper`、`mapper-pgsql` 或 `mapper-sqlite` | `configure_mapper_defaults` | Mapper 调用路径 |
 | 分组缓存 | `cache,redis`；`"redis"` | `grouped_caches.<name>` | `grouped_cache(name)` |
 | L1/两级缓存 | `cache`；`"cache"` | `cache.mode` 与后端配置 | `nasa::cache` |
 | 持久失效意图策略 | `cache`；`"cache"` | `configure_cache_invalidation_sink` | `record_invalidation` |
@@ -178,6 +178,14 @@ single-flight 只减少重复回源；失败、取消与等待者都共享同一
 
 cache-aside 不保证强一致；失效后，已经读取旧值的 loader 仍可能晚到回填，且重新起算 TTL。
 Pub/Sub 离线节点可能漏收。框架不把这些边界描述为一个 TTL 内必定新鲜。
+
+## SQLite 与数据库组件
+
+同一个 `"db"` 组件按每个 `datasources.<name>.driver` 管理 MySQL、PostgreSQL 和 SQLite；SQLite 组合启用 `application,mapper-sqlite`，仅事务时启用 `application,tx-sqlite`。业务仍使用同名 Mapper/SQL 方法宏，通过 `app.sqlite_datasource(name).await` 取得使用句柄，Application 持有唯一关闭 owner。
+
+SQLite 先验证整表配置与编译能力，再取得文件权威和原生连接；显式 migration 门禁在业务初始化前执行。请求共同截止点在独立 lease 接纳前固定，真实原生关闭前不释放容量或文件 owner。环境事务保留原总期限，配置变更要求重启，旧句柄不能绑定同名新来源。
+
+SQLite 没有 Inbox/Outbox/Saga、事务审计或幂等持久 adapter，相关引用在启动前拒绝，不能退回 MySQL/Pg 建另一个池。Redis L2 与 GroupedCache 可使用对应 SQLite feature，仍遵守 owner/提交序号隔离及事务默认旁路。完整接入见 [SQLite 指南](sqlite.md)。
 
 ## 持久适配器与迁移
 

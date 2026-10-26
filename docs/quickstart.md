@@ -26,7 +26,7 @@ rust-version = "1.94"
 
 [dependencies]
 anyhow = "1"
-nasa = { version = "2.0.5", default-features = false, features = ["application", "web"] }
+nasa = { version = "2.0.6", default-features = false, features = ["application", "web"] }
 ```
 
 将 `src/main.rs` 替换为：
@@ -99,7 +99,7 @@ curl --fail http://127.0.0.1:8080/hello
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = [
+nasa = { version = "2.0.6", features = [
     "application",
     "config-boot",
     "log",
@@ -118,7 +118,7 @@ PostgreSQL 服务把 `tx`、`mapper` 换成 `tx-pgsql`、`mapper-pgsql`；需要
 
 ```toml
 [dependencies]
-nasa = { version = "2.0.5", features = [
+nasa = { version = "2.0.6", features = [
     "application", "config-boot", "log", "tx-pgsql", "mapper-pgsql", "web",
 ] }
 ```
@@ -132,6 +132,12 @@ nasa = { git = "https://github.com/nasa-runtime/nasa-runtime-rust.git", features
     "mapper-redis-cache", "redis", "cache", "web",
 ] }
 ```
+
+## SQLite 文件数据库
+
+SQLite 使用 `application,mapper-sqlite`，属性入口仍为 `#[nasa::application("db")]`。配置每个 `datasources.<name>.driver: sqlite` 与 `sqlite.path`，业务从 `nasa::mapper::sqlite` 导入 `Mapper`，继续使用 `#[Query]`、`#[Insert]` 等方法宏。混配其它 driver 时同时启用对应 feature，每个 Mapper 的类型与配置必须匹配。
+
+[SQLite 接入指南](sqlite.md#可运行的-batch-应用) 提供完整 Cargo.toml、语义迁移 SQL、YAML、静态计划和业务 main，可直接运行。Batch 在工作负载前执行 `MIGRATION_PLANS`；Service 可以在 UserHook 登记迁移，业务工作在 Prepare 之后开放。SQLite 不提供 Saga/Inbox/Outbox 持久 adapter。
 
 ## 应用入口
 
@@ -169,7 +175,7 @@ Application 依据角色作用域的 datasource_ref 选择 driver、创建角色
 
 ~~~toml
 [dependencies]
-nasa = { version = "2.0.5", features = ["application", "saga-runtime", "web"] }
+nasa = { version = "2.0.6", features = ["application", "saga-runtime", "web"] }
 ~~~
 
 纯 Orchestrator 的业务入口可以为空：

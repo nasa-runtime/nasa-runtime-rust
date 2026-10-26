@@ -1,0 +1,19 @@
+[package]
+name = "namigrate-sqlite"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Atomic SQLite schema migration and validation gates for napp-managed file datasources"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["sqlite", "migration", "schema", "database"]
+categories = ["database", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+namigrate-core = { version = "2.0.0" }
+natx-sqlite = { version = "1.0.0", path = "../natx-sqlite" }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate"] }
+tokio = { version = "1", features = ["time"] }
+anyhow = "1"
