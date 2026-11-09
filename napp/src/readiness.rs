@@ -331,7 +331,8 @@ impl ReadinessContributor {
     #[cfg(any(
         feature = "saga",
         feature = "saga-pgsql",
-        feature = "discovery-runtime"
+        feature = "discovery-runtime",
+        feature = "config-watch"
     ))]
     pub(crate) fn observe_ready_until(&self, deadline: Instant) {
         let mut entry = self

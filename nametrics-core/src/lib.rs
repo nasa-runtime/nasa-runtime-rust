@@ -1189,15 +1189,23 @@ pub struct MetricFamilySnapshot {
 }
 
 impl MetricSample {
-    /// 业务作用：渲染本样本的 Prometheus 文本行(不含 HELP/TYPE),追加到 `output`。
+    /// 业务作用：将样本直接追加到 Prometheus 文本缓冲区，避免为每行标签建立临时字符串集合。
+    /// 参数说明：
+    /// - `output`: 接收不含 HELP/TYPE 的完整样本行，原有内容保留。
+    ///
+    /// 返回：追加标量或直方图累积桶、sum 和 count，不改变样本及标签顺序。
     fn render_prometheus(&self, output: &mut String) {
         use std::fmt::Write as _;
         match &self.value {
             MetricValue::Counter(v) => {
-                let _ = writeln!(output, "{}{} {v}", self.name, self.render_labels(&[]));
+                output.push_str(self.name);
+                self.render_labels(output, &[]);
+                let _ = writeln!(output, " {v}");
             }
             MetricValue::Gauge(v) => {
-                let _ = writeln!(output, "{}{} {v}", self.name, self.render_labels(&[]));
+                output.push_str(self.name);
+                self.render_labels(output, &[]);
+                let _ = writeln!(output, " {v}");
             }
             MetricValue::Histogram {
                 bounds,
@@ -1210,55 +1218,75 @@ impl MetricSample {
                 for (i, bound) in bounds.iter().enumerate() {
                     cumulative = cumulative.saturating_add(buckets[i]);
                     let le = format!("{bound}");
-                    let _ = writeln!(
-                        output,
-                        "{}_bucket{} {cumulative}",
-                        self.name,
-                        self.render_labels(&[("le", le.as_str())])
-                    );
+                    let _ = write!(output, "{}_bucket", self.name);
+                    self.render_labels(output, &[("le", le.as_str())]);
+                    let _ = writeln!(output, " {cumulative}");
                 }
                 cumulative = cumulative.saturating_add(buckets[bounds.len()]);
-                let _ = writeln!(
-                    output,
-                    "{}_bucket{} {cumulative}",
-                    self.name,
-                    self.render_labels(&[("le", "+Inf")])
-                );
-                let _ = writeln!(output, "{}_sum{} {sum}", self.name, self.render_labels(&[]));
-                let _ = writeln!(
-                    output,
-                    "{}_count{} {count}",
-                    self.name,
-                    self.render_labels(&[])
-                );
+                let _ = write!(output, "{}_bucket", self.name);
+                self.render_labels(output, &[("le", "+Inf")]);
+                let _ = writeln!(output, " {cumulative}");
+                let _ = write!(output, "{}_sum", self.name);
+                self.render_labels(output, &[]);
+                let _ = writeln!(output, " {sum}");
+                let _ = write!(output, "{}_count", self.name);
+                self.render_labels(output, &[]);
+                let _ = writeln!(output, " {count}");
             }
         }
     }
 
-    /// 业务作用：渲染 `{k="v",...}` label 集合;`extra` 追加在 descriptor label 之后(如 histogram 的 `le`)。
-    fn render_labels(&self, extra: &[(&str, &str)]) -> String {
-        let mut parts: Vec<String> = self
+    /// 业务作用：按样本标签和附加标签的既定顺序编码集合，不分配逐标签中间结果。
+    /// 参数说明：
+    /// - `output`: 接收标签集合的文本缓冲区。
+    /// - `extra`: 追加在样本标签之后的标签，如直方图的 `le`。
+    ///
+    /// 返回：有标签时追加花括号、逗号和已转义值；无标签时不写入内容。
+    fn render_labels(&self, output: &mut String, extra: &[(&str, &str)]) {
+        if self.labels.is_empty() && extra.is_empty() {
+            return;
+        }
+        output.push('{');
+        for (index, (key, value)) in self
             .labels
             .iter()
-            .map(|(k, v)| format!("{k}=\"{}\"", escape_label(v)))
-            .collect();
-        for (k, v) in extra {
-            parts.push(format!("{k}=\"{}\"", escape_label(v)));
+            .map(|(key, value)| (*key, value.as_str()))
+            .chain(extra.iter().copied())
+            .enumerate()
+        {
+            if index != 0 {
+                output.push(',');
+            }
+            output.push_str(key);
+            output.push_str("=\"");
+            append_escaped_label(output, value);
+            output.push('"');
         }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("{{{}}}", parts.join(","))
-        }
+        output.push('}');
     }
 }
 
-/// 业务作用：Prometheus label 值转义(`\`、`"`、换行)。
-fn escape_label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+/// 业务作用：直接追加符合 Prometheus 文本协议的标签值，防止引号、反斜杠或换行改变样本结构。
+/// 参数说明：
+/// - `output`: 接收已转义标签值的文本缓冲区。
+/// - `value`: 原始 UTF-8 标签值，不包含外围引号。
+///
+/// 返回：仅转义反斜杠、双引号和换行，其他 UTF-8 内容按原字节保留。
+fn append_escaped_label(output: &mut String, value: &str) {
+    let mut start = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        let escaped = match byte {
+            b'\\' => "\\\\",
+            b'"' => "\\\"",
+            b'\n' => "\\n",
+            _ => continue,
+        };
+        // 只在单字节 ASCII 字符处切分，保持多字节 UTF-8 标签的边界完整。
+        output.push_str(&value[start..index]);
+        output.push_str(escaped);
+        start = index + 1;
+    }
+    output.push_str(&value[start..]);
 }
 
 /// 指标样本值。

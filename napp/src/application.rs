@@ -4094,15 +4094,22 @@ impl Application {
     }
 
     /// 业务作用：复验当前候选权威后同步安装并发布真实状态，安装开始后不再响应取消。
-    /// 参数说明：`expected` 为准备时版本；`prepared` 为完整材料；`cancel` 为驱动取消信号；`install` 只安装已准备资源。
-    /// 返回：安装与发布完成时返回新版本；失去版本权威或提交前已取消时不调用安装。
+    /// 参数说明：
+    /// - `expected`：准备时版本。
+    /// - `prepared`：完整材料。
+    /// - `cancel`：驱动取消信号。
+    /// - `install`：同步提交已经全部准备的资源并返回各目标状态；失败须先恢复旧运行态，只有最终版本与取消门禁通过后才调用。
+    ///
+    /// 返回：安装与发布完成时返回新版本；失去权威、已取消或安装拒绝时保持旧视图，不发送新版本通知。
     #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
     pub(crate) fn publish_prepared_config(
         &self,
         expected: u64,
         prepared: crate::config::ResolvedCandidate,
         cancel: &tokio_util::sync::CancellationToken,
-        install: impl FnOnce() -> std::collections::HashMap<crate::ReloadTarget, crate::ReloadStatus>,
+        install: impl FnOnce() -> ApplicationResult<
+            std::collections::HashMap<crate::ReloadTarget, crate::ReloadStatus>,
+        >,
     ) -> ApplicationResult<u64> {
         let version = prepared.snapshot.version();
         let published = self.inner.config.publish_with(expected, || {
@@ -4114,7 +4121,7 @@ impl Application {
                     "config candidate cancelled before installation",
                 ));
             }
-            Ok(prepared.finish(install()))
+            Ok(prepared.finish(install()?))
         })?;
         if !published {
             return Err(ApplicationError::new(

@@ -455,6 +455,7 @@ impl LogConfig {
 pub struct LogManager {
     guard: Option<LogGuard>,
     reclaim: LogReclaimer,
+    publication: Arc<()>,
 }
 
 /// 锁外完成 I/O 和过滤器解析的日志候选；旧 guard 在安装后保留到候选被锁外释放。
@@ -464,6 +465,18 @@ pub struct PreparedLogConfig {
     file: Option<crate::PreparedFileLogging>,
     retired: Option<LogGuard>,
     reclaim: Option<ReclaimPermit>,
+    publication: Arc<()>,
+    rollback: Option<LogRollback>,
+}
+
+/// 安装前的输出槽和过滤器；旧 guard 继续保留在候选内，不重新打开旧文件。
+struct LogRollback {
+    filter: tracing_subscriber::EnvFilter,
+    pattern: Option<Arc<crate::CompiledLogPattern>>,
+    info: Option<Arc<crate::NonBlocking>>,
+    error: Option<Arc<crate::NonBlocking>>,
+    color: bool,
+    publication: Arc<()>,
 }
 
 /// 每个日志 owner 只保留固定数量的候选和回收工作，避免坏目录或慢刷盘累积后台线程。
@@ -615,6 +628,7 @@ impl LogManager {
         Ok(Self {
             guard: None,
             reclaim: LogReclaimer::new(),
+            publication: Arc::new(()),
         })
     }
 
@@ -628,7 +642,9 @@ impl LogManager {
     }
 
     /// 业务作用：在发布前准备日志文件、writer 和过滤器，当前输出保持可用。
-    /// 参数说明：`cfg` 为完整日志配置；`ctx` 为稳定的应用日志上下文。
+    /// 参数说明：
+    /// - `cfg`：完整日志配置。
+    /// - `ctx`：稳定的应用日志上下文。
     /// 返回：尚未安装的候选；任何解析或文件准备失败都不修改日志运行态。
     pub fn prepare(
         &self,
@@ -650,18 +666,29 @@ impl LogManager {
             file,
             retired: None,
             reclaim: Some(reclaim),
+            publication: Arc::new(()),
+            rollback: None,
         })
     }
 
     /// 业务作用：在宿主发布临界区安装已经准备的候选，不执行文件 I/O 或旧 writer 等待。
-    /// 参数说明：`prepared` 为尚未安装的候选，调用方必须在发布锁外释放它。
-    /// 返回：过滤器安装成功后切换输出；失败保留旧输出，候选仍负责未安装资源的清理。
+    /// 参数说明：
+    /// - `prepared`：尚未安装的候选，调用方必须在发布锁外释放它。
+    /// 返回：过滤器安装成功后切换输出并保留精确旧态；失败保留旧输出，候选仍负责资源清理。
     pub fn install(&mut self, prepared: &mut PreparedLogConfig) -> Result<(), LogApplyError> {
         let filter = prepared.filter.take().ok_or_else(|| {
             LogConfigError::InvalidLevel("candidate was already installed".into())
         })?;
         // 先完成唯一可拒绝的过滤器安装，再无失败地移交文件输出与 guard。
-        crate::install_level(filter).map_err(LogConfigError::InvalidLevel)?;
+        let previous_filter = crate::replace_level(filter).map_err(LogConfigError::InvalidLevel)?;
+        prepared.rollback = Some(LogRollback {
+            filter: previous_filter,
+            pattern: crate::LOG_PATTERN.load_full(),
+            info: crate::INFO_FILE_WRITER.load_full(),
+            error: crate::ERROR_FILE_WRITER.load_full(),
+            color: crate::FILE_COLOR.load(std::sync::atomic::Ordering::Relaxed),
+            publication: self.publication.clone(),
+        });
         set_log_pattern(prepared.resolved.pattern.clone());
         let next_guard = match prepared.file.take() {
             Some(file) => Some(file.install()),
@@ -671,11 +698,48 @@ impl LogManager {
             }
         };
         prepared.retired = std::mem::replace(&mut self.guard, next_guard);
+        self.publication = prepared.publication.clone();
+        Ok(())
+    }
+
+    /// 业务作用：配置事务未提交时恢复安装前的日志输出，旧文件无需重新打开。
+    /// 参数说明：
+    /// - `prepared`：本管理器当前安装的候选，保管旧过滤器、输出槽和 guard。
+    /// 返回：尚未切换或恢复完成时成功；候选已失去安装权威或过滤器不可恢复时拒绝，不覆盖更新的输出。
+    /// 失败候选的 guard 留在候选中等待发布锁外回收；已写出的日志及准备阶段创建的文件不撤销。
+    pub fn rollback(&mut self, prepared: &mut PreparedLogConfig) -> Result<(), LogApplyError> {
+        if prepared.rollback.is_none() {
+            return Ok(());
+        }
+        // 不能用旧事务覆盖后续成功配置或停机动作；恢复只属于仍占据当前输出的候选。
+        if !Arc::ptr_eq(&self.publication, &prepared.publication) {
+            return Err(LogConfigError::InvalidLevel(
+                "log candidate lost rollback authority".into(),
+            )
+            .into());
+        }
+        let previous = prepared
+            .rollback
+            .as_ref()
+            .expect("rollback state was checked");
+        crate::install_level(previous.filter.clone()).map_err(LogConfigError::InvalidLevel)?;
+        let previous = prepared
+            .rollback
+            .take()
+            .expect("rollback state was checked");
+        crate::LOG_PATTERN.store(previous.pattern);
+        crate::INFO_FILE_WRITER.store(previous.info);
+        crate::ERROR_FILE_WRITER.store(previous.error);
+        crate::FILE_COLOR.store(previous.color, std::sync::atomic::Ordering::Relaxed);
+        std::mem::swap(&mut self.guard, &mut prepared.retired);
+        self.publication = previous.publication;
         Ok(())
     }
 
     /// 业务作用：独立使用时完成准备、安装和旧输出回收。
-    /// 参数说明：`cfg` 为完整配置；`ctx` 为应用日志上下文。
+    /// 参数说明：
+    /// - `cfg`：已合并的完整日志配置。
+    /// - `ctx`：用于解析应用名和缺省路径的日志上下文。
     /// 返回：成功返回生效配置；失败保留原输出；此同步入口可能等待文件 I/O，不能在宿主发布锁内调用。
     pub fn apply(
         &mut self,
@@ -699,7 +763,12 @@ impl LogManager {
     }
 
     /// 业务作用：手动关闭文件日志,回到只控制台。
+    ///
+    /// 参数说明: 无。
+    /// 返回：撤销旧候选的回退资格，关闭文件输出并等待已退休资源回收，控制台输出继续有效。
     pub fn disable_file(&mut self) {
+        // 停机或显式关闭撤销旧候选的恢复资格，避免迟到回滚重新启用已关闭 writer。
+        self.publication = Arc::new(());
         disable_file_logging();
         self.guard = None;
         self.reclaim.drain();

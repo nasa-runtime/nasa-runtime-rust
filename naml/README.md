@@ -271,8 +271,8 @@ async fn main(app: nasa::Application) -> anyhow::Result<()> { Ok(()) }
 
 手动入口使用 `ApplicationSpec::with_config_loader(configuration)`，与宏共享 preflight。不指定工厂时保留兼容文件读取范围。`config-boot::strict::prepare/load/assemble` 将 `nacos.imports` 放在 `yml.imports` 前，校验归一后的远端身份、必需文档、顺序与格式；首拉前只求值必要引导依赖。
 
-宿主冻结主路径、profile、环境、imports、模式、连接与信任根。运行期只允许固定模式的匹配集合和业务正文变化；来源权限变化拒绝候选并要求重启。启用 `application,yml-watch` 和 `config_watch.enabled: true` 后，本地事件与 15 秒周期补读进入同一候选流程，Batch 拒绝持续监听。来源失败保留旧视图和观察；值相同仍更新来源观察。视图发布与全部组件应用成功不同，组件分别记录 Applied、ApplyFailed、RestartRequired，不承诺跨组件统一回滚。
+宿主冻结主路径、profile、环境、imports、模式、连接与信任根。运行期只允许固定模式的匹配集合和业务正文变化；来源权限变化拒绝候选并要求重启。启用 `application,yml-watch` 和 `config_watch.enabled: true` 后，本地事件与周期补读进入 napp 的同一候选事务，Batch 拒绝持续监听。`config_watch.poll_interval_ms` 默认 `1000` 毫秒，`10000` 表示 10 秒；允许 1 毫秒至 365 天，非法值拒绝候选。来源、校验或资源准备失败保留旧配置、观察与周期；安装失败逆序恢复旧运行态，全部成功后才发布新版本。naml 只提供加载与观察，不持有业务发布权威。
 
 `app.config_observation()` 提供独立的来源观察序号和规模摘要。候选拒绝时不推进；相同值的来源重命名或远端正文变化仍可推进观察序号，不伪装成业务配置版本。
 
-组件状态为 `ApplyFailed` 时，同值补读可能被值指纹去重，并不保证再次安装失败目标。确认资源条件恢复后应重启应用重新装配；`RestartRequired` 同样通过重启生效。来源解析失败则保留当前视图，并继续事件观察与周期补读。
+拒绝候选不推进当前值指纹，后续补读可以重新尝试同一正文。只支持重启的资源变化拒绝整份候选；补偿失败时 napp 请求停机。准备时创建的目录、文件和已经写出的日志不在运行态回退范围内。Nacos 完整包与本地内容先按原来源计划合并，再进入相同校验和提交边界；远端 freshness 补拉周期独立于本地补读周期。

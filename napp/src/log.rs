@@ -248,6 +248,24 @@ impl crate::reload::PreparedConfigApply for PreparedLogApply {
                 )
             })
     }
+
+    /// 业务作用：其它配置目标未能提交时恢复原有日志过滤器、模板和输出。
+    /// 参数说明：无。
+    /// 返回：精确旧态恢复时成功；恢复资格或过滤器不可用时返回错误，由宿主关闭业务准入。
+    fn rollback(&mut self) -> ApplicationResult<()> {
+        self.manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rollback(&mut self.prepared)
+            .map_err(|error| {
+                ApplicationError::with_source(
+                    ComponentId::Log,
+                    ApplicationPhase::Running,
+                    "log candidate rollback failed",
+                    error,
+                )
+            })
+    }
 }
 
 /// 业务作用：在互斥锁内执行一次日志配置应用。

@@ -65,8 +65,9 @@ Service 的 UserHook 不能提前取得尚未装配的标准 adapter；Batch 的
 Batch 的 Pipeline 与发送 Client 在工作负载前开放，不等待 Service Ready，也不接受长期消费或回调计划。
 hystrix 在 Prepare 安装本代目录，可用于后续初始化与业务收尾；它的准入由命令 owner 管理。
 
-配置更新先准备材料与安全资源，再发布同代视图和真实应用状态。`Applied` 表示该目标已经采用
-对应配置；`RestartRequired` 和 `ApplyFailed` 保留最后成功版本，不因无关更新而消失。
+本地与配置中心更新共用整份候选事务：先完成解析、校验和全部资源准备，再安装并发布同代视图。
+任何校验或准备失败均保留旧配置；安装失败逆序恢复旧运行态，不推进版本或发送新版本通知。
+要求重启的字段变化拒绝整份候选；恢复不完整则请求停机，不能继续声称旧运行态完整可用。
 配置读取应固定一次 `ConfigView`，不能把新 YAML 的可见性当成所有运行资源已切换的证明。
 每项资源只保留一个关闭 owner；关闭通知后仍须等待任务和在途调用的退出证明。
 
@@ -83,7 +84,7 @@ hystrix 在 Prepare 安装本代目录，可用于后续初始化与业务收尾
 命名计划须显式设置 `enabled: true`；未声明或禁用时不构造客户端、不读取其独占凭据。Prepare 使用
 同代配置和 `secret://` 材料绑定资源，并自动登记聚合指标。Service 在后续 initializer 或 Ready 后任务中
 使用句柄，Batch 在工作负载开始前完成装配。停机关闭新调用、等待在途调用，旧句柄永久返回 `Closed`；
-参数或凭据变化报告 `RestartRequired`。对象存储按显式健康策略监督远端状态；Registry 构造不探测远端、
+参数或凭据变化拒绝整份候选并要求重启。对象存储按显式健康策略监督远端状态；Registry 构造不探测远端、
 不注册 schema，其指标仅反映实际调用。
 
 Registry 的 `tls.ca` 与 `tls.identity` 是可选 `secret://` PEM 引用，分别提供替代默认根的信任锚及客户端证书链和未加密 PKCS#8 私钥；认证域独立于 Kafka，证书及主机名验证始终开启。取消业务等待后，已接纳的 HTTP 请求仍由客户端保留额度；宿主停止会关闭准入、取消本地读取并在共享截止点内等待请求退出，旧句柄返回 `Closed`。取消或关闭不能证明远端注册没有发生。
@@ -371,7 +372,7 @@ SQLite 文件 owner、连接、迁移门禁、观测与停机均由同一 Applic
 
 直接依赖 `napp` 时启用 `db-sqlite`，Redis Mapper 缓存启用 `mapper-cache-sqlite`。两者与 MySQL/PostgreSQL 对应 feature 独立。
 
-SQLite 的连接、结果和事务各有有限预算；独立请求的共同截止点在 lease 接纳前固定。真实原生执行或关闭未结束时继续占用容量和文件 owner，超时不证明文件已可由另一实例接管。普通健康探测不能解除持续隔离。`sql.observability`、SQLite 维护/错误指标与 readiness 使用同一来源身份；数据源配置热变更报告 `RestartRequired`，不会切换现存 Mapper client。完整代码和迁移登记见 [SQLite 接入指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/sqlite.md)。
+SQLite 的连接、结果和事务各有有限预算；独立请求的共同截止点在 lease 接纳前固定。真实原生执行或关闭未结束时继续占用容量和文件 owner，超时不证明文件已可由另一实例接管。普通健康探测不能解除持续隔离。`sql.observability`、SQLite 维护/错误指标与 readiness 使用同一来源身份；数据源配置变化拒绝整份候选并要求重启，不会切换现存 Mapper client。完整代码和迁移登记见 [SQLite 接入指南](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/docs/sqlite.md)。
 
 ### PostgreSQL 单源
 
@@ -1330,7 +1331,7 @@ Application 的退出原因与 Kafka 资源清理结果独立。宿主已停止�
 `control_partitions` 同样要求容器 Ready，返回 `Applied`、`NotApplied`、`Unknown` 或 `OwnerChanged` 的逐分区证据。报告保留部分成功，无法把跨 owner 操作解释为原子事务；`Unknown` 须查询确认后再决定下一步。容器停止后旧 handle 不得通过报告入口重新开放控制。
 
 Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选帧仍先做完整无副作用校验，非法帧保留
-旧快照，合法但发生变化统一标记 `RestartRequired`，运行期不热切 broker、凭据、group 或 route。
+旧快照，合法但发生变化时拒绝整份候选并要求重启，运行期不热切 broker、凭据、group 或 route。
 
 ### 业务项目复制后必须修改的 Kafka 项
 
@@ -1350,7 +1351,7 @@ Kafka 配置可以由 `nacos-config` 的初次 overlay 提供；运行期候选�
    web/ws/nacos-discovery/discovery/scheduling 之前。
 
 安全协议、用户名、密码、证书路径和原生 properties 仍使用 `KafkaConfig` 对应字段；这些值不要写进示例、
-日志或管理端点。运行期配置变更只报告 `RestartRequired`，必须通过应用重启生效。
+日志或管理端点。运行期配置变更拒绝整份候选，必须通过应用重启生效。
 
 ## Web HTTP listener 受管模式
 
@@ -1686,7 +1687,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 
 ## 生命周期要点
 
-- `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写只记 `RestartRequired`。
+- `zcf/application.yml` 必须存在（内容可为 `{}`）；整个 `application.*`（name/mode/worker_threads/超时）是 bootstrap-only，远端首拉改写拒绝启动，运行期改写拒绝整份候选并要求重启。
 - `mode: auto | service | batch`：auto 在声明 saga/kafka/outbox/web/ws/nacos-discovery/discovery/scheduling 任一长生命周期组件，或收集到静态 `hosted` initializer 时解析为 Service，否则 Batch；显式 Batch 不允许这些长生命周期能力。
 - Service 启动顺序为 `Bootstrap -> Start -> UserHook -> InitializerFreeze -> Prepare -> Initialization -> Seal -> Ready`；全部阶段共用 `application.startup_timeout_ms` 形成的一个绝对 deadline。
 - 信号：broker ready 先于任何异步组件；Service 首次 Ctrl-C/SIGTERM 优雅停机退 0，Batch 未完成被取消退 128+signo；Stopping 中再次收到信号立即强退。
@@ -1695,7 +1696,7 @@ Authorization 的 Basic/Bearer 引号凭据和 Digest 参数列表整体隐藏�
 - 组件 Bootstrap、Start、Prepare、Ready 的方法调用和 future 轮询发生单次展开式 panic 时，按组件与当前阶段报告固定错误，并沿 active stack 执行异步回滚。组件与 initializer 的启动 future、initializer 实例、暂存终端任务和任务工厂均在接管时建立释放保护；完成、超时、取消、信号或部分移交失败时，析构展开不越过回滚边界。实例从运行时登记或静态工厂产出起保持保护，拓扑排序只借用元数据；三轮结束及失败出口逐项释放实例后才清理其依赖。已有失败或停止原因保持不变，次要释放异常单独报告；成功结果后的释放异常阻止启动。异常 payload 的析构在独立边界处理，不输出正文。同步阻塞、`panic=abort` 与同一次展开中的再次 panic 无法安全抢占。
 - `ApplicationComponent` 对象从登记起受析构隔离保护，在清理栈和资源收口后逐项释放；尚未退出的受管任务保留组件所有权直到实际退出。批任务完成时的组件释放异常返回稳定的 Stopping 错误；已有主失败、信号或主动停止原因保持不变，释放异常进入次要清理报告。直接取消及延迟释放路径仅同步告警，不追改已交付结果。
 
-- 配置热刷新：整帧校验失败保留旧快照；可热刷组件（当前 log）成功记 `Applied`、失败保留 last-known-good 记 `ApplyFailed`；其余组件的段变化或依赖材料变化如实记 `RestartRequired`，保留最后实际生效版本。中性 `discovery` 的连接身份、注册目标与策略随 owner 冻结，该配置段变化直接拒绝整帧并保留原视图与客户端，须重启后生效。材料依赖识别完整合法的 `secret://id` 与既有裸 ID 引用，file/env/provider 内容改变即使配置树不变也参与判断；材料恢复到实际使用值后可重新记 `Applied`。命名 HTTP 客户端材料随视图发布，初始及后续成功版本记在 `Managed("http_clients")`；准备失败保留旧视图，名称集合变化拒绝整帧。`app.config_view()` 保证快照与状态表同版本。
+- 配置热刷新：本地文件和 Nacos 完整包先完成整份校验与全部资源准备，再同步安装并发布同代视图。任一步准备失败保留旧态，安装失败逆序恢复已尝试的目标；当前可热应用组件为 log，命名 HTTP 客户端材料随完整视图切换。不支持热应用的组件、固定资源名称、discovery 身份或策略变化拒绝整份候选，须重启生效。材料依赖包括合法 secret://id、既有裸 ID 及 file/env/provider 内容变化；拒绝候选不推进当前值指纹，允许后续补读重试。app.config_view() 固定同一代配置、材料与状态。
 - 错误报告有界展开错误链并统一脱敏（URI userinfo、常见敏感键）；敏感键比较忽略不可见格式控制并识别 ASCII 字母数字兼容字形，替换坐标保持原文。兼容标点不产生新的值结束边界；这不是任意视觉混淆字符检测。进程级 panic hook 只写受控 location marker，不读 payload。
 
 ## 业务扩展点
@@ -1963,7 +1964,7 @@ ws_clients:
 `token` 可省略；提供时必须使用 `secret://`，材料来自同一启动快照。仅被 disabled 计划引用的材料
 不解析。首连包含 TCP 建连与认证，共用一份超时；所有启用计划首连失败均拒绝启动。
 运行期重连由 `auto_reconnect` 控制，使用冻结的材料，每次重连都先等待旧 writer 与 heartbeat 退出。
-配置与材料变化报告 `RestartRequired`。
+配置与材料变化拒绝整份候选并要求重启。
 
 Service UserHook 使用 `configure_ws_client_event(name, event, callback)` 登记同步非阻塞回调，
 每客户端最多 256 个事件。Ready 前控制帧照常处理，业务帧最多缓冲 64 条且正文合计不超过单帧配置；
@@ -2006,7 +2007,7 @@ Service 和 Batch 都在 Prepare 装配；`app.hystrix_command("settlement").awa
 或存在手工全局 fallback 时拒绝受管启动。静态收集的全局 fallback 函数可复用，运行资源不能通过
 手工进程 fallback 移交给此 owner。
 
-规则、目录计划和容量冻结到启动，变化报告 `RestartRequired`。Service 业务 graceful shutdown
+规则、目录计划和容量冻结到启动，变化拒绝整份候选并要求重启。Service 业务 graceful shutdown
 仍可调用命令，随后才关闭新调用、等待在途执行与集中周期任务退出，再撤销本代全局引用。
 等待方取消不解除该责任；上一代真实退出前再次安装会得到 owner 冲突。观察任务意外结束影响 Ready
 并触发停机，健康阈值为 1，5 秒过期。该能力不提供错误率熔断或自适应限流。
@@ -2056,13 +2057,24 @@ async fn main(_app: nasa::Application) -> anyhow::Result<()> {
 在环境缺失时使用嵌套默认值；显式空环境值不触发回退。别名 `${aa.bb.cc}`、`${aa-bb-cc}`、
 `${AA_BB_CC}` 可命中同一大写环境名称，确切树值和原样环境键优先。
 
-启用 `yml-watch` 并设置 `config_watch.enabled: true` 时，实际来源及模式目录参与观察；相同值也对账新来源。固定模式允许文件增删和替换，imports、模式或信任根变化拒绝候选并要求重启。来源、材料或整帧校验失败保留旧态；组件应用仍分别记录 Applied、ApplyFailed、RestartRequired，不提供所有组件一起回滚的事务。详见[naml 配置合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)。
+启用 `yml-watch` 并设置 `config_watch.enabled: true` 时，实际来源及模式目录参与观察；相同值也对账新来源。固定模式允许文件增删和替换，imports、模式或信任根变化拒绝候选并要求重启。来源、材料、任一组件校验或资源准备失败保留当前完整配置、观察集合和补读周期。全部资源准备成功后才进入提交门禁，安装失败逆序恢复已尝试的目标，成功后统一发布配置视图与 `Applied` 状态。详见[naml 配置合同](https://github.com/nasa-runtime/nasa-runtime-rust/blob/master/naml/README.md)。
 
-组件状态为 `ApplyFailed` 时，同值补读可能被值指纹去重，并不保证再次安装失败目标。确认资源条件恢复后应重启应用重新装配；`RestartRequired` 同样通过重启生效。来源解析失败则保留当前视图，并继续事件观察与周期补读。
+被拒绝的候选不更新当前值指纹，因此后续事件或补读可以重新尝试同一正文；不支持热应用的资源变化需重启后生效。事务补偿不能撤销已写出的日志、准备阶段创建的目录文件或进程终止类故障；补偿失败会撤销配置准入并请求宿主停机。读取方应固定一次 `ConfigView`，跨多个业务组件的并发操作仍需业务自己的读侧门禁。
 
 `app.config_observation()` 返回严格来源独立的观察序号和规模摘要，不含路径或原值。来源受理后才更新；同值来源变化可推进此序号，快照版本和 Applied 状态仍单独记录。
 
-本地事件使用固定 100 ms 窗口合并，并每 15 秒补读；这些间隔不等于生效延迟上界，读取、材料准备、
+本地事件使用固定 100 ms 窗口合并，`config_watch.poll_interval_ms` 控制周期补读，默认 `1000` 毫秒。
+设置 `10000` 表示 10 秒；支持 1 毫秒至 365 天，零、越界或错误类型拒绝候选并保留旧周期。周期只在整份候选
+提交后更新。Nacos 本地依赖使用同一补读周期；远端完整包通知和 15 秒 freshness 补拉保持独立。
+运行期提交 `config_watch.enabled: false` 后，撤销本地监听并停止事件和周期补读，积压通知不再触发加载。
+独立本地驱动保留停机等待，后续编辑文件不能重新开启观察，需重启应用。Nacos 驱动仍接收远端完整候选，
+远端候选可重新启用本地观察；关闭本地触发不禁止远端候选按既有规则合并本地来源。
+独立本地观察的健康有效期为已提交周期的三倍且不少于 45 秒；读取端按绝对期限判断失联，
+长周期正常等待不会提前降级，主动关闭后清除该观察期限。候选拒绝立即显示降级并保留旧配置，合法候选恢复后采用新的周期和有效期。
+候选正文读取、来源复读、目录观察和组件文件准备在阻塞线程池执行，异步调用方通过 `.await` 让出业务线程。
+后台准备不能安装或发布配置；返回后仍须通过来源、版本与取消门禁。配置事务完成后的日志 writer 和
+已替换观察资源也在线程池回收，回收等待不改变已经提交的配置结果。
+这些间隔不等于生效延迟上界，读取、材料准备、
 组件安装及执行器调度仍需时间。同步文件系统调用无法被异步期限强制打断，需要硬期限的来源读取
 应由调用方使用可终止进程取得文本后再装配。观察异常应同时检查来源状态和各组件状态，不能仅看
 配置版本递增。严格候选不自动重新捕获进程环境，环境与来源权限调整后需重启。

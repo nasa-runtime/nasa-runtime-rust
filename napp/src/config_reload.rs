@@ -48,8 +48,14 @@ impl CandidatePublisher {
     }
 
     /// 业务作用：完成有界候选的材料准备后，在既有发布门禁内安装并发布最终状态。
-    /// 参数说明：`merged` 为完整原始候选；`sources` 为来源摘要；`cancel` 在同步安装前生效。
-    /// 返回：无变化时 None；成功返回新代次；准备或权威校验失败保留旧视图。
+    /// 参数说明：
+    /// - `merged`：尚未脱敏的完整合并候选，编码结果不得超过 1 MiB，声明组件与受管资源段须先通过校验。
+    /// - `sources`：本次候选的远端配置文档来源，随准备后的快照保存。
+    /// - `cancel`：来源驱动的取消信号；材料准备时可中断，最终同步安装前再次检查，安装开始后不再中断。
+    ///
+    /// 返回：候选及秘密均未变化时为 None；整批安装成功后才发布新版本，取消时拒绝候选。
+    /// 任一校验、准备或来源复验失败均保留旧态；不支持热应用的变更拒绝整份候选。
+    /// 安装失败时逆序恢复旧运行态且不发布；恢复不完整时撤销配置准入并请求宿主停机。
     pub(crate) async fn publish(
         &mut self,
         merged: Value,
@@ -66,8 +72,7 @@ impl CandidatePublisher {
             ));
         }
         // 先对候选整帧做内置组件段校验：任一段非法都不发布，旧快照继续有效。
-        // `application` 段被有意排除——它 bootstrap-only，只做原始 section 比较并记 RestartRequired，
-        // 否则远端新增/拼错 application 字段会因 deny_unknown_fields 把整帧候选一起否掉。
+        // `application` 已在启动时冻结，后续按原始段比较并拒绝任何变化，不能热迁移进程身份。
         crate::sections::validate_declared_sections(
             &self.components,
             &merged,
@@ -103,14 +108,18 @@ impl CandidatePublisher {
                 .prepare_reloaded_config(current_version, merged.clone(), sources);
         let prepared = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Ok(None),
-            _ = self.application.cancellation_token().cancelled_owned() => return Ok(None),
+            _ = cancel.cancelled() => return Err(cancelled()),
+            _ = self.application.cancellation_token().cancelled_owned() => return Err(cancelled()),
             result = prepare => result?,
         };
         let secret_changes = prepared.secrets.changed_ids(current.secrets());
         // 材料准备可能等待外部 I/O；同值候选也必须先复验来源才能切换观察记录。
         if let Some(source) = self.application.strict_source() {
-            source.revalidate()?;
+            crate::read_config_candidate(move || source.revalidate()).await??;
+        }
+        // 复读期间可能进入停机；同值候选也不能借无发布分支更新已失权的来源观察。
+        if cancel.is_cancelled() || self.application.cancellation_token().is_cancelled() {
+            return Err(cancelled());
         }
         if crate::secret::candidate_fingerprint(&merged) == current.candidate_fingerprint()
             && secret_changes.is_empty()
@@ -140,59 +149,98 @@ impl CandidatePublisher {
                 )
             })
             .collect();
-        let mut applications = std::collections::HashMap::new();
-        for component in &changed {
-            if let Some(applier) = self.appliers.get(component) {
-                applications.insert(*component, applier.prepare(&merged));
-            }
-        }
         let fixed_material_changes = prepared.secrets.changed_ids(self.initial.secrets());
-        // 组件预备资源仍在发布锁外；已知来源变化时丢弃整批预备资源并保持旧视图。
-        if let Some(source) = self.application.strict_source() {
-            source.revalidate()?;
+        let statuses = self.collect_statuses(
+            &current,
+            &merged,
+            next_version,
+            &changed,
+            &fixed_material_changes,
+        );
+        // 不能把要求重启的字段与可热更字段混合发布，否则同一配置版本会表达两套运行状态。
+        if statuses
+            .values()
+            .any(|status| matches!(status.state, crate::ReloadState::RestartRequired { .. }))
+        {
+            return Err(crate::ApplicationError::new(
+                ComponentId::Config,
+                ApplicationPhase::Running,
+                "configuration candidate changes resources that require restart",
+            ));
         }
+        let appliers: Vec<_> = self
+            .components
+            .iter()
+            .filter(|component| changed.contains(component))
+            .filter_map(|component| self.appliers.get(component).cloned())
+            .collect();
+        let source = self.application.strict_source();
+        // 日志文件打开与来源正文复读都可能阻塞；后台只准备资源，不能取得配置安装或发布权威。
+        let mut applications = crate::read_config_candidate(move || {
+            let mut applications = Vec::with_capacity(appliers.len());
+            for applier in appliers {
+                // 所有目标先准备完成，任一失败都不调用 install，已准备候选也在当前阻塞线程回收。
+                applications.push(applier.prepare(&merged)?);
+            }
+            // 准备期间来源可能改变；复读仍在发布锁外，拒绝时保留全部旧运行态。
+            if let Some(source) = source {
+                source.revalidate()?;
+            }
+            Ok::<_, crate::ApplicationError>(applications)
+        })
+        .await??;
         let version =
             self.application
                 .publish_prepared_config(current_version, prepared, cancel, || {
-                    self.install_and_collect_statuses(
-                        &current,
-                        &merged,
-                        next_version,
-                        &changed,
-                        &mut applications,
-                        &fixed_material_changes,
-                    )
+                    if let Err(error) = crate::apply_config_transaction(&mut applications) {
+                        if !error.rollback_complete() {
+                            // 无法证明旧态完整恢复时禁止继续接收配置，交由宿主退出，不能假报旧配置仍安全可用。
+                            self.application.cancellation_token().cancel();
+                            let _ = self.application.shutdown();
+                        }
+                        return Err(crate::ApplicationError::with_source(
+                            ComponentId::Config,
+                            ApplicationPhase::Running,
+                            "configuration transaction rejected",
+                            error,
+                        ));
+                    }
+                    Ok(statuses)
                 });
-        // 候选仍拥有被替换或未安装的日志 guard；发布锁已经释放，回收不阻塞订阅创建。
-        drop(applications);
-        let version = version?;
-        let installed = self.application.config_view();
-        for component in &self.components {
-            if installed
-                .reload_statuses()
-                .get(&ReloadTarget::Component(*component))
-                .is_some_and(|status| matches!(status.state, crate::ReloadState::Applied))
-            {
-                self.effective.insert(*component, installed.clone());
+        if version.is_ok() {
+            // 发布成功后立即同步本驱动的有效视图，不能在后续回收等待期间保留旧的应用状态记录。
+            let installed = self.application.config_view();
+            for component in &self.components {
+                if installed
+                    .reload_statuses()
+                    .get(&ReloadTarget::Component(*component))
+                    .is_some_and(|status| matches!(status.state, crate::ReloadState::Applied))
+                {
+                    self.effective.insert(*component, installed.clone());
+                }
             }
         }
-        Ok(Some(version))
+        // 文件 writer 回收可能等待刷盘线程；事务结束后只移交候选持有的退出资源，不切换当前输出。
+        crate::read_config_candidate(move || drop(applications)).await?;
+        version.map(Some)
     }
 
-    /// 业务作用：安装已准备资源，并保留尚未生效目标的状态及最后成功版本。
-    /// 参数说明：`current` 为当前视图；`candidate` 为原始候选；`next_version` 为本次代次；
-    /// `changed` 为配置或依赖材料变化目标；`applications` 持有准备结果及锁外回收责任。
-    /// 返回：根据真实安装结果生成的状态表，不执行准备 I/O 或日志输出。
-    fn install_and_collect_statuses(
+    /// 业务作用：在准备与安装前确定整批配置是否支持热应用，并构造成功提交后使用的状态表。
+    /// 参数说明：
+    /// - `current`：安装前的已发布视图，用于保留目标最后成功版本。
+    /// - `candidate`：已通过校验的原始候选，供比对固定引导段及受管资源设置。
+    /// - `next_version`：当前候选的期望版本，仅成功应用或无需变化的目标才能推进到它。
+    /// - `changed`：相对各组件最后有效配置或依赖材料发生变化的目标集合。
+    /// - `fixed_material_changes`：必须重启才能生效的固定材料变化集合。
+    ///
+    /// 返回：可热应用的目标预记成功，固定段变化标记要求重启；调用方必须先拒绝重启项，再准备并整体提交。
+    /// 本方法不安装资源或发布状态；状态表只有全部安装成功后才对外可见。
+    fn collect_statuses(
         &self,
         current: &ConfigView,
         candidate: &Value,
         next_version: u64,
         changed: &std::collections::HashSet<ComponentId>,
-        applications: &mut std::collections::HashMap<
-            ComponentId,
-            ApplicationResult<Box<dyn crate::reload::PreparedConfigApply>>,
-        >,
         fixed_material_changes: &std::collections::BTreeSet<Arc<str>>,
     ) -> std::collections::HashMap<ReloadTarget, ReloadStatus> {
         let mut statuses = std::collections::HashMap::new();
@@ -243,20 +291,8 @@ impl CandidatePublisher {
             let target = ReloadTarget::Component(*component);
             let status = if !changed.contains(component) {
                 ReloadStatus::applied(next_version)
-            } else if let Some(prepared) = applications.get_mut(component) {
-                match prepared {
-                    Ok(prepared) => match prepared.install() {
-                        Ok(()) => ReloadStatus::applied(next_version),
-                        Err(error) => ReloadStatus::apply_failed(
-                            applied_version_of(current, &target),
-                            crate::report::redact(&crate::report::error_chain(&error)),
-                        ),
-                    },
-                    Err(error) => ReloadStatus::apply_failed(
-                        applied_version_of(current, &target),
-                        crate::report::redact(&crate::report::error_chain(error)),
-                    ),
-                }
+            } else if self.appliers.contains_key(component) {
+                ReloadStatus::applied(next_version)
             } else {
                 ReloadStatus::restart_required(
                     applied_version_of(current, &target),
@@ -269,9 +305,22 @@ impl CandidatePublisher {
     }
 }
 
-/// 业务作用：提取启动期资源身份，禁止热刷新扩大或撤销已冻结的命名目录。
-/// 参数说明：`value` 为命名计划段。
-/// 返回：仅包含显式启用名称的有序集合。
+/// 业务作用：将停机期间的候选准备标为拒绝，避免来源驱动把取消误认成同值成功并更新观察。
+/// 参数说明：无。
+/// 返回：不包含来源正文的配置取消错误，当前配置及观察保持有效。
+fn cancelled() -> crate::ApplicationError {
+    crate::ApplicationError::new(
+        ComponentId::Config,
+        ApplicationPhase::Running,
+        "configuration candidate cancelled before publication",
+    )
+}
+
+/// 业务作用：提取显式启用的资源名称，供调用方识别热刷新是否改变已冻结的命名目录。
+/// 参数说明：
+/// - `value`：配置中按名称索引的资源计划段，可能缺失或不为对象。
+///
+/// 返回：只包含 enabled 恰为布尔 true 的名称集合；缺失、类型不符或未启用时不计入，不自行校验整段或执行拒绝动作。
 fn enabled_names(value: Option<&Value>) -> std::collections::BTreeSet<String> {
     value
         .and_then(Value::as_object)

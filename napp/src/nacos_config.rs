@@ -359,9 +359,10 @@ impl ApplicationComponent for NacosConfigComponent {
                 publisher,
                 #[cfg(feature = "config-watch")]
                 local: crate::config_watch::LocalWatch::new(
-                    context.application().config().value(),
+                    context.application().config().value().clone(),
                     context.application().strict_source(),
-                )?,
+                )
+                .await?,
                 readiness: contributor,
                 cancel: cancel.clone(),
             };
@@ -459,13 +460,22 @@ impl WatchDriver {
         probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // watch 建立过程已经完成一次全量拉取；跳过 interval 的立即首 tick，避免 Ready 后重复请求。
         probe.tick().await;
+        #[cfg(feature = "config-watch")]
+        let mut local_poll = crate::ConfigPoller::new(self.local.interval_ms)?;
+        #[cfg(feature = "config-watch")]
+        local_poll.tick().await;
         let mut latest_bundle = self.receiver.borrow().clone();
         loop {
             #[cfg(feature = "config-watch")]
             let local_signal = self.local.signal.clone();
             let local_event = async {
                 #[cfg(feature = "config-watch")]
-                local_signal.notified().await;
+                tokio::select! {
+                    // 本地观察关闭后积压通知也失去加载资格；远端通知和 freshness 补拉仍由外层驱动负责。
+                    _ = local_signal.notified(), if self.local.enabled => {},
+                    _ = local_poll.tick(), if self.local.enabled => {},
+                    else => std::future::pending::<()>().await,
+                }
                 #[cfg(not(feature = "config-watch"))]
                 std::future::pending::<()>().await;
             };
@@ -577,28 +587,35 @@ impl WatchDriver {
                     }
                 }
             }
+            #[cfg(feature = "config-watch")]
+            local_poll.set_interval(self.local.interval_ms)?;
         }
     }
 
     /// 业务作用：对一帧 bundle 执行合并、校验并按需发布新配置版本。
     ///
-    /// 返回 `None` 表示合并结果与当前快照逐字节相同、本帧未发布：注册 watch 时 SDK 会先投一次
-    /// 初始通知，重连和无关文档变更也会触发全量重拉，若照单发布就会出现"版本号涨了但配置没变"的
-    /// 噪声，令 `applied_version` 与快照版本的差值失去诊断意义。
+    /// 参数说明：
+    /// - `bundle`：本轮全量重拉的逐文档原文，按启动时冻结的来源计划合并。
     ///
-    /// # 参数
-    ///
-    /// - `bundle`：本轮全量重拉的逐文档原文。
+    /// 返回：整批提交新配置时为 Some(version)，内容与秘密未变化时为 None；取消时拒绝候选。
+    /// 合并、校验、准备或安装失败均不发布候选；不支持热应用的字段要求重启且保留当前完整配置。
+    /// publisher 完成整批提交后才更新本地监听和来源观察。
     async fn reload_once(&mut self, bundle: &ConfigBundle) -> ApplicationResult<Option<u64>> {
         let merged = if let Some(source) = &self.source {
-            let plan = source.prepare(false)?;
-            let loaded = config_boot::strict::assemble(plan, bundle, &self.boot).map_err(|_| {
-                nacos_error(
-                    ApplicationPhase::Running,
-                    "strict configuration candidate rejected",
-                )
-            })?;
-            source.accept(loaded)
+            let source = source.clone();
+            let bundle = bundle.clone();
+            let boot = self.boot.clone();
+            crate::read_config_candidate(move || {
+                let plan = source.prepare(false)?;
+                let loaded = config_boot::strict::assemble(plan, &bundle, &boot).map_err(|_| {
+                    nacos_error(
+                        ApplicationPhase::Running,
+                        "strict configuration candidate rejected",
+                    )
+                })?;
+                Ok::<_, crate::ApplicationError>(source.accept(loaded))
+            })
+            .await??
         } else {
             let overlays = config_boot::assemble_overlays_from_bundle_for_bootstrap(
                 &self.imports,
@@ -613,17 +630,21 @@ impl WatchDriver {
                     error,
                 )
             })?;
-            let loader = YmlLoader::standard();
-            loader.load_tree_with_overlays(&overlays).map_err(|error| {
-                nacos_error_src(
-                    ApplicationPhase::Running,
-                    "cannot merge nacos overlays",
-                    error,
-                )
-            })?
+            crate::read_config_candidate(move || {
+                YmlLoader::standard()
+                    .load_tree_with_overlays(&overlays)
+                    .map_err(|error| {
+                        nacos_error_src(
+                            ApplicationPhase::Running,
+                            "cannot merge nacos overlays",
+                            error,
+                        )
+                    })
+            })
+            .await??
         };
         #[cfg(feature = "config-watch")]
-        let watch = self.local.prepare(&merged)?;
+        let watch = self.local.prepare(&merged).await?;
         let published = self
             .publisher
             .publish(
@@ -631,9 +652,11 @@ impl WatchDriver {
                 nacos_sources(&self.imports, &self.boot),
                 &self.cancel,
             )
-            .await?;
+            .await;
         #[cfg(feature = "config-watch")]
-        self.local.install(watch, published.is_some());
+        let published = self.local.finish(watch, published).await?;
+        #[cfg(not(feature = "config-watch"))]
+        let published = published?;
         if let Some(source) = &self.source {
             source.commit_observation();
         }

@@ -442,7 +442,7 @@ pub fn init() {
 }
 
 // 运行期重置日志级别的"重置器":捕获 reload handle 的闭包(避免命名 handle 的复杂类型)。
-type LevelReloader = Box<dyn Fn(EnvFilter) -> Result<(), String> + Send + Sync>;
+type LevelReloader = Box<dyn Fn(EnvFilter) -> Result<EnvFilter, String> + Send + Sync>;
 static LEVEL_RELOADER: OnceLock<LevelReloader> = OnceLock::new();
 
 /// 业务作用：初始化全局日志:按配置模板输出的 formatter + `RUST_LOG`/默认级别过滤。
@@ -480,10 +480,11 @@ fn init_with_optional_layer(default_filter: &str, extra_layer: Option<OptionalRe
     // 把 filter 包成 reload::Layer:拿到 handle 后能在运行期 reload 成新级别。
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
 
-    let _ = LEVEL_RELOADER.set(Box::new(move |filter| {
+    let _ = LEVEL_RELOADER.set(Box::new(move |mut filter| {
         reload_handle
-            .reload(filter)
-            .map_err(|error| error.to_string())
+            .modify(|current| std::mem::swap(current, &mut filter))
+            .map_err(|error| error.to_string())?;
+        Ok(filter)
     }));
 
     // 控制台是否上色:stdout 是 TTY 才上色(颜色只在终端,重定向/管道时自动关,
@@ -543,9 +544,18 @@ pub fn set_level(level: &str) {
 }
 
 /// 业务作用：安装已解析的日志过滤器，不在提交阶段重新解析配置。
-/// 参数说明：`filter` 为已验证的过滤器。
+/// 参数说明：
+/// - `filter`：为已验证的过滤器。
 /// 返回：已初始化且过滤器可替换时成功；否则不改变文件输出。
 fn install_level(filter: EnvFilter) -> Result<(), String> {
+    replace_level(filter).map(|_| ())
+}
+
+/// 业务作用：切换过滤器并保留精确旧值，使配置事务可在不重新解析的情况下恢复。
+/// 参数说明：
+/// - `filter`：已完成解析的候选过滤器。
+/// 返回：成功返回先前过滤器；句柄不可用时不改变过滤状态。
+fn replace_level(filter: EnvFilter) -> Result<EnvFilter, String> {
     LEVEL_RELOADER
         .get()
         .ok_or_else(|| "log subscriber is not initialized".to_owned())?(filter)

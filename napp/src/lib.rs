@@ -165,6 +165,12 @@ mod cache;
 mod capabilities;
 mod component;
 mod config;
+mod config_poll;
+mod config_transaction;
+pub use config_poll::{read_config_candidate, ConfigPoller, DEFAULT_CONFIG_POLL_INTERVAL_MS};
+pub use config_transaction::{
+    apply_config_transaction, ConfigTransactionError, PreparedConfigChange,
+};
 #[cfg(any(feature = "nacos-config", feature = "config-watch"))]
 mod config_reload;
 #[cfg(feature = "config-watch")]
