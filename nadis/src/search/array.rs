@@ -25,7 +25,12 @@ use crate::error::{NasaRedisError, Result};
 /// "key 不存在则 JSON.SET 初始化 array,否则 JSON.ARRAPPEND 追加"。单 key,多 value。
 /// JSON.ARRAPPEND 不接受新 key(报 "could not perform this operation on a key that
 /// doesn't exist"),必须先 JSON.SET 创建。Lua 包成 1 RTT + TOCTTOU 安全。
-pub const INIT_OR_APPEND: &str = r#"if redis.call('EXISTS', KEYS[1]) == 0 then
+pub const INIT_OR_APPEND: &str = r#"-- 非数组根的追加可能返回空结果，覆盖还可能删除对象成员，必须在任何写入前拒绝。
+local root_type = redis.call('JSON.TYPE', KEYS[1])
+if root_type and root_type ~= 'array' then
+  return redis.error_reply('ARRAY root must be an array')
+end
+if redis.call('EXISTS', KEYS[1]) == 0 then
   redis.call('JSON.SET', KEYS[1], '$', '[' .. table.concat(ARGV, ',') .. ']')
 else
   for i = 1, #ARGV do
@@ -39,7 +44,12 @@ return #ARGV
 /// (DEL 可能把数组删空导致 key 整体消失),不在则 JSON.SET 初始化,在则 ARRAPPEND。
 /// 二次 EXISTS 是为了规避"DEL 把唯一子文档删除后 key 被回收"的边界。
 /// `ARGV[1]` = idFilter，`ARGV[2]` = 新子文档 JSON。
-pub const REPLACE_OR_APPEND: &str = r#"if redis.call('EXISTS', KEYS[1]) == 1 then
+pub const REPLACE_OR_APPEND: &str = r#"-- 非数组根的追加可能返回空结果，覆盖还可能删除对象成员，必须在任何写入前拒绝。
+local root_type = redis.call('JSON.TYPE', KEYS[1])
+if root_type and root_type ~= 'array' then
+  return redis.error_reply('ARRAY root must be an array')
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('JSON.DEL', KEYS[1], ARGV[1])
 end
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -192,7 +202,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `doc`：提供数组分组、子文档 ID 和序列化内容的业务文档。
     ///
-    /// 返回：数值 ID 通过比较范围检查、编码身份与同次 ID 一致、键派生成功且追加脚本调用成功时返回成功；失败返回错误，远端是否已追加需按错误类别判断。此入口不查重，同 ID 可以重复；覆盖应使用 save_or_replace。
+    /// 返回：数值 ID 通过比较范围检查、编码身份与同次 ID 一致、键派生成功且追加脚本调用成功时返回成功；已有键的根值不是数组时，脚本在写入前拒绝；其它失败返回错误，远端是否已追加需按错误类别判断。此入口不查重，同 ID 可以重复；覆盖应使用 save_or_replace。
     pub async fn save(&self, doc: &T) -> Result<()> {
         let id = doc.id();
         // 非有限数值会失去身份字段，越界浮点条件可能合并整数身份，必须在写入前拒绝。
@@ -217,7 +227,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `docs`：需要追加的文档列表，每个文档独立派生业务分组和桶。
     ///
-    /// 返回：空列表返回零；全部会话及票据成功时返回输入文档数。任一数值 ID 不满足比较范围、编码身份与同次 ID 不一致、派生或编码失败时整批不发送；提交失败返回错误，已经完成的批次不会回滚，未知执行结果不能自动当作未写入。
+    /// 返回：空列表返回零；全部会话及票据成功时返回输入文档数。任一数值 ID 不满足比较范围、编码身份与同次 ID 不一致、派生或编码失败时整批不发送；每个键的脚本在写入前拒绝已有的非数组根值；提交失败返回错误，已经完成的批次不会回滚，未知执行结果不能自动当作未写入。
     pub async fn save_all(&self, docs: &[T]) -> Result<usize> {
         // 所有正文与身份先在本地核对，避免后续文档拒绝时已有前序分组发出。
         let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
@@ -264,7 +274,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `doc`：提供目标分组、用于匹配的子文档 ID 和新内容的业务文档。
     ///
-    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器及编码身份校验成功且脚本返回可解码整数时返回成功；编码身份不一致在删除旧文档前拒绝，其它失败返回错误，Lua 内已有副作用不回滚；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
+    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器及编码身份校验成功且脚本返回可解码整数时返回成功；编码身份不一致或已有根值不是数组时，在删除旧文档前拒绝；其它失败返回错误，Lua 内已有副作用不回滚；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
     pub async fn save_or_replace(&self, doc: &T) -> Result<()> {
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
