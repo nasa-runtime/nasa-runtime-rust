@@ -101,6 +101,30 @@ end
 return redis.call('JSON.DEL', KEYS[1], ARGV[1])
 "#;
 
+// 大整数按 ID 读取在同一次脚本中检查身份类型并取回原始 JSON，避免在客户端用浮点数重新解析身份。
+const READ_INTEGER_ID: &str = r#"local root_type = redis.call('JSON.TYPE', KEYS[1])
+if not root_type then
+  return false
+end
+if root_type ~= 'array' then
+  return redis.error_reply('ARRAY root must be an array')
+end
+if type(ARGV[2]) ~= 'string' or ARGV[2] == '' then
+  return redis.error_reply('ARRAY integer identity path is required')
+end
+-- 类型复验与读取不能分成两个请求，否则检查之后出现的浮点身份仍可能被当作目标文档。
+local id_types = redis.call('JSON.TYPE', KEYS[1], ARGV[2])
+if type(id_types) ~= 'table' then
+  return redis.error_reply('ARRAY identity types are unavailable')
+end
+for i = 1, #id_types do
+  if id_types[i] ~= 'integer' then
+    return redis.error_reply('ARRAY large integer identity matches a non-integer value')
+  end
+end
+return redis.call('JSON.GET', KEYS[1], ARGV[1])
+"#;
+
 /// 跨桶 JSON.GET filter：KEYS = N 桶，`ARGV[1]` = JSONPath filter，
 /// 返回每桶非空 JSON 字符串的 list(空桶/无命中跳过,客户端不用判空)。
 pub const MULTI_GET: &str = r#"local out = {}
@@ -340,15 +364,18 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── 单子文档族(BUCKET 模式直接定位单桶,1 key 1 RTT)─────────
 
-    /// 业务作用：按 subId 查单个子文档。
+    /// 业务作用：按子文档 ID 定位普通数组或单个桶，并解码首个命中文档。
     ///
-    /// # 参数
-    /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
-    /// - `sub_id`: 数组内子文档 ID,BUCKET 模式下同时用于定位单桶。
+    /// 参数说明：
+    /// - `parts`：与 array_keys 顺序一致的业务分组值。
+    /// - `sub_id`：用于生成 ID 条件的标识，分桶模式还用它定位单桶。
+    ///
+    /// 返回：无命中返回 None，有命中返回首个文档；重复整数或字符串 ID 不在此拒绝。大整数条件命中非整数身份时整次读取拒绝，类型检查与取正文在同一脚本内完成。键或过滤器无效、命令或解码失败返回错误。
     pub async fn find_sub_doc(&self, parts: &[&str], sub_id: &str) -> Result<Option<T>> {
         let key = self.key_for_sub_doc(parts, sub_id)?;
         let filter = self.id_filter(sub_id)?;
-        let mut rows: Vec<T> = self.json_get_entities(&key, &filter).await?;
+        let chunk = self.json_get_identity_chunk(&key, sub_id, &filter).await?;
+        let mut rows: Vec<T> = decode_array_chunk(chunk.as_deref())?;
         Ok(if rows.is_empty() {
             None
         } else {
@@ -356,17 +383,18 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         })
     }
 
-    /// 业务作用：子文档存在性：只判断 JSON.GET filter 是否命中，不做反序列化。
+    /// 业务作用：按 ID 读取匹配数组，根据数组是否非空判断子文档存在性。
     ///
-    /// # 参数
-    /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
-    /// - `sub_id`: 要判断是否存在的数组内子文档 ID。
+    /// 参数说明：
+    /// - `parts`：与 array_keys 顺序一致的业务分组值。
+    /// - `sub_id`：待检查的子文档标识，分桶模式据此定位单桶。
+    ///
+    /// 返回：缺失回复或合法空 JSON 数组返回 false，非空数组返回 true；其它形态或解码失败返回错误。大整数条件命中非整数身份时拒绝，不把浮点舍入得到的匹配当作存在证据。不构造业务实体，参数和命令错误向上传播。
     pub async fn exists_sub_doc(&self, parts: &[&str], sub_id: &str) -> Result<bool> {
         let key = self.key_for_sub_doc(parts, sub_id)?;
         let filter = self.id_filter(sub_id)?;
-        Ok(chunk_non_empty(
-            self.json_get_chunk(&key, &filter).await?.as_deref(),
-        ))
+        let chunk = self.json_get_identity_chunk(&key, sub_id, &filter).await?;
+        Ok(!decode_array_chunk::<serde_json::Value>(chunk.as_deref())?.is_empty())
     }
 
     /// 业务作用：在 ID 对应的普通数组或单桶内删除全部匹配子文档。
@@ -540,7 +568,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// - `sub_id`：已经通过 ID 过滤器校验、与目标键共用的业务身份文本。
     /// - `filter`：该身份对应的完整 JSONPath 文档选择条件。
     ///
-    /// 返回：数值身份为绝对值至少 2^53 的 i64 时返回命中项的 ID 属性路径，供脚本在删除前检查；其它身份返回空字符串。属性名无法安全表达时返回配置错误，此处不读取或迁移已有数据。
+    /// 返回：数值身份为绝对值至少 2^53 的 i64 时返回命中项的 ID 属性路径，供脚本在执行目标操作前检查；其它身份返回空字符串。属性名无法安全表达时返回配置错误，此处不读取或迁移已有数据。
     fn large_integer_guard_path(&self, sub_id: &str, filter: &str) -> Result<String> {
         // 整数间的比较保留 i64 精度；混入浮点记录时则必须由服务端在同次按 ID 操作中排除歧义。
         if self.meta.id_numeric
@@ -555,6 +583,43 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
             ))
         } else {
             Ok(String::new())
+        }
+    }
+
+    /// 业务作用：读取同一身份条件的数组片段，并在大整数与历史浮点记录混合时拒绝歧义命中。
+    ///
+    /// 参数说明：
+    /// - `key`：由同一次身份观察派生的普通数组或单桶键。
+    /// - `sub_id`：已经通过 ID 过滤器校验的业务身份文本。
+    /// - `filter`：与该身份一致的完整文档选择条件。
+    ///
+    /// 返回：缺失键返回 None，有结果返回原始 JSON 文本；大整数分支在同一脚本内核对数组根和全部命中 ID 类型，非整数命中或异常回复返回错误。此处不构造实体，也不迁移历史数据。
+    async fn json_get_identity_chunk(
+        &self,
+        key: &str,
+        sub_id: &str,
+        filter: &str,
+    ) -> Result<Option<String>> {
+        let guard_path = self.large_integer_guard_path(sub_id, filter)?;
+        if guard_path.is_empty() {
+            return self.json_get_chunk(key, filter).await;
+        }
+        // 身份类型与正文必须来自同一次读取，不能先独立探测后再读取已经可能被替换的数据。
+        let raw: redis::Value = redis::Script::new(READ_INTEGER_ID)
+            .key(key)
+            .arg(filter)
+            .arg(&guard_path)
+            .invoke_async(&mut self.client.conn())
+            .await?;
+        // 仅允许缺失或原始 JSON 字节，不能把状态词或计数转换成业务文档。
+        match raw {
+            redis::Value::Nil => Ok(None),
+            redis::Value::BulkString(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| NasaRedisError::Codec("ARRAY JSON 回复不是有效 UTF-8".into())),
+            _ => Err(NasaRedisError::Codec(
+                "ARRAY 身份读取回复类型不符合约束".into(),
+            )),
         }
     }
 
@@ -714,4 +779,25 @@ fn check_array_count_reply(reply: redis::Value, expected: Option<usize>) -> Resu
         return Err(NasaRedisError::Codec("ARRAY 写入确认数量不符合请求".into()));
     }
     Ok(count)
+}
+
+/// 业务作用：统一把 ARRAY 读取片段解码为匹配列表，区分缺失、空集和异常正文。
+///
+/// 参数说明：
+/// - `chunk`：缺失键对应 None，其余为已通过 UTF-8 校验的 JSON 数组文本。
+///
+/// 返回：None 返回空列表，合法数组逐项解码后返回；非数组、语法或实体解码错误返回只含类别与位置的 Codec，不包含正文或自定义错误消息。自定义 Deserialize 的展开仍向调用方传播。
+fn decode_array_chunk<T: DeserializeOwned>(chunk: Option<&str>) -> Result<Vec<T>> {
+    match chunk {
+        None => Ok(Vec::new()),
+        Some(chunk) => serde_json::from_str(chunk).map_err(|error| {
+            // 空字符串、null 和对象不能代表已确认的空匹配，错误也不能携带业务正文。
+            NasaRedisError::Codec(format!(
+                "ARRAY JSON 解码失败: {:?} at {}:{}",
+                error.classify(),
+                error.line(),
+                error.column()
+            ))
+        }),
+    }
 }
