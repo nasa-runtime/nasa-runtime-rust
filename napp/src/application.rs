@@ -511,12 +511,14 @@ impl Application {
         self.state() == ApplicationState::Ready && self.inner.readiness.all_ready()
     }
 
-    /// 业务作用：读取各依赖只读就绪快照(管理端读取):按名有序的 name/state/reason/affects_ready,以及聚合
-    /// `ready`/`degraded`。无 I/O、无锁竞争地读内存已发布状态,供管理端诊断「谁未就绪/谁降级」。
+    /// 业务作用：读取各依赖的有效就绪状态及聚合结果，供管理端定位未就绪或降级的来源。
     ///
-    /// # 参数
+    /// 读取持有注册表读锁并依次取得各贡献项锁，按同一次单调时刻裁决 stale 与租约期限。
+    /// 各项可能在读取期间分别更新，因此结果不是同一瞬间的原子快照，也不保留后续接流权威。
     ///
-    /// 本方法无参数;快照反映读取时刻各 contributor 的已发布状态(含 stale 裁决)。
+    /// 参数说明: 无。
+    ///
+    /// 返回：按名称排序的依赖和聚合 ready/degraded 状态；不执行外部探测、不修改已发布状态，也不包含 Application 生命周期判断。完整就绪判断应使用 is_ready。
     pub fn readiness_snapshot(&self) -> crate::readiness::ReadinessSnapshot {
         self.inner.readiness.snapshot(std::time::Instant::now())
     }
