@@ -20,17 +20,34 @@ use std::collections::HashMap;
 use crate::error::{NasaRedisError, Result};
 use crate::partition::compat_string_hash;
 
-/// 业务作用：把文档序列化为 JSON，并递归移除对象中值为 null 的成员。
-/// 数组中的对象同样处理，数组自身的 null 元素保持原位置；该策略不依赖字段上的
-/// skip_serializing_if 标记。共享 Redis key 的生产者必须采用相同字段省略规则。
-/// 返回：JSON 文本；序列化失败时返回 Codec 错误。
+/// 业务作用：按共享文档省略规则序列化 JSON，移除对象中值为 null 的成员。
 ///
-/// # 参数
-/// - `doc`: 当前处理的配置文档。
+/// 参数说明：
+/// - `doc`：需要写入 RedisJSON 的业务文档。
+///
+/// 返回：成功返回 JSON 文本，对象成员递归处理、数组的 null 元素保持位置；序列化错误仅保留类别与行列，捕获到自定义序列化展开时返回固定 Codec 错误。只调用一次 Serialize，不重试或撤销其自身副作用；不改变宿主 panic hook，也不隔离进程终止或栈耗尽。
 pub fn to_json_omit_null<T: serde::Serialize>(doc: &T) -> Result<String> {
-    let mut v = serde_json::to_value(doc).map_err(|e| NasaRedisError::Codec(e.to_string()))?;
+    // 自定义 Serialize 可能把正文写进错误或展开载荷；文档编码必须在发送命令前结束，返回摘要不携带这些内容。
+    let encoded =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serde_json::to_value(doc)))
+            .map_err(|_| NasaRedisError::Codec("JSON 文档序列化展开".into()))?;
+    let mut v = encoded.map_err(|error| {
+        NasaRedisError::Codec(format!(
+            "JSON 文档序列化失败: {:?} at {}:{}",
+            error.classify(),
+            error.line(),
+            error.column()
+        ))
+    })?;
     strip_nulls(&mut v);
-    serde_json::to_string(&v).map_err(|e| NasaRedisError::Codec(e.to_string()))
+    serde_json::to_string(&v).map_err(|error| {
+        NasaRedisError::Codec(format!(
+            "JSON 文档编码失败: {:?} at {}:{}",
+            error.classify(),
+            error.line(),
+            error.column()
+        ))
+    })
 }
 
 /// 业务作用：递归剔除 JSON 对象中值为 null 的成员(对象/数组深度遍历)。

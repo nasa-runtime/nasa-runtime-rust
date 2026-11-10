@@ -405,6 +405,11 @@ proxy.shutdown().await;
 
 开启 `derive` feature 后可派生 `RedisDocument`。
 
+JSON 文档共用 `to_json_omit_null` 编码：递归省略对象中的 null 成员，保留数组中的 null 位置。
+编码失败返回只含类别与行列的 `Codec` 错误；捕获自定义 `Serialize` 展开时返回固定错误。
+编码只调用一次 `Serialize`，不会重试或撤销其自身副作用，也不改变宿主 panic hook。
+该边界不隔离进程终止或栈耗尽；ARRAY 编码失败发生在追加、覆盖或批量写命令发送之前。
+
 ```rust
 #[derive(nasa::redis::RedisDocument)]
 #[rs(index = "idx:user", prefix = "user:")]
