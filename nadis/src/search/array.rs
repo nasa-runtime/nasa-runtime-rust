@@ -106,33 +106,67 @@ pub struct JsonArrayOps<T: RedisDocument> {
 }
 
 impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
-    /// 业务作用：绑定 ARRAY 执行器并在启动期完成元数据和 RedisJSON 能力校验。
+    /// 业务作用：绑定数组执行器，在创建脚本句柄前检查存储形态与 RedisJSON 命令是否可调用。
     ///
-    /// # 参数
-    /// - `client`: 已初始化的 Redis 客户端,后续所有 ARRAY Lua 和 JSON 命令都从它获取连接。
+    /// 参数说明：
+    /// - `client`：后续数组命令、Lua 和批量写入共用的 Redis 客户端。
+    ///
+    /// 返回：元数据为数组模式且 JSON.TYPE 的回复形状、类型名称符合连接协议时返回执行器；配置、命令或回复异常时拒绝，不创建索引或修改数据。该只读探测不证明全部 JSON/Lua 命令权限、其它节点能力或后续可用性。
     pub async fn bind(client: Arc<RedisClient>) -> Result<Self> {
         let meta = T::meta();
         meta.validate()?;
+        // 数组键布局和普通索引文档不同，绑定到错误执行器会改变数据存取边界。
         if !meta.data_type.is_array() {
             return Err(NasaRedisError::Config(format!(
                 "{} 不是 ARRAY 模式(得到 {:?})—— JsonArrayOps 仅适用 JsonArray/JsonArrayBucket",
                 meta.index, meta.data_type
             )));
         }
-        // capability:JSON.TYPE 在缺 ReJSON 模块时报 unknown command(对照 actuator 探测)
+        // 绑定阶段先探测所需命令，避免接纳执行器后才发现 RedisJSON 不可调用。
         let js: std::result::Result<redis::Value, _> = redis::cmd("JSON.TYPE")
             .arg("__nasa_capability_check__")
             .query_async(&mut client.conn())
             .await;
-        if let Err(e) = js {
-            if e.to_string().contains("unknown command") {
-                return Err(NasaRedisError::Config(format!(
-                    "RedisJSON 模块不可用(ARRAY 模式需要):{e}"
-                )));
+        let reply = match js {
+            Ok(reply) => reply,
+            Err(e) => {
+                if e.to_string().contains("unknown command") {
+                    return Err(NasaRedisError::Config(format!(
+                        "RedisJSON 模块不可用(ARRAY 模式需要):{e}"
+                    )));
+                }
+                // ACL、超时或代理错误不能证明探测成功，也不能因此开放数组执行器。
+                return Err(e.into());
             }
-            //**非 unknown command 的错误(ACL 禁 JSON.TYPE/超时/READONLY/代理异常)不静默忽略**
-            // JSON.TYPE 对缺失 key 返回 nil；其它错误无法证明模块可用，必须在绑定阶段上抛。
-            return Err(e.into());
+        };
+        let info = redis::IntoConnectionInfo::into_connection_info(client.config().url.as_str())?;
+        // 无路径探测只读取根值；RESP3 增加一层单元素数组，不能把任意容器或多值回复转成成功。
+        let reply = match (info.redis_settings().protocol(), reply) {
+            (redis::ProtocolVersion::RESP2, reply) => reply,
+            (redis::ProtocolVersion::RESP3, redis::Value::Array(mut values))
+                if values.len() == 1 =>
+            {
+                values.pop().expect("length checked")
+            }
+            _ => {
+                return Err(NasaRedisError::Codec(
+                    "ARRAY JSON.TYPE 回复形状不符合连接协议".into(),
+                ));
+            }
+        };
+        // 缺失键与全部合法根类型都能证明命令可读；未知文本不得回显，也不得冒充模块能力。
+        let valid = match reply {
+            redis::Value::Nil => true,
+            redis::Value::BulkString(value) => matches!(
+                value.as_slice(),
+                b"null" | b"boolean" | b"integer" | b"number" | b"string" | b"object" | b"array"
+            ),
+            _ => false,
+        };
+        if !valid {
+            return Err(NasaRedisError::Codec(
+                "ARRAY JSON.TYPE 未返回已知根类型".into(),
+            ));
         }
         Ok(Self {
             client,
