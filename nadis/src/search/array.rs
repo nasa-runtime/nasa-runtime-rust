@@ -76,6 +76,31 @@ end
 return 1
 "#;
 
+// 大整数按 ID 删除先在同一脚本中复验根类型与全部命中身份，避免浮点舍入误选其它文档。
+// ARGV[1] 为文档条件，ARGV[2] 为命中项的 ID 属性路径；缺失键直接返回零。
+const REMOVE_INTEGER_ID: &str = r#"local root_type = redis.call('JSON.TYPE', KEYS[1])
+if not root_type then
+  return 0
+end
+if root_type ~= 'array' then
+  return redis.error_reply('ARRAY root must be an array')
+end
+if type(ARGV[2]) ~= 'string' or ARGV[2] == '' then
+  return redis.error_reply('ARRAY integer identity path is required')
+end
+-- 类型复验与删除不能分成两个请求，否则检查之后出现的浮点身份仍可能被删除。
+local id_types = redis.call('JSON.TYPE', KEYS[1], ARGV[2])
+if type(id_types) ~= 'table' then
+  return redis.error_reply('ARRAY identity types are unavailable')
+end
+for i = 1, #id_types do
+  if id_types[i] ~= 'integer' then
+    return redis.error_reply('ARRAY large integer identity matches a non-integer value')
+  end
+end
+return redis.call('JSON.DEL', KEYS[1], ARGV[1])
+"#;
+
 /// 跨桶 JSON.GET filter：KEYS = N 桶，`ARGV[1]` = JSONPath filter，
 /// 返回每桶非空 JSON 字符串的 list(空桶/无命中跳过,客户端不用判空)。
 pub const MULTI_GET: &str = r#"local out = {}
@@ -344,15 +369,28 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         ))
     }
 
-    /// 业务作用：按 subId 删单个子文档,返回删除数(0 = 不存在)。
+    /// 业务作用：在 ID 对应的普通数组或单桶内删除全部匹配子文档。
     ///
-    /// # 参数
-    /// - `parts`: `array_keys` 顺序对应的数组组业务 key 段。
-    /// - `sub_id`: 要删除的数组内子文档 ID,BUCKET 模式下用于定位单桶。
+    /// 参数说明：
+    /// - `parts`：与 array_keys 顺序一致的业务分组值。
+    /// - `sub_id`：待删除的子文档标识，同时参与桶路由。
+    ///
+    /// 返回：成功返回非负删除数，重复 ID 可能删除多条；缺失键返回零。大整数条件在同一脚本中先检查数组根和命中项 ID 类型，命中非整数时在删除前拒绝。键派生、过滤器或命令失败返回错误，大整数脚本的异常回复也返回错误；未知执行结果不能视为未删除。
     pub async fn remove_sub_doc(&self, parts: &[&str], sub_id: &str) -> Result<u64> {
         let key = self.key_for_sub_doc(parts, sub_id)?;
         let filter = self.id_filter(sub_id)?;
-        self.json_del(&key, &filter).await
+        let guard_path = self.large_integer_guard_path(sub_id, &filter)?;
+        if guard_path.is_empty() {
+            return self.json_del(&key, &filter).await;
+        }
+        // 浮点记录可能与相邻的大整数同时命中；删除前由同一个脚本检查，拒绝时保留全部原记录。
+        let reply: redis::Value = redis::Script::new(REMOVE_INTEGER_ID)
+            .key(&key)
+            .arg(&filter)
+            .arg(&guard_path)
+            .invoke_async(&mut self.client.conn())
+            .await?;
+        Ok(check_array_count_reply(reply, None)? as u64)
     }
 
     // ───────── 全 array 族(BUCKET 模式跨桶 Lua,1 RTT 扫全桶)─────────
@@ -496,7 +534,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(format!("$[?(@{}=={})]", property, lit))
     }
 
-    /// 业务作用：为存在浮点舍入歧义的大整数覆盖生成远端 ID 类型检查路径。
+    /// 业务作用：为存在浮点舍入歧义的大整数按 ID 操作生成远端 ID 类型检查路径。
     ///
     /// 参数说明：
     /// - `sub_id`：已经通过 ID 过滤器校验、与目标键共用的业务身份文本。
@@ -504,7 +542,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     ///
     /// 返回：数值身份为绝对值至少 2^53 的 i64 时返回命中项的 ID 属性路径，供脚本在删除前检查；其它身份返回空字符串。属性名无法安全表达时返回配置错误，此处不读取或迁移已有数据。
     fn large_integer_guard_path(&self, sub_id: &str, filter: &str) -> Result<String> {
-        // 整数间的比较保留 i64 精度；混入浮点记录时则必须由服务端在同次覆盖中排除歧义。
+        // 整数间的比较保留 i64 精度；混入浮点记录时则必须由服务端在同次按 ID 操作中排除歧义。
         if self.meta.id_numeric
             && sub_id
                 .parse::<i64>()
@@ -657,4 +695,23 @@ fn encode_array_document<T: Serialize>(doc: &T, meta: &DocMeta, id: &str) -> Res
             error.column()
         ))
     })
+}
+
+/// 业务作用：核对 ARRAY 命令的计数证据，避免类型转换或异常计数被误认为操作成功。
+///
+/// 参数说明：
+/// - `reply`：Redis 命令或脚本返回的原始回复，必须是非负 RESP 整数。
+/// - `expected`：追加或覆盖应确认的文档数量；删除和查询计数不预设精确值。
+///
+/// 返回：回复类型、非负性与可选精确数量均满足约束时返回计数，否则返回固定 Codec；不包含回复正文，不撤销远端副作用，也不提供安全重试依据。
+fn check_array_count_reply(reply: redis::Value, expected: Option<usize>) -> Result<i64> {
+    let count = match reply {
+        redis::Value::Int(count) if count >= 0 => count,
+        _ => return Err(NasaRedisError::Codec("ARRAY 命令未返回非负整数计数".into())),
+    };
+    // 写入已经发出，只有精确确认数量才足以报告完成；异常回复不能作为未执行的证据。
+    if expected.is_some_and(|expected| usize::try_from(count).ok() != Some(expected)) {
+        return Err(NasaRedisError::Codec("ARRAY 写入确认数量不符合请求".into()));
+    }
+    Ok(count)
 }
