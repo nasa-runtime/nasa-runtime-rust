@@ -703,6 +703,7 @@ impl Query {
     ///   · TagEq → `@.f=='v'`(单引号字面量);TagIn → `(@.f=='v1' || @.f=='v2')`;NumBetween →
     ///     `(@.f>=min && @.f<=max)`;多条件空格语义换 ` && `(JSONPath AND)。
     /// 字段引用用 alias(`@.alias`)——与 FT.SEARCH/JSON 文档字段名保持一致。
+    /// 数值条件的参数为 f64，大整数可能在调用前已经舍入；生成路径沿用 RedisJSON 的数值比较，混合整数与浮点记录可能匹配相邻业务值。该路径也用于条件删除，精确身份定位应使用按 ID 入口或字符串字段。
     pub fn render_json_path_filter(&self, meta: &DocMeta) -> Result<String> {
         if self.sort.is_some() {
             return Err(NasaRedisError::Config(
