@@ -270,7 +270,10 @@ impl BoundedWriter {
     /// 返回：标量及终止换行写入；编码或实际字节超限时返回脱敏错误。
     fn scalar<T: Serialize>(&mut self, value: &T, quote: bool) -> Result<()> {
         // 多行内容必须作为转义文本输出，避免首个内容行的 Tab 被消费方解释为缩进。
-        let options = serde_saphyr::ser_options! { prefer_block_scalars: false, quote_all: quote };
+        let options = serde_saphyr::ser_options! {
+            prefer_block_scalars: false,
+            quote_all: quote
+        };
         serde_saphyr::to_fmt_writer_with_options(self, value, options).map_err(|_| {
             ConfigError::new(if self.exceeded {
                 ErrorKind::Limit
