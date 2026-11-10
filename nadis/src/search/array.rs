@@ -259,17 +259,19 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(total)
     }
 
-    /// 业务作用：替换-或-追加:同 subId 旧子文档先删再追加(REPLACE_OR_APPEND 单脚本原子)。
-    /// ⚠ @JsonArrayKey/bucket_count 不可变约束见文件头——array key 字段变更后调用
-    /// 本方法不会清旧 key 的旧子文档,必须业务侧先显式 remove_sub_doc(旧 parts)。
+    /// 业务作用：在当前派生的数组键中按 ID 删除已有子文档，再追加新内容。
     ///
-    /// # 参数
-    /// - `doc`: 要写入的业务子文档,其 `id()` 用作数组内唯一子文档 ID。
+    /// 参数说明：
+    /// - `doc`：提供目标分组、用于匹配的子文档 ID 和新内容的业务文档。
+    ///
+    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器和编码成功且脚本返回可解码整数时返回成功；失败返回错误，Lua 内已有副作用不回滚。文档编码仍须与该 ID 一致；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
     pub async fn save_or_replace(&self, doc: &T) -> Result<()> {
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-        let key = self.meta.array_key_for(&refs, &doc.id())?;
-        let filter = self.id_filter(&doc.id())?;
+        // 键与删除条件必须共享同一身份观察，重复调用自定义访问器可能把一个桶与另一个 ID 拼成写入目标。
+        let id = doc.id();
+        let key = self.meta.array_key_for(&refs, &id)?;
+        let filter = self.id_filter(&id)?;
         let body = super::to_json_omit_null(doc)?;
         let _: i64 = self
             .replace_or_append
