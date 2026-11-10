@@ -247,6 +247,8 @@ impl ServerConfig {
 /// 框架内部共享状态。**`pub(crate)`**:业务不应直达内部装配
 /// 对外只通过 `RunningServer` 的受控访问器(registry/sender/endpoints/active_conns 等)。
 pub(crate) struct Shared {
+    /// 应用协议任务工厂，接管连接后负责业务身份与路由。
+    protocol_handler: Option<ProtocolHandler>,
     pub config: ServerConfig,
     pub registry: Arc<SessionRegistry>,
     pub endpoints: Arc<EndpointRegistry>,
@@ -267,6 +269,123 @@ pub(crate) struct Shared {
     pub cancel: CancellationToken,
     /// 所有服务端后台任务的跟踪器:graceful shutdown 时 close+wait 真正 join。
     pub tasks: TaskTracker,
+}
+
+type ProtocolHandler = Arc<
+    dyn Fn(
+            TcpStream,
+            ProtocolContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// 应用协议的单连接生命周期，认证预算与任务排空仍由 naws 统一管理。
+pub struct ProtocolContext {
+    /// 本次物理连接的随机关联标识，不授予业务身份。
+    session_id: String,
+    /// 操作系统提供的直接 TCP 对端。
+    peer: std::net::SocketAddr,
+    /// accept 时确定的初次认证截止点。
+    deadline: Instant,
+    /// 是否来自配置的独立 WebSocket 入口。
+    websocket_only: bool,
+    /// 本连接的取消令牌，同时继承服务取消。
+    cancel: CancellationToken,
+    /// 应用子任务登记到的服务级退出跟踪器。
+    tasks: TaskTracker,
+    /// 初次认证前占用的名额，确认认证或上下文销毁时归还。
+    unauthenticated: Option<UnauthGuard>,
+    /// 向连接 owner 一次性报告认证已完成的通道。
+    admitted: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl ProtocolContext {
+    /// 业务作用：取得框架为本次物理连接生成的随机关联标识。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：仅属于此连接的标识，不具有业务授权含义。
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// 业务作用：取得操作系统确认的直接对端地址，避免把客户端自报代理头当作来源事实。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：真实 TCP peer 地址；代理后的用户身份须由应用另外验证。
+    pub fn peer_addr(&self) -> std::net::SocketAddr {
+        self.peer
+    }
+
+    /// 业务作用：读取 accept 时确定的认证截止点，不因协议分类或 HTTP Upgrade 重新计时。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：当前连接唯一的初次认证截止点。
+    pub fn auth_deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// 业务作用：告知应用当前入口是否为独立 WebSocket 监听器。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：独立 WS 入口为 true；应用不能据此开放未配置的业务路由。
+    pub fn websocket_only(&self) -> bool {
+        self.websocket_only
+    }
+
+    /// 业务作用：提供连接取消信号，兼顾宿主停机与连接 owner 销毁。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：同一连接的子取消令牌，不能撤销父服务的取消事实。
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// 业务作用：应用完成必要认证后释放未认证容量，逾期或停机时不得扩大连接资格。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：首次且在截止前确认成功；重复、逾期或取消时返回 false。
+    pub fn authenticated(&mut self) -> bool {
+        if self.cancel.is_cancelled() || Instant::now() >= self.deadline {
+            return false;
+        }
+        let Some(admitted) = self.admitted.take() else {
+            return false;
+        };
+        self.unauthenticated.take();
+        admitted.send(()).is_ok()
+    }
+
+    /// 业务作用：把连接读写或业务子任务纳入同一个服务排空屏障，防止父任务退出后遗漏责任。
+    ///
+    /// 参数说明：
+    /// - `future`：必须观察本连接 cancellation 的有限任务。
+    ///
+    /// 返回：可等待的任务句柄，服务关闭同时等待该任务真正结束。
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.tasks.spawn(future)
+    }
+}
+
+impl Drop for ProtocolContext {
+    /// 业务作用：连接协议 owner 结束时撤销所有子任务准入，确保迟到操作不会继续使用连接。
+    ///
+    /// 参数说明: 无。
+    ///
+    /// 返回：取消当前连接任务组，未认证容量由 guard 自动释放。
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// `ServerBuilder::build` 的配置错误(启动期校验,不静默用错误默认)。
@@ -377,6 +496,8 @@ impl std::error::Error for BuildError {}
 
 /// 保存服务端构造参数；用于配置监听地址、鉴权和入口策略。
 pub struct ServerBuilder {
+    /// 可选接管整条连接的应用协议任务工厂。
+    protocol_handler: Option<ProtocolHandler>,
     config: ServerConfig,
     endpoints: Arc<EndpointRegistry>,
     authorize: Option<AuthorizeProvider>,
@@ -391,6 +512,23 @@ pub struct ServerBuilder {
 }
 
 impl ServerBuilder {
+    /// 业务作用：把已接收连接交给应用协议适配器，继续复用服务的连接容量、启动和排空责任。
+    ///
+    /// 参数说明：
+    /// - `handler`：拥有整条连接的协议任务；必须观察上下文取消并通过上下文登记子任务。
+    ///
+    /// 返回：更新后的构建器；显式接管后不执行既有 Message、endpoint、bridge 或 relay 协议。
+    pub fn protocol_handler<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(TcpStream, ProtocolContext) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.protocol_handler = Some(Arc::new(move |stream, context| {
+            Box::pin(handler(stream, context))
+        }));
+        self
+    }
+
     /// 业务作用：识别已经安装的集群策略，供宿主拒绝重复接管同一服务。
     /// 参数说明：无。
     /// 返回：存在通知器、节点身份或数据发布器时返回真，不改变 builder。
@@ -611,8 +749,12 @@ impl ServerBuilder {
         self
     }
 
-    /// 业务作用：装配服务端。**配置校验**:缺鉴权 / 空 node_id / incarnation 与 cluster
-    /// 不匹配 / 集群缺 incarnation → 返回 `Err`,不静默用错误默认。
+    /// 业务作用：验证认证器、容量及集群身份，装配会话目录、发送入口与应用协议任务工厂。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：配置合法时返回未绑定服务；缺少认证器、非法限额或不完整集群身份均拒绝。
+    /// 自定义协议与内置集群的冲突在绑定监听之前拒绝。
     pub fn build(self) -> Result<Server, BuildError> {
         let Some(authorize) = self.authorize else {
             return Err(BuildError::NoAuthorize);
@@ -779,6 +921,7 @@ impl ServerBuilder {
         ));
         Ok(Server {
             shared: Arc::new(Shared {
+                protocol_handler: self.protocol_handler,
                 config: self.config,
                 registry,
                 endpoints: self.endpoints,
@@ -903,9 +1046,14 @@ impl RunningServer {
 }
 
 impl Server {
-    /// 业务作用：构建 builder 结果；用于把配置和上下文组装成可执行对象。
+    /// 业务作用：创建默认使用内置协议的服务构建器。
+    ///
+    /// 参数说明：无。
+    ///
+    /// 返回：尚未绑定监听或创建集群设施的构建器，应用协议需要显式提供。
     pub fn builder() -> ServerBuilder {
         ServerBuilder {
+            protocol_handler: None,
             config: ServerConfig::default(),
             endpoints: EndpointRegistry::new(),
             authorize: None,
@@ -942,10 +1090,20 @@ impl Server {
         Ok(running)
     }
 
-    /// 业务作用：绑定监听地址并准备集群设施，保留业务连接准入屏障。
+    /// 业务作用：复验协议所有权并绑定监听、准备集群，保留业务连接准入屏障。
+    ///
     /// 参数说明：无。
-    /// 返回：资源准备成功时返回未接流的 owner；失败或取消准备时关闭本次设施。
+    ///
+    /// 返回：资源准备成功时返回未接流的运行句柄；冲突、失败或准备取消时不开放接入。
     pub async fn bind_suspended(self) -> std::io::Result<RunningServer> {
+        // 自定义协议拥有业务路由，不能同时启动内置集群中继而形成两套投递权威。
+        if self.shared.protocol_handler.is_some() && self.shared.cluster.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "custom protocol owns its message routing and cannot use legacy cluster relay",
+            ));
+        }
+
         // **先**把所有 listener bind 成功(可失败步骤前置),再启动 cluster / spawn accept——
         // 否则 bind 失败时已 start 的 cluster 不回滚、已 spawn 的 accept 泄漏。
         let tcp = listen_reuseaddr(&self.shared.config.addr)?;
@@ -1058,12 +1216,15 @@ fn listen_reuseaddr(addr: &str) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
-/// 业务作用：持续接受新连接；用于把监听器上的连接交给会话处理流程。
+/// 业务作用：宿主放行后接收连接，在容量门禁内交给内置协议或应用协议。
 ///
-/// # 参数
-/// - `listener`: TCP 或 WS listener。
-/// - `shared`: 运行时共享状态,包含连接、配置、指标或取消信号。
-/// - `is_ws`: 当前 accept loop 是否处理 WebSocket 连接。
+/// 参数说明：
+/// - `listener`：实际接受连接的 TCP 入口。
+/// - `shared`：协议工厂、容量与服务排空状态。
+/// - `is_ws`：是否来自独立 WebSocket 监听器。
+/// - `admission`：宿主完成准备后的放行信号。
+///
+/// 返回：停机结束接收；连接和应用登记的子任务仍由同一服务排空。
 async fn accept_loop(
     listener: TcpListener,
     shared: Arc<Shared>,
@@ -1081,10 +1242,9 @@ async fn accept_loop(
             biased;
             _ = shared.cancel.cancelled() => break,
             res = listener.accept() => match res {
-                Ok((stream, _peer)) => {
+                Ok((stream, peer)) => {
                     // 连接总数上限(过载/DoS 背压):超过则立即关闭新连接,不 spawn 连接任务、不升级 WS。
-                    // 计数由 ConnGuard 在 handle_* 里维护,accept 处读取略滞后(突发下可能小幅过量),
-                    // 作为粗粒度封顶足够(目的是背压,不追求精确)。0 = 不限制。
+                    // 内置协议在任务内计数，自定义协议移交前计数；多监听器仍可能竞争，零表示不限额。
                     let max_conns = shared.config.max_connections;
                     if max_conns != 0 && shared.active.count.load(Ordering::Relaxed) >= max_conns {
                         tracing::warn!(
@@ -1110,7 +1270,24 @@ async fn accept_loop(
                     };
                     let shared2 = shared.clone();
                     // 连接任务也进 TaskTracker → graceful shutdown 能 join。
-                    if is_ws {
+                    if let Some(handler) = shared2.protocol_handler.clone() {
+                        let deadline = Instant::now() + shared.config.auth_timeout;
+                        let connection = ConnGuard::new(shared.active.clone());
+                        // 移交前计入容量，协议认证和所有子任务仍属于同一服务排空责任。
+                        shared.tasks.spawn(async move {
+                            let _connection = connection;
+                            handle_protocol(
+                                stream,
+                                shared2,
+                                handler,
+                                peer,
+                                is_ws,
+                                unauth_guard,
+                                deadline
+                            )
+                            .await;
+                        });
+                    } else if is_ws {
                         shared.tasks.spawn(handle_ws(stream, shared2, unauth_guard));
                     } else {
                         shared.tasks.spawn(handle_tcp(stream, shared2, unauth_guard));
@@ -2210,5 +2387,55 @@ fn fire_disconnect(session: &Arc<Session>) {
             let h = SessionHandle::new(session.clone());
             isolate("on_disconnect", || f(h));
         }
+    }
+}
+
+
+/// 业务作用：在既有连接和未认证配额内执行应用协议，认证确认前统一执行原始截止点。
+///
+/// 参数说明：
+/// - `stream`：当前已接入连接。
+/// - `shared`：受管服务状态和任务屏障。
+/// - `handler`：应用选择的固定协议处理器。
+/// - `peer`：系统确认的直接对端。
+/// - `websocket_only`：入口是否只允许 WebSocket。
+/// - `unauthenticated`：尚未完成认证时保留的容量。
+/// - `deadline`：accept 时确定的认证截止点。
+///
+/// 返回：协议结束或认证截止后释放连接责任；所有登记子任务仍属于服务排空范围。
+async fn handle_protocol(
+    stream: TcpStream,
+    shared: Arc<Shared>,
+    handler: ProtocolHandler,
+    peer: std::net::SocketAddr,
+    websocket_only: bool,
+    unauthenticated: Option<UnauthGuard>,
+    deadline: Instant,
+) {
+    let (admitted, received) = tokio::sync::oneshot::channel();
+    let context = ProtocolContext {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        peer,
+        deadline,
+        websocket_only,
+        cancel: shared.cancel.child_token(),
+        tasks: shared.tasks.clone(),
+        unauthenticated,
+        admitted: Some(admitted),
+    };
+    let future = handler(stream, context);
+    tokio::pin!(future);
+    // 认证确认已在发送端复验原始截止点；通知与计时器同时就绪时，不能撤销期限内取得的资格。
+    // 停机仍优先结束连接，未确认认证的连接继续受同一截止点约束。
+    tokio::select! {
+        biased;
+        _ = shared.cancel.cancelled() => {},
+        _ = &mut future => {},
+        result = received => {
+            if result.is_ok() {
+                future.await;
+            }
+        },
+        _ = tokio::time::sleep_until(deadline) => {},
     }
 }
