@@ -416,7 +416,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `sub_id`：需要按文档标识字段匹配的原始字符串。
     ///
-    /// 返回：i64 整数文本保持精确值，其余形式必须能转换为绝对值小于 2^53 的有限 f64；不满足条件时返回配置错误。字符串使用 ARRAY 字面量规则；此处不校验序列化正文的 ID 表示或桶路由是否一致。
+    /// 返回：i64 整数文本保持精确值，其余形式必须能转换为绝对值小于 2^53 的有限 f64，且非零系数不能下溢为零；不满足条件时返回配置错误。字符串使用 ARRAY 字面量规则；此处不校验序列化正文的 ID 表示或桶路由是否一致。
     fn id_filter(&self, sub_id: &str) -> Result<String> {
         let lit = if self.meta.id_numeric {
             // 完整 i64 范围保留整数比较；不能先转成浮点数，否则相邻的大整数可能共享比较值。
@@ -431,6 +431,19 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
                 if !v.is_finite() {
                     return Err(NasaRedisError::Config(
                         "JSONPath 数值必须有限(NaN/Infinity 非法)".into(),
+                    ));
+                }
+                // 非零系数下溢后会选择零身份；真正的正负零和带指数的零仍保持原有比较语义。
+                if v == 0.0
+                    && sub_id
+                        .split(['e', 'E'])
+                        .next()
+                        .unwrap_or_default()
+                        .bytes()
+                        .any(|byte| matches!(byte, b'1'..=b'9'))
+                {
+                    return Err(NasaRedisError::Config(
+                        "ARRAY 非零数值 ID 不能下溢为零".into(),
                     ));
                 }
                 // 浮点比较在此边界可能合并相邻整数；越界整数也不能借浮点回退进入覆盖或删除。
