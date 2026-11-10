@@ -27,19 +27,7 @@ use crate::partition::compat_string_hash;
 ///
 /// 返回：成功返回 JSON 文本，对象成员递归处理、数组的 null 元素保持位置；序列化错误仅保留类别与行列，捕获到自定义序列化展开时返回固定 Codec 错误。只调用一次 Serialize，不重试或撤销其自身副作用；不改变宿主 panic hook，也不隔离进程终止或栈耗尽。
 pub fn to_json_omit_null<T: serde::Serialize>(doc: &T) -> Result<String> {
-    // 自定义 Serialize 可能把正文写进错误或展开载荷；文档编码必须在发送命令前结束，返回摘要不携带这些内容。
-    let encoded =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serde_json::to_value(doc)))
-            .map_err(|_| NasaRedisError::Codec("JSON 文档序列化展开".into()))?;
-    let mut v = encoded.map_err(|error| {
-        NasaRedisError::Codec(format!(
-            "JSON 文档序列化失败: {:?} at {}:{}",
-            error.classify(),
-            error.line(),
-            error.column()
-        ))
-    })?;
-    strip_nulls(&mut v);
+    let v = to_json_value_omit_null(doc)?;
     serde_json::to_string(&v).map_err(|error| {
         NasaRedisError::Codec(format!(
             "JSON 文档编码失败: {:?} at {}:{}",
@@ -706,4 +694,27 @@ pub trait RedisDocument: Sized + Send + Sync {
     fn array_key_parts(&self) -> Vec<String> {
         Vec::new()
     }
+}
+
+/// 业务作用：一次序列化文档并应用空成员省略规则，供编码与写入前身份校验共享同一份内容。
+///
+/// 参数说明：
+/// - `doc`：提供 RedisJSON 持久化内容的业务文档。
+///
+/// 返回：成功返回已递归省略对象 null 成员的 JSON 值，数组 null 位置保留；错误只含类别与位置，普通序列化展开返回固定 Codec。不重试 Serialize，不撤销其自身副作用或改变宿主 panic hook。
+fn to_json_value_omit_null<T: serde::Serialize>(doc: &T) -> Result<serde_json::Value> {
+    // 自定义 Serialize 可能把正文写进错误或展开载荷；文档编码必须在发送命令前结束，返回摘要不携带这些内容。
+    let encoded =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serde_json::to_value(doc)))
+            .map_err(|_| NasaRedisError::Codec("JSON 文档序列化展开".into()))?;
+    let mut v = encoded.map_err(|error| {
+        NasaRedisError::Codec(format!(
+            "JSON 文档序列化失败: {:?} at {}:{}",
+            error.classify(),
+            error.line(),
+            error.column()
+        ))
+    })?;
+    strip_nulls(&mut v);
+    Ok(v)
 }

@@ -192,7 +192,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `doc`：提供数组分组、子文档 ID 和序列化内容的业务文档。
     ///
-    /// 返回：数值 ID 通过比较范围检查、键派生和编码成功且追加脚本调用成功时返回成功；失败返回错误，远端是否已追加需按错误类别判断。此入口不查重，同 ID 可以重复；覆盖应使用 save_or_replace。
+    /// 返回：数值 ID 通过比较范围检查、编码身份与同次 ID 一致、键派生成功且追加脚本调用成功时返回成功；失败返回错误，远端是否已追加需按错误类别判断。此入口不查重，同 ID 可以重复；覆盖应使用 save_or_replace。
     pub async fn save(&self, doc: &T) -> Result<()> {
         let id = doc.id();
         // 非有限数值会失去身份字段，越界浮点条件可能合并整数身份，必须在写入前拒绝。
@@ -202,7 +202,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
         let key = self.meta.array_key_for(&refs, &id)?;
-        let body = super::to_json_omit_null(doc)?;
+        let body = encode_array_document(doc, self.meta, &id)?;
         let _: i64 = self
             .init_or_append
             .key(&key)
@@ -217,9 +217,9 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `docs`：需要追加的文档列表，每个文档独立派生业务分组和桶。
     ///
-    /// 返回：空列表返回零；全部会话及票据成功时返回输入文档数。任一数值 ID 不满足比较范围、派生或编码失败时整批不发送；提交失败返回错误，已经完成的批次不会回滚，未知执行结果不能自动当作未写入。
+    /// 返回：空列表返回零；全部会话及票据成功时返回输入文档数。任一数值 ID 不满足比较范围、编码身份与同次 ID 不一致、派生或编码失败时整批不发送；提交失败返回错误，已经完成的批次不会回滚，未知执行结果不能自动当作未写入。
     pub async fn save_all(&self, docs: &[T]) -> Result<usize> {
-        // 分组:key → 该 key 下待追加的子文档 JSON 列表
+        // 所有正文与身份先在本地核对，避免后续文档拒绝时已有前序分组发出。
         let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
         for doc in docs {
             let id = doc.id();
@@ -230,7 +230,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
             let parts = doc.array_key_parts();
             let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
             let key = self.meta.array_key_for(&refs, &id)?;
-            let body = super::to_json_omit_null(doc)?;
+            let body = encode_array_document(doc, self.meta, &id)?;
             grouped.entry(key).or_default().push(body);
         }
         let total = docs.len();
@@ -264,7 +264,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `doc`：提供目标分组、用于匹配的子文档 ID 和新内容的业务文档。
     ///
-    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器和编码成功且脚本返回可解码整数时返回成功；失败返回错误，Lua 内已有副作用不回滚。文档编码仍须与该 ID 一致；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
+    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器及编码身份校验成功且脚本返回可解码整数时返回成功；编码身份不一致在删除旧文档前拒绝，其它失败返回错误，Lua 内已有副作用不回滚；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
     pub async fn save_or_replace(&self, doc: &T) -> Result<()> {
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
@@ -272,7 +272,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         let id = doc.id();
         let key = self.meta.array_key_for(&refs, &id)?;
         let filter = self.id_filter(&id)?;
-        let body = super::to_json_omit_null(doc)?;
+        let body = encode_array_document(doc, self.meta, &id)?;
         let _: i64 = self
             .replace_or_append
             .key(&key)
@@ -549,4 +549,56 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 /// - `chunk`: 分片上传中的单个文件块。
 fn chunk_non_empty(chunk: Option<&str>) -> bool {
     matches!(chunk, Some(s) if !s.is_empty() && s != "[]" && s != "null")
+}
+
+/// 业务作用：在发送数组写入前核对编码后的身份，避免正文与选桶、覆盖条件选择不同的业务文档。
+///
+/// 参数说明：
+/// - `doc`：需要追加或覆盖的业务文档，仅调用一次 Serialize。
+/// - `meta`：绑定时冻结的身份属性名及数值类型约定。
+/// - `id`：本次派生键和过滤条件使用的同一次身份观察，数值形式应已通过 id_filter。
+///
+/// 返回：根对象的身份属性与 id 类型、值一致时返回 JSON 文本；缺失、类型或数值不一致返回固定 Config，序列化失败返回 Codec。整型双方按 i64 精确比较，涉及浮点时只允许绝对值小于 2^53 的相同值；不改变字段编码、ID 文本或桶布局，不清理已有数据。
+fn encode_array_document<T: Serialize>(doc: &T, meta: &DocMeta, id: &str) -> Result<String> {
+    let value = super::to_json_value_omit_null(doc)?;
+    let stored = value.get(&meta.id_name);
+    let matches = if meta.id_numeric {
+        let number = stored.and_then(serde_json::Value::as_number);
+        match (
+            id.parse::<i64>(),
+            number.and_then(serde_json::Number::as_i64),
+        ) {
+            (Ok(expected), Some(actual)) => expected == actual,
+            _ => {
+                // 整数与浮点混用时越过精确区间会合并相邻身份；不能仅比较各自转成 f64 的结果。
+                match (
+                    id.parse::<f64>(),
+                    number.and_then(serde_json::Number::as_f64),
+                ) {
+                    (Ok(expected), Some(actual)) => {
+                        expected.abs() < 9_007_199_254_740_992.0
+                            && actual.abs() < 9_007_199_254_740_992.0
+                            && expected == actual
+                    }
+                    _ => false,
+                }
+            }
+        }
+    } else {
+        stored.and_then(serde_json::Value::as_str) == Some(id)
+    };
+    // 先拒绝不一致正文，覆盖不能先删除旧记录；批量入口同样必须在提交任何一组前完成校验。
+    if !matches {
+        return Err(NasaRedisError::Config(
+            "ARRAY 文档编码的身份与 ID 不一致".into(),
+        ));
+    }
+    serde_json::to_string(&value).map_err(|error| {
+        NasaRedisError::Codec(format!(
+            "JSON 文档编码失败: {:?} at {}:{}",
+            error.classify(),
+            error.line(),
+            error.column()
+        ))
+    })
 }
