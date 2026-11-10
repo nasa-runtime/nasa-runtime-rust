@@ -911,21 +911,21 @@ fn wait_startup_gate(
 }
 
 /// 业务作用：构造并运行一次底层 consumer 会话，退出后把 owner 控制邮箱留给后续会话。
+/// DLT 交付或准入仍待完成时按维护节奏复验；空闲取消息仍使用配置的等待预算。
 ///
-/// # 参数
+/// 参数说明：
 ///
-/// - `runtime`: 所属运行时与冻结配置。
+/// - `runtime_ref`: 所属运行时与冻结配置，派发及资源额度在会话间共享。
 /// - `plan`: group 路由计划；动态订阅会更新其中的 mode。
 /// - `commands`: 跨会话保留的有界控制命令接收端。
-/// - `health`: 跨会话保留的健康快照。
+/// - `health_ref`: 跨会话保留的健康快照。
+/// - `attempts`: 跨会话保留的分区记录重试责任，由失权或显式恢复路径清理。
 /// - `initial_consumer`: 首次会话由 startup handshake 预先构造的 consumer；后续重建为 None。
 /// - `epoch_base`: 跨会话递增的消费世代基线。
 /// - `global_error`: 跨会话共享的最近错误单槽。
 /// - `fixed_offsets`: 固定分配已经解析、定位或确认提交的跨会话恢复坐标。
 ///
-/// # 返回
-///
-/// 返回本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
+/// 返回：本次会话的退出原因，由 owner 决定停止、重建或保持故障状态。
 #[allow(clippy::too_many_arguments)] // 启动握手、控制邮箱、故障证据和恢复坐标分别承担跨会话责任。
 fn run_owner_session(
     runtime_ref: &Arc<OwnerRuntime>,
@@ -1344,13 +1344,20 @@ fn run_owner_session(
                 continue;
             }
         }
+        // DLT 交付和额度恢复在原生消息队列外完成；以维护节奏复验未完成责任，
+        // 避免已暂停分区的取消息等待延后安全提交和分区恢复。
+        let input_wait = if dlt_pending.is_empty() && dlt_admission.is_empty() {
+            poll_timeout
+        } else {
+            poll_cadence
+        };
         if !plan.typed.is_empty() {
             let local_work = key_completions.has_active() || !queued_typed.is_empty();
             // 本地已有输入或调用时只做非阻塞 native 维护，完成票据唤醒后及时收割，不给每条业务附加网络等待。
             let wait = if local_work {
                 Duration::ZERO
             } else {
-                poll_timeout
+                input_wait
             };
             // 连续完成独立推进；网络维护按有界周期进行，让已接纳输入在下一次拉取前获得释放额度的机会。
             let polled = !local_work || last_typed_poll.elapsed() >= poll_cadence;
@@ -1537,7 +1544,7 @@ fn run_owner_session(
             }
             continue;
         }
-        let message = match consumer.poll(poll_timeout) {
+        let message = match consumer.poll(input_wait) {
             Ok(message) => message,
             Err(RdPollError::Transient(error)) => {
                 update_state(&health, GroupState::Recovering, Some(error.clone()));
