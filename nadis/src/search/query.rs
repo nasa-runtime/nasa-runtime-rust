@@ -1122,3 +1122,20 @@ fn escape_text(v: &str) -> String {
     }
     out
 }
+
+/// 业务作用：将实际 JSON 属性名编码成单个括号选择器，隔离名称中的路径语法。
+///
+/// 参数说明：
+/// - `name`：需要原样定位的 JSON 对象属性名，不是查询别名或路径表达式。
+///
+/// 返回：返回带双引号的单属性选择器，反斜杠与双引号按属性名语法转义；含 U+0020 以下控制字符时返回配置错误，不生成可能错配的路径。
+pub(super) fn json_path_property(name: &str) -> Result<String> {
+    // 控制字符的 JSON 文本转义不等同于路径中的属性名，不能让它静默选择另一个成员。
+    if name.chars().any(|ch| ch < '\u{20}') {
+        return Err(NasaRedisError::Config(
+            "ARRAY JSONPath 属性名不能含控制字符".into(),
+        ));
+    }
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("[\"{escaped}\"]"))
+}

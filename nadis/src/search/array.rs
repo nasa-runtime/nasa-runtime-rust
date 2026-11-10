@@ -43,11 +43,27 @@ return #ARGV
 /// 替换-或-追加:先 JSON.DEL 旧子文档(若 key 存在),再判断 key 是否还在
 /// (DEL 可能把数组删空导致 key 整体消失),不在则 JSON.SET 初始化,在则 ARRAPPEND。
 /// 二次 EXISTS 是为了规避"DEL 把唯一子文档删除后 key 被回收"的边界。
-/// `ARGV[1]` = idFilter，`ARGV[2]` = 新子文档 JSON。
+/// `ARGV[1]` = idFilter，`ARGV[2]` = 新子文档 JSON，`ARGV[3]` = 大整数命中项的 ID 属性路径；
+/// 不需要数值类型保护时仍传空字符串。大整数命中浮点身份时，在删除前拒绝整个覆盖。
 pub const REPLACE_OR_APPEND: &str = r#"-- 非数组根的追加可能返回空结果，覆盖还可能删除对象成员，必须在任何写入前拒绝。
 local root_type = redis.call('JSON.TYPE', KEYS[1])
 if root_type and root_type ~= 'array' then
   return redis.error_reply('ARRAY root must be an array')
+end
+if type(ARGV[3]) ~= 'string' then
+  return redis.error_reply('ARRAY identity guard is required')
+end
+-- 大整数与已有浮点身份比较可能合并相邻值；同一脚本先检查全部命中类型，避免误删后才发现歧义。
+if root_type and ARGV[3] ~= '' then
+  local id_types = redis.call('JSON.TYPE', KEYS[1], ARGV[3])
+  if type(id_types) ~= 'table' then
+    return redis.error_reply('ARRAY identity types are unavailable')
+  end
+  for i = 1, #id_types do
+    if id_types[i] ~= 'integer' then
+      return redis.error_reply('ARRAY large integer identity matches a non-integer value')
+    end
+  end
 end
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('JSON.DEL', KEYS[1], ARGV[1])
@@ -274,7 +290,7 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     /// 参数说明：
     /// - `doc`：提供目标分组、用于匹配的子文档 ID 和新内容的业务文档。
     ///
-    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器及编码身份校验成功且脚本返回可解码整数时返回成功；编码身份不一致或已有根值不是数组时，在删除旧文档前拒绝；其它失败返回错误，Lua 内已有副作用不回滚；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
+    /// 返回：使用同一次 ID 读取派生键与删除条件，派生、过滤器及编码身份校验成功且脚本返回可解码整数时返回成功；编码身份不一致、已有根值不是数组，或大整数条件命中非整数身份时，在删除旧文档前拒绝；其它失败返回错误，Lua 内已有副作用不回滚；更改分组或桶配置不会清理旧键，迁移前应按旧 parts 显式删除。
     pub async fn save_or_replace(&self, doc: &T) -> Result<()> {
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
@@ -282,12 +298,16 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         let id = doc.id();
         let key = self.meta.array_key_for(&refs, &id)?;
         let filter = self.id_filter(&id)?;
+        let guard_path = self.large_integer_guard_path(&id, &filter)?;
         let body = encode_array_document(doc, self.meta, &id)?;
+        // 命中类型检查与删除必须留在同一次 Lua 中，客户端先读再写会让并发插入的浮点身份绕过检查。
+        // 所有本地校验先完成；脚本后续运行错误仍不回滚已发生的删除。
         let _: i64 = self
             .replace_or_append
             .key(&key)
             .arg(&filter)
             .arg(&body)
+            .arg(&guard_path)
             .invoke_async(&mut self.client.conn())
             .await?;
         Ok(())
@@ -430,6 +450,8 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
     ///
     /// 返回：i64 整数文本保持精确值，其余形式必须能转换为绝对值小于 2^53 的有限 f64，且非零系数不能下溢为零；不满足条件时返回配置错误。字符串使用 ARRAY 字面量规则；此处不校验序列化正文的 ID 表示或桶路由是否一致。
     fn id_filter(&self, sub_id: &str) -> Result<String> {
+        // 标识字段按完整存储属性名定位，不能让点号或其它路径字符选择另一个业务身份。
+        let property = super::query::json_path_property(&self.meta.id_name)?;
         let lit = if self.meta.id_numeric {
             // 完整 i64 范围保留整数比较；不能先转成浮点数，否则相邻的大整数可能共享比较值。
             if let Ok(n) = sub_id.parse::<i64>() {
@@ -471,7 +493,31 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         } else {
             super::query::json_path_literal(sub_id)?
         };
-        Ok(format!("$[?(@.{}=={})]", self.meta.id_name, lit))
+        Ok(format!("$[?(@{}=={})]", property, lit))
+    }
+
+    /// 业务作用：为存在浮点舍入歧义的大整数覆盖生成远端 ID 类型检查路径。
+    ///
+    /// 参数说明：
+    /// - `sub_id`：已经通过 ID 过滤器校验、与目标键共用的业务身份文本。
+    /// - `filter`：该身份对应的完整 JSONPath 文档选择条件。
+    ///
+    /// 返回：数值身份为绝对值至少 2^53 的 i64 时返回命中项的 ID 属性路径，供脚本在删除前检查；其它身份返回空字符串。属性名无法安全表达时返回配置错误，此处不读取或迁移已有数据。
+    fn large_integer_guard_path(&self, sub_id: &str, filter: &str) -> Result<String> {
+        // 整数间的比较保留 i64 精度；混入浮点记录时则必须由服务端在同次覆盖中排除歧义。
+        if self.meta.id_numeric
+            && sub_id
+                .parse::<i64>()
+                .is_ok_and(|value| value.unsigned_abs() >= 9_007_199_254_740_992)
+        {
+            Ok(format!(
+                "{}{}",
+                filter,
+                super::query::json_path_property(&self.meta.id_name)?
+            ))
+        } else {
+            Ok(String::new())
+        }
     }
 
     /// 业务作用：JSON.GET key filter 取原始 chunk(JSONPath 命中结果,通常是 JSON 数组)。
