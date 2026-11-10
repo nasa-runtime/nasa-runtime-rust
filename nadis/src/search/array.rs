@@ -187,16 +187,21 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
 
     // ───────── save 族 ─────────
 
-    /// 业务作用：追加保存(不查重):INIT_OR_APPEND 到实体算出的目标 key
-    /// (ARRAY = 单 key;BUCKET = 按 subId 定桶)。同 subId 重复 save 会产生
-    /// 重复子文档——需要"同 id 覆盖"语义用 save_or_replace。
+    /// 业务作用：按文档业务分组和子文档标识选择目标键，并追加一个 JSON 子文档。
     ///
-    /// # 参数
-    /// - `doc`: 要追加写入数组的业务子文档,其 `array_key_parts()` 决定数组组,`id()` 决定子文档 ID。
+    /// 参数说明：
+    /// - `doc`：提供数组分组、子文档 ID 和序列化内容的业务文档。
+    ///
+    /// 返回：数值 ID 通过比较范围检查、键派生和编码成功且追加脚本调用成功时返回成功；失败返回错误，远端是否已追加需按错误类别判断。此入口不查重，同 ID 可以重复；覆盖应使用 save_or_replace。
     pub async fn save(&self, doc: &T) -> Result<()> {
+        let id = doc.id();
+        // 非有限数值会失去身份字段，越界浮点条件可能合并整数身份，必须在写入前拒绝。
+        if self.meta.id_numeric {
+            self.id_filter(&id)?;
+        }
         let parts = doc.array_key_parts();
         let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-        let key = self.meta.array_key_for(&refs, &doc.id())?;
+        let key = self.meta.array_key_for(&refs, &id)?;
         let body = super::to_json_omit_null(doc)?;
         let _: i64 = self
             .init_or_append
@@ -207,20 +212,24 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         Ok(())
     }
 
-    /// 业务作用：批量保存:按最终 key 分组(BUCKET 下不同 subId 自然分到不同桶),每组一条 INIT_OR_APPEND。
+    /// 业务作用：将批量子文档按最终数组键分组，再按会话命令上限逐批提交追加脚本。
     ///
-    /// # 参数
-    /// - `docs`: 待追加写入的业务子文档列表,每个文档独立计算数组组和 bucket。
+    /// 参数说明：
+    /// - `docs`：需要追加的文档列表，每个文档独立派生业务分组和桶。
     ///
-    ///分片进**真正的 `PipelineSession`**(单次 flush + session 上限约束),
-    /// 不再 `join_all` 一次性创建全部 future;逐 ticket surface 服务端错误 / ExecutionUnknown。
+    /// 返回：空列表返回零；全部会话及票据成功时返回输入文档数。任一数值 ID 不满足比较范围、派生或编码失败时整批不发送；提交失败返回错误，已经完成的批次不会回滚，未知执行结果不能自动当作未写入。
     pub async fn save_all(&self, docs: &[T]) -> Result<usize> {
         // 分组:key → 该 key 下待追加的子文档 JSON 列表
         let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
         for doc in docs {
+            let id = doc.id();
+            // 非有限数值会失去身份字段，越界浮点条件可能合并整数身份，必须在写入前拒绝。
+            if self.meta.id_numeric {
+                self.id_filter(&id)?;
+            }
             let parts = doc.array_key_parts();
             let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-            let key = self.meta.array_key_for(&refs, &doc.id())?;
+            let key = self.meta.array_key_for(&refs, &id)?;
             let body = super::to_json_omit_null(doc)?;
             grouped.entry(key).or_default().push(body);
         }
@@ -402,18 +411,15 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
         }
     }
 
-    /// 业务作用：构造按子文档 ID 精确匹配的 `$[?(@.{id_name}=={literal})]` 条件。
-    /// 数字先解析并规范化，字符串经过 JSON 转义；类型由 id_numeric 决定，必须与存储值一致。
-    /// 返回：安全的 JSONPath 条件；数字无效或非有限时返回错误。
+    /// 业务作用：把子文档标识转换为与 id_numeric 类型约定对应的 JSONPath 比较条件。
     ///
-    /// # 参数
-    /// - `sub_id`: 业务标识,用于定位具体对象或记录。
+    /// 参数说明：
+    /// - `sub_id`：需要按文档标识字段匹配的原始字符串。
+    ///
+    /// 返回：i64 整数文本保持精确值，其余形式必须能转换为绝对值小于 2^53 的有限 f64；不满足条件时返回配置错误。字符串使用 ARRAY 字面量规则；此处不校验序列化正文的 ID 表示或桶路由是否一致。
     fn id_filter(&self, sub_id: &str) -> Result<String> {
         let lit = if self.meta.id_numeric {
-            //**用解析后规范化的数字串**,不回写原串——原串可能是 RedisJSON JSONPath
-            // 数字文法**拒绝**的形态(科学计数 `1e3`/前导零 `01`/前导 `+`),`f64::parse` 接受但 JSONPath
-            // 报 parse error。先试 i64(保大整数精度),再退 f64,与 query.rs 数字渲染口径统一。
-            // RedisJSON JSONPath 是数值比较,`1000`/`1000.0` 等价,故规范化串能匹配存储的 JSON number。
+            // 完整 i64 范围保留整数比较；不能先转成浮点数，否则相邻的大整数可能共享比较值。
             if let Ok(n) = sub_id.parse::<i64>() {
                 n.to_string()
             } else {
@@ -427,7 +433,15 @@ impl<T: RedisDocument + Serialize + DeserializeOwned> JsonArrayOps<T> {
                         "JSONPath 数值必须有限(NaN/Infinity 非法)".into(),
                     ));
                 }
-                format!("{v}") // Rust `{}`:1000.0→"1000"、1.5→"1.5"(整数值无 .0,JSONPath 数值比较容忍)
+                // 浮点比较在此边界可能合并相邻整数；越界整数也不能借浮点回退进入覆盖或删除。
+                if v.abs() >= 9_007_199_254_740_992.0 {
+                    return Err(NasaRedisError::Config(
+                        "ARRAY 数值 ID 超出浮点比较范围；大整数必须使用 i64 整数文本或字符串身份"
+                            .into(),
+                    ));
+                }
+                // JSONPath 不接受全部浮点文本写法；渲染为普通十进制，避免把指数作为路径语法。
+                format!("{v}")
             }
         } else {
             super::query::json_path_literal(sub_id)?
